@@ -63,6 +63,15 @@ export function Sidebar() {
               <span className="ml-auto flex shrink-0 items-center gap-1.5 text-neutral-500">
                 {g.running > 0 && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />}
                 {g.sessions.length}
+                <Link
+                  to="/"
+                  search={{ cwd: g.cwd }}
+                  title={`New chat in ${g.cwd}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                >
+                  +
+                </Link>
               </span>
             </summary>
             {g.sessions.map((s) => (

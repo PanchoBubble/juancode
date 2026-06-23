@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
 import type { ProviderId } from "../protocol.ts";
@@ -8,8 +8,10 @@ import type { ProviderId } from "../protocol.ts";
 export function NewSession() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // Optional ?cwd= (e.g. the sidebar's per-folder "+") pre-targets the picker.
+  const { cwd: initialCwd } = useSearch({ strict: false }) as { cwd?: string };
   const [provider, setProvider] = useState<ProviderId>("claude");
-  const [path, setPath] = useState<string | undefined>(undefined);
+  const [path, setPath] = useState<string | undefined>(initialCwd);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [starting, setStarting] = useState(false);

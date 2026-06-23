@@ -29,6 +29,11 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  // Optional ?cwd= lets the sidebar spawn a new chat pre-targeted at a folder.
+  validateSearch: (search: Record<string, unknown>): { cwd?: string } => {
+    const cwd = search.cwd;
+    return typeof cwd === "string" && cwd ? { cwd } : {};
+  },
   component: NewSession,
 });
 
