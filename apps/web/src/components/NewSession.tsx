@@ -4,6 +4,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
 import type { ProviderId } from "../protocol.ts";
+import { StatusPanel } from "./StatusPanel.tsx";
 
 export function NewSession() {
   const navigate = useNavigate();
@@ -127,6 +128,8 @@ export function NewSession() {
       >
         {starting ? "Starting…" : `Start ${provider}`}
       </button>
+
+      <StatusPanel />
     </div>
   );
 }

@@ -25,6 +25,35 @@ export interface DirListing {
   search: boolean;
 }
 
+export type McpHealth =
+  | "connected"
+  | "needs-auth"
+  | "pending"
+  | "failed"
+  | "enabled"
+  | "disabled"
+  | "unknown";
+
+export interface McpServerStatus {
+  name: string;
+  detail: string;
+  transport: string | null;
+  health: McpHealth;
+  statusLabel: string;
+  auth: string | null;
+}
+
+export interface ProviderStatus {
+  id: ProviderId;
+  label: string;
+  command: string;
+  available: boolean;
+  version: string | null;
+  warning: string | null;
+  error: string | null;
+  mcpServers: McpServerStatus[];
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -50,6 +79,7 @@ export interface NewComment {
 
 export const api = {
   providers: () => getJson<ProviderInfo[]>("/api/providers"),
+  status: () => getJson<ProviderStatus[]>("/api/status"),
   sessions: () => getJson<SessionMeta[]>("/api/sessions"),
   dirs: (path?: string, q?: string) => {
     const params = new URLSearchParams();

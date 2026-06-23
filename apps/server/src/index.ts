@@ -11,6 +11,7 @@ import { getDiff } from "./git.ts";
 import type { CommentSide, DiffComment } from "./protocol.ts";
 import { PROVIDERS } from "./providers.ts";
 import { registry } from "./registry.ts";
+import { getAllStatus } from "./status.ts";
 import { setupWebSocket } from "./ws.ts";
 
 sessionDb.markOrphansExited();
@@ -22,6 +23,20 @@ app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.get("/api/providers", (_req, res) => {
   res.json(Object.values(PROVIDERS).map(({ id, label }) => ({ id, label })));
+});
+
+/**
+ * Per-provider auth + MCP status, so users can confirm (e.g.) pencil and their
+ * claude.ai connectors / codex config.toml servers are live before starting a
+ * session. Shells out to the genuine CLIs (`claude mcp list`, `codex mcp list`)
+ * with the user's real env untouched — same fidelity as everything else here.
+ */
+app.get("/api/status", async (_req, res) => {
+  try {
+    res.json(await getAllStatus());
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.get("/api/sessions", (_req, res) => {
