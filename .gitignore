@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.DS_Store
+*.log
+
+# juancode data (sqlite db lives here)
+data/
+*.db
+*.db-journal
+*.db-wal
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
