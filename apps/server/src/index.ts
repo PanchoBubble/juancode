@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync, type Dirent } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { DEFAULT_CWD, PORT } from "./config.ts";
@@ -30,16 +30,60 @@ app.get("/api/sessions/:id", (req, res) => {
   res.json(meta);
 });
 
+/** Directories we never descend into when searching — noisy and rarely a cwd. */
+const SEARCH_SKIP = new Set(["node_modules", "dist", "build", "coverage", "vendor", "target"]);
+
+/**
+ * Bounded, depth-limited recursive search for directories whose name matches
+ * `query` under `root`. Skips hidden + heavy dirs and caps results so a search
+ * near the home directory can't wander the whole disk.
+ */
+function searchDirs(root: string, query: string, limit = 200, maxDepth = 6): DirEntry[] {
+  const q = query.toLowerCase();
+  const results: DirEntry[] = [];
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  while (stack.length > 0 && results.length < limit) {
+    const { dir, depth } = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable dir — skip
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith(".") || SEARCH_SKIP.has(e.name)) continue;
+      const full = join(dir, e.name);
+      if (e.name.toLowerCase().includes(q)) {
+        // Show the path relative to the search root so matches are locatable.
+        results.push({ name: relative(root, full), path: full });
+      }
+      if (depth < maxDepth) stack.push({ dir: full, depth: depth + 1 });
+    }
+  }
+  return results.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+interface DirEntry {
+  name: string;
+  path: string;
+}
+
 /** Lightweight directory browser so the UI can pick a working directory. */
 app.get("/api/dirs", (req, res) => {
   const path = resolve(typeof req.query.path === "string" && req.query.path ? req.query.path : DEFAULT_CWD);
+  const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
   try {
+    const parent = dirname(path);
+    const base = { path, parent: parent === path ? null : parent };
+    if (query) {
+      res.json({ ...base, entries: searchDirs(path, query), search: true });
+      return;
+    }
     const entries = readdirSync(path, { withFileTypes: true })
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => ({ name: e.name, path: join(path, e.name) }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    const parent = dirname(path);
-    res.json({ path, parent: parent === path ? null : parent, entries });
+    res.json({ ...base, entries, search: false });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }

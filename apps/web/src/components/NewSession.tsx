@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
@@ -10,12 +10,31 @@ export function NewSession() {
   const queryClient = useQueryClient();
   const [provider, setProvider] = useState<ProviderId>("claude");
   const [path, setPath] = useState<string | undefined>(undefined);
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [starting, setStarting] = useState(false);
 
+  // Debounce the search input so we don't hammer the recursive search per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query.trim()), 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
-  const dirs = useQuery({ queryKey: ["dirs", path], queryFn: () => api.dirs(path) });
+  const dirs = useQuery({
+    queryKey: ["dirs", path, debouncedQuery],
+    queryFn: () => api.dirs(path, debouncedQuery || undefined),
+  });
 
   const cwd = dirs.data?.path;
+  const searching = dirs.data?.search ?? false;
+
+  /** Navigate into a folder (from browse or a search hit) and reset the search. */
+  const enter = (next: string) => {
+    setPath(next);
+    setQuery("");
+    setDebouncedQuery("");
+  };
 
   const start = () => {
     if (!cwd || starting) return;
@@ -64,10 +83,17 @@ export function NewSession() {
           <div className="border-b border-neutral-800 px-3 py-2 font-mono text-xs text-neutral-400">
             {cwd ?? "…"}
           </div>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search folders below here…"
+            className="w-full border-b border-neutral-800 bg-transparent px-3 py-2 text-sm text-neutral-200 placeholder:text-neutral-600 focus:outline-none"
+          />
           <div className="max-h-64 overflow-y-auto">
-            {dirs.data?.parent && (
+            {!searching && dirs.data?.parent && (
               <button
-                onClick={() => setPath(dirs.data!.parent!)}
+                onClick={() => enter(dirs.data!.parent!)}
                 className="block w-full px-3 py-1.5 text-left font-mono text-sm text-neutral-400 hover:bg-neutral-800"
               >
                 ../
@@ -76,12 +102,15 @@ export function NewSession() {
             {dirs.data?.entries.map((e) => (
               <button
                 key={e.path}
-                onClick={() => setPath(e.path)}
+                onClick={() => enter(e.path)}
                 className="block w-full px-3 py-1.5 text-left font-mono text-sm hover:bg-neutral-800"
               >
                 {e.name}/
               </button>
             ))}
+            {searching && dirs.data?.entries.length === 0 && (
+              <div className="px-3 py-1.5 text-sm text-neutral-500">No matching folders.</div>
+            )}
             {dirs.error && (
               <div className="px-3 py-1.5 text-sm text-red-400">{String(dirs.error)}</div>
             )}
