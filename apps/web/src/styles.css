@@ -1,8 +1,32 @@
 @import "tailwindcss";
 @import "@xterm/xterm/css/xterm.css";
+@import "react-diff-view/style/index.css";
 
 :root {
   color-scheme: dark;
+}
+
+/* Dark theme for react-diff-view (defaults are light). Scoped to .diff-dark. */
+.diff-dark {
+  --diff-background-color: transparent;
+  --diff-text-color: #d4d4d4;
+  --diff-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --diff-selection-background-color: #2d4f67;
+  --diff-gutter-insert-background-color: #1b3326;
+  --diff-gutter-delete-background-color: #3a2226;
+  --diff-gutter-selected-background-color: #34401f;
+  --diff-code-insert-background-color: #16261c;
+  --diff-code-delete-background-color: #2c1a1d;
+  --diff-code-insert-edit-background-color: #235c38;
+  --diff-code-delete-edit-background-color: #6b2a30;
+  --diff-code-selected-background-color: #34401f;
+}
+.diff-dark .diff-gutter {
+  color: #6b7280;
+}
+.diff-dark .diff-gutter:hover {
+  background-color: #1f2937;
+  color: #d4d4d4;
 }
 
 html,

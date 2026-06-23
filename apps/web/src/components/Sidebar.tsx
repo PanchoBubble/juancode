@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
+import { socket } from "../lib/socket.ts";
 import type { SessionMeta } from "../protocol.ts";
 
 interface FolderGroup {
@@ -87,6 +88,19 @@ export function Sidebar() {
                   }`}
                 />
                 <span className="truncate text-sm">{s.title}</span>
+                {s.status === "exited" && s.cliSessionId && (
+                  <button
+                    title="Reactivate session"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      socket.send({ type: "reactivate", sessionId: s.id, cols: 80, rows: 24 });
+                    }}
+                    className="ml-auto shrink-0 rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-emerald-400"
+                  >
+                    ↻
+                  </button>
+                )}
               </Link>
             ))}
           </details>

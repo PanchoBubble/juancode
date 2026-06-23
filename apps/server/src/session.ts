@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import * as pty from "node-pty";
 import { SCROLLBACK_LIMIT } from "./config.ts";
 import { appendScrollback } from "./scrollback.ts";
+import { captureCodexSessionId } from "./codexSession.ts";
 import { sessionDb } from "./db.ts";
 import { PROVIDERS } from "./providers.ts";
 import type { ProviderId, SessionMeta } from "./protocol.ts";
@@ -20,30 +21,26 @@ export class Session {
   private readonly exitListeners = new Set<ExitListener>();
   private persistTimer: NodeJS.Timeout | null = null;
 
-  constructor(provider: ProviderId, cwd: string, cols: number, rows: number) {
-    const spec = PROVIDERS[provider];
-    const now = Date.now();
-    this.meta = {
-      id: randomUUID(),
-      provider,
-      cwd,
-      title: `${spec.label} · ${basename(cwd) || cwd}`,
-      status: "running",
-      exitCode: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+  private constructor(meta: SessionMeta, args: string[], cols: number, rows: number, isNew: boolean) {
+    this.meta = meta;
+    const spec = PROVIDERS[meta.provider];
 
-    this.proc = pty.spawn(spec.command, spec.args, {
+    this.proc = pty.spawn(spec.command, args, {
       name: "xterm-256color",
       cols,
       rows,
-      cwd,
+      cwd: meta.cwd,
       // Inherit the real environment so the CLI loads the user's auth + MCPs.
       env: process.env as Record<string, string>,
     });
 
-    sessionDb.insert(this.meta);
+    if (isNew) sessionDb.insert(this.meta);
+    else sessionDb.update(this.meta, this.scrollback);
+
+    // For Codex we can't pin the session id, so discover it from the rollout file.
+    if (!spec.pinsSessionId && this.meta.cliSessionId === null) {
+      this.captureCliSessionId();
+    }
 
     this.proc.onData((data) => {
       this.appendScrollback(data);
@@ -58,6 +55,45 @@ export class Session {
       this.persistNow();
       for (const l of this.exitListeners) l(exitCode);
     });
+  }
+
+  /** Start a brand-new conversation. */
+  static create(provider: ProviderId, cwd: string, cols: number, rows: number): Session {
+    const spec = PROVIDERS[provider];
+    const now = Date.now();
+    const id = randomUUID();
+    const meta: SessionMeta = {
+      id,
+      provider,
+      cwd,
+      title: `${spec.label} · ${basename(cwd) || cwd}`,
+      status: "running",
+      exitCode: null,
+      // Claude's id is pinned to ours up front; Codex's is discovered post-spawn.
+      cliSessionId: spec.pinsSessionId ? id : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return new Session(meta, spec.startArgs(id), cols, rows, true);
+  }
+
+  /**
+   * Revive an exited session by resuming its prior CLI conversation in a fresh
+   * pty, keeping the same juancode id (so the route/sidebar entry is stable).
+   * Requires a captured `cliSessionId`.
+   */
+  static resume(prev: SessionMeta, cols: number, rows: number): Session {
+    if (!prev.cliSessionId) {
+      throw new Error("Session has no captured CLI session id to resume");
+    }
+    const spec = PROVIDERS[prev.provider];
+    const meta: SessionMeta = {
+      ...prev,
+      status: "running",
+      exitCode: null,
+      updatedAt: Date.now(),
+    };
+    return new Session(meta, spec.resumeArgs(prev.cliSessionId), cols, rows, false);
   }
 
   get id(): string {
@@ -92,6 +128,22 @@ export class Session {
   onExit(listener: ExitListener): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
+  }
+
+  private captureCliSessionId(): void {
+    const since = Date.now();
+    void captureCodexSessionId(this.meta.cwd, since)
+      .then((cliSessionId) => {
+        // Don't clobber a value set by a later resume, and ignore if the session
+        // is long gone without ever producing a rollout file.
+        if (cliSessionId && this.meta.cliSessionId === null) {
+          this.meta.cliSessionId = cliSessionId;
+          sessionDb.setCliSessionId(this.meta.id, cliSessionId);
+        }
+      })
+      .catch(() => {
+        // Discovery is best-effort; failure just leaves the session non-resumable.
+      });
   }
 
   private appendScrollback(data: string): void {

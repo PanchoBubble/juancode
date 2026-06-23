@@ -2,9 +2,13 @@ import { createServer } from "node:http";
 import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { DEFAULT_CWD, PORT } from "./config.ts";
-import { sessionDb } from "./db.ts";
+import { getBeads } from "./beads.ts";
+import { commentDb, sessionDb } from "./db.ts";
+import { getDiff } from "./git.ts";
+import type { CommentSide, DiffComment } from "./protocol.ts";
 import { PROVIDERS } from "./providers.ts";
 import { registry } from "./registry.ts";
 import { setupWebSocket } from "./ws.ts";
@@ -28,6 +32,65 @@ app.get("/api/sessions/:id", (req, res) => {
   const meta = sessionDb.get(req.params.id);
   if (!meta) return res.status(404).json({ error: "not found" });
   res.json(meta);
+});
+
+/** Git diff of the session's working dir vs HEAD (incl. staged + untracked). */
+app.get("/api/sessions/:id/diff", async (req, res) => {
+  const meta = sessionDb.get(req.params.id);
+  if (!meta) return res.status(404).json({ error: "not found" });
+  try {
+    res.json(await getDiff(meta.cwd));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Beads (bd) issues for the session's working folder. */
+app.get("/api/sessions/:id/beads", async (req, res) => {
+  const meta = sessionDb.get(req.params.id);
+  if (!meta) return res.status(404).json({ error: "not found" });
+  try {
+    res.json(await getBeads(meta.cwd));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Inline review comments for a session's diff. */
+app.get("/api/sessions/:id/comments", (req, res) => {
+  if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
+  res.json(commentDb.list(req.params.id));
+});
+
+app.post("/api/sessions/:id/comments", (req, res) => {
+  if (!sessionDb.get(req.params.id)) return res.status(404).json({ error: "not found" });
+  const { file, side, line, body } = req.body ?? {};
+  if (
+    typeof file !== "string" ||
+    (side !== "old" && side !== "new") ||
+    !Number.isInteger(line) ||
+    typeof body !== "string" ||
+    !body.trim()
+  ) {
+    return res.status(400).json({ error: "file, side ('old'|'new'), integer line, and body required" });
+  }
+  const comment: DiffComment = {
+    id: randomUUID(),
+    sessionId: req.params.id,
+    file,
+    side: side as CommentSide,
+    line,
+    body: body.trim(),
+    createdAt: Date.now(),
+  };
+  commentDb.add(comment);
+  res.status(201).json(comment);
+});
+
+app.delete("/api/sessions/:id/comments/:commentId", (req, res) => {
+  const removed = commentDb.remove(req.params.id, req.params.commentId);
+  if (!removed) return res.status(404).json({ error: "not found" });
+  res.status(204).end();
 });
 
 /** Directories we never descend into when searching — noisy and rarely a cwd. */

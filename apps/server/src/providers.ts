@@ -1,44 +1,29 @@
-import { execFileSync } from "node:child_process";
 import type { ProviderId } from "./protocol.ts";
+import { resolveBin } from "./resolveBin.ts";
 
 export interface ProviderSpec {
   id: ProviderId;
   label: string;
   /** Absolute path to the executable, resolved at startup. */
   command: string;
-  /** Extra args. We intentionally pass none so the CLI runs exactly as it does
-   *  in a terminal — loading the user's real MCP servers, auth and config. */
-  args: string[];
-}
-
-/**
- * Resolve a CLI to the SAME absolute path the user's interactive terminal would.
- *
- * A GUI/server process often has a different (or stripped) PATH than the user's
- * login shell — that's why juancode initially launched a stale `claude` from an
- * old nvm bin dir. We ask the user's login shell to resolve the command so the
- * panel uses the exact binary (and version) they see in their terminal.
- */
-function resolveBinary(cmd: string, override: string | undefined): string {
-  if (override) return override;
-  const shell = process.env.SHELL ?? "/bin/zsh";
-  try {
-    const out = execFileSync(shell, ["-lic", `command -v ${cmd} 2>/dev/null`], {
-      encoding: "utf8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const resolved = out
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .pop();
-    if (resolved && resolved.startsWith("/")) return resolved;
-  } catch {
-    // Login-shell resolution failed (no shell, timeout, not found) — fall back
-    // to the bare command name and let PATH/posix_spawnp handle it.
-  }
-  return cmd;
+  /**
+   * Args for a brand-new session. We pass nothing that changes how the CLI loads
+   * the user's MCP servers, auth or config — only a session-id pin where the CLI
+   * supports it, so we can resume the exact conversation later.
+   *
+   * `juancodeId` is our own session UUID; Claude lets us force it as the CLI
+   * session id (`--session-id`), so resuming needs no discovery. Codex has no
+   * such flag, so it starts clean and we discover its id after spawn.
+   */
+  startArgs: (juancodeId: string) => string[];
+  /** Args to resume a prior conversation by its captured CLI session id. */
+  resumeArgs: (cliSessionId: string) => string[];
+  /**
+   * True when `startArgs` pins the CLI session id to our own UUID, so the
+   * resumable id is known immediately (Claude). False when it must be discovered
+   * from the CLI's session files after spawn (Codex).
+   */
+  pinsSessionId: boolean;
 }
 
 /**
@@ -51,14 +36,22 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
   claude: {
     id: "claude",
     label: "Claude Code",
-    command: resolveBinary("claude", process.env.JUANCODE_CLAUDE_BIN),
-    args: [],
+    command: resolveBin("claude", process.env.JUANCODE_CLAUDE_BIN),
+    // Pin the CLI session id to our own UUID so `--resume` revives this exact
+    // conversation with no discovery step.
+    startArgs: (juancodeId) => ["--session-id", juancodeId],
+    resumeArgs: (cliSessionId) => ["--resume", cliSessionId],
+    pinsSessionId: true,
   },
   codex: {
     id: "codex",
     label: "Codex",
-    command: resolveBinary("codex", process.env.JUANCODE_CODEX_BIN),
-    args: [],
+    command: resolveBin("codex", process.env.JUANCODE_CODEX_BIN),
+    // Codex has no flag to pin a session id, so it starts clean; we discover the
+    // id from its rollout file and resume with `codex resume <id>`.
+    startArgs: () => [],
+    resumeArgs: (cliSessionId) => ["resume", cliSessionId],
+    pinsSessionId: false,
   },
 };
 

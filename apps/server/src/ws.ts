@@ -83,6 +83,36 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "reactivate": {
+          if (registry.get(msg.sessionId)) return; // already live
+          const meta = sessionDb.get(msg.sessionId);
+          if (!meta) {
+            send({ type: "error", sessionId: msg.sessionId, message: "Session not found" });
+            return;
+          }
+          if (!meta.cliSessionId) {
+            send({
+              type: "error",
+              sessionId: msg.sessionId,
+              message: "This session can't be resumed (no captured CLI session id)",
+            });
+            return;
+          }
+          try {
+            const session = registry.resume(meta, msg.cols, msg.rows);
+            subscribe(session.id);
+            // Fresh pty, so start the view clean — the resumed CLI repaints its TUI.
+            send({ type: "attached", sessionId: session.id, scrollback: "", session: session.meta });
+          } catch (err) {
+            send({
+              type: "error",
+              sessionId: msg.sessionId,
+              message: `Failed to resume: ${asMessage(err)}`,
+            });
+          }
+          return;
+        }
+
         case "input": {
           registry.get(msg.sessionId)?.write(msg.data);
           return;

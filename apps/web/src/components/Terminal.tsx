@@ -36,6 +36,9 @@ export function Terminal({ sessionId }: { sessionId: string }) {
         case "attached":
           term.reset();
           term.write(msg.scrollback);
+          // Sync the (possibly freshly reactivated) pty to our real dimensions —
+          // reactivate spawns at a placeholder size until we tell it otherwise.
+          socket.send({ type: "resize", sessionId, ...dims() });
           break;
         case "output":
           term.write(msg.data);
