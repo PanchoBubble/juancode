@@ -156,12 +156,16 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var branch: String
     public var draft: Bool
     public var checks: PrChecks
+    /// GitHub login of the PR author (empty if unknown).
     public var author: String
+    /// GitHub logins of the PR's assignees (empty when none) — powers the
+    /// "Assigned to me" filter alongside `author` for "Mine".
+    public var assignees: [String]
 
     public init(number: Int, title: String, url: String, branch: String,
-                draft: Bool, checks: PrChecks, author: String) {
+                draft: Bool, checks: PrChecks, author: String, assignees: [String] = []) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
-        self.draft = draft; self.checks = checks; self.author = author
+        self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
     }
 }
 

@@ -72,7 +72,8 @@ final class ParsePrsTests: XCTestCase {
                 headRefName: "fix-login",
                 isDraft: false,
                 statusCheckRollup: [RollupCheck(status: "COMPLETED", conclusion: "SUCCESS", state: nil)],
-                author: RawPrAuthor(login: "octocat")),
+                author: RawPrAuthor(login: "octocat"),
+                assignees: [RawPrAuthor(login: "octocat"), RawPrAuthor(login: nil), RawPrAuthor(login: "hubber")]),
             RawPr(
                 number: 7,
                 title: "WIP toggle",
@@ -90,7 +91,8 @@ final class ParsePrsTests: XCTestCase {
                 branch: "fix-login",
                 draft: false,
                 checks: .passing,
-                author: "octocat"),
+                author: "octocat",
+                assignees: ["octocat", "hubber"]),
             PullRequest(
                 number: 7,
                 title: "WIP toggle",

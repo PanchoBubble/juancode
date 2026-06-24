@@ -21,6 +21,12 @@ final class AppModel: ObservableObject {
     /// the UI can disable the control until the new pty is up.
     @Published var flippingPermissions: Set<String> = []
 
+    /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
+    /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
+    @Published var prsByCwd: [String: PrListResult] = [:]
+    /// cwds with a PR fetch in flight, so a refresh doesn't stampede.
+    private var prsLoading: Set<String> = []
+
     private var activityCancels: [String: () -> Void] = [:]
 
     init(appState: AppState) {
@@ -60,7 +66,8 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func create(provider: ProviderId, cwd: String, skipPermissions: Bool, isolateWorktree: Bool) async -> Bool {
+    func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
+                isolateWorktree: Bool, initialInput: String? = nil) async -> Bool {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -79,6 +86,9 @@ final class AppModel: ObservableObject {
                     provider: provider, cwd: cwdToUse, cols: 80, rows: 24,
                     opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: wt)
             }.value
+            // Seed the session with an initial prompt once its TUI is up — the same
+            // mechanism the WS `.create` path uses (Session.autoSubmit).
+            if let initialInput, !initialInput.isEmpty { s.autoSubmit(initialInput) }
             refresh()
             selection = s.id
             return true
@@ -93,6 +103,35 @@ final class AppModel: ObservableObject {
     /// (accept-all off, no worktree). Selects the new session on success.
     func createInFolder(provider: ProviderId, cwd: String) {
         Task { await create(provider: provider, cwd: cwd, skipPermissions: false, isolateWorktree: false) }
+    }
+
+    // MARK: - Open pull requests (per-folder PR popover)
+
+    /// The cached PR list for `cwd`, if loaded yet.
+    func prs(_ cwd: String) -> PrListResult? { prsByCwd[cwd] }
+
+    /// Load (or refresh) the open PRs for `cwd` via the real `gh` CLI. Runs off the
+    /// main actor since it shells out, then publishes the result. Coalesces
+    /// concurrent calls for the same cwd. Failures land as `available: false`
+    /// inside `getOpenPrs`, so the popover trigger just stays hidden.
+    func loadPrs(_ cwd: String) {
+        guard !prsLoading.contains(cwd) else { return }
+        prsLoading.insert(cwd)
+        Task {
+            let result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
+            prsByCwd[cwd] = result
+            prsLoading.remove(cwd)
+        }
+    }
+
+    /// Spawn a Claude session in the PR's folder seeded with a prompt that asks the
+    /// agent to review the PR and its diff — mirrors the web "Work on" action.
+    /// Always uses the folder's cwd (not a worktree) so the branch context lines up.
+    func workOnPr(_ pr: PullRequest, cwd: String) {
+        Task {
+            await create(provider: .claude, cwd: cwd, skipPermissions: false,
+                         isolateWorktree: false, initialInput: prPrompt(pr))
+        }
     }
 
     /// Flip "accept all" (skip permission prompts) on a live session. There's no

@@ -17,8 +17,9 @@ private let MAX_BUFFER = 16 * 1024 * 1024
 
 private let MAX_PRS = 50
 
-/// The `gh pr list --json` fields we request.
-private let FIELDS = "number,title,url,headRefName,isDraft,statusCheckRollup,author"
+/// The `gh pr list --json` fields we request. `assignees` powers the native
+/// "Assigned to me" filter (each element is `{ login }`).
+private let FIELDS = "number,title,url,headRefName,isDraft,statusCheckRollup,author,assignees"
 
 /// Resolve the `gh` binary like the user's terminal would, honouring the
 /// `JUANCODE_GH_BIN` override. Resolved per call (not cached at load) so a test
@@ -44,6 +45,9 @@ struct RawPr: Decodable {
     var isDraft: Bool
     var statusCheckRollup: [RollupCheck]?
     var author: RawPrAuthor?
+    // Defaulted so the synthesized memberwise init stays back-compatible with
+    // existing call sites (e.g. tests) that predate the assignees field.
+    var assignees: [RawPrAuthor]? = nil
 }
 
 struct RawPrAuthor: Decodable {
@@ -79,7 +83,8 @@ func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
             branch: p.headRefName,
             draft: p.isDraft,
             checks: rollupChecks(p.statusCheckRollup),
-            author: p.author?.login ?? "")
+            author: p.author?.login ?? "",
+            assignees: (p.assignees ?? []).compactMap { $0.login })
     }
 }
 

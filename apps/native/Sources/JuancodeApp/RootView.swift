@@ -131,6 +131,186 @@ private struct FolderHeader: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("New session in \(group.cwd)")
+            FolderPrs(cwd: group.cwd)
+        }
+        .onAppear { model.loadPrs(group.cwd) }
+    }
+}
+
+/// Build the single-line seed prompt auto-submitted to a PR-context session.
+/// Mirrors the web `prPrompt`.
+func prPrompt(_ pr: PullRequest) -> String {
+    "Please help me work on pull request #\(pr.number) \"\(pr.title)\" (branch \(pr.branch)): \(pr.url) — start by reviewing the PR and its diff."
+}
+
+/// Per-folder open-PR badge + popover. Renders nothing unless the folder is a
+/// GitHub repo with at least one open PR, so it stays invisible unless useful.
+/// Mirrors the web `FolderPrs`: list with rolled-up CI status, free-text search,
+/// "Mine" (author) and "Assigned to me" (assignee) filters, and per-PR
+/// Open / Work on / Track actions.
+private struct FolderPrs: View {
+    @EnvironmentObject var model: AppModel
+    let cwd: String
+    @State private var showing = false
+    @State private var query = ""
+    @State private var mineOnly = false
+    @State private var assignedOnly = false
+
+    private var result: PrListResult? { model.prs(cwd) }
+    private var all: [PullRequest] {
+        guard let r = result, r.available else { return [] }
+        return r.prs
+    }
+    private var viewer: String { result?.viewer ?? "" }
+    private var mineCount: Int {
+        viewer.isEmpty ? 0 : all.filter { $0.author == viewer }.count
+    }
+    private var assignedCount: Int {
+        viewer.isEmpty ? 0 : all.filter { $0.assignees.contains(viewer) }.count
+    }
+    /// Offer the viewer-scoped filters only when we know who the viewer is.
+    private var canFilterViewer: Bool { !viewer.isEmpty && all.count > 1 }
+
+    private var list: [PullRequest] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return all.filter { pr in
+            if mineOnly && canFilterViewer && pr.author != viewer { return false }
+            if assignedOnly && canFilterViewer && !pr.assignees.contains(viewer) { return false }
+            if !q.isEmpty {
+                let hay = "#\(pr.number) \(pr.title) \(pr.branch)".lowercased()
+                if !hay.contains(q) { return false }
+            }
+            return true
+        }
+    }
+
+    var body: some View {
+        if all.isEmpty {
+            EmptyView()
+        } else {
+            Button {
+                showing.toggle()
+            } label: {
+                Text("\(all.count) PR\(all.count == 1 ? "" : "s")")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .buttonStyle(.borderless)
+            .help("\(all.count) open pull request\(all.count == 1 ? "" : "s")")
+            .popover(isPresented: $showing, arrowEdge: .bottom) {
+                popover
+            }
+        }
+    }
+
+    private var popover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Search + viewer filters.
+            HStack(spacing: 6) {
+                TextField("Filter PRs…", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                if canFilterViewer {
+                    Toggle("Mine (\(mineCount))", isOn: $mineOnly)
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                        .font(.system(size: 10))
+                    Toggle("Assigned (\(assignedCount))", isOn: $assignedOnly)
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                        .font(.system(size: 10))
+                }
+            }
+            .padding(8)
+            Divider()
+            if list.isEmpty {
+                Text(query.isEmpty && !mineOnly && !assignedOnly ? "No open PRs" : "No matching PRs")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(list, id: \.number) { pr in
+                            PrRow(pr: pr, cwd: cwd) { showing = false }
+                            Divider()
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .frame(width: 320)
+    }
+}
+
+/// One PR in the popover: CI-status dot, title, draft badge, and the
+/// Open / Work on / Track actions.
+private struct PrRow: View {
+    @EnvironmentObject var model: AppModel
+    let pr: PullRequest
+    let cwd: String
+    /// Called to dismiss the popover after an action that navigates away.
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(checkColor).frame(width: 7, height: 7).help(checkLabel)
+                Text("#\(pr.number)").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(pr.title).font(.system(size: 12)).lineLimit(1).help(pr.title)
+                if pr.draft {
+                    Text("draft")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.2))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                Spacer(minLength: 4)
+                Text(checkLabel).font(.system(size: 10)).foregroundStyle(checkColor)
+            }
+            HStack(spacing: 12) {
+                Button("Open ↗") {
+                    if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                Button("Work on") {
+                    dismiss()
+                    model.workOnPr(pr, cwd: cwd)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                // Track hands off to juancode-it5 (watch + auto-fix review/CI),
+                // which is not implemented yet — disabled stub for now.
+                Button("Track") {}
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(true)
+                    .help("Tracking — coming soon (juancode-it5)")
+                Spacer()
+            }
+            .padding(.leading, 13)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private var checkColor: Color {
+        switch pr.checks {
+        case .passing: return .green
+        case .failing: return .red
+        case .pending: return .orange
+        case .none: return .secondary
+        }
+    }
+
+    private var checkLabel: String {
+        switch pr.checks {
+        case .passing: return "Checks passing"
+        case .failing: return "Checks failing"
+        case .pending: return "Checks running"
+        case .none: return "No checks"
         }
     }
 }
