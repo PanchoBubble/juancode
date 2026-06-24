@@ -19,12 +19,18 @@ import Foundation
 /// terminal hangup: we close the master fd (the slave then EOFs and the child
 /// exits, exactly as when a terminal window closes) plus a graceful SIGTERM to
 /// the process group for any child that doesn't exit on stdin EOF.
-public final class PtyProcess {
+/// `@unchecked Sendable`: `masterFd`/`pid`/`queue`/`onData`/`onExit` are immutable
+/// (`let`), and every mutable field (`readSource`, `exited`, `fdClosed`) is only
+/// ever read or written on the serial `queue` — the read source, exit watcher,
+/// `write`, and `terminate` all funnel their state access through it. That serial
+/// confinement is the synchronization invariant, so the cross-thread captures
+/// below (`[weak self]` from the waitpid thread / dispatch closures) are sound.
+public final class PtyProcess: @unchecked Sendable {
     public let masterFd: Int32
     public let pid: pid_t
 
-    private let onData: ([UInt8]) -> Void
-    private let onExit: (Int32) -> Void
+    private let onData: @Sendable ([UInt8]) -> Void
+    private let onExit: @Sendable (Int32) -> Void
     private var readSource: DispatchSourceRead?
     private let queue: DispatchQueue
     private var exited = false
@@ -37,8 +43,8 @@ public final class PtyProcess {
         cols: Int,
         rows: Int,
         queue: DispatchQueue = DispatchQueue(label: "juancode.pty"),
-        onData: @escaping ([UInt8]) -> Void,
-        onExit: @escaping (Int32) -> Void
+        onData: @escaping @Sendable ([UInt8]) -> Void,
+        onExit: @escaping @Sendable (Int32) -> Void
     ) {
         self.onData = onData
         self.onExit = onExit
@@ -119,7 +125,14 @@ public final class PtyProcess {
                 if r == pid { break }
                 if r == -1 && errno != EINTR { break } // ECHILD etc.
             }
-            self?.queue.async { self?.finish(status) }
+            // Copy to a `let` so the `@Sendable` queue closure captures an
+            // immutable value rather than the mutated `var`.
+            let finalStatus = status
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self else { return }
+                self.finish(finalStatus)
+            }
         }
     }
 

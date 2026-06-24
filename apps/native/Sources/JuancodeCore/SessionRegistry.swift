@@ -3,6 +3,10 @@ import Foundation
 /// Holds the live (in-memory) ptys for the current process lifetime. Mirrors
 /// `apps/server/src/registry.ts`. The local SwiftUI view and remote WS clients
 /// are both just subscribers to sessions tracked here.
+/// `@unchecked Sendable`: the mutable `sessions` / `createListeners` maps and
+/// `nextToken` are only ever touched under `lock` (an `NSRecursiveLock`); `env`
+/// is `let`. That lock is the synchronization invariant, so the registry is safe
+/// to share across the spawning thread, session exit callbacks, and WS handlers.
 public final class SessionRegistry: @unchecked Sendable {
     public typealias CreateListener = (Session) -> Void
 
@@ -57,8 +61,9 @@ public final class SessionRegistry: @unchecked Sendable {
         if live.meta.skipPermissions == skipPermissions { return live }
         guard live.meta.cliSessionId != nil else { throw SessionError.notResumable }
 
-        var next = live.meta
-        next.skipPermissions = skipPermissions
+        var nextMeta = live.meta
+        nextMeta.skipPermissions = skipPermissions
+        let next = nextMeta // immutable copy for the `@Sendable` exit closure
 
         // Snapshot scrollback now so the revived pty carries the conversation
         // forward, with a marker before the resumed CLI repaints over it.
@@ -69,16 +74,18 @@ public final class SessionRegistry: @unchecked Sendable {
         return try await withCheckedThrowingContinuation { cont in
             // Resume only after the old pty is fully gone, so its exit cleanup
             // (which drops the id from the live map) can't clobber the revived one.
-            var off: Session.Cancel?
-            off = live.onExit { [weak self] _ in
-                off?()
+            // The cancel handle is held in a Sendable box so the `@Sendable` exit
+            // listener can detach itself without capturing a mutable `var`.
+            let off = CancelBox()
+            off.set(live.onExit { [weak self] _ in
+                off.cancel()
                 guard let self else { return }
                 do {
                     cont.resume(returning: try self.resume(next, cols: cols, rows: rows, priorScrollback: seed))
                 } catch {
                     cont.resume(throwing: error)
                 }
-            }
+            })
             live.kill()
         }
     }

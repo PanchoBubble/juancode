@@ -46,12 +46,18 @@ public struct SessionEnvironment: Sendable {
 /// Mirrors `apps/server/src/session.ts`. Title/usage polling (u34.6) and the
 /// GRDB store (u34.5) plug in behind `SessionEnvironment`; here the store is the
 /// in-memory default.
+/// `@unchecked Sendable`: every mutable field (`_meta`, the listener maps,
+/// `scroll`, `nextToken`, the persist/title bookkeeping) is read and written only
+/// under `lock` (an `NSRecursiveLock`); the immutable collaborators (`env`,
+/// `spec`, `workQueue`) are `let`. The lock is the synchronization invariant, so
+/// the type is safe to share across the pty queue, the title-poll timer, and
+/// caller threads.
 public final class Session: @unchecked Sendable {
     /// A subscriber-cancel handle: call it to detach.
-    public typealias Cancel = () -> Void
-    public typealias OutputListener = (_ bytes: [UInt8]) -> Void
-    public typealias ExitListener = (_ exitCode: Int?) -> Void
-    public typealias ActivityListener = (_ state: SessionActivity, _ notify: Bool) -> Void
+    public typealias Cancel = @Sendable () -> Void
+    public typealias OutputListener = @Sendable (_ bytes: [UInt8]) -> Void
+    public typealias ExitListener = @Sendable (_ exitCode: Int?) -> Void
+    public typealias ActivityListener = @Sendable (_ state: SessionActivity, _ notify: Bool) -> Void
 
     private let lock = NSRecursiveLock()
     private var _meta: SessionMeta
@@ -232,13 +238,18 @@ public final class Session: @unchecked Sendable {
     public func autoSubmit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        var cancel: Cancel?
-        cancel = subscribeOutput(replay: false) { [weak self] _ in
-            cancel?()
-            self?.workQueue.asyncAfter(deadline: .now() + .milliseconds(500)) {
-                self?.write("\(trimmed)\r")
+        // Hold the cancel handle in a Sendable box so the (now `@Sendable`)
+        // listener can detach itself on first output without capturing a mutable
+        // `var` across concurrency domains.
+        let holder = CancelBox()
+        holder.set(subscribeOutput(replay: false) { [weak self] _ in
+            holder.cancel()
+            guard let self else { return }
+            self.workQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+                guard let self else { return }
+                self.write("\(trimmed)\r")
             }
-        }
+        })
     }
 
     public func resize(cols: Int, rows: Int) {
@@ -407,5 +418,30 @@ public final class Session: @unchecked Sendable {
             return (_meta, scroll.bytes)
         }
         env.store.update(meta, scrollback: bytes)
+    }
+}
+
+/// `@unchecked Sendable`: a one-shot, lock-guarded slot for a subscriber cancel
+/// handle, so a `@Sendable` listener can detach itself (in `autoSubmit` and in
+/// the registry's accept-all flip) without capturing a mutable `var` across
+/// concurrency domains. All access to the underlying optional goes through the
+/// `NSLock`.
+final class CancelBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handle: Session.Cancel?
+
+    init() {}
+
+    func set(_ handle: @escaping Session.Cancel) {
+        lock.withLock { self.handle = handle }
+    }
+
+    func cancel() {
+        let h = lock.withLock { () -> Session.Cancel? in
+            let h = handle
+            handle = nil
+            return h
+        }
+        h?()
     }
 }

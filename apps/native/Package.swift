@@ -32,11 +32,7 @@ let package = Package(
         // (juancode-u34.2). Deliberately dependency-free: SwiftTerm, the embedded
         // server, and the GRDB store are *consumers* of this core.
         .target(
-            name: "JuancodeCore",
-            // Throwaway-fast for now: Swift 5 mode sidesteps strict-concurrency
-            // friction while the shape settles. Hardening to Swift 6 concurrency
-            // is tracked as follow-up.
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            name: "JuancodeCore"
         ),
         // SQLite persistence (juancode-u34.5): GRDB-backed PersistentStore mirroring
         // db.ts — sessions (metadata + scrollback), diff comments, cached reviews,

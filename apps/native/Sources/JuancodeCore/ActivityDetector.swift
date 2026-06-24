@@ -133,6 +133,11 @@ public final class ActivityDetector: @unchecked Sendable {
 }
 
 /// Thin NSRegularExpression wrapper so the patterns above read cleanly.
+///
+/// `@unchecked Sendable`: the sole stored property `re` is an immutable `let`
+/// `NSRegularExpression`, which Apple documents as thread-safe for concurrent
+/// matching. There is no mutable state, so sharing instances across threads is
+/// safe.
 struct Regex: @unchecked Sendable {
     private let re: NSRegularExpression
     init(_ pattern: String, caseInsensitive: Bool) {
