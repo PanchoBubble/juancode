@@ -50,17 +50,17 @@ func errMsg(_ err: Error) -> String {
 // These DTOs live in JuancodeCore / JuancodeServices (which can't depend on
 // Hummingbird); conform them here so handlers can return them directly as JSON.
 
-extension SessionMeta: @retroactive ResponseEncodable {}
-extension SearchHit: @retroactive ResponseEncodable {}
-extension DiffResult: @retroactive ResponseEncodable {}
-extension GitState: @retroactive ResponseEncodable {}
-extension Worktree: @retroactive ResponseEncodable {}
-extension CommitResult: @retroactive ResponseEncodable {}
-extension PushResult: @retroactive ResponseEncodable {}
-extension CommitMessageResult: @retroactive ResponseEncodable {}
-extension PrCreateResult: @retroactive ResponseEncodable {}
-extension PrListResult: @retroactive ResponseEncodable {}
-extension BeadsResult: @retroactive ResponseEncodable {}
-extension ReviewResult: @retroactive ResponseEncodable {}
-extension DiffComment: @retroactive ResponseEncodable {}
-extension ProviderStatus: @retroactive ResponseEncodable {}
+extension SessionMeta: ResponseEncodable {}
+extension SearchHit: ResponseEncodable {}
+extension DiffResult: ResponseEncodable {}
+extension GitState: ResponseEncodable {}
+extension Worktree: ResponseEncodable {}
+extension CommitResult: ResponseEncodable {}
+extension PushResult: ResponseEncodable {}
+extension CommitMessageResult: ResponseEncodable {}
+extension PrCreateResult: ResponseEncodable {}
+extension PrListResult: ResponseEncodable {}
+extension BeadsResult: ResponseEncodable {}
+extension ReviewResult: ResponseEncodable {}
+extension DiffComment: ResponseEncodable {}
+extension ProviderStatus: ResponseEncodable {}

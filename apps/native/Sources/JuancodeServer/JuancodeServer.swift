@@ -12,11 +12,16 @@ import JuancodePersistence
 public enum JuancodeServer {
     /// Build and run the server until shutdown. `webDist`, when present, is served
     /// as the built web app (production); in dev the Vite server proxies instead.
+    /// - Parameter handleSignals: when true (headless runner) the server traps
+    ///   SIGINT/SIGTERM for graceful shutdown. The GUI app passes false — it owns
+    ///   its own lifecycle (Cmd-Q), and trapping SIGINT there would swallow the
+    ///   terminal's Ctrl-C without quitting the process.
     public static func run(
         state: AppState,
         host: String = "127.0.0.1",
         port: Int = Config.port,
-        webDist: String? = nil
+        webDist: String? = nil,
+        handleSignals: Bool = true
     ) async throws {
         let router = buildRouter(state: state, webDist: webDist)
         let wsRouter = buildWSRouter(state: state)
@@ -25,7 +30,11 @@ public enum JuancodeServer {
             server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
             configuration: .init(address: .hostname(host, port: port), serverName: "juancode")
         )
-        try await app.runService()
+        if handleSignals {
+            try await app.runService()
+        } else {
+            try await app.runService(gracefulShutdownSignals: [])
+        }
     }
 
     // MARK: - WebSocket router (/ws)
@@ -152,7 +161,7 @@ public enum JuancodeServer {
             guard !title.isEmpty else { throw APIError(.badRequest, "title required") }
             let cwd = await resolveTargetCwd(m.cwd, body.cwd)
             do {
-                try await pushCurrent(cwd) // ensure the branch is on the remote first
+                _ = try await pushCurrent(cwd) // ensure the branch is on the remote first
                 return try await createPr(cwd, title: title, body: body.body ?? "", draft: body.draft ?? false)
             } catch { throw APIError(.internalServerError, errMsg(error)) }
         }
