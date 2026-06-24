@@ -119,6 +119,53 @@ final class BeadsTests: XCTestCase {
         XCTAssertEqual(r.error, "No beads tracker in this folder")
     }
 
+    // MARK: - issuePrompt (juancode-sfh)
+
+    func testIssuePromptWithDescription() {
+        let p = issuePrompt(id: "x-1", title: "Fix the parser", description: "It chokes on empty input.")
+        XCTAssertEqual(p, "Work on x-1: Fix the parser\n\nIt chokes on empty input.")
+    }
+
+    func testIssuePromptWithoutDescriptionIsSingleLine() {
+        let p = issuePrompt(id: "x-2", title: "Add a flag")
+        XCTAssertEqual(p, "Work on x-2: Add a flag")
+        // A blank/whitespace description is treated as none — no trailing block.
+        XCTAssertEqual(issuePrompt(id: "x-2", title: "Add a flag", description: "   \n  "),
+                       "Work on x-2: Add a flag")
+    }
+
+    func testIssuePromptTrimsTitleAndDescription() {
+        let p = issuePrompt(id: "x-3", title: "  Spaced title  ", description: "  body  ")
+        XCTAssertEqual(p, "Work on x-3: Spaced title\n\nbody")
+    }
+
+    func testIssuePromptEmptyTitleOmitsColon() {
+        XCTAssertEqual(issuePrompt(id: "x-4", title: ""), "Work on x-4")
+        XCTAssertEqual(issuePrompt(id: "x-4", title: "   ", description: "details"),
+                       "Work on x-4\n\ndetails")
+    }
+
+    /// `getBeadsDescription` reads `[0].description` from `bd show <id> --json` and
+    /// degrades to nil for a missing/empty description — covered via a fake bd.
+    func testGetBeadsDescriptionReadsShowOutput() async throws {
+        let fake = try writeFakeBdShow(#"[{"id":"x-1","description":"the full body"}]"#)
+        setenv("JUANCODE_BD_BIN", fake, 1)
+        defer { unsetenv("JUANCODE_BD_BIN") }
+        let desc = await getBeadsDescription(dir, id: "x-1")
+        XCTAssertEqual(desc, "the full body")
+    }
+
+    func testGetBeadsDescriptionNilWhenMissing() async throws {
+        let fake = try writeFakeBdShow(#"[{"id":"x-1"}]"#)
+        setenv("JUANCODE_BD_BIN", fake, 1)
+        defer { unsetenv("JUANCODE_BD_BIN") }
+        let desc = await getBeadsDescription(dir, id: "x-1")
+        XCTAssertNil(desc)
+        // Empty id short-circuits without launching bd.
+        let none = await getBeadsDescription(dir, id: "")
+        XCTAssertNil(none)
+    }
+
     // MARK: - helpers
 
     private func runBd(_ args: [String], in cwd: String) {
@@ -161,6 +208,25 @@ final class BeadsTests: XCTestCase {
           blocked)
         cat <<'JSON'
         \(blocked)
+        JSON
+            ;;
+          *)
+            echo 'null'
+            ;;
+        esac
+        """
+        return try writeFakeBdScript(script)
+    }
+
+    /// A fake `bd` that echoes canned JSON for `bd --sandbox show <id> --json`
+    /// (the subcommand is `$2`), used to cover `getBeadsDescription`.
+    private func writeFakeBdShow(_ json: String) throws -> String {
+        let script = """
+        #!/bin/sh
+        case "$2" in
+          show)
+        cat <<'JSON'
+        \(json)
         JSON
             ;;
           *)

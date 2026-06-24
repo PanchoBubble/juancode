@@ -134,6 +134,67 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Beads issues (per-folder issue picker — juancode-sfh)
+
+    /// bd issue listings per folder cwd, loaded lazily by `FolderHeader` and
+    /// refreshed in the background. Mirrors `prsByCwd`. `available: false` (no
+    /// tracker / bd missing) keeps the popover trigger hidden.
+    @Published var beadsByCwd: [String: BeadsResult] = [:]
+    /// cwds with an issue fetch in flight, so a refresh doesn't stampede.
+    private var beadsLoading: Set<String> = []
+
+    /// The cached issue listing for `cwd`, if loaded yet.
+    func beads(_ cwd: String) -> BeadsResult? { beadsByCwd[cwd] }
+
+    /// Load (or refresh) the bd issues for `cwd` via the real `bd` CLI. Runs off
+    /// the main actor since it shells out, then publishes the result. Coalesces
+    /// concurrent calls for the same cwd. Mirrors `loadPrs`.
+    func loadBeads(_ cwd: String) {
+        guard !beadsLoading.contains(cwd) else { return }
+        beadsLoading.insert(cwd)
+        Task {
+            let result = await Task.detached(priority: .utility) { await getBeads(cwd) }.value
+            beadsByCwd[cwd] = result
+            beadsLoading.remove(cwd)
+        }
+    }
+
+    /// "Work on" a bd issue: compose `Work on <id>: <title>\n\n<description>` and
+    /// inject it into the focused/live session as if typed. The issue's status is
+    /// left untouched (side-effect-free, per juancode-sfh).
+    ///
+    /// If the folder has a live focused session it lands there; otherwise we fall
+    /// back to the folder's most-recent live session, and if none exists we spawn a
+    /// fresh Claude session seeded with the prompt (mirrors `workOnPr`). The bd
+    /// `show` lookup (for the full description) runs off the main actor.
+    func workOnIssue(_ issue: BeadsIssue, cwd: String) {
+        Task {
+            let id = issue.id
+            let description = await Task.detached(priority: .utility) {
+                await getBeadsDescription(cwd, id: id)
+            }.value
+            let prompt = issuePrompt(id: id, title: issue.title, description: description)
+            if let session = focusedLiveSession(in: cwd) {
+                // Write it as if typed: idle → runs now, busy → queued by the CLI.
+                session.write("\(prompt)\r")
+            } else {
+                // No live session for this folder — start one seeded with the prompt.
+                await create(provider: .claude, cwd: cwd, skipPermissions: false,
+                             isolateWorktree: false, initialInput: prompt)
+            }
+        }
+    }
+
+    /// The live session to inject an issue into for `cwd`: the current selection if
+    /// it's live and rooted in `cwd`, else the most recently-created live session
+    /// in that folder. `nil` when the folder has no live session.
+    private func focusedLiveSession(in cwd: String) -> Session? {
+        if let sel = selection, let s = liveSession(sel), s.meta.cwd == cwd { return s }
+        return appState.registry.all()
+            .filter { $0.meta.cwd == cwd }
+            .max { $0.meta.createdAt < $1.meta.createdAt }
+    }
+
     // MARK: - Tracked PRs (juancode-it5)
 
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`. The poll

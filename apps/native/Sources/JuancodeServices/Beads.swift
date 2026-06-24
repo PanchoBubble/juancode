@@ -170,3 +170,35 @@ private func describe(_ err: Error) -> String {
     if stderr.contains("no beads database") { return "No beads tracker in this folder" }
     return !stderr.isEmpty ? stderr : e.message
 }
+
+// MARK: - prompt builder (juancode-sfh)
+
+/// Fetch the full details for a single issue (`bd show <id> --json`), returning
+/// its `description` if present. Degrades to `nil` (never throws) when bd is
+/// missing or the id is unknown, so callers fall back to the list-only fields.
+///
+/// `bd show --json` emits an array with a single object; we read `[0].description`.
+public func getBeadsDescription(_ cwd: String, id: String) async -> String? {
+    guard !id.isEmpty else { return nil }
+    do {
+        let value = try await bdJson(cwd, ["show", id])
+        let first = (value as? [Any])?.first as? [String: Any]
+        let desc = (first?["description"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (desc?.isEmpty ?? true) ? nil : desc
+    } catch {
+        return nil
+    }
+}
+
+/// Compose the context blob injected into an agent session when the user picks an
+/// issue to "work on". Pure so it can be unit-tested. Template:
+/// `Work on <id>: <title>\n\n<description>` — the trailing description block is
+/// omitted entirely when there is none, leaving just the one-line `Work on …`.
+/// Side-effect-free by design (juancode-sfh): it never mutates the issue's status.
+public func issuePrompt(id: String, title: String, description: String? = nil) -> String {
+    let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    let header = trimmedTitle.isEmpty ? "Work on \(id)" : "Work on \(id): \(trimmedTitle)"
+    let body = description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return body.isEmpty ? header : "\(header)\n\n\(body)"
+}

@@ -132,9 +132,10 @@ private struct FolderHeader: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("New session in \(group.cwd)")
+            FolderIssues(cwd: group.cwd)
             FolderPrs(cwd: group.cwd)
         }
-        .onAppear { model.loadPrs(group.cwd) }
+        .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
     }
 }
 
@@ -382,6 +383,149 @@ private struct TrackBadge: View {
         case .fixing: return "Tracking — CI is running/failing; the agent is on it"
         case .needsDecision: return "Tracking — a change needs your decision"
         }
+    }
+}
+
+/// Per-folder bd-issue badge + popover (juancode-sfh). Renders nothing unless the
+/// folder has a beads tracker with at least one issue, so it stays invisible
+/// otherwise. Mirrors `FolderPrs`: a count badge opening a searchable list with a
+/// "Ready" filter and a per-issue "Work on" action that injects the issue's
+/// context into the folder's focused session.
+private struct FolderIssues: View {
+    @EnvironmentObject var model: AppModel
+    let cwd: String
+    @State private var showing = false
+    @State private var query = ""
+    @State private var readyOnly = false
+
+    private var result: BeadsResult? { model.beads(cwd) }
+    private var all: [BeadsIssue] {
+        guard let r = result, r.available else { return [] }
+        // Open work only — closed issues aren't actionable to "work on".
+        return r.issues.filter { $0.status != "closed" }
+    }
+    private var readyCount: Int { all.filter { $0.ready }.count }
+    /// Offer the Ready filter only when it would change the list.
+    private var canFilterReady: Bool { readyCount > 0 && readyCount < all.count }
+
+    private var list: [BeadsIssue] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return all.filter { issue in
+            if readyOnly && canFilterReady && !issue.ready { return false }
+            if !q.isEmpty {
+                let hay = "\(issue.id) \(issue.title)".lowercased()
+                if !hay.contains(q) { return false }
+            }
+            return true
+        }
+    }
+
+    var body: some View {
+        if all.isEmpty {
+            EmptyView()
+        } else {
+            Button {
+                showing.toggle()
+            } label: {
+                Text("\(all.count) issue\(all.count == 1 ? "" : "s")")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .buttonStyle(.borderless)
+            .help("\(all.count) open bd issue\(all.count == 1 ? "" : "s")")
+            .popover(isPresented: $showing, arrowEdge: .bottom) {
+                popover
+            }
+        }
+    }
+
+    private var popover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                TextField("Filter issues…", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                if canFilterReady {
+                    Toggle("Ready (\(readyCount))", isOn: $readyOnly)
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                        .font(.system(size: 10))
+                }
+            }
+            .padding(8)
+            Divider()
+            if list.isEmpty {
+                Text(query.isEmpty && !readyOnly ? "No open issues" : "No matching issues")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(list, id: \.id) { issue in
+                            IssueRow(issue: issue, cwd: cwd) { showing = false }
+                            Divider()
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .frame(width: 320)
+    }
+}
+
+/// One bd issue in the popover: status dot, id, title, and a "Work on" action
+/// that injects the issue's context into the folder's focused agent session.
+private struct IssueRow: View {
+    @EnvironmentObject var model: AppModel
+    let issue: BeadsIssue
+    let cwd: String
+    /// Called to dismiss the popover after an action that navigates away.
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(statusColor).frame(width: 7, height: 7).help(statusLabel)
+                Text(issue.id).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(issue.title).font(.system(size: 12)).lineLimit(1).help(issue.title)
+                if issue.blocked {
+                    Text("blocked")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.2))
+                        .foregroundStyle(.orange)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                Spacer(minLength: 4)
+                Text("p\(issue.priority)").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Button("Work on") {
+                    dismiss()
+                    model.workOnIssue(issue, cwd: cwd)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .help("Inject this issue's context into the focused session (starts one if none)")
+                Spacer()
+            }
+            .padding(.leading, 13)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private var statusColor: Color {
+        if issue.blocked { return .orange }
+        if issue.ready { return .green }
+        return .secondary
+    }
+    private var statusLabel: String {
+        if issue.blocked { return "Blocked" }
+        if issue.ready { return "Ready" }
+        return issue.status
     }
 }
 
