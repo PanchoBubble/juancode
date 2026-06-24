@@ -647,25 +647,56 @@ struct DetailView: View {
     }
 }
 
-/// The two views the session detail pane can show: the live terminal, or the
-/// working-tree changes panel (diff + inline comments + git actions).
-private enum SessionTab: String, CaseIterable { case terminal = "Terminal", changes = "Changes" }
+/// The two views the session's right-side panel can show: the working-tree
+/// changes panel (diff + inline comments + git actions) or the folder's bd issues.
+private enum SidePanelTab: String, CaseIterable { case changes = "Changes", issues = "Issues" }
+
+/// A thin draggable vertical divider that resizes the pane to its RIGHT by writing
+/// `width` (clamped to [min, max]). Dragging left grows the right pane; dragging
+/// right shrinks it. Mirrors `ChangesPanel`'s left-pane handle, sign-flipped.
+private struct PanelResizeHandle: View {
+    @Binding var width: Double
+    let min: Double
+    let max: Double
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.18))
+            .frame(width: 1)
+            .overlay(
+                Rectangle().fill(Color.clear).frame(width: 8)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                width = Swift.min(max, Swift.max(min, width - value.translation.width))
+                            })
+            )
+    }
+}
 
 struct SessionContainer: View {
     @EnvironmentObject var model: AppModel
     let meta: SessionMeta
-    @State private var tab: SessionTab = .terminal
+    /// Active right-panel tab, remembered app-wide.
+    @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.changes.rawValue
+    /// Whether the right-side panel is shown. Toggled from the header CTA.
+    @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
+    /// Persisted width of the right-side panel in the split.
+    @AppStorage("session.sidePanel.width") private var panelWidth: Double = 420
+
+    private var tab: SidePanelTab {
+        get { SidePanelTab(rawValue: tabRaw) ?? .changes }
+        nonmutating set { tabRaw = newValue.rawValue }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(meta.title).font(.headline).lineLimit(1)
-                Picker("", selection: $tab) {
-                    ForEach(SessionTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .labelsHidden()
                 Spacer()
                 if model.isLive(meta.id) {
                     acceptAllToggle
@@ -675,15 +706,49 @@ struct SessionContainer: View {
                     Button("Reactivate") { Task { await model.reactivate(meta.id) } }
                         .controlSize(.small)
                 }
+                Button {
+                    panelShown.toggle()
+                } label: {
+                    Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
+                }
+                .help(panelShown ? "Hide the Changes / Issues panel" : "Show the Changes / Issues panel")
             }
             .padding(8)
             Divider()
-            switch tab {
-            case .terminal: terminal
-            case .changes: ChangesPanel(sessionId: meta.id)
+            HStack(spacing: 0) {
+                terminal
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if panelShown {
+                    PanelResizeHandle(width: $panelWidth, min: 280, max: 760)
+                    sidePanel
+                        .frame(width: CGFloat(panelWidth))
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(meta.title)
+    }
+
+    /// The right-side panel: a Changes | Issues tab switcher hosting the existing
+    /// self-contained `ChangesPanel` (session diff) and `IssuesPanel` (folder bd
+    /// issues). The active tab is remembered app-wide via @AppStorage.
+    private var sidePanel: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: Binding(get: { tab }, set: { tab = $0 })) {
+                ForEach(SidePanelTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            Divider()
+            switch tab {
+            case .changes: ChangesPanel(sessionId: meta.id)
+            case .issues: IssuesPanel(cwd: meta.cwd)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.windowBackgroundColor))
     }
 
     /// Per-session accept-all switch. Flipping it resume-restarts the CLI at the
