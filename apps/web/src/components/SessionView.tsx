@@ -4,10 +4,13 @@ import { useNavigate } from "@tanstack/react-router";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
+import { useActivity } from "../lib/activity.ts";
 import type { ServerMessage } from "../protocol.ts";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
+import { MessageQueue } from "./MessageQueue.tsx";
 import { Terminal } from "./Terminal.tsx";
+import { TerminalPanel } from "./TerminalPanel.tsx";
 
 /** Which auxiliary view, if any, is open in the collapsible right panel. */
 type SidePanel = "changes" | "issues" | null;
@@ -38,20 +41,33 @@ export function SessionView({ id }: { id: string }) {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions });
   const meta = sessions.data?.find((s) => s.id === id);
   const [side, setSide] = useState<SidePanel>(null);
+  // The integrated shell-terminal panel splits the bottom of the session view.
+  const [showTerminal, setShowTerminal] = useState(false);
 
   // Track status live off the socket so the header reflects reality without
   // waiting for the next sessions poll (kill → exited, reactivate → running).
   const [liveStatus, setLiveStatus] = useState<"running" | "exited" | null>(null);
+  // Live "accept all" state, tracked off the socket so the toggle reflects the
+  // revived session immediately after a flip (without waiting for a sessions poll).
+  const [liveSkip, setLiveSkip] = useState<boolean | null>(null);
+  // True while a flip is in flight (CLI is resume-restarting) — disables the toggle.
+  const [flipping, setFlipping] = useState(false);
   // Set when the server reports it found no prior CLI conversation to resume —
   // then the only way forward is a fresh chat in the same folder.
   const [unresumable, setUnresumable] = useState(false);
   useEffect(() => {
     setLiveStatus(null);
+    setLiveSkip(null);
+    setFlipping(false);
     setUnresumable(false);
     return socket.subscribe((msg: ServerMessage) => {
       if (!("sessionId" in msg) || msg.sessionId !== id) return;
-      if (msg.type === "attached") setLiveStatus(msg.session.status);
-      else if (msg.type === "exit") setLiveStatus("exited");
+      if (msg.type === "attached") {
+        setLiveStatus(msg.session.status);
+        setLiveSkip(msg.session.skipPermissions);
+        setFlipping(false);
+      } else if (msg.type === "exit") setLiveStatus("exited");
+      else if (msg.type === "error") setFlipping(false);
       else if (msg.type === "unresumable") {
         setLiveStatus("exited");
         setUnresumable(true);
@@ -79,6 +95,52 @@ export function SessionView({ id }: { id: string }) {
 
   const status = liveStatus ?? meta?.status;
   const canReactivate = status === "exited" && !unresumable;
+  const activity = useActivity(id);
+
+  // ── "Accept all" (skip permission prompts) toggle ──────────────────────────
+  const skipOn = liveSkip ?? meta?.skipPermissions ?? false;
+  /**
+   * Flip accept-all on the live session. The server resume-restarts the CLI with
+   * the new permission level, preserving the conversation, and replies `attached`.
+   */
+  const flipSkipPermissions = () => {
+    if (status !== "running" || flipping) return;
+    const next = !skipOn;
+    if (
+      next &&
+      !window.confirm(
+        "Enable accept-all? The agent will run tools and commands with no permission prompts. The session restarts (conversation is kept).",
+      )
+    ) {
+      return;
+    }
+    setFlipping(true);
+    setLiveSkip(next); // optimistic
+    socket.send({ type: "setSkipPermissions", sessionId: id, skipPermissions: next, cols: 80, rows: 24 });
+    void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  };
+
+  // ── Queued follow-up message ───────────────────────────────────────────────
+  // Let the user line up their next instruction while the agent is still working
+  // (busy or waiting_input). We buffer it client-side and auto-send it as a
+  // normal `input` (with the trailing Enter the CLI expects) on the next edge
+  // into `idle` for this session. Keyed by id so switching sessions starts clean.
+  const [queued, setQueued] = useState<string | null>(null);
+  const prevActivity = useRef<typeof activity>(undefined);
+  useEffect(() => {
+    setQueued(null);
+    prevActivity.current = undefined;
+  }, [id]);
+  useEffect(() => {
+    const was = prevActivity.current;
+    prevActivity.current = activity;
+    // Fire only on a real transition into idle (not the first observation), and
+    // only while the session is alive — a dead pty can't receive input.
+    if (queued !== null && activity === "idle" && was !== undefined && was !== "idle" && status === "running") {
+      socket.send({ type: "input", sessionId: id, data: `${queued}\r` });
+      setQueued(null);
+    }
+  }, [activity, queued, status, id]);
 
   /** Resume the session (server resumes its CLI conversation, recovering the id if needed). */
   const reactivate = () => {
@@ -179,6 +241,22 @@ export function SessionView({ id }: { id: string }) {
     for (const file of Array.from(e.dataTransfer.files)) void handleFile(file);
   };
 
+  // Pasting an image (e.g. a screenshot) lands as clipboard `Files` rather than
+  // text, so xterm would just drop it. We intercept it the same way as a drop:
+  // upload the bytes and type the saved path into the prompt. Text pastes are
+  // left untouched so xterm/CLI keep handling them. The handler runs in the
+  // capture phase so we win before xterm's own paste handling.
+  const onPaste = (e: React.ClipboardEvent) => {
+    const images = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith("image/"));
+    if (images.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    for (const item of images) {
+      const file = item.getAsFile();
+      if (file) void handleFile(file);
+    }
+  };
+
   return (
     <div
       className="relative flex h-full flex-col"
@@ -186,10 +264,33 @@ export function SessionView({ id }: { id: string }) {
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
+      onPasteCapture={onPaste}
     >
       <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-2">
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{meta?.title ?? id}</div>
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium">{meta?.title ?? id}</span>
+            {meta?.worktreePath && (
+              <span
+                title={`Isolated git worktree: ${meta.worktreePath}`}
+                className="flex shrink-0 items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300"
+              >
+                ⎇ worktree
+              </span>
+            )}
+            {status === "running" && activity === "busy" && (
+              <span className="flex shrink-0 items-center gap-1 text-[11px] text-sky-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
+                working
+              </span>
+            )}
+            {status === "running" && activity === "waiting_input" && (
+              <span className="flex shrink-0 items-center gap-1 text-[11px] text-amber-400">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                input needed
+              </span>
+            )}
+          </div>
           <div className="truncate font-mono text-[11px] text-neutral-500">{meta?.cwd}</div>
         </div>
         <nav className="mr-auto ml-4 flex gap-1 text-xs">
@@ -204,7 +305,34 @@ export function SessionView({ id }: { id: string }) {
               {p}
             </button>
           ))}
+          <button
+            onClick={() => setShowTerminal((v) => !v)}
+            className={`rounded-md px-2.5 py-1 ${
+              showTerminal ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+            }`}
+          >
+            terminal
+          </button>
         </nav>
+        {status === "running" && (
+          <button
+            onClick={flipSkipPermissions}
+            disabled={flipping}
+            title={
+              skipOn
+                ? "Accept-all is ON — agent runs with no permission prompts. Click to turn off (restarts the session)."
+                : "Accept-all is OFF. Click to skip all permission prompts (restarts the session)."
+            }
+            className={`mr-2 flex items-center gap-1.5 rounded-md border px-3 py-1 text-xs disabled:opacity-50 ${
+              skipOn
+                ? "border-amber-500/60 bg-amber-500/10 text-amber-300 hover:border-amber-400"
+                : "border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+            }`}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${skipOn ? "bg-amber-400" : "bg-neutral-600"}`} />
+            {flipping ? "Restarting…" : skipOn ? "Accept all: on" : "Accept all: off"}
+          </button>
+        )}
         {status === "running" && (
           <button
             onClick={() => socket.send({ type: "kill", sessionId: id })}
@@ -277,23 +405,40 @@ export function SessionView({ id }: { id: string }) {
         </div>
       )}
       <div className="min-h-0 flex-1 bg-[#0b0d10]">
-        {/* The terminal panel is always mounted so the pty/xterm state and scroll
-            position survive opening/closing the side panel. xterm refits itself
-            via its ResizeObserver as the split is dragged. */}
-        <PanelGroup direction="horizontal" autoSaveId="juancode-session-split">
-          <Panel id="terminal" order={1} minSize={25} className="overflow-hidden">
-            <Terminal key={id} sessionId={id} />
+        {/* Vertical split: the agent terminal + side panel on top, the optional
+            integrated shell-terminal panel as an adjustable bottom split. */}
+        <PanelGroup direction="vertical" autoSaveId="juancode-session-vertical">
+          <Panel order={1} minSize={20} className="overflow-hidden">
+            {/* The terminal panel is always mounted so the pty/xterm state and
+                scroll position survive opening/closing the side panel. xterm
+                refits itself via its ResizeObserver as the split is dragged. */}
+            <PanelGroup direction="horizontal" autoSaveId="juancode-session-split">
+              <Panel id="terminal" order={1} minSize={25} className="overflow-hidden">
+                <Terminal key={id} sessionId={id} />
+              </Panel>
+              {side && (
+                <>
+                  <PanelResizeHandle className="relative w-px bg-neutral-800 transition-colors after:absolute after:inset-y-0 after:-left-1 after:w-2 hover:bg-neutral-600 data-[resize-handle-state=drag]:bg-neutral-500" />
+                  <Panel id="side" order={2} defaultSize={45} minSize={25} className="overflow-hidden">
+                    {side === "changes" ? <ChangesPanel sessionId={id} /> : <BeadsPanel sessionId={id} />}
+                  </Panel>
+                </>
+              )}
+            </PanelGroup>
           </Panel>
-          {side && (
+          {showTerminal && meta && (
             <>
-              <PanelResizeHandle className="w-1.5 bg-neutral-800 transition-colors hover:bg-neutral-600 data-[resize-handle-state=drag]:bg-neutral-500" />
-              <Panel id="side" order={2} defaultSize={45} minSize={25} className="overflow-hidden">
-                {side === "changes" ? <ChangesPanel sessionId={id} /> : <BeadsPanel sessionId={id} />}
+              <PanelResizeHandle className="relative h-px bg-neutral-800 transition-colors after:absolute after:-top-1 after:h-2 after:w-full hover:bg-neutral-600 data-[resize-handle-state=drag]:bg-neutral-500" />
+              <Panel order={2} defaultSize={35} minSize={10} className="overflow-hidden">
+                <TerminalPanel key={id} cwd={meta.cwd} onClose={() => setShowTerminal(false)} />
               </Panel>
             </>
           )}
         </PanelGroup>
       </div>
+      {status === "running" && (activity === "busy" || activity === "waiting_input" || queued !== null) && (
+        <MessageQueue queued={queued} onQueue={setQueued} onCancel={() => setQueued(null)} />
+      )}
     </div>
   );
 }

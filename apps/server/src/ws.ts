@@ -1,10 +1,14 @@
 import type { Server } from "node:http";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { sessionDb } from "./db.ts";
 import { editors } from "./editor.ts";
+import { terminals } from "./terminal.ts";
+import { createWorktree } from "./git.ts";
 import { registry } from "./registry.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
+import type { Session } from "./session.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
 
 export function setupWebSocket(server: Server): void {
@@ -16,14 +20,17 @@ export function setupWebSocket(server: Server): void {
     // Editor ptys this connection opened — killed when it disconnects so an
     // editor never outlives the tab that opened it (sessions, by design, do).
     const openedEditors = new Set<string>();
+    // Shell terminal ptys this connection opened — same tab-scoped lifetime.
+    const openedTerminals = new Set<string>();
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
 
-    // Both real sessions and ephemeral editor ptys are addressed by id over the
-    // same input/resize/kill/output/exit messages — resolve against both.
-    const resolvePty = (id: string) => registry.get(id) ?? editors.get(id);
+    // Real sessions and ephemeral editor / shell-terminal ptys are all addressed
+    // by id over the same input/resize/kill/output/exit messages — resolve
+    // against all three.
+    const resolvePty = (id: string) => registry.get(id) ?? editors.get(id) ?? terminals.get(id);
 
     const subscribe = (sessionId: string) => {
       if (subscriptions.has(sessionId)) return;
@@ -36,6 +43,22 @@ export function setupWebSocket(server: Server): void {
         offExit();
       });
     };
+
+    // Activity (busy / done / waiting-for-input) is broadcast for *every* live
+    // session, not just the attached one, so the sidebar can show a status icon
+    // per session. This is independent of `subscribe` (which carries the heavy
+    // output stream only for sessions this tab is actually viewing).
+    const activityWatchers = new Set<() => void>();
+    const watchActivity = (session: Session) => {
+      send({ type: "activity", sessionId: session.id, state: session.activity, notify: false });
+      activityWatchers.add(
+        session.onActivity((state, notify) =>
+          send({ type: "activity", sessionId: session.id, state, notify }),
+        ),
+      );
+    };
+    for (const s of registry.all()) watchActivity(s);
+    activityWatchers.add(registry.onCreate(watchActivity));
 
     ws.on("message", (raw) => {
       let msg: ClientMessage;
@@ -57,7 +80,23 @@ export function setupWebSocket(server: Server): void {
             return;
           }
           try {
-            const session = registry.create(msg.provider, msg.cwd, msg.cols, msg.rows);
+            // Opt-in isolation: spin up a fresh worktree off cwd and run the
+            // session there so it can't clobber other sessions' working tree.
+            let cwd = msg.cwd;
+            let worktreePath: string | null = null;
+            if (msg.isolateWorktree) {
+              const wt = await createWorktree(msg.cwd, randomUUID().slice(0, 8));
+              cwd = wt.path;
+              worktreePath = wt.path;
+            }
+            const session = registry.create(
+              msg.provider,
+              cwd,
+              msg.cols,
+              msg.rows,
+              { skipPermissions: msg.skipPermissions },
+              worktreePath,
+            );
             if (msg.initialInput) session.autoSubmit(msg.initialInput);
             send({ type: "created", session: session.meta });
             subscribe(session.id);
@@ -127,15 +166,65 @@ export function setupWebSocket(server: Server): void {
             return;
           }
           try {
-            const session = registry.resume(meta, msg.cols, msg.rows);
+            // Carry the persisted scrollback into the revived session (with a
+            // separator before the resumed CLI repaints its TUI underneath) so
+            // the prior conversation survives the new pty and any re-attach.
+            const prior = sessionDb.getScrollback(meta.id);
+            const seed = prior
+              ? `${prior}\r\n\x1b[2m── session resumed ──\x1b[0m\r\n`
+              : "";
+            const session = registry.resume(meta, msg.cols, msg.rows, seed);
             subscribe(session.id);
-            // Fresh pty, so start the view clean — the resumed CLI repaints its TUI.
-            send({ type: "attached", sessionId: session.id, scrollback: "", session: session.meta });
+            send({
+              type: "attached",
+              sessionId: session.id,
+              scrollback: session.getScrollback(),
+              session: session.meta,
+            });
           } catch (err) {
             send({
               type: "error",
               sessionId: msg.sessionId,
               message: `Failed to resume: ${asMessage(err)}`,
+            });
+          }
+          return;
+        }
+
+        case "setSkipPermissions": {
+          if (!registry.get(msg.sessionId)) {
+            send({ type: "error", sessionId: msg.sessionId, message: "Session is not running" });
+            return;
+          }
+          // Drop the current subscription before the resume-restart so the client
+          // doesn't observe the transient exit of the old pty.
+          const cleanup = subscriptions.get(msg.sessionId);
+          if (cleanup) {
+            cleanup();
+            subscriptions.delete(msg.sessionId);
+          }
+          try {
+            const session = await registry.setSkipPermissions(
+              msg.sessionId,
+              msg.skipPermissions,
+              msg.cols,
+              msg.rows,
+            );
+            subscribe(session.id);
+            send({
+              type: "attached",
+              sessionId: session.id,
+              scrollback: session.getScrollback(),
+              session: session.meta,
+            });
+          } catch (err) {
+            // The flip failed before killing the pty (e.g. id not captured yet) —
+            // re-subscribe so the still-live session keeps streaming.
+            subscribe(msg.sessionId);
+            send({
+              type: "error",
+              sessionId: msg.sessionId,
+              message: `Failed to change permissions: ${asMessage(err)}`,
             });
           }
           return;
@@ -149,6 +238,18 @@ export function setupWebSocket(server: Server): void {
             send({ type: "editorReady", editorId: ed.id });
           } catch (err) {
             send({ type: "error", message: `Failed to open editor: ${asMessage(err)}` });
+          }
+          return;
+        }
+
+        case "openTerminal": {
+          try {
+            const sh = terminals.open(msg.cwd, msg.cols, msg.rows);
+            openedTerminals.add(sh.id);
+            subscribe(sh.id);
+            send({ type: "terminalReady", terminalId: sh.id, requestId: msg.requestId });
+          } catch (err) {
+            send({ type: "error", message: `Failed to open terminal: ${asMessage(err)}` });
           }
           return;
         }
@@ -177,9 +278,14 @@ export function setupWebSocket(server: Server): void {
     ws.on("close", () => {
       for (const cleanup of subscriptions.values()) cleanup();
       subscriptions.clear();
+      for (const off of activityWatchers) off();
+      activityWatchers.clear();
       // Editor ptys are tab-scoped — tear them down with the connection.
       for (const id of openedEditors) editors.get(id)?.kill();
       openedEditors.clear();
+      // Shell terminals are likewise tab-scoped.
+      for (const id of openedTerminals) terminals.get(id)?.kill();
+      openedTerminals.clear();
     });
   });
 }

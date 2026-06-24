@@ -15,6 +15,9 @@ export function NewSession() {
   const [path, setPath] = useState<string | undefined>(initialCwd);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [skipPermissions, setSkipPermissions] = useState(false);
+  const [isolateWorktree, setIsolateWorktree] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
   // Debounce the search input so we don't hammer the recursive search per keystroke.
@@ -42,6 +45,7 @@ export function NewSession() {
   const start = () => {
     if (!cwd || starting) return;
     setStarting(true);
+    setError(null);
     const unsub = socket.subscribe((msg) => {
       if (msg.type === "created") {
         unsub();
@@ -49,10 +53,11 @@ export function NewSession() {
         void navigate({ to: "/session/$id", params: { id: msg.session.id } });
       } else if (msg.type === "error") {
         unsub();
+        setError(msg.message);
         setStarting(false);
       }
     });
-    socket.send({ type: "create", provider, cwd, cols: 80, rows: 24 });
+    socket.send({ type: "create", provider, cwd, cols: 80, rows: 24, skipPermissions, isolateWorktree });
   };
 
   return (
@@ -121,13 +126,54 @@ export function NewSession() {
         </div>
       </div>
 
-      <button
-        onClick={start}
-        disabled={!cwd || starting}
-        className="self-start rounded-md bg-sky-600 px-5 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-      >
-        {starting ? "Starting…" : `Start ${provider}`}
-      </button>
+      <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-neutral-800 bg-neutral-900/50 px-3 py-2.5">
+        <input
+          type="checkbox"
+          checked={skipPermissions}
+          onChange={(e) => setSkipPermissions(e.target.checked)}
+          className="mt-0.5 accent-amber-500"
+        />
+        <span className="text-sm">
+          <span className="font-medium text-amber-300">Accept all — skip permission prompts</span>
+          <span className="block text-xs text-neutral-500">
+            Runs the CLI with{" "}
+            <code className="text-neutral-400">
+              {provider === "claude"
+                ? "--dangerously-skip-permissions"
+                : "--dangerously-bypass-approvals-and-sandbox"}
+            </code>
+            . The agent executes tools and commands without asking. Use only in folders you trust.
+          </span>
+        </span>
+      </label>
+
+      <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-neutral-800 bg-neutral-900/50 px-3 py-2.5">
+        <input
+          type="checkbox"
+          checked={isolateWorktree}
+          onChange={(e) => setIsolateWorktree(e.target.checked)}
+          className="mt-0.5 accent-sky-500"
+        />
+        <span className="text-sm">
+          <span className="font-medium text-sky-300">Isolate in a new git worktree</span>
+          <span className="block text-xs text-neutral-500">
+            Runs in a fresh worktree on a new <code className="text-neutral-400">juancode/…</code>{" "}
+            branch, so this session can't clobber other sessions' working tree. Removed when the
+            session is deleted. Requires a git repo with at least one commit.
+          </span>
+        </span>
+      </label>
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={start}
+          disabled={!cwd || starting}
+          className="self-start rounded-md bg-sky-600 px-5 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+        >
+          {starting ? "Starting…" : `Start ${provider}`}
+        </button>
+        {error && <span className="text-sm text-red-400">{error}</span>}
+      </div>
 
       <StatusPanel />
     </div>

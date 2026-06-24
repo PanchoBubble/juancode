@@ -11,7 +11,15 @@ import type { ServerMessage } from "../protocol.ts";
  * the editor exiting (e.g. `:q`) the overlay closes and the caller refetches the
  * diff. The pty is killed on unmount if it's still alive.
  */
-export function EditorModal({ cwd, file, onClose }: { cwd: string; file: string; onClose: () => void }) {
+export function EditorModal({
+  cwd,
+  file,
+  onClose,
+}: {
+  cwd: string;
+  file: string;
+  onClose: () => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   // Keep the latest onClose without re-running the (pty-spawning) effect.
   const onCloseRef = useRef(onClose);

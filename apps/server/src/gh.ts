@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { PrChecks, PrListResult, PullRequest } from "./protocol.ts";
+import type { PrChecks, PrCreateResult, PrListResult, PullRequest } from "./protocol.ts";
 
 const exec = promisify(execFile);
 
@@ -98,6 +98,30 @@ export async function getOpenPrs(cwd: string): Promise<PrListResult> {
     return { available: true, prs: parsePrs(raw), viewer: await getViewerLogin(cwd) };
   } catch {
     return { available: false, prs: [], error: "Could not parse gh output" };
+  }
+}
+
+/**
+ * Open a pull request for the current branch via the real `gh` CLI. The caller
+ * pushes the branch first, so this just creates the PR. If a PR already exists
+ * for the branch, gh prints its url to stderr — we return that with
+ * `created: false` rather than erroring.
+ */
+export async function createPr(
+  cwd: string,
+  opts: { title: string; body: string; draft: boolean },
+): Promise<PrCreateResult> {
+  const args = ["pr", "create", "--title", opts.title, "--body", opts.body];
+  if (opts.draft) args.push("--draft");
+  try {
+    const { stdout } = await exec("gh", args, { cwd, maxBuffer: MAX_BUFFER });
+    const url = stdout.match(/https?:\/\/\S+/)?.[0] ?? stdout.trim();
+    return { url, created: true };
+  } catch (err) {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    const existing = stderr.match(/already exists[:\s]+(https?:\/\/\S+)/i);
+    if (existing) return { url: existing[1]!, created: false };
+    throw new Error(ghErrorReason(err));
   }
 }
 

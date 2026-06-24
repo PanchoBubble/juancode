@@ -6,6 +6,14 @@
   color-scheme: dark;
 }
 
+/* Tailwind v4 dropped the default cursor:pointer on buttons; restore it. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+}
+
 /* Dark theme for react-diff-view (defaults are light). Scoped to .diff-dark. */
 .diff-dark {
   --diff-background-color: transparent;

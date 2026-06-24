@@ -5,6 +5,13 @@
 
 export type ProviderId = "claude" | "codex";
 
+/**
+ * Inferred live activity of a running session: `busy` while the agent works,
+ * `waiting_input` when it has stopped to ask a question/permission, `idle` when
+ * a turn is simply done. Live-only; never persisted.
+ */
+export type SessionActivity = "busy" | "idle" | "waiting_input";
+
 export interface SessionMeta {
   id: string;
   provider: ProviderId;
@@ -21,6 +28,17 @@ export interface SessionMeta {
    * captured — when null the session can be viewed but not reactivated.
    */
   cliSessionId: string | null;
+  /**
+   * "Accept all" mode for this session — the CLI runs with no permission/approval
+   * prompts. Persisted; can be flipped on a live session via `setSkipPermissions`.
+   */
+  skipPermissions: boolean;
+  /**
+   * Absolute path of a git worktree juancode auto-created for this session and
+   * owns (its `cwd` is this path); removed when the session is deleted. Null for
+   * sessions that run in an existing directory.
+   */
+  worktreePath: string | null;
 }
 
 export type ClientMessage =
@@ -32,9 +50,33 @@ export type ClientMessage =
       rows: number;
       /** Optional text auto-submitted to the fresh session (e.g. PR context). */
       initialInput?: string;
+      /**
+       * Launch the CLI in "accept all" mode (no permission/approval prompts).
+       * Maps to `--dangerously-skip-permissions` (Claude) /
+       * `--dangerously-bypass-approvals-and-sandbox` (Codex).
+       */
+      skipPermissions?: boolean;
+      /**
+       * Run this session in a fresh git worktree off `cwd` (on a new
+       * `juancode/<id>` branch), removed when the session is deleted. Errors the
+       * create if `cwd` isn't a git repo with a commit to branch from.
+       */
+      isolateWorktree?: boolean;
     }
   | { type: "attach"; sessionId: string; cols: number; rows: number }
   | { type: "reactivate"; sessionId: string; cols: number; rows: number }
+  /**
+   * Flip "accept all" on a live session. The server resume-restarts the CLI with
+   * the new permission level (conversation + scrollback preserved) and replies
+   * with a fresh `attached` for the revived session.
+   */
+  | {
+      type: "setSkipPermissions";
+      sessionId: string;
+      skipPermissions: boolean;
+      cols: number;
+      rows: number;
+    }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
   | { type: "kill"; sessionId: string }
@@ -44,15 +86,36 @@ export type ClientMessage =
    * id via `editorReady`; thereafter input/resize/kill/output/exit address it by
    * that id exactly like a session.
    */
-  | { type: "openEditor"; cwd: string; file: string; cols: number; rows: number };
+  | { type: "openEditor"; cwd: string; file: string; cols: number; rows: number }
+  /**
+   * Spawn a plain interactive shell ($SHELL, default zsh/bash) in `cwd` in an
+   * ephemeral pty (not a persisted session) — the VS Code-style integrated
+   * terminal. `requestId` is echoed back in `terminalReady` so a client opening
+   * several terminals at once can match each reply to its request. Thereafter
+   * input/resize/kill/output/exit address the pty by its `terminalId`.
+   */
+  | { type: "openTerminal"; cwd: string; cols: number; rows: number; requestId: string };
 
 export type ServerMessage =
   | { type: "created"; session: SessionMeta }
   | { type: "attached"; sessionId: string; scrollback: string; session: SessionMeta }
   | { type: "output"; sessionId: string; data: string }
   | { type: "exit"; sessionId: string; exitCode: number | null }
+  /**
+   * A session's inferred activity changed. Broadcast for every live session so
+   * the sidebar can show per-session progress / done / input-required icons.
+   * `notify` is true only on a turn boundary worth alerting on (work finished or
+   * a question appeared).
+   */
+  | { type: "activity"; sessionId: string; state: SessionActivity; notify: boolean }
   /** An editor pty was spawned; its id is used as the `sessionId` for I/O. */
   | { type: "editorReady"; editorId: string }
+  /**
+   * A shell terminal pty was spawned; `terminalId` is used as the `sessionId`
+   * for I/O. `requestId` echoes the `openTerminal` request so the client can
+   * route the reply to the pane that asked for it.
+   */
+  | { type: "terminalReady"; terminalId: string; requestId: string }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
   | { type: "error"; sessionId?: string; message: string };
@@ -77,6 +140,22 @@ export interface DiffResult {
   root?: string;
   files: DiffFile[];
   truncatedFiles?: boolean;
+}
+
+/**
+ * One linked git worktree of a session's repo, from `git worktree list`. Lets
+ * the diff panel show the status of a worktree an agent is working in even when
+ * the session itself was started in the main repo.
+ */
+export interface Worktree {
+  /** Absolute path to the worktree's root. */
+  path: string;
+  /** Short branch name, or null when the worktree has a detached HEAD. */
+  branch: string | null;
+  /** The worktree's HEAD commit sha, if any. */
+  head: string | null;
+  /** True for the repo's main (primary) worktree. */
+  main: boolean;
 }
 
 /** Which side of the diff a comment is anchored to. */
@@ -183,4 +262,52 @@ export interface PrListResult {
   viewer?: string;
   /** Why PRs are unavailable (gh missing / not authed / not a repo / no remote). */
   error?: string;
+}
+
+// ── REST data types (git actions: commit / push / create PR) ─────────────────
+
+/** Working-tree git state for a worktree, driving the commit/push/PR CTAs. */
+export interface GitState {
+  /** False when the cwd isn't a git work tree. */
+  git: boolean;
+  /** Current branch, or null on a detached HEAD. */
+  branch: string | null;
+  detached: boolean;
+  /** Tracking branch (e.g. "origin/main"), or null when none is configured. */
+  upstream: string | null;
+  /** Commits ahead of the upstream (all local commits when there's no upstream). */
+  ahead: number;
+  /** Commits behind the upstream. */
+  behind: number;
+  /** True when there are staged, unstaged, or untracked changes. */
+  dirty: boolean;
+  /** True when the repo has at least one remote (so push/PR are meaningful). */
+  remote: boolean;
+}
+
+/** Result of staging everything and committing. */
+export interface CommitResult {
+  /** Short sha of the new commit. */
+  sha: string;
+  /** The commit's subject line. */
+  subject: string;
+}
+
+/** Result of pushing the current branch. */
+export interface PushResult {
+  branch: string;
+  /** Combined stdout/stderr from git, for a short status line. */
+  output: string;
+}
+
+/** An AI-generated commit message for the current diff. */
+export interface CommitMessageResult {
+  message: string;
+}
+
+/** Result of `gh pr create` — the PR url, and whether it was newly created. */
+export interface PrCreateResult {
+  url: string;
+  /** False when a PR for this branch already existed (url points at it). */
+  created: boolean;
 }

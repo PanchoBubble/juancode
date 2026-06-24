@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
+import { registerSessionTitles, useActivityMap } from "../lib/activity.ts";
+import { notifications } from "../lib/notifications.ts";
 import type { ProviderId, SessionMeta } from "../protocol.ts";
+import { ActivityDot } from "./ActivityDot.tsx";
 import { FolderPrs } from "./FolderPrs.tsx";
+import { SearchPanel } from "./SearchPanel.tsx";
 
 interface FolderGroup {
   cwd: string;
@@ -41,6 +45,18 @@ export function Sidebar() {
     refetchInterval: 4000,
   });
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const activity = useActivityMap();
+
+  // Mirror session titles into the activity store so notifications can name them.
+  useEffect(() => {
+    if (sessions.data) registerSessionTitles(sessions.data);
+  }, [sessions.data]);
+
+  // Notification on/off toggle, reflecting the persisted notifications state.
+  const notifyOn = useSyncExternalStore(
+    (cb) => notifications.subscribe(cb),
+    () => notifications.enabled,
+  );
 
   // Free-text filter over folder names + session titles.
   const [query, setQuery] = useState("");
@@ -54,6 +70,10 @@ export function Sidebar() {
 
   // Which folder's "+" agent menu is open (keyed by cwd), if any.
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  // "Accept all" (skip permission prompts) toggle for the open "+" menu.
+  const [menuYolo, setMenuYolo] = useState(false);
+  // "Isolate in a new git worktree" toggle for the open "+" menu.
+  const [menuWorktree, setMenuWorktree] = useState(false);
 
   /** Permanently delete a session after confirmation. */
   const remove = (s: SessionMeta) => {
@@ -82,7 +102,13 @@ export function Sidebar() {
    * Spawn a terminal for `provider` directly at `cwd`, then open it. An optional
    * `initialInput` is auto-submitted to the fresh session (e.g. PR context).
    */
-  const spawn = (provider: ProviderId, cwd: string, initialInput?: string) => {
+  const spawn = (
+    provider: ProviderId,
+    cwd: string,
+    initialInput?: string,
+    skipPermissions?: boolean,
+    isolateWorktree?: boolean,
+  ) => {
     setMenuFor(null);
     const unsub = socket.subscribe((msg) => {
       if (msg.type === "created") {
@@ -93,7 +119,16 @@ export function Sidebar() {
         unsub();
       }
     });
-    socket.send({ type: "create", provider, cwd, cols: 80, rows: 24, initialInput });
+    socket.send({
+      type: "create",
+      provider,
+      cwd,
+      cols: 80,
+      rows: 24,
+      initialInput,
+      skipPermissions,
+      isolateWorktree,
+    });
   };
 
   return (
@@ -102,23 +137,34 @@ export function Sidebar() {
         <Link to="/" className="text-sm font-semibold tracking-tight">
           juancode
         </Link>
-        <Link
-          to="/"
-          className="rounded-md bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
-        >
-          + New
-        </Link>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => notifications.setEnabled(!notifyOn)}
+            title={notifyOn ? "Notifications on — click to mute" : "Notifications muted — click to enable"}
+            className="rounded-md px-1.5 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            {notifyOn ? "🔔" : "🔕"}
+          </button>
+          <Link
+            to="/"
+            className="rounded-md bg-neutral-800 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
+          >
+            + New
+          </Link>
+        </div>
       </div>
       <div className="px-3 pb-2">
         <input
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search sessions…"
+          placeholder="Search sessions + transcripts…"
           className="w-full rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-500 focus:border-neutral-600 focus:outline-none"
         />
       </div>
       <nav className="flex-1 overflow-y-auto">
+        <SearchPanel query={query} />
         {groups.map((g) => (
           <details key={g.cwd} open className="group border-b border-neutral-900">
             <summary
@@ -128,7 +174,14 @@ export function Sidebar() {
               <span className="text-neutral-600 transition-transform group-open:rotate-90">▶</span>
               <span className="truncate font-medium text-neutral-300">{g.name}</span>
               <span className="ml-auto flex shrink-0 items-center gap-1.5 text-neutral-500">
-                {g.running > 0 && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />}
+                {g.sessions.some((s) => s.status === "running" && activity[s.id] === "waiting_input") ? (
+                  <span
+                    title="A session needs your input"
+                    className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400"
+                  />
+                ) : (
+                  g.running > 0 && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                )}
                 {g.sessions.length}
                 <FolderPrs cwd={g.cwd} onNewSession={spawn} />
                 <span className="relative">
@@ -138,6 +191,8 @@ export function Sidebar() {
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      setMenuYolo(false);
+                      setMenuWorktree(false);
                       setMenuFor((cur) => (cur === g.cwd ? null : g.cwd));
                     }}
                     className="rounded px-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
@@ -156,13 +211,37 @@ export function Sidebar() {
                           onClick={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
-                            spawn(p.id, g.cwd);
+                            spawn(p.id, g.cwd, undefined, menuYolo, menuWorktree);
                           }}
                           className="block w-full px-3 py-1 text-left text-xs text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
                         >
                           {p.label}
                         </button>
                       ))}
+                      <label
+                        title="Skip permission/approval prompts (--dangerously-skip-permissions / --dangerously-bypass-approvals-and-sandbox)"
+                        className="mt-1 flex cursor-pointer items-center gap-1.5 border-t border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 hover:text-neutral-200"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={menuYolo}
+                          onChange={(e) => setMenuYolo(e.target.checked)}
+                          className="accent-amber-500"
+                        />
+                        <span className={menuYolo ? "text-amber-300" : undefined}>Accept all</span>
+                      </label>
+                      <label
+                        title="Run in a fresh git worktree on a new juancode/ branch (removed on delete)"
+                        className="flex cursor-pointer items-center gap-1.5 px-3 py-1.5 text-xs text-neutral-400 hover:text-neutral-200"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={menuWorktree}
+                          onChange={(e) => setMenuWorktree(e.target.checked)}
+                          className="accent-sky-500"
+                        />
+                        <span className={menuWorktree ? "text-sky-300" : undefined}>New worktree</span>
+                      </label>
                     </div>
                   )}
                 </span>
@@ -176,11 +255,15 @@ export function Sidebar() {
                   params={{ id: s.id }}
                   className="group/item flex items-center gap-2 py-1.5 pr-2 pl-6 hover:bg-neutral-900 [&.active]:bg-neutral-900"
                 >
-                  <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${
-                      s.status === "running" ? "bg-emerald-500" : "bg-neutral-600"
-                    }`}
-                  />
+                  <ActivityDot status={s.status} activity={activity[s.id]} />
+                  {s.worktreePath && (
+                    <span
+                      title={`Isolated worktree: ${s.worktreePath}`}
+                      className="shrink-0 text-xs text-sky-500"
+                    >
+                      ⎇
+                    </span>
+                  )}
                   <span className="truncate text-sm">{s.title}</span>
                   <span className="ml-auto flex shrink-0 items-center">
                     {s.status === "exited" && (

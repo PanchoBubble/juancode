@@ -6,11 +6,14 @@ import { appendScrollback } from "./scrollback.ts";
 import { captureCodexSessionId } from "./codexSession.ts";
 import { sessionDb } from "./db.ts";
 import { PROVIDERS } from "./providers.ts";
+import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
-import type { ProviderId, SessionMeta } from "./protocol.ts";
+import { ActivityDetector } from "./activityDetector.ts";
+import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
+type ActivityListener = (state: SessionActivity, notify: boolean) => void;
 
 const PERSIST_DEBOUNCE_MS = 2000;
 const TITLE_POLL_MS = 4000;
@@ -21,11 +24,25 @@ export class Session {
   private scrollback = "";
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
+  private readonly activityListeners = new Set<ActivityListener>();
+  private readonly detector = new ActivityDetector((state, notify) => {
+    for (const l of this.activityListeners) l(state, notify);
+  });
   private persistTimer: NodeJS.Timeout | null = null;
   private titleTimer: NodeJS.Timeout | null = null;
 
-  private constructor(meta: SessionMeta, args: string[], cols: number, rows: number, isNew: boolean) {
+  private constructor(
+    meta: SessionMeta,
+    args: string[],
+    cols: number,
+    rows: number,
+    isNew: boolean,
+    seedScrollback = "",
+  ) {
     this.meta = meta;
+    // Resuming an exited session carries its prior scrollback forward so the
+    // history survives the new pty (and isn't clobbered by the persist below).
+    this.scrollback = seedScrollback;
     const spec = PROVIDERS[meta.provider];
 
     this.proc = pty.spawn(spec.command, args, {
@@ -47,6 +64,7 @@ export class Session {
 
     this.proc.onData((data) => {
       this.appendScrollback(data);
+      this.detector.feed(data);
       for (const l of this.outputListeners) l(data);
       this.schedulePersist();
     });
@@ -55,6 +73,7 @@ export class Session {
       this.meta.status = "exited";
       this.meta.exitCode = exitCode;
       this.meta.updatedAt = Date.now();
+      this.detector.reset();
       this.stopTitleWatch();
       void this.refreshTitle(); // one last read to catch a late-generated title
       this.persistNow();
@@ -66,7 +85,14 @@ export class Session {
   }
 
   /** Start a brand-new conversation. */
-  static create(provider: ProviderId, cwd: string, cols: number, rows: number): Session {
+  static create(
+    provider: ProviderId,
+    cwd: string,
+    cols: number,
+    rows: number,
+    opts?: SpawnOptions,
+    worktreePath: string | null = null,
+  ): Session {
     const spec = PROVIDERS[provider];
     const now = Date.now();
     const id = randomUUID();
@@ -79,18 +105,21 @@ export class Session {
       exitCode: null,
       // Claude's id is pinned to ours up front; Codex's is discovered post-spawn.
       cliSessionId: spec.pinsSessionId ? id : null,
+      skipPermissions: opts?.skipPermissions ?? false,
+      worktreePath,
       createdAt: now,
       updatedAt: now,
     };
-    return new Session(meta, spec.startArgs(id), cols, rows, true);
+    return new Session(meta, spec.startArgs(id, opts), cols, rows, true);
   }
 
   /**
    * Revive an exited session by resuming its prior CLI conversation in a fresh
    * pty, keeping the same juancode id (so the route/sidebar entry is stable).
-   * Requires a captured `cliSessionId`.
+   * Requires a captured `cliSessionId`. `priorScrollback` is the persisted
+   * history to carry forward so reactivation never loses the conversation.
    */
-  static resume(prev: SessionMeta, cols: number, rows: number): Session {
+  static resume(prev: SessionMeta, cols: number, rows: number, priorScrollback = ""): Session {
     if (!prev.cliSessionId) {
       throw new Error("Session has no captured CLI session id to resume");
     }
@@ -101,7 +130,14 @@ export class Session {
       exitCode: null,
       updatedAt: Date.now(),
     };
-    return new Session(meta, spec.resumeArgs(prev.cliSessionId), cols, rows, false);
+    return new Session(
+      meta,
+      spec.resumeArgs(prev.cliSessionId, { skipPermissions: meta.skipPermissions }),
+      cols,
+      rows,
+      false,
+      priorScrollback,
+    );
   }
 
   get id(): string {
@@ -152,6 +188,16 @@ export class Session {
   onExit(listener: ExitListener): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
+  }
+
+  /** Current inferred activity (busy / idle / waiting_input). */
+  get activity(): SessionActivity {
+    return this.detector.activity;
+  }
+
+  onActivity(listener: ActivityListener): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
   }
 
   /** Poll the CLI's transcript so the title reflects what the session is doing. */

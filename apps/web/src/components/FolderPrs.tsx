@@ -21,7 +21,12 @@ const POPOVER_WIDTH = 288; // w-72
 interface Props {
   cwd: string;
   /** Spawn a session in `cwd`, optionally seeding it with initial input. */
-  onNewSession: (provider: ProviderId, cwd: string, initialInput?: string) => void;
+  onNewSession: (
+    provider: ProviderId,
+    cwd: string,
+    initialInput?: string,
+    skipPermissions?: boolean,
+  ) => void;
 }
 
 /**
@@ -120,29 +125,27 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
             style={{ position: "fixed", top: pos.top, left: pos.left, width: POPOVER_WIDTH }}
             className="z-50 max-h-80 overflow-y-auto rounded-md border border-neutral-700 bg-neutral-900 pb-1 shadow-lg"
           >
-          <div className="sticky top-0 z-10 space-y-1.5 border-b border-neutral-800 bg-neutral-900 px-2 py-1.5">
+          <div className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-neutral-800 bg-neutral-900 px-2 py-1.5">
             <input
               type="text"
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Filter PRs…"
-              className="w-full rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-[11px] text-neutral-200 placeholder:text-neutral-500 focus:border-neutral-500 focus:outline-none"
+              className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-[11px] text-neutral-200 placeholder:text-neutral-500 focus:border-neutral-500 focus:outline-none"
             />
             {canFilterMine && (
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => setMineOnly((cur) => !cur)}
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    mineOnly
-                      ? "bg-sky-600/30 text-sky-300"
-                      : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
-                  }`}
-                >
-                  Created by me ({mineCount})
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setMineOnly((cur) => !cur)}
+                className={`shrink-0 rounded px-1.5 py-1 text-[10px] font-medium ${
+                  mineOnly
+                    ? "bg-sky-600/30 text-sky-300"
+                    : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
+                }`}
+              >
+                Mine ({mineCount})
+              </button>
             )}
           </div>
           {list.length === 0 && (
@@ -159,9 +162,16 @@ export function FolderPrs({ cwd, onNewSession }: Props) {
                     className={`h-1.5 w-1.5 shrink-0 rounded-full ${check.dot}`}
                     title={check.label}
                   />
-                  <span className="truncate text-xs text-neutral-200" title={pr.title}>
+                  <a
+                    href={pr.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="truncate text-xs text-neutral-200 hover:underline"
+                    title={pr.title}
+                  >
                     <span className="text-neutral-500">#{pr.number}</span> {pr.title}
-                  </span>
+                  </a>
                   {pr.draft && (
                     <span className="shrink-0 rounded bg-neutral-700 px-1 text-[9px] text-neutral-300">
                       draft
