@@ -84,7 +84,7 @@ public enum ProcessRunner {
         timeout: TimeInterval,
         stdin: String?,
         maxBytes: Int,
-        completion: @escaping (Result<ProcessResult, Error>) -> Void
+        completion: @escaping @Sendable (Result<ProcessResult, Error>) -> Void
     ) {
         let proc = Process()
         // Absolute paths run directly; bare command names go through `/usr/bin/env`
@@ -110,7 +110,7 @@ public enum ProcessRunner {
         let box = Box()
         let group = DispatchGroup()
 
-        func drain(_ pipe: Pipe, appendingTo append: @escaping (Data) -> Void) {
+        func drain(_ pipe: Pipe, appendingTo append: @escaping @Sendable (Data) -> Void) {
             group.enter()
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData

@@ -39,8 +39,7 @@ let package = Package(
         // and an FTS5 search index. The only target that depends on GRDB.
         .target(
             name: "JuancodePersistence",
-            dependencies: ["JuancodeCore", .product(name: "GRDB", package: "GRDB.swift")],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeCore", .product(name: "GRDB", package: "GRDB.swift")]
         ),
         // Auxiliary services (juancode-u34.6): 1:1 Swift `Process` ports of the
         // server's shell-out+parse modules (git, gh, beads, status, review, commit,
@@ -48,8 +47,7 @@ let package = Package(
         // Foundation + JuancodeCore only — no server/UI deps.
         .target(
             name: "JuancodeServices",
-            dependencies: ["JuancodeCore"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeCore"]
         ),
         // Embedded WS+HTTP server (juancode-u34.3): Hummingbird app serving the
         // protocol.ts wire format over /ws (mirrors ws.ts) + the REST endpoints
@@ -62,20 +60,17 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "NIOCore", package: "swift-nio"),
-            ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            ]
         ),
         // Headless dev smoke: spawns the REAL claude/codex through the core to
         // prove the whole stack (registry → session → forkpty) end-to-end.
         .executableTarget(
             name: "Smoke",
-            dependencies: ["JuancodeCore"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeCore"]
         ),
         .executableTarget(
             name: "Serve",
-            dependencies: ["JuancodeServer"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeServer"]
         ),
         // SwiftUI shell (juancode-u34.4): NavigationSplitView sidebar + SwiftTerm
         // session view (an in-process subscriber to the registry — no WS hop) +
@@ -85,23 +80,19 @@ let package = Package(
             dependencies: [
                 "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
-            ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            ]
         ),
         .testTarget(
             name: "JuancodeCoreTests",
-            dependencies: ["JuancodeCore"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeCore"]
         ),
         .testTarget(
             name: "JuancodePersistenceTests",
-            dependencies: ["JuancodePersistence"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodePersistence"]
         ),
         .testTarget(
             name: "JuancodeServicesTests",
-            dependencies: ["JuancodeServices"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["JuancodeServices"]
         ),
         .testTarget(
             name: "JuancodeServerTests",
@@ -110,8 +101,7 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
                 .product(name: "NIOCore", package: "swift-nio"),
-            ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            ]
         ),
     ]
 )

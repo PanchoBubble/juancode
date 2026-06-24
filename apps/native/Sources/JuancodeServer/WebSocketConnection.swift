@@ -9,22 +9,22 @@ protocol PtyLike: AnyObject {
     func write(_ bytes: [UInt8])
     func resize(cols: Int, rows: Int)
     func kill()
-    @discardableResult func subscribeBytes(_ onBytes: @escaping ([UInt8]) -> Void) -> () -> Void
-    @discardableResult func onExitHandler(_ cb: @escaping (Int?) -> Void) -> () -> Void
+    @discardableResult func subscribeBytes(_ onBytes: @escaping @Sendable ([UInt8]) -> Void) -> () -> Void
+    @discardableResult func onExitHandler(_ cb: @escaping @Sendable (Int?) -> Void) -> () -> Void
 }
 
 extension Session: PtyLike {
     // The 'attached' message carries scrollback explicitly, so the live stream
     // subscription does NOT replay (matches `session.onOutput` in ws.ts).
-    func subscribeBytes(_ onBytes: @escaping ([UInt8]) -> Void) -> () -> Void {
+    func subscribeBytes(_ onBytes: @escaping @Sendable ([UInt8]) -> Void) -> () -> Void {
         subscribeOutput(replay: false, onBytes)
     }
-    func onExitHandler(_ cb: @escaping (Int?) -> Void) -> () -> Void { onExit(cb) }
+    func onExitHandler(_ cb: @escaping @Sendable (Int?) -> Void) -> () -> Void { onExit(cb) }
 }
 
 extension EphemeralPty: PtyLike {
-    func subscribeBytes(_ onBytes: @escaping ([UInt8]) -> Void) -> () -> Void { onOutput(onBytes) }
-    func onExitHandler(_ cb: @escaping (Int?) -> Void) -> () -> Void { onExit(cb) }
+    func subscribeBytes(_ onBytes: @escaping @Sendable ([UInt8]) -> Void) -> () -> Void { onOutput(onBytes) }
+    func onExitHandler(_ cb: @escaping @Sendable (Int?) -> Void) -> () -> Void { onExit(cb) }
 }
 
 /// One browser/phone WebSocket connection. A faithful port of the per-connection

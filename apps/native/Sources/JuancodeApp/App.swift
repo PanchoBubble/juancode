@@ -9,7 +9,10 @@ import JuancodeServer
 /// foreground app on launch and bring it to front. (A signed `.app` bundle with
 /// an Info.plist — juancode-u34.9 — does this declaratively; until then we do it
 /// in code so `swift run juancode` shows a window.)
-/// Process-wide handle so the delegate can tear down live ptys on quit.
+/// Process-wide handle so the delegate can tear down live ptys on quit. Written
+/// in `JuancodeApp.init` and read in `applicationWillTerminate` — both run on the
+/// main actor, so confine the static there rather than guard it.
+@MainActor
 enum AppEnv {
     static var state: AppState?
 }

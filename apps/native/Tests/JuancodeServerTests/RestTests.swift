@@ -30,13 +30,14 @@ final class RestTests: XCTestCase {
         try await app.test(.router) { client in try await body(client, state.store) }
     }
 
-    private func sampleMeta(_ id: String, title: String = "Claude · work") -> SessionMeta {
+    // Pure helpers — `static` so the @Sendable test closures don't capture self.
+    private static func sampleMeta(_ id: String, title: String = "Claude · work") -> SessionMeta {
         SessionMeta(id: id, provider: .claude, cwd: "/tmp", title: title, status: .exited,
                     exitCode: 0, createdAt: nowMs(), updatedAt: nowMs(), cliSessionId: "cli-\(id)",
                     skipPermissions: false, worktreePath: nil, usage: nil)
     }
 
-    private func json(_ res: TestResponse) -> Any? {
+    private static func json(_ res: TestResponse) -> Any? {
         try? JSONSerialization.jsonObject(with: Data(res.body.readableBytesView), options: [.fragmentsAllowed])
     }
 
@@ -44,7 +45,7 @@ final class RestTests: XCTestCase {
         try await withServer { client, _ in
             try await client.execute(uri: "/api/health", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
-                XCTAssertEqual((self.json(res) as? [String: Any])?["ok"] as? Bool, true)
+                XCTAssertEqual((Self.json(res) as? [String: Any])?["ok"] as? Bool, true)
             }
         }
     }
@@ -53,7 +54,7 @@ final class RestTests: XCTestCase {
         try await withServer { client, _ in
             try await client.execute(uri: "/api/providers", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
-                let ids = (self.json(res) as? [[String: Any]])?.compactMap { $0["id"] as? String }
+                let ids = (Self.json(res) as? [[String: Any]])?.compactMap { $0["id"] as? String }
                 XCTAssertEqual(ids, ["claude", "codex"])
             }
         }
@@ -63,69 +64,69 @@ final class RestTests: XCTestCase {
         try await withServer { client, store in
             try await client.execute(uri: "/api/sessions", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 0)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 0)
             }
-            store.insert(self.sampleMeta("s1"))
+            store.insert(Self.sampleMeta("s1"))
             try await client.execute(uri: "/api/sessions", method: .get) { res in
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 1)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 1)
             }
             try await client.execute(uri: "/api/sessions/s1", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
-                XCTAssertEqual((self.json(res) as? [String: Any])?["id"] as? String, "s1")
+                XCTAssertEqual((Self.json(res) as? [String: Any])?["id"] as? String, "s1")
             }
             try await client.execute(uri: "/api/sessions/nope", method: .get) { res in
                 XCTAssertEqual(res.status, .notFound)
-                XCTAssertEqual((self.json(res) as? [String: Any])?["error"] as? String, "not found")
+                XCTAssertEqual((Self.json(res) as? [String: Any])?["error"] as? String, "not found")
             }
         }
     }
 
     func testSearchShortQueryIsEmpty() async throws {
         try await withServer { client, store in
-            store.insert(self.sampleMeta("s1", title: "deploy pipeline"))
+            store.insert(Self.sampleMeta("s1", title: "deploy pipeline"))
             try await client.execute(uri: "/api/search?q=a", method: .get) { res in
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 0)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 0)
             }
             try await client.execute(uri: "/api/search?q=deploy", method: .get) { res in
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 1)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 1)
             }
         }
     }
 
     func testCommentsLifecycle() async throws {
         try await withServer { client, store in
-            store.insert(self.sampleMeta("s1"))
+            store.insert(Self.sampleMeta("s1"))
             let body = ByteBuffer(string: #"{"file":"a.ts","side":"new","line":3,"body":"look here"}"#)
             try await client.execute(uri: "/api/sessions/s1/comments", method: .post,
                                      headers: [.contentType: "application/json"], body: body) { res in
                 XCTAssertEqual(res.status, .created)
-                XCTAssertEqual((self.json(res) as? [String: Any])?["file"] as? String, "a.ts")
+                XCTAssertEqual((Self.json(res) as? [String: Any])?["file"] as? String, "a.ts")
             }
             try await client.execute(uri: "/api/sessions/s1/comments", method: .get) { res in
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 1)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 1)
             }
             try await client.execute(uri: "/api/sessions/s1/comments", method: .delete) { res in
                 XCTAssertEqual(res.status, .noContent)
             }
             try await client.execute(uri: "/api/sessions/s1/comments", method: .get) { res in
-                XCTAssertEqual((self.json(res) as? [Any])?.count, 0)
+                XCTAssertEqual((Self.json(res) as? [Any])?.count, 0)
             }
         }
     }
 
     func testReviewNullWhenNone() async throws {
         try await withServer { client, store in
-            store.insert(self.sampleMeta("s1"))
+            store.insert(Self.sampleMeta("s1"))
             try await client.execute(uri: "/api/sessions/s1/review", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
-                XCTAssertTrue(self.json(res) is NSNull)
+                XCTAssertTrue(Self.json(res) is NSNull)
             }
         }
     }
 
     func testDeleteSession() async throws {
         try await withServer { client, store in
-            store.insert(self.sampleMeta("s1"))
+            store.insert(Self.sampleMeta("s1"))
             try await client.execute(uri: "/api/sessions/s1", method: .delete) { res in
                 XCTAssertEqual(res.status, .noContent)
             }

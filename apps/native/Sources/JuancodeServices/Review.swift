@@ -25,33 +25,35 @@ private let SEVERITIES: [ReviewSeverity] = [.critical, .high, .medium, .low, .in
 /// JSON Schema handed to `claude --json-schema` so findings come back validated.
 /// Built as a Foundation object so we can JSON-serialize it for the CLI argv,
 /// matching `JSON.stringify(FINDINGS_SCHEMA)` in the TS.
-private let FINDINGS_SCHEMA: [String: Any] = [
-    "type": "object",
-    "additionalProperties": false,
-    "properties": [
-        "summary": ["type": "string"],
-        "findings": [
-            "type": "array",
-            "items": [
-                "type": "object",
-                "additionalProperties": false,
-                "properties": [
-                    "file": ["type": "string", "description": "Repo-relative path exactly as it appears in the diff header"],
-                    "side": ["type": "string", "enum": ["old", "new"], "description": "'new' for added/context lines, 'old' for removed lines"],
-                    "line": [
-                        "type": ["integer", "null"],
-                        "description": "Line number on the chosen side; null for a file-level finding with no single line",
+private func findingsSchema() -> [String: Any] {
+    [
+        "type": "object",
+        "additionalProperties": false,
+        "properties": [
+            "summary": ["type": "string"],
+            "findings": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": [
+                        "file": ["type": "string", "description": "Repo-relative path exactly as it appears in the diff header"],
+                        "side": ["type": "string", "enum": ["old", "new"], "description": "'new' for added/context lines, 'old' for removed lines"],
+                        "line": [
+                            "type": ["integer", "null"],
+                            "description": "Line number on the chosen side; null for a file-level finding with no single line",
+                        ],
+                        "severity": ["type": "string", "enum": SEVERITIES.map { $0.rawValue }],
+                        "title": ["type": "string", "description": "One-line summary of the issue"],
+                        "note": ["type": "string", "description": "What's wrong and how to fix it"],
                     ],
-                    "severity": ["type": "string", "enum": SEVERITIES.map { $0.rawValue }],
-                    "title": ["type": "string", "description": "One-line summary of the issue"],
-                    "note": ["type": "string", "description": "What's wrong and how to fix it"],
+                    "required": ["file", "side", "line", "severity", "title", "note"],
                 ],
-                "required": ["file", "side", "line", "severity", "title", "note"],
             ],
         ],
-    ],
-    "required": ["summary", "findings"],
-]
+        "required": ["summary", "findings"],
+    ]
+}
 
 private let SYSTEM_PROMPT =
     "You are a meticulous senior code reviewer. You are given a unified git diff of a working tree. " +
@@ -214,7 +216,7 @@ private struct ReviewRunError: Error {
 private func runClaude(_ prompt: String, _ cwd: String, resolver: BinaryResolver) async throws -> String {
     let command = resolver.command(for: .claude)
     let schemaJSON = String(
-        decoding: (try? JSONSerialization.data(withJSONObject: FINDINGS_SCHEMA, options: [])) ?? Data(),
+        decoding: (try? JSONSerialization.data(withJSONObject: findingsSchema(), options: [])) ?? Data(),
         as: UTF8.self
     )
     let args = [

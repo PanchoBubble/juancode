@@ -24,15 +24,22 @@ do {
     exit(1)
 }
 
-let byteCount = NSLock()
-var total = 0
-session.subscribeOutput { bytes in byteCount.withLock { total += bytes.count } }
+// Lock-guarded counter so the @Sendable output listener doesn't capture a
+// main-actor `var` from this implicitly-main-actor top-level module.
+final class ByteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    func add(_ n: Int) { lock.withLock { total += n } }
+    var value: Int { lock.withLock { total } }
+}
+let byteCount = ByteCounter()
+session.subscribeOutput { bytes in byteCount.add(bytes.count) }
 
 log("spawned \(provider.rawValue) pid via core, session \(session.id)")
 Thread.sleep(forTimeInterval: seconds)
 
 let scroll = session.getScrollback().count
-let bytes = byteCount.withLock { total }
+let bytes = byteCount.value
 log("── core smoke summary ──")
 log("  scrollback bytes : \(scroll)")
 log("  fan-out bytes    : \(bytes)")
