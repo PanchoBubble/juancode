@@ -469,6 +469,74 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Bottom terminal panel (per-workdir)
+
+    /// VS Code-style bottom shell terminals, keyed by FOLDER cwd (not session id):
+    /// every session in a folder shares the same set of terminals, so switching
+    /// between sessions in one folder keeps the terminals alive and identical. The
+    /// pure tab/pane layout lives in `TerminalPanelModel`; the live shell ptys are
+    /// held alongside it, keyed by pane id. (Cross-session-switch persistence
+    /// niceties are tracked separately in juancode-iwi.)
+    @Published var terminalPanels: [String: TerminalPanelModel] = [:]
+    /// Live shell ptys for every open pane, keyed by pane id. Shared across all
+    /// folders; entries are removed + killed when their pane closes.
+    private var shellPtys: [TerminalPaneID: EphemeralPty] = [:]
+
+    /// The terminal panel model for `cwd` (empty if none opened yet).
+    func terminalPanel(_ cwd: String) -> TerminalPanelModel { terminalPanels[cwd] ?? .init() }
+
+    /// The live shell pty backing `pane`, if still alive.
+    func shellPty(_ pane: TerminalPaneID) -> EphemeralPty? { shellPtys[pane] }
+
+    /// Open a new shell terminal tab in `cwd`. Spawns the user's `$SHELL` (default
+    /// zsh, `-i`) in that folder via the ephemeral-pty service and makes it active.
+    func openTerminalTab(cwd: String) {
+        var panel = terminalPanel(cwd)
+        let pane = panel.addTab()
+        if spawnShell(for: pane, cwd: cwd) {
+            terminalPanels[cwd] = panel
+        }
+    }
+
+    /// Split the active tab in `cwd` into two side-by-side panes, spawning a shell
+    /// for the new pane. No-op if there's no active tab or it's already split.
+    func splitActiveTerminal(cwd: String) {
+        var panel = terminalPanel(cwd)
+        guard let pane = panel.splitActiveTab() else { return }
+        if spawnShell(for: pane, cwd: cwd) {
+            terminalPanels[cwd] = panel
+        }
+    }
+
+    /// Close a tab in `cwd`, killing its pane ptys.
+    func closeTerminalTab(cwd: String, tab: UUID) {
+        var panel = terminalPanel(cwd)
+        let orphaned = panel.closeTab(tab)
+        terminalPanels[cwd] = panel
+        for pane in orphaned { killShell(pane) }
+    }
+
+    /// Make `tab` the active terminal in `cwd`.
+    func selectTerminalTab(cwd: String, tab: UUID) {
+        var panel = terminalPanel(cwd)
+        panel.selectTab(tab)
+        terminalPanels[cwd] = panel
+    }
+
+    /// Spawn a shell pty for `pane` in `cwd`; returns false (and notes nothing) if
+    /// the spawn fails so the caller can skip persisting the pane.
+    private func spawnShell(for pane: TerminalPaneID, cwd: String) -> Bool {
+        guard let pty = try? appState.ephemeral.openTerminal(cwd: cwd, cols: 80, rows: 24) else {
+            return false
+        }
+        shellPtys[pane] = pty
+        return true
+    }
+
+    private func killShell(_ pane: TerminalPaneID) {
+        shellPtys.removeValue(forKey: pane)?.kill()
+    }
+
     /// Add an inline comment to a session's staging area.
     func addComment(_ id: String, file: String, side: CommentSide, line: Int, endLine: Int, body: String) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)

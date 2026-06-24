@@ -678,6 +678,33 @@ private struct PanelResizeHandle: View {
     }
 }
 
+/// A thin draggable horizontal divider that resizes the pane BELOW it by writing
+/// `height` (clamped to [min, max]). Dragging up grows the bottom pane; dragging
+/// down shrinks it. The horizontal sibling of `PanelResizeHandle`.
+private struct BottomResizeHandle: View {
+    @Binding var height: Double
+    let min: Double
+    let max: Double
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.18))
+            .frame(height: 1)
+            .overlay(
+                Rectangle().fill(Color.clear).frame(height: 8)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                height = Swift.min(max, Swift.max(min, height - value.translation.height))
+                            })
+            )
+    }
+}
+
 struct SessionContainer: View {
     @EnvironmentObject var model: AppModel
     let meta: SessionMeta
@@ -687,6 +714,10 @@ struct SessionContainer: View {
     @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
     /// Persisted width of the right-side panel in the split.
     @AppStorage("session.sidePanel.width") private var panelWidth: Double = 420
+    /// Whether the bottom terminal panel is shown. Toggled from the header CTA.
+    @AppStorage("session.bottomPanel.shown") private var bottomShown: Bool = false
+    /// Persisted height of the bottom terminal panel in the split.
+    @AppStorage("session.bottomPanel.height") private var bottomHeight: Double = 240
 
     private var tab: SidePanelTab {
         get { SidePanelTab(rawValue: tabRaw) ?? .changes }
@@ -707,6 +738,16 @@ struct SessionContainer: View {
                         .controlSize(.small)
                 }
                 Button {
+                    bottomShown.toggle()
+                    // Opening an empty panel for this folder seeds the first terminal.
+                    if bottomShown, model.terminalPanel(meta.cwd).isEmpty {
+                        model.openTerminalTab(cwd: meta.cwd)
+                    }
+                } label: {
+                    Image(systemName: bottomShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
+                }
+                .help(bottomShown ? "Hide the terminal panel" : "Show the terminal panel")
+                Button {
                     panelShown.toggle()
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
@@ -716,8 +757,16 @@ struct SessionContainer: View {
             .padding(8)
             Divider()
             HStack(spacing: 0) {
-                terminal
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 0) {
+                    terminal
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if bottomShown {
+                        BottomResizeHandle(height: $bottomHeight, min: 120, max: 720)
+                        BottomTerminalPanel(cwd: meta.cwd)
+                            .frame(height: CGFloat(bottomHeight))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if panelShown {
                     PanelResizeHandle(width: $panelWidth, min: 280, max: 760)
                     sidePanel
