@@ -50,6 +50,8 @@ struct SidebarView: View {
     @State private var renameText = ""
     /// Whether the full-text transcript search sheet is open (juancode-wx9).
     @State private var showingSearch = false
+    /// Whether the auth & MCP status sheet is open (juancode-daw).
+    @State private var showingStatus = false
 
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
@@ -127,12 +129,19 @@ struct SidebarView: View {
                     .help("Search transcripts")
             }
             ToolbarItem {
+                Button { showingStatus = true } label: { Image(systemName: "shield.lefthalf.filled") }
+                    .help("Auth & MCP status")
+            }
+            ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
             }
         }
         .sheet(isPresented: $showingSearch) {
             SearchPanel()
+        }
+        .sheet(isPresented: $showingStatus) {
+            StatusPanel()
         }
         .navigationTitle("juancode")
         .alert("Rename session", isPresented: Binding(

@@ -553,6 +553,29 @@ final class AppModel: ObservableObject {
         return String(describing: error)
     }
 
+    // MARK: - Auth & MCP status (provider + MCP server health) — juancode-daw
+
+    /// Per-provider auth + MCP-server health, loaded in-process via `getAllStatus`
+    /// (which shells into the real `claude`/`codex` CLIs). The native analogue of
+    /// the web `useQuery(["status"])`. `nil` until first loaded.
+    @Published var providerStatus: [ProviderStatus]?
+    /// True while a status check is in flight (the CLIs health-check every server,
+    /// so this can take a few seconds). Backs the panel's "checking…" affordance.
+    @Published var statusLoading = false
+
+    /// Load (or refresh) provider + MCP status off the main actor. Coalesces
+    /// concurrent calls. Mirrors `loadPrs`/`loadBeads`. `getAllStatus` never
+    /// throws — unavailable providers come back with `available: false`.
+    func loadStatus() {
+        guard !statusLoading else { return }
+        statusLoading = true
+        Task {
+            let result = await Task.detached(priority: .utility) { await getAllStatus() }.value
+            providerStatus = result
+            statusLoading = false
+        }
+    }
+
     func delete(_ id: String) {
         let meta = appState.store.get(id)
         appState.registry.get(id)?.kill()
