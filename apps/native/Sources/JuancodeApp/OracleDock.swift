@@ -9,6 +9,12 @@ import JuancodeServices
 /// which session/workdir is focused.
 struct OracleDock: View {
     @EnvironmentObject var oracle: OracleModel
+    /// Persisted dock size. Defaults wide enough that the agent's full-screen TUI
+    /// gets ~80 columns and renders cleanly (a narrow dock makes claude/codex draw
+    /// 80-col lines into too few columns → overlapping garbage). Resizable via the
+    /// top-left grip.
+    @AppStorage("oracle.dock.width") private var dockWidth: Double = 680
+    @AppStorage("oracle.dock.height") private var dockHeight: Double = 620
 
     var body: some View {
         Group {
@@ -58,11 +64,30 @@ struct OracleDock: View {
             Divider()
             content
         }
-        .frame(width: 380, height: 480)
+        .frame(width: dockWidth, height: dockHeight)
         .background(Color(white: 0.07))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.12), lineWidth: 1))
+        // Drag the top-left corner to resize (the dock is pinned bottom-right, so
+        // growing reaches up and to the left).
+        .overlay(alignment: .topLeading) { resizeGrip }
         .shadow(radius: 16, y: 4)
+    }
+
+    private var resizeGrip: some View {
+        Image(systemName: "arrow.up.left.and.arrow.down.right")
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .padding(5)
+            .contentShape(Rectangle())
+            .onHover { $0 ? NSCursor.crosshair.push() : NSCursor.pop() }
+            .gesture(
+                DragGesture()
+                    .onChanged { v in
+                        dockWidth = min(1200, max(420, dockWidth - v.translation.width))
+                        dockHeight = min(1000, max(320, dockHeight - v.translation.height))
+                    })
+            .help("Drag to resize")
     }
 
     private var header: some View {
