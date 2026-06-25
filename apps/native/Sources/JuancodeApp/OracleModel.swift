@@ -55,20 +55,25 @@ final class OracleModel: ObservableObject {
     /// call once on launch; no-ops if already ready.
     func bootstrap() {
         guard !ready, setupError == nil, loop == nil else { return }
+        // Fast, subprocess-free prep so the dock is usable immediately — the slow
+        // tracker setup (git init / bd init) runs in the background below.
+        do {
+            try prepareOracleControlDir()
+        } catch {
+            setupError = (error as? OracleError)?.message ?? error.localizedDescription
+            return
+        }
+        // Only act on dispatches appended after this point — pre-existing lines
+        // belong to a previous run and have already been handled.
+        dispatchOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count) ?? 0
+        ready = true
+        startLoop()
         Task {
-            do {
-                try await ensureOracleControlDir()
-            } catch {
-                setupError = (error as? OracleError)?.message ?? error.localizedDescription
-                return
-            }
-            // Only act on dispatches appended after this point — pre-existing lines
-            // belong to a previous run and have already been handled.
-            dispatchOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count) ?? 0
+            // Stand up the bd tracker, then load it and bring the agent up. The
+            // agent's cwd already exists (prep above), so it can start in parallel.
+            await ensureOracleTracker()
             ensureAgentSession()
             loadGlobalBeads()
-            startLoop()
-            ready = true
         }
     }
 

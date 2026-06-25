@@ -109,14 +109,11 @@ private func bdBin() -> String {
     resolveBin("bd", override: ProcessInfo.processInfo.environment["JUANCODE_BD_BIN"])
 }
 
-/// Ensure the control directory exists and is a self-contained bd tracker with a
-/// dispatch mailbox and fresh instructions. Idempotent: safe to call on every
-/// launch. Runs the slow/side-effecting bits (git init, bd init) only when their
-/// markers are absent.
-///
-/// `bd init` needs a git repo to persist its prefix/config, so we `git init`
-/// first — exactly how a project's `.beads` tracker is created.
-public func ensureOracleControlDir() async throws {
+/// Fast, subprocess-free prep so the dock is usable immediately: create the
+/// control dir, the dispatch mailbox, and (re)write the instructions. Throws only
+/// if the directory itself can't be created. The slow tracker setup runs
+/// separately in `ensureOracleTracker()`.
+public func prepareOracleControlDir() throws {
     let fm = FileManager.default
     let dir = OraclePaths.controlDir
     do {
@@ -124,26 +121,48 @@ public func ensureOracleControlDir() async throws {
     } catch {
         throw OracleError("Couldn't create Oracle control dir: \(error.localizedDescription)")
     }
-
-    // git init — bd persists its config in the repo; without it `bd create` fails.
-    if !fm.fileExists(atPath: OraclePaths.gitDir) {
-        _ = try? await ProcessRunner.capture("git", ["init"], cwd: dir, timeout: 20, maxBytes: 1 << 20)
-    }
-
-    // bd init — only when there's no tracker yet (it's a one-time setup).
-    if !fm.fileExists(atPath: OraclePaths.beadsDir) {
-        _ = try? await ProcessRunner.capture(
-            bdBin(), ["init", "--prefix", "oracle"], cwd: dir, timeout: 30, maxBytes: 1 << 20)
-    }
-
     // Dispatch mailbox — an empty append-only log of OracleDispatch lines.
     if !fm.fileExists(atPath: OraclePaths.dispatchFile) {
         fm.createFile(atPath: OraclePaths.dispatchFile, contents: Data())
     }
-
     // Instructions — rewritten every launch so the dispatch protocol stays current
     // even if it evolves across app versions.
     try? Data(oracleAgentsMarkdown.utf8).write(to: URL(fileURLWithPath: OraclePaths.agentsFile))
+}
+
+/// Ensure the control dir is a self-contained bd tracker (git repo + `.beads`,
+/// prefix `oracle-`). Idempotent and best-effort — only runs the side-effecting
+/// bits when their markers are absent. Slow, so callers run it off the dock's
+/// ready gate.
+///
+/// `bd init` spawns a persistent `dolt sql-server` daemon that inherits the
+/// child's stdout/stderr; if we captured those pipes directly the daemon would
+/// hold them open and the call would stall until timeout. So bd commands that may
+/// start the daemon run via `sh -c …` with output redirected to `/dev/null`,
+/// detaching the daemon from our pipes — the call returns as soon as `bd` exits.
+public func ensureOracleTracker() async {
+    let fm = FileManager.default
+    let dir = OraclePaths.controlDir
+
+    // git init — bd persists its config in the repo; without it `bd create` fails.
+    if !fm.fileExists(atPath: OraclePaths.gitDir) {
+        _ = try? await ProcessRunner.capture(
+            "sh", ["-c", "git init >/dev/null 2>&1 </dev/null"],
+            cwd: dir, timeout: 20, maxBytes: 1 << 20)
+    }
+
+    // bd init — only when there's no tracker yet (it's a one-time setup).
+    if !fm.fileExists(atPath: OraclePaths.beadsDir) {
+        let bd = shellQuote(bdBin())
+        _ = try? await ProcessRunner.capture(
+            "sh", ["-c", "\(bd) init --prefix oracle >/dev/null 2>&1 </dev/null"],
+            cwd: dir, timeout: 30, maxBytes: 1 << 20)
+    }
+}
+
+/// Single-quote a path for safe embedding in an `sh -c` string.
+private func shellQuote(_ s: String) -> String {
+    "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
 /// Append a dispatch request as one JSON line to the mailbox. Used by the app's
