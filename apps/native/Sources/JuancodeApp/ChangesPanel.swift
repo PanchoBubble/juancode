@@ -13,8 +13,10 @@ private struct EditorTarget: Identifiable {
 
 /// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`), re-laid-out as a
 /// VS Code-style "Source Control" view (juancode-dxg): a resizable SIDE panel with a
-/// directory FILE TREE of changed files on the left and the selected file's diff
-/// (hunks + inline comments) on the right. Inline line-range comments are staged
+/// directory FILE TREE of changed files on the left (hideable) and, on the right, a
+/// GitHub-review-style list of ALL changed files' diffs — each card individually
+/// collapsible (with collapse/expand-all), clicking a tree file scrolls to its card.
+/// Inline line-range comments are staged
 /// in-memory with a "Submit review" that injects them into the agent, and commit /
 /// push / PR run via AppModel — all in-process (no WS hop), mirroring FolderPrs /
 /// FolderIssues. An optional "Review with Claude" pass (juancode-7ha) runs the real
@@ -31,8 +33,11 @@ struct ChangesPanel: View {
     @State private var expanded: Set<String> = []
     /// Whether the tree's expansion has been seeded for the current file set.
     @State private var seededExpansion = false
-    /// The path of the file selected in the tree (its diff shows on the right).
+    /// The path of the file selected in the tree (the diff list scrolls to it).
     @State private var selectedPath: String?
+    /// Paths whose diff card is collapsed (GitHub-style per-file collapse). All
+    /// files are shown; collapsing just folds a card to its header.
+    @State private var collapsedFiles: Set<String> = []
     /// Closing-note composer for "Submit review".
     @State private var showSubmit = false
     @State private var finalNote = ""
@@ -117,6 +122,15 @@ struct ChangesPanel: View {
             }
             .buttonStyle(.borderless)
             .help(treeShown ? "Hide the file tree" : "Show the file tree")
+            let paths = Set(visibleFiles.map(\.path))
+            Button { collapsedFiles = paths } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
+                .buttonStyle(.borderless)
+                .help("Collapse all files")
+                .disabled(paths.isEmpty || collapsedFiles.isSuperset(of: paths))
+            Button { collapsedFiles = [] } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                .buttonStyle(.borderless)
+                .help("Expand all files")
+                .disabled(collapsedFiles.isEmpty)
             if let files = diff?.files {
                 Text("\(files.count) file\(files.count == 1 ? "" : "s")")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -294,27 +308,44 @@ struct ChangesPanel: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Diff pane (selected file)
+    // MARK: - Diff pane (all files, each collapsible — GitHub-review style)
 
     @ViewBuilder
     private var diffPane: some View {
-        if let path = selectedPath, let file = visibleFiles.first(where: { $0.path == path }) {
-            ScrollView {
-                FileCard(
-                    sessionId: sessionId,
-                    file: file,
-                    comments: model.comments(sessionId).filter { $0.file == file.path },
-                    findings: ReviewPresentation.findings(
-                        for: file.path, in: model.review(sessionId)?.findings ?? []),
-                    collapsed: false,
-                    onToggleCollapse: {},
-                    onEdit: { openEditor(file.path) },
-                    collapsible: false)
-                    .padding(10)
-            }
+        if visibleFiles.isEmpty {
+            centered("No files match “\(query)”.")
         } else {
-            centered("Select a file to view its diff.")
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(visibleFiles, id: \.path) { file in
+                            FileCard(
+                                sessionId: sessionId,
+                                file: file,
+                                comments: model.comments(sessionId).filter { $0.file == file.path },
+                                findings: ReviewPresentation.findings(
+                                    for: file.path, in: model.review(sessionId)?.findings ?? []),
+                                collapsed: collapsedFiles.contains(file.path),
+                                onToggleCollapse: { toggleFileCollapse(file.path) },
+                                onEdit: { openEditor(file.path) },
+                                collapsible: true)
+                                .id(file.path)
+                        }
+                    }
+                    .padding(10)
+                }
+                // Clicking a file in the tree scrolls to its card (and expands it).
+                .onChange(of: selectedPath) { _, path in
+                    guard let path else { return }
+                    collapsedFiles.remove(path)
+                    withAnimation { proxy.scrollTo(path, anchor: .top) }
+                }
+            }
         }
+    }
+
+    private func toggleFileCollapse(_ path: String) {
+        if collapsedFiles.contains(path) { collapsedFiles.remove(path) } else { collapsedFiles.insert(path) }
     }
 
     private func centered(_ text: String) -> some View {
