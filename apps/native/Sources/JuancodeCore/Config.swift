@@ -31,4 +31,18 @@ public enum Config {
         let workdir = (home as NSString).appendingPathComponent("workdir")
         return FileManager.default.fileExists(atPath: workdir) ? workdir : home
     }
+
+    /// Root under which sidebar folders must live to be shown. Same resolution as
+    /// `defaultCwd` (`JUANCODE_DEFAULT_CWD`, then `~/workdir`, else home) — folders
+    /// outside it are filtered out as noise. `~/workdir` covers `<repo>-worktrees/…`
+    /// siblings too, so worktrees of in-workspace repos stay visible.
+    public static var workspaceRoot: String { defaultCwd }
+
+    /// Whether `path` lives at or under `workspaceRoot`, normalised so a folder
+    /// isn't matched by a sibling that merely shares a name prefix.
+    public static func isUnderWorkspaceRoot(_ path: String) -> Bool {
+        let root = (workspaceRoot as NSString).standardizingPath
+        let p = (path as NSString).standardizingPath
+        return p == root || p.hasPrefix(root + "/")
+    }
 }

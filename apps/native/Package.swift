@@ -26,6 +26,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         // Native terminal emulator view for the SwiftUI shell (juancode-u34.4).
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        // SPIKE: GhosttyKit (libghostty) — evaluating as a GPU-rendered replacement
+        // for SwiftTerm (cleaner resize, fewer render glitches). Host-driven via
+        // InMemoryTerminalSession so we keep owning the pty/byte stream.
+        .package(url: "https://github.com/Lakr233/libghostty-spm.git", from: "1.2.0"),
     ],
     targets: [
         // The native core that replaces node-pty + the server's session layer
@@ -80,6 +84,9 @@ let package = Package(
             dependencies: [
                 "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                // SPIKE: GhosttyKit (libghostty) GPU-rendered terminal, A/B'd against
+                // SwiftTerm behind JUANCODE_GHOSTTY=1. See GhosttyLive.swift.
+                .product(name: "GhosttyTerminal", package: "libghostty-spm"),
             ]
         ),
         .testTarget(

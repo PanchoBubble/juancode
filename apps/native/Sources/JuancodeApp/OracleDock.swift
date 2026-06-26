@@ -24,21 +24,36 @@ struct OracleDock: View {
                     .contentShape(Rectangle())
                     .onTapGesture { oracle.expanded = false }
                     .transition(.opacity)
-                panel
-                    .transition(.move(edge: .trailing))
             }
+            // The panel stays mounted across toggles and slides off the right edge when
+            // collapsed, rather than being inserted/removed. Tearing it down rebuilt the
+            // terminal surface and replayed scrollback on every open — a visible flicker.
+            // Sliding keeps the live grid intact, so reopening is instant and clean.
+            panel
+                .offset(x: oracle.expanded ? 0 : hiddenOffset)
+                .allowsHitTesting(oracle.expanded)
         }
         .animation(.easeOut(duration: 0.16), value: oracle.expanded)
         .onAppear { oracle.bootstrap() }
+    }
+
+    /// How far to push the collapsed panel past the right edge so nothing (incl. its
+    /// shadow + drag handle) peeks back in.
+    private var hiddenOffset: Double {
+        min(Self.maxWidth, max(Self.minWidth, panelWidth)) + 60
     }
 
     private var panel: some View {
         @Bindable var oracle = oracle
         let w = min(Self.maxWidth, max(Self.minWidth, panelWidth))
         return HStack(spacing: 0) {
-            // Drag the left edge to widen/narrow the drawer (drag left grows it).
+            // Drag the left edge to widen/narrow the drawer (drag left grows it). A
+            // preview-only drag: the CLI's full-screen TUI garbles if it repaints at
+            // every intermediate width, so we show a guide line and commit the new
+            // width once on release — a single clean reflow.
             DragResizeHandle(axis: .vertical, value: $panelWidth,
-                             min: Self.minWidth, max: Self.maxWidth, invert: true)
+                             min: Self.minWidth, max: Self.maxWidth, invert: true,
+                             previewOnly: true)
             VStack(spacing: 0) {
                 header
                 Divider()
@@ -59,11 +74,15 @@ struct OracleDock: View {
             Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
         }
         .shadow(radius: 24, x: -6)
-        // Esc closes it (the close button mirrors this).
-        .background(
-            Button("") { oracle.expanded = false }
-                .keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
-        )
+        // Esc closes it (the close button mirrors this). Only while expanded — the
+        // panel is always mounted now, and an always-live cancelAction would swallow
+        // Esc app-wide even when the dock is closed.
+        .background {
+            if oracle.expanded {
+                Button("") { oracle.expanded = false }
+                    .keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
+            }
+        }
     }
 
     private var header: some View {
@@ -71,6 +90,12 @@ struct OracleDock: View {
             Image(systemName: "sparkles").foregroundStyle(.tint).padding(.leading, 12)
             Text("Oracle").font(.system(size: 13, weight: .semibold))
             Spacer()
+            if oracle.tab == .chat, oracle.session != nil {
+                Button { oracle.restartAgent() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless)
+                    .help("Restart the Oracle agent")
+                    .clickCursor()
+            }
             Button { oracle.expanded = false } label: { Image(systemName: "chevron.right") }
                 .buttonStyle(.borderless)
                 .help("Close (⌃Space)")
@@ -290,11 +315,19 @@ private struct OracleChatView: View {
     var body: some View {
         if let session = oracle.session {
             // Same pattern as the main session pane (which resizes correctly): a
-            // plain fill. `sizeThatFits` on SwiftTermLive makes the bridged view take
-            // the proposed size.
-            SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
-                .id(ObjectIdentifier(session))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // plain fill. `sizeThatFits` makes the bridged view take the proposed size.
+            // GhosttyKit by default; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm.
+            // The resizable dock is the key glitch test case.
+            Group {
+                if TerminalBackendChoice.useGhostty {
+                    GhosttyLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
+                        .id(ObjectIdentifier(session))
+                } else {
+                    SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
+                        .id(ObjectIdentifier(session))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 8) {
                 Spacer()

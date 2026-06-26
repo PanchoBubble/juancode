@@ -5,14 +5,27 @@ import JuancodeServices
 
 // MARK: - Worktrees (juancode-q6q)
 
+/// One repo's worktrees: its main worktree (the project root) and the linked
+/// `juancode/*` worktrees beneath it. Used to group the cleanup sheet by project.
+struct WorktreeGroup: Identifiable {
+    let main: Worktree
+    let children: [Worktree]
+    var id: String { main.path }
+    /// Project label — the repo's folder name.
+    var name: String { (main.path as NSString).lastPathComponent }
+}
+
 /// A sheet to review and clean up git worktrees across the repos you're working in
-/// — the easy "clean worktrees" affordance. Lists each repo's main worktree (kept)
-/// plus the linked `juancode/*` ones a session may have created, flags those a live
-/// session is still using, and removes the rest with a confirmation.
+/// — the easy "clean worktrees" affordance. Groups worktrees by project: each repo
+/// is a collapsible section headed by its main worktree, with the linked `juancode/*`
+/// worktrees beneath it. Flags those a live session is still using, and removes the
+/// rest with a confirmation.
 struct WorktreesSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmRemove: Worktree?
+    /// Repo ids (main worktree paths) the user has collapsed; expanded by default.
+    @State private var collapsed: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,7 +60,7 @@ struct WorktreesSheet: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.worktrees.isEmpty {
+        if model.worktreeGroups.isEmpty {
             VStack(spacing: 6) {
                 Spacer()
                 Image(systemName: "externaldrive").font(.largeTitle).foregroundStyle(.secondary)
@@ -61,13 +74,78 @@ struct WorktreesSheet: View {
         } else {
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(model.worktrees, id: \.path) { wt in
-                        WorktreeRow(wt: wt, inUse: model.worktreeInUse(wt.path)) { confirmRemove = wt }
+                    ForEach(model.worktreeGroups) { group in
+                        WorktreeProjectHeader(
+                            group: group,
+                            collapsed: collapsed.contains(group.id),
+                            inUse: model.worktreeInUse(group.main.path)
+                        ) {
+                            if collapsed.contains(group.id) { collapsed.remove(group.id) }
+                            else { collapsed.insert(group.id) }
+                        }
                         Divider()
+                        if !collapsed.contains(group.id) {
+                            ForEach(group.children, id: \.path) { wt in
+                                WorktreeRow(wt: wt, inUse: model.worktreeInUse(wt.path)) { confirmRemove = wt }
+                                Divider()
+                            }
+                            if group.children.isEmpty {
+                                Text("No linked worktrees")
+                                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 38).padding(.vertical, 8)
+                                Divider()
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Collapsible per-project header: the repo's main worktree. Shows the project
+/// (folder) name, full path, branch, a "main" tag, and a child count.
+private struct WorktreeProjectHeader: View {
+    let group: WorktreeGroup
+    let collapsed: Bool
+    let inUse: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 10) {
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary).frame(width: 16)
+                Image(systemName: "house.fill")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.name)
+                        .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(group.main.path)
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                if let b = group.main.branch {
+                    Text(b).font(.system(size: 10).monospaced()).foregroundStyle(.secondary)
+                        .lineLimit(1).help("Branch")
+                }
+                if !group.children.isEmpty {
+                    Text("\(group.children.count)")
+                        .font(.system(size: 9, weight: .medium))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.2)).foregroundStyle(.secondary)
+                        .clipShape(Capsule())
+                        .help("\(group.children.count) linked worktree(s)")
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
     }
 }
 

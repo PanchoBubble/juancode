@@ -72,7 +72,8 @@ func installPaneNavigation(model: AppModel, host: NSView) -> Any? {
         let ctrl = mods.contains(.control)
 
         // Terminal pane: only ⌃H escapes to the sidebar; all else (incl. ⌃L) is the pty's.
-        if fr is TerminalView {
+        // Matches both SwiftTerm and Ghostty surfaces via the shared marker.
+        if fr is JuancodeTerminalResponder {
             // Back in the pty by any route (incl. a mouse click) — clear the nav guard so
             // a later row click auto-focuses its terminal again. Guarded to avoid churn.
             if model.suppressTerminalAutoFocus { model.suppressTerminalAutoFocus = false }
@@ -241,6 +242,8 @@ final class TerminalHostView: NSView {
         return urls.map(\.path)
     }
 }
+
+extension TerminalView: JuancodeTerminalResponder {}
 
 /// A one-shot flag shared into a `@Sendable` callback. Only ever touched on the
 /// main thread (inside `MainActor.assumeIsolated`), so the unchecked Sendable is safe.

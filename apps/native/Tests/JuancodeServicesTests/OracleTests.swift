@@ -116,6 +116,25 @@ final class OracleTests: XCTestCase {
         XCTAssertEqual(decoded, state)
     }
 
+    func testAskMailboxRoundTripsIncrementally() throws {
+        // The ask mailbox (remote/MCP path) shares the JSONL plumbing but is its own
+        // file + offset, so a dispatch must never be read as an ask or vice versa.
+        try appendOracleAsk(OracleAsk(text: "what's on the board?"))
+        let (first, off1) = readOracleAsks(since: 0)
+        XCTAssertEqual(first.map(\.text), ["what's on the board?"])
+        XCTAssertTrue(OraclePaths.askFile.hasSuffix("ask.jsonl"))
+
+        // Nothing new from the advanced offset.
+        XCTAssertTrue(readOracleAsks(since: off1).asks.isEmpty)
+
+        // A dispatch appended to its own file is not visible to the ask reader.
+        try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "x"))
+        XCTAssertTrue(readOracleAsks(since: off1).asks.isEmpty)
+
+        try appendOracleAsk(OracleAsk(text: "and now?"))
+        XCTAssertEqual(readOracleAsks(since: off1).asks.map(\.text), ["and now?"])
+    }
+
     func testAppendsArePathSafeWithSlashes() throws {
         // withoutEscapingSlashes keeps the path readable in the JSONL (and the agent
         // sees clean paths), while still decoding back exactly.

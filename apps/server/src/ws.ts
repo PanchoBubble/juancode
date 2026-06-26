@@ -110,7 +110,15 @@ export function setupWebSocket(server: Server): void {
               { skipPermissions: msg.skipPermissions },
               worktreePath,
             );
-            if (msg.initialInput) session.autoSubmit(msg.initialInput);
+            if (msg.initialInput) {
+              // Surface a delivery failure instead of leaving the session silently
+              // idle with an unsent prompt (the dispatch-loop bug we guard against).
+              session.autoSubmit(msg.initialInput, (outcome) => {
+                if (!outcome.ok) {
+                  send({ type: "error", message: `Couldn't deliver the prompt: ${outcome.reason}` });
+                }
+              });
+            }
             send({ type: "created", session: session.meta });
             subscribe(session.id);
             send({ type: "attached", sessionId: session.id, scrollback: "", session: session.meta });

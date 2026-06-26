@@ -27,6 +27,7 @@ public enum OraclePaths {
     public static var agentsFile: String { join(controlDir, "AGENTS.md") }
     public static var stateFile: String { join(controlDir, "state.json") }
     public static var dispatchFile: String { join(controlDir, "dispatch.jsonl") }
+    public static var askFile: String { join(controlDir, "ask.jsonl") }
 
     private static func join(_ base: String, _ component: String) -> String {
         (base as NSString).appendingPathComponent(component)
@@ -58,6 +59,18 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     public var resolvedProvider: ProviderId {
         provider.flatMap { ProviderId(rawValue: $0.lowercased()) } ?? .claude
     }
+}
+
+/// A line appended to `ask.jsonl` by an out-of-process caller (the MCP sidecar that
+/// fronts Oracle for remote/phone clients) to hand the Oracle agent a question. The
+/// app tails the file and writes each new line into the live Oracle session — or
+/// spawns one seeded with the text if none is running. Mirrors `OracleDispatch`'s
+/// mailbox so remote and in-app paths share the same append-only file protocol.
+public struct OracleAsk: Codable, Sendable, Equatable {
+    /// The text to deliver to the Oracle agent's session.
+    public var text: String
+
+    public init(text: String) { self.text = text }
 }
 
 /// One live (or recently-exited) session, as written into `state.json` for the
@@ -125,6 +138,10 @@ public func prepareOracleControlDir() throws {
     if !fm.fileExists(atPath: OraclePaths.dispatchFile) {
         fm.createFile(atPath: OraclePaths.dispatchFile, contents: Data())
     }
+    // Ask mailbox — an empty append-only log of OracleAsk lines (remote/MCP path).
+    if !fm.fileExists(atPath: OraclePaths.askFile) {
+        fm.createFile(atPath: OraclePaths.askFile, contents: Data())
+    }
     // Instructions — rewritten every launch so the dispatch protocol stays current
     // even if it evolves across app versions.
     try? Data(oracleAgentsMarkdown.utf8).write(to: URL(fileURLWithPath: OraclePaths.agentsFile))
@@ -165,15 +182,14 @@ private func shellQuote(_ s: String) -> String {
     "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-/// Append a dispatch request as one JSON line to the mailbox. Used by the app's
-/// own UI-initiated dispatch so it flows through the exact same path the agent
-/// uses (single source of truth for "spawn an agent in a project").
-public func appendOracleDispatch(_ dispatch: OracleDispatch) throws {
+/// Append `value` as one JSON line to an append-only mailbox file. Shared by the
+/// dispatch and ask mailboxes so both use one write path.
+private func appendJSONLine<T: Encodable>(_ value: T, to path: String) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
-    var line = try encoder.encode(dispatch)
+    var line = try encoder.encode(value)
     line.append(0x0A) // newline
-    let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+    let url = URL(fileURLWithPath: path)
     if let handle = try? FileHandle(forWritingTo: url) {
         defer { try? handle.close() }
         try handle.seekToEnd()
@@ -183,23 +199,49 @@ public func appendOracleDispatch(_ dispatch: OracleDispatch) throws {
     }
 }
 
-/// Decode any complete dispatch lines starting at byte `offset`, returning the
-/// parsed requests and the new offset to resume from. A trailing partial line (no
+/// Decode any complete JSON lines of `T` starting at byte `offset`, returning the
+/// parsed values and the new offset to resume from. A trailing partial line (no
 /// newline yet) is left unconsumed so a half-written append isn't misparsed.
 /// Malformed lines are skipped (never throw) so one bad line can't wedge the tail.
-public func readOracleDispatches(since offset: Int) -> (dispatches: [OracleDispatch], offset: Int) {
-    let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+/// A shrunken/rotated file resets the offset to the new end. Shared by both mailboxes.
+private func readJSONL<T: Decodable>(_ type: T.Type, at path: String, since offset: Int) -> (items: [T], offset: Int) {
+    let url = URL(fileURLWithPath: path)
     guard let data = try? Data(contentsOf: url) else { return ([], offset) }
     guard offset <= data.count else { return ([], data.count) } // file shrank/rotated
     let fresh = data.subdata(in: offset..<data.count)
     guard let lastNewline = fresh.lastIndex(of: 0x0A) else { return ([], offset) }
     let consumable = fresh.subdata(in: 0..<(lastNewline + 1))
     let decoder = JSONDecoder()
-    var out: [OracleDispatch] = []
+    var out: [T] = []
     for lineData in consumable.split(separator: 0x0A) where !lineData.isEmpty {
-        if let d = try? decoder.decode(OracleDispatch.self, from: Data(lineData)) { out.append(d) }
+        if let d = try? decoder.decode(T.self, from: Data(lineData)) { out.append(d) }
     }
     return (out, offset + consumable.count)
+}
+
+/// Append a dispatch request as one JSON line to the mailbox. Used by the app's
+/// own UI-initiated dispatch so it flows through the exact same path the agent
+/// uses (single source of truth for "spawn an agent in a project").
+public func appendOracleDispatch(_ dispatch: OracleDispatch) throws {
+    try appendJSONLine(dispatch, to: OraclePaths.dispatchFile)
+}
+
+/// Decode any complete dispatch lines starting at byte `offset`. See `readJSONL`.
+public func readOracleDispatches(since offset: Int) -> (dispatches: [OracleDispatch], offset: Int) {
+    let r = readJSONL(OracleDispatch.self, at: OraclePaths.dispatchFile, since: offset)
+    return (r.items, r.offset)
+}
+
+/// Append an ask as one JSON line to the ask mailbox. Used by the MCP sidecar to
+/// hand the Oracle agent a question from a remote/phone client.
+public func appendOracleAsk(_ ask: OracleAsk) throws {
+    try appendJSONLine(ask, to: OraclePaths.askFile)
+}
+
+/// Decode any complete ask lines starting at byte `offset`. See `readJSONL`.
+public func readOracleAsks(since offset: Int) -> (asks: [OracleAsk], offset: Int) {
+    let r = readJSONL(OracleAsk.self, at: OraclePaths.askFile, since: offset)
+    return (r.items, r.offset)
 }
 
 /// Persist the global state snapshot to `state.json` (pretty, stable key order) so

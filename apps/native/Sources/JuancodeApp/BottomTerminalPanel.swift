@@ -112,10 +112,16 @@ struct BottomTerminalPanel: View {
     @ViewBuilder
     private func paneView(_ pane: TerminalPaneID) -> some View {
         if let pty = model.shellPty(pane) {
-            SwiftTermEphemeral(pty: pty, onExit: {})
-                .background(Color.black)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .id(pane)
+            Group {
+                if TerminalBackendChoice.useGhostty {
+                    GhosttyEphemeral(pty: pty, onExit: {})
+                } else {
+                    SwiftTermEphemeral(pty: pty, onExit: {})
+                }
+            }
+            .background(Color.black)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .id(pane)
         } else {
             Color.black
                 .overlay(Text("Shell exited").font(.system(size: 11)).foregroundStyle(.secondary))

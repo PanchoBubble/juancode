@@ -1,9 +1,16 @@
 import Foundation
 import Observation
+import AppKit
 import JuancodeCore
 import JuancodeServices
 import JuancodePersistence
 import JuancodeServer
+
+/// UserDefaults key for the turn-boundary notification toggle (Dock bounce + badge).
+private let notifyDefaultsKey = "juancode.notify.turnEnd"
+
+/// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
+private let projectOrderKey = "juancode.projectOrder"
 
 /// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
 /// local UI is an in-process subscriber to the same `SessionRegistry` the
@@ -15,7 +22,13 @@ final class AppModel {
 
     var sessions: [SessionMeta] = []
     var activities: [String: SessionActivity] = [:]
-    var selection: String?
+    var selection: String? {
+        didSet {
+            // Viewing a session clears its pending turn-end notification (and the
+            // Dock badge count it contributed).
+            if let sel = selection { clearUnread(sel) }
+        }
+    }
     var showingNewSession = false
 
     // MARK: Keyboard navigation (juancode-vgm)
@@ -59,6 +72,29 @@ final class AppModel {
         for s in appState.registry.all() { watch(s) }
         refresh()
         restoreTracked()
+        // Returning to the app clears the badge for whatever session you land on.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { if let sel = self?.selection { self?.clearUnread(sel) } }
+        }
+    }
+
+    // MARK: - Turn-end notifications (Dock bounce + unread badge)
+
+    /// Sessions that finished a turn (or now need input) while you weren't watching
+    /// them. Their count drives the Dock badge; clearing happens when you view the
+    /// session or return to the app.
+    private(set) var unreadSessions: Set<String> = []
+
+    private func clearUnread(_ id: String) {
+        guard unreadSessions.remove(id) != nil else { return }
+        updateDockBadge()
+    }
+
+    /// Reflect the unread count on the Dock tile — a number badge, hidden at zero.
+    private func updateDockBadge() {
+        NSApp.dockTile.badgeLabel = unreadSessions.isEmpty ? nil : "\(unreadSessions.count)"
     }
 
     /// Persisted sessions (incl. exited), with live registry meta preferred for
@@ -110,11 +146,15 @@ final class AppModel {
     private func watch(_ s: Session) {
         activities[s.id] = s.activity
         activityCancels[s.id]?()
-        activityCancels[s.id] = s.onActivity { [weak self] st, _ in
+        activityCancels[s.id] = s.onActivity { [weak self] st, notify in
             Task { @MainActor in
                 guard let self else { return }
                 let prev = self.activities[s.id]
                 self.activities[s.id] = st
+                // `notify` marks a real turn boundary (the agent finished or now
+                // needs you). Bounce the Dock + bump the badge so background work is
+                // noticeable. See `notifyTurnEnd`.
+                if notify { self.notifyTurnEnd(sessionId: s.id, state: st) }
                 // The agent stays `busy` through a turn (including any file edits) and
                 // flips to idle / waiting-input when it finishes — so a busy → non-busy
                 // transition is the moment the working tree has settled. Re-diff then so
@@ -129,6 +169,32 @@ final class AppModel {
             }
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
+    }
+
+    /// Whether a session reaching a turn boundary notifies you (Dock bounce + badge).
+    /// Persisted; on by default. Toggle from the View menu (or `defaults write`).
+    var notifyOnTurnEnd: Bool = UserDefaults.standard.object(forKey: notifyDefaultsKey) as? Bool ?? true {
+        didSet { UserDefaults.standard.set(notifyOnTurnEnd, forKey: notifyDefaultsKey) }
+    }
+
+    /// User's custom sidebar project order (folder cwds). Folders not listed here
+    /// fall back to alphabetical, after the ordered ones. Persisted; driven by
+    /// drag-and-drop on the folder headers.
+    var projectOrder: [String] = (UserDefaults.standard.array(forKey: projectOrderKey) as? [String]) ?? [] {
+        didSet { UserDefaults.standard.set(projectOrder, forKey: projectOrderKey) }
+    }
+
+    /// At a turn boundary — background work finishing or now needing your reply —
+    /// bounce the Dock icon and bump the unread badge count instead of chiming.
+    /// `.criticalRequest` bounces until you focus the app (the agent is blocked on
+    /// you); `.informationalRequest` bounces once (it's just done). Skipped for the
+    /// one session you're already watching (app frontmost + selected).
+    private func notifyTurnEnd(sessionId: String, state: SessionActivity) {
+        guard notifyOnTurnEnd else { return }
+        if NSApp.isActive, selection == sessionId { return }
+        unreadSessions.insert(sessionId)
+        updateDockBadge()
+        NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
     }
 
     /// The most recently-created live session rooted in `cwd`, if any. Used to find
@@ -173,8 +239,18 @@ final class AppModel {
                     opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: wt)
             }.value
             // Seed the session with an initial prompt once its TUI is up — the same
-            // mechanism the WS `.create` path uses (Session.autoSubmit).
-            if let initialInput, !initialInput.isEmpty { s.autoSubmit(initialInput) }
+            // mechanism the WS `.create` path uses (Session.autoSubmit). Surface a
+            // delivery failure instead of leaving the session silently idle with an
+            // unsent prompt (the dispatch-loop bug we're guarding against).
+            if let initialInput, !initialInput.isEmpty {
+                let title = s.meta.title
+                s.autoSubmit(initialInput) { [weak self] outcome in
+                    guard case .failed(let reason) = outcome else { return }
+                    Task { @MainActor in
+                        self?.errorMessage = "Couldn't deliver the prompt to \(title): \(reason)"
+                    }
+                }
+            }
             refresh()
             if select { selection = s.id }
             return s
@@ -390,8 +466,10 @@ final class AppModel {
             }.value
             let prompt = issuePrompt(id: id, title: issue.title, description: description)
             if let session = focusedLiveSession(in: cwd) {
-                // Write it as if typed: idle → runs now, busy → queued by the CLI.
-                session.write("\(prompt)\r")
+                // Submit it as if typed: idle → runs now, busy → queued by the CLI.
+                // Bracketed paste + separate Enter so the multi-line prompt isn't
+                // misread as a literal paste and left sitting unsent in the input.
+                session.submit(prompt)
             } else {
                 // No live session for this folder — start one seeded with the prompt.
                 await create(provider: .claude, cwd: cwd, skipPermissions: true,
@@ -531,9 +609,11 @@ final class AppModel {
                 }
             }
             if !fixReasons.isEmpty, let session = liveSession(entry.sessionId) {
-                // Write it as if typed: idle → runs now, busy → queued by the CLI.
+                // Submit it as if typed: idle → runs now, busy → queued by the CLI.
+                // Bracketed paste + separate Enter so the prompt isn't misread as
+                // a literal paste and left sitting unsent in the input.
                 let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
-                session.write("\(prompt)\r")
+                session.submit(prompt)
             }
             tracked[key] = entry
         }
@@ -935,25 +1015,33 @@ final class AppModel {
 
     // MARK: - Worktree cleanup (juancode-q6q)
 
-    /// Linked git worktrees discovered across the repos currently in play. The
-    /// "main" worktree of each repo is included (flagged, not removable).
-    var worktrees: [Worktree] = []
+    /// Linked git worktrees discovered across the repos currently in play, grouped
+    /// by their repo (project). Each group's `main` worktree is the project root
+    /// (kept, not removable); `children` are the linked `juancode/*` worktrees.
+    var worktreeGroups: [WorktreeGroup] = []
     var worktreesLoading = false
 
     /// Scan every distinct session cwd (and any session-owned worktree path) for the
-    /// repo's worktrees, deduped by path. Off the main actor (shells into git).
+    /// repo's worktrees, grouped per repo and deduped by repo root. Off the main
+    /// actor (shells into git).
     func loadWorktrees() {
         guard !worktreesLoading else { return }
         worktreesLoading = true
         let cwds = Set(sessions.map(\.cwd) + sessions.compactMap(\.worktreePath))
         Task {
-            var seen = Set<String>()
-            var out: [Worktree] = []
+            // `git worktree list` from any worktree returns the whole repo's set with
+            // the main one first, so the main worktree's path is a stable per-repo key.
+            var seenRepos = Set<String>()
+            var groups: [WorktreeGroup] = []
             for cwd in cwds {
                 let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
-                for t in trees where seen.insert(t.path).inserted { out.append(t) }
+                guard let main = trees.first(where: { $0.main }) else { continue }
+                guard seenRepos.insert(main.path).inserted else { continue }
+                let children = trees.filter { !$0.main }
+                    .sorted { $0.path.localizedCompare($1.path) == .orderedAscending }
+                groups.append(WorktreeGroup(main: main, children: children))
             }
-            worktrees = out.sorted { $0.path.localizedCompare($1.path) == .orderedAscending }
+            worktreeGroups = groups.sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
             worktreesLoading = false
         }
     }
@@ -982,6 +1070,7 @@ final class AppModel {
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
         if selection == id { selection = nil }
+        clearUnread(id)
         refresh()
         if let wt = meta?.worktreePath {
             Task { try? await removeWorktree(wt) }

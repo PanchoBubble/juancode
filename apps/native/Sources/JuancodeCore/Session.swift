@@ -6,6 +6,14 @@ public enum SessionError: Error {
     case notRunning
 }
 
+/// The result of seeding a fresh session with an initial prompt (`Session.autoSubmit`).
+/// `.failed` carries a human-readable reason so the caller can surface it instead of
+/// leaving the session silently idle with an undelivered prompt.
+public enum AutoSubmitOutcome: Sendable, Equatable {
+    case submitted
+    case failed(reason: String)
+}
+
 /// Dependencies a `Session` needs, injected by the registry so tests can supply
 /// fakes (in-memory store, fake binary resolver, stub codex discovery).
 public struct SessionEnvironment: Sendable {
@@ -161,7 +169,7 @@ public final class Session: @unchecked Sendable {
         self.scroll = Scrollback(limit: env.scrollbackLimit, seed: seedScrollback)
         self.workQueue = DispatchQueue(label: "juancode.session.\(meta.id)")
 
-        self.detector = ActivityDetector { [weak self] state, notify in
+        self.detector = ActivityDetector(cols: cols, rows: rows) { [weak self] state, notify in
             self?.emitActivity(state, notify)
         }
 
@@ -233,39 +241,160 @@ public final class Session: @unchecked Sendable {
         write(Array(text.utf8))
     }
 
-    /// Type `text` and submit it once the CLI's TUI has rendered (waits for the
-    /// first output so the TUI is in raw mode, then a short delay).
+    // MARK: - seeding a fresh session (autoSubmit)
+
+    /// Tunables for the verified initial-prompt delivery in `autoSubmit`.
+    private enum Seed {
+        /// Cap on waiting for the TUI to settle before pasting (MCP loading on
+        /// startup can be slow); we paste anyway once it elapses.
+        static let readyMaxMs = 45_000
+        static let readyPollMs = 200
+        /// Per-attempt budget to confirm the paste landed in the input box.
+        static let landMs = 2_000
+        /// Per-attempt budget to confirm the Enter submitted (agent went busy or
+        /// the prompt left the input box).
+        static let submitMs = 4_000
+        static let pollMs = 150
+        static let maxAttempts = 3
+        /// Rows of the bottom screen region treated as the input-box area.
+        static let inputRows = 16
+    }
+
+    /// Seed a fresh session with an initial prompt and **verify** it was actually
+    /// delivered, retrying on failure and reporting the outcome via `onResult`
+    /// instead of leaving the session silently idle with an unsent prompt.
     ///
-    /// The text is delivered as a **bracketed paste** (`ESC[200~ … ESC[201~`) and
-    /// the submitting Enter is sent as a *separate* keystroke a beat later. This is
-    /// the crucial bit for multi-line seeds (e.g. an Oracle dispatch carrying an
-    /// issue description): if we wrote `"\(text)\r"` in one burst the CLI's TUI
-    /// would auto-detect the fast multi-line chunk as a paste and treat the trailing
-    /// CR as a literal newline — so the message just sits in the input box, unsent.
-    /// Pasting first, then sending a lone CR, makes the CR register as submit.
-    public func autoSubmit(_ text: String) {
+    /// The old approach fired on the *first* output byte then pasted blind after a
+    /// fixed delay — but the first byte is the startup banner / MCP-loading chatter,
+    /// emitted seconds before the input box is in raw mode, so the paste could land
+    /// nowhere and the prompt would just rot in the box. Instead we:
+    ///   1. wait for the screen to *settle* (stable frames) so the input box is up,
+    ///   2. paste (bracketed `ESC[200~ … ESC[201~`) and confirm a signature of the
+    ///      prompt appears in the input-box region, re-pasting if it didn't,
+    ///   3. send a lone Enter and confirm submission — the agent goes busy or the
+    ///      prompt leaves the box — re-sending Enter if it didn't.
+    /// The bracketed-paste-then-separate-Enter split is still essential: a
+    /// `"\(text)\r"` burst makes the CLI read the chunk as a paste and keep the CR
+    /// as a literal newline, leaving the prompt unsent.
+    public func autoSubmit(_ text: String, onResult: (@Sendable (AutoSubmitOutcome) -> Void)? = nil) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { onResult?(.submitted); return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { onResult?(.failed(reason: "session was released")); return }
+            let outcome = await self.deliverSeed(trimmed)
+            onResult?(outcome)
+        }
+    }
+
+    /// The verified delivery state machine for `autoSubmit`. Runs off the main
+    /// actor; every collaborator it touches (`write`, `isRunning`, `detector`) is
+    /// thread-safe.
+    private func deliverSeed(_ trimmed: String) async -> AutoSubmitOutcome {
+        let signature = InitialPromptDelivery.signature(for: trimmed)
+
+        // 1) Wait for the TUI to settle so the input box exists before we paste.
+        await waitForStableScreen(maxMs: Seed.readyMaxMs, pollMs: Seed.readyPollMs)
+        guard isRunning else { return .failed(reason: "session exited during startup") }
+
+        // 2) Paste, then confirm the prompt actually landed in the input box.
+        var landed = false
+        for _ in 0..<Seed.maxAttempts {
+            guard isRunning else { return .failed(reason: "session exited before the prompt was typed") }
+            if activity == .busy { return .submitted } // already working — nothing to do
+            paste(trimmed)
+            landed = await waitUntil(maxMs: Seed.landMs, pollMs: Seed.pollMs) {
+                self.activity == .busy || self.inputBoxContains(signature)
+            }
+            if activity == .busy { return .submitted }
+            if landed { break }
+        }
+        guard landed else {
+            return .failed(reason: "the prompt never appeared in the input box after \(Seed.maxAttempts) tries")
+        }
+
+        // 3) Submit, then confirm it went through (agent busy, or the box cleared).
+        for _ in 0..<Seed.maxAttempts {
+            guard isRunning else { return .failed(reason: "session exited before the prompt was submitted") }
+            write("\r")
+            let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
+                self.activity == .busy || !self.inputBoxContains(signature)
+            }
+            if submitted { return .submitted }
+        }
+        return .failed(reason: "the prompt stayed in the input box; it was never submitted")
+    }
+
+    /// True if the prompt `signature` is currently visible in the input-box region.
+    /// Empty signature (all-whitespace prompt) is treated as "present" so delivery
+    /// of a content-free seed doesn't loop — though `autoSubmit` rejects those up front.
+    private func inputBoxContains(_ signature: String) -> Bool {
+        guard !signature.isEmpty else { return true }
+        return InitialPromptDelivery.region(detector.inputRegionSnapshot(rows: Seed.inputRows),
+                                            contains: signature)
+    }
+
+    /// Poll until the rendered screen stops changing (two identical, non-empty
+    /// frames `pollMs` apart) or `maxMs` elapses — a CLI-agnostic "TUI is ready"
+    /// signal that replaces trusting the first output byte.
+    private func waitForStableScreen(maxMs: Int, pollMs: Int) async {
+        var elapsed = 0
+        var prev = detector.screenSnapshot()
+        while elapsed < maxMs {
+            try? await Task.sleep(for: .milliseconds(pollMs))
+            elapsed += pollMs
+            let cur = detector.screenSnapshot()
+            if !cur.isEmpty && cur == prev { return }
+            prev = cur
+        }
+    }
+
+    /// Poll `cond` every `pollMs` until it's true or `maxMs` elapses; returns whether
+    /// it became true.
+    private func waitUntil(maxMs: Int, pollMs: Int, _ cond: @escaping @Sendable () -> Bool) async -> Bool {
+        if cond() { return true }
+        var elapsed = 0
+        while elapsed < maxMs {
+            try? await Task.sleep(for: .milliseconds(pollMs))
+            elapsed += pollMs
+            if cond() { return true }
+        }
+        return false
+    }
+
+    /// Paste `text` and submit it into an **already-live** session whose TUI is
+    /// up, without waiting for output first. `autoSubmit` waits for the startup
+    /// render before pasting; that listener never fires for a session that's
+    /// idle (agent done, TUI static, no new output), so a mid-session injection
+    /// — e.g. the PR-tracker pushing a follow-up prompt — must paste straight
+    /// away. Same bracketed-paste + separate-Enter delivery: writing
+    /// `"\(text)\r"` in one burst lets the CLI misread the chunk as a paste and
+    /// keep the CR as a literal newline, leaving the prompt unsent in the box.
+    public func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // Hold the cancel handle in a Sendable box so the (now `@Sendable`)
-        // listener can detach itself on first output without capturing a mutable
-        // `var` across concurrency domains.
-        let holder = CancelBox()
-        holder.set(subscribeOutput(replay: false) { [weak self] _ in
-            holder.cancel()
-            guard let self else { return }
-            self.workQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
-                guard let self else { return }
-                self.write("\u{1B}[200~\(trimmed)\u{1B}[201~")
-                // Let the paste settle in the prompt before the submitting Enter.
-                self.workQueue.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
-                    self?.write("\r")
-                }
-            }
-        })
+        pasteAndSubmit(trimmed)
+    }
+
+    /// Deliver `trimmed` as a bracketed paste, then send the submitting Enter as
+    /// a separate keystroke a beat later so the CR registers as submit.
+    private func pasteAndSubmit(_ trimmed: String) {
+        paste(trimmed)
+        // Let the paste settle in the prompt before the submitting Enter.
+        workQueue.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+            self?.write("\r")
+        }
+    }
+
+    /// Write `trimmed` as a bracketed paste (`ESC[200~ … ESC[201~`) without the
+    /// submitting Enter — `autoSubmit` pastes, verifies it landed, then submits
+    /// separately.
+    private func paste(_ trimmed: String) {
+        write("\u{1B}[200~\(trimmed)\u{1B}[201~")
     }
 
     public func resize(cols: Int, rows: Int) {
         if isRunning { proc?.resize(cols: cols, rows: rows) }
+        detector.resize(cols: cols, rows: rows)
     }
 
     public func kill() {

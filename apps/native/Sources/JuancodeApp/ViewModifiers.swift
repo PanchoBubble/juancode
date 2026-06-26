@@ -60,11 +60,25 @@ struct DragResizeHandle: View {
     let min: Double
     let max: Double
     var invert: Bool = true
+    /// When true, the bound `value` is written only on drag *end* — during the drag a
+    /// bright guide line previews where the edge will land, but nothing resizes yet.
+    /// Use for panes hosting a live terminal: the CLI's full-screen TUI repaints on
+    /// every intermediate width, so a live drag garbles it; committing once on release
+    /// yields a single clean repaint instead.
+    var previewOnly: Bool = false
 
     /// Width/height of the invisible grab zone.
     private let hit: CGFloat = 14
     @State private var hovering = false
     @State private var dragging = false
+    /// `value` at the moment the drag began. `DragGesture.translation` is cumulative
+    /// from the gesture start, so we apply it against this fixed anchor — adding it to
+    /// the live (already-updated) `value` each frame compounds the translation and the
+    /// size runs away to a clamp edge (the Oracle dock collapsing to its min width).
+    @State private var dragStart: Double?
+    /// In `previewOnly` mode, the live target while a drag is in flight; committed to
+    /// `value` on release. Nil when not previewing.
+    @State private var preview: Double?
 
     var body: some View {
         let active = hovering || dragging
@@ -72,11 +86,14 @@ struct DragResizeHandle: View {
         let thickness: CGFloat = active ? 3 : 1
         ZStack {
             Color.clear
-            RoundedRectangle(cornerRadius: thickness / 2)
-                .fill(lineColor)
-                .frame(
-                    width: axis == .vertical ? thickness : nil,
-                    height: axis == .horizontal ? thickness : nil)
+            line(color: lineColor, thickness: thickness)
+            if let target = preview {
+                // Bright guide at the release target — the only thing that moves while
+                // a previewOnly drag is in flight (the pane itself stays put).
+                line(color: .accentColor, thickness: 3)
+                    .offset(x: axis == .vertical ? guideOffset(target) : 0,
+                            y: axis == .horizontal ? guideOffset(target) : 0)
+            }
         }
         .frame(width: axis == .vertical ? hit : nil,
                height: axis == .horizontal ? hit : nil)
@@ -93,15 +110,34 @@ struct DragResizeHandle: View {
             DragGesture()
                 .onChanged { v in
                     dragging = true
+                    let start = dragStart ?? value
+                    if dragStart == nil { dragStart = value }
                     let delta = axis == .vertical ? v.translation.width : v.translation.height
                     let signed = invert ? -delta : delta
-                    value = Swift.min(max, Swift.max(min, value + signed))
+                    let next = Swift.min(max, Swift.max(min, start + signed))
+                    if previewOnly { preview = next } else { value = next }
                 }
                 .onEnded { _ in
+                    if previewOnly, let target = preview { value = target }
+                    preview = nil
                     dragging = false
+                    dragStart = nil
                     if !hovering { NSCursor.pop() }
                 }
         )
         .animation(.easeOut(duration: 0.10), value: active)
+    }
+
+    /// Point offset of the preview guide from the resting edge, given a target value.
+    /// An `invert` handle (e.g. the Oracle's left edge) moves opposite to the value.
+    private func guideOffset(_ target: Double) -> CGFloat {
+        CGFloat((invert ? -1 : 1) * (target - value))
+    }
+
+    @ViewBuilder private func line(color: Color, thickness: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: thickness / 2)
+            .fill(color)
+            .frame(width: axis == .vertical ? thickness : nil,
+                   height: axis == .horizontal ? thickness : nil)
     }
 }

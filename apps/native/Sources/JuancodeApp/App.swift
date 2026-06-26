@@ -149,6 +149,9 @@ struct JuancodeApp: App {
             CommandGroup(after: .toolbar) {
                 Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                Toggle("Turn-End Notifications", isOn: Binding(
+                    get: { model.notifyOnTurnEnd },
+                    set: { model.notifyOnTurnEnd = $0 }))
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") { model.toggleBottomTerminal() }

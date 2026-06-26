@@ -141,6 +141,8 @@ struct SidebarView: View {
     /// Folders expanded past the preview cap into a fixed-height, internally
     /// scrollable box (by cwd). Otherwise only the first `folderPreviewCount` show.
     @State private var expandedFolders: Set<String> = []
+    /// The folder header currently under a drag (by cwd), for the drop highlight.
+    @State private var dropTarget: String?
 
     /// How many session rows a folder shows before offering "Load more".
     private let folderPreviewCount = 5
@@ -174,7 +176,11 @@ struct SidebarView: View {
         // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
         // not the per-project sidebar (juancode-wjg).
         let nonOracle = (model.sessions + model.externalSessions).filter { $0.cwd != OraclePaths.controlDir }
-        let visible = showArchived ? nonOracle : nonOracle.filter { !$0.archived }
+        // Only show folders that live under the workspace root (~/workdir); sessions
+        // discovered elsewhere on disk are noise. Worktrees of in-workspace repos sit
+        // in sibling `<repo>-worktrees/…` dirs, still under the root, so they survive.
+        let inWorkspace = nonOracle.filter { Config.isUnderWorkspaceRoot($0.cwd) }
+        let visible = showArchived ? inWorkspace : inWorkspace.filter { !$0.archived }
         let filtered = q.isEmpty
             ? visible
             : visible.filter {
@@ -188,7 +194,31 @@ struct SidebarView: View {
                 sessions: sessions,
                 running: sessions.filter { model.isLive($0.id) }.count)
         }
-        .sorted { $0.cwd.localizedCompare($1.cwd) == .orderedAscending }
+        .sorted { a, b in
+            // Custom drag order first (folders the user has positioned); anything
+            // not yet placed falls back to alphabetical, after the ordered ones.
+            let ia = model.projectOrder.firstIndex(of: a.cwd)
+            let ib = model.projectOrder.firstIndex(of: b.cwd)
+            switch (ia, ib) {
+            case let (x?, y?): return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return a.cwd.localizedCompare(b.cwd) == .orderedAscending
+            }
+        }
+    }
+
+    /// Reorder projects by drag-and-drop: drop `dragged`'s header onto `target`'s to
+    /// place it just before `target`. Persists the full current order so subsequent
+    /// drags are stable.
+    private func reorderProjects(moving dragged: String, onto target: String) {
+        guard dragged != target else { return }
+        var order = groups.map(\.cwd)
+        guard let from = order.firstIndex(of: dragged) else { return }
+        order.remove(at: from)
+        guard let to = order.firstIndex(of: target) else { return }
+        order.insert(dragged, at: to)
+        model.projectOrder = order
     }
 
     /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
@@ -227,6 +257,26 @@ struct SidebarView: View {
                             } else {
                                 collapsedFolders.insert(group.cwd)
                             }
+                        }
+                        // Drag a header onto another to reorder projects (persisted).
+                        .overlay(alignment: .top) {
+                            if dropTarget == group.cwd {
+                                Rectangle().fill(Color.accentColor).frame(height: 2)
+                            }
+                        }
+                        .draggable(group.cwd) {
+                            Text(group.name)
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color.black.opacity(0.8))
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            dropTarget = nil
+                            guard let dragged = items.first else { return false }
+                            reorderProjects(moving: dragged, onto: group.cwd)
+                            return true
+                        } isTargeted: { hovering in
+                            dropTarget = hovering ? group.cwd : (dropTarget == group.cwd ? nil : dropTarget)
                         }
                     }
                 }
@@ -284,6 +334,17 @@ struct SidebarView: View {
         .background(Color.black)
         .onAppear { model.loadExternalSessions(); model.navOrder = visibleOrderedIDs }
         .toolbar {
+            ToolbarItem {
+                let anyExpanded = groups.contains { !collapsedFolders.contains($0.cwd) }
+                Button {
+                    collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
+                } label: {
+                    Image(systemName: anyExpanded
+                          ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                }
+                .help(anyExpanded ? "Collapse all projects" : "Expand all projects")
+                .clickCursor()
+            }
             ToolbarItem {
                 Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
                     .help("Search transcripts")
@@ -369,10 +430,13 @@ struct SidebarView: View {
     @ViewBuilder
     private func nativeRow(_ meta: SessionMeta) -> some View {
         let external = model.isExternal(meta.id)
-        sessionRow(meta)
+        let row = sessionRow(meta)
             .tag(meta.id)
             .selectionDisabled(external)
             .contextMenu { rowContextMenu(meta) }
+        // Pointing-hand on hover for the clickable (selectable) rows; external
+        // rows aren't selectable, so they keep the default cursor.
+        if external { row } else { row.pointerCursor() }
     }
 
     /// A row inside the scroll box: manual tap-to-select + highlight (the List's own
@@ -380,7 +444,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func scrollRow(_ meta: SessionMeta) -> some View {
         let external = model.isExternal(meta.id)
-        sessionRow(meta)
+        let row = sessionRow(meta)
             .padding(.horizontal, 8)
             .padding(.vertical, 1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -389,6 +453,9 @@ struct SidebarView: View {
             .contentShape(Rectangle())
             .onTapGesture { if !external { model.selection = meta.id } }
             .contextMenu { rowContextMenu(meta) }
+        // Pointing-hand on hover for the clickable rows; external rows can't be
+        // selected by tap, so they keep the default cursor.
+        if external { row } else { row.pointerCursor() }
     }
 
     private func sessionRow(_ meta: SessionMeta) -> SessionRow {
@@ -1067,7 +1134,7 @@ struct SessionContainer: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if panelShown {
-                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: 760)
+                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity)
                     sidePanel
                         .frame(width: CGFloat(panelWidth))
                 }
@@ -1113,10 +1180,19 @@ struct SessionContainer: View {
             // brand-new Session (same juancode id) behind the same pty, so this
             // forces a fresh terminal that subscribes to the new pty and replays
             // the carried-forward scrollback.
-            SwiftTermLive(session: session,
-                          focusToken: model.terminalFocusToken,
-                          autoFocusOnAppear: !model.suppressTerminalAutoFocus)
-                .id(ObjectIdentifier(session))
+            // GhosttyKit surface by default; JUANCODE_SWIFTTERM=1 falls back to
+            // SwiftTerm (see GhosttyLive.swift / bd spike).
+            if TerminalBackendChoice.useGhostty {
+                GhosttyLive(session: session,
+                            focusToken: model.terminalFocusToken,
+                            autoFocusOnAppear: !model.suppressTerminalAutoFocus)
+                    .id(ObjectIdentifier(session))
+            } else {
+                SwiftTermLive(session: session,
+                              focusToken: model.terminalFocusToken,
+                              autoFocusOnAppear: !model.suppressTerminalAutoFocus)
+                    .id(ObjectIdentifier(session))
+            }
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
         }

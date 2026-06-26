@@ -37,6 +37,9 @@ final class OracleModel {
     /// Byte offset into `dispatch.jsonl` we've consumed up to. Initialized to the
     /// file's end at bootstrap so we only act on dispatches made this run.
     @ObservationIgnored private var dispatchOffset = 0
+    /// Byte offset into `ask.jsonl` we've consumed up to. Primed to the file's end at
+    /// bootstrap so we only act on asks made this run (mirrors `dispatchOffset`).
+    @ObservationIgnored private var askOffset = 0
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var beadsLoading = false
     /// Last snapshot written to `state.json`, to skip rewriting an unchanged file
@@ -110,6 +113,7 @@ final class OracleModel {
         // Only act on dispatches appended after this point — pre-existing lines
         // belong to a previous run and have already been handled.
         dispatchOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count) ?? 0
+        askOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.askFile)).count) ?? 0
         ready = true
         startLoop()
         Task {
@@ -130,6 +134,17 @@ final class OracleModel {
         ensureAgentSession()
     }
 
+    /// Restart the Oracle agent from the chat tab: kill the live session and spawn a
+    /// fresh one. The chat transcript is disposable — Oracle's durable state lives in
+    /// its bd tracker + files (see `ensureAgentSession`) — so a clean respawn is safe
+    /// when the CLI's TUI gets garbled or the conversation is stuck.
+    func restartAgent() {
+        guard ready else { startAgent(); return }
+        if let id = oracleSessionId { app.delete(id) }
+        oracleSessionId = nil
+        ensureAgentSession()
+    }
+
     /// Restore the most recent persisted Oracle session (reactivating it) or spawn
     /// a fresh one seeded with the role prompt. The Oracle session is identified by
     /// its unique cwd (the control dir), so there's no schema/protocol change.
@@ -146,7 +161,7 @@ final class OracleModel {
         spawnAgent()
     }
 
-    private func spawnAgent() {
+    private func spawnAgent(seed: String = oracleSeedPrompt) {
         Task {
             // Accept-all so Oracle can run bd + manage its mailbox without prompts;
             // it operates only in its own control dir. Don't steal the selection.
@@ -155,9 +170,26 @@ final class OracleModel {
             // main-window size and wraps into garbage inside the narrower drawer.
             let grid = dockGrid
             let s = await app.create(provider: .claude, cwd: controlDir, skipPermissions: true,
-                                     isolateWorktree: false, initialInput: oracleSeedPrompt,
+                                     isolateWorktree: false, initialInput: seed,
                                      select: false, cols: grid.cols, rows: grid.rows)
             oracleSessionId = s?.id
+        }
+    }
+
+    /// Deliver a remote ask (drained from `ask.jsonl`, appended by the MCP sidecar)
+    /// to the Oracle agent. Writes into the live session if one is up; otherwise
+    /// spawns the agent seeded with the ask text so the question isn't lost. Surfaces
+    /// the chat so the exchange is visible on the Mac.
+    func receiveAsk(_ text: String) {
+        expanded = true
+        tab = .chat
+        if let s = session {
+            // Route through `submit` (bracketed paste + separate Enter), not a raw
+            // `"\(text)\r"` burst — the latter makes the CLI read a multi-line ask
+            // as a paste and keep the CR as a literal newline, leaving it unsent.
+            s.submit(text)
+        } else {
+            spawnAgent(seed: text)
         }
     }
 
@@ -202,7 +234,7 @@ final class OracleModel {
         expanded = true
         tab = .chat
         if let s = session {
-            s.write("\(text)\r")
+            s.submit(text) // bracketed paste + separate Enter (see `receiveAsk`)
         } else {
             ensureAgentSession()
         }
@@ -231,7 +263,7 @@ final class OracleModel {
         }
     }
 
-    /// One pass: publish the live state snapshot and process any new dispatch lines.
+    /// One pass: publish the live state snapshot and process any new dispatch + ask lines.
     private func tick() async {
         writeState()
         let (dispatches, newOffset) = readOracleDispatches(since: dispatchOffset)
@@ -243,6 +275,10 @@ final class OracleModel {
                              skipPermissions: true, isolateWorktree: d.worktree ?? false,
                              initialInput: d.prompt, select: true)
         }
+        // Drain the ask mailbox (remote/MCP path) into the live Oracle session.
+        let (asks, newAskOffset) = readOracleAsks(since: askOffset)
+        askOffset = newAskOffset
+        for a in asks { receiveAsk(a.text) }
     }
 
     /// Write the current session/workdir snapshot for the agent to read.

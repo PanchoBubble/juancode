@@ -10,14 +10,39 @@ import type { SpawnOptions } from "./providers.ts";
 import { deriveSessionTitle } from "./sessionTitle.ts";
 import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
+import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
 import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
 type ActivityListener = (state: SessionActivity, notify: boolean) => void;
 
+/**
+ * The result of seeding a fresh session with an initial prompt
+ * ({@link Session.autoSubmit}). `ok: false` carries a reason so the caller can
+ * surface it instead of leaving the session silently idle with an unsent prompt.
+ */
+export type AutoSubmitOutcome = { ok: true } | { ok: false; reason: string };
+
 const PERSIST_DEBOUNCE_MS = 2000;
 const TITLE_POLL_MS = 4000;
+
+/** Tunables for the verified initial-prompt delivery in {@link Session.autoSubmit}. */
+const SEED = {
+  /** Cap on waiting for the TUI to settle (MCP load can be slow); paste anyway after. */
+  readyMaxMs: 45_000,
+  readyPollMs: 200,
+  /** Per-attempt budget to confirm the paste landed in the input box. */
+  landMs: 2_000,
+  /** Per-attempt budget to confirm the Enter submitted. */
+  submitMs: 4_000,
+  pollMs: 150,
+  maxAttempts: 3,
+  /** Rows of the bottom screen region treated as the input-box area. */
+  inputRows: 16,
+} as const;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class Session {
   readonly meta: SessionMeta;
@@ -26,9 +51,7 @@ export class Session {
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
   private readonly activityListeners = new Set<ActivityListener>();
-  private readonly detector = new ActivityDetector((state, notify) => {
-    for (const l of this.activityListeners) l(state, notify);
-  });
+  private readonly detector: ActivityDetector;
   private persistTimer: NodeJS.Timeout | null = null;
   private titleTimer: NodeJS.Timeout | null = null;
 
@@ -41,6 +64,9 @@ export class Session {
     seedScrollback = "",
   ) {
     this.meta = meta;
+    this.detector = new ActivityDetector(cols, rows, (state, notify) => {
+      for (const l of this.activityListeners) l(state, notify);
+    });
     // Resuming an exited session carries its prior scrollback forward so the
     // history survives the new pty (and isn't clobbered by the persist below).
     this.scrollback = new Scrollback(SCROLLBACK_LIMIT, seedScrollback);
@@ -160,33 +186,118 @@ export class Session {
   }
 
   /**
-   * Type `text` into the session and submit it, once the CLI's TUI has rendered.
-   * Used to seed a fresh session with context (e.g. a PR to work on). We wait for
-   * the first output so the TUI has entered raw mode before we type, then add a
-   * short delay.
+   * Seed a fresh session with an initial prompt and **verify** it was actually
+   * delivered, retrying on failure and reporting the outcome via `onResult` instead
+   * of leaving the session silently idle with an unsent prompt.
    *
-   * The text is delivered as a bracketed paste (`ESC[200~ … ESC[201~`) and the
-   * submitting Enter is sent as a separate keystroke a beat later. This matters for
-   * multi-line seeds (e.g. an Oracle dispatch carrying an issue description): writing
-   * `${trimmed}\r` in one burst makes the CLI auto-detect the fast multi-line chunk
-   * as a paste and treat the trailing CR as a literal newline, leaving the message
-   * sitting in the input box unsent. Pasting first, then a lone CR, submits it.
+   * The old approach fired on the *first* output byte then pasted blind after a
+   * fixed delay — but the first byte is the startup banner / MCP-loading chatter,
+   * emitted seconds before the input box is in raw mode, so the paste could land
+   * nowhere and the prompt would just rot in the box. Instead we:
+   *   1. wait for the screen to *settle* (stable frames) so the input box is up,
+   *   2. paste (bracketed `ESC[200~ … ESC[201~`) and confirm a signature of the
+   *      prompt appears in the input-box region, re-pasting if it didn't,
+   *   3. send a lone Enter and confirm submission — the agent goes busy or the
+   *      prompt leaves the box — re-sending Enter if it didn't.
+   * The bracketed-paste-then-separate-Enter split is still essential: a `${text}\r`
+   * burst makes the CLI read the chunk as a paste and keep the CR as a literal
+   * newline, leaving the prompt unsent.
    */
-  autoSubmit(text: string): void {
+  autoSubmit(text: string, onResult?: (outcome: AutoSubmitOutcome) => void): void {
     const trimmed = text.trim();
-    if (!trimmed) return;
-    const off = this.onOutput(() => {
-      off();
-      setTimeout(() => {
-        this.write(`\x1b[200~${trimmed}\x1b[201~`);
-        // Let the paste settle in the prompt before the submitting Enter.
-        setTimeout(() => this.write("\r"), 150);
-      }, 500);
-    });
+    if (!trimmed) {
+      onResult?.({ ok: true });
+      return;
+    }
+    void this.deliverSeed(trimmed).then((outcome) => onResult?.(outcome));
+  }
+
+  /** The verified delivery state machine for {@link autoSubmit}. */
+  private async deliverSeed(trimmed: string): Promise<AutoSubmitOutcome> {
+    const signature = promptSignature(trimmed);
+
+    // 1) Wait for the TUI to settle so the input box exists before we paste.
+    await this.waitForStableScreen(SEED.readyMaxMs, SEED.readyPollMs);
+    if (!this.isRunning) return { ok: false, reason: "session exited during startup" };
+
+    // 2) Paste, then confirm the prompt actually landed in the input box.
+    let landed = false;
+    for (let i = 0; i < SEED.maxAttempts; i++) {
+      if (!this.isRunning) return { ok: false, reason: "session exited before the prompt was typed" };
+      if (this.isBusy()) return { ok: true }; // already working
+      this.write(`\x1b[200~${trimmed}\x1b[201~`);
+      landed = await this.waitUntil(
+        SEED.landMs,
+        SEED.pollMs,
+        () => this.isBusy() || this.inputBoxContains(signature),
+      );
+      if (this.isBusy()) return { ok: true };
+      if (landed) break;
+    }
+    if (!landed) {
+      return { ok: false, reason: `the prompt never appeared in the input box after ${SEED.maxAttempts} tries` };
+    }
+
+    // 3) Submit, then confirm it went through (agent busy, or the box cleared).
+    for (let i = 0; i < SEED.maxAttempts; i++) {
+      if (!this.isRunning) return { ok: false, reason: "session exited before the prompt was submitted" };
+      this.write("\r");
+      const submitted = await this.waitUntil(
+        SEED.submitMs,
+        SEED.pollMs,
+        () => this.isBusy() || !this.inputBoxContains(signature),
+      );
+      if (submitted) return { ok: true };
+    }
+    return { ok: false, reason: "the prompt stayed in the input box; it was never submitted" };
+  }
+
+  /**
+   * Whether the agent is currently working. A method (not a bare `activity ===
+   * "busy"`) so repeated checks across `await`s aren't narrowed away by TS.
+   */
+  private isBusy(): boolean {
+    return this.activity === "busy";
+  }
+
+  /** True if the prompt `signature` is currently visible in the input-box region. */
+  private inputBoxContains(signature: string): boolean {
+    if (!signature) return true; // nothing distinctive to verify
+    return regionContains(this.detector.inputRegionSnapshot(SEED.inputRows), signature);
+  }
+
+  /**
+   * Resolve once the rendered screen stops changing (two identical, non-empty
+   * frames `pollMs` apart) or `maxMs` elapses — a CLI-agnostic "TUI is ready"
+   * signal that replaces trusting the first output byte.
+   */
+  private async waitForStableScreen(maxMs: number, pollMs: number): Promise<void> {
+    let elapsed = 0;
+    let prev = this.detector.screenSnapshot();
+    while (elapsed < maxMs) {
+      await sleep(pollMs);
+      elapsed += pollMs;
+      const cur = this.detector.screenSnapshot();
+      if (cur !== "" && cur === prev) return;
+      prev = cur;
+    }
+  }
+
+  /** Poll `cond` every `pollMs` until true or `maxMs` elapses; returns whether it became true. */
+  private async waitUntil(maxMs: number, pollMs: number, cond: () => boolean): Promise<boolean> {
+    if (cond()) return true;
+    let elapsed = 0;
+    while (elapsed < maxMs) {
+      await sleep(pollMs);
+      elapsed += pollMs;
+      if (cond()) return true;
+    }
+    return false;
   }
 
   resize(cols: number, rows: number): void {
     if (this.isRunning && cols > 0 && rows > 0) this.proc.resize(cols, rows);
+    if (cols > 0 && rows > 0) this.detector.resize(cols, rows);
   }
 
   kill(): void {

@@ -3,43 +3,74 @@ import Foundation
 /// Infers whether a session is working, finished a turn, or waiting for the user
 /// from the raw pty byte stream alone (mirrors `apps/server/src/activityDetector.ts`).
 ///
-/// Both `claude` and `codex` paint an "esc to interrupt" status line *once* when a
-/// turn starts, then only update the changing bits via cursor moves. We use that
-/// phrase only to *enter* `busy`; from there any continued output keeps it busy,
-/// and we settle once output goes quiet for `settleMs`. Because busy can only be
-/// entered via the phrase, the startup banner and keystroke echoes never trigger
-/// it. On settle we classify the final screen: an option menu / yes-no prompt =>
-/// `waitingInput`, else `idle`. Best-effort; a CLI wording change can defeat it.
+/// The stream is fed into a headless `TerminalScreen`, so the detector reads the
+/// *actual rendered screen* rather than a flattened byte tail. Both `claude` and
+/// `codex` paint an "esc to interrupt" footer once at the start of a turn and then
+/// only animate the timer digits via cursor moves — the phrase is never re-emitted.
+/// A concatenated tail therefore can't tell whether the footer is still on screen,
+/// which is the whole question; the grid can, because the footer occupies real
+/// cells until the CLI erases them at turn end. So:
+///
+/// - **busy** while the working footer is visible in the current frame.
+/// - on a brief quiet period we re-read the screen: footer gone + a prompt/option
+///   menu visible => **waitingInput**; footer gone + nothing => **idle**.
+/// - a longer watchdog demotes a stuck **busy** if the footer somehow lingers but
+///   the spinner has stopped emitting (the timer repaints ~1/s while truly busy,
+///   so prolonged total silence means the turn really ended).
+///
+/// Busy can only be *entered* via the footer phrase, so the startup banner and
+/// keystroke echoes never trigger it. Best-effort; a CLI wording change can defeat
+/// the footer/prompt patterns.
 ///
 /// Thread-safety: all work happens on a private serial queue. `feed` dispatches
-/// onto it; the settle timer fires on it; `onChange` is invoked on it. Callers
-/// hop to the main thread themselves if needed.
+/// onto it; the timers fire on it; `onChange` is invoked on it. Callers hop to the
+/// main thread themselves if needed.
 public final class ActivityDetector: @unchecked Sendable {
     public typealias ChangeListener = @Sendable (_ state: SessionActivity, _ notify: Bool) -> Void
 
-    /// Grace period after the working indicator stops repainting before we settle.
+    /// Quiet period after output stops before we re-classify the screen.
     private let settleMs: Int
-    /// How much of the (ANSI-stripped) recent screen we keep for classification.
-    private static let tailLimit = 4000
+    /// Longer silence after which a still-"busy" footer is treated as stale (the
+    /// spinner repaints while truly working, so this much silence means done).
+    private let watchdogMs: Int
 
     private let queue: DispatchQueue
     private let onChange: ChangeListener
+    private let screen: TerminalScreen
     private var state: SessionActivity = .idle
-    private var tail = ""
-    private var settleGeneration = 0
+    private var generation = 0
 
     public init(
-        settleMs: Int = 1200,
+        cols: Int = 120,
+        rows: Int = 40,
+        settleMs: Int = 250,
+        watchdogMs: Int = 8000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
         onChange: @escaping ChangeListener
     ) {
         self.settleMs = settleMs
+        self.watchdogMs = watchdogMs
         self.queue = queue
         self.onChange = onChange
+        self.screen = TerminalScreen(cols: cols, rows: rows)
     }
 
     public var activity: SessionActivity {
         queue.sync { state }
+    }
+
+    /// A point-in-time snapshot of the whole rendered screen, taken on the detector's
+    /// queue so it's consistent with the byte stream fed so far. Used by
+    /// `Session.autoSubmit` to detect when the TUI has settled (stable frames).
+    public func screenSnapshot() -> String {
+        queue.sync { screen.visibleText }
+    }
+
+    /// The bottom `rows` of the rendered screen — the footer / input-box region —
+    /// so `Session.autoSubmit` can confirm a seeded prompt landed in (or left) the
+    /// input box without matching the same text echoed up in the conversation.
+    public func inputRegionSnapshot(rows: Int) -> String {
+        queue.sync { screen.bottomText(rows) }
     }
 
     /// Feed a chunk of raw pty output.
@@ -47,10 +78,16 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.async { self._feed(data) }
     }
 
-    /// The session ended — clear any pending settle and return to idle.
+    /// Keep the screen model in step with the pty size so cursor/erase math stays
+    /// accurate. Called from `Session.resize`.
+    public func resize(cols: Int, rows: Int) {
+        queue.async { self.screen.resize(cols: cols, rows: rows) }
+    }
+
+    /// The session ended — cancel any pending timers and return to idle.
     public func reset() {
         queue.async {
-            self.settleGeneration += 1
+            self.generation += 1
             self.transition(.idle, notify: false)
         }
     }
@@ -58,50 +95,52 @@ public final class ActivityDetector: @unchecked Sendable {
     // MARK: - internals (always on `queue`)
 
     private func _feed(_ data: String) {
-        // Cheap gate before the expensive ANSI-strip regex (this runs on every pty
-        // chunk of every live session, including unfocused/background ones). The
-        // working-line regex requires the literal word "interrupt", and the
-        // stripped `tail` is only ever consulted at settle time — which only happens
-        // after a busy period. So when the session is idle and the chunk can't be
-        // starting a turn, there's nothing to do.
-        let mightStart = data.range(of: "interrupt", options: .caseInsensitive) != nil
-        guard state == .busy || mightStart else { return }
-
-        let stripped = Self.stripAnsi(data)
-        if !stripped.isEmpty {
-            tail = String((tail + stripped).suffix(Self.tailLimit))
+        // The screen must see every byte to stay an accurate mirror.
+        screen.feed(data)
+        if state == .busy {
+            // Already working: any output (re)starts the settle/watchdog clocks.
+            armTimers()
+        } else if data.range(of: "interrupt", options: .caseInsensitive) != nil {
+            // Cheap gate: only a frame that could carry the working footer is worth
+            // re-reading the screen for. If the footer is now visible we go busy.
+            if Self.workingRe.firstMatch(in: normalizedScreen()) {
+                transition(.busy, notify: false)
+                armTimers()
+            }
         }
-        // Matched against the current frame only (not the historical tail) so it
-        // genuinely marks the *start* of a turn.
-        if mightStart, Self.workingRe.firstMatch(in: stripped) {
-            markBusy()
-        } else if state == .busy {
-            armSettle()
-        }
+        // Idle with no possible footer: nothing to do (don't reclassify idle output
+        // into waitingInput — active states are only entered via a working turn).
     }
 
-    private func markBusy() {
-        transition(.busy, notify: false)
-        armSettle()
-    }
-
-    private func armSettle() {
-        settleGeneration += 1
-        let gen = settleGeneration
+    /// (Re)arm both the short settle timer and the long stuck-busy watchdog. The
+    /// generation guard cancels stale timers when newer output arrives.
+    private func armTimers() {
+        generation += 1
+        let gen = generation
         queue.asyncAfter(deadline: .now() + .milliseconds(settleMs)) { [weak self] in
-            guard let self, gen == self.settleGeneration else { return }
-            self.settle()
+            guard let self, gen == self.generation else { return }
+            self.settle(demoteStaleFooter: false)
+        }
+        queue.asyncAfter(deadline: .now() + .milliseconds(watchdogMs)) { [weak self] in
+            guard let self, gen == self.generation else { return }
+            self.settle(demoteStaleFooter: true)
         }
     }
 
-    private func settle() {
-        let recent = String(tail.suffix(2000))
-        let next: SessionActivity = Self.promptRes.contains { $0.firstMatch(in: recent) }
-            ? .waitingInput
-            : .idle
-        // A settle always follows a busy period, so this is a real turn boundary:
-        // notify even when classifying back to idle.
-        transition(next, notify: true)
+    /// Re-read the screen and classify. Only meaningful while busy: it ends a turn.
+    /// `demoteStaleFooter` (the watchdog path) ignores a lingering footer and
+    /// settles anyway, so we never hang on busy after the spinner has gone silent.
+    private func settle(demoteStaleFooter: Bool) {
+        guard state == .busy else { return }
+        let text = normalizedScreen()
+        let next: SessionActivity
+        if !demoteStaleFooter, Self.workingRe.firstMatch(in: text) {
+            next = .busy // still working — leave it
+        } else {
+            next = Self.promptRes.contains { $0.firstMatch(in: text) } ? .waitingInput : .idle
+        }
+        // We're leaving busy on a real turn boundary, so notify.
+        transition(next, notify: next != .busy)
     }
 
     private func transition(_ next: SessionActivity, notify: Bool) {
@@ -110,20 +149,22 @@ public final class ActivityDetector: @unchecked Sendable {
         onChange(next, notify)
     }
 
+    /// The visible screen with runs of intra-line whitespace collapsed to a single
+    /// space. The grid renders cursor-positioned footer segments as the *actual*
+    /// column gap (many spaces); collapsing restores a compact line so the
+    /// distance-bounded `workingRe` (`[^\n]{0,40}`) matches as intended.
+    private func normalizedScreen() -> String {
+        Self.wsRe.replacingMatches(in: screen.visibleText, with: " ")
+    }
+
     // MARK: - patterns (ICU translations of the TS regexes)
-    //
-    // ICU `\x{..}` hex escapes pass through Swift raw strings untouched and ICU
-    // interprets them, so we never embed literal control bytes. ESC=1B, BEL=07.
 
     /// The "esc to interrupt" working line, tolerant of wording.
     private static let workingRe = Regex(
         #"\besc(?:ape)?\b[^\n]{0,40}\binterrupt\b"#, caseInsensitive: true)
 
-    /// CSI/OSC escape sequences + lone control bytes, stripped before matching.
-    private static let ansiRe = Regex(
-        #"\x{1B}\[[0-9;?]*[ -/]*[@-~]|\x{1B}[\]P][^\x{07}\x{1B}]*(?:\x{07}|\x{1B}\\)?|\x{1B}[()][AB0-2]|\x{1B}[=>]|[\x{00}-\x{08}\x{0B}\x{0C}\x{0E}-\x{1F}]"#,
-        caseInsensitive: false
-    )
+    /// Runs of spaces/tabs within a line (not newlines), collapsed before matching.
+    private static let wsRe = Regex(#"[^\S\n]{2,}"#, caseInsensitive: false)
 
     /// Markers that a settled screen is an interactive question awaiting a choice.
     private static let promptRes: [Regex] = [
@@ -134,10 +175,6 @@ public final class ActivityDetector: @unchecked Sendable {
         Regex(#"\[y/n\]"#, caseInsensitive: true),
         Regex(#"\bAllow\b[^\n]{0,40}\?"#, caseInsensitive: true),
     ]
-
-    static func stripAnsi(_ s: String) -> String {
-        ansiRe.replacingMatches(in: s, with: "")
-    }
 }
 
 /// Thin NSRegularExpression wrapper so the patterns above read cleanly.
