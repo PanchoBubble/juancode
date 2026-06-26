@@ -93,6 +93,36 @@ export interface SessionMeta {
   usage: SessionUsage | null;
 }
 
+/**
+ * One normalized item in the structured (non-TUI) rendering of a session — the
+ * opt-in alternative to the raw xterm view. Derived from the CLI's own
+ * stream-json transcript (the same `assistant` / `tool_use` / `tool_result`
+ * records the CLI would emit under `--output-format stream-json`; see the
+ * server's `structuredEvents.ts`), normalized across Claude and Codex so the UI
+ * renders one set of message / tool bubbles regardless of provider.
+ *
+ * `id` is stable across re-reads of the append-only transcript, so the client
+ * can dedup incremental appends and use it as a render key.
+ */
+export type StructuredEventKind = "user" | "assistant" | "thinking" | "tool_use" | "tool_result";
+
+export interface StructuredEvent {
+  id: string;
+  kind: StructuredEventKind;
+  /** Body text for user / assistant / thinking / tool_result; empty for tool_use. */
+  text: string;
+  /** Tool name — `tool_use` only. */
+  toolName?: string;
+  /** Pretty-printed tool input — `tool_use` only. */
+  toolInput?: string;
+  /** The `tool_use` id this result answers, pairing the two in the UI. */
+  toolUseId?: string;
+  /** True for an errored `tool_result`. */
+  isError?: boolean;
+  /** ISO timestamp when the transcript records one, else null. */
+  ts: string | null;
+}
+
 /** Messages sent from the browser to the server. */
 export type ClientMessage =
   | {
@@ -148,7 +178,15 @@ export type ClientMessage =
    * several terminals at once can match each reply to its request. Thereafter
    * input/resize/kill/output/exit address the pty by its `terminalId`.
    */
-  | { type: "openTerminal"; cwd: string; cols: number; rows: number; requestId: string };
+  | { type: "openTerminal"; cwd: string; cols: number; rows: number; requestId: string }
+  /**
+   * Opt into the structured (message/tool-bubble) view of a session — the server
+   * tails the session's stream-json transcript and pushes `structured` messages.
+   * Works for live and exited sessions alike (the transcript is read from disk).
+   */
+  | { type: "subscribeStructured"; sessionId: string }
+  /** Stop the structured tail for a session (the client closed that view). */
+  | { type: "unsubscribeStructured"; sessionId: string };
 
 /** Messages sent from the server to the browser. */
 export type ServerMessage =
@@ -179,6 +217,13 @@ export type ServerMessage =
    * route the reply to the pane that asked for it.
    */
   | { type: "terminalReady"; terminalId: string; requestId: string }
+  /**
+   * A batch of structured-view events for a session. `reset` is true on the
+   * first message after `subscribeStructured` (the full transcript backlog —
+   * the client should replace its list); subsequent messages carry only newly
+   * appended events with `reset: false` (append + dedup by `id`).
+   */
+  | { type: "structured"; sessionId: string; events: StructuredEvent[]; reset: boolean }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
   | { type: "error"; sessionId?: string; message: string };

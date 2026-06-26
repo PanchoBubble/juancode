@@ -10,6 +10,7 @@ import { registry } from "./registry.ts";
 import { healthMonitor } from "./healthMonitor.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
+import { TranscriptTail } from "./structuredTranscript.ts";
 import type { Session } from "./session.ts";
 import type { ClientMessage, ServerMessage } from "./protocol.ts";
 
@@ -36,6 +37,8 @@ export function setupWebSocket(server: Server): void {
     const openedEditors = new Set<string>();
     // Shell terminal ptys this connection opened — same tab-scoped lifetime.
     const openedTerminals = new Set<string>();
+    // Structured-view transcript tails, one per session this tab opted into.
+    const structuredTails = new Map<string, TranscriptTail>();
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -56,6 +59,34 @@ export function setupWebSocket(server: Server): void {
         offOutput();
         offExit();
       });
+    };
+
+    // Structured (message/tool-bubble) view: tail the session's stream-json
+    // transcript and push normalized events. Resolves the session's provider +
+    // CLI id from the live registry or the store (so exited sessions work too).
+    const subscribeStructured = (sessionId: string) => {
+      if (structuredTails.has(sessionId)) return;
+      const meta = registry.get(sessionId)?.meta ?? sessionDb.get(sessionId);
+      if (!meta) {
+        send({ type: "error", sessionId, message: "Session not found" });
+        return;
+      }
+      // Re-read the id each poll: Codex captures its CLI session id only after
+      // spawn, so it can still be null when the structured view is first opened.
+      const getCliSessionId = () =>
+        registry.get(sessionId)?.meta.cliSessionId ??
+        sessionDb.get(sessionId)?.cliSessionId ??
+        null;
+      const tail = new TranscriptTail(meta.provider, getCliSessionId, (events, reset) =>
+        send({ type: "structured", sessionId, events, reset }),
+      );
+      structuredTails.set(sessionId, tail);
+      tail.start();
+    };
+
+    const unsubscribeStructured = (sessionId: string) => {
+      structuredTails.get(sessionId)?.stop();
+      structuredTails.delete(sessionId);
     };
 
     // Activity (busy / done / waiting-for-input) is broadcast for *every* live
@@ -90,7 +121,6 @@ export function setupWebSocket(server: Server): void {
     });
 
     const handle = async (msg: ClientMessage): Promise<void> => {
-
       switch (msg.type) {
         case "create": {
           if (!isProviderId(msg.provider)) {
@@ -120,13 +150,21 @@ export function setupWebSocket(server: Server): void {
               // idle with an unsent prompt (the dispatch-loop bug we guard against).
               session.autoSubmit(msg.initialInput, (outcome) => {
                 if (!outcome.ok) {
-                  send({ type: "error", message: `Couldn't deliver the prompt: ${outcome.reason}` });
+                  send({
+                    type: "error",
+                    message: `Couldn't deliver the prompt: ${outcome.reason}`,
+                  });
                 }
               });
             }
             send({ type: "created", session: session.meta });
             subscribe(session.id);
-            send({ type: "attached", sessionId: session.id, scrollback: "", session: session.meta });
+            send({
+              type: "attached",
+              sessionId: session.id,
+              scrollback: "",
+              session: session.meta,
+            });
           } catch (err) {
             send({ type: "error", message: `Failed to start ${msg.provider}: ${asMessage(err)}` });
           }
@@ -196,9 +234,7 @@ export function setupWebSocket(server: Server): void {
             // separator before the resumed CLI repaints its TUI underneath) so
             // the prior conversation survives the new pty and any re-attach.
             const prior = sessionDb.getScrollback(meta.id);
-            const seed = prior
-              ? `${prior}\r\n\x1b[2m── session resumed ──\x1b[0m\r\n`
-              : "";
+            const seed = prior ? `${prior}\r\n\x1b[2m── session resumed ──\x1b[0m\r\n` : "";
             const session = registry.resume(meta, msg.cols, msg.rows, seed);
             subscribe(session.id);
             send({
@@ -280,6 +316,16 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "subscribeStructured": {
+          subscribeStructured(msg.sessionId);
+          return;
+        }
+
+        case "unsubscribeStructured": {
+          unsubscribeStructured(msg.sessionId);
+          return;
+        }
+
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
           return;
@@ -312,6 +358,9 @@ export function setupWebSocket(server: Server): void {
       // Shell terminals are likewise tab-scoped.
       for (const id of openedTerminals) terminals.get(id)?.kill();
       openedTerminals.clear();
+      // Stop any structured transcript tails this connection started.
+      for (const tail of structuredTails.values()) tail.stop();
+      structuredTails.clear();
     });
   });
 }

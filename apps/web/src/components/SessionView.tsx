@@ -9,6 +9,7 @@ import type { ServerMessage } from "../protocol.ts";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
 import { MessageQueue } from "./MessageQueue.tsx";
+import { StructuredView } from "./StructuredView.tsx";
 import { Terminal } from "./Terminal.tsx";
 import { TerminalPanel } from "./TerminalPanel.tsx";
 import { UsageBadge } from "./UsageBadge.tsx";
@@ -44,6 +45,9 @@ export function SessionView({ id }: { id: string }) {
   const [side, setSide] = useState<SidePanel>(null);
   // The integrated shell-terminal panel splits the bottom of the session view.
   const [showTerminal, setShowTerminal] = useState(false);
+  // How the agent's output is rendered: the raw xterm/ANSI TUI (default) or the
+  // opt-in structured message/tool-bubble view fed by the stream-json transcript.
+  const [renderMode, setRenderMode] = useState<"terminal" | "structured">("terminal");
 
   // Track status live off the socket so the header reflects reality without
   // waiting for the next sessions poll (kill → exited, reactivate → running).
@@ -117,7 +121,13 @@ export function SessionView({ id }: { id: string }) {
     }
     setFlipping(true);
     setLiveSkip(next); // optimistic
-    socket.send({ type: "setSkipPermissions", sessionId: id, skipPermissions: next, cols: 80, rows: 24 });
+    socket.send({
+      type: "setSkipPermissions",
+      sessionId: id,
+      skipPermissions: next,
+      cols: 80,
+      rows: 24,
+    });
     void queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
@@ -137,7 +147,13 @@ export function SessionView({ id }: { id: string }) {
     prevActivity.current = activity;
     // Fire only on a real transition into idle (not the first observation), and
     // only while the session is alive — a dead pty can't receive input.
-    if (queued !== null && activity === "idle" && was !== undefined && was !== "idle" && status === "running") {
+    if (
+      queued !== null &&
+      activity === "idle" &&
+      was !== undefined &&
+      was !== "idle" &&
+      status === "running"
+    ) {
       socket.send({ type: "input", sessionId: id, data: `${queued}\r` });
       setQueued(null);
     }
@@ -204,13 +220,17 @@ export function SessionView({ id }: { id: string }) {
     ]);
     try {
       const { path } = await api.uploadFile(file);
-      setAttachments((list) => list.map((a) => (a.id === attId ? { ...a, status: "done", path } : a)));
+      setAttachments((list) =>
+        list.map((a) => (a.id === attId ? { ...a, status: "done", path } : a)),
+      );
       // The saved basename is sanitised server-side to be space-free, so the
       // path can be typed verbatim. Trailing space keeps the prompt usable.
       socket.send({ type: "input", sessionId: id, data: `${path} ` });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      setAttachments((list) => list.map((a) => (a.id === attId ? { ...a, status: "error", error } : a)));
+      setAttachments((list) =>
+        list.map((a) => (a.id === attId ? { ...a, status: "error", error } : a)),
+      );
     }
   };
 
@@ -321,6 +341,17 @@ export function SessionView({ id }: { id: string }) {
           >
             terminal
           </button>
+          <button
+            onClick={() => setRenderMode((m) => (m === "structured" ? "terminal" : "structured"))}
+            title="Toggle the structured message/tool-bubble view (from the stream-json transcript)"
+            className={`rounded-md px-2.5 py-1 transition-colors ${
+              renderMode === "structured"
+                ? "bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
+                : "text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200"
+            }`}
+          >
+            structured
+          </button>
         </nav>
         {status === "running" && (
           <button
@@ -337,7 +368,9 @@ export function SessionView({ id }: { id: string }) {
                 : "border-neutral-700 text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
             }`}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${skipOn ? "bg-amber-400" : "bg-neutral-600"}`} />
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${skipOn ? "bg-amber-400" : "bg-neutral-600"}`}
+            />
             {flipping ? "Restarting…" : skipOn ? "Accept all: on" : "Accept all: off"}
           </button>
         )}
@@ -422,13 +455,32 @@ export function SessionView({ id }: { id: string }) {
                 refits itself via its ResizeObserver as the split is dragged. */}
             <PanelGroup direction="horizontal" autoSaveId="juancode-session-split">
               <Panel id="terminal" order={1} minSize={25} className="overflow-hidden">
-                <Terminal key={id} sessionId={id} />
+                {/* The xterm view stays mounted (hidden under the structured
+                    view) so the pty's render + scroll position survive toggling.
+                    The structured view mounts only when chosen, so its transcript
+                    tail isn't opened for sessions viewed only as a terminal. */}
+                <div className="h-full" hidden={renderMode === "structured"}>
+                  <Terminal key={id} sessionId={id} />
+                </div>
+                {renderMode === "structured" && (
+                  <StructuredView sessionId={id} running={status === "running"} />
+                )}
               </Panel>
               {side && (
                 <>
                   <PanelResizeHandle className="relative w-px bg-neutral-800 transition-colors after:absolute after:inset-y-0 after:-left-1 after:w-2 hover:bg-neutral-600 data-[resize-handle-state=drag]:bg-neutral-500" />
-                  <Panel id="side" order={2} defaultSize={45} minSize={25} className="overflow-hidden">
-                    {side === "changes" ? <ChangesPanel sessionId={id} /> : <BeadsPanel sessionId={id} />}
+                  <Panel
+                    id="side"
+                    order={2}
+                    defaultSize={45}
+                    minSize={25}
+                    className="overflow-hidden"
+                  >
+                    {side === "changes" ? (
+                      <ChangesPanel sessionId={id} />
+                    ) : (
+                      <BeadsPanel sessionId={id} />
+                    )}
                   </Panel>
                 </>
               )}
@@ -444,9 +496,10 @@ export function SessionView({ id }: { id: string }) {
           )}
         </PanelGroup>
       </div>
-      {status === "running" && (activity === "busy" || activity === "waiting_input" || queued !== null) && (
-        <MessageQueue queued={queued} onQueue={setQueued} onCancel={() => setQueued(null)} />
-      )}
+      {status === "running" &&
+        (activity === "busy" || activity === "waiting_input" || queued !== null) && (
+          <MessageQueue queued={queued} onQueue={setQueued} onCancel={() => setQueued(null)} />
+        )}
     </div>
   );
 }
