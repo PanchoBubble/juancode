@@ -211,3 +211,42 @@ public func recoverCliSessionId(
         : codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
     return chooseNearest(cands, createdAtMs, excludeIds)
 }
+
+/// A resumable CLI conversation found on disk for a `cwd`: which CLI produced it,
+/// its resumable id, and when it began. The lightweight result of
+/// `listExternalSessions` — just enough to build a `SessionMeta` and adopt it
+/// (juancode-iqi). Distinct from `ExternalSession` (SessionDiscovery.swift), which
+/// reads each transcript's content to derive a display title for the global
+/// "discover" list; this one is a cheap, cwd-scoped, header-only lookup.
+public struct ResumableCliSession: Sendable, Equatable {
+    /// The CLI that owns this transcript (`claude` or `codex`).
+    public let provider: ProviderId
+    /// The id to resume with (`claude --resume <id>` / a Codex rollout id).
+    public let cliSessionId: String
+    /// When the conversation began, ms since epoch.
+    public let startMs: Int
+
+    public init(provider: ProviderId, cliSessionId: String, startMs: Int) {
+        self.provider = provider
+        self.cliSessionId = cliSessionId
+        self.startMs = startMs
+    }
+}
+
+/// List every resumable CLI conversation (Claude + Codex) whose transcript ran in
+/// `cwd`, newest first. Reuses the same header parsing as `recoverCliSessionId`
+/// (Claude: basename = id, cwd+timestamp on the first matching line; Codex:
+/// `session_meta` payload id+cwd) but applies no time window and no exclusion —
+/// it surfaces *all* candidates so the caller can offer them for adoption. Dedupe
+/// against already-adopted ids (`store.usedCliSessionIds()`) at the call site,
+/// not here.
+public func listExternalSessions(
+    cwd: String,
+    roots: RecoverRoots = RecoverRoots()
+) -> [ResumableCliSession] {
+    let claude = claudeCandidates(roots.claudeProjects ?? RECOVER_CLAUDE_PROJECTS, cwd)
+        .map { ResumableCliSession(provider: .claude, cliSessionId: $0.id, startMs: $0.startMs) }
+    let codex = codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
+        .map { ResumableCliSession(provider: .codex, cliSessionId: $0.id, startMs: $0.startMs) }
+    return (claude + codex).sorted { $0.startMs > $1.startMs }
+}
