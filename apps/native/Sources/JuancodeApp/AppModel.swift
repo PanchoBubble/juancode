@@ -111,9 +111,34 @@ final class AppModel {
     /// session or return to the app.
     private(set) var unreadSessions: Set<String> = []
 
+    /// Whether the Oracle dock is currently expanded. Oracle's own sessions are hidden
+    /// from the sidebar, so their unread can never clear by selection (the Dock badge
+    /// would stay stuck). Instead the dock acts as their "viewer": while it's open we
+    /// suppress + clear their notifications, mirroring how selecting a session clears it.
+    var oracleDockExpanded = false {
+        didSet { if oracleDockExpanded { markOracleRead() } }
+    }
+
+    /// Unread sessions surfaced in the notification list / bell — excludes Oracle's own
+    /// sessions (handled by the dock) since they aren't selectable from the sidebar.
+    var unreadSessionMetas: [SessionMeta] {
+        sessions.filter { unreadSessions.contains($0.id) && $0.cwd != OraclePaths.controlDir }
+    }
+
     private func clearUnread(_ id: String) {
         guard unreadSessions.remove(id) != nil else { return }
         updateDockBadge()
+    }
+
+    /// Is this one of Oracle's own sessions (rooted in its control dir)?
+    private func isOracleSession(_ id: String) -> Bool {
+        (liveSession(id)?.meta.cwd ?? sessions.first { $0.id == id }?.cwd) == OraclePaths.controlDir
+    }
+
+    /// Clear any pending unread for every live/known Oracle session — called when the
+    /// Oracle dock is opened (its sessions are never the sidebar `selection`).
+    private func markOracleRead() {
+        for id in unreadSessions where isOracleSession(id) { clearUnread(id) }
     }
 
     /// Reflect the unread count on the Dock tile — a number badge, hidden at zero.
@@ -282,6 +307,9 @@ final class AppModel {
     private func notifyTurnEnd(sessionId: String, state: SessionActivity) {
         guard notifyOnTurnEnd else { return }
         if NSApp.isActive, selection == sessionId { return }
+        // The open Oracle dock is the "viewer" for Oracle's own (sidebar-hidden)
+        // sessions — don't accrue an unclearable unread while you're looking at it.
+        if NSApp.isActive, oracleDockExpanded, isOracleSession(sessionId) { return }
         unreadSessions.insert(sessionId)
         updateDockBadge()
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)

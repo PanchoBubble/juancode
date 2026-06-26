@@ -25,8 +25,12 @@ final class OracleModel {
     var ready = false
     /// Whatever went wrong during bootstrap, surfaced in the dock.
     var setupError: String?
-    /// Whether the dock is expanded (vs. the collapsed floating button).
-    var expanded = false
+    /// Whether the dock is expanded (vs. the collapsed floating button). Mirrored onto
+    /// `AppModel` so it can treat the open dock as the viewer for Oracle's own
+    /// (sidebar-hidden) sessions and clear/suppress their unread notifications.
+    var expanded = false {
+        didSet { app.oracleDockExpanded = expanded }
+    }
     /// Which dock tab is showing.
     var tab: OracleTab = .issues
     /// The global bd tracker listing (control-dir cwd), loaded lazily + refreshable.

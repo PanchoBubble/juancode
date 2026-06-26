@@ -24,6 +24,7 @@ struct RootView: View {
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                NotificationsBell()
                 Button { model.showingTrackedPrs = true } label: {
                     Label("Tracked PRs", systemImage: "checklist")
                 }
@@ -171,6 +172,68 @@ private struct FolderGroup: Identifiable {
     let sessions: [SessionMeta]
     let running: Int
     var id: String { cwd }
+}
+
+/// Top-bar notification center: a bell with the unread count that opens a popover
+/// listing every session with a pending turn-end notification. Clicking a row jumps
+/// to that session (which clears its unread). Hidden-from-sidebar Oracle sessions are
+/// excluded — the Oracle dock clears those itself.
+private struct NotificationsBell: View {
+    @Environment(AppModel.self) private var model
+    @State private var showing = false
+
+    private var unread: [SessionMeta] { model.unreadSessionMetas }
+
+    var body: some View {
+        Button { showing = true } label: {
+            Label("Notifications", systemImage: unread.isEmpty ? "bell" : "bell.badge.fill")
+        }
+        .help(unread.isEmpty
+              ? "Notifications — sessions that finished or need a reply"
+              : "\(unread.count) session(s) with unread activity")
+        .foregroundStyle(unread.isEmpty ? Color.primary : Color.red)
+        .clickCursor()
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Notifications")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
+                if unread.isEmpty {
+                    Text("Nothing unread.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10).padding(.bottom, 8)
+                } else {
+                    ForEach(unread, id: \.id) { meta in
+                        Button {
+                            model.selection = meta.id
+                            showing = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: model.activity(meta.id) == .waitingInput
+                                      ? "questionmark.circle.fill" : "checkmark.circle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(model.activity(meta.id) == .waitingInput ? .yellow : .green)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(meta.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                    Text((meta.cwd as NSString).lastPathComponent)
+                                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer(minLength: 12)
+                            }
+                            .contentShape(Rectangle())
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .clickCursor()
+                    }
+                }
+            }
+            .frame(width: 280)
+            .padding(.bottom, 4)
+        }
+    }
 }
 
 struct SidebarView: View {
@@ -553,6 +616,11 @@ private struct FolderHeader: View {
     let toggle: () -> Void
     @State private var showingAgentPicker = false
 
+    /// Sessions in this project with a pending turn-end notification.
+    private var unreadCount: Int {
+        group.sessions.filter { model.unreadSessions.contains($0.id) }.count
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Chevron + name + running-count + the empty stretch up to the "+" menu all
@@ -572,6 +640,18 @@ private struct FolderHeader: View {
                         Text("\(group.running) running")
                             .font(.system(size: 10))
                             .foregroundStyle(.green)
+                    }
+                    // Unread roll-up: a red dot + count when any session in this project
+                    // has a pending turn-end notification, so a collapsed folder still
+                    // signals "something here wants you".
+                    if unreadCount > 0 {
+                        HStack(spacing: 3) {
+                            Circle().fill(Color.red).frame(width: 6, height: 6)
+                            Text("\(unreadCount)")
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.red)
+                        }
+                        .help("\(unreadCount) session(s) here with unread activity")
                     }
                     Spacer(minLength: 8)
                 }
@@ -1238,6 +1318,10 @@ struct SessionContainer: View {
                             .frame(height: CGFloat(bottomHeight))
                     }
                 }
+                // Breathing room so the terminal isn't glued to the divider/side panel.
+                .padding(.leading, 10)
+                .padding(.trailing, panelShown ? 10 : 0)
+                .padding(.top, 6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if panelShown {
                     DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity)
