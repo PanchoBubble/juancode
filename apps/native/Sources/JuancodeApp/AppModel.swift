@@ -707,12 +707,35 @@ final class AppModel {
                         message: reason, createdAt: nowMs()))
                 }
             }
-            if !fixReasons.isEmpty, let session = liveSession(entry.sessionId) {
-                // Submit it as if typed: idle → runs now, busy → queued by the CLI.
-                // Bracketed paste + separate Enter so the prompt isn't misread as
-                // a literal paste and left sitting unsent in the input.
+            if !fixReasons.isEmpty {
                 let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
-                session.submit(prompt)
+                if let session = liveSession(entry.sessionId) {
+                    // Submit it as if typed: idle → runs now, busy → queued by the CLI.
+                    // Bracketed paste + separate Enter so the prompt isn't misread as
+                    // a literal paste and left sitting unsent in the input.
+                    session.submit(prompt)
+                } else {
+                    // The driving session is offline — typically after an app restart,
+                    // where the watch list is restored (juancode-38z) but its pty isn't.
+                    // Revive it lazily on the first poll with work, then seed the fix via
+                    // autoSubmit (which waits for the TUI to repaint) so auto-fix prompts
+                    // aren't silently dropped.
+                    await reactivate(entry.sessionId)
+                    if let session = liveSession(entry.sessionId) {
+                        session.autoSubmit(prompt)
+                    } else {
+                        // Couldn't resume (e.g. no recoverable CLI conversation) — surface
+                        // it so the Tracked PRs panel shows the work is stuck rather than
+                        // dropping it. Dedupe so a persistently-offline session doesn't
+                        // raise the same notification on every poll.
+                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed."
+                        if !entry.notifications.contains(where: { $0.message == offlineMsg }) {
+                            entry.notifications.append(TrackNotification(
+                                id: UUID().uuidString, prNumber: number,
+                                message: offlineMsg, createdAt: nowMs()))
+                        }
+                    }
+                }
             }
             tracked[key] = entry
         }
