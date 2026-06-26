@@ -283,6 +283,236 @@ private struct TrackedPrRow: View {
     }
 }
 
+// MARK: - Tracked Linear issues (juancode-7sa)
+
+/// The global view of every Linear issue under watch — the twin of `TrackedPrsSheet`.
+/// Start tracking a new issue (type its id or pick one assigned to you, choosing the
+/// folder its agent session runs in), see each one's workflow-state badge and surfaced
+/// decisions, jump to the driving session, and untrack.
+struct TrackedIssuesSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Tracked Issues").font(.title3).bold()
+                Spacer()
+                Button("Done") { dismiss() }.clickCursor()
+            }
+            .padding()
+            Divider()
+            TrackIssueEntry()
+            Divider()
+            if model.trackedIssuesList.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "ticket").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("No Linear issues tracked yet.").foregroundStyle(.secondary).font(.system(size: 13))
+                    Text("Enter an issue id (or pick one assigned to you) above and choose a folder\nto start a do-or-escalate loop: the agent watches the issue, acts on new\nactivity, and escalates the real decisions back to you.")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.trackedIssuesList) { issue in
+                            TrackedIssueRow(issue: issue) { dismiss() }
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 660, height: 520)
+    }
+}
+
+/// The "start tracking" affordance at the top of the issues panel: an id field + a
+/// folder picker (the agent runs there) wired to `AppModel.trackIssue`, plus an
+/// optional "Assigned to me" list that fills the id field from your Linear issues.
+private struct TrackIssueEntry: View {
+    @Environment(AppModel.self) private var model
+    @State private var identifier = ""
+    @State private var folder = ""
+    @State private var showingAssigned = false
+
+    private var folders: [String] { model.trackableFolders }
+    private var canTrack: Bool {
+        !identifier.trimmingCharacters(in: .whitespaces).isEmpty && !folder.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Issue id (e.g. ENG-123)", text: $identifier)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .frame(width: 170)
+                    .onSubmit(track)
+                Menu {
+                    ForEach(folders, id: \.self) { f in
+                        Button((f as NSString).lastPathComponent) { folder = f }
+                    }
+                } label: {
+                    Text(folder.isEmpty ? "Folder…" : (folder as NSString).lastPathComponent)
+                        .font(.system(size: 12)).lineLimit(1)
+                }
+                .frame(maxWidth: 170)
+                .disabled(folders.isEmpty)
+                .help(folder.isEmpty ? "Choose the folder the tracking agent runs in" : folder)
+                Button("Track", action: track)
+                    .disabled(!canTrack)
+                    .clickCursor()
+                Spacer()
+                Button {
+                    showingAssigned.toggle()
+                    if showingAssigned && model.assignedIssues.isEmpty { model.loadAssignedIssues() }
+                } label: {
+                    Label("Assigned to me", systemImage: "person.crop.circle")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Pick from issues assigned to you in Linear")
+                .clickCursor()
+            }
+            if showingAssigned { assignedList }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .onAppear { if folder.isEmpty { folder = folders.first ?? "" } }
+    }
+
+    @ViewBuilder private var assignedList: some View {
+        if model.assignedIssuesLoading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Loading assigned issues…").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        } else if model.assignedIssues.isEmpty {
+            Text("No open issues assigned to you (or no Linear token set).")
+                .font(.system(size: 11)).foregroundStyle(.tertiary)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.assignedIssues) { issue in
+                        Button { identifier = issue.identifier } label: {
+                            HStack(spacing: 6) {
+                                Text(issue.identifier)
+                                    .font(.system(size: 11).monospaced()).foregroundStyle(.secondary)
+                                Text(issue.title).font(.system(size: 11)).lineLimit(1)
+                                Spacer(minLength: 4)
+                                if !issue.stateName.isEmpty {
+                                    Text(issue.stateName).font(.system(size: 9)).foregroundStyle(.tertiary)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 3)
+                        }
+                        .buttonStyle(.plain)
+                        .clickCursor()
+                    }
+                }
+            }
+            .frame(maxHeight: 120)
+        }
+    }
+
+    private func track() {
+        let id = identifier.trimmingCharacters(in: .whitespaces)
+        guard !id.isEmpty, !folder.isEmpty else { return }
+        model.trackIssue(identifier: id, cwd: folder)
+        identifier = ""
+    }
+}
+
+private struct TrackedIssueRow: View {
+    @Environment(AppModel.self) private var model
+    let issue: TrackedIssue
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(issue.identifier).font(.system(size: 12).monospaced()).foregroundStyle(.secondary)
+                Text(issue.title).font(.system(size: 13)).lineLimit(1).help(issue.title)
+                IssueTrackBadge(state: issue.state)
+                Spacer(minLength: 8)
+                Text((issue.cwd as NSString).lastPathComponent)
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            HStack(spacing: 12) {
+                if !issue.lastStateName.isEmpty {
+                    Text(issue.lastStateName).font(.system(size: 10).monospaced()).foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Button("Open ↗") {
+                    if let u = URL(string: issue.url) { NSWorkspace.shared.open(u) }
+                }
+                .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
+                Button("Go to session") { dismiss(); model.selection = issue.sessionId }
+                    .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
+                Button("Untrack") { model.untrackIssue(issue.id) }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+                    .help("Stop watching this issue (keeps the session)").clickCursor()
+            }
+            ForEach(issue.notifications) { note in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9)).foregroundStyle(.orange)
+                    Text(note.message).font(.system(size: 11))
+                    Spacer(minLength: 4)
+                    Button("Dismiss") {
+                        model.resolveIssueNotification(issueId: issue.id, notificationId: note.id)
+                    }
+                    .buttonStyle(.borderless).font(.system(size: 9)).clickCursor()
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+}
+
+/// A small pill showing what a tracked Linear issue is currently doing — the twin of
+/// `TrackBadge`, over `IssueTrackState`.
+struct IssueTrackBadge: View {
+    let state: IssueTrackState
+    var body: some View {
+        Text(label)
+            .font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2))
+            .foregroundStyle(color)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .help(help)
+    }
+    private var label: String {
+        switch state {
+        case .watching: return "watching"
+        case .active: return "active"
+        case .needsDecision: return "needs you"
+        case .done: return "done"
+        }
+    }
+    private var color: Color {
+        switch state {
+        case .watching: return .secondary
+        case .active: return .blue
+        case .needsDecision: return .orange
+        case .done: return .green
+        }
+    }
+    private var help: String {
+        switch state {
+        case .watching: return "Tracking — watching for new activity"
+        case .active: return "Tracking — the issue is in progress"
+        case .needsDecision: return "Tracking — a change needs your decision"
+        case .done: return "Tracking — the issue reached a terminal state"
+        }
+    }
+}
+
 // MARK: - Session health (juancode-0me pillar 3 / juancode-02k)
 
 /// The global view of sessions the periodic health sweep flagged as dead (their pty

@@ -29,6 +29,11 @@ struct RootView: View {
                 }
                 .help("PRs under watch — CI-fix loops")
                 .clickCursor()
+                Button { model.showingTrackedIssues = true } label: {
+                    Label("Tracked Issues", systemImage: "ticket")
+                }
+                .help("Linear issues under watch — do-or-escalate loops")
+                .clickCursor()
                 Button { model.showingWorktrees = true; model.loadWorktrees() } label: {
                     Label("Worktrees", systemImage: "externaldrive.badge.minus")
                 }
@@ -73,6 +78,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showingTrackedPrs) {
             TrackedPrsSheet()
+        }
+        .sheet(isPresented: $model.showingTrackedIssues) {
+            TrackedIssuesSheet()
         }
         .sheet(isPresented: $model.showingSessionHealth) {
             SessionHealthSheet()
@@ -508,6 +516,7 @@ struct SidebarView: View {
         return SessionRow(meta: meta, activity: model.activity(meta.id),
                           live: model.isLive(meta.id), external: external,
                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                          trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                           unread: model.unreadSessions.contains(meta.id),
                           onResume: external ? { model.importExternalSession(meta.id) } : nil)
     }
@@ -1025,6 +1034,8 @@ struct SessionRow: View {
     var external: Bool = false
     /// The PR this session is tracking, if any — drives the PR label (juancode-kxy).
     var tracked: TrackedPr? = nil
+    /// The Linear issue this session is tracking, if any — drives the issue label (juancode-7sa).
+    var trackedIssue: TrackedIssue? = nil
     /// Pending turn-end notification for this session — shows an unread dot until viewed.
     var unread: Bool = false
     /// Resume action for an external row; the row is otherwise non-interactive.
@@ -1049,6 +1060,17 @@ struct SessionRow: View {
                 .foregroundStyle(trackColor(t.state))
                 .clipShape(Capsule())
                 .help("Tracking PR #\(t.number) — \(t.state.rawValue)")
+            }
+            if let ti = trackedIssue {
+                HStack(spacing: 3) {
+                    Image(systemName: "ticket").font(.system(size: 8))
+                    Text(ti.identifier).font(.system(size: 9, weight: .semibold).monospaced())
+                }
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(issueTrackColor(ti.state).opacity(0.2))
+                .foregroundStyle(issueTrackColor(ti.state))
+                .clipShape(Capsule())
+                .help("Tracking \(ti.identifier) — \(ti.state.rawValue)")
             }
             if external {
                 Image(systemName: "terminal")
@@ -1084,6 +1106,15 @@ struct SessionRow: View {
         case .watching: return .secondary
         case .fixing: return .blue
         case .needsDecision: return .orange
+        }
+    }
+
+    private func issueTrackColor(_ state: IssueTrackState) -> Color {
+        switch state {
+        case .watching: return .secondary
+        case .active: return .blue
+        case .needsDecision: return .orange
+        case .done: return .green
         }
     }
 

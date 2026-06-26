@@ -53,6 +53,47 @@ final class ParseIssueActivityTests: XCTestCase {
     }
 }
 
+// MARK: - parseAssignedIssues
+
+final class ParseAssignedIssuesTests: XCTestCase {
+    private func parse(_ json: String) -> [IssueSummary] {
+        let raw = try! JSONDecoder().decode(RawAssignedForTest.self, from: Data(json.utf8))
+        return parseAssignedIssues(raw)
+    }
+
+    func testParsesViewerAssignedIssues() {
+        let issues = parse("""
+        {"data":{"viewer":{"assignedIssues":{"nodes":[
+          {"identifier":"ENG-1","title":"Fix login","url":"https://linear.app/o/issue/ENG-1",
+           "state":{"name":"Ongoing","type":"started"}},
+          {"identifier":"ENG-2","title":"Triage","url":"u2","state":{"name":"Triage","type":"triage"}}
+        ]}}}}
+        """)
+        XCTAssertEqual(issues.map(\.identifier), ["ENG-1", "ENG-2"])
+        XCTAssertEqual(issues.first?.title, "Fix login")
+        XCTAssertEqual(issues.first?.stateName, "Ongoing")
+        XCTAssertEqual(issues.first?.stateType, "started")
+    }
+
+    func testDropsTerminalAndIdlessIssues() {
+        let issues = parse("""
+        {"data":{"viewer":{"assignedIssues":{"nodes":[
+          {"identifier":"ENG-1","state":{"name":"Done","type":"completed"}},
+          {"identifier":"ENG-2","state":{"name":"Canceled","type":"canceled"}},
+          {"title":"no id","state":{"name":"Ongoing","type":"started"}},
+          {"identifier":"ENG-3","state":{"name":"Backlog","type":"backlog"}}
+        ]}}}}
+        """)
+        XCTAssertEqual(issues.map(\.identifier), ["ENG-3"])  // terminal + id-less dropped
+    }
+
+    func testEmptyWhenViewerMissing() {
+        XCTAssertEqual(parse(#"{"data":{"viewer":null}}"#), [])
+        XCTAssertEqual(parse(#"{"data":{}}"#), [])
+        XCTAssertEqual(parse(#"{}"#), [])
+    }
+}
+
 // MARK: - classifyIssueActivity
 
 final class ClassifyIssueActivityTests: XCTestCase {

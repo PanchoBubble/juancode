@@ -122,3 +122,69 @@ public func getIssueActivity(_ identifier: String,
         return nil
     }
 }
+
+// MARK: - assigned issues (for the "track an issue" picker, juancode-7sa)
+
+/// A lightweight summary of one of the viewer's assigned Linear issues, used to
+/// populate the "pick from assigned issues" affordance when starting tracking.
+public struct IssueSummary: Sendable, Equatable, Identifiable {
+    public let identifier: String
+    public let title: String
+    public let url: String
+    public let stateName: String
+    public let stateType: String
+    public init(identifier: String, title: String, url: String, stateName: String, stateType: String) {
+        self.identifier = identifier; self.title = title; self.url = url
+        self.stateName = stateName; self.stateType = stateType
+    }
+    public var id: String { identifier }
+}
+
+private struct RawAssignedIssue: Decodable {
+    var identifier: String?; var title: String?; var url: String?; var state: RawState?
+}
+private struct RawAssignedNodes: Decodable { var nodes: [RawAssignedIssue]? }
+private struct RawViewer: Decodable { var assignedIssues: RawAssignedNodes? }
+private struct RawViewerData: Decodable { var viewer: RawViewer? }
+
+/// Test seam mirroring the `{ "data": { "viewer": { "assignedIssues": … } } }` envelope.
+public struct RawAssignedForTest: Decodable {
+    fileprivate var data: RawViewerData?
+}
+
+/// Map Linear's viewer→assignedIssues envelope onto `IssueSummary`. Pure and testable.
+/// Drops issues missing an identifier and any already in a terminal (completed /
+/// canceled) state — you don't start *tracking* finished work.
+func parseAssignedIssues(_ raw: RawAssignedForTest) -> [IssueSummary] {
+    (raw.data?.viewer?.assignedIssues?.nodes ?? []).compactMap { i in
+        guard let identifier = i.identifier else { return nil }
+        let type = i.state?.type ?? ""
+        if type == "completed" || type == "canceled" { return nil }
+        return IssueSummary(identifier: identifier, title: i.title ?? "", url: i.url ?? "",
+                            stateName: i.state?.name ?? "", stateType: type)
+    }
+}
+
+private let ASSIGNED_QUERY = """
+query{ viewer{ assignedIssues(first:50){ nodes{ identifier title url state{name type} } } } }
+"""
+
+/// List the viewer's assigned, non-terminal Linear issues for the tracking picker.
+/// Returns `[]` when no token is set or the call fails — the UI just shows "none".
+public func getAssignedIssues(env: [String: String] = ProcessInfo.processInfo.environment) async -> [IssueSummary] {
+    guard let token = linearToken(env) else { return [] }
+    var req = URLRequest(url: LINEAR_GRAPHQL_URL)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue(token, forHTTPHeaderField: "Authorization")
+    guard let body = try? JSONSerialization.data(withJSONObject: ["query": ASSIGNED_QUERY]) else { return [] }
+    req.httpBody = body
+    do {
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return [] }
+        let raw = try JSONDecoder().decode(RawAssignedForTest.self, from: data)
+        return parseAssignedIssues(raw)
+    } catch {
+        return []
+    }
+}
