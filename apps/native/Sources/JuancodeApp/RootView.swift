@@ -1329,6 +1329,7 @@ struct NewSessionView: View {
                 Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
                 Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
             }
+            continueExisting
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).clickCursor()
@@ -1349,6 +1350,66 @@ struct NewSessionView: View {
                 if needsScope { url.stopAccessingSecurityScopedResource() }
             }
         }
+        // Surface resumable CLI conversations for whichever folder is selected,
+        // refreshed as the directory changes (juancode-g4c).
+        .onAppear { model.loadResumableSessions(for: cwd) }
+        .onChange(of: cwd) { _, new in model.loadResumableSessions(for: new) }
+    }
+
+    /// A `claude --resume`-style list of CLI conversations already started in the
+    /// selected folder (in a terminal, or a prior juancode session). Selecting one
+    /// adopts + resumes it in juancode rather than starting fresh. Hidden entirely
+    /// when the folder has none. (juancode-g4c)
+    @ViewBuilder
+    private var continueExisting: some View {
+        if model.resumableLoading || !model.resumableSessions.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("Continue existing").font(.system(size: 13, weight: .semibold))
+                    if model.resumableLoading { ProgressView().controlSize(.small) }
+                    Spacer()
+                }
+                if model.resumableSessions.isEmpty, model.resumableLoading {
+                    Text("Looking for resumable conversations…")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                } else {
+                    Text("Resume a conversation already started in this folder.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(model.resumableSessions) { s in resumableRow(s) }
+                        }
+                    }
+                    .frame(maxHeight: 160)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func resumableRow(_ s: ResumableSession) -> some View {
+        Button { adoptResumable(s) } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(s.title).lineLimit(1).font(.system(size: 13))
+                    Text("\(Providers.spec(for: s.provider).label) · started \(relativeTime(s.startMs))")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "play.circle").font(.system(size: 14)).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4).padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+    }
+
+    private func adoptResumable(_ s: ResumableSession) {
+        if model.adoptResumable(s, cwd: cwd) != nil { dismiss() }
     }
 
     private func start() {

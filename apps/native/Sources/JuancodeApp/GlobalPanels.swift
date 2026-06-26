@@ -841,7 +841,7 @@ private func plural(_ n: Int, _ unit: String) -> String {
 }
 
 /// A relative date string ("in 5 min", "2 hr ago") for a ms-since-epoch timestamp.
-private func relativeTime(_ msEpoch: Int) -> String {
+func relativeTime(_ msEpoch: Int) -> String {
     let date = Date(timeIntervalSince1970: TimeInterval(msEpoch) / 1000)
     let fmt = RelativeDateTimeFormatter()
     fmt.unitsStyle = .abbreviated

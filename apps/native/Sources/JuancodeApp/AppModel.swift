@@ -15,6 +15,18 @@ private let keepAwakeDefaultsKey = "juancode.keepAwake"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// A resumable external CLI conversation offered in the new-session sheet's
+/// "Continue existing" picker (juancode-g4c): a cwd-scoped, header-only
+/// `listExternalSessions` hit enriched with a derived display title. Selecting one
+/// adopts + resumes it through the T2 path (`adoptExternal`, juancode-iqi).
+struct ResumableSession: Identifiable, Sendable {
+    let provider: ProviderId
+    let cliSessionId: String
+    let startMs: Int
+    let title: String
+    var id: String { cliSessionId }
+}
+
 /// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
 /// local UI is an in-process subscriber to the same `SessionRegistry` the
 /// embedded server drives — there is no WS hop for the local view.
@@ -376,6 +388,69 @@ final class AppModel {
 
     /// True if `id` is a not-yet-imported terminal session (vs. one of ours).
     func isExternal(_ id: String) -> Bool { externalIds.contains(id) }
+
+    // MARK: - "Continue existing" picker (new-session flow, juancode-g4c)
+
+    /// Resumable CLI conversations for the cwd currently shown in the new-session
+    /// sheet, newest first — the per-workdir "Continue existing" list. Reloaded
+    /// whenever that cwd changes; empty when none are available.
+    private(set) var resumableSessions: [ResumableSession] = []
+    /// Whether a `loadResumableSessions` scan is in flight (drives a spinner).
+    private(set) var resumableLoading = false
+    /// The cwd the latest load was issued for, so a slower in-flight scan can drop
+    /// its result once the user has moved on to a different folder.
+    @ObservationIgnored private var resumableCwd: String?
+
+    /// Load the resumable external CLI conversations for `cwd` to back the
+    /// new-session "Continue existing" picker (juancode-g4c). Uses the cheap,
+    /// cwd-scoped header lookup (`listExternalSessions`), drops any conversation
+    /// juancode already owns (`usedCliSessionIds`), then derives a display title per
+    /// hit. Debounced so typing a path doesn't scan on every keystroke, and stale
+    /// results (cwd changed mid-load) are discarded.
+    func loadResumableSessions(for cwd: String) {
+        let target = cwd.trimmingCharacters(in: .whitespaces)
+        resumableCwd = target
+        guard !target.isEmpty else {
+            resumableSessions = []
+            resumableLoading = false
+            return
+        }
+        resumableLoading = true
+        resumableSessions = []
+        Task {
+            // Debounce keystrokes in the directory field before touching disk.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard resumableCwd == target else { return }
+            let used = appState.store.usedCliSessionIds()
+            let rows = await Task.detached(priority: .utility) { () -> [ResumableSession] in
+                let hits = listExternalSessions(cwd: target)
+                    .filter { !used.contains($0.cliSessionId) }
+                var out: [ResumableSession] = []
+                for hit in hits {
+                    let title = await deriveSessionTitle(hit.provider, hit.cliSessionId)
+                    out.append(ResumableSession(
+                        provider: hit.provider, cliSessionId: hit.cliSessionId,
+                        startMs: hit.startMs,
+                        title: title ?? (target as NSString).lastPathComponent))
+                }
+                return out
+            }.value
+            guard resumableCwd == target else { return }  // a newer load superseded us
+            resumableSessions = rows
+            resumableLoading = false
+        }
+    }
+
+    /// Adopt + resume the chosen "Continue existing" conversation via the T2 path
+    /// (`adoptExternal`), then drop it from the picker list. Returns the new
+    /// session's id, or nil if juancode already owned this conversation.
+    @discardableResult
+    func adoptResumable(_ session: ResumableSession, cwd: String) -> String? {
+        let meta = adoptExternal(provider: session.provider, cliSessionId: session.cliSessionId,
+                                 cwd: cwd.trimmingCharacters(in: .whitespaces), startMs: session.startMs)
+        if meta != nil { resumableSessions.removeAll { $0.id == session.id } }
+        return meta?.id
+    }
 
     /// (Re)load the most recent terminal sessions, deduped against the sessions
     /// juancode already owns. Starts at one page; resets the window each call.
