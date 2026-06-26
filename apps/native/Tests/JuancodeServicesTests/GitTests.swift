@@ -123,6 +123,82 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(f?.additions, 1)
     }
 
+    // MARK: - getBaseDiff (juancode-49w)
+
+    func testGetBaseDiffReturnsGitFalseForNonGitDir() async throws {
+        let plain = mkdtemp("juancode-plain-")
+        defer { rmrf(plain) }
+        let r = try await getBaseDiff(plain, base: nil)
+        XCTAssertFalse(r.result.git)
+        XCTAssertEqual(r.base, "")
+    }
+
+    func testGetBaseDiffShowsOnlyBranchChangesAgainstMergeBase() async throws {
+        // main: shared.txt committed. branch feature adds feat.txt; main later moves on.
+        writeFile(join(dir, "shared.txt"), "base\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "base"])
+        // Capture the default branch name (main or master depending on git config).
+        let mainBranch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try runGit(["checkout", "-qb", "feature"])
+        writeFile(join(dir, "feat.txt"), "feature work\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "feat"])
+
+        // main advances after the branch diverged — must NOT appear in the base diff.
+        try runGit(["checkout", "-q", mainBranch])
+        writeFile(join(dir, "shared.txt"), "base changed on main\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "advance main"])
+        try runGit(["checkout", "-q", "feature"])
+
+        let r = try await getBaseDiff(dir, base: mainBranch)
+        XCTAssertEqual(r.base, mainBranch)
+        XCTAssertTrue(r.result.git)
+        let paths = Set(r.result.files.map(\.path))
+        XCTAssertTrue(paths.contains("feat.txt"), "branch's own change should show")
+        XCTAssertFalse(paths.contains("shared.txt"), "post-divergence main change must not show")
+    }
+
+    func testGetBaseDiffIncludesUncommittedBranchWork() async throws {
+        writeFile(join(dir, "a.txt"), "one\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "base"])
+        let mainBranch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["checkout", "-qb", "feature"])
+        // Uncommitted new file on the branch.
+        writeFile(join(dir, "scratch.txt"), "wip\n")
+
+        let r = try await getBaseDiff(dir, base: mainBranch)
+        XCTAssertTrue(r.result.files.contains(where: { $0.path == "scratch.txt" }))
+    }
+
+    func testGetBaseDiffThrowsWhenBaseMissing() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        do {
+            _ = try await getBaseDiff(dir, base: "no-such-branch")
+            XCTFail("expected throw")
+        } catch is GitError {
+            // expected — no merge-base with a non-existent ref.
+        }
+    }
+
+    func testDefaultBaseBranchPrefersLocalMainOrMaster() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        let mainBranch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let inferred = await defaultBaseBranch(dir)
+        // The single branch (main or master) is the inferred default.
+        XCTAssertEqual(inferred, mainBranch)
+    }
+
     // MARK: - getGitState
 
     func testGetGitStateReturnsGitFalseForNonGitDir() async throws {

@@ -104,3 +104,48 @@ final class ParsePrsTests: XCTestCase {
         ])
     }
 }
+
+/// CI-check parsing + run-id extraction backing the PR CI-log reader (juancode-49w).
+/// Pure functions only — no `gh` is spawned.
+final class PrChecksTests: XCTestCase {
+    func testParseCheckRunsMapsFieldsAndNormalisesCase() {
+        let json = """
+        [
+          {"name":"build","state":"SUCCESS","bucket":"pass",
+           "link":"https://github.com/o/r/actions/runs/100/job/1"},
+          {"name":"test","state":"failure","bucket":"Fail",
+           "link":"https://github.com/o/r/actions/runs/101/job/2"}
+        ]
+        """
+        let runs = parseCheckRuns(json)
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertEqual(runs[0].name, "build")
+        XCTAssertEqual(runs[0].state, "SUCCESS")
+        XCTAssertEqual(runs[0].bucket, "pass")
+        XCTAssertFalse(runs[0].failed)
+        // state/bucket are normalised (upper/lower) so `failed` is robust.
+        XCTAssertEqual(runs[1].state, "FAILURE")
+        XCTAssertEqual(runs[1].bucket, "fail")
+        XCTAssertTrue(runs[1].failed)
+    }
+
+    func testParseCheckRunsHandlesEmptyAndGarbage() {
+        XCTAssertTrue(parseCheckRuns("").isEmpty)
+        XCTAssertTrue(parseCheckRuns("not json").isEmpty)
+        XCTAssertTrue(parseCheckRuns("[]").isEmpty)
+    }
+
+    func testRunIdFromActionsLink() {
+        XCTAssertEqual(
+            runIdFromCheckLink("https://github.com/o/r/actions/runs/123456/job/789"),
+            "123456")
+        XCTAssertEqual(
+            runIdFromCheckLink("https://github.com/o/r/actions/runs/42"),
+            "42")
+    }
+
+    func testRunIdFromNonActionsLinkIsNil() {
+        XCTAssertNil(runIdFromCheckLink("https://example.com/ci/build/9"))
+        XCTAssertNil(runIdFromCheckLink(""))
+    }
+}

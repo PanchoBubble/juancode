@@ -280,6 +280,162 @@ public func getPrActivity(_ cwd: String, number: Int) async -> PrActivity? {
     }
 }
 
+// MARK: - PR diff (load an existing PR into the ChangesPanel, juancode-49w)
+
+/// Per-PR-diff cap, mirroring `Git.swift`'s `MAX_FILES` for the working tree.
+private let MAX_PR_FILES = 300
+
+/// Load an existing PR's diff via `gh pr diff`, parsed into the same per-file wire
+/// shape `getDiff` produces so it drops straight into the ChangesPanel (juancode-49w).
+/// Throws `GhError` (gh missing / not authed / no such PR) rather than returning a
+/// `git: false` shape, since here the failure is about gh/the PR, not the cwd.
+public func getPrDiff(_ cwd: String, number: Int) async throws -> DiffResult {
+    let r: ProcessResult
+    do {
+        r = try await ProcessRunner.capture(
+            ghBin(), ["pr", "diff", String(number), "--patch"], cwd: cwd, maxBytes: MAX_BUFFER)
+    } catch {
+        throw GhError(ghErrorReason(error))
+    }
+    guard r.ok else {
+        throw GhError(ghErrorReason(ProcessError(
+            code: r.exitCode, stdout: r.stdout, stderr: r.stderr,
+            launchFailed: false, timedOut: false)))
+    }
+    var files = parseMultiFileDiff(r.stdout)
+    let truncatedFiles = files.count > MAX_PR_FILES
+    if truncatedFiles { files = Array(files.prefix(MAX_PR_FILES)) }
+    files.sort { $0.path.localizedCompare($1.path) == .orderedAscending }
+    return DiffResult(git: true, root: nil, files: files, truncatedFiles: truncatedFiles)
+}
+
+// MARK: - CI/check logs (juancode-49w)
+
+/// One CI check on a PR, from `gh pr checks --json`. `bucket` is gh's coarse
+/// outcome (pass/fail/pending/skipping/cancel); `link` is the check's details URL,
+/// from which a GitHub Actions run id can be extracted.
+public struct PrCheckRun: Sendable, Equatable {
+    public let name: String
+    public let state: String
+    public let bucket: String
+    public let link: String
+    public init(name: String, state: String, bucket: String, link: String) {
+        self.name = name; self.state = state; self.bucket = bucket; self.link = link
+    }
+    /// True when this check counts as failed (gh's `fail` bucket, or a raw
+    /// FAILURE/ERROR state for older status contexts).
+    public var failed: Bool { bucket == "fail" || state == "FAILURE" || state == "ERROR" }
+}
+
+private struct RawCheckRun: Decodable {
+    var name: String?
+    var state: String?
+    var bucket: String?
+    var link: String?
+}
+
+/// Map `gh pr checks --json` output onto `[PrCheckRun]`. Exposed for testing.
+func parseCheckRuns(_ json: String) -> [PrCheckRun] {
+    guard let data = json.data(using: .utf8),
+          let raw = try? JSONDecoder().decode([RawCheckRun].self, from: data) else { return [] }
+    return raw.map {
+        PrCheckRun(name: $0.name ?? "", state: ($0.state ?? "").uppercased(),
+                   bucket: ($0.bucket ?? "").lowercased(), link: $0.link ?? "")
+    }
+}
+
+/// The GitHub Actions run id embedded in a check's details URL
+/// (`…/actions/runs/<id>/job/<jobId>`), or nil for a non-Actions check. Pure;
+/// exposed for testing.
+func runIdFromCheckLink(_ link: String) -> String? {
+    firstMatch(in: link, pattern: "/actions/runs/([0-9]+)", group: 1)
+}
+
+/// List a PR's CI checks via `gh pr checks`. Returns `[]` when gh is missing /
+/// unauthenticated / there are no checks. Note: `gh pr checks` exits non-zero when
+/// checks are failing or pending, but still prints the JSON, so we parse stdout
+/// regardless of the exit code.
+public func getPrCheckRuns(_ cwd: String, number: Int) async -> [PrCheckRun] {
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(), ["pr", "checks", String(number), "--json", "name,state,bucket,link"],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        return parseCheckRuns(r.stdout)
+    } catch {
+        return []
+    }
+}
+
+/// Cap on captured CI-log text, so a huge log can't blow up the UI / an agent
+/// prompt. We keep the tail (where failures surface), not the head.
+private let MAX_LOG_CHARS = 20_000
+
+/// Read the failing-step logs for a PR's red CI checks: resolve each failing
+/// GitHub Actions check to its run id and pull `gh run view <id> --log-failed`,
+/// concatenated (capped). Returns "" when nothing is failing or logs can't be
+/// read — best-effort, never throws. Lets the UI / a tracking agent surface *why*
+/// CI is red without leaving juancode.
+public func getFailedCheckLogs(_ cwd: String, number: Int, maxRuns: Int = 5) async -> String {
+    let failing = await getPrCheckRuns(cwd, number: number).filter(\.failed)
+    var seen = Set<String>()
+    var runIds: [String] = []
+    for check in failing {
+        if let id = runIdFromCheckLink(check.link), seen.insert(id).inserted { runIds.append(id) }
+    }
+    guard !runIds.isEmpty else { return "" }
+
+    var sections: [String] = []
+    for id in runIds.prefix(maxRuns) {
+        guard let log = await failedRunLog(cwd, runId: id), !log.isEmpty else { continue }
+        sections.append("===== run \(id) (failed steps) =====\n\(log)")
+    }
+    return sections.joined(separator: "\n\n")
+}
+
+/// `gh run view <id> --log-failed`, capped to the trailing `MAX_LOG_CHARS`.
+private func failedRunLog(_ cwd: String, runId: String) async -> String? {
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(), ["run", "view", runId, "--log-failed"], cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return nil }
+        let log = r.stdout
+        guard log.count > MAX_LOG_CHARS else { return log }
+        return "…(truncated)\n" + String(log.suffix(MAX_LOG_CHARS))
+    } catch {
+        return nil
+    }
+}
+
+// MARK: - replying to a PR (juancode-49w)
+
+/// Post a top-level comment on a PR (`gh pr comment`). Throws `GhError` on failure.
+public func commentOnPr(_ cwd: String, number: Int, body: String) async throws {
+    try await ghWrite(cwd, ["pr", "comment", String(number), "--body", body])
+}
+
+/// Reply to an inline PR review-thread comment (`POST …/pulls/<n>/comments/<id>/replies`
+/// via `gh api`). `commentId` is the id of the review comment being replied to. gh
+/// fills `{owner}`/`{repo}` from the current repo. Throws `GhError` on failure.
+public func replyToReviewComment(_ cwd: String, number: Int, commentId: Int, body: String) async throws {
+    let path = "repos/{owner}/{repo}/pulls/\(number)/comments/\(commentId)/replies"
+    try await ghWrite(cwd, ["api", "--method", "POST", path, "-f", "body=\(body)"])
+}
+
+/// Run a gh write command, throwing a clean `GhError` on launch-fail or non-zero exit.
+private func ghWrite(_ cwd: String, _ args: [String]) async throws {
+    let r: ProcessResult
+    do {
+        r = try await ProcessRunner.capture(ghBin(), args, cwd: cwd, maxBytes: MAX_BUFFER)
+    } catch {
+        throw GhError(ghErrorReason(error))
+    }
+    guard r.ok else {
+        throw GhError(ghErrorReason(ProcessError(
+            code: r.exitCode, stdout: r.stdout, stderr: r.stderr,
+            launchFailed: false, timedOut: false)))
+    }
+}
+
 /// A clean, message-bearing error for gh failures surfaced to the UI. Mirrors the
 /// `throw new Error(ghErrorReason(...))` the TS throws.
 public struct GhError: Error, Sendable {

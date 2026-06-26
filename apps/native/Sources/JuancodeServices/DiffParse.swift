@@ -101,6 +101,129 @@ public func parseUnifiedDiff(_ diff: String) -> [DiffHunk] {
     return hunks
 }
 
+// MARK: - multi-file patch splitting (PR diffs, juancode-49w)
+
+/// Per-file cap mirroring `Git.swift`'s `MAX_DIFF_BYTES`: a single file's diff
+/// larger than this is summarized (counts kept, body dropped), not carried.
+private let MAX_FILE_DIFF_BYTES = 400_000
+
+/// Split a combined unified diff (e.g. `gh pr diff` / `git diff`, many files in
+/// one stream) into per-file `DiffFile`s — the same wire shape `getDiff` produces,
+/// so a PR's diff can be loaded into the ChangesPanel exactly like the working
+/// tree (juancode-49w). Pure string parsing — no git/gh — which is why it lives
+/// here. Lines before the first `diff --git` header (any tool preamble) are
+/// ignored. Returns `[]` for an empty/headerless patch.
+public func parseMultiFileDiff(_ patch: String) -> [DiffFile] {
+    guard !patch.isEmpty else { return [] }
+    var chunks: [[String]] = []
+    var current: [String]? = nil
+    for line in patch.components(separatedBy: "\n") {
+        if line.hasPrefix("diff --git ") {
+            if let c = current { chunks.append(c) }
+            current = [line]
+        } else if current != nil {
+            current?.append(line)
+        }
+        // else: preamble before the first file header — skip.
+    }
+    if let c = current { chunks.append(c) }
+    return chunks.compactMap(diffFile(fromChunk:))
+}
+
+/// Build one `DiffFile` from a single file's chunk (its `diff --git` header
+/// through the line before the next header). Returns nil if no path can be found.
+private func diffFile(fromChunk lines: [String]) -> DiffFile? {
+    var oldMarkerPath: String? = nil
+    var newMarkerPath: String? = nil
+    var renameFrom: String? = nil
+    var renameTo: String? = nil
+    var sawNewFile = false
+    var sawDeleted = false
+    var binary = false
+
+    for line in lines {
+        if line.hasPrefix("new file mode") { sawNewFile = true }
+        else if line.hasPrefix("deleted file mode") { sawDeleted = true }
+        else if line.hasPrefix("rename from ") { renameFrom = String(line.dropFirst("rename from ".count)) }
+        else if line.hasPrefix("rename to ") { renameTo = String(line.dropFirst("rename to ".count)) }
+        else if line.hasPrefix("Binary files ") || line.hasPrefix("GIT binary patch") { binary = true }
+        else if line.hasPrefix("--- ") {
+            if let p = pathFromFileMarker(String(line.dropFirst(4))) { oldMarkerPath = p }
+        } else if line.hasPrefix("+++ ") {
+            if let p = pathFromFileMarker(String(line.dropFirst(4))) { newMarkerPath = p }
+        }
+    }
+
+    let status: FileStatus
+    var path: String?
+    var oldPath: String? = nil
+    if let to = renameTo {
+        status = .renamed
+        path = to
+        oldPath = renameFrom
+    } else if sawNewFile {
+        status = .added
+        path = newMarkerPath
+    } else if sawDeleted {
+        status = .deleted
+        path = oldMarkerPath
+    } else {
+        status = .modified
+        path = newMarkerPath ?? oldMarkerPath
+    }
+    // Fall back to the `diff --git a/… b/…` header (handles pure renames / binary
+    // files that carry no `---`/`+++` lines).
+    let resolved = path ?? pathFromGitHeader(lines.first ?? "")
+    guard let finalPath = resolved, !finalPath.isEmpty else { return nil }
+
+    let (additions, deletions) = countAddDel(lines)
+    let text = lines.joined(separator: "\n")
+    let tooLarge = text.utf16.count > MAX_FILE_DIFF_BYTES
+    return DiffFile(
+        path: finalPath,
+        oldPath: oldPath,
+        status: status,
+        additions: binary ? 0 : additions,
+        deletions: binary ? 0 : deletions,
+        binary: binary,
+        diff: (binary || tooLarge) ? "" : text,
+        truncated: tooLarge)
+}
+
+/// Strip a `--- `/`+++ ` marker down to its path: drops a leading `a/`/`b/`, maps
+/// `/dev/null` (add/delete sentinel) to nil. Trims only the surrounding spaces.
+private func pathFromFileMarker(_ raw: String) -> String? {
+    var s = raw.trimmingCharacters(in: .whitespaces)
+    if s == "/dev/null" { return nil }
+    if s.hasPrefix("a/") || s.hasPrefix("b/") { s = String(s.dropFirst(2)) }
+    return s.isEmpty ? nil : s
+}
+
+/// Best-effort path from a `diff --git a/<old> b/<new>` header — used only when a
+/// chunk has no usable `---`/`+++` lines. Splits on the ` b/` separator, which is
+/// unambiguous for the common case of paths without spaces.
+private func pathFromGitHeader(_ header: String) -> String? {
+    guard header.hasPrefix("diff --git ") else { return nil }
+    let rest = String(header.dropFirst("diff --git ".count))
+    if let r = rest.range(of: " b/") {
+        let newPart = String(rest[r.upperBound...])
+        return newPart.isEmpty ? nil : newPart
+    }
+    return nil
+}
+
+/// Count added/removed content lines in a file chunk, ignoring the `+++`/`---`
+/// file-header lines (mirrors `Git.swift`'s `countChanges`).
+private func countAddDel(_ lines: [String]) -> (additions: Int, deletions: Int) {
+    var additions = 0
+    var deletions = 0
+    for line in lines {
+        if line.hasPrefix("+") && !line.hasPrefix("+++") { additions += 1 }
+        else if line.hasPrefix("-") && !line.hasPrefix("---") { deletions += 1 }
+    }
+    return (additions, deletions)
+}
+
 /// Extract the old/new starting line numbers from a `@@ -a,b +c,d @@` header.
 /// Defaults the counts to line 1 when a hunk omits them (`@@ -a +c @@`).
 private func parseHunkStarts(_ header: String) -> (old: Int, new: Int) {
