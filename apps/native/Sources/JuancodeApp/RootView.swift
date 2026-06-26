@@ -1147,13 +1147,18 @@ struct SessionRow: View {
         }
     }
 
-    private var dotColor: Color {
-        guard live else { return .secondary.opacity(0.4) }
-        switch activity {
-        case .busy: return .orange
-        case .waitingInput: return .blue
-        case .idle, .none: return .green
-        }
+    private var dotColor: Color { sessionDotColor(live: live, activity: activity) }
+}
+
+/// Status-dot color for a session: grey when not live, else activity-tinted (busy =
+/// orange, waiting = blue, idle = green). Shared by the sidebar `SessionRow` and the
+/// Oracle dock's session rail (juancode-cwa) so the two stay visually in sync.
+func sessionDotColor(live: Bool, activity: SessionActivity?) -> Color {
+    guard live else { return .secondary.opacity(0.4) }
+    switch activity {
+    case .busy: return .orange
+    case .waitingInput: return .blue
+    case .idle, .none: return .green
     }
 }
 

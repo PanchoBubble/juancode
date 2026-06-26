@@ -73,7 +73,7 @@ final class OracleModel {
         // collapses the dock, so the top-bar Issues / Oracle buttons (and ⌘⇧I) close
         // it as well as open it — otherwise the panel only ever opens and feels stuck.
         if expanded, self.tab == tab {
-            expanded = false
+            collapse()
             return
         }
         self.tab = tab
@@ -81,12 +81,18 @@ final class OracleModel {
         bootstrap()
         ensureAgentSession()
         if tab == .issues { loadGlobalBeads() }
+        // Opening straight onto the chat should land the cursor in the agent's input
+        // (same as ⌃Space), so the focus handoff into Oracle is deterministic.
+        if tab == .chat { chatFocusToken += 1 }
     }
 
-    /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open.
+    /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open; on close
+    /// hands focus back to the open session's terminal.
     func toggle() {
-        expanded.toggle()
-        if expanded { bootstrap(); ensureAgentSession() }
+        if expanded { collapse(); return }
+        expanded = true
+        bootstrap()
+        ensureAgentSession()
     }
 
     /// ⌃Space: open the Oracle on the chat tab with the input focused, so you can
@@ -94,7 +100,7 @@ final class OracleModel {
     /// showing. Brings the agent up if it isn't running.
     func toggleChatFocused() {
         if expanded && tab == .chat {
-            expanded = false
+            collapse()
             return
         }
         expanded = true
@@ -102,6 +108,16 @@ final class OracleModel {
         bootstrap()
         ensureAgentSession()
         chatFocusToken += 1
+    }
+
+    /// Collapse the dock and hand keyboard focus straight back to the currently-open
+    /// session's terminal, so you can keep typing without a manual click (juancode-cwa).
+    /// Every close path routes through here to keep the focus handoff deterministic
+    /// rather than leaving focus stranded on the dismissed panel.
+    func collapse() {
+        guard expanded else { return }
+        expanded = false
+        app.focusTerminal()
     }
 
     init(app: AppModel) { self.app = app }

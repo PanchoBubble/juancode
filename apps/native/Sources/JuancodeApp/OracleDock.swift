@@ -13,6 +13,10 @@ struct OracleDock: View {
     /// Persisted panel width (drag the left edge). Floored so the agent CLI never
     /// renders into too few columns (which garbles its TUI).
     @AppStorage("oracle.panel.width") private var panelWidth: Double = 600
+    /// Whether the chat tab's mini session rail (juancode-cwa) is shown. Shared with
+    /// `OracleChatView` via the same @AppStorage key so the header toggle and the rail
+    /// stay in lock-step.
+    @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
     private static let minWidth: Double = 460
     private static let maxWidth: Double = 1100
 
@@ -22,7 +26,7 @@ struct OracleDock: View {
                 Color.black.opacity(0.28)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
-                    .onTapGesture { oracle.expanded = false }
+                    .onTapGesture { oracle.collapse() }
                     .transition(.opacity)
             }
             // The panel stays mounted across toggles and slides off the right edge when
@@ -87,29 +91,47 @@ struct OracleDock: View {
         // Esc app-wide even when the dock is closed.
         .background {
             if oracle.expanded {
-                Button("") { oracle.expanded = false }
+                Button("") { oracle.collapse() }
                     .keyboardShortcut(.cancelAction).opacity(0).frame(width: 0, height: 0)
             }
         }
     }
 
+    /// One header toolbar: title on the left, then the tab's contextual action(s) and
+    /// the close button on the right — all the same borderless icon-button styling at a
+    /// single level (juancode-cwa). Previously the issues Refresh sat buried in the
+    /// content row while restart/close lived up here, so the controls read as
+    /// misaligned; routing every action through `headerButton` keeps them consistent.
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.tint).padding(.leading, 12)
             Text("Oracle").font(.system(size: 13, weight: .semibold))
             Spacer()
-            if oracle.tab == .chat, oracle.session != nil {
-                Button { oracle.restartAgent() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless)
-                    .help("Restart the Oracle agent")
-                    .clickCursor()
+            switch oracle.tab {
+            case .issues:
+                headerButton("arrow.clockwise", help: "Refresh issues") { oracle.loadGlobalBeads() }
+            case .chat:
+                headerButton(sessionRailShown ? "sidebar.left" : "sidebar.squares.left",
+                             help: sessionRailShown ? "Hide the session list" : "Show the session list") {
+                    sessionRailShown.toggle()
+                }
+                if oracle.session != nil {
+                    headerButton("arrow.clockwise", help: "Restart the Oracle agent") { oracle.restartAgent() }
+                }
             }
-            Button { oracle.expanded = false } label: { Image(systemName: "chevron.right") }
-                .buttonStyle(.borderless)
-                .help("Close (⌃Space)")
-                .clickCursor()
+            headerButton("chevron.right", help: "Close (⌃Space)") { oracle.collapse() }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    /// A header action: a borderless icon button with a tooltip and the click cursor,
+    /// so every control in the header shares one look.
+    private func headerButton(_ icon: String, help: String,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: icon) }
+            .buttonStyle(.borderless)
+            .help(help)
+            .clickCursor()
     }
 
     @ViewBuilder private var content: some View {
@@ -155,16 +177,11 @@ private struct OracleIssuesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                TextField("Filter global items…", text: $query)
-                    .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                Button { oracle.loadGlobalBeads() } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 11))
-                }
-                .buttonStyle(.borderless).help("Refresh")
-                .clickCursor()
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            // Refresh now lives in the dock header alongside the other controls
+            // (juancode-cwa); this row is just the filter field.
+            TextField("Filter global items…", text: $query)
+                .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                .padding(.horizontal, 12).padding(.vertical, 8)
             Divider()
             content
         }
@@ -316,11 +333,26 @@ private struct OracleDispatchPicker: View {
     }
 }
 
-/// The Oracle agent's live chat terminal, or a starting affordance.
+/// The Oracle agent's live chat terminal, with an optional mini session rail on the
+/// left (juancode-cwa) so all your work is navigable at a glance without leaving the
+/// dock, or a starting affordance when the agent isn't up.
 private struct OracleChatView: View {
     @Environment(OracleModel.self) private var oracle
+    @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
 
     var body: some View {
+        HStack(spacing: 0) {
+            if sessionRailShown {
+                OracleSessionRail()
+                    .frame(width: 156)
+                Divider()
+            }
+            terminal
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder private var terminal: some View {
         if let session = oracle.session {
             // Same pattern as the main session pane (which resizes correctly): a
             // plain fill. `sizeThatFits` makes the bridged view take the proposed size.
@@ -347,5 +379,79 @@ private struct OracleChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+/// A compact rail listing all your project sessions (the Oracle agent's own control-dir
+/// session is hidden — its terminal is right there). Each row shows a live-status dot,
+/// title, and folder; tapping selects it in the main window and collapses the dock so
+/// you land straight on it (juancode-cwa). Oracle's dock thus doubles as mission control.
+private struct OracleSessionRail: View {
+    @Environment(AppModel.self) private var model
+    @Environment(OracleModel.self) private var oracle
+
+    /// Own (non-external) sessions, minus the Oracle control dir and archived ones,
+    /// most-recent first so freshly dispatched work surfaces at the top.
+    private var sessions: [SessionMeta] {
+        model.sessions
+            .filter { $0.cwd != OraclePaths.controlDir && !$0.archived }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Text("Sessions")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
+            Divider()
+            if sessions.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No sessions yet")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(sessions, id: \.id) { meta in row(meta) }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .background(Color(white: 0.10))
+    }
+
+    private func row(_ meta: SessionMeta) -> some View {
+        let selected = model.selection == meta.id
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(sessionDotColor(live: model.isLive(meta.id), activity: model.activity(meta.id)))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(meta.title).font(.system(size: 11)).lineLimit(1)
+                Text((meta.cwd as NSString).lastPathComponent)
+                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.selection = meta.id
+            oracle.collapse()
+        }
+        .help(meta.cwd)
+        .clickCursor()
     }
 }
