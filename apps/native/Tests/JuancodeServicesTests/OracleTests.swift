@@ -116,6 +116,39 @@ final class OracleTests: XCTestCase {
         XCTAssertEqual(decoded, state)
     }
 
+    func testDiscoverProjectsFindsGitReposAndUnionsSessions() throws {
+        let fm = FileManager.default
+        // A workspace root with one git repo, one plain dir (ignored), and a file.
+        let ws = (dir as NSString).appendingPathComponent("ws")
+        let repo = (ws as NSString).appendingPathComponent("repo")
+        try fm.createDirectory(atPath: (repo as NSString).appendingPathComponent(".git"),
+                               withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: (ws as NSString).appendingPathComponent("plain"),
+                               withIntermediateDirectories: true)
+        // A session cwd outside the workspace root still shows up (union), as active.
+        let outside = (dir as NSString).appendingPathComponent("elsewhere")
+        try fm.createDirectory(atPath: outside, withIntermediateDirectories: true)
+
+        let projects = discoverOracleProjects(workspaceRoot: ws, sessionCwds: [outside])
+        let byPath = Dictionary(uniqueKeysWithValues: projects.map { ($0.path, $0) })
+
+        // The git repo is listed (inactive — no session), the plain dir is not.
+        XCTAssertEqual(byPath[repo]?.active, false)
+        XCTAssertEqual(byPath[repo]?.name, "repo")
+        XCTAssertNil(byPath[(ws as NSString).appendingPathComponent("plain")])
+        // The out-of-workspace session cwd is unioned in and marked active.
+        XCTAssertEqual(byPath[outside]?.active, true)
+    }
+
+    func testStateRoundTripsWithProjects() throws {
+        let state = OracleState(
+            updatedAt: 1, workdirs: ["/proj"], sessions: [],
+            projects: [OracleProject(path: "/proj", name: "proj", active: true)])
+        try writeOracleState(state)
+        let data = try Data(contentsOf: URL(fileURLWithPath: OraclePaths.stateFile))
+        XCTAssertEqual(try JSONDecoder().decode(OracleState.self, from: data), state)
+    }
+
     func testAskMailboxRoundTripsIncrementally() throws {
         // The ask mailbox (remote/MCP path) shares the JSONL plumbing but is its own
         // file + offset, so a dispatch must never be read as an ask or vice versa.

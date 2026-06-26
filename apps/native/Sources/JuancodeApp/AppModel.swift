@@ -9,6 +9,9 @@ import JuancodeServer
 /// UserDefaults key for the turn-boundary notification toggle (Dock bounce + badge).
 private let notifyDefaultsKey = "juancode.notify.turnEnd"
 
+/// UserDefaults key for the "keep awake" toggle (block idle system sleep).
+private let keepAwakeDefaultsKey = "juancode.keepAwake"
+
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
@@ -72,6 +75,7 @@ final class AppModel {
         for s in appState.registry.all() { watch(s) }
         refresh()
         restoreTracked()
+        applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -103,6 +107,42 @@ final class AppModel {
         let persisted = appState.store.list()
         let live = Dictionary(appState.registry.all().map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
         sessions = persisted.map { live[$0.id] ?? $0 }
+        refreshWorktreeMap()
+    }
+
+    // MARK: - Worktree → repo grouping
+
+    /// Authoritative map from any git worktree path to its repo's main worktree
+    /// path, so the sidebar nests linked worktrees under their project — even ones
+    /// whose dir doesn't follow the `<repo>-worktrees/` naming (a plain
+    /// `git worktree add ../styx`). Built by shelling `git worktree list` per
+    /// distinct session cwd; populated async, so grouping refines once it lands.
+    var worktreeRepoRoots: [String: String] = [:]
+    /// cwds already scanned (incl. non-git ones that returned nothing) so we don't
+    /// re-shell git for them on every refresh.
+    private var scannedWorktreeCwds: Set<String> = []
+    private var worktreeScanInFlight = false
+
+    /// Scan any not-yet-seen session cwd for its repo's worktrees and record each
+    /// `worktree → main` mapping. Cached + guarded so refresh() can call it freely.
+    func refreshWorktreeMap() {
+        let cwds = Set(sessions.map(\.cwd) + sessions.compactMap(\.worktreePath))
+            .subtracting(scannedWorktreeCwds)
+        guard !cwds.isEmpty, !worktreeScanInFlight else { return }
+        worktreeScanInFlight = true
+        Task {
+            var additions: [String: String] = [:]
+            for cwd in cwds {
+                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                guard let main = trees.first(where: { $0.main }) else { continue }
+                for t in trees { additions[t.path] = main.path }
+            }
+            for (k, v) in additions { worktreeRepoRoots[k] = v }
+            scannedWorktreeCwds.formUnion(cwds)
+            worktreeScanInFlight = false
+            // New sessions may have arrived mid-scan; pick them up (no-op if none).
+            refreshWorktreeMap()
+        }
     }
 
     func activity(_ id: String) -> SessionActivity? { activities[id] }
@@ -175,6 +215,36 @@ final class AppModel {
     /// Persisted; on by default. Toggle from the View menu (or `defaults write`).
     var notifyOnTurnEnd: Bool = UserDefaults.standard.object(forKey: notifyDefaultsKey) as? Bool ?? true {
         didSet { UserDefaults.standard.set(notifyOnTurnEnd, forKey: notifyDefaultsKey) }
+    }
+
+    /// While on, hold a power assertion that blocks the Mac from idle-sleeping, so a
+    /// long-running prompt isn't cut off when you step away (the app already opts out
+    /// of App Nap in `AppDelegate`, but that variant still permits idle system sleep —
+    /// this is the stronger, user-controlled version). Persisted; off by default.
+    /// Toggle from the View menu (⌃⇧A).
+    var keepAwake: Bool = UserDefaults.standard.bool(forKey: keepAwakeDefaultsKey) {
+        didSet {
+            UserDefaults.standard.set(keepAwake, forKey: keepAwakeDefaultsKey)
+            applyKeepAwake()
+        }
+    }
+
+    /// The held idle-sleep assertion, when `keepAwake` is on. `nil` means the Mac is
+    /// free to idle-sleep as usual.
+    @ObservationIgnored private var keepAwakeToken: NSObjectProtocol?
+
+    /// Acquire or release the idle-system-sleep assertion to match `keepAwake`.
+    /// Idempotent: re-applying the current state is a no-op.
+    private func applyKeepAwake() {
+        if keepAwake {
+            guard keepAwakeToken == nil else { return }
+            keepAwakeToken = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled],
+                reason: "Keep Awake: running prompts must not be interrupted by sleep")
+        } else if let token = keepAwakeToken {
+            ProcessInfo.processInfo.endActivity(token)
+            keepAwakeToken = nil
+        }
     }
 
     /// User's custom sidebar project order (folder cwds). Folders not listed here

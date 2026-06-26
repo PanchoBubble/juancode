@@ -73,6 +73,25 @@ public struct OracleAsk: Codable, Sendable, Equatable {
     public init(text: String) { self.text = text }
 }
 
+/// A project the Oracle may dispatch into — the "address book" for the `project`
+/// field of `OracleDispatch`. Written into `state.json` so the agent dispatches to
+/// real, valid paths instead of guessing. Sourced from the git repos under the
+/// workspace root unioned with any in-play session cwds (see `discoverOracleProjects`).
+public struct OracleProject: Codable, Sendable, Equatable {
+    /// Absolute path to the project root — a valid `dispatch` target verbatim.
+    public var path: String
+    /// Basename, so the agent can match a natural-language reference ("juancode").
+    public var name: String
+    /// True when at least one session is currently live in this project.
+    public var active: Bool
+
+    public init(path: String, name: String, active: Bool) {
+        self.path = path
+        self.name = name
+        self.active = active
+    }
+}
+
 /// One live (or recently-exited) session, as written into `state.json` for the
 /// Oracle agent to read with its own tools.
 public struct OracleSessionSnapshot: Codable, Sendable, Equatable {
@@ -103,13 +122,49 @@ public struct OracleState: Codable, Sendable, Equatable {
     public var updatedAt: Int
     /// Distinct work dirs in play (project sessions), excluding the control dir.
     public var workdirs: [String]
+    /// The dispatch address book: every project the Oracle may target, whether or
+    /// not it currently has a session. See `OracleProject` / `discoverOracleProjects`.
+    public var projects: [OracleProject]
     public var sessions: [OracleSessionSnapshot]
 
-    public init(updatedAt: Int, workdirs: [String], sessions: [OracleSessionSnapshot]) {
+    public init(updatedAt: Int, workdirs: [String], sessions: [OracleSessionSnapshot],
+                projects: [OracleProject] = []) {
         self.updatedAt = updatedAt
         self.workdirs = workdirs
+        self.projects = projects
         self.sessions = sessions
     }
+}
+
+/// Build the Oracle's dispatch address book: every immediate git repo under
+/// `workspaceRoot`, unioned with `sessionCwds` (projects already open, even ones
+/// living outside the workspace root). Every returned `path` is an absolute,
+/// existing directory the agent can dispatch to verbatim. `active` marks the ones
+/// currently running a session. Pure + best-effort: an unreadable root yields just
+/// the session cwds. Results are sorted by path for a stable `state.json`.
+public func discoverOracleProjects(workspaceRoot: String, sessionCwds: [String]) -> [OracleProject] {
+    let fm = FileManager.default
+    let active = Set(sessionCwds.map { ($0 as NSString).standardizingPath })
+    var byPath: [String: Bool] = [:] // path -> active
+
+    // Git repos directly under the workspace root (the common case: ~/workdir/<repo>).
+    let root = (workspaceRoot as NSString).standardizingPath
+    if let entries = try? fm.contentsOfDirectory(atPath: root) {
+        for entry in entries {
+            let p = (root as NSString).appendingPathComponent(entry)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard fm.fileExists(atPath: (p as NSString).appendingPathComponent(".git")) else { continue }
+            byPath[p] = active.contains(p)
+        }
+    }
+    // Union the cwds of sessions already in play — they're valid targets too, and a
+    // repo opened from outside the workspace root would be invisible otherwise.
+    for cwd in active { byPath[cwd] = true }
+
+    return byPath
+        .map { OracleProject(path: $0.key, name: ($0.key as NSString).lastPathComponent, active: $0.value) }
+        .sorted { $0.path.localizedCompare($1.path) == .orderedAscending }
 }
 
 /// Errors raised while bootstrapping the control dir. UI degrades on these.
@@ -253,15 +308,6 @@ public func writeOracleState(_ state: OracleState) throws {
     try data.write(to: URL(fileURLWithPath: OraclePaths.stateFile))
 }
 
-/// The seed prompt sent to the Oracle agent once its TUI is up (juancode-wjg). It
-/// points the agent at its instructions, tracker, and the dispatch mailbox.
-public let oracleSeedPrompt = """
-You are Oracle, the global orchestrator for this machine. Read ./AGENTS.md for \
-your role and the dispatch protocol, run `bd ready` to see the current global \
-work items, and read ./state.json to see what agents are already running. Then \
-tell me, briefly, what's on the board and what you'd suggest tackling first.
-"""
-
 /// Instructions written to the control dir's `AGENTS.md`, read by the Oracle CLI
 /// agent on launch. Kept here (not a bundled resource) so it ships with the binary
 /// and stays in lockstep with the dispatch protocol the app implements.
@@ -272,6 +318,13 @@ You are **Oracle**, a persistent agent operating at a GLOBAL level across every
 juancode session and work dir. You are not scoped to one project. Your job is to
 track cross-cutting work and dispatch agents into the projects where the work
 actually happens.
+
+## On startup
+
+When the user first speaks to you, orient yourself before answering: run
+`bd ready` to see the current global work items and read `./state.json` to see
+what agents are already running. Then tell them, briefly, what's on the board and
+what you'd suggest tackling first.
 
 ## Your global tracker
 
@@ -285,16 +338,29 @@ GLOBAL notes/issue tracker — a single item may span one or more projects.
   trackers live in each repo's own `.beads/` and are owned by that project — read
   them by dispatching an agent there; don't edit them from here.
 
-## Seeing what's running
+## Seeing what's running, and where you can dispatch
 
-`state.json` (refreshed by the app) lists active sessions and their work dirs:
+`state.json` (refreshed by the app) has two lists you need. `projects` is your
+**dispatch address book** — every project you may target, with its absolute path,
+whether or not it has a session yet. `sessions` is what's currently running.
 
 ```json
-{ "updatedAt": 0, "workdirs": ["/abs/project"],
+{ "updatedAt": 0,
+  "workdirs": ["/abs/project"],
+  "projects": [{ "path": "/abs/project", "name": "project", "active": true }],
   "sessions": [{ "id": "…", "title": "…", "cwd": "/abs/project",
                  "provider": "claude", "status": "running", "activity": "idle",
                  "live": true }] }
 ```
+
+## Choosing the project to dispatch to
+
+The `project` field of a dispatch MUST be the exact `path` of an entry in
+`state.json`'s `projects` list. **Never invent, guess, or hand-construct a path** —
+a wrong path silently fails or spawns an agent in the wrong place. Match the user's
+words against the `name`/`path` of a listed project. If what they're asking for
+isn't in the list, DON'T guess — tell them it's not a known project and ask for the
+absolute path (then it'll appear once a session exists there).
 
 ## Dispatching agents into projects
 
@@ -306,10 +372,10 @@ juancode session in that project:
 {"project":"/abs/path/to/repo","prompt":"Work on oracle-12: …","provider":"claude","worktree":false}
 ```
 
-Fields: `project` (absolute path, required), `prompt` (required), `provider`
-(`"claude"` or `"codex"`, default claude), `worktree` (default false — set true
-to isolate the agent in a fresh git worktree off the project so parallel agents
-don't collide). Append with your file tools, e.g.:
+Fields: `project` (absolute path from the `projects` list, required), `prompt`
+(required), `provider` (`"claude"` or `"codex"`, default claude), `worktree`
+(default false — set true to isolate the agent in a fresh git worktree off the
+project so parallel agents don't collide). Append with your file tools, e.g.:
 
 ```sh
 echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl

@@ -33,6 +33,14 @@ struct OracleDock: View {
                 .offset(x: oracle.expanded ? 0 : hiddenOffset)
                 .allowsHitTesting(oracle.expanded)
         }
+        // Always fill the window AND pin the content to the trailing edge. When
+        // collapsed there's no full-width scrim, so the ZStack shrinks to the
+        // panel's own width; a plain fill frame would center that narrow box,
+        // leaving the panel ~half the window from the right edge and `hiddenOffset`
+        // only sliding it partway off (a visible strip stays). Aligning to
+        // `.trailing` keeps the panel flush against the real right edge in both
+        // states, so the slide-off-screen geometry is correct.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .animation(.easeOut(duration: 0.16), value: oracle.expanded)
         .onAppear { oracle.bootstrap() }
     }
@@ -320,7 +328,9 @@ private struct OracleChatView: View {
             // The resizable dock is the key glitch test case.
             Group {
                 if TerminalBackendChoice.useGhostty {
-                    GhosttyLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
+                    GhosttyLive(session: session, remembersSize: false,
+                                focusToken: oracle.chatFocusToken,
+                                onGrid: { cols, rows in oracle.rememberDockGrid(cols: cols, rows: rows) })
                         .id(ObjectIdentifier(session))
                 } else {
                     SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)

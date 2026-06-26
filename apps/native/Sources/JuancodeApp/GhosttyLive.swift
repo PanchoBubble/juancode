@@ -44,12 +44,17 @@ struct GhosttyLive: View {
     var remembersSize: Bool = true
     var focusToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    /// Reports the real grid Ghostty measures for the current bounds (cols, rows).
+    /// Lets a caller persist a surface-specific spawn size — e.g. the Oracle dock,
+    /// which can't use the shared `TerminalGrid` (that's the main panes') and must
+    /// respawn into a grid Ghostty actually rendered, not a hand-estimated one.
+    var onGrid: ((Int, Int) -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
             GhosttyRepresentable(session: session, targetSize: proxy.size,
                                  remembersSize: remembersSize, focusToken: focusToken,
-                                 autoFocusOnAppear: autoFocusOnAppear)
+                                 autoFocusOnAppear: autoFocusOnAppear, onGrid: onGrid)
         }
     }
 }
@@ -141,10 +146,12 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     var remembersSize: Bool
     var focusToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    var onGrid: ((Int, Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
     func makeNSView(context: Context) -> GhosttyHostView {
+        context.coordinator.onGrid = onGrid
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         context.coordinator.attach(to: tv)
         let host = GhosttyHostView(terminal: tv)
@@ -154,6 +161,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
+        context.coordinator.onGrid = onGrid
         nsView.applySize(targetSize)
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken
@@ -182,6 +190,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var lastSent: (cols: Int, rows: Int)?
         private let remembersSize: Bool
         var lastFocusToken = 0
+        /// Surface-specific grid sink (see `GhosttyLive.onGrid`).
+        var onGrid: ((Int, Int) -> Void)?
 
         init(session: Session, remembersSize: Bool) {
             self.session = session
@@ -253,6 +263,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
             if let last = lastSent, last.cols == cols, last.rows == rows { return }
             lastSent = (cols, rows)
+            onGrid?(cols, rows)
             session.resize(cols: cols, rows: rows)
         }
 

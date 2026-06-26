@@ -152,6 +152,12 @@ struct JuancodeApp: App {
                 Toggle("Turn-End Notifications", isOn: Binding(
                     get: { model.notifyOnTurnEnd },
                     set: { model.notifyOnTurnEnd = $0 }))
+                // Block idle system sleep so a long prompt isn't cut off when you
+                // step away. ⌃⇧A toggles it from anywhere.
+                Toggle("Keep Awake", isOn: Binding(
+                    get: { model.keepAwake },
+                    set: { model.keepAwake = $0 }))
+                    .keyboardShortcut("a", modifiers: [.control, .shift])
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") { model.toggleBottomTerminal() }

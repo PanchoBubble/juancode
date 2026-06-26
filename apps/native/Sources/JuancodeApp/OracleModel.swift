@@ -4,6 +4,10 @@ import AppKit
 import JuancodeCore
 import JuancodeServices
 
+/// UserDefaults keys for the dock's last real Ghostty-measured grid (see `dockGrid`).
+private let dockGridColsKey = "oracle.grid.cols"
+private let dockGridRowsKey = "oracle.grid.rows"
+
 /// Drives the global "Oracle" helper (juancode-wjg): bootstraps the control dir,
 /// owns the pinned Oracle agent session, keeps `state.json` fresh, tails the
 /// dispatch mailbox to spawn agents into projects, and exposes the global bd
@@ -65,6 +69,13 @@ final class OracleModel {
     /// The agent CLI is spawned here — on open, when the drawer's size is known — not
     /// at launch, so it boots into the panel's grid rather than the main window's.
     func open(tab: OracleTab) {
+        // Act as a toggle: invoking the command for the tab that's already showing
+        // collapses the dock, so the top-bar Issues / Oracle buttons (and ⌘⇧I) close
+        // it as well as open it — otherwise the panel only ever opens and feels stuck.
+        if expanded, self.tab == tab {
+            expanded = false
+            return
+        }
         self.tab = tab
         expanded = true
         bootstrap()
@@ -146,7 +157,9 @@ final class OracleModel {
     }
 
     /// Restore the most recent persisted Oracle session (reactivating it) or spawn
-    /// a fresh one seeded with the role prompt. The Oracle session is identified by
+    /// a fresh one. The agent's role lives in the control dir's `AGENTS.md` (read by
+    /// the CLI on launch), so the fresh spawn needs no seed prompt. The Oracle session
+    /// is identified by
     /// its unique cwd (the control dir), so there's no schema/protocol change.
     private func ensureAgentSession() {
         if let existing = app.liveSession(inCwd: controlDir) {
@@ -161,7 +174,11 @@ final class OracleModel {
         spawnAgent()
     }
 
-    private func spawnAgent(seed: String = oracleSeedPrompt) {
+    /// Spawn the Oracle agent. By default it boots **silent** — its role and startup
+    /// routine live in the control dir's `AGENTS.md`, which the CLI reads on launch, so
+    /// there's no seed prompt typed into the chat. `seed` is only non-empty on the ask
+    /// path (`receiveAsk`), where the remote question is delivered as the first turn.
+    private func spawnAgent(seed: String = "") {
         Task {
             // Accept-all so Oracle can run bd + manage its mailbox without prompts;
             // it operates only in its own control dir. Don't steal the selection.
@@ -193,12 +210,25 @@ final class OracleModel {
         }
     }
 
-    /// Estimate the Oracle drawer's terminal grid so the agent CLI boots matching it.
-    /// Width comes from the persisted drawer width; height is the live window's, since
-    /// the drawer is full-height. Cell metrics (~9.85×18pt) are the SwiftTerm
-    /// default-font dimensions measured from live sessions; the drawer chrome (header +
-    /// tab picker) costs ~92pt of height. Approximate is fine — the live view fine-tunes.
+    /// Persist the real grid the Ghostty surface measured for the dock, so the next
+    /// agent spawn boots at exactly that size — no reflow, no garbled startup banner.
+    /// The CLI emits its (normal-screen) startup output at the spawn grid; if that
+    /// mismatches the render grid it wraps wrong and lands mis-wrapped in scrollback.
+    func rememberDockGrid(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        UserDefaults.standard.set(cols, forKey: dockGridColsKey)
+        UserDefaults.standard.set(rows, forKey: dockGridRowsKey)
+    }
+
+    /// The grid the agent CLI boots into. Prefer the real grid Ghostty last measured
+    /// for the dock (persisted via `rememberDockGrid`); fall back to an estimate from
+    /// the drawer width + window height only before the surface has ever measured one.
+    /// Cell metrics (~9.85×18pt) are SwiftTerm's defaults — a rough seed for the very
+    /// first spawn; the live Ghostty view then measures the true grid and remembers it.
     private var dockGrid: (cols: Int, rows: Int) {
+        let storedCols = UserDefaults.standard.integer(forKey: dockGridColsKey)
+        let storedRows = UserDefaults.standard.integer(forKey: dockGridRowsKey)
+        if storedCols > 0, storedRows > 0 { return (storedCols, storedRows) }
         let w = max(460, (UserDefaults.standard.object(forKey: "oracle.panel.width") as? Double) ?? 600)
         let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
         let winH = Double(window?.contentView?.bounds.height ?? 820)
@@ -269,6 +299,14 @@ final class OracleModel {
         let (dispatches, newOffset) = readOracleDispatches(since: dispatchOffset)
         dispatchOffset = newOffset
         for d in dispatches {
+            // Guard the target path: a dispatch to a non-existent dir would otherwise
+            // silently spawn a session in the wrong place. Reject it and tell Oracle
+            // so it can re-dispatch to a real `projects` entry rather than guessing.
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: d.project, isDirectory: &isDir), isDir.boolValue else {
+                rejectDispatch(d)
+                continue
+            }
             // Spawn (or seed) the agent in the target project. Selecting it lets the
             // user jump straight to freshly dispatched work.
             await app.create(provider: d.resolvedProvider, cwd: d.project,
@@ -289,10 +327,24 @@ final class OracleModel {
                 provider: meta.provider.rawValue, status: meta.status.rawValue,
                 activity: app.activity(meta.id)?.rawValue, live: app.isLive(meta.id))
         }
-        let next = OracleState(updatedAt: nowMs(), workdirs: knownProjects, sessions: snaps)
+        let projects = discoverOracleProjects(
+            workspaceRoot: Config.workspaceRoot,
+            sessionCwds: app.sessions.compactMap { $0.cwd == controlDir ? nil : $0.cwd })
+        let next = OracleState(updatedAt: nowMs(), workdirs: knownProjects, sessions: snaps, projects: projects)
         // Skip the write when nothing meaningful changed (ignore the timestamp).
-        if let last = lastState, last.workdirs == next.workdirs, last.sessions == next.sessions { return }
+        if let last = lastState, last.workdirs == next.workdirs, last.sessions == next.sessions,
+           last.projects == next.projects { return }
         lastState = next
         try? writeOracleState(next)
+    }
+
+    /// Tell the Oracle agent a dispatch was rejected (bad `project` path) so it can
+    /// correct itself instead of silently losing the work. Delivered into its live
+    /// chat the same way a remote ask is; no-op if the agent isn't up (the agent
+    /// re-reads `state.json` on its next turn anyway).
+    private func rejectDispatch(_ d: OracleDispatch) {
+        guard let s = session else { return }
+        s.submit("⚠️ Dispatch rejected: \"\(d.project)\" is not an existing directory. "
+            + "Use the exact `path` of an entry in state.json's `projects` list — don't guess paths.")
     }
 }

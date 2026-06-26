@@ -119,6 +119,20 @@ private struct PaneNavInstaller: NSViewRepresentable {
     final class Coordinator { var monitor: Any? }
 }
 
+/// The repo a working directory belongs to, for sidebar grouping. A juancode
+/// worktree lives in a sibling `<repo>-worktrees/<name>` dir (see `createWorktree`);
+/// map it back to `<repo>` so its sessions nest under the project instead of
+/// floating as their own hash-named folder. Any other path is its own project.
+func projectCwd(for cwd: String) -> String {
+    let url = URL(fileURLWithPath: cwd)
+    let parent = url.deletingLastPathComponent()
+    let parentName = parent.lastPathComponent
+    guard parentName.hasSuffix("-worktrees") else { return cwd }
+    let repoBase = String(parentName.dropLast("-worktrees".count))
+    guard !repoBase.isEmpty else { return cwd }
+    return parent.deletingLastPathComponent().appendingPathComponent(repoBase).path
+}
+
 /// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
 private struct FolderGroup: Identifiable {
     let cwd: String
@@ -186,7 +200,13 @@ struct SidebarView: View {
             : visible.filter {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q)
             }
-        let byCwd = Dictionary(grouping: filtered, by: \.cwd)
+        // Group by the owning repo so linked worktrees nest under their project
+        // instead of floating as their own folder. Prefer git's authoritative
+        // worktree→repo map (`worktreeRepoRoots`); fall back to the path heuristic
+        // (`<repo>-worktrees/…`) until that async scan lands.
+        let byCwd = Dictionary(grouping: filtered, by: {
+            model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
+        })
         return byCwd.map { cwd, sessions in
             FolderGroup(
                 cwd: cwd,
@@ -463,6 +483,7 @@ struct SidebarView: View {
         return SessionRow(meta: meta, activity: model.activity(meta.id),
                           live: model.isLive(meta.id), external: external,
                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                          unread: model.unreadSessions.contains(meta.id),
                           onResume: external ? { model.importExternalSession(meta.id) } : nil)
     }
 
@@ -968,6 +989,8 @@ struct SessionRow: View {
     var external: Bool = false
     /// The PR this session is tracking, if any — drives the PR label (juancode-kxy).
     var tracked: TrackedPr? = nil
+    /// Pending turn-end notification for this session — shows an unread dot until viewed.
+    var unread: Bool = false
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
 
@@ -975,7 +998,8 @@ struct SessionRow: View {
         HStack(spacing: 8) {
             statusIndicator
             VStack(alignment: .leading, spacing: 1) {
-                Text(meta.title).lineLimit(1).font(.system(size: 13))
+                Text(meta.title).lineLimit(1)
+                    .font(.system(size: 13, weight: unread ? .semibold : .regular))
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
@@ -1044,6 +1068,16 @@ struct SessionRow: View {
             }
         }
         .frame(width: 12, alignment: .center)
+        .overlay(alignment: .topTrailing) {
+            if unread {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color(NSColor.windowBackgroundColor), lineWidth: 1))
+                    .offset(x: 1, y: -1)
+                    .help("Unread — agent finished or needs your reply")
+            }
+        }
     }
 
     private var dotColor: Color {
