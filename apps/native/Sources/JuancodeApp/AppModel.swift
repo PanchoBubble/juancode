@@ -54,6 +54,8 @@ final class AppModel {
     /// Top command-bar sheets (juancode-6sw / q6q / 38z).
     var showingWorktrees = false
     var showingTrackedPrs = false
+    /// Session-health panel (juancode-0me pillar 3 / juancode-02k).
+    var showingSessionHealth = false
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -76,6 +78,7 @@ final class AppModel {
         refresh()
         restoreTracked()
         restoreRecurringTasks()
+        startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on.
         NotificationCenter.default.addObserver(
@@ -1020,6 +1023,84 @@ final class AppModel {
             }
         }
         persistRecurringTasks()
+    }
+
+    // MARK: - Periodic health checks (juancode-0me pillar 3 / juancode-02k)
+
+    /// Unhealthy sessions surfaced by the latest health sweep, keyed by session id.
+    /// Drives the Session Health panel + its toolbar badge. Only sessions we've seen
+    /// live this run are considered, so the pile of historical exited sessions in the
+    /// store doesn't flood it — we flag the ones the orchestration loops were actually
+    /// driving when they died or stalled.
+    var sessionHealth: [String: SessionHealthReport] = [:]
+
+    /// Health alerts the user has dismissed this run, so the sweep doesn't keep
+    /// re-raising them. Cleared for a session once it recovers (so a later re-failure
+    /// surfaces again).
+    @ObservationIgnored private var dismissedHealth: Set<String> = []
+    /// Session ids we've observed live at least once this run — the set the sweep is
+    /// allowed to flag. A session must have come up before we'll report it dead/stale.
+    @ObservationIgnored private var everLive: Set<String> = []
+    /// How often the health sweep runs. Coarse — sessions dying/stalling is a
+    /// minutes-scale concern, and `onExit` already handles the live UI refresh.
+    private let healthTickInterval: Duration = .seconds(30)
+    @ObservationIgnored private var healthLoop: Task<Void, Never>?
+
+    /// Unhealthy sessions, newest-failing-id first, for the health panel + badge.
+    var unhealthySessions: [SessionHealthReport] {
+        sessionHealth.values.sorted { $0.id < $1.id }
+    }
+
+    private func startHealthLoop() {
+        guard healthLoop == nil else { return }
+        healthLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.runHealthCheckOnce()
+                try? await Task.sleep(for: self?.healthTickInterval ?? .seconds(30))
+            }
+        }
+    }
+
+    /// One health pass: reconcile the store against the live registry and republish
+    /// the set of dead/stale sessions. Idempotent and cheap, so the tracked-PR /
+    /// reactivate paths can call it directly to refresh the panel without waiting for
+    /// the next tick.
+    func runHealthCheckOnce() {
+        let now = nowMs()
+        // Remember anything currently live so we only ever flag sessions we were
+        // actually driving — not the backlog of long-dead history.
+        for meta in sessions where isLive(meta.id) { everLive.insert(meta.id) }
+        let inputs: [SessionHealthInput] = sessions.compactMap { meta in
+            guard everLive.contains(meta.id) else { return nil }
+            return SessionHealthInput(
+                id: meta.id, status: meta.status, isLive: isLive(meta.id),
+                activity: activity(meta.id), lastOutputMs: meta.updatedAt,
+                resumable: meta.cliSessionId != nil)
+        }
+        let reports = SessionHealth.sweep(inputs, nowMs: now)
+        // Keep dismissals only for sessions that are still unhealthy; a recovered one
+        // drops its dismissal so a future failure re-alerts.
+        dismissedHealth.formIntersection(Set(reports.map(\.id)))
+        sessionHealth = Dictionary(
+            uniqueKeysWithValues: reports
+                .filter { !dismissedHealth.contains($0.id) }
+                .map { ($0.id, $0) })
+    }
+
+    /// Reactivate a dead session from the health panel, then re-sweep so its alert
+    /// clears (or, if it couldn't be resumed, stays with an error surfaced).
+    func reactivateUnhealthy(_ id: String) {
+        Task {
+            await reactivate(id)
+            runHealthCheckOnce()
+        }
+    }
+
+    /// Dismiss a health alert. It won't re-raise unless the session recovers and then
+    /// fails again (see `runHealthCheckOnce`).
+    func dismissHealth(_ id: String) {
+        dismissedHealth.insert(id)
+        sessionHealth[id] = nil
     }
 
     // MARK: - Changes panel (working-tree diff + inline comments + git actions) — juancode-3bq

@@ -282,3 +282,117 @@ private struct TrackedPrRow: View {
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
 }
+
+// MARK: - Session health (juancode-0me pillar 3 / juancode-02k)
+
+/// The global view of sessions the periodic health sweep flagged as dead (their pty
+/// is gone) or stale (busy with no output for a long time — a likely hang). Offers
+/// reactivation for resumable dead ones, a jump to the session, and dismissal.
+struct SessionHealthSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Session Health").font(.title3).bold()
+                Spacer()
+                Button("Done") { dismiss() }.clickCursor()
+            }
+            .padding()
+            Divider()
+            if model.unhealthySessions.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "heart.text.square").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("All sessions healthy.").foregroundStyle(.secondary).font(.system(size: 13))
+                    Text("This panel flags sessions that died (pty exited) or stalled\n(busy with no output for a while), and offers to revive them.")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.unhealthySessions, id: \.id) { report in
+                            SessionHealthRow(report: report) { dismiss() }
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 620, height: 440)
+    }
+}
+
+private struct SessionHealthRow: View {
+    @Environment(AppModel.self) private var model
+    let report: SessionHealthReport
+    let dismiss: () -> Void
+
+    /// The persisted meta for this session, for its title + folder.
+    private var meta: SessionMeta? { model.sessions.first { $0.id == report.id } }
+
+    private var stateLabel: (text: String, color: Color, icon: String) {
+        switch report.state {
+        case .dead: return ("Dead", .red, "xmark.octagon.fill")
+        case .stale: return ("Stale", .orange, "clock.badge.exclamationmark.fill")
+        case .healthy: return ("Healthy", .green, "checkmark.circle.fill")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                let label = stateLabel
+                Image(systemName: label.icon).font(.system(size: 10)).foregroundStyle(label.color)
+                Text(meta?.title ?? report.id).font(.system(size: 13)).lineLimit(1)
+                    .help(meta?.title ?? report.id)
+                tag(label.text, label.color)
+                Spacer(minLength: 8)
+                if let cwd = meta?.cwd {
+                    Text((cwd as NSString).lastPathComponent)
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+            }
+            HStack(spacing: 12) {
+                Text(reason).font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+                if report.state == .dead {
+                    Button(report.resumable ? "Reactivate" : "Reactivate…") {
+                        model.reactivateUnhealthy(report.id)
+                    }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+                    .help(report.resumable
+                          ? "Resume this session's CLI conversation"
+                          : "Try to recover and resume this session")
+                    .clickCursor()
+                }
+                Button("Go to session") { dismiss(); model.selection = report.id }
+                    .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
+                Button("Dismiss") { model.dismissHealth(report.id) }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+                    .help("Stop flagging this session (until it recovers and fails again)")
+                    .clickCursor()
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private var reason: String {
+        switch report.state {
+        case .dead: return "The session's process exited — its prompt may never have finished."
+        case .stale: return "Busy with no output for a while — the turn looks stuck."
+        case .healthy: return ""
+        }
+    }
+
+    private func tag(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 9, weight: .medium))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.2)).foregroundStyle(color)
+            .clipShape(Capsule())
+    }
+}

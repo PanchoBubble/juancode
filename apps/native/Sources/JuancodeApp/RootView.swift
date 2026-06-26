@@ -34,6 +34,15 @@ struct RootView: View {
                 }
                 .help("Manage / clean git worktrees")
                 .clickCursor()
+                Button { model.showingSessionHealth = true } label: {
+                    Label("Session Health", systemImage: model.unhealthySessions.isEmpty
+                          ? "heart.text.square" : "heart.slash")
+                }
+                .help(model.unhealthySessions.isEmpty
+                      ? "Session health — dead / stalled sessions"
+                      : "\(model.unhealthySessions.count) session(s) need attention")
+                .foregroundStyle(model.unhealthySessions.isEmpty ? Color.primary : Color.orange)
+                .clickCursor()
                 Button { oracle.open(tab: .issues) } label: {
                     Label("Issues", systemImage: "tray.full")
                 }
@@ -57,6 +66,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.showingTrackedPrs) {
             TrackedPrsSheet()
+        }
+        .sheet(isPresented: $model.showingSessionHealth) {
+            SessionHealthSheet()
         }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
