@@ -415,6 +415,10 @@ final class AppModel {
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`. The poll
     /// loop diffs each one's `gh` activity and feeds fixes into its agent session.
     var tracked: [String: TrackedPr] = [:]
+    /// Linear issues under continuous watch, keyed by `TrackedIssue.key(cwd:identifier:)`
+    /// (juancode-z4v). The same poll loop diffs each one's Linear activity and feeds
+    /// next-step prompts into its agent session — the Linear twin of `tracked`.
+    var trackedIssues: [String: TrackedIssue] = [:]
     /// How often the poll loop revisits every tracked PR.
     private let trackPollInterval: Duration = .seconds(20)
     private var trackLoop: Task<Void, Never>?
@@ -434,6 +438,20 @@ final class AppModel {
     var trackedList: [TrackedPr] {
         tracked.values.sorted {
             ($0.lastPolledAt ?? 0, $0.number) > ($1.lastPolledAt ?? 0, $1.number)
+        }
+    }
+
+    /// The tracked Linear issue whose agent session is `id`, if any.
+    func trackedIssue(forSession id: String) -> TrackedIssue? {
+        trackedIssues.values.first { $0.sessionId == id }
+    }
+
+    /// All tracked issues, most recently polled first, for the global panel.
+    var trackedIssuesList: [TrackedIssue] {
+        trackedIssues.values.sorted {
+            ($0.lastPolledAt ?? 0) != ($1.lastPolledAt ?? 0)
+                ? ($0.lastPolledAt ?? 0) > ($1.lastPolledAt ?? 0)
+                : $0.identifier > $1.identifier
         }
     }
 
@@ -461,7 +479,12 @@ final class AppModel {
     func untrackPr(_ id: String) {
         tracked[id] = nil
         persistTracked()
-        if tracked.isEmpty { trackLoop?.cancel(); trackLoop = nil }
+        stopTrackLoopIfIdle()
+    }
+
+    /// Stop the shared poll loop once nothing — PR or Linear issue — is being watched.
+    private func stopTrackLoopIfIdle() {
+        if tracked.isEmpty && trackedIssues.isEmpty { trackLoop?.cancel(); trackLoop = nil }
     }
 
     /// Dismiss a surfaced decision once the user has dealt with it.
@@ -470,12 +493,59 @@ final class AppModel {
         persistTracked()
     }
 
+    /// Start tracking a Linear issue: fetch it (for title/url + an initial baseline so
+    /// existing comments/state aren't replayed), spawn a dedicated Claude session seeded
+    /// with the issue context + do-or-escalate contract, register it, and ensure the
+    /// poll loop is running. No-op if already tracked. The Linear twin of `trackPr`.
+    func trackIssue(identifier: String, cwd: String) {
+        let key = TrackedIssue.key(cwd: cwd, identifier: identifier)
+        guard trackedIssues[key] == nil else { return }
+        Task {
+            guard let activity = await Task.detached(priority: .utility, operation: {
+                await getIssueActivity(identifier)
+            }).value else {
+                errorMessage = linearToken() == nil
+                    ? "Set LINEAR_API_KEY (or JUANCODE_LINEAR_TOKEN) in your environment to track Linear issues."
+                    : "Couldn't fetch Linear issue \(identifier)."
+                return
+            }
+            let seed = trackIssueSeedPrompt(identifier: activity.identifier,
+                                            title: activity.title, url: activity.url)
+            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
+                                             isolateWorktree: false, initialInput: seed) else { return }
+            // Baseline from the activity we already fetched, so the first poll doesn't
+            // fire events for comments/state that predate tracking.
+            let baseline = classifyIssueActivity(prev: IssueTrackSnapshot(), activity: activity).snapshot
+            trackedIssues[key] = TrackedIssue(
+                identifier: activity.identifier, title: activity.title, url: activity.url,
+                cwd: cwd, sessionId: session.id, snapshot: baseline,
+                lastPolledAt: nowMs(), lastStateName: activity.stateName)
+            persistTrackedIssues()
+            startTrackLoop()
+        }
+    }
+
+    /// Stop tracking an issue. Leaves its agent session alone; just drops it from the
+    /// watch list. Stops the loop when nothing (PR or issue) remains.
+    func untrackIssue(_ id: String) {
+        trackedIssues[id] = nil
+        persistTrackedIssues()
+        stopTrackLoopIfIdle()
+    }
+
+    /// Dismiss a surfaced issue decision once the user has dealt with it.
+    func resolveIssueNotification(issueId: String, notificationId: String) {
+        trackedIssues[issueId]?.notifications.removeAll { $0.id == notificationId }
+        persistTrackedIssues()
+    }
+
     // Tracked PRs survive an app restart (juancode-38z) via UserDefaults — the watch
     // list + diff baseline (seen comments/reviews, last CI status) are restored, so
     // the loop doesn't replay history. The driving session may be exited after a
     // restart; auto-fix prompts resume injecting once it's reactivated, while the
     // badge/state keep working in the meantime.
     private static let trackedDefaultsKey = "juancode.trackedPrs.v1"
+    private static let trackedIssuesDefaultsKey = "juancode.trackedIssues.v1"
 
     private func persistTracked() {
         let list = Array(tracked.values)
@@ -486,11 +556,25 @@ final class AppModel {
         }
     }
 
+    private func persistTrackedIssues() {
+        let list = Array(trackedIssues.values)
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: Self.trackedIssuesDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.trackedIssuesDefaultsKey)
+        }
+    }
+
     private func restoreTracked() {
-        guard let data = UserDefaults.standard.data(forKey: Self.trackedDefaultsKey),
-              let list = try? JSONDecoder().decode([TrackedPr].self, from: data) else { return }
-        for pr in list { tracked[pr.id] = pr }
-        if !tracked.isEmpty { startTrackLoop() }
+        if let data = UserDefaults.standard.data(forKey: Self.trackedDefaultsKey),
+           let list = try? JSONDecoder().decode([TrackedPr].self, from: data) {
+            for pr in list { tracked[pr.id] = pr }
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.trackedIssuesDefaultsKey),
+           let list = try? JSONDecoder().decode([TrackedIssue].self, from: data) {
+            for issue in list { trackedIssues[issue.id] = issue }
+        }
+        if !tracked.isEmpty || !trackedIssues.isEmpty { startTrackLoop() }
     }
 
     private func startTrackLoop() {
@@ -498,6 +582,7 @@ final class AppModel {
         trackLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollTrackedOnce()
+                await self?.pollTrackedIssuesOnce()
                 try? await Task.sleep(for: self?.trackPollInterval ?? .seconds(20))
             }
         }
@@ -538,6 +623,45 @@ final class AppModel {
             tracked[key] = entry
         }
         persistTracked()
+    }
+
+    /// One pass over every tracked Linear issue: fetch its activity off the main actor,
+    /// classify what changed, inject next-step prompts into the agent session, and raise
+    /// notifications for changes that need a human decision. The Linear twin of
+    /// `pollTrackedOnce`.
+    func pollTrackedIssuesOnce() async {
+        for (key, issue) in trackedIssues {
+            let identifier = issue.identifier
+            guard let activity = await Task.detached(priority: .utility, operation: {
+                await getIssueActivity(identifier)
+            }).value else { continue }
+
+            // The entry may have been untracked while we were off-actor.
+            guard var entry = trackedIssues[key] else { continue }
+            let result = classifyIssueActivity(prev: entry.snapshot, activity: activity)
+            entry.snapshot = result.snapshot
+            entry.lastPolledAt = nowMs()
+            entry.lastStateName = activity.stateName
+            entry.title = activity.title  // keep the cached title fresh
+
+            var reasons: [String] = []
+            for event in result.events {
+                switch event {
+                case .autoFix(let reason):
+                    reasons.append(reason)
+                case .needsDecision(let reason):
+                    entry.notifications.append(IssueTrackNotification(
+                        id: UUID().uuidString, issueIdentifier: identifier,
+                        message: reason, createdAt: nowMs()))
+                }
+            }
+            if !reasons.isEmpty, let session = liveSession(entry.sessionId) {
+                let prompt = issueActivityPrompt(identifier: identifier, reasons: reasons)
+                session.write("\(prompt)\r")
+            }
+            trackedIssues[key] = entry
+        }
+        persistTrackedIssues()
     }
 
     /// Revive an exited session (mirrors the WS `reactivate` path).

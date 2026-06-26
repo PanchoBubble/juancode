@@ -156,7 +156,8 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> P
 }
 
 /// Comma-join distinct, non-empty `@author`s in first-seen order (for summaries).
-private func orderedUniqueAuthors(_ logins: [String]) -> String {
+/// Shared with the Linear issue tracker (`classifyIssueActivity`).
+func orderedUniqueAuthors(_ logins: [String]) -> String {
     var seen = Set<String>()
     var out: [String] = []
     for l in logins where !l.isEmpty && seen.insert(l).inserted { out.append("@\(l)") }
