@@ -298,6 +298,9 @@ struct SidebarView: View {
                         } isTargeted: { hovering in
                             dropTarget = hovering ? group.cwd : (dropTarget == group.cwd ? nil : dropTarget)
                         }
+                        // Let the project bar span the full sidebar width (no default
+                        // section-header inset), so its fill/divider reach both edges.
+                        .listRowInsets(EdgeInsets())
                     }
                 }
                 if groups.isEmpty {
@@ -521,8 +524,10 @@ private struct FolderHeader: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            // Chevron + name + running-count form the collapse toggle; the "+" menu
-            // and PR/issue badges stay separately clickable.
+            // Chevron + name + running-count + the empty stretch up to the "+" menu all
+            // form the collapse toggle (the trailing Spacer lives *inside* the button so
+            // the whole row width is clickable); the "+" menu and PR/issue badges stay
+            // separately clickable.
             Button(action: toggle) {
                 HStack(spacing: 6) {
                     Image(systemName: collapsed ? "chevron.right" : "chevron.down")
@@ -537,12 +542,12 @@ private struct FolderHeader: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.green)
                     }
+                    Spacer(minLength: 8)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .clickCursor()
-            Spacer()
             // A popover (not a native Menu) so each agent option is a real SwiftUI
             // button: it gets the pointing-hand cursor + hover highlight, and clicks
             // register reliably (native menu rows did neither).
@@ -574,6 +579,14 @@ private struct FolderHeader: View {
             FolderIssues(cwd: group.cwd)
             FolderPrs(cwd: group.cwd)
         }
+        // Give each project a distinct, full-width bar: a subtle raised fill for
+        // contrast against the session rows, plus a top divider so projects read as
+        // separate sections.
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.06))
+        .overlay(alignment: .top) { Divider() }
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
     }
 }
