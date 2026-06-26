@@ -86,6 +86,110 @@ final class DiffParseTests: XCTestCase {
         XCTAssertEqual(hunks[1].lines[2].newLine, 11) // insert "DROP"
     }
 
+    // MARK: - parseMultiFileDiff (PR diffs, juancode-49w)
+
+    func testParseMultiFileDiffEmptyAndHeaderless() {
+        XCTAssertTrue(parseMultiFileDiff("").isEmpty)
+        // No `diff --git` header → nothing parsed.
+        XCTAssertTrue(parseMultiFileDiff("just some text\nno header here\n").isEmpty)
+    }
+
+    func testParseMultiFileDiffSplitsModifiedAddedDeleted() {
+        let patch = """
+        diff --git a/keep.txt b/keep.txt
+        index 111..222 100644
+        --- a/keep.txt
+        +++ b/keep.txt
+        @@ -1,2 +1,3 @@
+         one
+         two
+        +three
+        diff --git a/new.txt b/new.txt
+        new file mode 100644
+        index 000..333
+        --- /dev/null
+        +++ b/new.txt
+        @@ -0,0 +1,1 @@
+        +fresh
+        diff --git a/gone.txt b/gone.txt
+        deleted file mode 100644
+        index 444..000
+        --- a/gone.txt
+        +++ /dev/null
+        @@ -1,1 +0,0 @@
+        -remove me
+        """
+        let files = parseMultiFileDiff(patch)
+        var byPath: [String: DiffFile] = [:]
+        for f in files { byPath[f.path] = f }
+
+        XCTAssertEqual(byPath.count, 3)
+        XCTAssertEqual(byPath["keep.txt"]?.status, .modified)
+        XCTAssertEqual(byPath["keep.txt"]?.additions, 1)
+        XCTAssertEqual(byPath["keep.txt"]?.deletions, 0)
+        XCTAssertNil(byPath["keep.txt"]?.oldPath)
+        XCTAssertTrue(byPath["keep.txt"]?.diff.contains("@@ -1,2 +1,3 @@") ?? false)
+
+        XCTAssertEqual(byPath["new.txt"]?.status, .added)
+        XCTAssertEqual(byPath["new.txt"]?.additions, 1)
+
+        XCTAssertEqual(byPath["gone.txt"]?.status, .deleted)
+        XCTAssertEqual(byPath["gone.txt"]?.deletions, 1)
+    }
+
+    func testParseMultiFileDiffDetectsRename() {
+        let patch = """
+        diff --git a/old/name.txt b/new/name.txt
+        similarity index 95%
+        rename from old/name.txt
+        rename to new/name.txt
+        index 111..222 100644
+        --- a/old/name.txt
+        +++ b/new/name.txt
+        @@ -1,1 +1,1 @@
+        -hello
+        +hello world
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].status, .renamed)
+        XCTAssertEqual(files[0].path, "new/name.txt")
+        XCTAssertEqual(files[0].oldPath, "old/name.txt")
+    }
+
+    func testParseMultiFileDiffMarksBinaryWithZeroCounts() {
+        let patch = """
+        diff --git a/logo.png b/logo.png
+        new file mode 100644
+        index 000..abc
+        Binary files /dev/null and b/logo.png differ
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].path, "logo.png")
+        XCTAssertTrue(files[0].binary)
+        XCTAssertEqual(files[0].additions, 0)
+        XCTAssertEqual(files[0].deletions, 0)
+        XCTAssertEqual(files[0].diff, "") // body dropped for binary
+    }
+
+    func testParseMultiFileDiffIgnoresLeadingPreamble() {
+        // gh sometimes prefaces the patch with non-diff lines — they're skipped.
+        let patch = """
+        Some preamble line
+        diff --git a/f.txt b/f.txt
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.map(\.path), ["f.txt"])
+        XCTAssertEqual(files[0].additions, 1)
+        XCTAssertEqual(files[0].deletions, 1)
+    }
+
     // MARK: - commentRangeLabel
 
     func testRangeLabel() {

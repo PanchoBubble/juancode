@@ -121,6 +121,90 @@ public func getDiff(_ cwd: String) async throws -> DiffResult {
         base = EMPTY_TREE
     }
 
+    return try await collectDiff(cwd, root: root, base: base)
+}
+
+/// Result of diffing the current branch against a base branch (juancode-49w):
+/// the base ref actually used (e.g. `origin/main`) plus the diff against the
+/// merge-base. Carries `base` so the UI can label what it's comparing against.
+public struct BaseDiffResult: Sendable, Equatable {
+    /// The base ref the diff was computed against (empty when not a git repo).
+    public let base: String
+    public let result: DiffResult
+    public init(base: String, result: DiffResult) {
+        self.base = base; self.result = result
+    }
+}
+
+/// Diff the current branch against its base branch — everything this branch
+/// introduced (committed *and* uncommitted) relative to where it diverged from
+/// `base`. When `base` is nil the repo's default branch is inferred (origin/HEAD,
+/// then main/master/develop). Returns a `{ git: false }` shape for a non-git cwd
+/// (mirroring `getDiff`); throws `GitError` when no base branch or no shared
+/// history can be found.
+public func getBaseDiff(_ cwd: String, base requestedBase: String? = nil) async throws -> BaseDiffResult {
+    // Confirm this is a git work tree.
+    let root: String
+    do {
+        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if inside != "true" { return BaseDiffResult(base: "", result: DiffResult(git: false, files: [])) }
+        root = try await git(cwd, ["rev-parse", "--show-toplevel"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch {
+        return BaseDiffResult(base: "", result: DiffResult(git: false, files: []))
+    }
+
+    // Resolve the base ref: the caller's choice, else the inferred default branch.
+    let base: String
+    if let requestedBase, !requestedBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        base = requestedBase.trimmingCharacters(in: .whitespacesAndNewlines)
+    } else if let inferred = await defaultBaseBranch(cwd) {
+        base = inferred
+    } else {
+        throw GitError("No base branch found to diff against.")
+    }
+
+    // The merge-base is where this branch diverged from `base`; diffing against it
+    // shows just this branch's changes (not commits that landed on base since).
+    let mergeBase: String
+    do {
+        mergeBase = try await git(cwd, ["merge-base", base, "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch {
+        throw GitError("No base branch found to diff against.")
+    }
+    if mergeBase.isEmpty { throw GitError("No common history with \(base).") }
+
+    let result = try await collectDiff(cwd, root: root, base: mergeBase)
+    return BaseDiffResult(base: base, result: result)
+}
+
+/// Infer the repo's default/base branch: the `origin/HEAD` symbolic ref first
+/// (e.g. `origin/main`), then the first of main/master/develop that exists as a
+/// remote or local ref. Returns nil when none can be found. Never throws.
+public func defaultBaseBranch(_ cwd: String) async -> String? {
+    // origin/HEAD points at the remote's default branch when it's been set.
+    if let head = try? await git(cwd, ["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+        let ref = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ref.isEmpty && ref != "origin/HEAD" { return ref }
+    }
+    for name in ["main", "master", "develop"] {
+        for ref in ["origin/\(name)", name] {
+            if let out = try? await git(cwd, ["rev-parse", "--verify", "--quiet", ref]),
+               !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return ref
+            }
+        }
+    }
+    return nil
+}
+
+/// Build the per-file diff set of a known git work tree against `base`: every
+/// tracked change (name-status, renames via -M) plus untracked files, each as its
+/// own unified diff. Shared by the working-tree diff (`getDiff`, base = HEAD) and
+/// the base-branch diff (`getBaseDiff`, base = merge-base).
+private func collectDiff(_ cwd: String, root: String, base: String) async throws -> DiffResult {
     var files: [DiffFile] = []
 
     // Tracked changes vs base, via name-status (handles renames with -M).
