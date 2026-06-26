@@ -12,9 +12,11 @@ import JuancodeServices
 /// in-memory with a "Submit review" that injects them into the agent, and commit /
 /// push / PR run via AppModel — all in-process (no WS hop), mirroring FolderPrs /
 /// FolderIssues. An optional "Review with Claude" pass (juancode-7ha) runs the real
-/// `claude` CLI over the diff and overlays its findings inline. Base-branch diff
-/// (juancode-49w) is out of scope; this view is self-contained so the Changes/Issues
-/// tab switcher (juancode-fmh) can host it as-is.
+/// `claude` CLI over the diff and overlays its findings inline. A source switcher
+/// (juancode-49w) points the same viewer at the working tree, the current branch vs
+/// its base/merge-base, or an existing PR's diff (`gh pr diff`) — and surfaces a
+/// failing PR's CI logs. This view is self-contained so the Changes/Issues tab
+/// switcher (juancode-fmh) can host it as-is.
 struct ChangesPanel: View {
     @Environment(AppModel.self) private var model
     let sessionId: String
@@ -50,15 +52,114 @@ struct ChangesPanel: View {
             header
             Divider()
             reviewBanner
+            ciBanner
             content
             if !model.comments(sessionId).isEmpty {
                 Divider()
                 submitBar
             }
         }
-        .onAppear { if diff == nil { model.loadChanges(sessionId) } }
+        .onAppear {
+            if diff == nil { model.loadChanges(sessionId) }
+            // Populate the source switcher's PR list for this folder.
+            if let cwd = model.sessionCwd(sessionId) { model.loadPrs(cwd) }
+        }
         .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
         .perfTrackBody()
+    }
+
+    // MARK: - Diff source (working tree / base branch / PR) — juancode-49w
+
+    private var currentSource: AppModel.ChangesSource { model.changesSource(sessionId) }
+
+    private var sourceLabel: String {
+        switch currentSource {
+        case .workingTree: return "Working tree"
+        case .base: return "vs " + (model.changesBaseLabel(sessionId) ?? "base")
+        case .pr(let pr): return "PR #\(pr.number)"
+        }
+    }
+
+    private var sourceIcon: String {
+        switch currentSource {
+        case .workingTree: return "pencil"
+        case .base: return "arrow.triangle.branch"
+        case .pr: return "arrow.triangle.pull"
+        }
+    }
+
+    /// Dropdown to point the viewer at the working tree, the base branch, or any
+    /// open PR. The PR section is populated from the folder's `loadPrs` cache.
+    @ViewBuilder private var sourceMenu: some View {
+        let prs = (model.sessionCwd(sessionId).flatMap { model.prs($0) })?.prs ?? []
+        Menu {
+            Button { model.setChangesSource(sessionId, .workingTree) } label: {
+                sourceItemLabel("Working tree", selected: currentSource == .workingTree)
+            }
+            Button { model.setChangesSource(sessionId, .base) } label: {
+                sourceItemLabel("Against base branch", selected: currentSource == .base)
+            }
+            if !prs.isEmpty {
+                Section("Pull requests") {
+                    ForEach(prs, id: \.number) { pr in
+                        Button { model.setChangesSource(sessionId, .pr(pr)) } label: {
+                            sourceItemLabel("#\(pr.number) \(pr.title)", selected: currentSource == .pr(pr))
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: sourceIcon)
+                Text(sourceLabel).lineLimit(1)
+            }
+            .font(.system(size: 11))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose what to diff: the working tree, the base branch, or a PR")
+    }
+
+    @ViewBuilder
+    private func sourceItemLabel(_ title: String, selected: Bool) -> some View {
+        if selected { Label(title, systemImage: "checkmark") } else { Text(title) }
+    }
+
+    // MARK: - PR CI logs banner (juancode-49w)
+
+    /// When viewing a PR whose CI is red, offer to pull its failing-step logs
+    /// (`gh run view --log-failed`) inline — read CI logs without leaving juancode.
+    @ViewBuilder private var ciBanner: some View {
+        if case let .pr(pr) = currentSource, pr.checks == .failing {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                    Text("CI failing on PR #\(pr.number)")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    if model.isLoadingPrCiLogs(sessionId) {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button(model.prCiLogs(sessionId) == nil ? "Show CI logs" : "Reload logs") {
+                            model.loadPrCiLogs(sessionId, number: pr.number)
+                        }
+                        .controlSize(.small).clickCursor()
+                    }
+                }
+                if let logs = model.prCiLogs(sessionId) {
+                    ScrollView {
+                        Text(logs)
+                            .font(.system(size: 10, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 180)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.red.opacity(0.08))
+        }
     }
 
     /// Keep the tree selection valid as the diff reloads, and expand all folders the
@@ -113,6 +214,7 @@ struct ChangesPanel: View {
         .buttonStyle(.borderless)
         .help(treeShown ? "Hide the file tree" : "Show the file tree")
         .clickCursor()
+        sourceMenu
         let paths = Set(visibleFiles.map(\.path))
         Button { collapsedFiles = paths } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
             .buttonStyle(.borderless)
@@ -231,14 +333,32 @@ struct ChangesPanel: View {
 
     @ViewBuilder
     private var content: some View {
-        if loading && diff == nil {
-            centered("Loading changes…")
+        if let err = model.changesError(sessionId), diff == nil {
+            centered(err)
+        } else if loading && diff == nil {
+            centered(loadingMessage)
         } else if let d = diff, !d.git {
             centered("Not a git repository — nothing to diff.")
         } else if (diff?.files ?? []).isEmpty {
-            centered("No changes in the working tree.")
+            centered(emptyMessage)
         } else {
             splitView
+        }
+    }
+
+    private var loadingMessage: String {
+        switch currentSource {
+        case .workingTree: return "Loading changes…"
+        case .base: return "Diffing against base…"
+        case .pr(let pr): return "Loading PR #\(pr.number)…"
+        }
+    }
+
+    private var emptyMessage: String {
+        switch currentSource {
+        case .workingTree: return "No changes in the working tree."
+        case .base: return "No changes vs \(model.changesBaseLabel(sessionId) ?? "base")."
+        case .pr: return "This PR has no file changes."
         }
     }
 

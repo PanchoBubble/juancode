@@ -1182,6 +1182,28 @@ final class AppModel {
     /// "Reviewing…" spinner and disable the button.
     var reviewRunning: Set<String> = []
 
+    /// What the ChangesPanel is diffing for a session (juancode-49w): the working
+    /// tree (default), the current branch vs its base, or an existing PR. Held per
+    /// session so the choice survives view rebuilds and `Refresh`.
+    enum ChangesSource: Equatable, Sendable {
+        case workingTree
+        /// Current branch vs its base/merge-base (base inferred when nil).
+        case base
+        /// An existing PR's diff, loaded via `gh pr diff`.
+        case pr(PullRequest)
+    }
+    /// Per-session diff source. Absent ⇒ `.workingTree`.
+    var changesSourceBySession: [String: ChangesSource] = [:]
+    /// The base ref a `.base` diff resolved to (e.g. `origin/main`), for the header.
+    var changesBaseBySession: [String: String] = [:]
+    /// A per-session diff-load error (base/PR fetch failures), shown in the panel.
+    var changesErrorBySession: [String: String] = [:]
+    /// Per-session failing-CI logs for the PR currently shown in its ChangesPanel,
+    /// fetched on demand via `gh run view --log-failed` (juancode-49w).
+    var prCiLogsBySession: [String: String] = [:]
+    /// Sessions whose CI-log fetch is in flight (for the banner spinner).
+    private var prCiLogsLoading: Set<String> = []
+
     struct GitNote: Equatable { var ok: Bool; var text: String }
 
     func diff(_ id: String) -> DiffResult? { diffBySession[id] }
@@ -1189,24 +1211,63 @@ final class AppModel {
     func comments(_ id: String) -> [DiffComment] { commentsBySession[id] ?? [] }
     func review(_ id: String) -> ReviewResult? { reviewBySession[id] }
     func isReviewing(_ id: String) -> Bool { reviewRunning.contains(id) }
+    func changesSource(_ id: String) -> ChangesSource { changesSourceBySession[id] ?? .workingTree }
+    func changesBaseLabel(_ id: String) -> String? { changesBaseBySession[id] }
+    func changesError(_ id: String) -> String? { changesErrorBySession[id] }
+    func prCiLogs(_ id: String) -> String? { prCiLogsBySession[id] }
+    func isLoadingPrCiLogs(_ id: String) -> Bool { prCiLogsLoading.contains(id) }
+
+    /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel
+    /// (`gh run view --log-failed` for each red Actions check). Off the main actor;
+    /// coalesces. A "no logs" result is shown rather than left blank.
+    func loadPrCiLogs(_ id: String, number: Int) {
+        guard let cwd = cwd(of: id), !prCiLogsLoading.contains(id) else { return }
+        prCiLogsLoading.insert(id)
+        Task {
+            let logs = await Task.detached(priority: .utility) {
+                await getFailedCheckLogs(cwd, number: number)
+            }.value
+            prCiLogsBySession[id] = logs.isEmpty ? "No failing-step logs available." : logs
+            prCiLogsLoading.remove(id)
+        }
+    }
 
     /// The cwd a session's changes panel operates on (its own working directory).
     private func cwd(of id: String) -> String? {
         liveSession(id)?.meta.cwd ?? appState.store.get(id)?.cwd
     }
 
-    /// Load (or refresh) the working-tree diff + git state for a session, off the
-    /// main actor (both shell out to git). Coalesces concurrent calls. Mirrors
-    /// `loadPrs`.
+    /// The working folder of a session — for the ChangesPanel's PR picker and CI
+    /// affordances (open PRs are keyed by folder cwd).
+    func sessionCwd(_ id: String) -> String? { cwd(of: id) }
+
+    /// Switch what a session's ChangesPanel diffs and reload. No-op when the source
+    /// is unchanged. Clears the stale diff so the panel shows a spinner, not the
+    /// previous source's files, while the new one loads.
+    func setChangesSource(_ id: String, _ source: ChangesSource) {
+        guard changesSource(id) != source else { return }
+        changesSourceBySession[id] = source
+        diffBySession[id] = nil
+        changesErrorBySession[id] = nil
+        prCiLogsBySession[id] = nil
+        loadChanges(id)
+    }
+
+    /// Load (or refresh) the diff + git state for a session, off the main actor
+    /// (both shell out). The diff source (working tree / base branch / PR) is read
+    /// from `changesSource`. Coalesces concurrent calls. Mirrors `loadPrs`.
     func loadChanges(_ id: String) {
         guard let cwd = cwd(of: id), !diffInFlight.contains(id) else { return }
+        let source = changesSource(id)
         diffInFlight.insert(id)
         diffLoading.insert(id)
         Task {
-            async let d = Task.detached(priority: .utility) { try? await getDiff(cwd) }.value
-            async let g = Task.detached(priority: .utility) { await getGitState(cwd) }.value
-            let (diff, state) = await (d, g)
-            if let diff { diffBySession[id] = diff }
+            async let stateTask = Task.detached(priority: .utility) { await getGitState(cwd) }.value
+            let loaded = await Task.detached(priority: .utility) { await loadDiffForSource(cwd, source) }.value
+            let state = await stateTask
+            if let d = loaded.diff { diffBySession[id] = d }
+            if let base = loaded.base { changesBaseBySession[id] = base }
+            changesErrorBySession[id] = loaded.error
             gitStateBySession[id] = state
             diffLoading.remove(id)
             diffInFlight.remove(id)
@@ -1559,4 +1620,42 @@ final class AppModel {
             Task { try? await removeWorktree(wt) }
         }
     }
+}
+
+/// Outcome of loading a diff for a ChangesPanel source — the files, the resolved
+/// base ref (for `.base`), and a user-facing error if the fetch failed.
+private struct LoadedDiff: Sendable {
+    var diff: DiffResult?
+    var base: String?
+    var error: String?
+}
+
+/// Resolve a `ChangesSource` to its diff off the main actor (juancode-49w). The
+/// working-tree path keeps the old "swallow errors, keep prior diff" behaviour;
+/// the base/PR paths surface a clean error string the panel can show.
+private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) async -> LoadedDiff {
+    switch source {
+    case .workingTree:
+        return LoadedDiff(diff: try? await getDiff(cwd), base: nil, error: nil)
+    case .base:
+        do {
+            let bd = try await getBaseDiff(cwd)
+            return LoadedDiff(diff: bd.result, base: bd.base, error: nil)
+        } catch {
+            return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
+        }
+    case .pr(let pr):
+        do {
+            return LoadedDiff(diff: try await getPrDiff(cwd, number: pr.number), base: nil, error: nil)
+        } catch {
+            return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
+        }
+    }
+}
+
+/// The clean message from a GitError/GhError, else a generic description.
+private func diffErrorMessage(_ error: Error) -> String {
+    if let e = error as? GitError { return e.message }
+    if let e = error as? GhError { return e.message }
+    return String(describing: error)
 }
