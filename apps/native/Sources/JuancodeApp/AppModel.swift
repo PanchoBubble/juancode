@@ -54,6 +54,8 @@ final class AppModel {
     /// Top command-bar sheets (juancode-6sw / q6q / 38z).
     var showingWorktrees = false
     var showingTrackedPrs = false
+    /// Tracked Linear issues panel (juancode-7sa).
+    var showingTrackedIssues = false
     /// Session-health panel (juancode-0me pillar 3 / juancode-02k).
     var showingSessionHealth = false
     var errorMessage: String?
@@ -718,6 +720,37 @@ final class AppModel {
     func resolveIssueNotification(issueId: String, notificationId: String) {
         trackedIssues[issueId]?.notifications.removeAll { $0.id == notificationId }
         persistTrackedIssues()
+    }
+
+    /// The viewer's assigned Linear issues, for the "pick from assigned issues" picker
+    /// when starting tracking (juancode-7sa). Loaded lazily on demand.
+    var assignedIssues: [IssueSummary] = []
+    var assignedIssuesLoading = false
+
+    /// Load the viewer's assigned issues into `assignedIssues` for the tracking picker.
+    /// Surfaces the same missing-token hint as `trackIssue` when no key is set.
+    func loadAssignedIssues() {
+        guard linearToken() != nil else {
+            errorMessage = "Set LINEAR_API_KEY (or JUANCODE_LINEAR_TOKEN) in your environment to track Linear issues."
+            return
+        }
+        assignedIssuesLoading = true
+        Task {
+            let issues = await Task.detached(priority: .utility, operation: {
+                await getAssignedIssues()
+            }).value
+            assignedIssues = issues
+            assignedIssuesLoading = false
+        }
+    }
+
+    /// Distinct project roots among the current in-workspace sessions, sorted — the
+    /// folder choices when starting to track a Linear issue (the agent runs there).
+    var trackableFolders: [String] {
+        let cwds = (sessions + externalSessions)
+            .map { worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd) }
+            .filter { Config.isUnderWorkspaceRoot($0) && $0 != OraclePaths.controlDir }
+        return Array(Set(cwds)).sorted()
     }
 
     // Tracked PRs survive an app restart (juancode-38z) via UserDefaults — the watch
