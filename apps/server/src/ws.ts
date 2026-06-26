@@ -7,6 +7,7 @@ import { editors } from "./editor.ts";
 import { terminals } from "./terminal.ts";
 import { createWorktree } from "./git.ts";
 import { registry } from "./registry.ts";
+import { healthMonitor } from "./healthMonitor.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
 import type { Session } from "./session.ts";
@@ -72,6 +73,10 @@ export function setupWebSocket(server: Server): void {
     };
     for (const s of registry.all()) watchActivity(s);
     activityWatchers.add(registry.onCreate(watchActivity));
+
+    // Periodic health sweep: the full set of dead/stale sessions, pushed on
+    // connect and after every sweep so the client can surface them + reactivate.
+    activityWatchers.add(healthMonitor.onHealth((reports) => send({ type: "health", reports })));
 
     ws.on("message", (raw) => {
       let msg: ClientMessage;

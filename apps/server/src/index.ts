@@ -20,9 +20,12 @@ import type { CommentSide, DiffComment } from "./protocol.ts";
 import { PROVIDERS } from "./providers.ts";
 import { registry } from "./registry.ts";
 import { getAllStatus } from "./status.ts";
+import { healthMonitor } from "./healthMonitor.ts";
 import { setupWebSocket } from "./ws.ts";
 
 sessionDb.markOrphansExited();
+// Begin the periodic health-check sweep (dead/stale session detection).
+healthMonitor.start();
 
 const app = express();
 app.use(express.json());
