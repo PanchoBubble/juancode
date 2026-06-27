@@ -7,6 +7,7 @@ import { editors } from "./editor.ts";
 import { terminals } from "./terminal.ts";
 import { createWorktree } from "./git.ts";
 import { registry } from "./registry.ts";
+import { messageQueue } from "./messageQueue.ts";
 import { healthMonitor } from "./healthMonitor.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
@@ -42,6 +43,8 @@ export function setupWebSocket(server: Server): void {
     // Live screen-stream subscriptions, one per session this tab is watching on
     // the phone-friendly rendered-screen view.
     const screenWatchers = new Map<string, () => void>();
+    // Message-queue subscriptions, one per session this tab is watching.
+    const queueWatchers = new Map<string, () => void>();
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -127,6 +130,23 @@ export function setupWebSocket(server: Server): void {
     const unsubscribeScreen = (sessionId: string) => {
       screenWatchers.get(sessionId)?.();
       screenWatchers.delete(sessionId);
+    };
+
+    // Per-session message queue: push the current queue, then a fresh snapshot on
+    // every change. Backed by the shared store so two tabs stay in sync and the
+    // delivering session sees the same list.
+    const subscribeQueue = (sessionId: string) => {
+      if (queueWatchers.has(sessionId)) return;
+      send({ type: "queue", sessionId, items: messageQueue.list(sessionId) });
+      const off = messageQueue.onChange(sessionId, (items) =>
+        send({ type: "queue", sessionId, items }),
+      );
+      queueWatchers.set(sessionId, off);
+    };
+
+    const unsubscribeQueue = (sessionId: string) => {
+      queueWatchers.get(sessionId)?.();
+      queueWatchers.delete(sessionId);
     };
 
     // Activity (busy / done / waiting-for-input) is broadcast for *every* live
@@ -411,6 +431,31 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "subscribeQueue": {
+          subscribeQueue(msg.sessionId);
+          return;
+        }
+
+        case "unsubscribeQueue": {
+          unsubscribeQueue(msg.sessionId);
+          return;
+        }
+
+        case "queueMessage": {
+          const text = msg.text.trim();
+          if (!text) return;
+          messageQueue.add(msg.sessionId, text);
+          // Deliver right away if the session is already sitting idle; otherwise
+          // it flushes on the next idle edge.
+          registry.get(msg.sessionId)?.kickQueue();
+          return;
+        }
+
+        case "dequeueMessage": {
+          messageQueue.remove(msg.sessionId, msg.messageId);
+          return;
+        }
+
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
           return;
@@ -449,6 +494,9 @@ export function setupWebSocket(server: Server): void {
       // Drop any live screen-stream subscriptions.
       for (const off of screenWatchers.values()) off();
       screenWatchers.clear();
+      // Drop any message-queue subscriptions (the queue itself persists).
+      for (const off of queueWatchers.values()) off();
+      queueWatchers.clear();
     });
   });
 }

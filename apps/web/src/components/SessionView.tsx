@@ -5,7 +5,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
 import { useActivity, usePrompt } from "../lib/activity.ts";
-import type { ServerMessage } from "../protocol.ts";
+import type { QueuedMessage, ServerMessage } from "../protocol.ts";
 import { AttachBar } from "./AttachBar.tsx";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
@@ -148,33 +148,26 @@ export function SessionView({ id }: { id: string }) {
     void queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
-  // ── Queued follow-up message ───────────────────────────────────────────────
-  // Let the user line up their next instruction while the agent is still working
-  // (busy or waiting_input). We buffer it client-side and auto-send it as a
-  // normal `input` (with the trailing Enter the CLI expects) on the next edge
-  // into `idle` for this session. Keyed by id so switching sessions starts clean.
-  const [queued, setQueued] = useState<string | null>(null);
-  const prevActivity = useRef<typeof activity>(undefined);
+  // ── Queued follow-up messages (ticket oracle-cj3) ──────────────────────────
+  // Line up one or more instructions while the agent is still working. The queue
+  // lives on the server (persisted per session, flushed in order on the next
+  // idle), so we just mirror the snapshots it pushes and send queue/dequeue
+  // commands. Keyed by id so switching sessions starts clean.
+  const [queueItems, setQueueItems] = useState<QueuedMessage[]>([]);
   useEffect(() => {
-    setQueued(null);
-    prevActivity.current = undefined;
+    setQueueItems([]);
+    const unsub = socket.subscribe((msg: ServerMessage) => {
+      if (msg.type === "queue" && msg.sessionId === id) setQueueItems(msg.items);
+    });
+    socket.send({ type: "subscribeQueue", sessionId: id });
+    return () => {
+      socket.send({ type: "unsubscribeQueue", sessionId: id });
+      unsub();
+    };
   }, [id]);
-  useEffect(() => {
-    const was = prevActivity.current;
-    prevActivity.current = activity;
-    // Fire only on a real transition into idle (not the first observation), and
-    // only while the session is alive — a dead pty can't receive input.
-    if (
-      queued !== null &&
-      activity === "idle" &&
-      was !== undefined &&
-      was !== "idle" &&
-      status === "running"
-    ) {
-      socket.send({ type: "input", sessionId: id, data: `${queued}\r` });
-      setQueued(null);
-    }
-  }, [activity, queued, status, id]);
+  const queueMessage = (text: string) => socket.send({ type: "queueMessage", sessionId: id, text });
+  const dequeueMessage = (messageId: string) =>
+    socket.send({ type: "dequeueMessage", sessionId: id, messageId });
 
   /** Resume the session (server resumes its CLI conversation, recovering the id if needed). */
   const reactivate = () => {
@@ -542,8 +535,8 @@ export function SessionView({ id }: { id: string }) {
         <DecisionCard sessionId={id} prompt={prompt} />
       )}
       {status === "running" &&
-        (activity === "busy" || activity === "waiting_input" || queued !== null) && (
-          <MessageQueue queued={queued} onQueue={setQueued} onCancel={() => setQueued(null)} />
+        (activity === "busy" || activity === "waiting_input" || queueItems.length > 0) && (
+          <MessageQueue items={queueItems} onQueue={queueMessage} onRemove={dequeueMessage} />
         )}
     </div>
   );

@@ -2,7 +2,15 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { DATA_DIR } from "./config.ts";
-import type { DiffComment, ProviderId, ReviewResult, SessionMeta, SessionUsage } from "./protocol.ts";
+import { randomUUID } from "node:crypto";
+import type {
+  DiffComment,
+  ProviderId,
+  QueuedMessage,
+  ReviewResult,
+  SessionMeta,
+  SessionUsage,
+} from "./protocol.ts";
 
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -78,6 +86,21 @@ db.exec(`
     payload     TEXT NOT NULL,
     created_at  INTEGER NOT NULL
   );
+`);
+
+// Per-session outbound message queue: instructions the user lined up while the
+// agent was busy, delivered in order on the next idle. Persisted so the queue
+// survives a reconnect / server restart and a session reactivating, and so the
+// flush happens once server-side regardless of how many tabs are watching.
+// Insertion order (and thus delivery order) is the implicit `rowid`.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS message_queue (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_message_queue_session ON message_queue(session_id);
 `);
 
 // Full-text search index over each session's title + scrollback. A contentless
@@ -185,6 +208,7 @@ const searchStmt = db.prepare(`
 const deleteSessionStmt = db.prepare(`DELETE FROM sessions WHERE id = ?`);
 const deleteSessionCommentsStmt = db.prepare(`DELETE FROM diff_comments WHERE session_id = ?`);
 const deleteSessionReviewStmt = db.prepare(`DELETE FROM diff_reviews WHERE session_id = ?`);
+const deleteSessionQueueStmt = db.prepare(`DELETE FROM message_queue WHERE session_id = ?`);
 
 // FTS sync: the index is contentless, so a "row update" is delete-then-insert.
 const ftsDeleteStmt = db.prepare(`DELETE FROM sessions_fts WHERE session_id = ?`);
@@ -219,6 +243,7 @@ export function toFtsMatch(query: string): string {
 const deleteSessionTxn = db.transaction((id: string): boolean => {
   deleteSessionCommentsStmt.run(id);
   deleteSessionReviewStmt.run(id);
+  deleteSessionQueueStmt.run(id);
   ftsDeleteStmt.run(id);
   return deleteSessionStmt.run(id).changes > 0;
 });
@@ -374,6 +399,57 @@ export const reviewDb = {
     } catch {
       return null;
     }
+  },
+};
+
+const insertQueueStmt = db.prepare(`
+  INSERT INTO message_queue (id, session_id, text, created_at)
+  VALUES (@id, @sessionId, @text, @createdAt)
+`);
+const listQueueStmt = db.prepare(
+  `SELECT id, text, created_at FROM message_queue WHERE session_id = ? ORDER BY rowid ASC`,
+);
+const firstQueueStmt = db.prepare(
+  `SELECT id, text, created_at FROM message_queue WHERE session_id = ? ORDER BY rowid ASC LIMIT 1`,
+);
+const deleteQueueItemStmt = db.prepare(
+  `DELETE FROM message_queue WHERE id = ? AND session_id = ?`,
+);
+
+interface QueueRow {
+  id: string;
+  text: string;
+  created_at: number;
+}
+
+const rowToQueued = (r: QueueRow): QueuedMessage => ({
+  id: r.id,
+  text: r.text,
+  createdAt: r.created_at,
+});
+
+export const messageQueueDb = {
+  /** Append a message to a session's queue, returning the stored item. */
+  add(sessionId: string, text: string): QueuedMessage {
+    const item: QueuedMessage = { id: randomUUID(), text, createdAt: Date.now() };
+    insertQueueStmt.run({ id: item.id, sessionId, text, createdAt: item.createdAt });
+    return item;
+  },
+
+  /** A session's pending messages, in delivery (insertion) order. */
+  list(sessionId: string): QueuedMessage[] {
+    return (listQueueStmt.all(sessionId) as QueueRow[]).map(rowToQueued);
+  },
+
+  /** The next message to deliver, or null when the queue is empty. */
+  first(sessionId: string): QueuedMessage | null {
+    const row = firstQueueStmt.get(sessionId) as QueueRow | undefined;
+    return row ? rowToQueued(row) : null;
+  },
+
+  /** Remove one queued message; returns true when it belonged to the session. */
+  remove(sessionId: string, id: string): boolean {
+    return deleteQueueItemStmt.run(id, sessionId).changes > 0;
   },
 };
 

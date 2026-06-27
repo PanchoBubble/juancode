@@ -11,6 +11,7 @@ import { deriveSessionTitle } from "./sessionTitle.ts";
 import { deriveSessionUsage } from "./sessionUsage.ts";
 import { ActivityDetector } from "./activityDetector.ts";
 import { notificationGate } from "./notificationGate.ts";
+import { messageQueue } from "./messageQueue.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
 import type { ProviderId, ScreenRow, SessionActivity, SessionMeta, SessionPrompt } from "./protocol.ts";
@@ -37,6 +38,15 @@ const TITLE_POLL_MS = 4000;
  * the device.
  */
 const SCREEN_FLUSH_MS = 80;
+
+/** Tunables for delivering queued messages on an idle transition (oracle-cj3). */
+const QUEUE = {
+  /** Pause between pasting the text and the submitting Enter (let the TUI catch up). */
+  pasteToEnterMs: 80,
+  /** How long to confirm a delivered message took (the agent went busy). */
+  acceptMs: 4000,
+  pollMs: 120,
+} as const;
 
 /** Tunables for the verified initial-prompt delivery in {@link Session.autoSubmit}. */
 const SEED = {
@@ -66,6 +76,10 @@ export class Session {
   /** Last screen frame we diffed against, so flushes only carry changed rows. */
   private lastScreenRows: string[] = [];
   private screenTimer: NodeJS.Timeout | null = null;
+  /** Previous activity, tracked to fire the queue flush on the edge into idle. */
+  private prevQueueActivity: SessionActivity | undefined;
+  /** True while {@link flushQueue} is mid-delivery, so edges don't overlap it. */
+  private flushingQueue = false;
   private readonly detector: ActivityDetector;
   /**
    * Tails this session's stream-json transcript purely to feed structured
@@ -92,6 +106,7 @@ export class Session {
       // those bursts so clients ding / OS-notify once, not once per repaint.
       const alert = notify && notificationGate.shouldNotify(this.meta.id, state);
       for (const l of this.activityListeners) l(state, alert);
+      this.maybeFlushQueueOnEdge(state);
     });
     // Preferred activity signal: pulse the detector busy on each batch of agent
     // records the CLI appends to its transcript. The id is read via a getter so
@@ -450,6 +465,59 @@ export class Session {
   onActivity(listener: ActivityListener): () => void {
     this.activityListeners.add(listener);
     return () => this.activityListeners.delete(listener);
+  }
+
+  /**
+   * Nudge the queue when a message is added while the session is already idle —
+   * otherwise the next message would wait for an activity edge that never comes.
+   * Safe to call any time; it no-ops unless idle with something to deliver.
+   */
+  kickQueue(): void {
+    if (this.isRunning && this.activity === "idle") void this.flushQueue();
+  }
+
+  /** Fire the queue flush only on a real transition *into* idle (turn boundary). */
+  private maybeFlushQueueOnEdge(state: SessionActivity): void {
+    const was = this.prevQueueActivity;
+    this.prevQueueActivity = state;
+    if (state === "idle" && was !== undefined && was !== "idle") void this.flushQueue();
+  }
+
+  /**
+   * Deliver queued messages (ticket oracle-cj3) one at a time while the session
+   * sits idle. Each is sent with the same bracketed-paste-then-Enter the seed and
+   * decision-reply paths use (a `${text}\r` burst is read as a paste with the CR
+   * kept literal, so it never submits). We pop a message only once we've confirmed
+   * it landed the agent in `busy`; that also ends this pass — the agent finishing
+   * the turn fires the next idle edge, which delivers the next message in order.
+   */
+  private async flushQueue(): Promise<void> {
+    if (this.flushingQueue) return;
+    this.flushingQueue = true;
+    try {
+      while (this.isRunning && this.activity === "idle") {
+        const item = messageQueue.peek(this.meta.id);
+        if (!item) break;
+        this.write(`\x1b[200~${item.text}\x1b[201~`);
+        await sleep(QUEUE.pasteToEnterMs);
+        if (!this.isRunning) break;
+        this.write("\r");
+        const accepted = await this.waitUntil(
+          QUEUE.acceptMs,
+          QUEUE.pollMs,
+          () => this.isBusy() || !this.isRunning,
+        );
+        // Drop the message only once it actually took; otherwise leave it queued
+        // and stop, so a stalled delivery is retried on the next idle/kick rather
+        // than spun on in a hot loop.
+        if (accepted && this.isBusy()) {
+          messageQueue.remove(this.meta.id, item.id);
+        }
+        break;
+      }
+    } finally {
+      this.flushingQueue = false;
+    }
   }
 
   /** Poll the CLI's transcript so the title + token usage reflect the session. */

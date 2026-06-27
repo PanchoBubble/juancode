@@ -154,6 +154,19 @@ export interface ScreenRow {
   text: string;
 }
 
+/**
+ * One message the user queued to a session while it was busy. Queued items are
+ * persisted per-session and delivered in order (`createdAt`/insertion order) on
+ * the next idle. See the `queue` server message and the `queueMessage` /
+ * `dequeueMessage` client messages.
+ */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  /** Epoch ms the message was queued. */
+  createdAt: number;
+}
+
 /** Messages sent from the browser to the server. */
 export type ClientMessage =
   | {
@@ -241,7 +254,24 @@ export type ClientMessage =
   | { type: "subscribeScreen"; sessionId: string }
   /** Stop the live screen stream for a session (the client closed that view). */
   | { type: "unsubscribeScreen"; sessionId: string }
-  // ── BEGIN tracked-PR registry (ticket juancode-bt2) — additive ───────────────
+  // ── BEGIN per-session message queue (ticket oracle-cj3) — additive ───────────
+  /**
+   * Watch a session's pending message queue: the server replies with the current
+   * `queue` snapshot and pushes an updated snapshot on every change (queued,
+   * delivered, or cancelled), until `unsubscribeQueue` or the connection closes.
+   */
+  | { type: "subscribeQueue"; sessionId: string }
+  /** Stop watching a session's message queue. */
+  | { type: "unsubscribeQueue"; sessionId: string }
+  /**
+   * Queue a message to a session for delivery on its next idle — lets the user
+   * line up instructions while the agent is still busy. Persisted server-side and
+   * flushed in order; if the session is idle right now it's delivered promptly.
+   */
+  | { type: "queueMessage"; sessionId: string; text: string }
+  /** Cancel a still-pending queued message before it's delivered. */
+  | { type: "dequeueMessage"; sessionId: string; messageId: string }
+  // ── END per-session message queue ────────────────────────────────────────────
   /**
    * Subscribe to the tracked-PR registry. The server immediately replies with the
    * current `trackedPrs` snapshot and pushes further updates (and per-escalation
@@ -323,6 +353,12 @@ export type ServerMessage =
    * client can size/trim its grid (e.g. after a resize).
    */
   | { type: "screen"; sessionId: string; rows: ScreenRow[]; height: number; reset: boolean }
+  /**
+   * A session's pending message queue. Sent on `subscribeQueue` and after every
+   * change (queued / delivered / cancelled). Always the complete, ordered list —
+   * not a delta — so the client replaces its view wholesale.
+   */
+  | { type: "queue"; sessionId: string; items: QueuedMessage[] }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
   | { type: "error"; sessionId?: string; message: string }
