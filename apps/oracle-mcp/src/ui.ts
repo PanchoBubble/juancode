@@ -372,9 +372,10 @@ export const consoleHtml = /* html */ `<!doctype html>
   #c-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--faint);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-pill {
-    flex: none; padding: 5px 11px; min-height: 32px;
-    border: 0; border-radius: 999px; background: var(--panel); color: var(--faint);
-    box-shadow: inset 0 0 0 1px var(--line-soft); font-size: 12px; font-weight: 600;
+    flex: none; display: inline-flex; align-items: center; gap: 5px;
+    padding: 0 15px; min-height: 40px;
+    border: 0; border-radius: 999px; background: var(--panel); color: var(--dim);
+    box-shadow: inset 0 0 0 1px var(--line-soft); font-size: 13.5px; font-weight: 640;
   }
   .chat-pill:active { transform: scale(.96); }
   #chat-sessions { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 8px;
