@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePrs, rollupChecks } from "./gh.ts";
+import { parsePrActivity, parsePrs, rollupChecks } from "./gh.ts";
 
 describe("rollupChecks", () => {
   it("returns none for empty or missing checks", () => {
@@ -90,5 +90,32 @@ describe("parsePrs", () => {
         author: "",
       },
     ]);
+  });
+});
+
+describe("parsePrActivity", () => {
+  it("maps comments/reviews, rolls up checks, and upper-cases review state", () => {
+    const out = parsePrActivity({
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }],
+      comments: [{ id: "c1", author: { login: "alice" }, body: "fix" }],
+      reviews: [{ id: "r1", author: { login: "bob" }, body: "no", state: "changes_requested" }],
+    });
+    expect(out).toEqual({
+      checks: "failing",
+      comments: [{ id: "c1", author: "alice", body: "fix" }],
+      reviews: [{ id: "r1", author: "bob", body: "no", state: "CHANGES_REQUESTED" }],
+    });
+  });
+
+  it("drops comments/reviews missing an id and defaults missing fields", () => {
+    const out = parsePrActivity({
+      comments: [{ author: { login: "alice" } }, { id: "c2" }],
+      reviews: [{ state: "APPROVED" }, { id: "r2" }],
+    });
+    expect(out).toEqual({
+      checks: "none",
+      comments: [{ id: "c2", author: "", body: "" }],
+      reviews: [{ id: "r2", author: "", body: "", state: "" }],
+    });
   });
 });

@@ -125,6 +125,99 @@ export async function createPr(
   }
 }
 
+// ── PR activity (for the tracked-PR poller, juancode-yow) ────────────────────
+
+/**
+ * One issue-level PR comment, as returned by `gh pr view --json comments`. We keep
+ * only the fields the poller needs to dedup and summarise new activity. Mirrors the
+ * native `PrComment` (apps/native/.../Gh.swift).
+ */
+export interface PrComment {
+  id: string;
+  author: string;
+  body: string;
+}
+
+/**
+ * One PR review (`gh pr view --json reviews`). `state` is GitHub's review state
+ * (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING), upper-cased.
+ */
+export interface PrReview {
+  id: string;
+  author: string;
+  body: string;
+  state: string;
+}
+
+/**
+ * A snapshot of a PR's reviewable activity: rolled-up CI status, issue comments,
+ * and reviews. What the tracked-PR poller diffs each tick to detect new events.
+ */
+export interface PrActivity {
+  checks: PrChecks;
+  comments: PrComment[];
+  reviews: PrReview[];
+}
+
+/** Raw `gh pr view --json comments/reviews` element shapes. */
+interface RawPrComment {
+  id?: string;
+  author?: { login?: string } | null;
+  body?: string;
+}
+interface RawPrReview {
+  id?: string;
+  author?: { login?: string } | null;
+  body?: string;
+  state?: string;
+}
+interface RawPrActivity {
+  statusCheckRollup?: RollupCheck[] | null;
+  comments?: RawPrComment[] | null;
+  reviews?: RawPrReview[] | null;
+}
+
+/**
+ * Map gh's raw activity JSON onto our wire shape. Exported for testing. Drops any
+ * comment/review missing an `id` (can't be deduped reliably without one).
+ */
+export function parsePrActivity(raw: RawPrActivity): PrActivity {
+  return {
+    checks: rollupChecks(raw.statusCheckRollup),
+    comments: (raw.comments ?? []).flatMap((c) =>
+      c.id ? [{ id: c.id, author: c.author?.login ?? "", body: c.body ?? "" }] : [],
+    ),
+    reviews: (raw.reviews ?? []).flatMap((r) =>
+      r.id
+        ? [{ id: r.id, author: r.author?.login ?? "", body: r.body ?? "", state: (r.state ?? "").toUpperCase() }]
+        : [],
+    ),
+  };
+}
+
+/**
+ * Read a single PR's reviewable activity via the real `gh` CLI. Returns null when
+ * gh is missing/unauthenticated, the cwd isn't a repo, or the output won't parse —
+ * the poller treats null as "couldn't poll this tick" and tries again later.
+ */
+export async function getPrActivity(cwd: string, number: number): Promise<PrActivity | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      "gh",
+      ["pr", "view", String(number), "--json", "statusCheckRollup,comments,reviews"],
+      { cwd, maxBuffer: MAX_BUFFER },
+    ));
+  } catch {
+    return null;
+  }
+  try {
+    return parsePrActivity(JSON.parse(stdout) as RawPrActivity);
+  } catch {
+    return null;
+  }
+}
+
 /** Turn an execFile failure into a short, user-facing reason. */
 function ghErrorReason(err: unknown): string {
   const e = err as { code?: string | number; stderr?: string };

@@ -8,6 +8,7 @@ import { terminals } from "./terminal.ts";
 import { createWorktree } from "./git.ts";
 import { registry } from "./registry.ts";
 import { messageQueue } from "./messageQueue.ts";
+import { trackedPrs } from "./trackedPrs.ts";
 import { healthMonitor } from "./healthMonitor.ts";
 import { isProviderId } from "./providers.ts";
 import { recoverCliSessionId } from "./recoverSession.ts";
@@ -45,6 +46,8 @@ export function setupWebSocket(server: Server): void {
     const screenWatchers = new Map<string, () => void>();
     // Message-queue subscriptions, one per session this tab is watching.
     const queueWatchers = new Map<string, () => void>();
+    // The tracked-PR registry subscription for this connection (at most one).
+    let trackedPrsWatcher: (() => void) | null = null;
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -147,6 +150,24 @@ export function setupWebSocket(server: Server): void {
     const unsubscribeQueue = (sessionId: string) => {
       queueWatchers.get(sessionId)?.();
       queueWatchers.delete(sessionId);
+    };
+
+    // Tracked-PR registry: push the current watch list, then a fresh snapshot on
+    // every change, plus a per-escalation ping the client can alert on. Driven by
+    // the shared process-wide registry so every tab stays in sync (juancode-yow).
+    const subscribeTrackedPrs = () => {
+      if (trackedPrsWatcher) return;
+      send({ type: "trackedPrs", tracked: trackedPrs.list() });
+      trackedPrsWatcher = trackedPrs.onChange((change) => {
+        if (change.kind === "tracked") send({ type: "trackedPrs", tracked: change.tracked });
+        else
+          send({
+            type: "trackNotification",
+            trackedId: change.trackedId,
+            prNumber: change.prNumber,
+            notification: change.notification,
+          });
+      });
     };
 
     // Activity (busy / done / waiting-for-input) is broadcast for *every* live
@@ -466,6 +487,28 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        // ── BEGIN tracked-PR registry (ticket juancode-yow) — additive ──────────
+        case "subscribeTrackedPrs": {
+          subscribeTrackedPrs();
+          return;
+        }
+
+        case "trackPr": {
+          trackedPrs.track(msg.pr, msg.cwd);
+          return;
+        }
+
+        case "untrackPr": {
+          trackedPrs.untrack(msg.trackedId);
+          return;
+        }
+
+        case "resolveTrackNotification": {
+          trackedPrs.resolveNotification(msg.trackedId, msg.notificationId);
+          return;
+        }
+        // ── END tracked-PR registry ─────────────────────────────────────────────
+
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
           return;
@@ -507,6 +550,9 @@ export function setupWebSocket(server: Server): void {
       // Drop any message-queue subscriptions (the queue itself persists).
       for (const off of queueWatchers.values()) off();
       queueWatchers.clear();
+      // Drop the tracked-PR subscription (the registry + poller persist).
+      trackedPrsWatcher?.();
+      trackedPrsWatcher = null;
     });
   });
 }
