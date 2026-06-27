@@ -13,11 +13,13 @@ import { ActivityDetector } from "./activityDetector.ts";
 import { notificationGate } from "./notificationGate.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
-import type { ProviderId, SessionActivity, SessionMeta, SessionPrompt } from "./protocol.ts";
+import type { ProviderId, ScreenRow, SessionActivity, SessionMeta, SessionPrompt } from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
 type ActivityListener = (state: SessionActivity, notify: boolean) => void;
+/** A coalesced frame of the live screen stream — see {@link Session.onScreen}. */
+type ScreenListener = (rows: ScreenRow[], height: number, reset: boolean) => void;
 
 /**
  * The result of seeding a fresh session with an initial prompt
@@ -28,6 +30,13 @@ export type AutoSubmitOutcome = { ok: true } | { ok: false; reason: string };
 
 const PERSIST_DEBOUNCE_MS = 2000;
 const TITLE_POLL_MS = 4000;
+/**
+ * Coalesce window for the live screen stream: many pty writes land per turn, but
+ * a phone only needs a few frames a second. We diff the rendered screen at most
+ * this often and push just the rows that changed — cheap on the wire, smooth on
+ * the device.
+ */
+const SCREEN_FLUSH_MS = 80;
 
 /** Tunables for the verified initial-prompt delivery in {@link Session.autoSubmit}. */
 const SEED = {
@@ -53,6 +62,10 @@ export class Session {
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();
   private readonly activityListeners = new Set<ActivityListener>();
+  private readonly screenListeners = new Set<ScreenListener>();
+  /** Last screen frame we diffed against, so flushes only carry changed rows. */
+  private lastScreenRows: string[] = [];
+  private screenTimer: NodeJS.Timeout | null = null;
   private readonly detector: ActivityDetector;
   /**
    * Tails this session's stream-json transcript purely to feed structured
@@ -120,6 +133,7 @@ export class Session {
       this.appendScrollback(data);
       this.detector.feed(data);
       for (const l of this.outputListeners) l(data);
+      this.scheduleScreenFlush();
       this.schedulePersist();
     });
 
@@ -127,6 +141,7 @@ export class Session {
       this.meta.status = "exited";
       this.meta.exitCode = exitCode;
       this.meta.updatedAt = Date.now();
+      this.flushScreen(); // push the final frame before the screen goes static
       this.detector.reset();
       notificationGate.forget(this.meta.id);
       this.activityTail.stop();
@@ -345,6 +360,53 @@ export class Session {
   onExit(listener: ExitListener): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to the live rendered-screen stream — the cheap, phone-friendly
+   * alternative to the raw `output` byte stream. The listener fires immediately
+   * with a full-screen snapshot (`reset: true`), then with per-row diffs
+   * (`reset: false`) coalesced to {@link SCREEN_FLUSH_MS}. Reads the same headless
+   * screen the activity detector already maintains, so it adds no extra emulation.
+   */
+  onScreen(listener: ScreenListener): () => void {
+    const rows = this.detector.screenRows();
+    if (this.screenListeners.size === 0) this.lastScreenRows = rows;
+    listener(
+      rows.map((text, i) => ({ i, text })),
+      rows.length,
+      true,
+    );
+    this.screenListeners.add(listener);
+    return () => this.screenListeners.delete(listener);
+  }
+
+  /** Coalesce a screen diff; cheap no-op when nobody is watching the screen. */
+  private scheduleScreenFlush(): void {
+    if (this.screenListeners.size === 0 || this.screenTimer) return;
+    this.screenTimer = setTimeout(() => {
+      this.screenTimer = null;
+      this.flushScreen();
+    }, SCREEN_FLUSH_MS);
+  }
+
+  /** Diff the current screen against the last frame and push only changed rows. */
+  private flushScreen(): void {
+    if (this.screenTimer) {
+      clearTimeout(this.screenTimer);
+      this.screenTimer = null;
+    }
+    if (this.screenListeners.size === 0) return;
+    const rows = this.detector.screenRows();
+    const diff: ScreenRow[] = [];
+    const max = Math.max(rows.length, this.lastScreenRows.length);
+    for (let i = 0; i < max; i++) {
+      const text = rows[i] ?? "";
+      if (text !== (this.lastScreenRows[i] ?? "")) diff.push({ i, text });
+    }
+    this.lastScreenRows = rows;
+    if (diff.length === 0) return;
+    for (const l of this.screenListeners) l(diff, rows.length, false);
   }
 
   /** Current inferred activity (busy / idle / waiting_input). */

@@ -87,6 +87,16 @@ export class TerminalScreen {
     return rows.slice(0, end).join("\n");
   }
 
+  /**
+   * Every row of the active buffer as text (trailing spaces trimmed per row),
+   * always exactly `height` entries so callers can address rows by a stable
+   * index and diff frame-to-frame. Used to stream the rendered screen to phone
+   * clients as cheap per-row diffs (see `Session.onScreen`).
+   */
+  rows(): string[] {
+    return this.buf.grid.map((r) => rowString(r));
+  }
+
   /** The last `n` rows of the active buffer as text (footer / prompt region). */
   bottomText(n: number): string {
     return this.buf.grid

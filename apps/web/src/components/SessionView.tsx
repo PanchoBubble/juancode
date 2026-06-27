@@ -10,9 +10,11 @@ import { AttachBar } from "./AttachBar.tsx";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
 import { DecisionCard } from "./DecisionCard.tsx";
+import { LiveOutput } from "./LiveOutput.tsx";
 import { MessageQueue } from "./MessageQueue.tsx";
 import { StructuredView } from "./StructuredView.tsx";
 import { Terminal } from "./Terminal.tsx";
+import { useIsPhone } from "../lib/useMediaQuery.ts";
 import { TerminalPanel } from "./TerminalPanel.tsx";
 import { toggleTerminalOpen, useTerminalOpen, setTerminalOpen } from "../lib/terminalStore.ts";
 import { UsageBadge } from "./UsageBadge.tsx";
@@ -56,6 +58,9 @@ export function SessionView({ id }: { id: string }) {
   // navigating to another session and back (VS Code-style), rather than being
   // torn down with this per-session view on every switch.
   const showTerminal = useTerminalOpen(id);
+  // On a phone the raw xterm TUI is unreadable, so we swap it for the live
+  // rendered-screen view (cheap row-diff stream); desktop keeps the real xterm.
+  const isPhone = useIsPhone();
   // How the agent's output is rendered: the raw xterm/ANSI TUI (default) or the
   // opt-in structured message/tool-bubble view fed by the stream-json transcript.
   const [renderMode, setRenderMode] = useState<"terminal" | "structured">("terminal");
@@ -487,7 +492,11 @@ export function SessionView({ id }: { id: string }) {
                     The structured view mounts only when chosen, so its transcript
                     tail isn't opened for sessions viewed only as a terminal. */}
                 <div className="h-full" hidden={renderMode === "structured"}>
-                  <Terminal key={id} sessionId={id} />
+                  {isPhone ? (
+                    <LiveOutput key={id} sessionId={id} running={status === "running"} />
+                  ) : (
+                    <Terminal key={id} sessionId={id} />
+                  )}
                 </div>
                 {renderMode === "structured" && (
                   <StructuredView sessionId={id} running={status === "running"} />

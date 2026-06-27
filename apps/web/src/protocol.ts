@@ -132,6 +132,17 @@ export interface StructuredEvent {
   ts: string | null;
 }
 
+/**
+ * One row of the live rendered-screen stream: the row's index in the screen grid
+ * and its current text (trailing spaces trimmed). See the `screen` server message.
+ */
+export interface ScreenRow {
+  /** Row index in the screen grid (0 = top). */
+  i: number;
+  /** The row's rendered text, ANSI stripped. */
+  text: string;
+}
+
 export type ClientMessage =
   | {
       type: "create";
@@ -207,6 +218,16 @@ export type ClientMessage =
   | { type: "subscribeStructured"; sessionId: string }
   /** Stop the structured tail for a session (the client closed that view). */
   | { type: "unsubscribeStructured"; sessionId: string }
+  /**
+   * Opt into the live rendered-screen stream for a session — the cheap,
+   * phone-friendly alternative to the full xterm `output` byte stream. The server
+   * replies immediately with a full-screen snapshot (`screen` with `reset: true`)
+   * and thereafter pushes only the rows that changed (`reset: false`), coalesced
+   * to a few frames a second. Survives the session reactivating underneath it.
+   */
+  | { type: "subscribeScreen"; sessionId: string }
+  /** Stop the live screen stream for a session (the client closed that view). */
+  | { type: "unsubscribeScreen"; sessionId: string }
   // ── BEGIN tracked-PR registry (ticket juancode-bt2) — additive ───────────────
   /**
    * Subscribe to the tracked-PR registry. The server replies with the current
@@ -274,6 +295,15 @@ export type ServerMessage =
    * dedup by `id`).
    */
   | { type: "structured"; sessionId: string; events: StructuredEvent[]; reset: boolean }
+  /**
+   * A frame of the live rendered-screen stream. `reset: true` carries the full
+   * screen (every row, 0..height-1) — sent first after `subscribeScreen` and again
+   * whenever the session reactivates; the client should replace its grid. Later
+   * frames carry only the rows that changed since the last frame (`reset: false`);
+   * the client applies them by index. `height` is the current row count so the
+   * client can size/trim its grid (e.g. after a resize).
+   */
+  | { type: "screen"; sessionId: string; rows: ScreenRow[]; height: number; reset: boolean }
   /** A reactivate couldn't be honoured: no prior CLI conversation to resume. */
   | { type: "unresumable"; sessionId: string; reason: string }
   | { type: "error"; sessionId?: string; message: string }

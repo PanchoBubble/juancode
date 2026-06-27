@@ -90,4 +90,14 @@ describe("TerminalScreen", () => {
     s.resize(40, 6);
     expect(s.visibleText).toBe("hello");
   });
+
+  it("rows() returns one trimmed entry per grid row (stable for diffing)", () => {
+    const s = new TerminalScreen(10, 3);
+    s.feed("ab\r\ncd");
+    const rows = s.rows();
+    expect(rows).toHaveLength(3); // always `height` entries, not trimmed away
+    expect(rows[0]).toBe("ab");
+    expect(rows[1]).toBe("cd");
+    expect(rows[2]).toBe(""); // trailing blank row kept, trailing spaces trimmed
+  });
 });

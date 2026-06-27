@@ -166,6 +166,14 @@ export class ActivityDetector {
   }
 
   /**
+   * Every rendered row of the screen (stable count, trailing spaces trimmed) —
+   * the source for the live phone screen stream (see `Session.onScreen`).
+   */
+  screenRows(): string[] {
+    return this.screen.rows();
+  }
+
+  /**
    * The bottom `rows` of the rendered screen — the footer / input-box region — so
    * {@link Session.autoSubmit} can confirm a seeded prompt landed in (or left) the
    * input box without matching the same text echoed up in the conversation.

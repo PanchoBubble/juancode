@@ -39,6 +39,9 @@ export function setupWebSocket(server: Server): void {
     const openedTerminals = new Set<string>();
     // Structured-view transcript tails, one per session this tab opted into.
     const structuredTails = new Map<string, TranscriptTail>();
+    // Live screen-stream subscriptions, one per session this tab is watching on
+    // the phone-friendly rendered-screen view.
+    const screenWatchers = new Map<string, () => void>();
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -87,6 +90,43 @@ export function setupWebSocket(server: Server): void {
     const unsubscribeStructured = (sessionId: string) => {
       structuredTails.get(sessionId)?.stop();
       structuredTails.delete(sessionId);
+    };
+
+    // Live rendered-screen stream for the phone-friendly view: push the session's
+    // current screen, then per-row diffs. Tolerant of the session not being live
+    // yet (or reactivating later) — `registry.onCreate` re-attaches to the same
+    // id so the screen resumes after a reactivate without the client re-asking.
+    const subscribeScreen = (sessionId: string) => {
+      if (screenWatchers.has(sessionId)) return;
+      let offScreen = () => {};
+      let offExit = () => {};
+      const attach = (session: Session) => {
+        offScreen = session.onScreen((rows, height, reset) =>
+          send({ type: "screen", sessionId, rows, height, reset }),
+        );
+        offExit = session.onExit((exitCode) => send({ type: "exit", sessionId, exitCode }));
+      };
+      const live = registry.get(sessionId);
+      if (live) attach(live);
+      // No live pty (exited / pre-restart): clear the client's view until one
+      // appears. A reactivate fires `onCreate` below and brings the screen back.
+      else send({ type: "screen", sessionId, rows: [], height: 0, reset: true });
+      const offCreate = registry.onCreate((session) => {
+        if (session.id !== sessionId) return;
+        offScreen();
+        offExit();
+        attach(session);
+      });
+      screenWatchers.set(sessionId, () => {
+        offScreen();
+        offExit();
+        offCreate();
+      });
+    };
+
+    const unsubscribeScreen = (sessionId: string) => {
+      screenWatchers.get(sessionId)?.();
+      screenWatchers.delete(sessionId);
     };
 
     // Activity (busy / done / waiting-for-input) is broadcast for *every* live
@@ -361,6 +401,16 @@ export function setupWebSocket(server: Server): void {
           return;
         }
 
+        case "subscribeScreen": {
+          subscribeScreen(msg.sessionId);
+          return;
+        }
+
+        case "unsubscribeScreen": {
+          unsubscribeScreen(msg.sessionId);
+          return;
+        }
+
         case "input": {
           resolvePty(msg.sessionId)?.write(msg.data);
           return;
@@ -396,6 +446,9 @@ export function setupWebSocket(server: Server): void {
       // Stop any structured transcript tails this connection started.
       for (const tail of structuredTails.values()) tail.stop();
       structuredTails.clear();
+      // Drop any live screen-stream subscriptions.
+      for (const off of screenWatchers.values()) off();
+      screenWatchers.clear();
     });
   });
 }
