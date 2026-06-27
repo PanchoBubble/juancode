@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { socket } from "./socket.ts";
 import { notifications } from "./notifications.ts";
-import type { ServerMessage, SessionActivity, SessionMeta } from "../protocol.ts";
+import type { ServerMessage, SessionActivity, SessionMeta, SessionPrompt } from "../protocol.ts";
 
 /**
  * A tiny store of per-session live activity, fed by the server's `activity`
@@ -12,8 +12,10 @@ import type { ServerMessage, SessionActivity, SessionMeta } from "../protocol.ts
  */
 
 type ActivityMap = Record<string, SessionActivity>;
+type PromptMap = Record<string, SessionPrompt>;
 
 let map: ActivityMap = {};
+let prompts: PromptMap = {};
 const titles = new Map<string, string>();
 const listeners = new Set<() => void>();
 let started = false;
@@ -23,10 +25,24 @@ function start(): void {
   started = true;
   socket.subscribe((msg: ServerMessage) => {
     if (msg.type !== "activity") return;
+    let changed = false;
     if (map[msg.sessionId] !== msg.state) {
       map = { ...map, [msg.sessionId]: msg.state };
-      for (const l of listeners) l();
+      changed = true;
     }
+    // Keep the pending question only while the session is waiting on the user;
+    // drop it the moment it moves on, so a stale decision card never lingers.
+    const nextPrompt = msg.state === "waiting_input" ? msg.prompt : undefined;
+    if (nextPrompt) {
+      prompts = { ...prompts, [msg.sessionId]: nextPrompt };
+      changed = true;
+    } else if (prompts[msg.sessionId]) {
+      const rest = { ...prompts };
+      delete rest[msg.sessionId];
+      prompts = rest;
+      changed = true;
+    }
+    if (changed) for (const l of listeners) l();
     if (msg.notify) {
       notifications.fire(msg.state, titles.get(msg.sessionId) ?? "Session", msg.sessionId);
     }
@@ -47,6 +63,11 @@ function subscribe(cb: () => void): () => void {
 /** Live activity for one session (undefined until the first broadcast). */
 export function useActivity(id: string): SessionActivity | undefined {
   return useSyncExternalStore(subscribe, () => map[id]);
+}
+
+/** The pending question for one session while it waits on the user, else undefined. */
+export function usePrompt(id: string): SessionPrompt | undefined {
+  return useSyncExternalStore(subscribe, () => prompts[id]);
 }
 
 /** The whole activity map (for rendering many sessions at once). */

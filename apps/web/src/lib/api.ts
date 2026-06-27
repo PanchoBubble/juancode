@@ -180,6 +180,12 @@ export const api = {
     input: { title: string; body: string; draft: boolean },
     cwd?: string,
   ) => sendJson<PrCreateResult>(`/api/sessions/${id}/pr`, "POST", { ...input, cwd }),
+  /**
+   * Answer a waiting_input session's pending question — select a menu option
+   * and/or send a free-text note, routed back into the live pty by session id.
+   */
+  respond: (id: string, answer: { option?: number; text?: string }) =>
+    sendJson<void>(`/api/sessions/${id}/respond`, "POST", answer),
   /** Upload a dragged file's bytes; returns the absolute path the server saved it to. */
   uploadFile: async (file: File): Promise<{ path: string }> => {
     const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, {

@@ -14,6 +14,25 @@ export type ProviderId = "claude" | "codex";
  */
 export type SessionActivity = "busy" | "idle" | "waiting_input";
 
+/** One selectable choice in a session's pending question (a numbered menu item). */
+export interface PromptOption {
+  /** The keypress that selects it (the menu's own number, 1-9). */
+  index: number;
+  /** The human-readable choice, e.g. "Yes, and don't ask again". */
+  label: string;
+}
+
+/**
+ * The pending question a `waiting_input` session is blocked on, parsed best-effort
+ * from its rendered screen (see `promptParse.ts`). Lets the UI offer tappable
+ * options + a free-text note on a phone instead of making the user drive the raw
+ * TUI. `options` is empty for a plain yes/no or free-text prompt.
+ */
+export interface SessionPrompt {
+  question: string;
+  options: PromptOption[];
+}
+
 /**
  * Health of a session as judged by the periodic health-check sweep (pillar 3 of
  * the orchestration loop — see `sessionHealth.ts`). `dead`: the pty is gone —
@@ -231,8 +250,18 @@ export type ServerMessage =
    * input-required indicators. `notify` is true only on a turn boundary worth
    * alerting on (work finished or a question appeared), so the client can ping
    * for those without re-pinging on every `busy`.
+   *
+   * `prompt` carries the parsed pending question + options when `state` is
+   * `waiting_input` (and a question could be parsed), so the client can surface a
+   * tappable decision affordance; it is absent otherwise.
    */
-  | { type: "activity"; sessionId: string; state: SessionActivity; notify: boolean }
+  | {
+      type: "activity";
+      sessionId: string;
+      state: SessionActivity;
+      notify: boolean;
+      prompt?: SessionPrompt;
+    }
   /**
    * The full set of sessions the periodic health-check sweep currently considers
    * unhealthy (dead / stale). Sent on connect and after every sweep (see

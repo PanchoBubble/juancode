@@ -1,5 +1,6 @@
-import type { SessionActivity, StructuredEvent } from "./protocol.ts";
+import type { SessionActivity, SessionPrompt, StructuredEvent } from "./protocol.ts";
 import { TerminalScreen } from "./terminalScreen.ts";
+import { parsePrompt } from "./promptParse.ts";
 
 /**
  * Infers whether an agent session is working, has finished a turn, or is waiting
@@ -144,6 +145,16 @@ export class ActivityDetector {
 
   get activity(): SessionActivity {
     return this.state;
+  }
+
+  /**
+   * The pending question + options parsed from the current screen when the
+   * session is waiting on the user, else null. Best-effort (see `promptParse.ts`)
+   * and only meaningful while `waiting_input`.
+   */
+  extractPrompt(): SessionPrompt | null {
+    if (this.state !== "waiting_input") return null;
+    return parsePrompt(this.screen.visibleText);
   }
 
   /**

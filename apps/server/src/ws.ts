@@ -94,12 +94,23 @@ export function setupWebSocket(server: Server): void {
     // per session. This is independent of `subscribe` (which carries the heavy
     // output stream only for sessions this tab is actually viewing).
     const activityWatchers = new Set<() => void>();
+    // Carry the parsed pending question + options whenever a session is
+    // waiting_input, so the client can offer a tappable decision affordance.
+    const activityMsg = (
+      session: Session,
+      state: Session["activity"],
+      notify: boolean,
+    ): ServerMessage => ({
+      type: "activity",
+      sessionId: session.id,
+      state,
+      notify,
+      prompt: state === "waiting_input" ? (session.promptInfo() ?? undefined) : undefined,
+    });
     const watchActivity = (session: Session) => {
-      send({ type: "activity", sessionId: session.id, state: session.activity, notify: false });
+      send(activityMsg(session, session.activity, false));
       activityWatchers.add(
-        session.onActivity((state, notify) =>
-          send({ type: "activity", sessionId: session.id, state, notify }),
-        ),
+        session.onActivity((state, notify) => send(activityMsg(session, state, notify))),
       );
     };
     for (const s of registry.all()) watchActivity(s);

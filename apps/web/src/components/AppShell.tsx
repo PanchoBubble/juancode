@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Outlet, useRouterState } from "@tanstack/react-router";
+import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Sidebar } from "./Sidebar.tsx";
 import { ConnectionBanner } from "./ConnectionBanner.tsx";
 import { onTrackNotification } from "../lib/trackedPrs.ts";
@@ -12,12 +12,26 @@ import { notifications } from "../lib/notifications.ts";
  */
 export function AppShell() {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const navigate = useNavigate();
 
   // Close the drawer whenever the route changes (e.g. tapping a session).
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   useEffect(() => {
     setDrawerOpen(false);
   }, [pathname]);
+
+  // Deep-link: tapping a session OS notification jumps straight to that session
+  // (and thus its decision affordance when it's waiting on input). Track-PR
+  // notifications use a `track-*` tag with no session route, so those are ignored.
+  useEffect(() => {
+    const onClick = (e: Event) => {
+      const id = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
+      if (!id || id.startsWith("track-")) return;
+      void navigate({ to: "/session/$id", params: { id } });
+    };
+    window.addEventListener("juancode:notification-click", onClick);
+    return () => window.removeEventListener("juancode:notification-click", onClick);
+  }, [navigate]);
 
   // Alert on tracked-PR needs-decision escalations (juancode-bt2): the same
   // urgent ding + (backgrounded-tab) OS notification used for "session needs

@@ -200,6 +200,33 @@ app.post("/api/sessions/:id/pr", async (req, res) => {
   }
 });
 
+/**
+ * Reply channel: route a decision answer back into a live session by id. Used by
+ * the waiting_input decision affordance (select an option and/or add a free-text
+ * note) and reachable for deep-linked notification answers. WebSocket `input`
+ * already injects raw keystrokes by id; this gives a stateless HTTP path that
+ * resolves the menu option / note delivery server-side (see `Session.respond`).
+ */
+app.post("/api/sessions/:id/respond", async (req, res) => {
+  const live = registry.get(req.params.id);
+  if (!live) return res.status(409).json({ error: "session is not running" });
+  const rawOption = req.body?.option;
+  const rawText = req.body?.text;
+  const hasOption = rawOption !== undefined && rawOption !== null;
+  const text = typeof rawText === "string" ? rawText : "";
+  const hasText = text.trim().length > 0;
+  if (!hasOption && !hasText) return res.status(400).json({ error: "option or text required" });
+  if (hasOption && (!Number.isInteger(rawOption) || rawOption < 1 || rawOption > 9)) {
+    return res.status(400).json({ error: "option must be an integer 1-9" });
+  }
+  try {
+    await live.respond({ option: hasOption ? (rawOption as number) : undefined, text: hasText ? text : undefined });
+    res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: errMsg(err) });
+  }
+});
+
 /** Linked git worktrees of the session's repo (for the diff worktree picker). */
 app.get("/api/sessions/:id/worktrees", async (req, res) => {
   const meta = sessionDb.get(req.params.id);

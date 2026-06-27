@@ -13,7 +13,7 @@ import { ActivityDetector } from "./activityDetector.ts";
 import { notificationGate } from "./notificationGate.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
-import type { ProviderId, SessionActivity, SessionMeta } from "./protocol.ts";
+import type { ProviderId, SessionActivity, SessionMeta, SessionPrompt } from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
@@ -350,6 +350,39 @@ export class Session {
   /** Current inferred activity (busy / idle / waiting_input). */
   get activity(): SessionActivity {
     return this.detector.activity;
+  }
+
+  /** The pending question + options when waiting on the user, else null. */
+  promptInfo(): SessionPrompt | null {
+    return this.detector.extractPrompt();
+  }
+
+  /**
+   * Route a decision answer back into the live pty by session id — the reply
+   * channel for the `waiting_input` decision affordance (and for deep-linked
+   * notification answers). Selecting an option presses its number (the CLI menus
+   * activate on the digit); a free-text note is delivered with the same robust
+   * bracketed-paste-then-Enter the seed path uses (a `${text}\r` burst is read as
+   * a paste with the CR kept literal, so the prompt never submits).
+   */
+  async respond(answer: { option?: number; text?: string }): Promise<void> {
+    if (!this.isRunning) throw new Error("session is not running");
+    const { option } = answer;
+    if (option !== undefined) {
+      if (!Number.isInteger(option) || option < 1 || option > 9) {
+        throw new Error("option must be an integer 1-9");
+      }
+      this.write(String(option));
+    }
+    const note = answer.text?.trim();
+    if (note) {
+      // After picking a menu option that opens a text field ("tell Claude what to
+      // do differently"), give the TUI a beat to show the input before pasting.
+      if (option !== undefined) await sleep(150);
+      this.write(`\x1b[200~${note}\x1b[201~`);
+      await sleep(80);
+      this.write("\r");
+    }
   }
 
   onActivity(listener: ActivityListener): () => void {

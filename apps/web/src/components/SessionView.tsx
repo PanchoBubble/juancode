@@ -4,10 +4,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
-import { useActivity } from "../lib/activity.ts";
+import { useActivity, usePrompt } from "../lib/activity.ts";
 import type { ServerMessage } from "../protocol.ts";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
+import { DecisionCard } from "./DecisionCard.tsx";
 import { MessageQueue } from "./MessageQueue.tsx";
 import { StructuredView } from "./StructuredView.tsx";
 import { Terminal } from "./Terminal.tsx";
@@ -106,6 +107,7 @@ export function SessionView({ id }: { id: string }) {
   const status = liveStatus ?? meta?.status;
   const canReactivate = status === "exited" && !unresumable;
   const activity = useActivity(id);
+  const prompt = usePrompt(id);
 
   // ── "Accept all" (skip permission prompts) toggle ──────────────────────────
   const skipOn = liveSkip ?? meta?.skipPermissions ?? false;
@@ -501,6 +503,9 @@ export function SessionView({ id }: { id: string }) {
           )}
         </PanelGroup>
       </div>
+      {status === "running" && activity === "waiting_input" && prompt && (
+        <DecisionCard sessionId={id} prompt={prompt} />
+      )}
       {status === "running" &&
         (activity === "busy" || activity === "waiting_input" || queued !== null) && (
           <MessageQueue queued={queued} onQueue={setQueued} onCancel={() => setQueued(null)} />
