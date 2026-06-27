@@ -1,4 +1,5 @@
 import type { SessionActivity } from "../protocol.ts";
+import { NotifyGate } from "./notifyGate.ts";
 
 /**
  * Alerts for session activity: a sound (distinct ding for "needs input" vs a
@@ -16,6 +17,10 @@ const STORAGE_KEY = "juancode-notify";
 let enabled = readEnabled();
 let audio: AudioContext | null = null;
 const stateListeners = new Set<() => void>();
+const gate = new NotifyGate();
+
+/** Stable tag for the coalesced "several sessions" summary notification. */
+const SUMMARY_TAG = "juancode-activity";
 
 function readEnabled(): boolean {
   try {
@@ -73,16 +78,23 @@ function requestOsPermission(): void {
   if (Notification.permission === "default") void Notification.requestPermission();
 }
 
-function osNotify(body: string, tag: string): void {
+function osNotify(body: string, tag: string, onAck?: () => void): void {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   // The in-app sound + sidebar icon already cover a focused tab; only escalate
   // to an OS notification when the user has tabbed away.
   if (!document.hidden) return;
   try {
-    const n = new Notification("juancode", { body, tag });
+    // A per-session `tag` with `renotify:false` makes the browser *replace* an
+    // existing notification for that session in place (no stacking, no re-alert)
+    // rather than piling up a fresh banner each time. `renotify` isn't in the
+    // current DOM lib's NotificationOptions type, hence the cast — false is the
+    // spec default, so this is belt-and-suspenders on top of the stable tag.
+    const opts = { body, tag, renotify: false } as NotificationOptions;
+    const n = new Notification("juancode", opts);
     n.onclick = () => {
       window.focus();
       n.close();
+      onAck?.();
     };
   } catch {
     /* notification construction can throw on some platforms — ignore */
@@ -126,15 +138,39 @@ export const notifications = {
     return () => stateListeners.delete(listener);
   },
 
-  /** Fire the alert for a notable activity transition on a session. */
+  /**
+   * Fire the alert for a notable activity transition on a session — gated by
+   * {@link NotifyGate} so detector flapping / simultaneous turn-ends can't turn
+   * into a notification flood.
+   */
   fire(state: SessionActivity, title: string, sessionId: string): void {
     if (!enabled) return;
+    if (state !== "waiting_input" && state !== "idle") return;
+
+    const action = gate.decide(sessionId, state, Date.now());
+    if (action === "drop") return;
+
+    if (action === "coalesce") {
+      // A burst across many sessions collapses into one replace-in-place summary
+      // (single soft chime) instead of one banner + ding per session.
+      playChime();
+      osNotify("Multiple sessions need your attention", SUMMARY_TAG);
+      return;
+    }
+
+    // action === "fire": a single per-session alert, acknowledged on click.
+    const ack = () => gate.clear(sessionId);
     if (state === "waiting_input") {
       playDingDong();
-      osNotify(`${title} needs your input`, sessionId);
-    } else if (state === "idle") {
+      osNotify(`${title} needs your input`, sessionId, ack);
+    } else {
       playChime();
-      osNotify(`${title} finished`, sessionId);
+      osNotify(`${title} finished`, sessionId, ack);
     }
+  },
+
+  /** Forget a session's notification dedup state (e.g. it was closed). */
+  clear(sessionId: string): void {
+    gate.clear(sessionId);
   },
 };
