@@ -83,6 +83,15 @@ public enum JuancodeServer {
 
         router.get("/api/health") { _, _ in jsonResponse(["ok": true]) }
 
+        // Desktop presence (juancode-2zp): the app reports frontmost/resign so the
+        // oracle-mcp push gate can stay quiet on the phone while the user is at the
+        // desk. `active` = updated within the last ~15s (frontmost right now).
+        router.get("/presence") { _, _ in
+            let last = state.desktopLastActiveMs
+            let active = last.map { nowMs() - $0 <= 15_000 } ?? false
+            return jsonResponse(PresenceResponse(active: active, lastActiveMs: last))
+        }
+
         router.get("/api/providers") { _, _ in
             ProviderId.allCases.map { ProviderInfo(id: $0.rawValue, label: Providers.spec(for: $0).label) }
         }
@@ -376,6 +385,7 @@ private extension String {
 // MARK: - request/response DTOs
 
 struct ProviderInfo: Codable, ResponseEncodable { let id: String; let label: String }
+struct PresenceResponse: Codable, ResponseEncodable { let active: Bool; let lastActiveMs: Int? }
 struct CwdBody: Decodable { let cwd: String? }
 struct CommitBody: Decodable { let message: String; let cwd: String? }
 struct PrBody: Decodable { let title: String; let body: String?; let draft: Bool?; let cwd: String? }

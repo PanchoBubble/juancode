@@ -46,7 +46,10 @@ struct OracleDock: View {
         // states, so the slide-off-screen geometry is correct.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .animation(.easeOut(duration: 0.16), value: oracle.expanded)
-        .onAppear { oracle.bootstrap() }
+        // Open the app into the Oracle chat (juancode-8n0): chat is the main surface,
+        // so the dock auto-presents on the chat tab at first launch. A one-shot inside
+        // `presentChatAtLaunch`, so it won't re-open after the user closes it.
+        .onAppear { oracle.presentChatAtLaunch() }
     }
 
     /// How far to push the collapsed panel past the right edge so nothing (incl. its
@@ -69,12 +72,7 @@ struct OracleDock: View {
             VStack(spacing: 0) {
                 header
                 Divider()
-                Picker("", selection: $oracle.tab) {
-                    ForEach(OracleModel.OracleTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .padding(.horizontal, 8).padding(.vertical, 6)
+                OracleTabBar(selection: $oracle.tab)
                 Divider()
                 content.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -155,6 +153,82 @@ struct OracleDock: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The dock's tab switcher (juancode-010). The stock `.segmented` Picker rendered
+/// tiny and out of step with the rest of the app's chrome; this is a larger,
+/// dark-theme tab bar — an icon + label per tab in a rounded track, with a filled
+/// accent pill on the selected tab and a hover highlight on the others. Sizing and
+/// typography match the app's other headers (≈13pt semibold, like the project bars
+/// and sheet titles) so the dock reads as part of the app, not a system control.
+private struct OracleTabBar: View {
+    @Binding var selection: OracleModel.OracleTab
+
+    /// SF Symbol per tab, echoing the toolbar's Issues (`tray.full`) / Oracle
+    /// (`sparkles`) buttons so the same concept carries the same glyph.
+    private func icon(_ tab: OracleModel.OracleTab) -> String {
+        switch tab {
+        case .issues: return "tray.full"
+        case .chat: return "sparkles"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(OracleModel.OracleTab.allCases, id: \.self) { tab in
+                OracleTabButton(
+                    title: tab.rawValue,
+                    icon: icon(tab),
+                    selected: selection == tab
+                ) {
+                    selection = tab
+                }
+            }
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
+/// One tab in `OracleTabBar`: a full-width segment with an icon + label. Selected =
+/// a filled accent pill with primary text; unselected = transparent with secondary
+/// text and a subtle hover fill (matching `clickCursor`'s idiom).
+private struct OracleTabButton: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 12, weight: .medium))
+                Text(title).font(.system(size: 13, weight: .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .foregroundStyle(selected ? Color.white : Color.secondary)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(selected
+                          ? Color.accentColor.opacity(0.85)
+                          : Color.primary.opacity(hovering ? 0.08 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.12), value: selected)
+        .pointerCursor()
     }
 }
 
@@ -382,45 +456,48 @@ private struct OracleChatView: View {
     }
 }
 
-/// A compact rail listing all your project sessions (the Oracle agent's own control-dir
-/// session is hidden — its terminal is right there). Each row shows a live-status dot,
-/// title, and folder; tapping selects it in the main window and collapses the dock so
-/// you land straight on it (juancode-cwa). Oracle's dock thus doubles as mission control.
+/// A compact rail listing the running Oracle agents (you can spin up several in
+/// parallel; they all live in the control dir). Each row shows a live-status dot and
+/// title; tapping switches the chat to that Oracle, and the "+" starts a new one
+/// (juancode-cwa). Only Oracle sessions appear here — never project/dispatched work.
 private struct OracleSessionRail: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
 
-    /// Own (non-external) sessions, minus the Oracle control dir and archived ones,
-    /// most-recent first so freshly dispatched work surfaces at the top.
-    private var sessions: [SessionMeta] {
-        model.sessions
-            .filter { $0.cwd != OraclePaths.controlDir && !$0.archived }
-            .sorted { $0.createdAt > $1.createdAt }
-    }
+    /// The running Oracles, most-recent first (see `OracleModel.oracleSessions`).
+    private var sessions: [SessionMeta] { oracle.oracleSessions }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                Text("Sessions")
+                Text("Oracles")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
                 Spacer()
+                Button { oracle.newOracle() } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .help("Start another Oracle")
+                    .clickCursor()
             }
             .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
             Divider()
             if sessions.isEmpty {
-                VStack {
+                VStack(spacing: 8) {
                     Spacer()
-                    Text("No sessions yet")
+                    Text("No Oracle running.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    Button("Start Oracle") { oracle.newOracle() }
+                        .controlSize(.small).clickCursor()
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(sessions, id: \.id) { meta in row(meta) }
+                        ForEach(Array(sessions.enumerated()), id: \.element.id) { idx, meta in
+                            row(meta, number: sessions.count - idx)
+                        }
                     }
                     .padding(.vertical, 4)
                 }
@@ -430,16 +507,17 @@ private struct OracleSessionRail: View {
         .background(Color(white: 0.10))
     }
 
-    private func row(_ meta: SessionMeta) -> some View {
-        let selected = model.selection == meta.id
+    /// `number` labels Oracles in spawn order (oldest = 1) so several read distinctly,
+    /// since they share a cwd and often a title.
+    private func row(_ meta: SessionMeta, number: Int) -> some View {
+        let selected = oracle.oracleSessionId == meta.id
         return HStack(spacing: 6) {
             Circle()
                 .fill(sessionDotColor(live: model.isLive(meta.id), activity: model.activity(meta.id)))
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 1) {
-                Text(meta.title).font(.system(size: 11)).lineLimit(1)
-                Text((meta.cwd as NSString).lastPathComponent)
-                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                Text("Oracle \(number)").font(.system(size: 11)).lineLimit(1)
+                Text(meta.title).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
@@ -447,11 +525,8 @@ private struct OracleSessionRail: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
-        .onTapGesture {
-            model.selection = meta.id
-            oracle.collapse()
-        }
-        .help(meta.cwd)
+        .onTapGesture { oracle.selectOracle(meta.id) }
+        .help(meta.title)
         .clickCursor()
     }
 }

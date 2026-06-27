@@ -102,12 +102,29 @@ final class AppModel {
         restorePromptTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
-        // Returning to the app clears the badge for whatever session you land on.
+        // Returning to the app clears the badge for whatever session you land on,
+        // and marks the desktop active so the phone-push gate stays quiet (juancode-2zp).
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { if let sel = self?.selection { self?.clearUnread(sel) } }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.appState.markDesktopActive()
+                if let sel = self.selection { self.clearUnread(sel) }
+            }
         }
+        // Stepping away records one final stamp so `lastActiveMs` reflects exactly when
+        // the desktop went background (juancode-2zp).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.appState.markDesktopActive() }
+        }
+        // Seed presence at launch when the app starts frontmost (the usual case: the
+        // AppDelegate promotes to a regular foreground app and activates). `NSApp` is
+        // still nil this early in `App.main()`, so chain optionally — if it's not up
+        // yet the didBecomeActive observer above stamps presence the moment it is.
+        if NSApp?.isActive == true { appState.markDesktopActive() }
     }
 
     // MARK: - Turn-end notifications (Dock bounce + unread badge)

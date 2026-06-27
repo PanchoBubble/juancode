@@ -68,12 +68,15 @@ struct RootView: View {
                 .clickCursor()
             }
         }
-        // The Oracle helper opens as a centered overlay over the whole window,
-        // from the toolbar or ⌃Space (juancode-wjg / juancode-6sw).
-        .overlay { OracleDock() }
         // The file editor opens as a large, resizable floating window over the whole
         // window (not the narrow Changes side panel a sheet was confined near).
         .overlay { EditorHost() }
+        // The Oracle helper opens as a docked overlay over the whole window, from the
+        // toolbar or ⌃Space (juancode-wjg / juancode-6sw). Mounted LAST so it layers
+        // above the editor: opening Oracle over an open editor draws on top of it, and
+        // collapsing Oracle reveals the editor underneath. Both are `.overlay`s, so
+        // neither reflows the split view beneath — no layout shift on open/close.
+        .overlay { OracleDock() }
         .sheet(isPresented: $model.showingWorktrees) {
             WorktreesSheet()
         }

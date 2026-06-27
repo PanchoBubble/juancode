@@ -22,7 +22,18 @@ import {
   oracleChat,
   resetChat,
 } from "./oracle.ts";
+import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import { consoleHtml } from "./ui.ts";
+import {
+  addSubscription,
+  initPush,
+  iconPng,
+  removeSubscription,
+  serviceWorkerJs,
+  startActivityListener,
+  vapidPublicKey,
+  webManifest,
+} from "./push.ts";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -236,17 +247,43 @@ app.post("/api/ask", async (req: Request, res: Response) => {
 
 app.post("/api/chat", async (req: Request, res: Response) => {
   try {
-    const text = (req.body ?? {}).text;
+    const { text, sessionId } = req.body ?? {};
     if (typeof text !== "string" || !text.trim()) {
       res.status(400).send("text is required");
       return;
     }
-    res.json(await oracleChat(text));
+    res.json(await oracleChat(text, typeof sessionId === "string" ? sessionId : null));
   } catch (e) {
     sendErr(res, e);
   }
 });
 
+// Past phone-chat sessions, so the console can list + continue any of them. Continuity
+// is `claude --resume` under the hood; we persist only the session record, no transcript.
+app.get("/api/chat/sessions", async (_req: Request, res: Response) => {
+  try {
+    res.json(await listChatSessions());
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.post("/api/chat/sessions/delete", async (req: Request, res: Response) => {
+  try {
+    const id = (req.body ?? {}).id;
+    if (typeof id !== "string" || !id) {
+      res.status(400).send("id is required");
+      return;
+    }
+    await removeChatSession(id);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Legacy: clears the pre-multi-session single-session pointer. The console now starts a
+// fresh thread client-side (send with no sessionId) rather than calling this.
 app.post("/api/chat/reset", async (_req: Request, res: Response) => {
   try {
     await resetChat();
@@ -255,6 +292,58 @@ app.post("/api/chat/reset", async (_req: Request, res: Response) => {
     sendErr(res, e);
   }
 });
+
+// ── Web Push (juancode-mov) ──────────────────────────────────────────────────
+// The sidecar owns the push subsystem: VAPID keys, subscription store, the PWA
+// service worker + manifest, and (started below) a WS client to the native
+// backend that pushes on notify-worthy events.
+
+app.get("/api/push/vapid", (_req: Request, res: Response) => {
+  res.json({ publicKey: vapidPublicKey() });
+});
+
+app.post("/api/push/subscribe", async (req: Request, res: Response) => {
+  try {
+    const sub = req.body;
+    if (!sub || typeof sub.endpoint !== "string" || !sub.keys) {
+      res.status(400).send("a PushSubscription JSON (endpoint + keys) is required");
+      return;
+    }
+    await addSubscription(sub);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.post("/api/push/unsubscribe", async (req: Request, res: Response) => {
+  try {
+    const endpoint = (req.body ?? {}).endpoint;
+    if (typeof endpoint !== "string" || !endpoint) {
+      res.status(400).send("endpoint is required");
+      return;
+    }
+    await removeSubscription(endpoint);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.get("/sw.js", (_req: Request, res: Response) => {
+  res.set("Service-Worker-Allowed", "/");
+  res.type("application/javascript").send(serviceWorkerJs);
+});
+
+app.get("/manifest.webmanifest", (_req: Request, res: Response) => {
+  res.type("application/manifest+json").json(webManifest);
+});
+
+const sendIcon = (_req: Request, res: Response) => {
+  res.type("image/png").send(iconPng());
+};
+app.get("/icon-192.png", sendIcon);
+app.get("/icon-512.png", sendIcon);
 
 // Stateless MCP: a new server + transport per request, no session to retain.
 app.post("/mcp", async (req: Request, res: Response) => {
@@ -283,4 +372,9 @@ const port = Number(process.env.ORACLE_MCP_PORT ?? 4281);
 const host = process.env.ORACLE_MCP_HOST ?? "127.0.0.1";
 app.listen(port, host, () => {
   console.log(`oracle-mcp listening on http://${host}:${port}/mcp`);
+  // Web Push (juancode-mov): load/generate VAPID keys, then watch the native
+  // backend over WS and push notify-worthy events to the phone.
+  void initPush()
+    .then(() => startActivityListener())
+    .catch((e) => console.error("oracle-mcp push init failed:", e));
 });

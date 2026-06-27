@@ -23,6 +23,10 @@ final class OracleModel {
 
     /// True once the control dir is bootstrapped and the agent session is up.
     var ready = false
+    /// Whether we've already auto-presented the chat at launch (juancode-8n0). A
+    /// one-shot so re-entrant `bootstrap()` calls don't keep re-opening the dock after
+    /// the user has closed it.
+    @ObservationIgnored private var didAutoPresentChat = false
     /// Whatever went wrong during bootstrap, surfaced in the dock.
     var setupError: String?
     /// Whether the dock is expanded (vs. the collapsed floating button). Mirrored onto
@@ -31,11 +35,15 @@ final class OracleModel {
     var expanded = false {
         didSet { app.oracleDockExpanded = expanded }
     }
-    /// Which dock tab is showing.
-    var tab: OracleTab = .issues
+    /// Which dock tab is showing. Defaults to `.chat` so the Oracle conversation is
+    /// the surface the app leads with (juancode-8n0) — chat is the primary window,
+    /// not a transient afterthought.
+    var tab: OracleTab = .chat
     /// The global bd tracker listing (control-dir cwd), loaded lazily + refreshable.
     var globalBeads: BeadsResult?
-    /// The pinned Oracle agent session id, once created/restored.
+    /// The Oracle agent session currently shown in the chat. You can run several
+    /// Oracles in parallel (all live in the control dir); this points at the active
+    /// one and the session rail lists them all (see `oracleSessions`).
     var oracleSessionId: String?
 
     /// Bumped to ask the chat terminal to grab keyboard focus (⌃Space). The chat
@@ -60,8 +68,17 @@ final class OracleModel {
     /// are Oracle's own and are hidden from the per-project sidebar.
     var controlDir: String { OraclePaths.controlDir }
 
-    /// The live Oracle agent session, if running.
+    /// The live Oracle agent session currently shown in the chat, if running.
     var session: Session? { oracleSessionId.flatMap { app.liveSession($0) } }
+
+    /// Every Oracle agent session — they all live in the control dir — most-recent
+    /// first. Drives the dock's session rail so you can switch between (and spin up)
+    /// parallel Oracles. Excludes archived ones.
+    var oracleSessions: [SessionMeta] {
+        app.sessions
+            .filter { $0.cwd == controlDir && !$0.archived }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
 
     /// Count of open global tracker items, for the top-bar Issues badge.
     var openCount: Int {
@@ -121,7 +138,10 @@ final class OracleModel {
     func collapse() {
         guard expanded else { return }
         expanded = false
-        app.focusTerminal()
+        // Hand focus back to the session terminal — but not when an editor overlay is
+        // open beneath the dock (the dock now layers above it): the editor pty should
+        // keep focus so you land back in it, not the main terminal behind it.
+        if app.editing == nil { app.focusTerminal() }
     }
 
     init(app: AppModel) { self.app = app }
@@ -157,6 +177,23 @@ final class OracleModel {
         }
     }
 
+    /// Present the Oracle chat as the app's main surface on launch (juancode-8n0):
+    /// bootstrap, then open the dock on the chat tab with the agent up and the input
+    /// focused — so the app opens *into* the conversation rather than to an empty
+    /// session pane you have to toggle Oracle open over. A one-shot (`didAutoPresentChat`)
+    /// so it only fires for the first appearance, never re-opening the dock after the
+    /// user has deliberately closed it. To revert "chat as main window", drop this call
+    /// from the dock's `.onAppear` (and reset the default `tab` to `.issues`).
+    func presentChatAtLaunch() {
+        bootstrap()
+        guard !didAutoPresentChat else { return }
+        didAutoPresentChat = true
+        tab = .chat
+        expanded = true
+        ensureAgentSession()
+        chatFocusToken += 1
+    }
+
     /// Bring the Oracle agent back up from the chat tab's "Start Oracle" button.
     /// `bootstrap()` is a one-shot (its guard no-ops once `ready`/`loop` are set),
     /// so once the agent session exits the chat needs its own re-entry point.
@@ -165,33 +202,74 @@ final class OracleModel {
         ensureAgentSession()
     }
 
-    /// Restart the Oracle agent from the chat tab: kill the live session and spawn a
-    /// fresh one. The chat transcript is disposable — Oracle's durable state lives in
-    /// its bd tracker + files (see `ensureAgentSession`) — so a clean respawn is safe
-    /// when the CLI's TUI gets garbled or the conversation is stuck.
+    /// Restart the Oracle agent from the chat tab: spawn a fresh Oracle when the current
+    /// CLI's TUI gets garbled or the conversation is stuck. The old session is left in
+    /// the rail (not deleted) so it stays available to continue later — its durable state
+    /// lives in Oracle's bd tracker + files. Only the active chat is repointed; other
+    /// live Oracles are untouched.
     func restartAgent() {
         guard ready else { startAgent(); return }
-        if let id = oracleSessionId { app.delete(id) }
+        // Stop the garbled pty but keep its persisted row, so the conversation stays
+        // in the rail and can be resumed later (kill ≠ delete).
+        if let id = oracleSessionId { app.liveSession(id)?.kill() }
         oracleSessionId = nil
-        ensureAgentSession()
+        spawnAgent()
     }
 
-    /// Restore the most recent persisted Oracle session (reactivating it) or spawn
-    /// a fresh one. The agent's role lives in the control dir's `AGENTS.md` (read by
-    /// the CLI on launch), so the fresh spawn needs no seed prompt. The Oracle session
-    /// is identified by
-    /// its unique cwd (the control dir), so there's no schema/protocol change.
+    /// Spin up an additional Oracle agent and make it the active chat. Several Oracles
+    /// can run in parallel — all in the control dir, all listed in the session rail —
+    /// so you can keep one working while you start another. Always a fresh spawn (it
+    /// becomes `oracleSessionId` once up); existing Oracles are untouched.
+    func newOracle() {
+        guard ready else { bootstrap(); return }
+        tab = .chat
+        spawnAgent()
+        chatFocusToken += 1
+    }
+
+    /// Switch the chat to an existing Oracle session (rail tap). No-op if it's already
+    /// active; focuses the chat input on switch. If the tapped Oracle has exited, revive
+    /// it (resume its CLI conversation via the pinned session id) so a past session can
+    /// be continued, not just viewed.
+    func selectOracle(_ id: String) {
+        guard oracleSessionId != id else { return }
+        oracleSessionId = id
+        tab = .chat
+        chatFocusToken += 1
+        if app.liveSession(id) == nil {
+            Task { await app.reactivate(id) }
+        }
+    }
+
+    /// Make sure the chat is pointed at a live Oracle: keep the active one if it's
+    /// still running, else adopt the most recent live Oracle, else continue the most
+    /// recent *past* Oracle (resumed via its pinned CLI session id), and only spawn a
+    /// fresh one when there are genuinely no past Oracles to revive. Past sessions are
+    /// kept — not deleted — so you can see and continue earlier Oracle conversations
+    /// (juancode: persist Oracle sessions), matching the per-project session list.
     private func ensureAgentSession() {
+        if let id = oracleSessionId, app.liveSession(id) != nil { return }
         if let existing = app.liveSession(inCwd: controlDir) {
             oracleSessionId = existing.id
             return
         }
-        // Don't resume a prior Oracle conversation — its CLI session may be gone
-        // (claude/codex print "No conversation found …" and exit, leaving a dead
-        // session). Oracle's durable state lives in its bd tracker + files, not the
-        // chat, so we always start fresh and clear out the stale exited sessions.
-        for meta in app.persistedSessions(inCwd: controlDir) { app.delete(meta.id) }
-        spawnAgent()
+        // No live Oracle. Rather than discard history, continue the most recent past
+        // Oracle; if its CLI conversation can't be resumed, fall back to a fresh spawn.
+        if let recent = oracleSessions.first {
+            Task {
+                await app.reactivate(recent.id)
+                if app.liveSession(recent.id) != nil {
+                    oracleSessionId = recent.id
+                } else {
+                    // Couldn't revive it — start fresh and clear the resume error so the
+                    // dock doesn't show a stale "no conversation to resume" banner.
+                    app.errorMessage = nil
+                    spawnAgent()
+                }
+            }
+        } else {
+            spawnAgent()
+        }
     }
 
     /// Spawn the Oracle agent. By default it boots **silent** — its role and startup

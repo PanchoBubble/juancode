@@ -7,10 +7,11 @@
 // these files and decodes them.
 
 import { spawn } from "node:child_process";
-import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { touchChatSession, upsertChatSession } from "./chat-store.ts";
 
 /** `~/.juancode/oracle` (the Oracle control dir), overridable to match the Swift
  *  `JUANCODE_ORACLE_DIR` so both sides point at the same tree in tests. */
@@ -207,14 +208,29 @@ export interface ChatReply {
  *  the subprocess env so claude uses the user's claude.ai subscription + connectors
  *  — matching the GUI Oracle (the key is only present in interactive shells via
  *  ~/.zshrc, never in the GUI app's login env). Continuity comes from `--resume`
- *  with the persisted session id; if that id is stale we retry once fresh. */
-export async function oracleChat(text: string): Promise<ChatReply> {
-  const prev = (await readFile(chatSessionFile(), "utf8").catch(() => "")).trim();
-  const first = await runClaude(text, prev || null);
+ *  with `sessionId`; if that id is stale we retry once fresh. The resulting session is
+ *  recorded in the chat-session store so the console can list + continue it later. */
+export async function oracleChat(text: string, sessionId?: string | null): Promise<ChatReply> {
+  const resume = sessionId && sessionId.length > 0 ? sessionId : null;
+  let result = await runClaude(text, resume);
   // A stale/unknown resume id makes claude exit with "No conversation found" — start
   // a fresh conversation rather than surfacing that as the Oracle's answer.
-  if (first.processError && prev) return (await runClaude(text, null)).reply;
-  return first.reply;
+  if (result.processError && resume) result = await runClaude(text, null);
+  const reply = result.reply;
+  // Persist the session: continuing the same id just bumps it; anything else (a new
+  // chat, or a fresh id after a stale resume) is recorded with a title from the prompt.
+  if (reply.sessionId) {
+    if (resume && reply.sessionId === resume) await touchChatSession(reply.sessionId);
+    else await upsertChatSession(reply.sessionId, deriveTitle(text));
+  }
+  return reply;
+}
+
+/** A short, single-line label for a chat session, from its opening prompt. */
+function deriveTitle(text: string): string {
+  const firstLine = text.trim().split(/\r?\n/, 1)[0]?.trim() ?? "";
+  if (!firstLine) return "New chat";
+  return firstLine.length > 50 ? firstLine.slice(0, 49).trimEnd() + "…" : firstLine;
 }
 
 /** Injected so the headless turn embodies Oracle (claude's default system prompt
@@ -282,7 +298,6 @@ async function runClaude(
   }
 
   const sessionId = typeof parsed.session_id === "string" ? parsed.session_id : null;
-  if (sessionId) await writeFile(chatSessionFile(), sessionId, "utf8").catch(() => {});
   const result = typeof parsed.result === "string" ? parsed.result : "";
   return {
     reply: { reply: result, isError: parsed.is_error === true, sessionId },
