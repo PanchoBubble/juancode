@@ -491,10 +491,29 @@ export const consoleHtml = /* html */ `<!doctype html>
 
 <script>
 const $ = (s) => document.querySelector(s);
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+// fetch with a small backoff retry for *network* failures only — a phone lock or
+// backgrounded tab rejects fetch with a TypeError ("Failed to fetch") that resolves
+// itself once the link is back. HTTP error responses (4xx/5xx) are never retried, and
+// only idempotent GETs retry — a request with a method (POST/DELETE) stays one-shot so
+// we never resubmit a mutation. Mirrors apps/web's fetchGetWithRetry.
 const api = async (path, opts) => {
-  const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
-  if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
-  return r.json();
+  const idempotent = !opts || !opts.method || opts.method === "GET";
+  const attempts = idempotent ? 3 : 1;
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    let r;
+    try {
+      r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+    } catch (err) {
+      lastErr = err; // network error — fetch only rejects for these, not for 4xx/5xx
+      if (i < attempts - 1) { await sleep(Math.min(300 * 2 ** i, 2000)); continue; }
+      throw err;
+    }
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    return r.json();
+  }
+  throw lastErr;
 };
 function esc(s){ return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
@@ -1008,6 +1027,29 @@ async function disablePush(){
   renderPush("default");
 }
 refreshPushState();
+
+// ── Resume / reconnect ────────────────────────────────────
+// Mobile Safari/Chrome suspend the page and drop in-flight requests while the phone is
+// locked or the tab is backgrounded. On resume the visible list is stale and the
+// connection pill can be stuck on "offline". Re-fetch the active tab so it recovers
+// silently instead of stranding a "Failed to fetch" error. The retry-aware api() above
+// absorbs the first network blip during the handover.
+function reloadActiveTab(){
+  const active = document.querySelector("nav button.active");
+  const tab = active && active.dataset.tab;
+  if (tab === "issues") loadIssues();
+  else if (tab === "sessions") loadSessions();
+  // Chat has no list to refresh; its SSE turn is one-shot per send.
+}
+const onResume = () => {
+  if (document.visibilityState === "hidden") return;
+  if (!navigator.onLine) return;
+  reloadActiveTab();
+};
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") onResume(); });
+window.addEventListener("online", onResume);
+window.addEventListener("pageshow", onResume); // bfcache restore
+window.addEventListener("offline", () => setConn(false));
 
 // ── Boot ──────────────────────────────────────────────────
 // Deep-link from a push notification: /?session=<id> jumps to the Sessions tab and
