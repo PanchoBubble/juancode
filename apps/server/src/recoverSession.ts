@@ -192,3 +192,46 @@ export async function recoverCliSessionId(
       : await codexCandidates(roots.codexSessions ?? CODEX_SESSIONS, cwd);
   return chooseNearest(cands, createdAtMs, excludeIds);
 }
+
+/**
+ * A resumable CLI conversation found on disk for a `cwd`: which CLI produced it,
+ * its resumable id, and when it began. The lightweight result of
+ * {@link listExternalSessions} — just enough to build a `SessionMeta` and adopt it.
+ * Distinct from `recoverCliSessionId`, which matches *one* id to an existing
+ * orphaned session row; this surfaces *every* candidate so the caller can offer
+ * them for adoption.
+ */
+export interface ResumableCliSession {
+  /** The CLI that owns this transcript (`claude` or `codex`). */
+  provider: ProviderId;
+  /** The id to resume with (`claude --resume <id>` / a Codex rollout id). */
+  cliSessionId: string;
+  /** When the conversation began, ms since epoch. */
+  startMs: number;
+}
+
+/**
+ * List every resumable CLI conversation (Claude + Codex) whose transcript ran in
+ * `cwd`, newest first. Reuses the same header parsing as {@link recoverCliSessionId}
+ * (Claude: basename = id, cwd+timestamp on the first matching line; Codex:
+ * `session_meta` payload id+cwd) but applies no time window and no exclusion — it
+ * surfaces *all* candidates so the caller can offer them for adoption. Dedupe
+ * against already-adopted ids (`db.usedCliSessionIds()`) at the call site, not here.
+ *
+ * Ported from native `listExternalSessions` (juancode-723) to give the Node/TS
+ * server the same external-session surfacing.
+ */
+export async function listExternalSessions(
+  cwd: string,
+  roots: RecoverRoots = {},
+): Promise<ResumableCliSession[]> {
+  const [claude, codex] = await Promise.all([
+    claudeCandidates(roots.claudeProjects ?? CLAUDE_PROJECTS, cwd),
+    codexCandidates(roots.codexSessions ?? CODEX_SESSIONS, cwd),
+  ]);
+  const sessions: ResumableCliSession[] = [
+    ...claude.map((c) => ({ provider: "claude" as const, cliSessionId: c.id, startMs: c.startMs })),
+    ...codex.map((c) => ({ provider: "codex" as const, cliSessionId: c.id, startMs: c.startMs })),
+  ];
+  return sessions.sort((a, b) => b.startMs - a.startMs);
+}

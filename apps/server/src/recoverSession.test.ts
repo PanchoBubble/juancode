@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { recoverCliSessionId } from "./recoverSession.ts";
+import { listExternalSessions, recoverCliSessionId } from "./recoverSession.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "juancode-recover-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -35,6 +35,24 @@ function claudeRoot(
         { type: "user", cwd: t.cwd, timestamp: new Date(t.startMs).toISOString(), message: "hi" },
       ]),
     );
+  }
+  return root;
+}
+
+/**
+ * Build a Codex sessions root containing one `rollout-*.jsonl` per entry, each
+ * with a `session_meta` header carrying the resumable id + cwd. Codex has no
+ * in-record start time, so the rollout file's birthtime/mtime is the start — we
+ * stamp `mtime` to a deterministic value so order is testable.
+ */
+function codexRoot(name: string, transcripts: { id: string; cwd: string; startMs: number }[]): string {
+  const root = join(tmp, name);
+  mkdirSync(root, { recursive: true });
+  for (const t of transcripts) {
+    const file = join(root, `rollout-${t.id}.jsonl`);
+    writeFileSync(file, jsonl([{ type: "session_meta", payload: { id: t.id, cwd: t.cwd } }]));
+    const when = new Date(t.startMs);
+    utimesSync(file, when, when);
   }
   return root;
 }
@@ -77,5 +95,42 @@ describe("recoverCliSessionId (claude)", () => {
   it("returns null when the projects root has nothing for this cwd", async () => {
     const root = claudeRoot("empty", [{ id: "x", cwd: OTHER, startMs: T0 }]);
     expect(await recover(root)).toBeNull();
+  });
+});
+
+describe("listExternalSessions", () => {
+  it("lists every Claude transcript for the cwd, newest first, with no time window", async () => {
+    const claudeProjects = claudeRoot("ext-claude", [
+      { id: "old", cwd: CWD, startMs: T0 - 60 * 60_000 }, // well before T0 — still listed
+      { id: "newer", cwd: CWD, startMs: T0 + 99 * 60_000 }, // well after T0 — still listed
+      { id: "elsewhere", cwd: OTHER, startMs: T0 }, // different cwd — excluded
+    ]);
+    const out = await listExternalSessions(CWD, { claudeProjects });
+    expect(out.map((s) => s.cliSessionId)).toEqual(["newer", "old"]);
+    expect(out.every((s) => s.provider === "claude")).toBe(true);
+  });
+
+  it("merges Claude and Codex candidates and sorts the combined list newest first", async () => {
+    const claudeProjects = claudeRoot("ext-merge-claude", [
+      { id: "c-old", cwd: CWD, startMs: T0 - 30 * 60_000 },
+      { id: "c-new", cwd: CWD, startMs: T0 + 60 * 60_000 },
+    ]);
+    const codexSessions = codexRoot("ext-merge-codex", [
+      { id: "x-mid", cwd: CWD, startMs: T0 },
+      { id: "x-other", cwd: OTHER, startMs: T0 + 5 * 60_000 }, // different cwd — excluded
+    ]);
+    const out = await listExternalSessions(CWD, { claudeProjects, codexSessions });
+    // c-new (T0+60m) > x-mid (~T0) > c-old (T0-30m); x-other excluded by cwd.
+    expect(out.map((s) => `${s.provider}:${s.cliSessionId}`)).toEqual([
+      "claude:c-new",
+      "codex:x-mid",
+      "claude:c-old",
+    ]);
+  });
+
+  it("returns an empty list when neither root has anything for the cwd", async () => {
+    const claudeProjects = claudeRoot("ext-none-claude", [{ id: "x", cwd: OTHER, startMs: T0 }]);
+    const codexSessions = codexRoot("ext-none-codex", [{ id: "y", cwd: OTHER, startMs: T0 }]);
+    expect(await listExternalSessions(CWD, { claudeProjects, codexSessions })).toEqual([]);
   });
 });
