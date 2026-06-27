@@ -332,8 +332,13 @@ export const consoleHtml = /* html */ `<!doctype html>
   .attach .a-status.err { color: var(--bad); }
   .attach .a-status:empty { display: none; }
   .composer textarea {
-    flex: 1; min-height: var(--tap); max-height: 130px; height: var(--tap);
+    flex: 1; min-width: 0; min-height: var(--tap); max-height: 130px; height: var(--tap);
     border-radius: 22px; padding: 12px 16px; background: var(--panel);
+    /* No manual drag-resize: it leaves a handle poking outside the rounded
+       corner on mobile. The input grows to fit its content (see the input
+       event handler) up to max-height, then scrolls internally. min-width:0
+       lets the flex item shrink so the caret/box never overflows the viewport. */
+    resize: none; overflow-y: auto;
   }
   .composer .send {
     width: var(--tap); height: var(--tap); flex: none; border: 0; border-radius: 50%;
