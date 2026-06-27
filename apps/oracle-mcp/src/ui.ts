@@ -58,6 +58,13 @@ export const consoleHtml = /* html */ `<!doctype html>
     list-style: none; padding: 4px 0; }
   details > summary::-webkit-details-marker { display: none; }
   .hint { color: var(--dim); font-size: 12px; text-align: center; padding: 24px 0; }
+  /* Pin the new-issue / dispatch ("compose") control to the top of the scroll
+     area so it stays reachable while the list scrolls under it. Sticky is
+     relative to <main> (the overflow-y:auto container); the safe-area notch is
+     already handled by the sticky <header> above main. */
+  .create { position: sticky; top: 0; z-index: 4; margin: 0 -12px;
+    padding: 4px 12px 0; background: var(--bg); }
+  .create > summary { padding: 8px 0; }
   /* chat */
   #chat { display: flex; flex-direction: column; height: 100%; }
   #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
@@ -82,7 +89,7 @@ export const consoleHtml = /* html */ `<!doctype html>
   </nav>
   <main>
     <section id="issues" class="tab active">
-      <details><summary>＋ New global issue</summary>
+      <details class="create"><summary>＋ New global issue</summary>
         <div class="card">
           <label>Title</label><input id="i-title" placeholder="Short title" />
           <label>Description</label><textarea id="i-desc" placeholder="Context (optional)"></textarea>
@@ -99,7 +106,7 @@ export const consoleHtml = /* html */ `<!doctype html>
     </section>
 
     <section id="sessions" class="tab">
-      <details><summary>➤ Dispatch an agent</summary>
+      <details class="create"><summary>➤ Dispatch an agent</summary>
         <div class="card">
           <label>Project path (absolute)</label><input id="d-project" placeholder="/Users/you/repo" />
           <label>Prompt</label><textarea id="d-prompt" placeholder="What should the agent do?"></textarea>
