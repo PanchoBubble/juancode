@@ -168,6 +168,7 @@ export function SessionView({ id }: { id: string }) {
   const queueMessage = (text: string) => socket.send({ type: "queueMessage", sessionId: id, text });
   const dequeueMessage = (messageId: string) =>
     socket.send({ type: "dequeueMessage", sessionId: id, messageId });
+  const steerMessage = (text: string) => socket.send({ type: "steerMessage", sessionId: id, text });
 
   /** Resume the session (server resumes its CLI conversation, recovering the id if needed). */
   const reactivate = () => {
@@ -536,7 +537,13 @@ export function SessionView({ id }: { id: string }) {
       )}
       {status === "running" &&
         (activity === "busy" || activity === "waiting_input" || queueItems.length > 0) && (
-          <MessageQueue items={queueItems} onQueue={queueMessage} onRemove={dequeueMessage} />
+          <MessageQueue
+            items={queueItems}
+            canSteer={activity === "busy" || activity === "waiting_input"}
+            onQueue={queueMessage}
+            onSteer={steerMessage}
+            onRemove={dequeueMessage}
+          />
         )}
     </div>
   );

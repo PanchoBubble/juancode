@@ -257,6 +257,15 @@ export type ClientMessage =
   | { type: "queueMessage"; sessionId: string; text: string }
   /** Cancel a still-pending queued message before it's delivered. */
   | { type: "dequeueMessage"; sessionId: string; messageId: string }
+  /**
+   * Steer a *busy* session: inject `text` into the running agent immediately to
+   * redirect it mid-task, instead of queueing it for the next idle. The CLIs
+   * accept input while working (Claude Code reads typed-and-submitted text as a
+   * steering instruction for the current turn), so the server delivers it with
+   * the same robust bracketed-paste-then-Enter as the queue / seed / decision
+   * paths. No-op if the session isn't live. See `Session.steer`.
+   */
+  | { type: "steerMessage"; sessionId: string; text: string }
   // ── END per-session message queue ────────────────────────────────────────────
   // ── BEGIN tracked-PR registry (ticket juancode-bt2) — additive ───────────────
   /**

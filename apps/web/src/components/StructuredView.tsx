@@ -16,6 +16,16 @@ export function StructuredView({ sessionId, running }: { sessionId: string; runn
   // through history isn't yanked away by a fresh event.
   const pinnedToBottom = useRef(true);
   const [draft, setDraft] = useState("");
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the composer to fit its content up to the CSS max-height (no drag
+  // handle), so multi-line prompts are comfortable to read on a phone.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
 
   useEffect(() => {
     setEvents([]);
@@ -86,6 +96,7 @@ export function StructuredView({ sessionId, running }: { sessionId: string; runn
         <div className="border-t border-neutral-800 p-2">
           <div className="flex items-end gap-2">
             <textarea
+              ref={taRef}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
