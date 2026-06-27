@@ -6,6 +6,7 @@ import { api } from "../lib/api.ts";
 import { socket } from "../lib/socket.ts";
 import { useActivity, usePrompt } from "../lib/activity.ts";
 import type { ServerMessage } from "../protocol.ts";
+import { AttachBar } from "./AttachBar.tsx";
 import { BeadsPanel } from "./BeadsPanel.tsx";
 import { ChangesPanel } from "./ChangesPanel.tsx";
 import { DecisionCard } from "./DecisionCard.tsx";
@@ -38,6 +39,10 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/** Client-side attachment ceiling. The server caps the raw body at 100 MB; we
+ *  reject earlier with a friendly message so a huge phone video never uploads. */
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 export function SessionView({ id }: { id: string }) {
   const navigate = useNavigate();
@@ -221,6 +226,21 @@ export function SessionView({ id }: { id: string }) {
     const attId = crypto.randomUUID();
     const isImage = file.type.startsWith("image/");
     const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setAttachments((list) => [
+        ...list,
+        {
+          id: attId,
+          name: file.name,
+          size: file.size,
+          isImage,
+          previewUrl,
+          status: "error",
+          error: `too large (max ${formatSize(MAX_UPLOAD_BYTES)})`,
+        },
+      ]);
+      return;
+    }
     setAttachments((list) => [
       ...list,
       { id: attId, name: file.name, size: file.size, isImage, previewUrl, status: "uploading" },
@@ -503,6 +523,12 @@ export function SessionView({ id }: { id: string }) {
           )}
         </PanelGroup>
       </div>
+      {/* Phone-only photo/audio composer (desktop has drag-drop + paste). */}
+      {status === "running" && (
+        <div className="md:hidden">
+          <AttachBar onFile={(file) => void handleFile(file)} />
+        </div>
+      )}
       {status === "running" && activity === "waiting_input" && prompt && (
         <DecisionCard sessionId={id} prompt={prompt} />
       )}
