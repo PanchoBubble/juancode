@@ -95,6 +95,7 @@ interface TgChat {
   id: number;
 }
 interface TgMessage {
+  message_id?: number;
   chat?: TgChat;
   from?: TgUser;
   text?: string;
@@ -108,14 +109,15 @@ export interface TgUpdate {
  *  not a text message we can act on (edits, photos, joins, etc. are ignored). */
 export function parseTextMessage(
   update: TgUpdate,
-): { chatId: number; userId: number; text: string } | null {
+): { chatId: number; userId: number; messageId: number | null; text: string } | null {
   const msg = update.message;
   const chatId = msg?.chat?.id;
   const userId = msg?.from?.id;
   const text = msg?.text;
   if (typeof chatId !== "number" || typeof userId !== "number") return null;
   if (typeof text !== "string" || !text.trim()) return null;
-  return { chatId, userId, text: text.trim() };
+  const messageId = typeof msg?.message_id === "number" ? msg.message_id : null;
+  return { chatId, userId, messageId, text: text.trim() };
 }
 
 /** The side-effecting collaborators the update handler needs. Injected so the handler
@@ -126,6 +128,10 @@ export interface TelegramDeps {
   setSession: (chatId: number, sessionId: string) => Promise<void>;
   clearSession: (chatId: number) => Promise<void>;
   send: (chatId: number, text: string) => Promise<void>;
+  /** Best-effort "typing…" chat action; never throws (a failed hint must not stall a reply). */
+  typing: (chatId: number) => Promise<void>;
+  /** Best-effort message reaction. `emoji === null` removes the reaction. Never throws. */
+  react: (chatId: number, messageId: number, emoji: string | null) => Promise<void>;
 }
 
 /** The real collaborators, wired to the shared Oracle backend + per-chat store. */
@@ -136,6 +142,8 @@ function defaultDeps(token: string): TelegramDeps {
     setSession: setTelegramSession,
     clearSession: clearTelegramSession,
     send: (chatId, text) => sendMessage(token, chatId, text),
+    typing: (chatId) => sendChatAction(token, chatId, "typing"),
+    react: (chatId, messageId, emoji) => setMessageReaction(token, chatId, messageId, emoji),
   };
 }
 
@@ -150,7 +158,7 @@ export async function handleUpdate(
 ): Promise<void> {
   const parsed = parseTextMessage(update);
   if (!parsed) return;
-  const { chatId, userId, text } = parsed;
+  const { chatId, userId, messageId, text } = parsed;
 
   if (!isAllowed(userId, allowed)) {
     console.warn(`telegram: ignoring message from non-allowed user ${userId}`);
@@ -169,8 +177,23 @@ export async function handleUpdate(
     return;
   }
 
+  // Immediate "Oracle is working" feedback before the (often slow) backend call: a 👀
+  // reaction on the user's message plus a "typing…" chat action, refreshed every few
+  // seconds since Telegram clears typing after ~5s. Both are best-effort and never throw.
+  if (messageId !== null) await deps.react(chatId, messageId, "👀");
+  await deps.typing(chatId);
+  const typingTimer = setInterval(() => void deps.typing(chatId), 4000);
+
   const sessionId = await deps.getSession(chatId);
-  const reply = await deps.chat(text, sessionId);
+  let reply: ChatReply;
+  try {
+    reply = await deps.chat(text, sessionId);
+  } finally {
+    clearInterval(typingTimer);
+    // Clear the working indicator now that the turn is done (typing stops on its own
+    // once we send the reply, but the reaction must be removed explicitly).
+    if (messageId !== null) await deps.react(chatId, messageId, null);
+  }
   if (reply.sessionId) await deps.setSession(chatId, reply.sessionId);
 
   const body = reply.reply.trim() || "(no reply)";
@@ -192,6 +215,50 @@ async function sendMessage(token: string, chatId: number, text: string): Promise
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new Error(`telegram sendMessage ${res.status}: ${detail.slice(0, 200)}`);
+  }
+}
+
+/** Best-effort "typing…" chat action. Swallows failures: a missing typing hint must
+ *  never stall or fail the actual reply. Telegram auto-clears it after ~5s or when we
+ *  send a message, so there's nothing to undo. */
+async function sendChatAction(token: string, chatId: number, action: string): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase(token)}/sendChatAction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`telegram sendChatAction ${res.status}: ${detail.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.warn("telegram sendChatAction failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+/** Best-effort message reaction. `emoji === null` clears the reaction (empty array).
+ *  Swallows failures (e.g. an emoji the chat disallows) — a decorative hint must never
+ *  break message handling. */
+async function setMessageReaction(
+  token: string,
+  chatId: number,
+  messageId: number,
+  emoji: string | null,
+): Promise<void> {
+  const reaction = emoji ? [{ type: "emoji", emoji }] : [];
+  try {
+    const res = await fetch(`${apiBase(token)}/setMessageReaction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, reaction }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`telegram setMessageReaction ${res.status}: ${detail.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.warn("telegram setMessageReaction failed:", e instanceof Error ? e.message : e);
   }
 }
 

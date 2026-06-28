@@ -62,9 +62,16 @@ describe("chunkMessage", () => {
 });
 
 describe("parseTextMessage", () => {
-  it("extracts chatId, userId, trimmed text", () => {
-    const u: TgUpdate = { update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: " hi " } };
-    expect(parseTextMessage(u)).toEqual({ chatId: 9, userId: 5, text: "hi" });
+  it("extracts chatId, userId, messageId, trimmed text", () => {
+    const u: TgUpdate = {
+      update_id: 1,
+      message: { message_id: 42, chat: { id: 9 }, from: { id: 5 }, text: " hi " },
+    };
+    expect(parseTextMessage(u)).toEqual({ chatId: 9, userId: 5, messageId: 42, text: "hi" });
+  });
+  it("returns a null messageId when message_id is absent", () => {
+    const u: TgUpdate = { update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: "hi" } };
+    expect(parseTextMessage(u)).toEqual({ chatId: 9, userId: 5, messageId: null, text: "hi" });
   });
   it("ignores non-text / malformed updates", () => {
     expect(parseTextMessage({ update_id: 1 })).toBeNull();
@@ -82,13 +89,15 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
     setSession: vi.fn(async () => {}),
     clearSession: vi.fn(async () => {}),
     send: vi.fn(async () => {}),
+    typing: vi.fn(async () => {}),
+    react: vi.fn(async () => {}),
     ...overrides,
   };
 }
 
-const msg = (userId: number, text: string, chatId = 100): TgUpdate => ({
+const msg = (userId: number, text: string, chatId = 100, messageId = 7): TgUpdate => ({
   update_id: 1,
-  message: { chat: { id: chatId }, from: { id: userId }, text },
+  message: { message_id: messageId, chat: { id: chatId }, from: { id: userId }, text },
 });
 
 describe("handleUpdate", () => {
@@ -110,6 +119,34 @@ describe("handleUpdate", () => {
     expect(deps.chat).toHaveBeenCalledWith("what's up", "prev-session");
     expect(deps.setSession).toHaveBeenCalledWith(100, "new-session");
     expect(deps.send).toHaveBeenCalledWith(100, "the answer");
+  });
+
+  it("shows a 👀 reaction + typing before working, then clears the reaction", async () => {
+    const deps = makeDeps();
+    await handleUpdate(msg(5, "what's up"), allowed, deps);
+    // 👀 reaction set on the user's message, then cleared (null) when done.
+    expect(deps.react).toHaveBeenNthCalledWith(1, 100, 7, "👀");
+    expect(deps.react).toHaveBeenLastCalledWith(100, 7, null);
+    expect(deps.typing).toHaveBeenCalledWith(100);
+  });
+
+  it("does not react when the update has no message id", async () => {
+    const deps = makeDeps();
+    const update: TgUpdate = {
+      update_id: 1,
+      message: { chat: { id: 100 }, from: { id: 5 }, text: "hi" },
+    };
+    await handleUpdate(update, allowed, deps);
+    expect(deps.react).not.toHaveBeenCalled();
+    expect(deps.typing).toHaveBeenCalledWith(100);
+    expect(deps.send).toHaveBeenCalled();
+  });
+
+  it("does not show the working indicator for /new or /start", async () => {
+    const deps = makeDeps();
+    await handleUpdate(msg(5, "/new"), allowed, deps);
+    expect(deps.react).not.toHaveBeenCalled();
+    expect(deps.typing).not.toHaveBeenCalled();
   });
 
   it("/new clears the chat's session and confirms", async () => {
