@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendAsk, appendDispatch, oracleDir } from "./oracle.ts";
+import { appendAsk, appendDispatch, deleteSession, oracleDir } from "./oracle.ts";
 
 // The dispatch/ask mailbox line shapes are a contract with the Swift
 // `OracleDispatch` / `OracleAsk` decoders in apps/native — if these keys or types
@@ -69,5 +69,46 @@ describe("Oracle mailbox line shapes", () => {
     await appendAsk("second");
     const lines = readFileSync(join(dir, "ask.jsonl"), "utf8").split("\n").filter(Boolean);
     expect(lines.map((l) => JSON.parse(l).text)).toEqual(["first", "second"]);
+  });
+});
+
+describe("deleteSession", () => {
+  const prev = process.env.JUANCODE_API;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    process.env.JUANCODE_API = "http://native.test";
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.JUANCODE_API;
+    else process.env.JUANCODE_API = prev;
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("DELETEs the session by id against the native app", async () => {
+    const fetchMock = vi.fn(
+      async (_url: string | URL, _init?: RequestInit) => new Response(null, { status: 204 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await deleteSession("sess 1/weird");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://native.test/api/sessions/sess%201%2Fweird");
+    expect(init?.method).toBe("DELETE");
+  });
+
+  it("reports a clear error when the session is unknown", async () => {
+    globalThis.fetch = (async () => new Response(null, { status: 404 })) as unknown as typeof fetch;
+    await expect(deleteSession("nope")).rejects.toThrow(/not found/i);
+  });
+
+  it("reports a clear error when the native app is unreachable", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    await expect(deleteSession("x")).rejects.toThrow(/is the native app running/i);
   });
 });

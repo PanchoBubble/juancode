@@ -432,6 +432,12 @@ export const consoleHtml = /* html */ `<!doctype html>
   }
   .sreply .sreply-send:active { transform: scale(.94); }
   .sreply .sreply-send:disabled { opacity: .45; }
+  .sdel {
+    flex: none; border: 0; background: transparent; color: var(--faint);
+    font-size: 15px; line-height: 1; padding: 5px 7px; margin: -3px -5px -3px 0;
+    border-radius: 8px;
+  }
+  .sdel:active { background: var(--panel-2); color: var(--bad); }
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; transition: none !important; }
@@ -646,8 +652,9 @@ async function loadSessions(){
       const st = (s.status||"").toLowerCase();
       const live = st && st !== "exited" && st !== "closed" && st !== "done";
       const id = esc(s.id || s.cliSessionId || "");
+      const del = id ? '<button class="sdel" data-del="'+id+'" aria-label="Delete session">✕</button>' : '';
       const head = '<div class="row"><span class="title">'+esc(s.title||"untitled")+'</span>'
-      + '<span class="badge b-open spacer">'+esc(s.provider||"agent")+'</span></div>'
+      + '<span class="badge b-open spacer">'+esc(s.provider||"agent")+'</span>'+del+'</div>'
       + '<div class="meta"><span class="mono">'+esc(s.cwd||"")+'</span>'
       + (s.status?'<span class="badge '+(live?"b-ready":"b-closed")+'">'+esc(s.status)+'</span>':'')+'</div>';
       if (!live || !id) return '<div class="card item">'+head+'</div>';
@@ -703,7 +710,19 @@ async function sendReply(card){
   } catch(e){ setConn(false); alert("Couldn't send the reply: " + e.message); }
   if (btn) btn.disabled = false;
 }
+// Permanently delete a session (kills its pty + removes any auto-created worktree on
+// the Mac, via the native app). Destructive, so confirm first.
+async function deleteSessionCard(id){
+  if (!id) return;
+  if (!confirm("Delete this session? This kills the agent and removes its worktree.")) return;
+  try {
+    await api("/api/sessions/delete", { method:"POST", body: JSON.stringify({ id }) }); setConn(true);
+    await loadSessions();
+  } catch(e){ setConn(false); alert("Couldn't delete the session: " + e.message); }
+}
 $("#sessions-list").addEventListener("click", (e) => {
+  const delBtn = e.target.closest && e.target.closest("[data-del]");
+  if (delBtn) { e.stopPropagation(); deleteSessionCard(delBtn.dataset.del); return; }
   const sendBtn = e.target.closest && e.target.closest(".sreply-send");
   if (sendBtn) { sendReply(sendBtn.closest(".sess")); return; }
   if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle

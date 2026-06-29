@@ -29,6 +29,7 @@ import {
   appendAsk,
   appendDispatch,
   createIssue,
+  deleteSession,
   deliverReply,
   listIssues,
   listSessions,
@@ -173,6 +174,26 @@ function buildServer(): McpServer {
   );
 
   server.registerTool(
+    "oracle_delete_session",
+    {
+      title: "Delete a session",
+      description:
+        "Permanently delete an agent session by id: kills its pty, drops it from the store, and removes any auto-created git worktree (best-effort). The native app must be running.",
+      inputSchema: {
+        id: z.string().min(1).describe("The session id to delete (from oracle_list_sessions)"),
+      },
+    },
+    async (args) => {
+      try {
+        await deleteSession(args.id);
+        return ok(`Deleted session ${args.id}.`);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
     "oracle_ask",
     {
       title: "Ask the Oracle",
@@ -238,6 +259,20 @@ app.post("/api/issues", async (req: Request, res: Response) => {
 app.get("/api/sessions", async (_req: Request, res: Response) => {
   try {
     res.json(await listSessions());
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.post("/api/sessions/delete", async (req: Request, res: Response) => {
+  try {
+    const id = (req.body ?? {}).id;
+    if (typeof id !== "string" || !id) {
+      res.status(400).send("id is required");
+      return;
+    }
+    await deleteSession(id);
+    res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);
   }

@@ -24,7 +24,9 @@ import {
   type PresenceFetcher,
 } from "./presence.ts";
 
-const VAPID_SUBJECT = "mailto:juan@fanvue.com";
+// VAPID requires a contact (mailto: or https: URL) so push services can reach
+// the sender. Override with VAPID_SUBJECT; the fallback is a neutral placeholder.
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT?.trim() || "mailto:admin@example.com";
 
 /** Resolve the native backend's WS URL from the same base oracle.ts uses for its
  *  HTTP calls. Kept local (oracle.ts doesn't export nativeApiBase). */

@@ -198,6 +198,23 @@ export async function listSessions(): Promise<unknown> {
   return res.json();
 }
 
+/** Permanently delete a session via the native app's embedded server: it kills the
+ *  pty, drops the row from sqlite, and removes any auto-created worktree (best-effort).
+ *  Throws a clear error when the app isn't running. */
+export async function deleteSession(id: string): Promise<void> {
+  const url = `${nativeApiBase()}/api/sessions/${encodeURIComponent(id)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "DELETE" });
+  } catch {
+    throw new Error(
+      `Couldn't reach the juancode app at ${nativeApiBase()} — is the native app running on the Mac?`,
+    );
+  }
+  if (res.status === 404) throw new Error(`Session ${id} not found`);
+  if (!res.ok) throw new Error(`DELETE /api/sessions/${id} returned ${res.status}`);
+}
+
 /** The native server's WebSocket URL, derived from the same base as the HTTP API. */
 function nativeWsUrl(): string {
   return nativeApiBase().replace(/^http/, "ws") + "/ws";
