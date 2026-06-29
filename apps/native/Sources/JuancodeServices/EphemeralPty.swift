@@ -19,6 +19,10 @@ public final class EphemeralPty: @unchecked Sendable {
     private var exitListeners: [Int: ExitListener] = [:]
     private var nextToken = 0
     private var alive = true
+    /// Capped scrollback so a late/re-attaching view repaints history. Without it,
+    /// switching sessions tears down the bottom panel's terminal view and the fresh
+    /// one re-attaches to this still-alive pty showing nothing. (Mirrors `Session`.)
+    private var scroll = Scrollback(limit: Config.scrollbackLimit)
 
     /// Spawn `executable` with `args` in `cwd`. Returns nil if `forkpty` fails.
     init?(executable: String, args: [String], cwd: String, cols: Int, rows: Int) {
@@ -31,7 +35,11 @@ public final class EphemeralPty: @unchecked Sendable {
     }
 
     private func emitOutput(_ bytes: [UInt8]) {
-        for l in lock.withLock({ Array(outputListeners.values) }) { l(bytes) }
+        let listeners = lock.withLock { () -> [OutputListener] in
+            scroll.append(bytes)
+            return Array(outputListeners.values)
+        }
+        for l in listeners { l(bytes) }
     }
 
     private func handleExit(_ code: Int32) {
@@ -54,13 +62,17 @@ public final class EphemeralPty: @unchecked Sendable {
         if lock.withLock({ alive }) { proc?.terminate() }
     }
 
+    /// Subscribe to output bytes. With `replay: true` (default) the current
+    /// scrollback is delivered immediately so a re-attaching view repaints history;
+    /// registration + snapshot happen atomically so no byte is dropped or doubled.
     @discardableResult
-    public func onOutput(_ listener: @escaping OutputListener) -> () -> Void {
-        let token = lock.withLock { () -> Int in
+    public func onOutput(replay: Bool = true, _ listener: @escaping OutputListener) -> () -> Void {
+        let (token, replayBytes): (Int, [UInt8]) = lock.withLock {
             let t = nextToken; nextToken += 1
             outputListeners[t] = listener
-            return t
+            return (t, replay ? scroll.replay : [])
         }
+        if replay && !replayBytes.isEmpty { listener(replayBytes) }
         return { [weak self] in self?.lock.withLock { _ = self?.outputListeners.removeValue(forKey: token) } }
     }
 

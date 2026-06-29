@@ -275,10 +275,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 }
 
 /// Ghostty counterpart of `SwiftTermEphemeral`: drives the libghostty surface from a
-/// live `EphemeralPty` (a `$SHELL -i` for the bottom terminal panel / editor). Unlike
-/// `Session`, an `EphemeralPty` has no scrollback replay — its first output (the shell
-/// prompt) can arrive before the surface is created, and `receive()` drops bytes while
-/// the surface is nil. So we buffer pre-surface output and flush it on attach.
+/// live `EphemeralPty` (a `$SHELL -i` for the bottom terminal panel / editor). On
+/// attach the pty replays its scrollback so a re-created surface (e.g. after a session
+/// switch) repaints history; but that replay — and the shell's first prompt — can
+/// arrive before the surface is live, and `receive()` drops bytes while the surface is
+/// nil. So we buffer pre-surface output and flush it on attach.
 struct GhosttyEphemeral: NSViewRepresentable {
     let pty: EphemeralPty
     let onExit: @Sendable () -> Void
