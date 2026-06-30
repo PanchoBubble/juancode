@@ -16,15 +16,21 @@ public enum JuancodeServer {
     ///   SIGINT/SIGTERM for graceful shutdown. The GUI app passes false — it owns
     ///   its own lifecycle (Cmd-Q), and trapping SIGINT there would swallow the
     ///   terminal's Ctrl-C without quitting the process.
+    /// `auth` defaults to the token resolved from configuration (`JUANCODE_TOKEN`
+    /// env, else a self-provisioned token persisted in the data dir, else none), so
+    /// callers that don't pass it — including the GUI app — pick up auth whenever a
+    /// token is configured and stay open (loopback-only) otherwise. Tests pass an
+    /// explicit `AuthConfig` (often `.disabled`).
     public static func run(
         state: AppState,
-        host: String = "127.0.0.1",
+        host: String = Config.bindHost,
         port: Int = Config.port,
         webDist: String? = nil,
+        auth: AuthConfig = AuthConfig(token: Config.remoteToken),
         handleSignals: Bool = true
     ) async throws {
-        let router = buildRouter(state: state, webDist: webDist)
-        let wsRouter = buildWSRouter(state: state)
+        let router = buildRouter(state: state, webDist: webDist, auth: auth)
+        let wsRouter = buildWSRouter(state: state, auth: auth)
         let app = Application(
             router: router,
             server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
@@ -39,9 +45,14 @@ public enum JuancodeServer {
 
     // MARK: - WebSocket router (/ws)
 
-    static func buildWSRouter(state: AppState) -> Router<BasicWebSocketRequestContext> {
+    static func buildWSRouter(state: AppState, auth: AuthConfig = .disabled) -> Router<BasicWebSocketRequestContext> {
         let wsRouter = Router(context: BasicWebSocketRequestContext.self)
-        wsRouter.ws("/ws") { inbound, outbound, _ in
+        // Gate the upgrade on the token (opt-in via JUANCODE_TOKEN). `.dontUpgrade`
+        // makes the handshake fail with a non-101 response — the client's WebSocket
+        // never opens. Pass-through when auth is disabled.
+        wsRouter.ws("/ws", shouldUpgrade: { request, _ in
+            authorizeWsUpgrade(request, config: auth) ? .upgrade([:]) : .dontUpgrade
+        }) { inbound, outbound, _ in
             // Server→client messages are produced from many threads (pty output,
             // activity); funnel them through a stream that one writer task drains.
             let (stream, cont) = AsyncStream<ServerMessage>.makeStream()
@@ -72,9 +83,14 @@ public enum JuancodeServer {
 
     // MARK: - HTTP router (REST, mirrors index.ts)
 
-    static func buildRouter(state: AppState, webDist: String?) -> Router<BasicRequestContext> {
+    static func buildRouter(state: AppState, webDist: String?, auth: AuthConfig = .disabled) -> Router<BasicRequestContext> {
         let router = Router()
         let store = state.store
+
+        // Token auth (opt-in via JUANCODE_TOKEN). Added first so it gates every
+        // route below — the static SPA, the REST API, and any browser navigation.
+        // No-op when disabled. Mirrors `app.use(authMiddleware())` in index.ts.
+        router.middlewares.add(AuthMiddleware(config: auth))
 
         // Serve the built web app in production (apps/web/dist), if present.
         if let webDist, FileManager.default.fileExists(atPath: webDist) {
