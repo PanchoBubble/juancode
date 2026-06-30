@@ -9,11 +9,13 @@ public extension SessionEnvironment {
     /// JuancodeServices, so these seams are injected here.
     static func live(
         store: SessionStore,
+        messageQueue: MessageQueue = MessageQueue(),
         scrollbackLimit: Int = Config.scrollbackLimit
     ) -> SessionEnvironment {
         SessionEnvironment(
             resolver: DefaultBinaryResolver(),
             store: store,
+            messageQueue: messageQueue,
             scrollbackLimit: scrollbackLimit,
             deriveTitle: { provider, id in await deriveSessionTitle(provider, id) },
             deriveUsage: { provider, id in await deriveSessionUsage(provider, id) }

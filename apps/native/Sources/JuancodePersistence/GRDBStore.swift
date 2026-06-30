@@ -12,7 +12,7 @@ import JuancodeCore
 /// (a lossy UTF-8 decode of the raw pty bytes) so the same data dir is readable
 /// by either implementation. Replay fidelity is preserved end to end because the
 /// trim happens on byte boundaries upstream (see `Scrollback`).
-public final class GRDBStore: PersistentStore, @unchecked Sendable {
+public final class GRDBStore: PersistentStore, MessageQueuePersistence, @unchecked Sendable {
     private let dbQueue: DatabaseQueue
 
     /// Open (creating if needed) the database at `path`. Defaults to
@@ -102,6 +102,21 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
                     payload     TEXT NOT NULL,
                     created_at  INTEGER NOT NULL
                 );
+                """)
+
+            // Per-session outbound message queue (oracle-cj3 / juancode-r82):
+            // instructions lined up while the agent was busy, delivered in order on
+            // the next idle. Persisted so the queue survives a reconnect / restart
+            // and a session reactivating. Insertion order (and thus delivery order)
+            // is the implicit `rowid`. Mirrors `message_queue` in db.ts.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS message_queue (
+                    id          TEXT PRIMARY KEY,
+                    session_id  TEXT NOT NULL,
+                    text        TEXT NOT NULL,
+                    created_at  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_queue_session ON message_queue(session_id);
                 """)
 
             // Contentless FTS5 mirror of sessions(title, scrollback), keyed by id.
@@ -283,6 +298,7 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
         (try? dbQueue.write { db -> Bool in
             try db.execute(sql: "DELETE FROM diff_comments WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM diff_reviews WHERE session_id = ?", arguments: [id])
+            try db.execute(sql: "DELETE FROM message_queue WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM sessions_fts WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM sessions WHERE id = ?", arguments: [id])
             return db.changesCount > 0
@@ -358,6 +374,49 @@ public final class GRDBStore: PersistentStore, @unchecked Sendable {
         } ?? nil
         guard let payload, let data = payload.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ReviewResult.self, from: data)
+    }
+
+    // MARK: - MessageQueuePersistence (oracle-cj3 / juancode-r82)
+
+    @discardableResult
+    public func add(_ sessionId: String, text: String) -> QueuedMessage {
+        let item = QueuedMessage(text: text)
+        try? dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO message_queue (id, session_id, text, created_at)
+                VALUES (?, ?, ?, ?)
+                """, arguments: [item.id, sessionId, item.text, item.createdAt])
+        }
+        return item
+    }
+
+    public func list(_ sessionId: String) -> [QueuedMessage] {
+        (try? dbQueue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT id, text, created_at FROM message_queue WHERE session_id = ? ORDER BY rowid ASC",
+                arguments: [sessionId]
+            ).map { QueuedMessage(id: $0["id"], text: $0["text"], createdAt: $0["created_at"]) }
+        }) ?? []
+    }
+
+    public func first(_ sessionId: String) -> QueuedMessage? {
+        (try? dbQueue.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT id, text, created_at FROM message_queue WHERE session_id = ? ORDER BY rowid ASC LIMIT 1",
+                arguments: [sessionId]
+            ).map { QueuedMessage(id: $0["id"], text: $0["text"], createdAt: $0["created_at"]) }
+        }) ?? nil
+    }
+
+    @discardableResult
+    public func remove(_ sessionId: String, _ id: String) -> Bool {
+        (try? dbQueue.write { db -> Bool in
+            try db.execute(sql: "DELETE FROM message_queue WHERE id = ? AND session_id = ?",
+                           arguments: [id, sessionId])
+            return db.changesCount > 0
+        }) ?? false
     }
 
     // MARK: - FTS query building

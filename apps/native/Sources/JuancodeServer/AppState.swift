@@ -12,15 +12,23 @@ public final class AppState: @unchecked Sendable {
     public let store: GRDBStore
     public let registry: SessionRegistry
     public let ephemeral = EphemeralPtyRegistry()
+    /// Per-session outbound message queue (oracle-cj3 / juancode-r82), persisted in
+    /// the same SQLite store. The session registry's env drives it on idle edges;
+    /// the WS layer reads/mutates it and fans changes to watchers.
+    public let messageQueue: MessageQueue
     /// Server-side tracked-PR engine (juancode-bt2) — drives PR tracking over the
     /// wire for the remote web/phone client, mirroring the GUI's in-process tracking.
     public let prTracking: PrTrackingEngine
 
     public init(store: GRDBStore) {
         self.store = store
+        // The queue persists into the same store, so it survives restarts / reconnects.
+        let messageQueue = MessageQueue(persistence: store)
+        self.messageQueue = messageQueue
         // The registry's session env carries the real seams: login-shell binary
-        // resolution, this store, Codex id discovery, and title/usage polling.
-        let registry = SessionRegistry(env: .live(store: store))
+        // resolution, this store, the message queue, Codex id discovery, and
+        // title/usage polling.
+        let registry = SessionRegistry(env: .live(store: store, messageQueue: messageQueue))
         self.registry = registry
         self.prTracking = PrTrackingEngine(registry: registry, store: store)
         // Any session still "running" in the db is stale — its pty died with the

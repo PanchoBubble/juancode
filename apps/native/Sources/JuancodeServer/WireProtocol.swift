@@ -25,6 +25,17 @@ public enum ClientMessage: Sendable {
     case input(sessionId: String, data: String)
     case resize(sessionId: String, cols: Int, rows: Int)
     case kill(sessionId: String)
+    // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────
+    /// Watch a session's pending message queue: the server replies with the current
+    /// `queue` snapshot and pushes an updated snapshot on every change.
+    case subscribeQueue(sessionId: String)
+    /// Stop watching a session's message queue.
+    case unsubscribeQueue(sessionId: String)
+    /// Queue a message to a session for delivery on its next idle. Persisted and
+    /// flushed in order; delivered promptly if the session is idle right now.
+    case queueMessage(sessionId: String, text: String)
+    /// Cancel a still-pending queued message before it's delivered.
+    case dequeueMessage(sessionId: String, messageId: String)
     case openEditor(cwd: String, file: String, cols: Int, rows: Int)
     case openTerminal(cwd: String, cols: Int, rows: Int, requestId: String)
     // ── Tracked-PR registry (juancode-bt2) — keep beside the PR server messages ──
@@ -45,6 +56,8 @@ extension ClientMessage: Decodable {
         case sessionId, data, file, requestId, cliSessionId, startMs
         // Tracked-PR registry (juancode-bt2).
         case pr, trackedId, notificationId
+        // Per-session message queue (oracle-cj3 / juancode-r82).
+        case text, messageId
     }
 
     public init(from decoder: Decoder) throws {
@@ -90,6 +103,16 @@ extension ClientMessage: Decodable {
                            rows: try c.decode(Int.self, forKey: .rows))
         case "kill":
             self = .kill(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "subscribeQueue":
+            self = .subscribeQueue(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "unsubscribeQueue":
+            self = .unsubscribeQueue(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "queueMessage":
+            self = .queueMessage(sessionId: try c.decode(String.self, forKey: .sessionId),
+                                 text: try c.decode(String.self, forKey: .text))
+        case "dequeueMessage":
+            self = .dequeueMessage(sessionId: try c.decode(String.self, forKey: .sessionId),
+                                   messageId: try c.decode(String.self, forKey: .messageId))
         case "openEditor":
             self = .openEditor(cwd: try c.decode(String.self, forKey: .cwd),
                                file: try c.decode(String.self, forKey: .file),
@@ -125,6 +148,10 @@ public enum ServerMessage: Sendable {
     case output(sessionId: String, data: String)
     case exit(sessionId: String, exitCode: Int?)
     case activity(sessionId: String, state: SessionActivity, notify: Bool)
+    /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
+    /// on `subscribeQueue` and after every change (queued, delivered, cancelled).
+    /// Always the complete ordered list; replace wholesale.
+    case queue(sessionId: String, items: [QueuedMessage])
     case editorReady(editorId: String)
     case terminalReady(terminalId: String, requestId: String)
     case unresumable(sessionId: String, reason: String)
@@ -174,6 +201,8 @@ extension ServerMessage: Encodable {
         case editorId, terminalId, requestId, reason, message
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
+        // Per-session message queue (oracle-cj3 / juancode-r82).
+        case items
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -202,6 +231,10 @@ extension ServerMessage: Encodable {
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(state, forKey: .state)
             try c.encode(notify, forKey: .notify)
+        case let .queue(sessionId, items):
+            try c.encode("queue", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(items, forKey: .items)
         case let .editorReady(editorId):
             try c.encode("editorReady", forKey: .type)
             try c.encode(editorId, forKey: .editorId)

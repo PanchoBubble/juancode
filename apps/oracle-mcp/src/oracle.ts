@@ -273,6 +273,63 @@ export async function deliverReply(sessionId: string, text: string): Promise<voi
   });
 }
 
+/**
+ * Queue one or more messages to a live session for in-order delivery on its next
+ * idle (juancode-r82). Unlike {@link deliverReply} — which types straight into the
+ * pty right now — this hands the text to the native server's persisted per-session
+ * queue (`queueMessage`), which flushes one message at a time on each idle edge, so
+ * the agent receives them in order even while it's still busy. The native server
+ * owns the ordering / idle logic; we just enqueue. Messages are queued in the order
+ * given. Throws a clear error if the native app isn't reachable.
+ */
+export async function queueMessages(sessionId: string, texts: string[]): Promise<void> {
+  const items = texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  if (items.length === 0) return;
+  const url = nativeWsUrl();
+  await new Promise<void>((resolve, reject) => {
+    const sock = new WebSocket(url);
+    const fail = (e: unknown) => {
+      try {
+        sock.close();
+      } catch {
+        /* already closing */
+      }
+      reject(
+        e instanceof Error
+          ? e
+          : new Error(`Couldn't reach the juancode app at ${nativeApiBase()} — is it running?`),
+      );
+    };
+    const timer = setTimeout(() => fail(new Error("timed out reaching the native app")), 5000);
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      fail(e);
+    });
+    sock.on("open", () => {
+      try {
+        // Send each queueMessage in order; the native queue preserves insertion
+        // order (rowid), so delivery order matches. A short tick lets the writes
+        // flush before we close.
+        for (const text of items) {
+          sock.send(JSON.stringify({ type: "queueMessage", sessionId, text }));
+        }
+        setTimeout(() => {
+          clearTimeout(timer);
+          try {
+            sock.close();
+          } catch {
+            /* already closing */
+          }
+          resolve();
+        }, 80);
+      } catch (e) {
+        clearTimeout(timer);
+        fail(e);
+      }
+    });
+  });
+}
+
 export interface ChatReply {
   reply: string;
   isError: boolean;

@@ -31,6 +31,7 @@ import {
   createIssue,
   deleteSession,
   deliverReply,
+  queueMessages,
   listIssues,
   listSessions,
   oracleChat,
@@ -207,6 +208,31 @@ function buildServer(): McpServer {
       try {
         await appendAsk(args.text);
         return ok("Delivered to the Oracle. Its reply shows in the Oracle chat on the Mac.");
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_queue_messages",
+    {
+      title: "Queue messages to a session",
+      description:
+        "Queue one or more messages to a running agent session for in-order delivery. Unlike a direct reply, queued messages are held and released one at a time on the session's next idle, so they're delivered in order even while the agent is still busy. The native app must be running.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("The session id to queue to (from oracle_list_sessions)"),
+        messages: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("One or more messages, delivered in this order on each idle"),
+      },
+    },
+    async (args) => {
+      try {
+        await queueMessages(args.sessionId, args.messages);
+        const n = args.messages.length;
+        return ok(`Queued ${n} message${n === 1 ? "" : "s"} to session ${args.sessionId}.`);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -398,6 +424,30 @@ app.post("/api/reply", async (req: Request, res: Response) => {
       return;
     }
     await deliverReply(sessionId, text);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Queue one or more messages to a live session for in-order delivery on its next
+// idle (juancode-r82). Accepts `messages: string[]` (or a single `text`), handed to
+// the native server's persisted per-session queue. The native app must be running.
+app.post("/api/queue", async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const sessionId = body.sessionId;
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    const raw: unknown[] = Array.isArray(body.messages) ? body.messages : [body.text];
+    const messages = raw.filter((m): m is string => typeof m === "string" && m.trim().length > 0);
+    if (messages.length === 0) {
+      res.status(400).send("messages (a non-empty string array) or text is required");
+      return;
+    }
+    await queueMessages(sessionId, messages);
     res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);

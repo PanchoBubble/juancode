@@ -39,6 +39,10 @@ final class WebSocketConnection: @unchecked Sendable {
     private let lock = NSLock()
     private var subscriptions: [String: () -> Void] = [:]
     private var activityWatchers: [() -> Void] = []
+    /// Message-queue subscriptions, one per session this tab is watching
+    /// (oracle-cj3 / juancode-r82). The queue itself persists; only the fan-out is
+    /// torn down here.
+    private var queueWatchers: [String: () -> Void] = [:]
     private var openedEditors: Set<String> = []
     private var openedTerminals: Set<String> = []
     /// Cancel handle for this tab's tracked-PR subscription (juancode-bt2), set when
@@ -61,17 +65,19 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     func close() {
-        let (subs, watchers, eds, terms, prsUnsub):
-            ([() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
+        let (subs, watchers, queues, eds, terms, prsUnsub):
+            ([() -> Void], [() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
             lock.withLock {
-                let r = (Array(subscriptions.values), activityWatchers, openedEditors, openedTerminals, trackedPrsUnsub)
-                subscriptions.removeAll(); activityWatchers.removeAll()
+                let r = (Array(subscriptions.values), activityWatchers, Array(queueWatchers.values),
+                         openedEditors, openedTerminals, trackedPrsUnsub)
+                subscriptions.removeAll(); activityWatchers.removeAll(); queueWatchers.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
                 trackedPrsUnsub = nil
                 return r
             }
         for c in subs { c() }
         for w in watchers { w() }
+        for q in queues { q() }
         prsUnsub?()
         // Editor + shell ptys are tab-scoped — tear them down with the connection.
         for id in eds { state.ephemeral.get(id)?.kill() }
@@ -106,6 +112,23 @@ final class WebSocketConnection: @unchecked Sendable {
 
     private func unsubscribe(_ id: String) {
         lock.withLock { subscriptions.removeValue(forKey: id) }?()
+    }
+
+    // MARK: - message-queue fan-out (oracle-cj3 / juancode-r82)
+
+    /// Push the current queue snapshot, then a fresh snapshot on every change, until
+    /// `unsubscribeQueue` or the connection closes. Idempotent per session.
+    private func subscribeQueue(_ id: String) {
+        if lock.withLock({ queueWatchers[id] != nil }) { return }
+        send(.queue(sessionId: id, items: state.messageQueue.list(id)))
+        let off = state.messageQueue.onChange(id) { [weak self] items in
+            self?.send(.queue(sessionId: id, items: items))
+        }
+        lock.withLock { queueWatchers[id] = off }
+    }
+
+    private func unsubscribeQueue(_ id: String) {
+        lock.withLock { queueWatchers.removeValue(forKey: id) }?()
     }
 
     // MARK: - message routing (mirrors ws.ts handle())
@@ -261,6 +284,24 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .kill(sessionId):
             resolvePty(sessionId)?.kill()
+
+        // ── Per-session message queue (oracle-cj3 / juancode-r82) ─────────────────
+        case let .subscribeQueue(sessionId):
+            subscribeQueue(sessionId)
+
+        case let .unsubscribeQueue(sessionId):
+            unsubscribeQueue(sessionId)
+
+        case let .queueMessage(sessionId, text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            state.messageQueue.add(sessionId, text: trimmed)
+            // Deliver right away if the session is already idle; otherwise it
+            // flushes on the next idle edge.
+            state.registry.get(sessionId)?.kickQueue()
+
+        case let .dequeueMessage(sessionId, messageId):
+            state.messageQueue.remove(sessionId, messageId)
 
         // ── Tracked-PR registry (juancode-bt2) ───────────────────────────────────
         case .subscribeTrackedPrs:

@@ -19,6 +19,11 @@ public enum AutoSubmitOutcome: Sendable, Equatable {
 public struct SessionEnvironment: Sendable {
     public var resolver: BinaryResolver
     public var store: SessionStore
+    /// Per-session outbound message queue (oracle-cj3 / juancode-r82): the
+    /// session drives this on idle-edge transitions to deliver queued messages in
+    /// order. Defaults to a process-local in-memory queue; the server injects the
+    /// persisted one so the queue survives reconnects / restarts.
+    public var messageQueue: MessageQueue
     public var scrollbackLimit: Int
     /// Discover a Codex CLI session id post-spawn. Defaults to the real scanner;
     /// tests override it. `(cwd, sinceMs) -> id?`.
@@ -34,6 +39,7 @@ public struct SessionEnvironment: Sendable {
     public init(
         resolver: BinaryResolver = DefaultBinaryResolver(),
         store: SessionStore = InMemorySessionStore(),
+        messageQueue: MessageQueue = MessageQueue(),
         scrollbackLimit: Int = 256 * 1024,
         discoverCodexId: @escaping @Sendable (String, Int) async -> String? = {
             await CodexSessionDiscovery.capture(cwd: $0, sinceMs: $1)
@@ -43,6 +49,7 @@ public struct SessionEnvironment: Sendable {
     ) {
         self.resolver = resolver
         self.store = store
+        self.messageQueue = messageQueue
         self.scrollbackLimit = scrollbackLimit
         self.discoverCodexId = discoverCodexId
         self.deriveTitle = deriveTitle
@@ -81,6 +88,13 @@ public final class Session: @unchecked Sendable {
 
     private let workQueue: DispatchQueue
     private var detector: ActivityDetector!
+
+    /// Previous activity, tracked to fire the queue flush on the edge into idle
+    /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
+    private var prevQueueActivity: SessionActivity?
+    /// True while `flushQueue` is mid-delivery, so overlapping edges don't double
+    /// up a paste. Guarded by `lock`.
+    private var flushingQueue = false
 
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
@@ -229,6 +243,7 @@ public final class Session: @unchecked Sendable {
 
     private func emitActivity(_ state: SessionActivity, _ notify: Bool) {
         for l in lock.withLock({ Array(activityListeners.values) }) { l(state, notify) }
+        maybeFlushQueueOnEdge(state)
     }
 
     // MARK: - input / lifecycle
@@ -400,6 +415,73 @@ public final class Session: @unchecked Sendable {
     /// separately.
     private func paste(_ trimmed: String) {
         write("\u{1B}[200~\(trimmed)\u{1B}[201~")
+    }
+
+    // MARK: - outbound message queue (oracle-cj3 / juancode-r82)
+
+    /// Tunables for delivering queued messages on an idle transition. Mirrors the
+    /// `QUEUE` constants in `apps/server/src/session.ts`.
+    private enum Queue {
+        /// How long to confirm a delivered message took (the agent went busy).
+        static let acceptMs = 4_000
+        static let pollMs = 120
+    }
+
+    /// Nudge the queue when a message is added while the session is already idle —
+    /// otherwise the next message would wait for an activity edge that never comes.
+    /// Safe to call any time; it no-ops unless idle with something to deliver.
+    public func kickQueue() {
+        if isRunning && activity == .idle { startFlushQueue() }
+    }
+
+    /// Fire the queue flush only on a real transition *into* idle (turn boundary).
+    private func maybeFlushQueueOnEdge(_ state: SessionActivity) {
+        let was: SessionActivity? = lock.withLock {
+            let prev = prevQueueActivity
+            prevQueueActivity = state
+            return prev
+        }
+        if state == .idle && was != nil && was != .idle { startFlushQueue() }
+    }
+
+    /// Run the flush off the main actor; every collaborator it touches is thread-safe.
+    private func startFlushQueue() {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.flushQueue()
+        }
+    }
+
+    /// Deliver queued messages one at a time while the session sits idle. Each is
+    /// sent with the same bracketed-paste-then-Enter the seed / submit paths use (a
+    /// `"\(text)\r"` burst is read as a paste with the CR kept literal, so it never
+    /// submits). We pop a message only once we've confirmed it landed the agent in
+    /// `busy`; that also ends this pass — the agent finishing the turn fires the
+    /// next idle edge, which delivers the next message in order. A stalled delivery
+    /// is left queued and retried on the next idle / kick rather than spun on.
+    /// Mirrors `flushQueue` in `apps/server/src/session.ts`.
+    private func flushQueue() async {
+        let claimed = lock.withLock { () -> Bool in
+            if flushingQueue { return false }
+            flushingQueue = true
+            return true
+        }
+        guard claimed else { return }
+        defer { lock.withLock { flushingQueue = false } }
+
+        while isRunning && activity == .idle {
+            guard let item = env.messageQueue.peek(id) else { break }
+            pasteAndSubmit(item.text)
+            if !isRunning { break }
+            let accepted = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
+                self.activity == .busy || !self.isRunning
+            }
+            // Drop the message only once it actually took; otherwise leave it queued
+            // and stop, so a stalled delivery is retried on the next idle / kick.
+            if accepted && activity == .busy {
+                env.messageQueue.remove(id, item.id)
+            }
+            break
+        }
     }
 
     public func resize(cols: Int, rows: Int) {
