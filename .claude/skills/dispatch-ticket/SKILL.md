@@ -51,12 +51,17 @@ or run `bd ready` and offer the top items. Never guess an id.
 
 4. **Dispatch** a fresh headless session in the repo, in the background:
    ```bash
-   cd <repo-root> && claude -p "$(cat "$SCRATCH/dispatch-<id>.txt")" \
-     --dangerously-skip-permissions
+   cd <repo-root> && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+     claude -p "$(cat "$SCRATCH/dispatch-<id>.txt")" --dangerously-skip-permissions
    ```
    Run it with `run_in_background: true`. `--dangerously-skip-permissions` is what
    makes it autonomous (no approval prompts), matching the Oracle's `skipPermissions`
-   dispatch. The background task re-invokes you when it exits.
+   dispatch. **Unset `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`** (as shown): a parent
+   Claude Code session often has a metered API key in its env, which the spawned
+   `claude` would prefer over the user's claude.ai subscription login — leading to a
+   "Credit balance is too low" failure. Unsetting them makes the dispatched session
+   auth via the user's normal login, exactly like a terminal (the prime directive).
+   The background task re-invokes you when it exits.
 
 5. **Report** to the user: which ticket was dispatched, that a separate `claude`
    session is now working it in the background, and that you'll relay the outcome
