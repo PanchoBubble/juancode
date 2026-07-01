@@ -218,11 +218,13 @@ public struct PrReview: Sendable, Equatable {
 /// A snapshot of a PR's reviewable activity: rolled-up CI status, issue comments,
 /// and reviews. What the tracked-PR poller diffs each tick to detect new events.
 public struct PrActivity: Sendable, Equatable {
+    /// GitHub's PR state, upper-cased: OPEN / CLOSED / MERGED. Drives auto-untrack.
+    public let state: String
     public let checks: PrChecks
     public let comments: [PrComment]
     public let reviews: [PrReview]
-    public init(checks: PrChecks, comments: [PrComment], reviews: [PrReview]) {
-        self.checks = checks; self.comments = comments; self.reviews = reviews
+    public init(state: String, checks: PrChecks, comments: [PrComment], reviews: [PrReview]) {
+        self.state = state; self.checks = checks; self.comments = comments; self.reviews = reviews
     }
 }
 
@@ -243,6 +245,7 @@ private struct RawPrReview: Decodable {
 /// comment/review missing an `id` (can't be deduped reliably without one).
 func parsePrActivity(_ raw: RawPrActivityForTest) -> PrActivity {
     PrActivity(
+        state: (raw.state ?? "").uppercased(),
         checks: rollupChecks(raw.statusCheckRollup),
         comments: (raw.comments ?? []).compactMap { c in
             guard let id = c.id else { return nil }
@@ -258,6 +261,7 @@ func parsePrActivity(_ raw: RawPrActivityForTest) -> PrActivity {
 /// Test seam mirroring the private raw decode shape (so `parsePrActivity` can be
 /// unit-tested without spawning `gh`). Decodes the same JSON `gh pr view` emits.
 public struct RawPrActivityForTest: Decodable {
+    fileprivate var state: String?
     fileprivate var statusCheckRollup: [RollupCheck]?
     fileprivate var comments: [RawPrComment]?
     fileprivate var reviews: [RawPrReview]?
@@ -267,7 +271,7 @@ public struct RawPrActivityForTest: Decodable {
 /// gh is missing/unauthenticated, the cwd isn't a repo, or the output won't parse
 /// — the poller treats nil as "couldn't poll this tick" and tries again later.
 public func getPrActivity(_ cwd: String, number: Int) async -> PrActivity? {
-    let fields = "statusCheckRollup,comments,reviews"
+    let fields = "state,statusCheckRollup,comments,reviews"
     do {
         let r = try await ProcessRunner.capture(
             ghBin(), ["pr", "view", String(number), "--json", fields],

@@ -62,6 +62,8 @@ public enum TrackEvent: Sendable, Equatable {
     case autoFix(String)
     /// Surface to the user; do NOT auto-apply.
     case needsDecision(String)
+    /// The PR is no longer open (merged or closed) — stop tracking it.
+    case closed(String)
 }
 
 /// Result of classifying one poll: the advanced baseline + the events detected.
@@ -120,6 +122,15 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> P
         seenReviewIds: allReviewIds,
         checks: activity.checks,
         baselined: true)
+
+    // A merged/closed PR is terminal — emit a single `closed` event (even before the
+    // first baseline, so tracking an already-merged PR untracks immediately) and skip
+    // all other classification; there's nothing left to auto-fix or decide on.
+    if activity.state == "MERGED" || activity.state == "CLOSED" {
+        let reason = activity.state == "MERGED"
+            ? "PR was merged — stopped tracking" : "PR was closed — stopped tracking"
+        return PrClassification(snapshot: next, events: [.closed(reason)])
+    }
 
     guard prev.baselined else {
         return PrClassification(snapshot: next, events: [])

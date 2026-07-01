@@ -219,6 +219,8 @@ export interface PrReview {
  * and reviews. What the tracked-PR poller diffs each tick to detect new events.
  */
 export interface PrActivity {
+  /** GitHub's PR state, upper-cased: OPEN / CLOSED / MERGED. Drives auto-untrack. */
+  state: string;
   checks: PrChecks;
   comments: PrComment[];
   reviews: PrReview[];
@@ -237,6 +239,7 @@ interface RawPrReview {
   state?: string;
 }
 interface RawPrActivity {
+  state?: string | null;
   statusCheckRollup?: RollupCheck[] | null;
   comments?: RawPrComment[] | null;
   reviews?: RawPrReview[] | null;
@@ -248,6 +251,7 @@ interface RawPrActivity {
  */
 export function parsePrActivity(raw: RawPrActivity): PrActivity {
   return {
+    state: (raw.state ?? "").toUpperCase(),
     checks: rollupChecks(raw.statusCheckRollup),
     comments: (raw.comments ?? []).flatMap((c) =>
       c.id ? [{ id: c.id, author: c.author?.login ?? "", body: c.body ?? "" }] : [],
@@ -270,7 +274,7 @@ export async function getPrActivity(cwd: string, number: number): Promise<PrActi
   try {
     ({ stdout } = await exec(
       "gh",
-      ["pr", "view", String(number), "--json", "statusCheckRollup,comments,reviews"],
+      ["pr", "view", String(number), "--json", "state,statusCheckRollup,comments,reviews"],
       { cwd, maxBuffer: MAX_BUFFER },
     ));
   } catch {

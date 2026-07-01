@@ -17,11 +17,13 @@ final class ParsePrActivityTests: XCTestCase {
     func testParsesChecksCommentsAndReviews() {
         let a = parse("""
         {
+          "state": "open",
           "statusCheckRollup": [{"status":"COMPLETED","conclusion":"FAILURE"}],
           "comments": [{"id":"c1","author":{"login":"octocat"},"body":"nit: rename"}],
           "reviews": [{"id":"r1","author":{"login":"hubber"},"body":"please fix","state":"changes_requested"}]
         }
         """)
+        XCTAssertEqual(a.state, "OPEN")  // state is upper-cased on parse
         XCTAssertEqual(a.checks, .failing)
         XCTAssertEqual(a.comments, [PrComment(id: "c1", author: "octocat", body: "nit: rename")])
         // state is upper-cased on parse.
@@ -50,10 +52,11 @@ final class ParsePrActivityTests: XCTestCase {
 // MARK: - classifyPrActivity
 
 final class ClassifyPrActivityTests: XCTestCase {
-    private func activity(checks: PrChecks = .none,
+    private func activity(state: String = "OPEN",
+                          checks: PrChecks = .none,
                           comments: [PrComment] = [],
                           reviews: [PrReview] = []) -> PrActivity {
-        PrActivity(checks: checks, comments: comments, reviews: reviews)
+        PrActivity(state: state, checks: checks, comments: comments, reviews: reviews)
     }
 
     func testFirstPollOnlyBaselinesAndEmitsNoEvents() {
@@ -134,6 +137,22 @@ final class ClassifyPrActivityTests: XCTestCase {
         let decisions = r.events.filter { if case .needsDecision = $0 { return true }; return false }
         XCTAssertEqual(autoFixes.count, 2)  // new comment + CI failing
         XCTAssertEqual(decisions.count, 1)  // changes requested
+    }
+
+    func testMergedOrClosedEmitsSingleClosedEventIgnoringOtherActivity() {
+        let prev = PrTrackSnapshot(checks: .passing, baselined: true)
+        let merged = classifyPrActivity(prev: prev, activity: activity(
+            state: "MERGED", checks: .failing,
+            comments: [PrComment(id: "c1", author: "a", body: "nit")]))
+        XCTAssertEqual(merged.events, [.closed("PR was merged — stopped tracking")])
+
+        let closed = classifyPrActivity(prev: prev, activity: activity(state: "CLOSED"))
+        XCTAssertEqual(closed.events, [.closed("PR was closed — stopped tracking")])
+    }
+
+    func testMergedEmitsClosedEvenBeforeBaseline() {
+        let r = classifyPrActivity(prev: PrTrackSnapshot(), activity: activity(state: "MERGED"))
+        XCTAssertEqual(r.events, [.closed("PR was merged — stopped tracking")])
     }
 }
 

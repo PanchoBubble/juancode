@@ -245,6 +245,20 @@ export class TrackedPrRegistry {
       entry.snapshot = result.snapshot;
       entry.lastPolledAt = Date.now();
 
+      // Terminal: the PR merged/closed. Ping observers once (so the client can toast /
+      // notify), then drop it from the watch list. Its agent session is left alone.
+      const closed = result.events.find((e) => e.kind === "closed");
+      if (closed) {
+        this.broadcastNotification(key, entry.number, {
+          id: randomUUID(),
+          prNumber: entry.number,
+          message: closed.reason,
+          createdAt: Date.now(),
+        });
+        this.untrack(key);
+        continue;
+      }
+
       const fixReasons: string[] = [];
       const newNotifications: TrackNotification[] = [];
       for (const event of result.events) {

@@ -16,6 +16,7 @@ const pr = (over: Partial<PullRequest> = {}): PullRequest => ({
 });
 
 const activity = (over: Partial<PrActivity> = {}): PrActivity => ({
+  state: "OPEN",
   checks: "none",
   comments: [],
   reviews: [],
@@ -166,6 +167,27 @@ describe("TrackedPrRegistry", () => {
     expect(injectPrompt).not.toHaveBeenCalled();
     const notes = reg.list()[0]!.notifications;
     expect(notes.some((n) => n.message.includes("offline"))).toBe(true);
+  });
+
+  it("auto-untracks a merged PR, pings observers, and doesn't inject a fix", async () => {
+    let state = "OPEN";
+    const { deps, injectPrompt } = makeDeps({ getPrActivity: vi.fn(async () => activity({ state })) });
+    reg = new TrackedPrRegistry(deps);
+    const changes: TrackChange[] = [];
+    reg.onChange((c) => changes.push(c));
+
+    reg.track(pr(), "/repo");
+    await reg.pollOnce(); // baseline, still open
+    expect(reg.list()).toHaveLength(1);
+
+    state = "MERGED";
+    await reg.pollOnce();
+    expect(reg.list()).toEqual([]); // dropped from the watch list
+    expect(injectPrompt).not.toHaveBeenCalled();
+    const ping = changes.find(
+      (c): c is Extract<TrackChange, { kind: "notification" }> => c.kind === "notification",
+    );
+    expect(ping?.notification.message).toBe("PR was merged — stopped tracking");
   });
 
   it("skips a PR whose poll returns null (couldn't reach gh)", async () => {

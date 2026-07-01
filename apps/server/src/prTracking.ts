@@ -42,7 +42,9 @@ export type TrackEvent =
   /** The agent should attempt this autonomously (with a human reason for the UI). */
   | { kind: "autoFix"; reason: string }
   /** Surface to the user; do NOT auto-apply. */
-  | { kind: "needsDecision"; reason: string };
+  | { kind: "needsDecision"; reason: string }
+  /** The PR is no longer open (merged or closed) — stop tracking it. */
+  | { kind: "closed"; reason: string };
 
 /** Result of classifying one poll: the advanced baseline + the events detected. */
 export interface PrClassification {
@@ -65,6 +67,15 @@ export function classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity):
     checks: activity.checks,
     baselined: true,
   };
+
+  // A merged/closed PR is terminal — emit a single `closed` event (even before the
+  // first baseline, so tracking an already-merged PR untracks immediately) and skip
+  // all other classification; there's nothing left to auto-fix or decide on.
+  if (activity.state === "MERGED" || activity.state === "CLOSED") {
+    const reason =
+      activity.state === "MERGED" ? "PR was merged — stopped tracking" : "PR was closed — stopped tracking";
+    return { snapshot: next, events: [{ kind: "closed", reason }] };
+  }
 
   if (!prev.baselined) return { snapshot: next, events: [] };
 

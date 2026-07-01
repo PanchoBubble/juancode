@@ -467,7 +467,7 @@ final class AppModel {
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true,
-                cols: Int? = nil, rows: Int? = nil) async -> Session? {
+                cols: Int? = nil, rows: Int? = nil, model: String? = nil) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -489,7 +489,7 @@ final class AppModel {
             let s = try await Task.detached(priority: .userInitiated) {
                 try state.registry.create(
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
-                    opts: SpawnOptions(skipPermissions: skipPermissions), worktreePath: wt)
+                    opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt)
             }.value
             // Seed the session with an initial prompt once its TUI is up — the same
             // mechanism the WS `.create` path uses (Session.autoSubmit). Surface a
@@ -846,6 +846,16 @@ final class AppModel {
     private let trackPollInterval: Duration = .seconds(20)
     private var trackLoop: Task<Void, Never>?
 
+    /// While tracking is live, hold an idle-system-sleep assertion so the poll loop
+    /// keeps fetching PR/issue activity and driving fixes in the background even when
+    /// the Mac would otherwise idle-sleep. `.idleSystemSleepDisabled` lets the display
+    /// sleep (the screen can turn off) while keeping the system awake — the caffeinated
+    /// tracker the user asked for. Acquired with the loop, released when nothing is
+    /// tracked, so it never pins the machine awake longer than needed. Independent of
+    /// the user's manual Keep Awake toggle (`keepAwakeToken`), which serves a different
+    /// purpose and may be off.
+    @ObservationIgnored private var trackKeepAwakeToken: NSObjectProtocol?
+
     /// Look up a tracked PR by folder + number (for the "Track / Tracking" toggle).
     func trackedPr(cwd: String, number: Int) -> TrackedPr? {
         tracked[TrackedPr.key(cwd: cwd, number: number)]
@@ -888,7 +898,8 @@ final class AppModel {
             let seed = trackSeedPrompt(number: pr.number, title: pr.title,
                                        branch: pr.branch, url: pr.url)
             guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
-                                             isolateWorktree: false, initialInput: seed) else { return }
+                                             isolateWorktree: false, initialInput: seed,
+                                             model: "opus") else { return }
             tracked[key] = TrackedPr(
                 number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
                 cwd: cwd, sessionId: session.id)
@@ -907,7 +918,26 @@ final class AppModel {
 
     /// Stop the shared poll loop once nothing — PR or Linear issue — is being watched.
     private func stopTrackLoopIfIdle() {
-        if tracked.isEmpty && trackedIssues.isEmpty { trackLoop?.cancel(); trackLoop = nil }
+        if tracked.isEmpty && trackedIssues.isEmpty {
+            trackLoop?.cancel(); trackLoop = nil
+            releaseTrackKeepAwake()
+        }
+    }
+
+    /// Acquire the background-tracking idle-sleep assertion. Idempotent.
+    private func acquireTrackKeepAwake() {
+        guard trackKeepAwakeToken == nil else { return }
+        trackKeepAwakeToken = ProcessInfo.processInfo.beginActivity(
+            options: [.idleSystemSleepDisabled],
+            reason: "Tracking PRs/issues in the background")
+    }
+
+    /// Release the background-tracking idle-sleep assertion. Idempotent.
+    private func releaseTrackKeepAwake() {
+        if let token = trackKeepAwakeToken {
+            ProcessInfo.processInfo.endActivity(token)
+            trackKeepAwakeToken = nil
+        }
     }
 
     /// Dismiss a surfaced decision once the user has dealt with it.
@@ -935,7 +965,8 @@ final class AppModel {
             let seed = trackIssueSeedPrompt(identifier: activity.identifier,
                                             title: activity.title, url: activity.url)
             guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
-                                             isolateWorktree: false, initialInput: seed) else { return }
+                                             isolateWorktree: false, initialInput: seed,
+                                             model: "opus") else { return }
             // Baseline from the activity we already fetched, so the first poll doesn't
             // fire events for comments/state that predate tracking.
             let baseline = classifyIssueActivity(prev: IssueTrackSnapshot(), activity: activity).snapshot
@@ -1033,6 +1064,7 @@ final class AppModel {
 
     private func startTrackLoop() {
         guard trackLoop == nil else { return }
+        acquireTrackKeepAwake()
         trackLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollTrackedOnce()
@@ -1058,6 +1090,15 @@ final class AppModel {
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()
 
+            // Terminal: the PR merged/closed. Drop it from the watch list — the row
+            // disappears once tracking stops. Its driving session is left alone.
+            if result.events.contains(where: { if case .closed = $0 { return true } else { return false } }) {
+                tracked[key] = nil
+                persistTracked()
+                stopTrackLoopIfIdle()
+                continue
+            }
+
             var fixReasons: [String] = []
             for event in result.events {
                 switch event {
@@ -1067,6 +1108,8 @@ final class AppModel {
                     entry.notifications.append(TrackNotification(
                         id: UUID().uuidString, prNumber: number,
                         message: reason, createdAt: nowMs()))
+                case .closed:
+                    break  // handled above
                 }
             }
             if !fixReasons.isEmpty {
@@ -1132,6 +1175,8 @@ final class AppModel {
                     entry.notifications.append(IssueTrackNotification(
                         id: UUID().uuidString, issueIdentifier: identifier,
                         message: reason, createdAt: nowMs()))
+                case .closed:
+                    break  // issue classifier never emits this; PR-only terminal event
                 }
             }
             if !reasons.isEmpty, let session = liveSession(entry.sessionId) {

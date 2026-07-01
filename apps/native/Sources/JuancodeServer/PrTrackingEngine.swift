@@ -105,7 +105,7 @@ public actor PrTrackingEngine {
         let grid = (cols: 120, rows: 32)
         guard let session = try? registry.create(
             provider: .claude, cwd: cwd, cols: grid.cols, rows: grid.rows,
-            opts: SpawnOptions(skipPermissions: true)
+            opts: SpawnOptions(skipPermissions: true, model: "opus")
         ) else { return }
         if !seed.isEmpty { session.autoSubmit(seed) }
         tracked[key] = TrackedPr(
@@ -159,6 +159,17 @@ public actor PrTrackingEngine {
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()
 
+            // Terminal: the PR merged/closed. Ping observers once (so the client can
+            // toast / notify), then drop it from the watch list. Its session is left alone.
+            var closedReason: String?
+            for case .closed(let r) in result.events { closedReason = r; break }
+            if let reason = closedReason {
+                broadcastNotification(trackedId: key, prNumber: number, TrackNotification(
+                    id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
+                untrack(key)
+                continue
+            }
+
             var fixReasons: [String] = []
             var newNotifications: [TrackNotification] = []
             for event in result.events {
@@ -168,6 +179,8 @@ public actor PrTrackingEngine {
                 case .needsDecision(let reason):
                     newNotifications.append(TrackNotification(
                         id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
+                case .closed:
+                    break  // handled above
                 }
             }
             entry.notifications.append(contentsOf: newNotifications)

@@ -145,11 +145,13 @@ describe("parseUnresolvedCounts", () => {
 describe("parsePrActivity", () => {
   it("maps comments/reviews, rolls up checks, and upper-cases review state", () => {
     const out = parsePrActivity({
+      state: "open",
       statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }],
       comments: [{ id: "c1", author: { login: "alice" }, body: "fix" }],
       reviews: [{ id: "r1", author: { login: "bob" }, body: "no", state: "changes_requested" }],
     });
     expect(out).toEqual({
+      state: "OPEN",
       checks: "failing",
       comments: [{ id: "c1", author: "alice", body: "fix" }],
       reviews: [{ id: "r1", author: "bob", body: "no", state: "CHANGES_REQUESTED" }],
@@ -162,6 +164,7 @@ describe("parsePrActivity", () => {
       reviews: [{ state: "APPROVED" }, { id: "r2" }],
     });
     expect(out).toEqual({
+      state: "",
       checks: "none",
       comments: [{ id: "c2", author: "", body: "" }],
       reviews: [{ id: "r2", author: "", body: "", state: "" }],

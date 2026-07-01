@@ -10,6 +10,7 @@ import {
 import type { PrActivity } from "./gh.ts";
 
 const activity = (over: Partial<PrActivity> = {}): PrActivity => ({
+  state: "OPEN",
   checks: "none",
   comments: [],
   reviews: [],
@@ -116,6 +117,23 @@ describe("classifyPrActivity", () => {
       activity({ reviews: [{ id: "r1", author: "", body: "", state: "CHANGES_REQUESTED" }] }),
     );
     expect(result.events).toEqual([{ kind: "needsDecision", reason: "a reviewer requested changes" }]);
+  });
+
+  it("emits a single closed event when the PR merges or closes, ignoring other activity", () => {
+    const prev = { ...emptySnapshot(), baselined: true };
+    const merged = classifyPrActivity(
+      prev,
+      activity({ state: "MERGED", checks: "failing", comments: [{ id: "c1", author: "a", body: "hi" }] }),
+    );
+    expect(merged.events).toEqual([{ kind: "closed", reason: "PR was merged — stopped tracking" }]);
+
+    const closed = classifyPrActivity(prev, activity({ state: "CLOSED" }));
+    expect(closed.events).toEqual([{ kind: "closed", reason: "PR was closed — stopped tracking" }]);
+  });
+
+  it("emits closed even before the first baseline (already-merged PR)", () => {
+    const result = classifyPrActivity(emptySnapshot(), activity({ state: "MERGED" }));
+    expect(result.events).toEqual([{ kind: "closed", reason: "PR was merged — stopped tracking" }]);
   });
 });
 
