@@ -37,9 +37,12 @@ final class PerfMonitor: ObservableObject {
     @Published private(set) var feedCallsPerSec = 0
     @Published private(set) var bodyEvalsPerSec = 0
 
-    /// Read on hot paths (feed/body hooks) without touching the actor, so recording
-    /// is a single bool check when the HUD is off. Only mutated on the main actor.
-    nonisolated(unsafe) private static var enabled = false
+    /// Fast gate read on hot paths (feed/body hooks) so recording is a single bool
+    /// check when the HUD is off. Main-actor-isolated like the rest of the type —
+    /// every access (the `recordFeed`/`recordBody` hooks and the `visible` toggle)
+    /// is already on the main actor, so this needs no unsafe opt-out and carries no
+    /// data race (juancode-n9e; was `nonisolated(unsafe)`).
+    private static var enabled = false
 
     // Counters accumulated between 1 s samples.
     private var feedBytes = 0
