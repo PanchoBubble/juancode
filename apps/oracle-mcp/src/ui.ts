@@ -750,7 +750,6 @@ function openSessionReply(id){
   if (!card) return;
   const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
   if (!box) return;
-  rememberProject(card);
   box.hidden = false; if (hint) hint.hidden = true;
   const ta = box.querySelector("textarea"); if (ta) ta.focus();
   card.scrollIntoView({ block: "center" });
@@ -799,7 +798,6 @@ $("#sessions-list").addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle
   const card = e.target.closest && e.target.closest(".sess[data-id]");
   if (!card) return;
-  rememberProject(card); // so Ctrl/⌘+N can open a new session on this project
   const box = card.querySelector(".sreply"), hint = card.querySelector(".reply-hint");
   if (!box) return;
   const show = box.hidden; box.hidden = !show; if (hint) hint.hidden = show;
@@ -820,12 +818,12 @@ $("#sessions-list").addEventListener("keydown", (e) => {
 
 // ── Keyboard shortcuts (juancode-oe4) ─────────────────────
 // Editable, localStorage-backed. Each binding is { mod, shift, alt, key } where
-// mod means Ctrl OR Cmd (so one combo works on every platform). Only newSession
+// mod means Ctrl OR Cmd (so one combo works on every platform). Only newChat
 // is rebindable here; the in-textarea Enter/Shift+Enter behaviour is shown for
-// reference. New session mirrors the native Cmd-N: dispatch on the current project.
+// reference. New chat mirrors the native Cmd-N: start a fresh Oracle conversation.
 const SC_KEY = "oracle-shortcuts";
-const SC_DEFAULTS = { newSession: { mod: true, shift: false, alt: false, key: "n" } };
-const SC_LABELS = { newSession: "New session on current project" };
+const SC_DEFAULTS = { newChat: { mod: true, shift: false, alt: false, key: "n" } };
+const SC_LABELS = { newChat: "New Oracle chat" };
 function loadShortcuts(){
   try {
     const raw = localStorage.getItem(SC_KEY);
@@ -850,30 +848,18 @@ function scMatch(b, e){
   return modOk && e.shiftKey === !!b.shift && e.altKey === !!b.alt && key === b.key.toLowerCase();
 }
 
-// The project a new session should target: the last session card you opened,
-// falling back to whatever's already typed in the dispatch form, persisted so it
-// survives reloads.
-const LAST_PROJ_KEY = "oracle-last-project";
-let lastProject = null;
-try { lastProject = JSON.parse(localStorage.getItem(LAST_PROJ_KEY) || "null"); } catch(_){ lastProject = null; }
-function rememberProject(card){
-  if (!card || !card.dataset.cwd) return;
-  lastProject = { cwd: card.dataset.cwd, provider: card.dataset.prov || "" };
-  try { localStorage.setItem(LAST_PROJ_KEY, JSON.stringify(lastProject)); } catch(_){}
-}
-function newSessionOnCurrentProject(){
-  const sessTab = document.querySelector('nav button[data-tab="sessions"]');
-  if (sessTab) sessTab.click();
-  const proj = (lastProject && lastProject.cwd) || $("#d-project").value.trim();
-  const det = $("#sessions details"); if (det) det.open = true;
-  if (proj) $("#d-project").value = proj;
-  if (lastProject && lastProject.provider) $("#d-prov").value = lastProject.provider;
-  const prompt = $("#d-prompt"); if (prompt) prompt.focus();
+// Cmd/Ctrl+N: surface the Chat tab and start a fresh Oracle conversation.
+// startNewChat() is hoisted (declared later); it clears currentSessionId, resets
+// the log, and focuses the input.
+function newOracleChat(){
+  const chatTab = document.querySelector('nav button[data-tab="chat"]');
+  if (chatTab) chatTab.click();
+  startNewChat();
 }
 
 window.addEventListener("keydown", (e) => {
   if (document.getElementById("settings-modal").hidden === false) return; // editing combos
-  if (scMatch(shortcuts.newSession, e)) { e.preventDefault(); newSessionOnCurrentProject(); }
+  if (scMatch(shortcuts.newChat, e)) { e.preventDefault(); newOracleChat(); }
 });
 
 // ── Settings modal ────────────────────────────────────────

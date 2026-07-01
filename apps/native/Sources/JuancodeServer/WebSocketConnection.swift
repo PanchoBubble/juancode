@@ -7,7 +7,7 @@ import JuancodeServices
 /// messages (mirrors `resolvePty` in ws.ts).
 protocol PtyLike: AnyObject {
     func write(_ bytes: [UInt8])
-    func resize(cols: Int, rows: Int)
+    @discardableResult func resize(cols: Int, rows: Int) -> Bool
     func kill()
     @discardableResult func subscribeBytes(_ onBytes: @escaping @Sendable ([UInt8]) -> Void) -> () -> Void
     @discardableResult func onExitHandler(_ cb: @escaping @Sendable (Int?) -> Void) -> () -> Void
@@ -285,8 +285,15 @@ final class WebSocketConnection: @unchecked Sendable {
             // its own `exit`.
             if let seq { send(.inputAck(sessionId: sessionId, seq: seq)) }
 
-        case let .resize(sessionId, cols, rows):
-            resolvePty(sessionId)?.resize(cols: cols, rows: rows)
+        case let .resize(sessionId, cols, rows, seq):
+            // `resize` returns whether the grid reached a live pty; a resize that
+            // arrives before the pty is running is dropped. Ack that outcome so a
+            // sequenced client can re-assert instead of trusting a grid that never
+            // landed (juancode-uz6). No pty at all → not applied.
+            let applied = resolvePty(sessionId)?.resize(cols: cols, rows: rows) ?? false
+            if let seq {
+                send(.resizeAck(sessionId: sessionId, seq: seq, cols: cols, rows: rows, applied: applied))
+            }
 
         case let .kill(sessionId):
             resolvePty(sessionId)?.kill()

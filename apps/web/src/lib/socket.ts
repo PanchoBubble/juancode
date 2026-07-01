@@ -1,6 +1,7 @@
 import type { ClientMessage, ServerMessage } from "../protocol.ts";
 import { getToken, promptForToken } from "./auth.ts";
 import { InputAckBuffer } from "./inputAckBuffer.ts";
+import { ResizeAckTracker } from "./resizeAckTracker.ts";
 
 type Listener = (msg: ServerMessage) => void;
 type InFlightListener = (count: number) => void;
@@ -41,6 +42,15 @@ class JuancodeSocket {
   // optimistically until then. A server that doesn't ack makes tracking useless
   // (acks would never clear the buffer), so we stop buffering once we know.
   private ackSupported: boolean | null = null;
+
+  // Latest desired terminal grid per session, so a dropped `resize` can't strand
+  // the CLI at the wrong size (juancode-uz6). Re-asserted on reconnect; retried
+  // when the server acks that the grid didn't reach a live pty.
+  private readonly resizeTracker = new ResizeAckTracker();
+  // Whether the server advertised the `resizeAck` capability. `null` until the
+  // `serverInfo` handshake; we track optimistically until then. A server that
+  // doesn't ack (an older embedded native server) makes tracking useless.
+  private resizeAckSupported: boolean | null = null;
 
   private state: ConnectionState = "offline";
   // Consecutive failed reconnect attempts; drives the backoff delay.
@@ -133,7 +143,10 @@ class JuancodeSocket {
   }
 
   private connect(): void {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING))
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    )
       return;
 
     this.setState("connecting");
@@ -152,6 +165,10 @@ class JuancodeSocket {
       // handed to a now-dead socket, so the offline queue never held them.
       while (this.queue.length) ws.send(this.queue.shift()!);
       for (const data of this.inputBuffer.pending()) ws.send(data);
+      // Re-assert the latest desired grid for every session: a reattached or
+      // respawned pty may have booted at a default size, and any resize in flight
+      // when the old socket dropped never reached it (juancode-uz6).
+      for (const data of this.resizeTracker.pending()) ws.send(data);
     };
     ws.onmessage = (ev) => {
       let msg: ServerMessage;
@@ -168,10 +185,21 @@ class JuancodeSocket {
           this.inputBuffer.clear();
           this.notifyInFlight();
         }
+        // Same feature-detect for resize acking; without it, tracking is useless
+        // (acks would never arrive to confirm/retry), so stop tracking.
+        this.resizeAckSupported = msg.capabilities.includes("resizeAck");
+        if (!this.resizeAckSupported) this.resizeTracker.clear();
       } else if (msg.type === "inputAck") {
         // Clear the acknowledged keystroke; not forwarded to UI listeners.
         if (this.inputBuffer.ack(msg.seq)) this.notifyInFlight();
         return;
+      } else if (msg.type === "resizeAck") {
+        // Re-assert the grid if it didn't reach a live pty; not forwarded to UI.
+        const resend = this.resizeTracker.ack(msg);
+        if (resend) setTimeout(() => this.rawSend(resend.data), resend.delayMs);
+        return;
+      } else if (msg.type === "exit") {
+        this.resizeTracker.forget(msg.sessionId);
       }
       for (const l of this.listeners) l(msg);
     };
@@ -210,6 +238,15 @@ class JuancodeSocket {
       else this.connect();
       return;
     }
+    // Track the latest desired grid so a dropped `resize` can't strand the CLI at
+    // the wrong size (juancode-uz6). Like input, don't also queue: `onopen`
+    // re-asserts every tracked grid, so queueing would double-send.
+    if (msg.type === "resize" && this.resizeAckSupported !== false) {
+      const { data } = this.resizeTracker.track(msg);
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(data);
+      else this.connect();
+      return;
+    }
     const data = JSON.stringify(msg);
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(data);
@@ -217,6 +254,13 @@ class JuancodeSocket {
       this.queue.push(data);
       this.connect();
     }
+  }
+
+  /** Send a pre-serialized frame if the socket is open, else drop it. Used for a
+   * delayed resize retry: if the socket closed in the meantime, `onopen`'s
+   * `pending()` replay re-asserts the latest grid, so dropping here is safe. */
+  private rawSend(data: string): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(data);
   }
 
   /** Count of sent-but-unacknowledged keystrokes (for a subtle "unsent" hint). */

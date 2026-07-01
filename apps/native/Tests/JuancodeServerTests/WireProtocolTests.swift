@@ -101,6 +101,47 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertTrue(WireProtocol.capabilities.contains("inputAck"))
     }
 
+    // ── Resize acknowledgement + resend (juancode-uz6) ───────────────────────────
+
+    func testDecodesResizeWithSeq() throws {
+        let json = #"{"type":"resize","sessionId":"s-1","cols":120,"rows":40,"seq":3}"#
+        guard case let .resize(sessionId, cols, rows, seq) = try decode(json) else {
+            return XCTFail("expected .resize")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(cols, 120)
+        XCTAssertEqual(rows, 40)
+        XCTAssertEqual(seq, 3)
+    }
+
+    func testDecodesResizeWithoutSeqStaysBackCompatible() throws {
+        // Older clients omit `seq`; it must decode to nil, not fail (the server
+        // then just resizes without acking).
+        let json = #"{"type":"resize","sessionId":"s-1","cols":80,"rows":24}"#
+        guard case let .resize(sessionId, cols, rows, seq) = try decode(json) else {
+            return XCTFail("expected .resize")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(cols, 80)
+        XCTAssertEqual(rows, 24)
+        XCTAssertNil(seq)
+    }
+
+    func testEncodesResizeAck() throws {
+        let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30, applied: false)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "resizeAck")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        XCTAssertEqual(obj?["seq"] as? Int, 9)
+        XCTAssertEqual(obj?["cols"] as? Int, 100)
+        XCTAssertEqual(obj?["rows"] as? Int, 30)
+        XCTAssertEqual(obj?["applied"] as? Bool, false)
+    }
+
+    func testResizeAckCapabilityIsAdvertised() {
+        XCTAssertTrue(WireProtocol.capabilities.contains("resizeAck"))
+    }
+
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────
 
     func testDecodesQueueMessage() throws {

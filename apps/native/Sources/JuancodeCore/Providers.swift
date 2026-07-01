@@ -12,8 +12,12 @@ import Foundation
 public struct SpawnOptions: Sendable, Equatable {
     /// Run the CLI in "accept all" mode — no permission/approval prompts.
     public var skipPermissions: Bool
-    public init(skipPermissions: Bool = false) {
+    /// Pin the CLI to a specific model (e.g. "opus"). nil = the CLI's own
+    /// default. Currently only wired for Claude (`--model`).
+    public var model: String?
+    public init(skipPermissions: Bool = false, model: String? = nil) {
         self.skipPermissions = skipPermissions
+        self.model = model
     }
 }
 
@@ -39,6 +43,12 @@ public enum Providers {
         skip ? ["--dangerously-skip-permissions"] : []
     }
 
+    /// `--model <name>` when a model is pinned; empty otherwise.
+    static func claudeModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
     public static let claude = ProviderSpec(
         id: .claude,
         label: "Claude Code",
@@ -46,10 +56,14 @@ public enum Providers {
         // Pin the CLI session id to our own UUID so `--resume` revives this exact
         // conversation with no discovery step.
         startArgs: { juancodeId, opts in
-            ["--session-id", juancodeId] + claudePermArgs(opts.skipPermissions)
+            ["--session-id", juancodeId]
+                + claudePermArgs(opts.skipPermissions)
+                + claudeModelArgs(opts.model)
         },
         resumeArgs: { cliSessionId, opts in
-            ["--resume", cliSessionId] + claudePermArgs(opts.skipPermissions)
+            ["--resume", cliSessionId]
+                + claudePermArgs(opts.skipPermissions)
+                + claudeModelArgs(opts.model)
         }
     )
 

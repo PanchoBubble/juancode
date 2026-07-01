@@ -197,7 +197,22 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var streaming = false
         private var resizeWork: DispatchWorkItem?
+        /// Retry for a resize the pty didn't adopt because it wasn't running yet
+        /// (a resize racing session spawn). The surface won't re-fire once the size
+        /// settles, so without this the CLI would boot at its startup grid and stay
+        /// there — the local twin of the WS `resizeAck` retry (juancode-uz6).
+        private var resizeRetryWork: DispatchWorkItem?
+        private var resizeRetries = 0
+        private let maxResizeRetries = 10
+        private let resizeRetryDelay = DispatchTimeInterval.milliseconds(120)
         private var lastSent: (cols: Int, rows: Int)?
+        /// The most recent grid the surface actually reported, recorded on EVERY
+        /// resize before any throttle/dedup — the authoritative current size. Both
+        /// the trailing throttled send and `forceResync` push *this* rather than a
+        /// value captured earlier, so a stale/out-of-order intermediate resize can
+        /// never be the last thing the pty hears (which stranded the CLI at a smaller
+        /// grid than the surface — the black band below its output after a panel drag).
+        private var lastSurfaceGrid: (cols: Int, rows: Int)?
         /// When we last pushed a grid to the pty, for the resize throttle below.
         private var lastResizeAt: DispatchTime?
         /// Max SIGWINCH cadence during a drag (~30fps). Small enough that the pty
@@ -264,6 +279,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         func detach() {
             resizeWork?.cancel(); resizeWork = nil
+            resizeRetryWork?.cancel(); resizeRetryWork = nil
             cancel?(); cancel = nil
             streaming = false
             gsession = nil
@@ -283,16 +299,26 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// final settled size. Also remembered as the next spawn grid.
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
+            lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
-                sendResize(cols: columns, rows: rows)
+                flushSurfaceGrid()
             } else {
-                let work = DispatchWorkItem { [weak self] in self?.sendResize(cols: columns, rows: rows) }
+                let work = DispatchWorkItem { [weak self] in self?.flushSurfaceGrid() }
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
             }
+        }
+
+        /// Push the *latest* surface grid to the pty. Reads `lastSurfaceGrid` at fire
+        /// time rather than a value captured when the work item was scheduled, so the
+        /// throttle's trailing send always asserts the final settled size — never a
+        /// stale intermediate that would strand the CLI a few rows short (black band).
+        private func flushSurfaceGrid() {
+            guard let g = lastSurfaceGrid else { return }
+            sendResize(cols: g.cols, rows: g.rows)
         }
 
         private func sendResize(cols: Int, rows: Int) {
@@ -300,20 +326,51 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             lastResizeAt = .now()
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
             if let last = lastSent, last.cols == cols, last.rows == rows { return }
-            lastSent = (cols, rows)
             onGrid?(cols, rows)
-            session.resize(cols: cols, rows: rows)
+            // Only cache the grid as sent once the pty actually adopts it. If the
+            // session isn't running yet the resize is dropped; leaving `lastSent`
+            // unset means the next identical measurement isn't deduped away, and we
+            // also schedule an explicit retry since the surface won't re-fire once
+            // the size settles (juancode-uz6).
+            if session.resize(cols: cols, rows: rows) {
+                lastSent = (cols, rows)
+                resizeRetries = 0
+                resizeRetryWork?.cancel()
+                resizeRetryWork = nil
+            } else {
+                lastSent = nil
+                scheduleResizeRetry()
+            }
+        }
+
+        /// Re-assert the latest settled surface grid after a short delay, bounded so
+        /// a session that never starts isn't retried forever (its exit tears the pane
+        /// down anyway). Reads `lastSurfaceGrid` at fire time so it always chases the
+        /// current size, not a stale one captured when the retry was scheduled.
+        private func scheduleResizeRetry() {
+            guard resizeRetries < maxResizeRetries else { return }
+            resizeRetries += 1
+            resizeRetryWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let g = self.lastSurfaceGrid else { return }
+                self.sendResize(cols: g.cols, rows: g.rows)
+            }
+            resizeRetryWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + resizeRetryDelay, execute: work)
         }
 
         /// Manual "recalculate geometry": re-measure the surface, then force a genuine
         /// SIGWINCH (drop a row, then restore the real one a beat later) so the agent's
         /// TUI fully re-lays-out — even when the grid is unchanged and a plain same-size
         /// SIGWINCH would be a no-op. The escape hatch for a pane left mis-sized by a
-        /// resize the automatic resync missed.
+        /// resize the automatic resync missed. Works from `lastSurfaceGrid` (the true
+        /// current size) rather than `lastSent`, so it can recover a pane even when the
+        /// pty was left at a stale grid — the previous cache-only version just re-asserted
+        /// that same stale size and appeared to do nothing.
         func forceResync() {
             guard let tv = view else { return }
             tv.fitToSize()
-            guard let grid = lastSent, grid.cols > 0, grid.rows > 0 else { return }
+            guard let grid = lastSurfaceGrid ?? lastSent, grid.cols > 0, grid.rows > 0 else { return }
             let cols = grid.cols, rows = grid.rows
             lastSent = nil
             session.resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
@@ -373,6 +430,10 @@ struct GhosttyEphemeral: NSViewRepresentable {
         private var cancelExit: (() -> Void)?
         private var resizeWork: DispatchWorkItem?
         private var lastSent: (cols: Int, rows: Int)?
+        /// Latest grid the surface reported (see the main pane's `lastSurfaceGrid`):
+        /// the trailing throttled send reads this at fire time so it can't assert a
+        /// stale intermediate size and leave the shell a few rows short.
+        private var lastSurfaceGrid: (cols: Int, rows: Int)?
         private var lastResizeAt: DispatchTime?
         private let resizeThrottle = DispatchTimeInterval.milliseconds(33)
         /// Output that arrived before the surface existed; flushed on attach.
@@ -442,16 +503,24 @@ struct GhosttyEphemeral: NSViewRepresentable {
         /// trailing debounce corrupts the agent's render here.
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
+            lastSurfaceGrid = (columns, rows)
             resizeWork?.cancel()
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
-                send(cols: columns, rows: rows)
+                flushSurfaceGrid()
             } else {
-                let work = DispatchWorkItem { [weak self] in self?.send(cols: columns, rows: rows) }
+                let work = DispatchWorkItem { [weak self] in self?.flushSurfaceGrid() }
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
             }
+        }
+
+        /// Push the latest surface grid to the pty (reads `lastSurfaceGrid` at fire
+        /// time — see the main pane's `flushSurfaceGrid`).
+        private func flushSurfaceGrid() {
+            guard let g = lastSurfaceGrid else { return }
+            send(cols: g.cols, rows: g.rows)
         }
 
         private func send(cols: Int, rows: Int) {

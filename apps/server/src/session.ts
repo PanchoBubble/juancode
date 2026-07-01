@@ -15,7 +15,13 @@ import { notificationGate } from "./notificationGate.ts";
 import { messageQueue } from "./messageQueue.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
 import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
-import type { ProviderId, ScreenRow, SessionActivity, SessionMeta, SessionPrompt } from "./protocol.ts";
+import type {
+  ProviderId,
+  ScreenRow,
+  SessionActivity,
+  SessionMeta,
+  SessionPrompt,
+} from "./protocol.ts";
 
 type OutputListener = (data: string) => void;
 type ExitListener = (exitCode: number | null) => void;
@@ -290,7 +296,8 @@ export class Session {
     // 2) Paste, then confirm the prompt actually landed in the input box.
     let landed = false;
     for (let i = 0; i < SEED.maxAttempts; i++) {
-      if (!this.isRunning) return { ok: false, reason: "session exited before the prompt was typed" };
+      if (!this.isRunning)
+        return { ok: false, reason: "session exited before the prompt was typed" };
       if (this.isBusy()) return { ok: true }; // already working
       this.write(`\x1b[200~${trimmed}\x1b[201~`);
       landed = await this.waitUntil(
@@ -302,12 +309,16 @@ export class Session {
       if (landed) break;
     }
     if (!landed) {
-      return { ok: false, reason: `the prompt never appeared in the input box after ${SEED.maxAttempts} tries` };
+      return {
+        ok: false,
+        reason: `the prompt never appeared in the input box after ${SEED.maxAttempts} tries`,
+      };
     }
 
     // 3) Submit, then confirm it went through (agent busy, or the box cleared).
     for (let i = 0; i < SEED.maxAttempts; i++) {
-      if (!this.isRunning) return { ok: false, reason: "session exited before the prompt was submitted" };
+      if (!this.isRunning)
+        return { ok: false, reason: "session exited before the prompt was submitted" };
       this.write("\r");
       const submitted = await this.waitUntil(
         SEED.submitMs,
@@ -362,9 +373,14 @@ export class Session {
     return false;
   }
 
-  resize(cols: number, rows: number): void {
-    if (this.isRunning && cols > 0 && rows > 0) this.proc.resize(cols, rows);
+  /** Resize the pty grid. Returns whether the grid reached the live pty (false
+   * when the session isn't running yet — the resize is then dropped and the
+   * caller can ack that so a sequenced client re-asserts, juancode-uz6). */
+  resize(cols: number, rows: number): boolean {
+    const applied = this.isRunning && cols > 0 && rows > 0;
+    if (applied) this.proc.resize(cols, rows);
     if (cols > 0 && rows > 0) this.detector.resize(cols, rows);
+    return applied;
   }
 
   kill(): void {

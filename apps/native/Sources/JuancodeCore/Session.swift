@@ -484,9 +484,14 @@ public final class Session: @unchecked Sendable {
         }
     }
 
-    public func resize(cols: Int, rows: Int) {
-        if isRunning { proc?.resize(cols: cols, rows: rows) }
+    /// Resize the pty grid. Returns whether the grid reached the live pty (false
+    /// when the session isn't running yet — the resize is then dropped and a
+    /// sequenced remote client can re-assert it, juancode-uz6).
+    @discardableResult
+    public func resize(cols: Int, rows: Int) -> Bool {
+        let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
         detector.resize(cols: cols, rows: rows)
+        return applied
     }
 
     public func kill() {

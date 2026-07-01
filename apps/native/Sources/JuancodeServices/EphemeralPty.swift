@@ -53,9 +53,11 @@ public final class EphemeralPty: @unchecked Sendable {
 
     public func write(_ text: String) { write(Array(text.utf8)) }
 
-    public func resize(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0, lock.withLock({ alive }) else { return }
-        proc?.resize(cols: cols, rows: rows)
+    /// Resize the pty grid; returns whether it reached the live pty (juancode-uz6).
+    @discardableResult
+    public func resize(cols: Int, rows: Int) -> Bool {
+        guard cols > 0, rows > 0, lock.withLock({ alive }) else { return false }
+        return proc?.resize(cols: cols, rows: rows) ?? false
     }
 
     public func kill() {

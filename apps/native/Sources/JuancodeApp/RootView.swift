@@ -699,6 +699,14 @@ struct SidebarView: View {
             } else {
                 Button("Archive") { model.setArchived(meta.id, true) }
             }
+            if let tracked = model.trackedPr(forSession: meta.id) {
+                Divider()
+                Button("Untrack PR #\(tracked.number)") { model.untrackPr(tracked.id) }
+            }
+            if let trackedIssue = model.trackedIssue(forSession: meta.id) {
+                Divider()
+                Button("Untrack issue \(trackedIssue.identifier)") { model.untrackIssue(trackedIssue.id) }
+            }
             Divider()
             Button("Delete", role: .destructive) { model.delete(meta.id) }
         }

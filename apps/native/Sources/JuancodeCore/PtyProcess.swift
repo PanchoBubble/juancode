@@ -191,11 +191,21 @@ public final class PtyProcess: @unchecked Sendable {
     /// (`login_tty` → `setsid`), so we send `SIGWINCH` to its group explicitly —
     /// idempotent with whatever the kernel does, and what actually makes claude/codex
     /// repaint when you drag the window or a panel.
-    public func resize(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0 else { return }
+    ///
+    /// Returns whether the grid actually took: after setting it we read the winsize
+    /// back (`TIOCGWINSZ`) and confirm it matches (juancode-uz6). A closed master
+    /// (the child exited) makes both ioctls fail, so a `false` return tells the
+    /// caller the resize never landed instead of it silently trusting a size the
+    /// pty never adopted.
+    @discardableResult
+    public func resize(cols: Int, rows: Int) -> Bool {
+        guard cols > 0, rows > 0, !fdClosed else { return false }
         var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-        _ = ioctl(masterFd, TIOCSWINSZ, &ws)
+        guard ioctl(masterFd, TIOCSWINSZ, &ws) == 0 else { return false }
         _ = killpg(pid, SIGWINCH)
+        var got = winsize()
+        guard ioctl(masterFd, TIOCGWINSZ, &got) == 0 else { return false }
+        return got.ws_col == UInt16(cols) && got.ws_row == UInt16(rows)
     }
 
     /// Hang up: send a graceful SIGTERM to the group and close the master so the

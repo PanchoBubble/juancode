@@ -27,7 +27,11 @@ public enum ClientMessage: Sendable {
     /// matching `inputAck` after writing, so the client can buffer unacked input
     /// and resend it on reconnect. Nil for older clients / fire-and-forget writes.
     case input(sessionId: String, data: String, seq: Int?)
-    case resize(sessionId: String, cols: Int, rows: Int)
+    /// Resize a pty's grid. `seq` is an optional per-connection monotonic id
+    /// (juancode-uz6): when present the server replies with a matching `resizeAck`
+    /// reporting whether the grid reached a live pty, so the client can re-assert a
+    /// resize dropped because the pty wasn't running yet. Nil for older clients.
+    case resize(sessionId: String, cols: Int, rows: Int, seq: Int?)
     case kill(sessionId: String)
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────
     /// Watch a session's pending message queue: the server replies with the current
@@ -112,7 +116,8 @@ extension ClientMessage: Decodable {
         case "resize":
             self = .resize(sessionId: try c.decode(String.self, forKey: .sessionId),
                            cols: try c.decode(Int.self, forKey: .cols),
-                           rows: try c.decode(Int.self, forKey: .rows))
+                           rows: try c.decode(Int.self, forKey: .rows),
+                           seq: try c.decodeIfPresent(Int.self, forKey: .seq))
         case "kill":
             self = .kill(sessionId: try c.decode(String.self, forKey: .sessionId))
         case "subscribeQueue":
@@ -163,7 +168,7 @@ extension ClientMessage: Decodable {
 /// via `serverInfo` rather than assuming parity.
 public enum WireProtocol {
     public static let version = 1
-    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck"]
+    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck", "resizeAck"]
 }
 
 public enum ServerMessage: Sendable {
@@ -178,6 +183,12 @@ public enum ServerMessage: Sendable {
     /// (juancode-1u3) — echoes `sessionId` + `seq` so the client clears that
     /// keystroke from its unacked buffer. Only sent when the input carried a seq.
     case inputAck(sessionId: String, seq: Int)
+    /// Acknowledgement that the server processed a `resize` carrying a `seq`
+    /// (juancode-uz6). `cols`/`rows` echo the requested grid; `applied` is true only
+    /// when the grid reached a live pty (false when it wasn't running yet). The
+    /// client re-asserts its latest grid on `applied: false`. Only sent when the
+    /// resize carried a seq.
+    case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool)
     case exit(sessionId: String, exitCode: Int?)
     case activity(sessionId: String, state: SessionActivity, notify: Bool)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
@@ -235,6 +246,8 @@ extension ServerMessage: Encodable {
         case protocolVersion, capabilities
         // Input acknowledgement (juancode-1u3).
         case seq
+        // Resize acknowledgement (juancode-uz6).
+        case cols, rows, applied
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -264,6 +277,13 @@ extension ServerMessage: Encodable {
             try c.encode("inputAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(seq, forKey: .seq)
+        case let .resizeAck(sessionId, seq, cols, rows, applied):
+            try c.encode("resizeAck", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(seq, forKey: .seq)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+            try c.encode(applied, forKey: .applied)
         case let .exit(sessionId, exitCode):
             try c.encode("exit", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

@@ -52,8 +52,11 @@ export class EditorPty {
     if (this.alive) this.proc.write(data);
   }
 
-  resize(cols: number, rows: number): void {
-    if (this.alive && cols > 0 && rows > 0) this.proc.resize(cols, rows);
+  /** Resize the pty grid; returns whether it reached the live pty (juancode-uz6). */
+  resize(cols: number, rows: number): boolean {
+    const applied = this.alive && cols > 0 && rows > 0;
+    if (applied) this.proc.resize(cols, rows);
+    return applied;
   }
 
   kill(): void {

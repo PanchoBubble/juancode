@@ -33,7 +33,13 @@ export type ServerCapability =
   // The server replies with an `inputAck` for every `input` that carries a
   // `seq` (juancode-1u3), so a client can buffer unacked keystrokes and resend
   // them on reconnect instead of silently losing a mid-write connection drop.
-  | "inputAck";
+  | "inputAck"
+  // The server replies with a `resizeAck` for every `resize` that carries a
+  // `seq` (juancode-uz6), reporting whether the grid actually reached a live pty.
+  // A resize is silently dropped when the pty isn't running yet (e.g. arriving
+  // during spawn); the ack lets the client detect that and re-assert its size
+  // instead of believing the CLI adopted a grid it never received.
+  | "resizeAck";
 
 export type ProviderId = "claude" | "codex";
 
@@ -226,7 +232,15 @@ export type ClientMessage =
    * which case the server just writes without acking.
    */
   | { type: "input"; sessionId: string; data: string; seq?: number }
-  | { type: "resize"; sessionId: string; cols: number; rows: number }
+  /**
+   * Resize a session (or ephemeral editor/terminal) pty's grid. `seq` is an
+   * optional per-connection monotonic id (juancode-uz6): when present the server
+   * replies with a matching `resizeAck` reporting whether the grid reached a live
+   * pty, so the client can re-assert a resize that was dropped (pty not yet
+   * running) instead of leaving the CLI stranded at the wrong grid. Omitted by
+   * older clients, in which case the server resizes without acking.
+   */
+  | { type: "resize"; sessionId: string; cols: number; rows: number; seq?: number }
   | { type: "kill"; sessionId: string }
   /**
    * Open a file in the user's real editor ($VISUAL/$EDITOR, default nvim) in an
@@ -318,7 +332,7 @@ export type ClientMessage =
   | { type: "untrackPr"; trackedId: string }
   /** Dismiss a surfaced needs-decision notification. */
   | { type: "resolveTrackNotification"; trackedId: string; notificationId: string };
-  // ── END tracked-PR registry ──────────────────────────────────────────────────
+// ── END tracked-PR registry ──────────────────────────────────────────────────
 
 export type ServerMessage =
   /**
@@ -338,6 +352,22 @@ export type ServerMessage =
    * carried a `seq`; advertised via the `inputAck` server capability.
    */
   | { type: "inputAck"; sessionId: string; seq: number }
+  /**
+   * Acknowledgement that the server processed a `resize` that carried a `seq`
+   * (juancode-uz6). `cols`/`rows` echo the requested grid; `applied` is true only
+   * when the grid actually reached a live pty (false when the pty wasn't running,
+   * e.g. the resize raced session spawn). A client that sees `applied: false` — or
+   * an ack whose grid differs from its current desired size — re-sends its latest
+   * grid so the CLI never stays stranded. Advertised via the `resizeAck` capability.
+   */
+  | {
+      type: "resizeAck";
+      sessionId: string;
+      seq: number;
+      cols: number;
+      rows: number;
+      applied: boolean;
+    }
   | { type: "exit"; sessionId: string; exitCode: number | null }
   /**
    * A session's inferred activity changed. Broadcast for every live session so
@@ -410,8 +440,13 @@ export type ServerMessage =
    * A single needs-decision escalation fired for a tracked PR — a ping the client
    * can alert on without diffing the list (also reflected in the next snapshot).
    */
-  | { type: "trackNotification"; trackedId: string; prNumber: number; notification: TrackNotification };
-  // ── END tracked-PR registry ──────────────────────────────────────────────────
+  | {
+      type: "trackNotification";
+      trackedId: string;
+      prNumber: number;
+      notification: TrackNotification;
+    };
+// ── END tracked-PR registry ──────────────────────────────────────────────────
 
 // ── REST data types (diff viewer + inline review comments) ───────────────────
 

@@ -68,6 +68,7 @@ export function setupWebSocket(server: Server): void {
       "terminal",
       "adoptExternal",
       "inputAck",
+      "resizeAck",
     ];
     send({ type: "serverInfo", protocolVersion: PROTOCOL_VERSION, capabilities: CAPABILITIES });
 
@@ -534,12 +535,26 @@ export function setupWebSocket(server: Server): void {
           // regardless of whether the pty still exists — the ack means the
           // server received and processed the frame; a dead pty surfaces via
           // its own `exit`.
-          if (msg.seq !== undefined) send({ type: "inputAck", sessionId: msg.sessionId, seq: msg.seq });
+          if (msg.seq !== undefined)
+            send({ type: "inputAck", sessionId: msg.sessionId, seq: msg.seq });
           return;
         }
 
         case "resize": {
-          resolvePty(msg.sessionId)?.resize(msg.cols, msg.rows);
+          // `resize()` returns whether the grid reached a live pty; a resize that
+          // arrives before the pty is running is dropped. Ack that outcome so a
+          // sequenced client can re-assert instead of trusting a grid that never
+          // landed (juancode-uz6). No pty at all → not applied.
+          const applied = resolvePty(msg.sessionId)?.resize(msg.cols, msg.rows) ?? false;
+          if (msg.seq !== undefined)
+            send({
+              type: "resizeAck",
+              sessionId: msg.sessionId,
+              seq: msg.seq,
+              cols: msg.cols,
+              rows: msg.rows,
+              applied,
+            });
           return;
         }
 

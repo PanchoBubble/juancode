@@ -154,6 +154,26 @@ final class ClassifyPrActivityTests: XCTestCase {
         let r = classifyPrActivity(prev: PrTrackSnapshot(), activity: activity(state: "MERGED"))
         XCTAssertEqual(r.events, [.closed("PR was merged — stopped tracking")])
     }
+
+    func testCodexOutOfCapacityCommentIsAutoFixToReviewAndQueue() {
+        let prev = PrTrackSnapshot(checks: .passing, baselined: true)
+        let r = classifyPrActivity(prev: prev, activity: activity(
+            checks: .passing,
+            comments: [PrComment(id: "c1", author: "codex",
+                                 body: "You have reached your Codex usage limits for code reviews.")]))
+        let autoFixReasons = r.events.compactMap { if case .autoFix(let s) = $0 { return s }; return nil }
+        XCTAssertTrue(autoFixReasons.contains { $0.contains("Codex is out of review capacity") })
+        XCTAssertTrue(autoFixReasons.contains { $0.contains("@mergifyio queue") })
+    }
+
+    func testCodexLimitNoticeInReviewBodyAlsoTriggers() {
+        let prev = PrTrackSnapshot(checks: .passing, baselined: true)
+        let r = classifyPrActivity(prev: prev, activity: activity(
+            reviews: [PrReview(id: "r1", author: "codex",
+                               body: "reached your Codex usage limits for code reviews", state: "COMMENTED")]))
+        let autoFixReasons = r.events.compactMap { if case .autoFix(let s) = $0 { return s }; return nil }
+        XCTAssertTrue(autoFixReasons.contains { $0.contains("Codex is out of review capacity") })
+    }
 }
 
 // MARK: - deriveTrackState

@@ -163,7 +163,23 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity) -> P
         events.append(.autoFix("CI checks are failing"))
     }
 
+    // Codex normally does the code review before a PR is queued for merge. When it
+    // posts that it's out of review capacity, Claude has to step in and review the PR
+    // itself (see `trackSeedPrompt`), so surface that as its own auto-fix signal.
+    let newReviews = activity.reviews.filter { !prev.seenReviewIds.contains($0.id) }
+    let codexTappedOut = newComments.contains { isCodexReviewLimitNotice($0.body) }
+        || newReviews.contains { isCodexReviewLimitNotice($0.body) }
+    if codexTappedOut {
+        events.append(.autoFix("Codex is out of review capacity — review the PR yourself, then `@mergifyio queue`"))
+    }
+
     return PrClassification(snapshot: next, events: events)
+}
+
+/// True when a comment/review body is Codex reporting it couldn't review the PR
+/// because it hit its usage limits — the signal for Claude to review it instead.
+func isCodexReviewLimitNotice(_ body: String) -> Bool {
+    body.range(of: "usage limits for code reviews", options: .caseInsensitive) != nil
 }
 
 /// Comma-join distinct, non-empty `@author`s in first-seen order (for summaries).
@@ -204,6 +220,15 @@ public func trackSeedPrompt(number: Int, title: String, branch: String, url: Str
     - If it needs a real decision (ambiguous feedback, conflicting requirements, a \
     risky refactor, or a non-obvious failure), STOP and explain what you need from \
     me instead of guessing.
+
+    Codex review fallback: this PR is normally code-reviewed by Codex, and only added \
+    to the Mergify merge queue after that review. If you see a comment saying Codex has \
+    reached its usage limits for code reviews (i.e. it couldn't review this PR), do the \
+    code review yourself: read the full diff, post your review as a PR comment, and fix \
+    anything clearly wrong per the rules above. Once your review is clean and CI is \
+    green, add the PR to the Mergify queue by commenting `@mergifyio queue` on it. If \
+    your review turns up something that needs a real decision, STOP and escalate to me \
+    instead of queueing.
 
     Start by reviewing the PR and its diff with `gh pr view \(number)` and \
     `gh pr diff \(number)`.
