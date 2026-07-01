@@ -8,6 +8,9 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
     @Environment(Shortcuts.self) private var shortcuts
+    /// Shown once at launch when the on-disk database failed to open and the app
+    /// fell back to an in-memory store (juancode-4zk).
+    @State private var showDbRecovery = false
 
     var body: some View {
         @Bindable var model = model
@@ -120,6 +123,11 @@ struct RootView: View {
         .sheet(isPresented: $model.showingSessionTemplates) {
             SessionTemplatesView()
         }
+        // On-disk DB failed to open at launch → running in-memory; surface recovery.
+        .sheet(isPresented: $showDbRecovery) {
+            DatabaseRecoveryView()
+        }
+        .onAppear { if model.degradedReason != nil { showDbRecovery = true } }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }

@@ -30,6 +30,16 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
         try migrate()
     }
 
+    /// An ephemeral in-memory database — the degraded fallback when the on-disk
+    /// store can't be opened (corrupt / locked / unwritable data dir). The app
+    /// still runs this launch on it, though nothing persists; the UI surfaces a
+    /// recovery banner offering to reset the on-disk file (juancode-4zk).
+    public init(inMemory: Bool) throws {
+        precondition(inMemory, "use init(path:) for an on-disk store")
+        dbQueue = try DatabaseQueue() // no path ⇒ in-memory
+        try migrate()
+    }
+
     public static func defaultPath() -> String {
         (Config.dataDir as NSString).appendingPathComponent("juancode.db")
     }

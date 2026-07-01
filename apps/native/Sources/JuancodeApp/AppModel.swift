@@ -39,6 +39,13 @@ struct ResumableSession: Identifiable, Sendable {
 final class AppModel {
     let appState: AppState
 
+    /// Set when the on-disk database failed to open and the app fell back to an
+    /// ephemeral in-memory store (juancode-4zk). Non-nil = degraded: nothing this
+    /// launch persists. The value is the underlying open error, shown in the
+    /// recovery sheet; `corruptDbPath` is the on-disk file the user can reset.
+    let degradedReason: String?
+    let corruptDbPath: String?
+
     var sessions: [SessionMeta] = []
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
@@ -106,8 +113,10 @@ final class AppModel {
 
     private var activityCancels: [String: () -> Void] = [:]
 
-    init(appState: AppState) {
+    init(appState: AppState, degradedReason: String? = nil, corruptDbPath: String? = nil) {
         self.appState = appState
+        self.degradedReason = degradedReason
+        self.corruptDbPath = corruptDbPath
         appState.registry.onCreate { [weak self] s in
             Task { @MainActor in self?.watch(s); self?.refresh() }
         }
@@ -1433,6 +1442,35 @@ final class AppModel {
                              select: i == 0)
             }
         }
+    }
+
+    // MARK: - Database recovery (juancode-4zk)
+
+    /// Move the unopenable on-disk database aside so a fresh one is created on the
+    /// next launch, preserving the old file (and its `-wal`/`-shm` siblings) as a
+    /// timestamped `.corrupt-<ms>` backup for forensics. Returns the backup path on
+    /// success. Only meaningful in the degraded (in-memory-fallback) state.
+    @discardableResult
+    func resetCorruptDatabase() -> String? {
+        guard let path = corruptDbPath else { return nil }
+        let fm = FileManager.default
+        let stamp = String(nowMs())
+        let backup = "\(path).corrupt-\(stamp)"
+        var movedMain = false
+        for suffix in ["", "-wal", "-shm"] {
+            let src = path + suffix
+            guard fm.fileExists(atPath: src) else { continue }
+            do {
+                try fm.moveItem(atPath: src, toPath: backup + suffix)
+                if suffix.isEmpty { movedMain = true }
+            } catch {
+                errorMessage = "Couldn't move aside \(src): \(error)"
+                return nil
+            }
+        }
+        // If the main file didn't exist at all, the open failure was the directory
+        // itself (permissions / disk) — nothing to reset; tell the caller.
+        return movedMain ? backup : nil
     }
 
     private func startScheduleLoop() {

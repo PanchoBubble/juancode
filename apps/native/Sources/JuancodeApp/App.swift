@@ -107,13 +107,27 @@ struct JuancodeApp: App {
     @State private var shortcuts = Shortcuts()
 
     init() {
+        // Open the on-disk store. If that fails (corrupt file, locked, unwritable
+        // data dir) don't crash — fall back to an ephemeral in-memory store so the
+        // app still runs this launch, and carry the reason so RootView can surface
+        // a recovery sheet offering to reset the on-disk DB (juancode-4zk). Only a
+        // failure to open even an in-memory database is truly fatal.
+        let dbPath = GRDBStore.defaultPath()
         let state: AppState
+        var degradedReason: String? = nil
         do {
             state = try AppState()
         } catch {
-            fatalError("Failed to open juancode database: \(error)")
+            NSLog("juancode: on-disk database failed to open (\(dbPath)): \(error)")
+            do {
+                state = AppState(store: try GRDBStore(inMemory: true))
+                degradedReason = String(describing: error)
+            } catch {
+                fatalError("Failed to open even an in-memory database: \(error)")
+            }
         }
-        let appModel = AppModel(appState: state)
+        let appModel = AppModel(appState: state, degradedReason: degradedReason,
+                                corruptDbPath: degradedReason != nil ? dbPath : nil)
         _model = State(wrappedValue: appModel)
         _oracle = State(wrappedValue: OracleModel(app: appModel))
         AppEnv.state = state

@@ -45,6 +45,16 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertNil(store.get("nope"))
     }
 
+    /// The in-memory fallback used when the on-disk DB can't be opened (juancode-4zk)
+    /// opens cleanly, runs migrations, and supports normal reads/writes for the
+    /// session — it just doesn't persist across instances.
+    func testInMemoryFallbackStoreWorks() throws {
+        let mem = try GRDBStore(inMemory: true)
+        let m = meta("mem-1")
+        mem.insert(m)
+        XCTAssertEqual(mem.get("mem-1"), m)
+    }
+
     func testListOrdersNewestFirst() {
         let a = meta("a", createdAt: 1000)
         let b = meta("b", createdAt: 3000)
