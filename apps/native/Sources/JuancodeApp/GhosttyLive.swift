@@ -44,6 +44,9 @@ struct GhosttyLive: View {
     let session: Session
     var remembersSize: Bool = true
     var focusToken: Int = 0
+    /// A change vs. the coordinator's last triggers a manual geometry recalc — see
+    /// `AppModel.terminalResyncToken`.
+    var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
     /// Reports the real grid Ghostty measures for the current bounds (cols, rows).
     /// Lets a caller persist a surface-specific spawn size — e.g. the Oracle dock,
@@ -55,6 +58,7 @@ struct GhosttyLive: View {
         GeometryReader { proxy in
             GhosttyRepresentable(session: session, targetSize: proxy.size,
                                  remembersSize: remembersSize, focusToken: focusToken,
+                                 resyncToken: resyncToken,
                                  autoFocusOnAppear: autoFocusOnAppear, onGrid: onGrid)
         }
     }
@@ -146,6 +150,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     var targetSize: CGSize
     var remembersSize: Bool
     var focusToken: Int = 0
+    var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
     var onGrid: ((Int, Int) -> Void)? = nil
 
@@ -168,6 +173,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             context.coordinator.lastFocusToken = focusToken
             nsView.focusTerminal()
         }
+        if resyncToken != context.coordinator.lastResyncToken {
+            context.coordinator.lastResyncToken = resyncToken
+            context.coordinator.forceResync()
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: GhosttyHostView, context: Context) -> CGSize? {
@@ -189,8 +198,15 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var streaming = false
         private var resizeWork: DispatchWorkItem?
         private var lastSent: (cols: Int, rows: Int)?
+        /// When we last pushed a grid to the pty, for the resize throttle below.
+        private var lastResizeAt: DispatchTime?
+        /// Max SIGWINCH cadence during a drag (~30fps). Small enough that the pty
+        /// grid never trails the surface long enough to corrupt; large enough not to
+        /// flood the agent's TUI with intermediate widths.
+        private let resizeThrottle = DispatchTimeInterval.milliseconds(33)
         private let remembersSize: Bool
         var lastFocusToken = 0
+        var lastResyncToken = 0
         /// Surface-specific grid sink (see `GhosttyLive.onGrid`).
         var onGrid: ((Int, Int) -> Void)?
 
@@ -235,6 +251,13 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                     gsession?.receive(data)
                 }
             }
+            // `subscribeOutput` delivers the whole scrollback synchronously above, so
+            // its `receive()` is already queued on main ahead of this block. Writing
+            // bytes into a freshly-attached Ghostty surface doesn't itself schedule a
+            // frame (only live wakeups do), so on a session switch the replayed history
+            // sits un-drawn until a user event forces a tick — the "blank until you
+            // select all the text" bug. Nudge one redraw right after the replay lands.
+            DispatchQueue.main.async { [weak view] in view?.fitToSize() }
         }
 
         func terminalDidDetachSurface() {}
@@ -248,24 +271,57 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         // MARK: TerminalSurfaceResizeDelegate
 
-        /// Ghostty measured a new grid for the current bounds. Debounce a SIGWINCH
-        /// so a resize burst (divider drag, panel toggle) collapses to one repaint,
-        /// and remember the size as the next spawn grid — mirrors SwiftTermLive.
+        /// Ghostty measured a new grid for the current bounds. Keep the pty in
+        /// lockstep with the surface via a leading+trailing throttle (not a pure
+        /// trailing debounce): Ghostty reflows its *display* grid on every layout
+        /// tick, so during a sidebar/divider drag a trailing-only debounce never
+        /// fires until you let go — for the whole drag the agent draws for the old
+        /// grid into an already-reflowed surface, landing characters and SGR runs at
+        /// the wrong cells (the corruption that only heals once the agent next idles
+        /// and repaints). The leading edge pushes the first change immediately and
+        /// the throttle coalesces the rest, with a guaranteed trailing send for the
+        /// final settled size. Also remembered as the next spawn grid.
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             resizeWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.sendResize(cols: columns, rows: rows) }
-            resizeWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(90), execute: work)
+            let now = DispatchTime.now()
+            let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
+            if earliest <= now {
+                sendResize(cols: columns, rows: rows)
+            } else {
+                let work = DispatchWorkItem { [weak self] in self?.sendResize(cols: columns, rows: rows) }
+                resizeWork = work
+                DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
+            }
         }
 
         private func sendResize(cols: Int, rows: Int) {
             guard cols > 0, rows > 0 else { return }
+            lastResizeAt = .now()
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
             if let last = lastSent, last.cols == cols, last.rows == rows { return }
             lastSent = (cols, rows)
             onGrid?(cols, rows)
             session.resize(cols: cols, rows: rows)
+        }
+
+        /// Manual "recalculate geometry": re-measure the surface, then force a genuine
+        /// SIGWINCH (drop a row, then restore the real one a beat later) so the agent's
+        /// TUI fully re-lays-out — even when the grid is unchanged and a plain same-size
+        /// SIGWINCH would be a no-op. The escape hatch for a pane left mis-sized by a
+        /// resize the automatic resync missed.
+        func forceResync() {
+            guard let tv = view else { return }
+            tv.fitToSize()
+            guard let grid = lastSent, grid.cols > 0, grid.rows > 0 else { return }
+            let cols = grid.cols, rows = grid.rows
+            lastSent = nil
+            session.resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) { [weak self] in
+                guard let self else { return }
+                self.lastSent = (cols, rows)
+                self.session.resize(cols: cols, rows: rows)
+            }
         }
 
         // MARK: misc delegates
@@ -317,6 +373,8 @@ struct GhosttyEphemeral: NSViewRepresentable {
         private var cancelExit: (() -> Void)?
         private var resizeWork: DispatchWorkItem?
         private var lastSent: (cols: Int, rows: Int)?
+        private var lastResizeAt: DispatchTime?
+        private let resizeThrottle = DispatchTimeInterval.milliseconds(33)
         /// Output that arrived before the surface existed; flushed on attach.
         private var preSurfaceBuffer: [UInt8] = []
         private var surfaceReady = false
@@ -379,17 +437,28 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         // MARK: TerminalSurfaceResizeDelegate
 
+        /// Leading+trailing throttle so the pty stays in lockstep with the surface
+        /// during a drag — see the main pane's `terminalDidResize` for why a pure
+        /// trailing debounce corrupts the agent's render here.
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             resizeWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                if let last = self.lastSent, last.cols == columns, last.rows == rows { return }
-                self.lastSent = (columns, rows)
-                self.pty.resize(cols: columns, rows: rows)
+            let now = DispatchTime.now()
+            let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
+            if earliest <= now {
+                send(cols: columns, rows: rows)
+            } else {
+                let work = DispatchWorkItem { [weak self] in self?.send(cols: columns, rows: rows) }
+                resizeWork = work
+                DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
             }
-            resizeWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(90), execute: work)
+        }
+
+        private func send(cols: Int, rows: Int) {
+            lastResizeAt = .now()
+            if let last = lastSent, last.cols == cols, last.rows == rows { return }
+            lastSent = (cols, rows)
+            pty.resize(cols: cols, rows: rows)
         }
 
         func terminalDidRingBell() { NSSound.beep() }

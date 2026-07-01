@@ -138,6 +138,7 @@ struct JuancodeApp: App {
             RootView()
                 .environment(model)
                 .environment(oracle)
+                .environment(shortcuts)
                 .overlay(alignment: .topTrailing) { PerfOverlay().environment(model) }
                 .frame(minWidth: 900, minHeight: 560)
         }
@@ -147,18 +148,26 @@ struct JuancodeApp: App {
                 // is selected); ⌘⇧N always opens the full New Session sheet. All
                 // these key-equivalents are user-rebindable (juancode-oe4) — see
                 // Shortcuts.swift and the Settings → Shortcuts pane.
-                Button("New Session (same agent & folder)") { model.quickNewSession() }
-                    .appShortcut(.newSessionSameProject, shortcuts)
-                Button("New Session…") { model.showingNewSession = true }
-                    .appShortcut(.newSessionSheet, shortcuts)
+                Button("New Session (same agent & folder)") {
+                    performShortcut(.newSessionSameProject, model: model, oracle: oracle)
+                }
+                .appShortcut(.newSessionSameProject, shortcuts)
+                Button("New Session…") {
+                    performShortcut(.newSessionSheet, model: model, oracle: oracle)
+                }
+                .appShortcut(.newSessionSheet, shortcuts)
                 // ⌘K opens the prompt-template palette: pick a saved prompt and
                 // insert (or insert+send) it into the active session (juancode-2vd).
-                Button("Prompt Templates…") { model.showingPromptPalette = true }
-                    .appShortcut(.promptTemplates, shortcuts)
+                Button("Prompt Templates…") {
+                    performShortcut(.promptTemplates, model: model, oracle: oracle)
+                }
+                .appShortcut(.promptTemplates, shortcuts)
             }
             CommandGroup(after: .toolbar) {
-                Button("Toggle Performance HUD") { PerfMonitor.shared.visible.toggle() }
-                    .appShortcut(.togglePerfHud, shortcuts)
+                Button("Toggle Performance HUD") {
+                    performShortcut(.togglePerfHud, model: model, oracle: oracle)
+                }
+                .appShortcut(.togglePerfHud, shortcuts)
                 Toggle("Turn-End Notifications", isOn: Binding(
                     get: { model.notifyOnTurnEnd },
                     set: { model.notifyOnTurnEnd = $0 }))
@@ -168,16 +177,28 @@ struct JuancodeApp: App {
                     get: { model.keepAwake },
                     set: { model.keepAwake = $0 }))
                     .appShortcut(.keepAwake, shortcuts)
+                // Force the live terminal to re-measure + SIGWINCH when a resize left
+                // the pane mis-sized and the auto-resync was missed. ⌃⇧R from anywhere.
+                Button("Recalculate Terminal Geometry") {
+                    performShortcut(.recalcGeometry, model: model, oracle: oracle)
+                }
+                .appShortcut(.recalcGeometry, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
-                Button("Toggle Terminal") { model.toggleBottomTerminal() }
-                    .appShortcut(.toggleTerminal, shortcuts)
+                Button("Toggle Terminal") {
+                    performShortcut(.toggleTerminal, model: model, oracle: oracle)
+                }
+                .appShortcut(.toggleTerminal, shortcuts)
                 // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
                 // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
-                Button("Oracle") { oracle.toggleChatFocused() }
-                    .appShortcut(.oracle, shortcuts)
-                Button("Global Issues") { oracle.open(tab: .issues) }
-                    .appShortcut(.globalIssues, shortcuts)
+                Button("Oracle") {
+                    performShortcut(.oracle, model: model, oracle: oracle)
+                }
+                .appShortcut(.oracle, shortcuts)
+                Button("Global Issues") {
+                    performShortcut(.globalIssues, model: model, oracle: oracle)
+                }
+                .appShortcut(.globalIssues, shortcuts)
             }
         }
 

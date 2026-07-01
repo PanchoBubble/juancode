@@ -64,6 +64,11 @@ final class AppModel {
     var terminalFocusToken = 0
     /// Bumped to request the sidebar list grab focus (⌃H). Drives a `@FocusState`.
     var sidebarFocusToken = 0
+    /// Bumped to request the live terminal re-measure its bounds and force a genuine
+    /// SIGWINCH — the manual "recalculate geometry" escape hatch for when a resize
+    /// left the pane mis-sized (black margins / clipped render) and the automatic
+    /// resync was missed. Threaded into `GhosttyLive`/`SwiftTermLive.resyncToken`.
+    var terminalResyncToken = 0
     /// While true (sidebar is being keyboard-navigated) a freshly-shown terminal must
     /// not auto-grab focus on appear, or each j/k would yank focus back into the pty.
     var suppressTerminalAutoFocus = false
@@ -249,6 +254,13 @@ final class AppModel {
     func focusTerminal() {
         suppressTerminalAutoFocus = false
         terminalFocusToken &+= 1
+    }
+
+    /// Manually re-measure the live terminal and force a SIGWINCH — recovers a pane
+    /// left mis-sized by a resize the automatic resync missed. Wired to the toolbar
+    /// and the View menu (⌃⇧R).
+    func resyncTerminalGeometry() {
+        terminalResyncToken &+= 1
     }
 
     func scrollback(_ id: String) -> [UInt8] {
@@ -1925,6 +1937,26 @@ final class AppModel {
         refresh()
         if let wt = meta?.worktreePath {
             Task { try? await removeWorktree(wt) }
+        }
+    }
+
+    /// Close (kill + delete) every given session in one pass — the per-project
+    /// "close all" action. Same teardown as `delete(_:)` but refreshes once and
+    /// removes worktrees in a single batched task instead of one per session.
+    func closeSessions(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        var worktrees: [String] = []
+        for id in ids {
+            if let wt = appState.store.get(id)?.worktreePath { worktrees.append(wt) }
+            appState.registry.get(id)?.kill()
+            appState.store.delete(id)
+            activityCancels[id]?(); activityCancels[id] = nil
+            if selection == id { selection = nil }
+            clearUnread(id)
+        }
+        refresh()
+        if !worktrees.isEmpty {
+            Task { for wt in worktrees { try? await removeWorktree(wt) } }
         }
     }
 }

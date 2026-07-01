@@ -9,6 +9,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import AppKit
 
 /// One rebindable app command. The raw value is the stable persistence key, so
 /// don't rename cases without a migration.
@@ -18,6 +19,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case promptTemplates
     case togglePerfHud
     case keepAwake
+    case recalcGeometry
     case toggleTerminal
     case oracle
     case globalIssues
@@ -32,6 +34,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .promptTemplates: return "Prompt Templates…"
         case .togglePerfHud: return "Toggle Performance HUD"
         case .keepAwake: return "Keep Awake"
+        case .recalcGeometry: return "Recalculate Terminal Geometry"
         case .toggleTerminal: return "Toggle Terminal"
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
@@ -46,6 +49,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .promptTemplates: return KeyBinding(key: "k", command: true)
         case .togglePerfHud: return KeyBinding(key: "p", command: true, shift: true)
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
+        case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
@@ -83,6 +87,26 @@ struct KeyBinding: Codable, Equatable, Sendable {
     /// A bound shortcut needs at least one modifier and a key, else it'd swallow
     /// plain typing. Unbound combos are simply not applied as menu shortcuts.
     var isBound: Bool { !key.isEmpty && (command || shift || control || option) }
+
+    /// Does this binding match an AppKit key-down event? Compares the exact active
+    /// modifier set and the resolved character (case-insensitive, so a shifted key
+    /// still matches). Used by the window key monitor to fire app shortcuts while a
+    /// terminal holds first responder — see `installPaneNavigation`.
+    func matches(_ event: NSEvent) -> Bool {
+        guard isBound else { return false }
+        let active = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        var want: NSEvent.ModifierFlags = []
+        if command { want.insert(.command) }
+        if shift { want.insert(.shift) }
+        if control { want.insert(.control) }
+        if option { want.insert(.option) }
+        guard active == want else { return false }
+        switch key {
+        case "space": return event.keyCode == 49
+        case "": return false
+        default: return (event.charactersIgnoringModifiers ?? "").lowercased() == key
+        }
+    }
 
     /// Human label like `⌘⇧N` or `⌃Space`.
     var display: String {
@@ -141,6 +165,12 @@ final class Shortcuts {
         return ShortcutAction.allCases.filter { $0 != action && binding(for: $0) == b }
     }
 
+    /// The bound action whose key+modifiers match this key-down event, if any.
+    /// Reads live bindings, so it tracks Settings edits without a rebuild.
+    func action(matching event: NSEvent) -> ShortcutAction? {
+        ShortcutAction.allCases.first { binding(for: $0).matches(event) }
+    }
+
     private func load() {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey),
               let decoded = try? JSONDecoder().decode([String: KeyBinding].self, from: data)
@@ -161,5 +191,25 @@ extension View {
     func appShortcut(_ action: ShortcutAction, _ shortcuts: Shortcuts) -> some View {
         let b = shortcuts.binding(for: action)
         return keyboardShortcut(b.keyEquivalent, modifiers: b.modifiers)
+    }
+}
+
+/// Run a shortcut's effect. The single source of truth for what each command does,
+/// shared by the menu commands (App.swift) and the window key monitor
+/// (`installPaneNavigation`) so the two never drift. The monitor needs this because
+/// a focused terminal swallows ⌘-key events before the main menu's key equivalents
+/// ever fire — so it intercepts the event and dispatches the action here directly.
+@MainActor
+func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleModel) {
+    switch action {
+    case .newSessionSameProject: model.quickNewSession()
+    case .newSessionSheet: model.showingNewSession = true
+    case .promptTemplates: model.showingPromptPalette = true
+    case .togglePerfHud: PerfMonitor.shared.visible.toggle()
+    case .keepAwake: model.keepAwake.toggle()
+    case .recalcGeometry: model.resyncTerminalGeometry()
+    case .toggleTerminal: model.toggleBottomTerminal()
+    case .oracle: oracle.toggleChatFocused()
+    case .globalIssues: oracle.open(tab: .issues)
     }
 }

@@ -64,7 +64,21 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
 /// Scoped to our own key window (and only when no sheet is attached / no text field is
 /// editing) so it never hijacks dialogs or the filter field.
 @MainActor
-func installPaneNavigation(model: AppModel, host: NSView) -> Any? {
+func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shortcuts, host: NSView) -> Any? {
+    // App-level shortcuts (⌘N, ⌃Space, …) while a terminal holds focus: the terminal
+    // surface (Ghostty/SwiftTerm) consumes ⌘-key events for the pty before the main
+    // menu's key equivalents ever fire, so the menu commands silently do nothing. We
+    // sit ahead of the chain here — match the event against the live bindings and run
+    // the action directly, consuming the event so it doesn't also leak into the pty.
+    // Only when a terminal is first responder; elsewhere the menu key equivalents work.
+    let routeAppShortcut: @MainActor (NSEvent) -> Bool = { [weak host] event in
+        guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil,
+              window.firstResponder is JuancodeTerminalResponder,
+              let action = shortcuts.action(matching: event)
+        else { return false }
+        performShortcut(action, model: model, oracle: oracle)
+        return true
+    }
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
         else { return false }
@@ -99,6 +113,7 @@ func installPaneNavigation(model: AppModel, host: NSView) -> Any? {
         }
     }
     return NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        if MainActor.assumeIsolated({ routeAppShortcut(event) }) { return nil }
         let keyCode = event.keyCode
         let mods = event.modifierFlags
         let consumed = MainActor.assumeIsolated { handle(keyCode, mods) }
@@ -288,6 +303,8 @@ struct SwiftTermLive: View {
     /// Bump to request keyboard focus (⌃Space). Each change makes the terminal first
     /// responder; the initial value is ignored (the view auto-focuses on appear).
     var focusToken: Int = 0
+    /// Bump to manually re-measure + force a SIGWINCH (see `AppModel.terminalResyncToken`).
+    var resyncToken: Int = 0
     /// Whether the terminal grabs keyboard focus the first time it appears. False
     /// while the sidebar is being keyboard-navigated, so opening rows with j/k doesn't
     /// yank focus into the pty on every move (juancode-vgm).
@@ -297,6 +314,7 @@ struct SwiftTermLive: View {
         GeometryReader { proxy in
             SwiftTermRepresentable(session: session, targetSize: proxy.size,
                                    remembersSize: remembersSize, focusToken: focusToken,
+                                   resyncToken: resyncToken,
                                    autoFocusOnAppear: autoFocusOnAppear)
         }
     }
@@ -313,6 +331,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     /// Latest focus-request token; a change vs. the coordinator's last makes the
     /// terminal grab focus (⌃Space). See `SwiftTermLive.focusToken`.
     var focusToken: Int = 0
+    /// Latest resync-request token; a change vs. the coordinator's last re-measures
+    /// the grid and forces a SIGWINCH. See `SwiftTermLive.resyncToken`.
+    var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
@@ -344,6 +365,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken
             nsView.focusTerminal()
+        }
+        if resyncToken != context.coordinator.lastResyncToken {
+            context.coordinator.lastResyncToken = resyncToken
+            context.coordinator.forceResync()
         }
     }
 
@@ -380,6 +405,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private let remembersSize: Bool
         /// Last focus-request token honored, so a focus only fires when it changes.
         var lastFocusToken = 0
+        /// Last resync-request token honored, so a recalc only fires when it changes.
+        var lastResyncToken = 0
 
         init(session: Session, remembersSize: Bool) {
             self.session = session
@@ -443,6 +470,15 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) {
                 session.resize(cols: cols, rows: rows)
             }
+        }
+
+        /// Manual "recalculate geometry": re-measure the view's grid and force a genuine
+        /// SIGWINCH so the agent's TUI fully re-lays-out. The escape hatch for a pane
+        /// left mis-sized by a resize the automatic resync missed. `updateNSView` has
+        /// already applied the current bounds by the time this runs.
+        @MainActor func forceResync() {
+            lastSent = nil
+            Self.nudgeResize(view, session)
         }
 
         /// The CLI is spawned at a default 80x24. Once SwiftTerm has measured its

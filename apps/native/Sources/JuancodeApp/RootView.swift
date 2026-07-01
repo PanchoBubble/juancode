@@ -7,6 +7,7 @@ import JuancodeServices
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
+    @Environment(Shortcuts.self) private var shortcuts
 
     var body: some View {
         @Bindable var model = model
@@ -19,7 +20,7 @@ struct RootView: View {
         .preferredColorScheme(model.themePreference.colorScheme)
         .background(WindowBackground(color: .appWindow))
         // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
-        .background(PaneNavInstaller(model: model).frame(width: 0, height: 0))
+        .background(PaneNavInstaller(model: model, oracle: oracle, shortcuts: shortcuts).frame(width: 0, height: 0))
         // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
@@ -155,10 +156,13 @@ private struct WindowBackground: NSViewRepresentable {
 /// of the terminal in the responder chain, which only an NSEvent local monitor can do.
 private struct PaneNavInstaller: NSViewRepresentable {
     let model: AppModel
+    let oracle: OracleModel
+    let shortcuts: Shortcuts
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
-        context.coordinator.monitor = installPaneNavigation(model: model, host: v)
+        context.coordinator.monitor = installPaneNavigation(
+            model: model, oracle: oracle, shortcuts: shortcuts, host: v)
         return v
     }
 
@@ -330,11 +334,18 @@ struct SidebarView: View {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
         return byCwd.map { cwd, sessions in
-            FolderGroup(
+            // Within a project, most-recently-active session first. `updatedAt` is
+            // bumped on every output flush, so live sessions float to the top as they
+            // work; ties (and identical timestamps) fall back to createdAt for stable
+            // order.
+            let ordered = sessions.sorted {
+                $0.updatedAt != $1.updatedAt ? $0.updatedAt > $1.updatedAt : $0.createdAt > $1.createdAt
+            }
+            return FolderGroup(
                 cwd: cwd,
                 name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,
-                sessions: sessions,
-                running: sessions.filter { model.isLive($0.id) }.count)
+                sessions: ordered,
+                running: ordered.filter { model.isLive($0.id) }.count)
         }
         .sorted { a, b in
             // Custom drag order first (folders the user has positioned); anything
@@ -514,6 +525,20 @@ struct SidebarView: View {
                     .clickCursor()
             }
             ToolbarItem {
+                // Visible Keep Awake indicator + quick toggle (also on View menu, ⌃⇧A).
+                // Filled + tinted while the idle-sleep assertion is held; dimmed cup
+                // when off. So you can always tell at a glance whether sessions are
+                // protected from idle sleep.
+                Button { model.keepAwake.toggle() } label: {
+                    Image(systemName: model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                        .foregroundStyle(model.keepAwake ? Color.accentColor : Color.secondary)
+                }
+                .help(model.keepAwake
+                      ? "Keep Awake is on — the Mac won't idle-sleep. Click to turn off (⌃⇧A)"
+                      : "Keep Awake is off — click to stop the Mac idle-sleeping while sessions run (⌃⇧A)")
+                .clickCursor()
+            }
+            ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
                     .clickCursor()
@@ -657,10 +682,17 @@ private struct FolderHeader: View {
     let collapsed: Bool
     let toggle: () -> Void
     @State private var showingAgentPicker = false
+    @State private var confirmingCloseAll = false
 
     /// Sessions in this project with a pending turn-end notification.
     private var unreadCount: Int {
         group.sessions.filter { model.unreadSessions.contains($0.id) }.count
+    }
+
+    /// Own sessions we can close in bulk. Discovered/external sessions aren't ours
+    /// to delete (their row only offers "Resume"), so they're excluded.
+    private var closableSessions: [SessionMeta] {
+        group.sessions.filter { !model.isExternal($0.id) }
     }
 
     var body: some View {
@@ -741,6 +773,25 @@ private struct FolderHeader: View {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.appHairline(0.06)))
         .padding(.horizontal, 6)
+        .contextMenu {
+            if !closableSessions.isEmpty {
+                Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
+                       role: .destructive) { confirmingCloseAll = true }
+            }
+        }
+        .confirmationDialog("Close all sessions in \(group.name)?",
+                            isPresented: $confirmingCloseAll, titleVisibility: .visible) {
+            Button("Close \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
+                   role: .destructive) {
+                model.closeSessions(closableSessions.map(\.id))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            let running = closableSessions.filter { model.isLive($0.id) }.count
+            Text(running > 0
+                 ? "\(running) of these are still running. This stops every agent here and removes the sessions."
+                 : "This removes every session in this project.")
+        }
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd) }
     }
 }
@@ -1334,6 +1385,13 @@ struct SessionContainer: View {
                         .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
                 }
                 Button {
+                    model.resyncTerminalGeometry()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .help("Recalculate terminal geometry — re-fit the grid if a resize left it mis-sized (⌃⇧R)")
+                .clickCursor()
+                Button {
                     model.toggleBottomTerminal()
                 } label: {
                     Image(systemName: model.bottomTerminalShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
@@ -1355,7 +1413,13 @@ struct SessionContainer: View {
                     terminal
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if model.bottomTerminalShown {
-                        DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720)
+                        // previewOnly: this divider borders the live terminal panes
+                        // (main + bottom). Committing the size live reflows the CLI's
+                        // TUI on every drag frame, interleaving partial redraws into the
+                        // scrollback buffer permanently. Preview the edge during the drag
+                        // and resize once on release for a single clean repaint.
+                        DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720,
+                                         previewOnly: true)
                         BottomTerminalPanel(cwd: meta.cwd)
                             .frame(height: CGFloat(bottomHeight))
                     }
@@ -1366,7 +1430,10 @@ struct SessionContainer: View {
                 .padding(.top, 6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if panelShown {
-                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity)
+                    // previewOnly: see the bottom-handle note above — this divider
+                    // resizes the live terminal too, so commit once on release.
+                    DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity,
+                                     previewOnly: true)
                     sidePanel
                         .frame(width: CGFloat(panelWidth))
                 }
@@ -1417,11 +1484,13 @@ struct SessionContainer: View {
             if TerminalBackendChoice.useGhostty {
                 GhosttyLive(session: session,
                             focusToken: model.terminalFocusToken,
+                            resyncToken: model.terminalResyncToken,
                             autoFocusOnAppear: !model.suppressTerminalAutoFocus)
                     .id(ObjectIdentifier(session))
             } else {
                 SwiftTermLive(session: session,
                               focusToken: model.terminalFocusToken,
+                              resyncToken: model.terminalResyncToken,
                               autoFocusOnAppear: !model.suppressTerminalAutoFocus)
                     .id(ObjectIdentifier(session))
             }
