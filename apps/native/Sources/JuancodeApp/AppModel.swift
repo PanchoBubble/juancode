@@ -86,6 +86,13 @@ final class AppModel {
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
     /// `addTemplate`/`updateTemplate`/`deleteTemplate`, which persist on every change.
     var promptTemplates: [PromptTemplate] = []
+    /// Session presets (juancode-a2r): saved launch configs (agent + folder + knobs
+    /// + optional seed prompt) that spawn one or many sessions at once. Mutated
+    /// through `addSessionTemplate`/`updateSessionTemplate`/`deleteSessionTemplate`,
+    /// which persist on every change. The launcher sheet binds to this array.
+    var sessionTemplates: [SessionTemplate] = []
+    /// Controls the session-template launcher/manager sheet.
+    var showingSessionTemplates = false
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -109,6 +116,7 @@ final class AppModel {
         restoreTracked()
         restoreRecurringTasks()
         restorePromptTemplates()
+        restoreSessionTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on,
@@ -1348,6 +1356,82 @@ final class AppModel {
         Task {
             await create(provider: .claude, cwd: cwd, skipPermissions: true,
                          isolateWorktree: false, initialInput: body)
+        }
+    }
+
+    // MARK: - Session templates (juancode-a2r)
+    //
+    // Saved launch presets surfaced through the templates sheet. Persisted to
+    // UserDefaults as a JSON-encoded array (mirroring prompt templates / tracked
+    // PRs). CRUD goes through the helpers below, each of which re-persists; the
+    // sheet binds to `sessionTemplates` and calls `launchSessionTemplate`.
+
+    private static let sessionTemplatesDefaultsKey = "juancode.sessionTemplates.v1"
+
+    private func persistSessionTemplates() {
+        if let data = try? JSONEncoder().encode(sessionTemplates) {
+            UserDefaults.standard.set(data, forKey: Self.sessionTemplatesDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.sessionTemplatesDefaultsKey)
+        }
+    }
+
+    private func restoreSessionTemplates() {
+        guard let data = UserDefaults.standard.data(forKey: Self.sessionTemplatesDefaultsKey),
+              let list = try? JSONDecoder().decode([SessionTemplate].self, from: data) else { return }
+        sessionTemplates = list
+    }
+
+    /// Create a new session template and persist. Returns the stored value.
+    @discardableResult
+    func addSessionTemplate(name: String, provider: ProviderId, cwd: String,
+                            skipPermissions: Bool, isolateWorktree: Bool,
+                            initialPrompt: String) -> SessionTemplate {
+        let now = nowMs()
+        let t = SessionTemplate(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            provider: provider, cwd: cwd.trimmingCharacters(in: .whitespaces),
+            skipPermissions: skipPermissions, isolateWorktree: isolateWorktree,
+            initialPrompt: initialPrompt, createdAt: now, updatedAt: now)
+        sessionTemplates.append(t)
+        persistSessionTemplates()
+        return t
+    }
+
+    /// Edit an existing template in place (bumps `updatedAt`) and persist.
+    func updateSessionTemplate(_ id: String, name: String, provider: ProviderId, cwd: String,
+                               skipPermissions: Bool, isolateWorktree: Bool, initialPrompt: String) {
+        guard let i = sessionTemplates.firstIndex(where: { $0.id == id }) else { return }
+        sessionTemplates[i].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        sessionTemplates[i].provider = provider
+        sessionTemplates[i].cwd = cwd.trimmingCharacters(in: .whitespaces)
+        sessionTemplates[i].skipPermissions = skipPermissions
+        sessionTemplates[i].isolateWorktree = isolateWorktree
+        sessionTemplates[i].initialPrompt = initialPrompt
+        sessionTemplates[i].updatedAt = nowMs()
+        persistSessionTemplates()
+    }
+
+    func deleteSessionTemplate(_ id: String) {
+        sessionTemplates.removeAll { $0.id == id }
+        persistSessionTemplates()
+    }
+
+    /// Spawn `count` sessions from a template. Each is a normal `create` — same
+    /// spawn path a hand-made session takes — seeded with the template's prompt (if
+    /// any). Only the first is selected (so a fan-out of N doesn't thrash focus);
+    /// worktree isolation is honoured per session, so N copies land in N worktrees.
+    func launchSessionTemplate(_ template: SessionTemplate, count: Int = 1) {
+        let n = max(1, count)
+        let seed = template.initialPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            for i in 0..<n {
+                await create(provider: template.provider, cwd: template.cwd,
+                             skipPermissions: template.skipPermissions,
+                             isolateWorktree: template.isolateWorktree,
+                             initialInput: seed.isEmpty ? nil : seed,
+                             select: i == 0)
+            }
         }
     }
 

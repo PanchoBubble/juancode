@@ -117,6 +117,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingPromptPalette) {
             PromptPaletteView()
         }
+        .sheet(isPresented: $model.showingSessionTemplates) {
+            SessionTemplatesView()
+        }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }

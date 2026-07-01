@@ -17,6 +17,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case newSessionSameProject
     case newSessionSheet
     case promptTemplates
+    case sessionTemplates
     case togglePerfHud
     case keepAwake
     case recalcGeometry
@@ -32,6 +33,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .newSessionSameProject: return "New Session (same agent & folder)"
         case .newSessionSheet: return "New Session…"
         case .promptTemplates: return "Prompt Templates…"
+        case .sessionTemplates: return "Session Templates…"
         case .togglePerfHud: return "Toggle Performance HUD"
         case .keepAwake: return "Keep Awake"
         case .recalcGeometry: return "Recalculate Terminal Geometry"
@@ -47,6 +49,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .newSessionSameProject: return KeyBinding(key: "n", command: true)
         case .newSessionSheet: return KeyBinding(key: "n", command: true, shift: true)
         case .promptTemplates: return KeyBinding(key: "k", command: true)
+        case .sessionTemplates: return KeyBinding(key: "l", command: true)
         case .togglePerfHud: return KeyBinding(key: "p", command: true, shift: true)
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
         case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
@@ -205,6 +208,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .newSessionSameProject: model.quickNewSession()
     case .newSessionSheet: model.showingNewSession = true
     case .promptTemplates: model.showingPromptPalette = true
+    case .sessionTemplates: model.showingSessionTemplates = true
     case .togglePerfHud: PerfMonitor.shared.visible.toggle()
     case .keepAwake: model.keepAwake.toggle()
     case .recalcGeometry: model.resyncTerminalGeometry()

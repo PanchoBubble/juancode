@@ -162,6 +162,13 @@ struct JuancodeApp: App {
                     performShortcut(.promptTemplates, model: model, oracle: oracle)
                 }
                 .appShortcut(.promptTemplates, shortcuts)
+                // ⌘L opens the session-template launcher: pick a saved launch preset
+                // (agent + folder + knobs + prompt) and spawn one or N sessions from
+                // it (juancode-a2r).
+                Button("Session Templates…") {
+                    performShortcut(.sessionTemplates, model: model, oracle: oracle)
+                }
+                .appShortcut(.sessionTemplates, shortcuts)
             }
             CommandGroup(after: .toolbar) {
                 Button("Toggle Performance HUD") {
