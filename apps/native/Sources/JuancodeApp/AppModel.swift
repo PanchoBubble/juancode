@@ -9,6 +9,10 @@ import JuancodeServer
 /// UserDefaults key for the turn-boundary notification toggle (Dock bounce + badge).
 private let notifyDefaultsKey = "juancode.notify.turnEnd"
 
+/// UserDefaults key for the outbound notification webhook URL (juancode-xac). Empty
+/// = off. POSTed (Slack-compatible JSON) on the same turn-end/needs-input edge.
+private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
+
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
@@ -323,6 +327,14 @@ final class AppModel {
         didSet { UserDefaults.standard.set(notifyOnTurnEnd, forKey: notifyDefaultsKey) }
     }
 
+    /// Outbound notification webhook URL (juancode-xac). When set, a turn-end /
+    /// needs-input event POSTs a Slack-compatible JSON body here so background work
+    /// reaches you off-device. Empty = off. Nothing is ever sent without this URL.
+    /// Persisted; edited from Settings → Sessions.
+    var notifyWebhookUrl: String = UserDefaults.standard.string(forKey: notifyWebhookUrlKey) ?? "" {
+        didSet { UserDefaults.standard.set(notifyWebhookUrl, forKey: notifyWebhookUrlKey) }
+    }
+
     /// Light / dark / follow-system appearance (juancode light/dark toggle). Persisted;
     /// drives the SwiftUI `preferredColorScheme` (RootView) and the AppKit window chrome
     /// (`applyAppearance`). Defaults to dark to preserve the app's pure-black look.
@@ -416,6 +428,26 @@ final class AppModel {
         unreadSessions.insert(sessionId)
         updateDockBadge()
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
+        fireNotificationWebhook(sessionId: sessionId, state: state)
+    }
+
+    /// POST a Slack-compatible notification to the user's configured webhook, if any
+    /// (juancode-xac). Fired on the same turn-end/needs-input edge as the Dock
+    /// bounce, so it respects the same "not the session you're watching" suppression.
+    /// Best-effort and fire-and-forget — a webhook failure never touches the UI.
+    private func fireNotificationWebhook(sessionId: String, state: SessionActivity) {
+        let raw = notifyWebhookUrl.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty, let url = URL(string: raw), url.scheme?.hasPrefix("http") == true else { return }
+        let meta = (sessions + externalSessions).first { $0.id == sessionId }
+        let event: NotificationEvent = state == .waitingInput ? .waitingInput : .turnEnd
+        let body = webhookBody(event: event, title: meta?.title ?? "",
+                               sessionId: sessionId, cwd: meta?.cwd ?? "")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        req.timeoutInterval = 10
+        Task.detached { _ = try? await URLSession.shared.data(for: req) }
     }
 
     /// The most recently-created live session rooted in `cwd`, if any. Used to find

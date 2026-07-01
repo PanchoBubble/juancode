@@ -73,6 +73,22 @@ struct SessionSettingsView: View {
                 }
                 .disabled(!budgetEnabled)
                 .foregroundStyle(budgetEnabled ? .primary : .secondary)
+
+                Divider().padding(.vertical, 4)
+
+                // Notification routing (juancode-xac): POST a Slack-compatible JSON
+                // to this URL on turn-end / needs-input. Empty = off; nothing sends
+                // without a URL. Gated by the turn-end notifications toggle above.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Notification webhook")
+                    TextField("https://hooks.slack.com/services/…", text: Binding(
+                        get: { model.notifyWebhookUrl },
+                        set: { model.notifyWebhookUrl = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                    Text("POSTs a Slack-compatible JSON on turn-end / needs-input so background work reaches you off-device. Any incoming-webhook URL works.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(16)
 
@@ -88,7 +104,7 @@ struct SessionSettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 520, height: 560)
         .onAppear {
             if enabled { minutes = model.autoCloseIdleMinutes }
             if budgetEnabled { budget = model.costBudgetUsd }
