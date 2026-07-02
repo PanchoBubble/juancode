@@ -1148,7 +1148,18 @@ private struct PrRow: View {
                         .clipShape(RoundedRectangle(cornerRadius: 3))
                 }
                 Spacer(minLength: 4)
-                Text(checkLabel).font(.system(size: 10)).foregroundStyle(checkColor)
+                // Counts, not a phrase: N checks (coloured by rollup status) and,
+                // when any, the number of unresolved review threads. Hover the
+                // check count for the old passing/failing wording.
+                Text(checksText).font(.system(size: 10)).foregroundStyle(checkColor).help(checkLabel)
+                if pr.unresolvedComments > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "bubble.left.fill").font(.system(size: 8))
+                        Text("\(pr.unresolvedComments)").font(.system(size: 10))
+                    }
+                    .foregroundStyle(.orange)
+                    .help("\(pr.unresolvedComments) unresolved comment\(pr.unresolvedComments == 1 ? "" : "s")")
+                }
             }
             HStack(spacing: 12) {
                 Button("Open ↗") {
@@ -1224,6 +1235,13 @@ private struct PrRow: View {
         case .pending: return .orange
         case .none: return .secondary
         }
+    }
+
+    /// The short check-count shown in the row: "N checks" (or "No checks" when
+    /// there are none). Colour comes from `checkColor`; the full passing/failing
+    /// wording lives in `checkLabel` (tooltip).
+    private var checksText: String {
+        pr.checkCount == 0 ? "No checks" : "\(pr.checkCount) check\(pr.checkCount == 1 ? "" : "s")"
     }
 
     private var checkLabel: String {

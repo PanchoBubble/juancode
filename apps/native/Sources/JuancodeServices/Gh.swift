@@ -73,7 +73,9 @@ func rollupChecks(_ checks: [RollupCheck]?) -> PrChecks {
     return pending ? .pending : .passing
 }
 
-/// Map gh's raw JSON into our wire shape. Exposed for testing.
+/// Map gh's raw JSON into our wire shape. Exposed for testing. `unresolvedComments`
+/// is left at 0 here — the list fetch can't see review-thread resolution, so it's
+/// merged in separately (see `mergeUnresolvedCounts`).
 func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
     raw.map { p in
         PullRequest(
@@ -84,7 +86,8 @@ func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
             draft: p.isDraft,
             checks: rollupChecks(p.statusCheckRollup),
             author: p.author?.login ?? "",
-            assignees: (p.assignees ?? []).compactMap { $0.login })
+            assignees: (p.assignees ?? []).compactMap { $0.login },
+            checkCount: p.statusCheckRollup?.count ?? 0)
     }
 }
 
@@ -149,9 +152,99 @@ public func getOpenPrs(_ cwd: String) async -> PrListResult {
     do {
         let raw = try JSONDecoder().decode([RawPr].self, from: Data(stdout.utf8))
         let viewer = await getViewerLogin(cwd)
-        return PrListResult(available: true, prs: parsePrs(raw), viewer: viewer)
+        var prs = parsePrs(raw)
+        // Best-effort: fold in the unresolved-review-thread count per PR (one
+        // GraphQL call for the whole list). Failures leave counts at 0.
+        let counts = await getUnresolvedThreadCounts(cwd, prs: prs)
+        prs = mergeUnresolvedCounts(prs, counts: counts)
+        return PrListResult(available: true, prs: prs, viewer: viewer)
     } catch {
         return PrListResult(available: false, prs: [], error: "Could not parse gh output")
+    }
+}
+
+// MARK: - Unresolved review threads (the "active comments" count in the PR list)
+
+/// Overlay unresolved-review-thread counts onto parsed PRs, keyed by PR number.
+/// Pure; exposed for testing.
+func mergeUnresolvedCounts(_ prs: [PullRequest], counts: [Int: Int]) -> [PullRequest] {
+    prs.map { pr in
+        guard let n = counts[pr.number] else { return pr }
+        var pr = pr
+        pr.unresolvedComments = n
+        return pr
+    }
+}
+
+/// `owner`/`name` parsed from a `https://github.com/<owner>/<repo>/pull/<n>` url,
+/// so we can scope the GraphQL query without a separate `gh repo view` call. Pure;
+/// exposed for testing. Returns nil for anything that isn't a github.com PR url.
+func repoSlug(fromPrUrl url: String) -> (owner: String, name: String)? {
+    guard let m = firstMatch(in: url, pattern: "github\\.com/([^/]+)/([^/]+)/pull/",
+                             group: 0, options: [.caseInsensitive]),
+          !m.isEmpty else { return nil }
+    // Re-run capturing both groups (firstMatch returns one group at a time).
+    guard let owner = firstMatch(in: url, pattern: "github\\.com/([^/]+)/([^/]+)/pull/",
+                                 group: 1, options: [.caseInsensitive]),
+          let name = firstMatch(in: url, pattern: "github\\.com/([^/]+)/([^/]+)/pull/",
+                                group: 2, options: [.caseInsensitive]) else { return nil }
+    return (owner, name)
+}
+
+/// GraphQL response shape for the unresolved-thread query.
+private struct ThreadCountsResponse: Decodable {
+    struct DataField: Decodable { let repository: Repository? }
+    struct Repository: Decodable { let pullRequests: PrConnection? }
+    struct PrConnection: Decodable { let nodes: [PrNode]? }
+    struct PrNode: Decodable { let number: Int?; let reviewThreads: ThreadConnection? }
+    struct ThreadConnection: Decodable { let nodes: [ThreadNode]? }
+    struct ThreadNode: Decodable { let isResolved: Bool? }
+    let data: DataField?
+}
+
+/// Parse the GraphQL response into number→unresolved-thread-count. Pure; exposed
+/// for testing. A thread counts as unresolved when `isResolved` is false/absent.
+func parseUnresolvedThreadCounts(_ json: String) -> [Int: Int] {
+    guard let data = json.data(using: .utf8),
+          let decoded = try? JSONDecoder().decode(ThreadCountsResponse.self, from: data),
+          let nodes = decoded.data?.repository?.pullRequests?.nodes else { return [:] }
+    var out: [Int: Int] = [:]
+    for node in nodes {
+        guard let number = node.number else { continue }
+        let unresolved = (node.reviewThreads?.nodes ?? []).filter { $0.isResolved != true }.count
+        out[number] = unresolved
+    }
+    return out
+}
+
+/// Count of unresolved review threads per open PR, via a single `gh api graphql`
+/// call scoped to the repo (owner/name lifted from a PR url, so no extra lookup).
+/// Best-effort: returns `[:]` when gh is missing/unauthenticated, there are no PRs,
+/// or the response won't parse — the list still renders, just without the count.
+func getUnresolvedThreadCounts(_ cwd: String, prs: [PullRequest]) async -> [Int: Int] {
+    guard let slug = prs.lazy.compactMap({ repoSlug(fromPrUrl: $0.url) }).first else { return [:] }
+    let query = """
+    query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(states: OPEN, first: \(MAX_PRS)) {
+          nodes {
+            number
+            reviewThreads(first: 100) { nodes { isResolved } }
+          }
+        }
+      }
+    }
+    """
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(),
+            ["api", "graphql", "-f", "query=\(query)",
+             "-f", "owner=\(slug.owner)", "-f", "name=\(slug.name)"],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return [:] }
+        return parseUnresolvedThreadCounts(r.stdout)
+    } catch {
+        return [:]
     }
 }
 

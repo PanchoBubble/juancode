@@ -156,6 +156,14 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var branch: String
     public var draft: Bool
     public var checks: PrChecks
+    /// Total number of CI checks (`statusCheckRollup` entries), 0 when none —
+    /// shown in the row instead of a "passing/failing" phrase; `checks` still
+    /// carries the rolled-up colour.
+    public var checkCount: Int
+    /// Count of unresolved review threads ("active" conversations) on the PR, 0
+    /// when none or when it couldn't be fetched. Populated via a GraphQL call
+    /// alongside the list fetch.
+    public var unresolvedComments: Int
     /// GitHub login of the PR author (empty if unknown).
     public var author: String
     /// GitHub logins of the PR's assignees (empty when none) — powers the
@@ -163,9 +171,11 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var assignees: [String]
 
     public init(number: Int, title: String, url: String, branch: String,
-                draft: Bool, checks: PrChecks, author: String, assignees: [String] = []) {
+                draft: Bool, checks: PrChecks, author: String, assignees: [String] = [],
+                checkCount: Int = 0, unresolvedComments: Int = 0) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
+        self.checkCount = checkCount; self.unresolvedComments = unresolvedComments
     }
 }
 

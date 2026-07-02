@@ -92,7 +92,8 @@ final class ParsePrsTests: XCTestCase {
                 draft: false,
                 checks: .passing,
                 author: "octocat",
-                assignees: ["octocat", "hubber"]),
+                assignees: ["octocat", "hubber"],
+                checkCount: 1),
             PullRequest(
                 number: 7,
                 title: "WIP toggle",
@@ -147,5 +148,65 @@ final class PrChecksTests: XCTestCase {
     func testRunIdFromNonActionsLinkIsNil() {
         XCTAssertNil(runIdFromCheckLink("https://example.com/ci/build/9"))
         XCTAssertNil(runIdFromCheckLink(""))
+    }
+}
+
+/// Unresolved-review-thread ("active comments") count backing the PR-list badge.
+/// Pure functions only — no `gh` is spawned.
+final class UnresolvedThreadTests: XCTestCase {
+    func testParsePrsCarriesCheckCount() {
+        let out = parsePrs([
+            RawPr(number: 1, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: [
+                    RollupCheck(status: "COMPLETED", conclusion: "SUCCESS", state: nil),
+                    RollupCheck(status: "COMPLETED", conclusion: "FAILURE", state: nil),
+                  ], author: nil),
+            RawPr(number: 2, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: nil, author: nil),
+        ])
+        XCTAssertEqual(out[0].checkCount, 2)
+        XCTAssertEqual(out[1].checkCount, 0)
+    }
+
+    func testRepoSlugFromPrUrl() {
+        let slug = repoSlug(fromPrUrl: "https://github.com/owner-x/repo.y/pull/42")
+        XCTAssertEqual(slug?.owner, "owner-x")
+        XCTAssertEqual(slug?.name, "repo.y")
+        XCTAssertNil(repoSlug(fromPrUrl: "https://example.com/o/r/pull/1"))
+        XCTAssertNil(repoSlug(fromPrUrl: ""))
+    }
+
+    func testParseUnresolvedThreadCounts() {
+        let json = """
+        {"data":{"repository":{"pullRequests":{"nodes":[
+          {"number":10,"reviewThreads":{"nodes":[
+            {"isResolved":false},{"isResolved":true},{"isResolved":false}]}},
+          {"number":11,"reviewThreads":{"nodes":[]}},
+          {"number":12,"reviewThreads":{"nodes":[{"isResolved":true}]}}
+        ]}}}}
+        """
+        let counts = parseUnresolvedThreadCounts(json)
+        XCTAssertEqual(counts[10], 2)
+        XCTAssertEqual(counts[11], 0)
+        XCTAssertEqual(counts[12], 0)
+    }
+
+    func testParseUnresolvedThreadCountsHandlesGarbage() {
+        XCTAssertTrue(parseUnresolvedThreadCounts("").isEmpty)
+        XCTAssertTrue(parseUnresolvedThreadCounts("not json").isEmpty)
+        XCTAssertTrue(parseUnresolvedThreadCounts("{}").isEmpty)
+    }
+
+    func testMergeUnresolvedCounts() {
+        let prs = [
+            PullRequest(number: 10, title: "a", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: ""),
+            PullRequest(number: 11, title: "b", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: ""),
+        ]
+        let merged = mergeUnresolvedCounts(prs, counts: [10: 3])
+        XCTAssertEqual(merged[0].unresolvedComments, 3)
+        // PR without an entry keeps its default (0).
+        XCTAssertEqual(merged[1].unresolvedComments, 0)
     }
 }
