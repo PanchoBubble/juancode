@@ -73,6 +73,27 @@ func rollupChecks(_ checks: [RollupCheck]?) -> PrChecks {
     return pending ? .pending : .passing
 }
 
+/// Count the checks that concluded successfully — anything not failing and not
+/// still running (SUCCESS, plus skipped/neutral). Mirrors `rollupChecks`'
+/// per-check classification so `passedCount/checkCount` stays consistent with the
+/// rolled-up colour.
+func countPassedChecks(_ checks: [RollupCheck]?) -> Int {
+    guard let checks else { return 0 }
+    var passed = 0
+    for c in checks {
+        let conclusion = (c.conclusion ?? "").uppercased()
+        let state = (c.state ?? "").uppercased()
+        let status = (c.status ?? "").uppercased()
+        if ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].contains(conclusion) { continue }
+        if ["FAILURE", "ERROR"].contains(state) { continue }
+        // Not yet concluded — a CheckRun still running or a pending commit status.
+        if !status.isEmpty && status != "COMPLETED" { continue }
+        if state == "PENDING" { continue }
+        passed += 1
+    }
+    return passed
+}
+
 /// Map gh's raw JSON into our wire shape. Exposed for testing. `unresolvedComments`
 /// is left at 0 here — the list fetch can't see review-thread resolution, so it's
 /// merged in separately (see `mergeUnresolvedCounts`).
@@ -87,7 +108,8 @@ func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
             checks: rollupChecks(p.statusCheckRollup),
             author: p.author?.login ?? "",
             assignees: (p.assignees ?? []).compactMap { $0.login },
-            checkCount: p.statusCheckRollup?.count ?? 0)
+            checkCount: p.statusCheckRollup?.count ?? 0,
+            passedCount: countPassedChecks(p.statusCheckRollup))
     }
 }
 

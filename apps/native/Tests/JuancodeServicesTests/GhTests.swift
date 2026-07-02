@@ -93,7 +93,8 @@ final class ParsePrsTests: XCTestCase {
                 checks: .passing,
                 author: "octocat",
                 assignees: ["octocat", "hubber"],
-                checkCount: 1),
+                checkCount: 1,
+                passedCount: 1),
             PullRequest(
                 number: 7,
                 title: "WIP toggle",
@@ -165,7 +166,26 @@ final class UnresolvedThreadTests: XCTestCase {
                   statusCheckRollup: nil, author: nil),
         ])
         XCTAssertEqual(out[0].checkCount, 2)
+        XCTAssertEqual(out[0].passedCount, 1) // one SUCCESS, one FAILURE
         XCTAssertEqual(out[1].checkCount, 0)
+        XCTAssertEqual(out[1].passedCount, 0)
+    }
+
+    func testCountsPassedChecksExcludingPendingAndFailing() {
+        let checks = [
+            RollupCheck(status: "COMPLETED", conclusion: "SUCCESS", state: nil),
+            RollupCheck(status: "COMPLETED", conclusion: "SKIPPED", state: nil),
+            RollupCheck(status: "COMPLETED", conclusion: "NEUTRAL", state: nil),
+            RollupCheck(status: "COMPLETED", conclusion: "FAILURE", state: nil),
+            RollupCheck(status: "IN_PROGRESS", conclusion: nil, state: nil),
+            RollupCheck(status: nil, conclusion: nil, state: "PENDING"),
+            RollupCheck(status: nil, conclusion: nil, state: "SUCCESS"),
+        ]
+        // SUCCESS, SKIPPED, NEUTRAL, legacy-SUCCESS state = 4 passed; FAILURE +
+        // IN_PROGRESS + PENDING excluded.
+        XCTAssertEqual(countPassedChecks(checks), 4)
+        XCTAssertEqual(countPassedChecks(nil), 0)
+        XCTAssertEqual(countPassedChecks([]), 0)
     }
 
     func testRepoSlugFromPrUrl() {

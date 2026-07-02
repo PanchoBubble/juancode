@@ -1178,10 +1178,15 @@ private struct PrRow: View {
                         .clipShape(RoundedRectangle(cornerRadius: 3))
                 }
                 Spacer(minLength: 4)
-                // Counts, not a phrase: N checks (coloured by rollup status) and,
-                // when any, the number of unresolved review threads. Hover the
-                // check count for the old passing/failing wording.
-                Text(checksText).font(.system(size: 10)).foregroundStyle(checkColor).help(checkLabel)
+                // Checks as an icon + passed/total fraction (coloured by rollup
+                // status), and, when any, the number of unresolved review threads.
+                // Hover for the full passing/failing wording.
+                HStack(spacing: 3) {
+                    Image(systemName: checkIcon).font(.system(size: 9))
+                    Text(checksText).font(.system(size: 10).monospacedDigit())
+                }
+                .foregroundStyle(checkColor)
+                .help(checkLabel)
                 if pr.unresolvedComments > 0 {
                     HStack(spacing: 3) {
                         Image(systemName: "bubble.left.fill").font(.system(size: 8))
@@ -1267,20 +1272,34 @@ private struct PrRow: View {
         }
     }
 
-    /// The short check-count shown in the row: "N checks" (or "No checks" when
-    /// there are none). Colour comes from `checkColor`; the full passing/failing
-    /// wording lives in `checkLabel` (tooltip).
+    /// Status-adaptive check glyph paired with the fraction. Colour comes from
+    /// `checkColor`.
+    private var checkIcon: String {
+        switch pr.checks {
+        case .passing: return "checkmark.circle.fill"
+        case .failing: return "xmark.circle.fill"
+        case .pending: return "clock.fill"
+        case .none: return "minus.circle"
+        }
+    }
+
+    /// The check summary shown in the row: "passed/total" (e.g. "4/11"), or "No
+    /// checks" when there are none. Colour comes from `checkColor`; the full
+    /// passing/failing wording lives in `checkLabel` (tooltip).
     private var checksText: String {
-        pr.checkCount == 0 ? "No checks" : "\(pr.checkCount) check\(pr.checkCount == 1 ? "" : "s")"
+        pr.checkCount == 0 ? "No checks" : "\(pr.passedCount)/\(pr.checkCount)"
     }
 
     private var checkLabel: String {
+        guard pr.checkCount > 0 else { return "No checks" }
+        let base: String
         switch pr.checks {
-        case .passing: return "Checks passing"
-        case .failing: return "Checks failing"
-        case .pending: return "Checks running"
-        case .none: return "No checks"
+        case .passing: base = "All checks passing"
+        case .failing: base = "Checks failing"
+        case .pending: base = "Checks running"
+        case .none: base = "No checks"
         }
+        return "\(base) — \(pr.passedCount)/\(pr.checkCount) passed"
     }
 }
 
@@ -1503,16 +1522,18 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(meta.title).lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
-                HStack(spacing: 3) {
-                    // A branch glyph marks a worktree session — the fastest way to tell
-                    // it apart from a main-checkout row (which shows the project name).
-                    if isWorktree {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                if isWorktree || !subtitle.isEmpty {
+                    HStack(spacing: 3) {
+                        // A branch glyph marks a worktree session — the fastest way to
+                        // tell it apart from a main-checkout row.
+                        if isWorktree {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
+                        Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    .help(usageHelp)
                 }
-                .help(usageHelp)
             }
             Spacer(minLength: 6)
             trailingOrnament
@@ -1531,11 +1552,15 @@ struct SessionRow: View {
         } else if showIssue, let ti = trackedIssue {
             issueCapsule(ti)
         }
-        if atRisk, !external {
+        // At-risk warning only on worktree rows: an isolated worktree's uncommitted
+        // work can be orphaned/forgotten, so it's worth flagging. Main-checkout
+        // sessions all share one checkout — the dirty state is just the current
+        // branch's normal work, and the folder header already rolls that up.
+        if atRisk, !external, isWorktree {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 9))
                 .foregroundStyle(.orange)
-                .help("Uncommitted or unpushed work in this folder")
+                .help("Uncommitted or unpushed work in this worktree")
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
         }
         if external, let onResume, hovering || selected {
@@ -1550,19 +1575,26 @@ struct SessionRow: View {
     }
 
     private func prCapsule(_ t: TrackedPr) -> some View {
-        var help = "Tracking PR #\(t.number) — \(t.state.rawValue)"
+        var help = "Tracking PR #\(t.number) — \(t.state.rawValue)\nClick to open in browser"
         // When an issue is also tracked but folded away, keep its id discoverable.
         if let ti = trackedIssue, !showIssue {
             help += "\nAlso tracking \(ti.identifier) — \(ti.state.rawValue)"
         }
-        return HStack(spacing: 3) {
-            Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
-            Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+        // A button so the click opens the PR without also selecting the row.
+        return Button {
+            if let url = URL(string: t.url) { NSWorkspace.shared.open(url) }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+            }
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(trackColor(t.state).opacity(0.2))
+            .foregroundStyle(trackColor(t.state))
+            .clipShape(Capsule())
         }
-        .padding(.horizontal, 5).padding(.vertical, 1)
-        .background(trackColor(t.state).opacity(0.2))
-        .foregroundStyle(trackColor(t.state))
-        .clipShape(Capsule())
+        .buttonStyle(.plain)
+        .clickCursor()
         .help(help)
     }
 
@@ -1593,10 +1625,13 @@ struct SessionRow: View {
     private var isWorktree: Bool { meta.worktreePath != nil }
 
     private var subtitle: String {
+        // Non-worktree rows: the folder/project name is redundant (the row sits under
+        // its project header), so show only usage.
+        guard isWorktree else { return meta.usage?.badgeLabel ?? "" }
         // Worktree rows show the branch (e.g. `juancode/48e86fc1`) rather than the
         // worktree dir's bare hash, so the row reads meaningfully. Falls back to the
         // dir name until the branch loads (or on a detached HEAD).
-        let base = (isWorktree ? worktreeBranch : nil) ?? (meta.cwd as NSString).lastPathComponent
+        let base = worktreeBranch ?? (meta.cwd as NSString).lastPathComponent
         if let label = meta.usage?.badgeLabel { return "\(base) · \(label)" }
         return base
     }

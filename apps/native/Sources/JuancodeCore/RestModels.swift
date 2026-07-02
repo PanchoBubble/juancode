@@ -160,6 +160,10 @@ public struct PullRequest: Codable, Sendable, Equatable {
     /// shown in the row instead of a "passing/failing" phrase; `checks` still
     /// carries the rolled-up colour.
     public var checkCount: Int
+    /// Number of checks that concluded successfully (SUCCESS / skipped / neutral —
+    /// anything not failing and not still running). Drives the `passed/total` badge
+    /// alongside `checkCount`. 0 when there are no checks.
+    public var passedCount: Int
     /// Count of unresolved review threads ("active" conversations) on the PR, 0
     /// when none or when it couldn't be fetched. Populated via a GraphQL call
     /// alongside the list fetch.
@@ -172,10 +176,11 @@ public struct PullRequest: Codable, Sendable, Equatable {
 
     public init(number: Int, title: String, url: String, branch: String,
                 draft: Bool, checks: PrChecks, author: String, assignees: [String] = [],
-                checkCount: Int = 0, unresolvedComments: Int = 0) {
+                checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
-        self.checkCount = checkCount; self.unresolvedComments = unresolvedComments
+        self.checkCount = checkCount; self.passedCount = passedCount
+        self.unresolvedComments = unresolvedComments
     }
 }
 
