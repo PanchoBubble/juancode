@@ -46,12 +46,17 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     public var provider: String?
     /// Isolate the dispatched agent in a fresh git worktree off `project`.
     public var worktree: Bool?
+    /// Model override passed to the provider CLI, e.g. "opus", "sonnet", or a full
+    /// model id; absent = provider default.
+    public var model: String?
 
-    public init(project: String, prompt: String, provider: String? = nil, worktree: Bool? = nil) {
+    public init(project: String, prompt: String, provider: String? = nil,
+                worktree: Bool? = nil, model: String? = nil) {
         self.project = project
         self.prompt = prompt
         self.provider = provider
         self.worktree = worktree
+        self.model = model
     }
 
     /// Resolve `provider` to a `ProviderId`, defaulting to Claude for an absent or
@@ -386,13 +391,16 @@ To spin up (or seed) an agent in a project, append ONE JSON object per line to
 juancode session in that project:
 
 ```jsonl
-{"project":"/abs/path/to/repo","prompt":"Work on oracle-12: …","provider":"claude","worktree":false}
+{"project":"/abs/path/to/repo","prompt":"Work on oracle-12: …","provider":"claude","worktree":false,"model":"opus"}
 ```
 
 Fields: `project` (absolute path from the `projects` list, required), `prompt`
 (required), `provider` (`"claude"` or `"codex"`, default claude), `worktree`
 (default false — set true to isolate the agent in a fresh git worktree off the
-project so parallel agents don't collide). Append with your file tools, e.g.:
+project so parallel agents don't collide), `model` (optional — a model override
+passed to the provider CLI, e.g. `"opus"`, `"sonnet"`, or a full model id; omit
+to use the provider's default. Model names differ per provider — Claude takes
+`"opus"`/`"sonnet"`, codex takes its own ids). Append with your file tools, e.g.:
 
 ```sh
 echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl

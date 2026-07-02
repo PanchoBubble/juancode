@@ -54,6 +54,40 @@ final class OracleTests: XCTestCase {
         XCTAssertEqual(offset, size)
     }
 
+    func testDispatchEncodesModelWhenSet() throws {
+        try appendOracleDispatch(OracleDispatch(
+            project: "/a", prompt: "on opus", provider: "claude", worktree: false, model: "opus"))
+        let raw = try String(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile), encoding: .utf8)
+        XCTAssertTrue(raw.contains(#""model":"opus""#))
+
+        let (out, _) = readOracleDispatches(since: 0)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].model, "opus")
+        XCTAssertEqual(out[0], OracleDispatch(
+            project: "/a", prompt: "on opus", provider: "claude", worktree: false, model: "opus"))
+    }
+
+    func testDispatchDecodesLineWithoutModel() throws {
+        // Backward compatibility: pre-`model` lines (and the app's own older
+        // dispatches) omit the field entirely and must decode with model == nil.
+        let url = URL(fileURLWithPath: OraclePaths.dispatchFile)
+        let contents = #"{"project":"/a","prompt":"legacy","provider":"claude","worktree":false}"# + "\n"
+        try Data(contents.utf8).write(to: url)
+
+        let (out, _) = readOracleDispatches(since: 0)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertNil(out[0].model)
+        XCTAssertEqual(out[0], OracleDispatch(project: "/a", prompt: "legacy", provider: "claude", worktree: false))
+    }
+
+    func testDispatchOmitsModelKeyWhenNil() throws {
+        // An absent model should not serialize a null/empty key — keeps lines lean
+        // and matches how existing (model-less) dispatches look on disk.
+        try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "plain dispatch"))
+        let raw = try String(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile), encoding: .utf8)
+        XCTAssertFalse(raw.contains(#""model""#))
+    }
+
     func testReadIsIncrementalFromOffset() throws {
         try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "first"))
         let (first, off1) = readOracleDispatches(since: 0)

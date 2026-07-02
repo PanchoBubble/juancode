@@ -13,7 +13,8 @@ public struct SpawnOptions: Sendable, Equatable {
     /// Run the CLI in "accept all" mode — no permission/approval prompts.
     public var skipPermissions: Bool
     /// Pin the CLI to a specific model (e.g. "opus"). nil = the CLI's own
-    /// default. Currently only wired for Claude (`--model`).
+    /// default. Wired for both Claude and Codex via each CLI's `--model` flag
+    /// (note the two CLIs accept different model names).
     public var model: String?
     public init(skipPermissions: Bool = false, model: String? = nil) {
         self.skipPermissions = skipPermissions
@@ -49,6 +50,15 @@ public enum Providers {
         return ["--model", model]
     }
 
+    /// Codex's own `--model <name>` (a top-level flag valid for both the default
+    /// interactive launch and `resume`). Empty when unpinned. Model *names* differ
+    /// from Claude's (e.g. "o3"/"gpt-5", not "opus"/"sonnet"); we just forward
+    /// whatever the dispatch specified and let codex validate it.
+    static func codexModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
     public static let claude = ProviderSpec(
         id: .claude,
         label: "Claude Code",
@@ -74,11 +84,13 @@ public enum Providers {
         // Codex has no flag to pin a session id, so it starts clean; we discover
         // the id from its rollout file and resume with `codex resume <id>`.
         startArgs: { _, opts in
-            opts.skipPermissions ? ["--dangerously-bypass-approvals-and-sandbox"] : []
+            (opts.skipPermissions ? ["--dangerously-bypass-approvals-and-sandbox"] : [])
+                + codexModelArgs(opts.model)
         },
         resumeArgs: { cliSessionId, opts in
             ["resume"]
                 + (opts.skipPermissions ? ["--dangerously-bypass-approvals-and-sandbox"] : [])
+                + codexModelArgs(opts.model)
                 + [cliSessionId]
         }
     )

@@ -369,9 +369,10 @@ final class OracleModel {
     /// Dispatch an agent into a project. Routed through the same mailbox the agent
     /// uses, so UI- and agent-initiated dispatch share one code path; the tail loop
     /// turns it into a real session.
-    func dispatch(project: String, prompt: String, provider: ProviderId = .claude, worktree: Bool = false) {
+    func dispatch(project: String, prompt: String, provider: ProviderId = .claude,
+                  worktree: Bool = false, model: String? = nil) {
         let req = OracleDispatch(project: project, prompt: prompt,
-                                 provider: provider.rawValue, worktree: worktree)
+                                 provider: provider.rawValue, worktree: worktree, model: model)
         try? appendOracleDispatch(req)
     }
 
@@ -428,7 +429,7 @@ final class OracleModel {
             // user jump straight to freshly dispatched work.
             await app.create(provider: d.resolvedProvider, cwd: d.project,
                              skipPermissions: true, isolateWorktree: d.worktree ?? false,
-                             initialInput: d.prompt, select: true)
+                             initialInput: d.prompt, select: true, model: d.model)
         }
         // Drain the ask mailbox (remote/MCP path) into the live Oracle session.
         let (asks, newAskOffset) = readOracleAsks(since: askOffset)
