@@ -521,7 +521,14 @@ final class AppModel {
                 }
             }
             refresh()
-            if select { selection = s.id }
+            if select {
+                selection = s.id
+                // Creating a session is an explicit "take me there": clear any j/k
+                // nav focus suppression and request focus, so the fresh terminal is
+                // typeable whether it appeared behind the New Session sheet, from
+                // the folder "+" popover, or mid keyboard navigation.
+                focusTerminal()
+            }
             return s
         } catch {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"

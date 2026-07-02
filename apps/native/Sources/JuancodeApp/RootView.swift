@@ -562,6 +562,21 @@ struct SidebarView: View {
                 withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
             }
             }
+            Divider()
+            // Always-visible "add a project" entry point: opens the New Session
+            // sheet (its Choose… picker is how a folder becomes a sidebar project),
+            // so adding a project doesn't depend on the toolbar "+" or a shortcut.
+            Button { model.showingNewSession = true } label: {
+                Label("New project…", systemImage: "plus")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .help("Start a session in any folder — it appears here as a project")
             if let total = totalUsage, let label = total.badgeLabel {
                 Divider()
                 // Colour + budget progress when a cost budget is set (juancode-qoc):
@@ -898,6 +913,9 @@ private struct FolderHeader: View {
                             .foregroundStyle(.secondary)
                         Text(group.name)
                             .font(.system(size: 15, weight: .semibold))
+                            // Explicit primary: section-header text otherwise renders
+                            // in the dimmed secondary gray, which read as disabled.
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                             .help(folderHelp)
                         Spacer(minLength: 8)
@@ -1015,13 +1033,22 @@ private struct FolderHeader: View {
         // Full-width project bar: a subtle raised fill that spans the whole sidebar
         // (edge to edge, no rounded inset) for clear contrast against the session
         // rows, with a hairline underline separating it from the sessions below.
-        .padding(.horizontal, 8)
+        // Trailing is wider than leading: the outer -10 stretch below eats 10pt of
+        // it, leaving ~8pt of visible inset so the badge cluster doesn't sit under
+        // the splitter/scrollbar.
+        .padding(.leading, 8)
+        .padding(.trailing, 18)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.appHairline(0.06))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
         }
+        // `.listRowInsets(EdgeInsets())` (at the call site) removes the row's own
+        // insets, but the sidebar list style still pads row content ~10pt per side
+        // for its rounded-selection look — the gap left of the bar. Negative
+        // padding outside the fill stretches it to the true sidebar edges.
+        .padding(.horizontal, -10)
         .contextMenu {
             if !closableSessions.isEmpty {
                 Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",

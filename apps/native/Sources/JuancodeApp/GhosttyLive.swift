@@ -158,6 +158,13 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> GhosttyHostView {
         context.coordinator.onGrid = onGrid
+        // Seed the token caches with the current values. The model's tokens count
+        // requests made against EARLIER terminals; a fresh coordinator starting at 0
+        // would treat any past ⌃L / ⌃⇧R as pending and replay it on first update —
+        // stealing focus from the sidebar and firing a spurious SIGWINCH nudge into
+        // a CLI that's still booting (mis-sized first paint on new sessions).
+        context.coordinator.lastFocusToken = focusToken
+        context.coordinator.lastResyncToken = resyncToken
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         context.coordinator.attach(to: tv)
         let host = GhosttyHostView(terminal: tv)

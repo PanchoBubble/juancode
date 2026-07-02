@@ -335,6 +335,11 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
     func makeNSView(context: Context) -> TerminalHostView {
+        // Seed the token caches with the current values — a fresh coordinator at 0
+        // would replay a past ⌃L / ⌃⇧R on first update (focus steal + spurious
+        // resync nudge on every newly-opened terminal). See GhosttyRepresentable.
+        context.coordinator.lastFocusToken = focusToken
+        context.coordinator.lastResyncToken = resyncToken
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         tv.terminalDelegate = context.coordinator
         // Stop SwiftTerm from auto-forwarding mouse motion/clicks to the pty. When a
