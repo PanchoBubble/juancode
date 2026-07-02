@@ -297,8 +297,9 @@ struct SidebarView: View {
 
     /// How many session rows a folder shows before offering "Load more".
     private let folderPreviewCount = 5
-    /// Max height of an expanded folder's scrollable session box (~5 rows).
-    private let folderScrollMaxHeight: CGFloat = 220
+    /// Max height of an expanded folder's scrollable session box (~5 rows at the
+    /// 220 default). User-resizable via the drag handle under the box; persisted.
+    @AppStorage("session.folderScroll.maxHeight") private var folderScrollMaxHeight: Double = 220
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
@@ -634,7 +635,10 @@ struct SidebarView: View {
                     ForEach(sessions, id: \.id) { meta in scrollRow(meta) }
                 }
             }
-            .frame(maxHeight: folderScrollMaxHeight)
+            .frame(maxHeight: CGFloat(folderScrollMaxHeight))
+            // Drag the divider down to grow the box / up to shrink it (persisted).
+            DragResizeHandle(axis: .horizontal, value: $folderScrollMaxHeight,
+                             min: 120, max: 800, invert: false)
             Button { expandedFolders.remove(cwd) } label: {
                 Label("Show less", systemImage: "chevron.up.circle").font(.system(size: 11))
             }
@@ -685,7 +689,8 @@ struct SidebarView: View {
                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
                           trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                           unread: model.unreadSessions.contains(meta.id),
-                          onResume: external ? { model.importExternalSession(meta.id) } : nil)
+                          onResume: external ? { model.importExternalSession(meta.id) } : nil,
+                          selected: model.selection == meta.id)
     }
 
     @ViewBuilder
@@ -728,6 +733,14 @@ private struct FolderHeader: View {
     let toggle: () -> Void
     @State private var showingAgentPicker = false
     @State private var confirmingCloseAll = false
+    @State private var plusHovering = false
+
+    /// Folder tooltip: full path, plus the per-project spend rollup when known so
+    /// the cost stays discoverable without crowding the header (juancode-341).
+    private var folderHelp: String {
+        guard let cost = folderCost else { return group.cwd }
+        return "\(group.cwd)\n\(cost) estimated across this project"
+    }
 
     /// Sessions in this project with a pending turn-end notification.
     private var unreadCount: Int {
@@ -760,7 +773,10 @@ private struct FolderHeader: View {
                     Text(group.name)
                         .font(.system(size: 15, weight: .semibold))
                         .lineLimit(1)
-                        .help(group.cwd)
+                        .help(folderHelp)
+                    // Quiet metadata cluster: a single 10pt style, semantic color only
+                    // where it's a signal (green running, red unread). The per-project
+                    // cost rollup lives in the header tooltip now (juancode-341).
                     if group.running > 0 {
                         Text("\(group.running) running")
                             .font(.system(size: 10))
@@ -778,13 +794,6 @@ private struct FolderHeader: View {
                         }
                         .help("\(unreadCount) session(s) here with unread activity")
                     }
-                    // Per-project spend rollup (juancode-qoc).
-                    if let cost = folderCost {
-                        Text(cost)
-                            .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .help("Estimated cost across this project's sessions")
-                    }
                     Spacer(minLength: 8)
                 }
                 .contentShape(Rectangle())
@@ -796,10 +805,17 @@ private struct FolderHeader: View {
             // register reliably (native menu rows did neither).
             Button { showingAgentPicker = true } label: {
                 Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.appHairline(plusHovering ? 0.14 : 0)))
             }
             .buttonStyle(.plain)
             .help("New session in \(group.cwd)")
             .clickCursor()
+            .onHover { plusHovering = $0 }
             .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(ProviderId.allCases, id: \.self) { p in
@@ -1271,65 +1287,110 @@ struct SessionRow: View {
     var unread: Bool = false
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
+    /// Whether this row is the current selection — drives showing the external
+    /// resume affordance alongside hover.
+    var selected: Bool = false
+
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        // firstTextBaseline so the status dot and any trailing ornament sit on the
+        // title line — a two-line row (title + usage subtitle) reads as one unit.
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             statusIndicator
-            VStack(alignment: .leading, spacing: 1) {
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+            VStack(alignment: .leading, spacing: 2) {
                 Text(meta.title).lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    .help(usageHelp)
             }
-            Spacer()
-            if let t = tracked {
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
-                    Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
-                }
-                .padding(.horizontal, 5).padding(.vertical, 1)
-                .background(trackColor(t.state).opacity(0.2))
-                .foregroundStyle(trackColor(t.state))
-                .clipShape(Capsule())
-                .help("Tracking PR #\(t.number) — \(t.state.rawValue)")
-            }
-            if let ti = trackedIssue {
-                HStack(spacing: 3) {
-                    Image(systemName: "ticket").font(.system(size: 8))
-                    Text(ti.identifier).font(.system(size: 9, weight: .semibold).monospaced())
-                }
-                .padding(.horizontal, 5).padding(.vertical, 1)
-                .background(issueTrackColor(ti.state).opacity(0.2))
-                .foregroundStyle(issueTrackColor(ti.state))
-                .clipShape(Capsule())
-                .help("Tracking \(ti.identifier) — \(ti.state.rawValue)")
-            }
-            if external {
-                Image(systemName: "terminal")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .help("From your terminal")
-                if let onResume {
-                    Button(action: onResume) {
-                        Image(systemName: "play.circle").font(.system(size: 13))
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Resume this conversation in juancode")
-                    .clickCursor()
-                }
-            }
-            if let label = meta.usage?.badgeLabel {
-                Text(label)
-                    .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
-            }
+            Spacer(minLength: 6)
+            trailingOrnament
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+        .onHover { hovering = $0 }
     }
 
+    /// At most one tracking capsule plus (for external rows) a hover-revealed
+    /// resume button. Usage moved into the subtitle, so the trailing edge stays
+    /// quiet (juancode-341).
+    @ViewBuilder
+    private var trailingOrnament: some View {
+        if showPr, let t = tracked {
+            prCapsule(t)
+        } else if showIssue, let ti = trackedIssue {
+            issueCapsule(ti)
+        }
+        if external, let onResume, hovering || selected {
+            Button(action: onResume) {
+                Image(systemName: "play.circle").font(.system(size: 13))
+            }
+            .buttonStyle(.borderless)
+            .help("From your terminal — resume in juancode")
+            .clickCursor()
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+        }
+    }
+
+    private func prCapsule(_ t: TrackedPr) -> some View {
+        var help = "Tracking PR #\(t.number) — \(t.state.rawValue)"
+        // When an issue is also tracked but folded away, keep its id discoverable.
+        if let ti = trackedIssue, !showIssue {
+            help += "\nAlso tracking \(ti.identifier) — \(ti.state.rawValue)"
+        }
+        return HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+            Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+        }
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(trackColor(t.state).opacity(0.2))
+        .foregroundStyle(trackColor(t.state))
+        .clipShape(Capsule())
+        .help(help)
+    }
+
+    private func issueCapsule(_ ti: TrackedIssue) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "ticket").font(.system(size: 8))
+            Text(ti.identifier).font(.system(size: 9, weight: .semibold).monospaced())
+        }
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(issueTrackColor(ti.state).opacity(0.2))
+        .foregroundStyle(issueTrackColor(ti.state))
+        .clipShape(Capsule())
+        .help("Tracking \(ti.identifier) — \(ti.state.rawValue)")
+    }
+
+    /// Which single tracking capsule to show. Prefer whichever is in a non-watching
+    /// (active) state; when a PR and an issue are both present, the PR wins unless
+    /// only the issue is active — the loser is folded into the survivor's tooltip.
+    private var prActive: Bool { tracked.map { $0.state != .watching } ?? false }
+    private var issueActive: Bool { trackedIssue.map { $0.state != .watching } ?? false }
+    private var showPr: Bool {
+        guard tracked != nil else { return false }
+        guard trackedIssue != nil else { return true }
+        return !(issueActive && !prActive)
+    }
+    private var showIssue: Bool { trackedIssue != nil && !showPr }
+
     private var subtitle: String {
-        (meta.cwd as NSString).lastPathComponent
+        let folder = (meta.cwd as NSString).lastPathComponent
+        if let label = meta.usage?.badgeLabel { return "\(folder) · \(label)" }
+        return folder
+    }
+
+    /// Detailed usage breakdown for the subtitle tooltip (was the trailing badge's
+    /// `.help`). Falls back to the plain subtitle when no usage is reported.
+    private var usageHelp: String {
+        guard let u = meta.usage, u.totalTokens > 0 else { return subtitle }
+        var lines = [
+            "\(SessionUsageFormat.tokens(u.totalTokens)) tokens total",
+            "in \(SessionUsageFormat.tokens(u.inputTokens)) · out \(SessionUsageFormat.tokens(u.outputTokens))",
+            "cache read \(SessionUsageFormat.tokens(u.cacheReadTokens)) · write \(SessionUsageFormat.tokens(u.cacheWriteTokens))",
+        ]
+        if let c = SessionUsageFormat.cost(u.costUsd) { lines.append("est. cost \(c)") }
+        return lines.joined(separator: "\n")
     }
 
     private func trackColor(_ state: TrackState) -> Color {
