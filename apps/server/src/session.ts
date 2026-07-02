@@ -80,15 +80,14 @@ const SEED = {
  * window — forcing a genuine SIGWINCH each time — until the settled CLI adopts it.
  */
 const GRID = {
-  /** Re-apply the desired grid this many times across the boot window. */
+  /** Settle-check rounds across the boot window; the nudge fires at most once,
+   * on the first round whose screen genuinely settles. */
   reapplyAttempts: 3,
-  /** Wait for the TUI to settle (stable frames) before each re-apply. */
+  /** Per-round budget for the TUI to settle (stable frames). */
   settleMaxMs: 8_000,
   settlePollMs: 200,
   /** Gap between the `rows-1` nudge and the real `rows` (a genuine size change). */
   nudgeMs: 60,
-  /** Pause between re-apply attempts (lets the re-laid-out screen settle again). */
-  reapplyGapMs: 500,
 } as const;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -387,18 +386,21 @@ export class Session {
   /**
    * Resolve once the rendered screen stops changing (two identical, non-empty
    * frames `pollMs` apart) or `maxMs` elapses — a CLI-agnostic "TUI is ready"
-   * signal that replaces trusting the first output byte.
+   * signal that replaces trusting the first output byte. Resolves with whether
+   * the screen actually settled (false = still changing at `maxMs`), so a caller
+   * can tell "ready" from "busy streaming" and avoid disturbing the latter.
    */
-  private async waitForStableScreen(maxMs: number, pollMs: number): Promise<void> {
+  private async waitForStableScreen(maxMs: number, pollMs: number): Promise<boolean> {
     let elapsed = 0;
     let prev = this.detector.screenSnapshot();
     while (elapsed < maxMs) {
       await sleep(pollMs);
       elapsed += pollMs;
       const cur = this.detector.screenSnapshot();
-      if (cur !== "" && cur === prev) return;
+      if (cur !== "" && cur === prev) return true;
       prev = cur;
     }
+    return false;
   }
 
   /** Poll `cond` every `pollMs` until true or `maxMs` elapses; returns whether it became true. */
@@ -443,20 +445,26 @@ export class Session {
   }
 
   /**
-   * Re-assert the desired grid across the boot window (juancode-1th.3). A CLI that
-   * installs its SIGWINCH handler late (slow MCP load) misses the spawn-time grid;
-   * we wait for the TUI to settle, then force a genuine SIGWINCH, a bounded number
-   * of times. Each re-apply re-lays-out the screen, so the next {@link
-   * waitForStableScreen} naturally spaces the attempts. Runs server-side so no
-   * client needs its own retry timers.
+   * Re-assert the desired grid once the TUI is up (juancode-1th.3). A CLI that
+   * installs its SIGWINCH handler late (slow MCP load) can miss a resize that
+   * landed during boot; once the screen settles, one genuine SIGWINCH makes it
+   * re-read the size — and one is enough, a settled TUI is fully initialized.
+   * The nudge fires ONLY on a genuinely settled screen: forcing it into a CLI
+   * that's actively streaming (resumed mid-turn, auto-submitted prompt) makes the
+   * TUI full-redraw twice mid-stream and lands mis-rendered frames in scrollback
+   * permanently — the "terminal garbles without any resize" bug. If the screen
+   * never settles across the rounds, skip entirely: a streaming CLI is
+   * demonstrably rendering, and any later real client resize re-asserts the grid
+   * anyway. Runs server-side so no client needs its own retry timers.
    */
   private async reapplyGridWhenReady(): Promise<void> {
     for (let i = 0; i < GRID.reapplyAttempts; i++) {
-      await this.waitForStableScreen(GRID.settleMaxMs, GRID.settlePollMs);
+      const settled = await this.waitForStableScreen(GRID.settleMaxMs, GRID.settlePollMs);
       if (!this.isRunning) return;
-      this.nudgeReapply();
-      await sleep(GRID.reapplyGapMs);
-      if (!this.isRunning) return;
+      if (settled) {
+        this.nudgeReapply();
+        return;
+      }
     }
   }
 

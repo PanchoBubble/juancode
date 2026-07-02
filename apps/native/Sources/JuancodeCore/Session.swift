@@ -347,15 +347,14 @@ public final class Session: @unchecked Sendable {
     /// Tunables for the server-owned desired-grid re-apply (juancode-1th.3). Mirrors
     /// the `GRID` block in `apps/server/src/session.ts`.
     private enum GridReapply {
-        /// Re-apply the desired grid this many times across the boot window.
+        /// Settle-check rounds across the boot window; the nudge fires at most once,
+        /// on the first round whose screen genuinely settles.
         static let attempts = 3
-        /// Wait for the TUI to settle (stable frames) before each re-apply.
+        /// Per-round budget for the TUI to settle (stable frames).
         static let settleMaxMs = 8_000
         static let settlePollMs = 200
         /// Gap between the `rows-1` nudge and the real `rows` (a genuine size change).
         static let nudgeMs = 60
-        /// Pause between re-apply attempts (lets the re-laid-out screen settle again).
-        static let gapMs = 500
     }
 
     /// Seed a fresh session with an initial prompt and **verify** it was actually
@@ -433,17 +432,22 @@ public final class Session: @unchecked Sendable {
 
     /// Poll until the rendered screen stops changing (two identical, non-empty
     /// frames `pollMs` apart) or `maxMs` elapses — a CLI-agnostic "TUI is ready"
-    /// signal that replaces trusting the first output byte.
-    private func waitForStableScreen(maxMs: Int, pollMs: Int) async {
+    /// signal that replaces trusting the first output byte. Returns whether the
+    /// screen actually settled (false = it was still changing at `maxMs`), so a
+    /// caller can tell "ready" from "busy streaming" and avoid disturbing the
+    /// latter.
+    @discardableResult
+    private func waitForStableScreen(maxMs: Int, pollMs: Int) async -> Bool {
         var elapsed = 0
         var prev = detector.screenSnapshot()
         while elapsed < maxMs {
             try? await Task.sleep(for: .milliseconds(pollMs))
             elapsed += pollMs
             let cur = detector.screenSnapshot()
-            if !cur.isEmpty && cur == prev { return }
+            if !cur.isEmpty && cur == prev { return true }
             prev = cur
         }
+        return false
     }
 
     /// Poll `cond` every `pollMs` until it's true or `maxMs` elapses; returns whether
@@ -612,19 +616,26 @@ public final class Session: @unchecked Sendable {
         grid.release(owner)
     }
 
-    /// Re-assert the desired grid across the boot window (juancode-1th.3). A CLI
-    /// that installs its SIGWINCH handler late (slow MCP load) misses the spawn-time
-    /// grid; we wait for the TUI to settle, then force a genuine SIGWINCH, a bounded
-    /// number of times. Each re-apply re-lays-out the screen, so the next
-    /// `waitForStableScreen` naturally spaces the attempts. Runs server-side so no
-    /// client needs its own retry timers.
+    /// Re-assert the desired grid once the TUI is up (juancode-1th.3). A CLI that
+    /// installs its SIGWINCH handler late (slow MCP load) can miss a resize that
+    /// landed during boot; once the screen settles, one genuine SIGWINCH makes it
+    /// re-read the size — and one is enough, a settled TUI is fully initialized.
+    /// The nudge fires ONLY on a genuinely settled screen: forcing it into a CLI
+    /// that's actively streaming (resumed mid-turn, auto-submitted prompt) makes
+    /// the TUI full-redraw twice mid-stream and lands mis-rendered frames in
+    /// scrollback permanently — the "terminal garbles without any resize" bug. If
+    /// the screen never settles across the rounds, skip entirely: a streaming CLI
+    /// is demonstrably rendering, and any later real client resize re-asserts the
+    /// grid anyway. Runs server-side so no client needs its own retry timers.
     private func reapplyGridWhenReady() async {
         for _ in 0..<GridReapply.attempts {
-            await waitForStableScreen(maxMs: GridReapply.settleMaxMs, pollMs: GridReapply.settlePollMs)
+            let settled = await waitForStableScreen(maxMs: GridReapply.settleMaxMs,
+                                                    pollMs: GridReapply.settlePollMs)
             guard isRunning else { return }
-            nudgeReapply()
-            try? await Task.sleep(for: .milliseconds(GridReapply.gapMs))
-            guard isRunning else { return }
+            if settled {
+                nudgeReapply()
+                return
+            }
         }
     }
 
