@@ -800,9 +800,39 @@ private struct FolderHeader: View {
         group.sessions.filter { model.unreadSessions.contains($0.id) }.count
     }
 
-    /// Sessions in this project whose folder holds uncommitted/unpushed work.
-    private var atRiskCount: Int {
-        group.sessions.filter { model.workAtRisk(forSession: $0) != nil }.count
+    /// At-risk work rolled up per CHECKOUT, not per session — dozens of sessions
+    /// share one checkout, so counting sessions showed absurd numbers ("97" for
+    /// one dirty branch, juancode-64z). `main` is the repo root's own risk entry
+    /// (uncommitted/unpushed on the folder itself); `worktrees` counts distinct
+    /// at-risk linked worktrees under this repo, including orphaned ones.
+    private var atRiskRoots: (main: WorkAtRisk?, worktrees: Int) {
+        let root = WorkAtRiskScan.normalize(group.cwd)
+        var seen = Set<String>()
+        var main: WorkAtRisk?
+        var worktrees = 0
+        func take(_ r: WorkAtRisk) {
+            guard seen.insert(r.path).inserted else { return }
+            if r.path == root { main = r } else { worktrees += 1 }
+        }
+        for r in model.workAtRiskList where r.path == root || r.repoRoot == root { take(r) }
+        // Sessions whose at-risk root isn't tied to this repo root (e.g. a cwd in
+        // a subdirectory the worktree listing doesn't know) still count once.
+        for s in group.sessions {
+            if let r = model.workAtRisk(forSession: s) { take(r) }
+        }
+        return (main, worktrees)
+    }
+
+    /// Tooltip for the main-checkout badge: what exactly is at risk there.
+    private func mainRiskHelp(_ r: WorkAtRisk) -> String {
+        var parts: [String] = []
+        if r.dirtyFiles > 0 { parts.append("\(r.dirtyFiles) uncommitted file(s)") }
+        if r.ahead > 0 {
+            parts.append("\(r.ahead) unpushed commit(s)\(r.noUpstream ? " (no upstream)" : "")")
+        }
+        let what = parts.joined(separator: ", ")
+        let branch = r.branch.map { " on \($0)" } ?? ""
+        return "Main checkout: \(what)\(branch)"
     }
 
     /// Own sessions we can close in bulk. Discovered/external sessions aren't ours
@@ -852,17 +882,30 @@ private struct FolderHeader: View {
                         }
                         .help("\(unreadCount) session(s) here with unread activity")
                     }
-                    // Work-at-risk roll-up: an orange warning + count when any session
-                    // here sits on uncommitted/unpushed work (juancode-rxu).
-                    if atRiskCount > 0 {
+                    // Work-at-risk roll-up per checkout, not per session (juancode-64z):
+                    // yellow pencil = the main checkout itself holds uncommitted/unpushed
+                    // work (count: dirty files + unpushed commits); orange warning = how
+                    // many distinct WORKTREES hold at-risk work.
+                    let risk = atRiskRoots
+                    if let main = risk.main {
+                        HStack(spacing: 3) {
+                            Image(systemName: "pencil.circle.fill")
+                                .font(.system(size: 9))
+                            Text("\(main.dirtyFiles + main.ahead)")
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        }
+                        .foregroundStyle(.yellow)
+                        .help(mainRiskHelp(main))
+                    }
+                    if risk.worktrees > 0 {
                         HStack(spacing: 3) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 8))
-                            Text("\(atRiskCount)")
+                            Text("\(risk.worktrees)")
                                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                         }
                         .foregroundStyle(.orange)
-                        .help("\(atRiskCount) session(s) here with uncommitted or unpushed work")
+                        .help("\(risk.worktrees) worktree(s) here with uncommitted or unpushed work")
                     }
                     Spacer(minLength: 8)
                 }
