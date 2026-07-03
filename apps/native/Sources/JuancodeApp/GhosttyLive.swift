@@ -222,6 +222,22 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// before we assert the settled grid (juancode-1th.2). Longer than any gap
         /// between the transition's own layout passes, shorter than feels laggy.
         private let transitionSettleDelay = DispatchTimeInterval.milliseconds(150)
+        /// How long the CLI's *output* must stay quiet after a plain (non-transition)
+        /// resize before we heal it. A window-edge / divider drag pushes SIGWINCHes
+        /// straight into a streaming CLI, so bytes it emitted for the pre-resize grid
+        /// land mis-wrapped; the drag path has no settle pass of its own (unlike a
+        /// layout transition). Once the stream quiets we force one genuine SIGWINCH so
+        /// the CLI fully re-lays-out at the settled grid. Keyed on output quiet, not
+        /// layout quiet, because a drag can end while the CLI is still streaming.
+        private let resizeHealQuietDelay = DispatchTimeInterval.milliseconds(250)
+        /// A plain resize is waiting to heal once the CLI's output settles.
+        private var resizeHealArmed = false
+        /// Output actually arrived while the heal was armed — i.e. the CLI was
+        /// streaming through/after the resize, so its render is the corruptible case
+        /// worth nudging. An idle resize already repaints cleanly via the CLI's own
+        /// SIGWINCH handling, so we skip the extra flap there.
+        private var sawStreamDuringHeal = false
+        private var healWork: DispatchWorkItem?
         private let remembersSize: Bool
         var lastFocusToken = 0
         var lastResyncToken = 0
@@ -262,11 +278,12 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             streaming = true
             // Replay scrollback then stream live output, pushed into the surface.
             // The pty callback is on a background queue; surface writes must be on main.
-            cancel = session.subscribeOutput(replay: true) { [weak gsession] bytes in
+            cancel = session.subscribeOutput(replay: true) { [weak self, weak gsession] bytes in
                 let data = Data(bytes)
                 DispatchQueue.main.async {
                     PerfMonitor.recordFeed(bytes.count)
                     gsession?.receive(data)
+                    self?.noteOutputForHeal()
                 }
             }
             // `subscribeOutput` delivers the whole scrollback synchronously above, so
@@ -285,6 +302,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
             resizeWork?.cancel(); resizeWork = nil
+            healWork?.cancel(); healWork = nil
+            resizeHealArmed = false
             cancel?(); cancel = nil
             streaming = false
             gsession = nil
@@ -324,6 +343,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 DispatchQueue.main.asyncAfter(deadline: .now() + transitionSettleDelay, execute: work)
                 return
             }
+            // A plain drag has no layout-transition settle pass; arm the output-quiet
+            // heal so a resize that lands mid-stream gets one clean re-lay-out once the
+            // CLI stops emitting (see `resizeHealQuietDelay`).
+            armResizeHeal()
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
@@ -333,6 +356,43 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 resizeWork = work
                 DispatchQueue.main.asyncAfter(deadline: earliest, execute: work)
             }
+        }
+
+        /// Arm (or push out) the post-resize heal timer. Fires `fireResizeHeal` once the
+        /// CLI's output has been quiet for `resizeHealQuietDelay`. Re-arming while
+        /// already armed just reschedules — it never re-clears `sawStreamDuringHeal`, so
+        /// the streaming signal accumulated across the whole gesture survives.
+        private func armResizeHeal() {
+            if !resizeHealArmed {
+                resizeHealArmed = true
+                sawStreamDuringHeal = false
+            }
+            healWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.fireResizeHeal() }
+            healWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + resizeHealQuietDelay, execute: work)
+        }
+
+        /// Output landed. If a heal is armed, the CLI was streaming through the resize
+        /// (the corruptible case) — record it and push the quiet timer out so we only
+        /// nudge once the stream actually stops.
+        private func noteOutputForHeal() {
+            guard resizeHealArmed else { return }
+            sawStreamDuringHeal = true
+            armResizeHeal()
+        }
+
+        /// The CLI's output has settled after a resize. If it was streaming through the
+        /// resize, force one genuine SIGWINCH so it fully re-lays-out at the settled
+        /// grid, clearing the mid-stream mis-wrap. Disarm *before* nudging so the redraw
+        /// bytes the nudge provokes don't re-arm the heal into a loop.
+        private func fireResizeHeal() {
+            resizeHealArmed = false
+            healWork = nil
+            guard sawStreamDuringHeal else { return }
+            sawStreamDuringHeal = false
+            guard let g = lastSurfaceGrid, g.cols > 0, g.rows > 0 else { return }
+            nudge(cols: g.cols, rows: g.rows)
         }
 
         /// True when a resize actually reached the pty during the current layout

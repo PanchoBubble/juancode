@@ -473,7 +473,12 @@ struct SidebarView: View {
         order.remove(at: from)
         guard let to = order.firstIndex(of: target) else { return }
         order.insert(dragged, at: to)
-        model.projectOrder = order
+        // Spring so the sections slide into their new positions instead of
+        // snapping — `groups` re-sorts deterministically off `projectOrder` and
+        // `FolderGroup.id == cwd` is stable, so SwiftUI interpolates the move.
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            model.projectOrder = order
+        }
     }
 
     /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
@@ -521,9 +526,10 @@ struct SidebarView: View {
                         }
                         // Drag a header onto another to reorder projects (persisted).
                         .overlay(alignment: .top) {
-                            if dropTarget == group.cwd {
-                                Rectangle().fill(Color.accentColor).frame(height: 2)
-                            }
+                            Rectangle()
+                                .fill(Color.accentColor)
+                                .frame(height: 2)
+                                .opacity(dropTarget == group.cwd ? 1 : 0)
                         }
                         .draggable(group.cwd) {
                             Text(group.name)
@@ -537,7 +543,9 @@ struct SidebarView: View {
                             reorderProjects(moving: dragged, onto: group.cwd)
                             return true
                         } isTargeted: { hovering in
-                            dropTarget = hovering ? group.cwd : (dropTarget == group.cwd ? nil : dropTarget)
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                dropTarget = hovering ? group.cwd : (dropTarget == group.cwd ? nil : dropTarget)
+                            }
                         }
                         // Let the project bar span the full sidebar width (no default
                         // section-header inset), so its fill/divider reach both edges.
