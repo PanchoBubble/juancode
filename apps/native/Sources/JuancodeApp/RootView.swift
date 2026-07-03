@@ -19,7 +19,12 @@ struct RootView: View {
         // macOS autosaves manual column widths, so "manual wins" holds natively.
         let sidebarIdeal = PanelAutoSize.width(window: model.windowWidth,
                                                fraction: 0.20, min: 280, max: 380)
-        return NavigationSplitView {
+        // Column visibility is bridged through AppModel so ⌃S can toggle the projects
+        // sidebar; the native toolbar toggle writes back through the same binding.
+        return NavigationSplitView(columnVisibility: Binding(
+            get: { model.projectsSidebarVisible ? .all : .detailOnly },
+            set: { model.projectsSidebarVisible = $0 != .detailOnly }
+        )) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: sidebarIdeal)
         } detail: {
@@ -1152,6 +1157,12 @@ private struct FolderPrs: View {
             EmptyView()
         } else {
             Button {
+                if !showing {
+                    model.loadPrs(cwd)
+                    // Reopening with a filter still active: re-run the scoped query
+                    // since loadPrs resets the cache to the firehose top-50.
+                    model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: query)
+                }
                 showing.toggle()
             } label: {
                 Text("\(all.count) PR\(all.count == 1 ? "" : "s")")
@@ -1207,6 +1218,18 @@ private struct FolderPrs: View {
             }
         }
         .frame(width: 320)
+        // Instant filtering happens over the cached set above; these fire a
+        // debounced, repo-scoped `gh` re-query in the background so matches beyond
+        // the newest-50 firehose (e.g. your own older PRs) fold into the view.
+        .onChange(of: query) { _, q in
+            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: q)
+        }
+        .onChange(of: mineOnly) { _, m in
+            model.backfillPrs(cwd, mine: m, assigned: assignedOnly, query: query)
+        }
+        .onChange(of: assignedOnly) { _, a in
+            model.backfillPrs(cwd, mine: mineOnly, assigned: a, query: query)
+        }
     }
 }
 

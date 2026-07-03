@@ -293,6 +293,14 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // sits un-drawn until a user event forces a tick — the "blank until you
             // select all the text" bug. Nudge one redraw right after the replay lands.
             DispatchQueue.main.async { [weak view] in view?.fitToSize() }
+            // The immediate nudge can race the surface's first real layout — a tick
+            // requested before the frame is renderable is skipped silently, which is
+            // why a hard Refresh could still land on a stale render. One delayed
+            // retry after layout has certainly settled flushes it; a repeat tick on
+            // an already-clean surface is a no-op repaint.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak view] in
+                view?.fitToSize()
+            }
         }
 
         func terminalDidDetachSurface() {}
@@ -413,6 +421,14 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private func settleAfterTransition() {
             guard let g = lastSurfaceGrid else { return }
             if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
+            // Always flush one client repaint at settle, in every branch. Bytes the
+            // CLI printed while the panel animated can arrive without scheduling a
+            // frame (output wakeups are gated while the surface isn't renderable),
+            // leaving a stale partial frame on screen that only a user event — the
+            // "select all the text" heal — would flush. `fitToSize` ends in an
+            // unconditional immediate tick and never touches the pty, so it's safe
+            // even when the settled grid was already delivered mid-transition.
+            view?.fitToSize()
             let delivered = sentDuringTransition
             sentDuringTransition = false
             if let last = lastSent, last.cols == g.cols, last.rows == g.rows {

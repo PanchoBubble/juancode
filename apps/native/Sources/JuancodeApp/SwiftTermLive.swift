@@ -86,11 +86,22 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
     // Only when a terminal is first responder; elsewhere the menu key equivalents work.
     let routeAppShortcut: @MainActor (NSEvent) -> Bool = { [weak host] event in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil,
-              window.firstResponder is JuancodeTerminalResponder,
-              let action = shortcuts.action(matching: event)
+              window.firstResponder is JuancodeTerminalResponder
         else { return false }
-        performShortcut(action, model: model, oracle: oracle)
-        return true
+        if let action = shortcuts.action(matching: event) {
+            performShortcut(action, model: model, oracle: oracle)
+            return true
+        }
+        // ⌃N mirrors ⌘N while the Oracle dock is open: start a new Oracle session.
+        // Only intercepted with the dock up — otherwise ⌃N stays the pty's (readline
+        // next-history / cursor-down).
+        if oracle.expanded,
+           event.modifierFlags.intersection([.command, .shift, .control, .option]) == .control,
+           (event.charactersIgnoringModifiers ?? "").lowercased() == "n" {
+            oracle.newOracle()
+            return true
+        }
+        return false
     }
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil

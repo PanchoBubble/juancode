@@ -25,6 +25,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case oracle
     case globalIssues
     case focusSessionSearch
+    case refreshTerminal
+    case toggleChanges
+    case toggleProjects
 
     var id: String { rawValue }
 
@@ -42,6 +45,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
         case .focusSessionSearch: return "Find Sessions"
+        case .refreshTerminal: return "Refresh Terminal"
+        case .toggleChanges: return "Toggle Code Changes"
+        case .toggleProjects: return "Toggle Projects Panel"
         }
     }
 
@@ -59,6 +65,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
         case .focusSessionSearch: return KeyBinding(key: "f", control: true)
+        case .refreshTerminal: return KeyBinding(key: "z", control: true)
+        case .toggleChanges: return KeyBinding(key: "c", command: true)
+        case .toggleProjects: return KeyBinding(key: "s", control: true)
         }
     }
 }
@@ -208,7 +217,10 @@ extension View {
 @MainActor
 func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleModel) {
     switch action {
-    case .newSessionSameProject: model.quickNewSession()
+    case .newSessionSameProject:
+        // With the Oracle dock open, "new" means a new Oracle session — the dock is
+        // the surface you're looking at (⌘N and ⌃N both land here via the monitor).
+        if oracle.expanded { oracle.newOracle() } else { model.quickNewSession() }
     case .newSessionSheet: model.showingNewSession = true
     case .promptTemplates: model.showingPromptPalette = true
     case .sessionTemplates: model.showingSessionTemplates = true
@@ -219,5 +231,11 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .oracle: oracle.toggleChatFocused()
     case .globalIssues: oracle.open(tab: .issues)
     case .focusSessionSearch: model.focusSessionSearch()
+    case .refreshTerminal:
+        // Refresh whichever terminal you're looking at: the Oracle chat when the
+        // dock is open, else the selected session's pane.
+        if oracle.expanded { oracle.refreshChat() } else { model.refreshTerminal() }
+    case .toggleChanges: model.toggleChangesPanel()
+    case .toggleProjects: model.toggleProjectsSidebar()
     }
 }

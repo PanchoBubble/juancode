@@ -256,6 +256,17 @@ struct JuancodeApp: App {
                     performShortcut(.recalcGeometry, model: model, oracle: oracle)
                 }
                 .appShortcut(.recalcGeometry, shortcuts)
+                // ⌃Z hard-refreshes the visible terminal (Oracle chat when the dock
+                // is open, else the session pane) — rebuild + replay scrollback.
+                Button("Refresh Terminal") {
+                    performShortcut(.refreshTerminal, model: model, oracle: oracle)
+                }
+                .appShortcut(.refreshTerminal, shortcuts)
+                // ⌃S shows/hides the projects sidebar column.
+                Button("Toggle Projects Panel") {
+                    performShortcut(.toggleProjects, model: model, oracle: oracle)
+                }
+                .appShortcut(.toggleProjects, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") {

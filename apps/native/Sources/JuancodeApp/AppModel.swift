@@ -142,6 +142,8 @@ final class AppModel {
     var prsByCwd: [String: PrListResult] = [:]
     /// cwds with a PR fetch in flight, so a refresh doesn't stampede.
     private var prsLoading: Set<String> = []
+    /// Per-cwd debounce tasks for the PR popover's background scoped re-query.
+    private var prsBackfillTasks: [String: Task<Void, Never>] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
 
@@ -325,6 +327,31 @@ final class AppModel {
     /// (garbled glyphs / half-drawn TUI) — a geometry resync can't fix that.
     func refreshTerminal() {
         terminalRefreshToken &+= 1
+    }
+
+    /// Whether the projects (sessions-by-folder) sidebar column is visible. RootView
+    /// binds NavigationSplitView's columnVisibility to this, so the ⌃S shortcut can
+    /// show/hide it programmatically while the native toolbar toggle stays in sync.
+    var projectsSidebarVisible = true
+
+    func toggleProjectsSidebar() {
+        projectsSidebarVisible.toggle()
+    }
+
+    /// Toggle the session's right-side panel onto the Changes tab (⌘C). The panel's
+    /// visibility + tab live in @AppStorage inside SessionContainer; writing the same
+    /// UserDefaults keys keeps that view the single owner of the state. Hides only
+    /// when Changes is already the visible tab — from Issues it switches tabs instead.
+    func toggleChangesPanel() {
+        let d = UserDefaults.standard
+        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
+        let onChanges = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Changes"
+        if shown && onChanges {
+            d.set(false, forKey: "session.sidePanel.shown")
+        } else {
+            d.set("Changes", forKey: "session.sidePanel.tab")
+            d.set(true, forKey: "session.sidePanel.shown")
+        }
     }
 
     func scrollback(_ id: String) -> [UInt8] {
@@ -783,6 +810,35 @@ final class AppModel {
             let result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
             prsByCwd[cwd] = result
             prsLoading.remove(cwd)
+        }
+    }
+
+    /// Debounced, repo-scoped `gh pr list --search` backing the PR popover's
+    /// Mine/Assigned/text filters. The popover filters the cached set instantly for
+    /// responsiveness; this runs in the background and unions in matches that fall
+    /// beyond the newest-`MAX_PRS` firehose the initial `loadPrs` caps at (e.g. your
+    /// own older PRs, or an old PR matched by the query). Nothing to scope (no
+    /// query, no Mine/Assigned) → no-op, since the base list already covers that
+    /// view. Coalesces rapid keystrokes/toggles via a per-cwd cancellable task.
+    func backfillPrs(_ cwd: String, mine: Bool, assigned: Bool, query: String) {
+        let text = query.trimmingCharacters(in: .whitespaces)
+        prsBackfillTasks[cwd]?.cancel()
+        guard mine || assigned || !text.isEmpty else { return }
+        let viewer = prsByCwd[cwd]?.viewer ?? ""
+        var qualifiers = "state:open"
+        if mine && !viewer.isEmpty { qualifiers += " author:\(viewer)" }
+        if assigned && !viewer.isEmpty { qualifiers += " assignee:\(viewer)" }
+        if !text.isEmpty { qualifiers += " \(text)" }
+        prsBackfillTasks[cwd] = Task { [qualifiers] in
+            try? await Task.sleep(for: .milliseconds(300))
+            if Task.isCancelled { return }
+            let found = await Task.detached(priority: .utility) {
+                await searchOpenPrs(cwd, search: qualifiers)
+            }.value
+            if Task.isCancelled || found.isEmpty { return }
+            guard var existing = prsByCwd[cwd], existing.available else { return }
+            existing.prs = mergePrLists(existing.prs, found)
+            prsByCwd[cwd] = existing
         }
     }
 

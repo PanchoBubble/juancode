@@ -711,7 +711,7 @@ private struct FileCard: View {
                     side: line.anchor?.side,
                     anchorLine: line.anchor?.line,
                     text: rd.rendered[idx],
-                    selected: isRowSelected(idx),
+                    selected: isRowSelected(idx, side: line.anchor?.side, line: line.anchor?.line),
                     onComment: { side, ln in
                         beginCompose(ComposeAnchor(side: side, line: ln, endLine: ln))
                     })
@@ -798,10 +798,17 @@ private struct FileCard: View {
         return sorted.min { abs($0.value.midY - point.y) < abs($1.value.midY - point.y) }?.key
     }
 
-    /// True while a drag-select spans this flat row index.
-    private func isRowSelected(_ index: Int) -> Bool {
-        guard let a = dragAnchorIndex, let c = dragCurrentIndex else { return false }
-        return normalizedLineRange(anchor: a, current: c).contains(index)
+    /// True while a drag-select spans this flat row index, or while the composer is
+    /// open on a range covering this row's anchor — the highlight must survive the
+    /// drag ending so the commented-on lines stay visible under the comment box.
+    private func isRowSelected(_ index: Int, side: CommentSide?, line: Int?) -> Bool {
+        if let a = dragAnchorIndex, let c = dragCurrentIndex {
+            return normalizedLineRange(anchor: a, current: c).contains(index)
+        }
+        if let comp = composing, let side, let line {
+            return side == comp.side && (comp.line...comp.endLine).contains(line)
+        }
+        return false
     }
 
     private func beginCompose(_ anchor: ComposeAnchor) {

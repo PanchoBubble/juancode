@@ -3,11 +3,12 @@ import JuancodeCore
 import JuancodeServices
 
 /// The global "Oracle" helper (juancode-wjg / juancode-6sw): a right-docked,
-/// full-height side panel with two tabs — a global bd issue view (dispatch into a
-/// project / ask Oracle) and the Oracle agent's live chat terminal. Opened from the
-/// top command bar or ⌃Space; it slides in over the right edge with a minimum width
-/// so the agent CLI always boots into a usable, stable grid (a fixed drawer avoids
-/// the live-reflow fragility of a free-floating resizable panel).
+/// full-height side panel. Chat is the whole surface — the Oracle agent's live
+/// terminal plus the session rail; the global bd issue view (dispatch into a
+/// project / ask Oracle) is reached via a header button rather than a tab bar.
+/// Opened from the top command bar or ⌃Space; it slides in over the right edge
+/// with a minimum width so the agent CLI always boots into a usable, stable grid
+/// (a fixed drawer avoids the live-reflow fragility of a free-floating panel).
 struct OracleDock: View {
     @Environment(OracleModel.self) private var oracle
     @Environment(AppModel.self) private var model
@@ -83,7 +84,6 @@ struct OracleDock: View {
     }
 
     private var panel: some View {
-        @Bindable var oracle = oracle
         let w = min(maxWidth, max(Self.minWidth, panelWidth))
         return HStack(spacing: 0) {
             // Drag the left edge to widen/narrow the drawer (drag left grows it). A
@@ -98,8 +98,6 @@ struct OracleDock: View {
                              previewOnly: true)
             VStack(spacing: 0) {
                 header
-                Divider()
-                OracleTabBar(selection: $oracle.tab)
                 Divider()
                 content.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -135,7 +133,17 @@ struct OracleDock: View {
             switch oracle.tab {
             case .issues:
                 headerButton("arrow.clockwise", help: "Refresh issues") { oracle.loadGlobalBeads() }
+                headerButton("sparkles", help: "Back to chat") {
+                    oracle.tab = .chat
+                    oracle.chatFocusToken += 1
+                }
             case .chat:
+                // Issues is a header action, not a tab (juancode dock cleanup): chat
+                // owns the panel; this flips the content to the global bd view.
+                headerButton("tray.full", help: "Global issues") {
+                    oracle.tab = .issues
+                    oracle.loadGlobalBeads()
+                }
                 headerButton(sessionRailShown ? "sidebar.left" : "sidebar.squares.left",
                              help: sessionRailShown ? "Hide the session list" : "Show the session list") {
                     sessionRailShown.toggle()
@@ -181,82 +189,6 @@ struct OracleDock: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// The dock's tab switcher (juancode-010). The stock `.segmented` Picker rendered
-/// tiny and out of step with the rest of the app's chrome; this is a larger,
-/// dark-theme tab bar — an icon + label per tab in a rounded track, with a filled
-/// accent pill on the selected tab and a hover highlight on the others. Sizing and
-/// typography match the app's other headers (≈13pt semibold, like the project bars
-/// and sheet titles) so the dock reads as part of the app, not a system control.
-private struct OracleTabBar: View {
-    @Binding var selection: OracleModel.OracleTab
-
-    /// SF Symbol per tab, echoing the toolbar's Issues (`tray.full`) / Oracle
-    /// (`sparkles`) buttons so the same concept carries the same glyph.
-    private func icon(_ tab: OracleModel.OracleTab) -> String {
-        switch tab {
-        case .issues: return "tray.full"
-        case .chat: return "sparkles"
-        }
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(OracleModel.OracleTab.allCases, id: \.self) { tab in
-                OracleTabButton(
-                    title: tab.rawValue,
-                    icon: icon(tab),
-                    selected: selection == tab
-                ) {
-                    selection = tab
-                }
-            }
-        }
-        .padding(4)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.appHairline(0.05))
-        )
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-    }
-}
-
-/// One tab in `OracleTabBar`: a full-width segment with an icon + label. Selected =
-/// a filled accent pill with primary text; unselected = transparent with secondary
-/// text and a subtle hover fill (matching `clickCursor`'s idiom).
-private struct OracleTabButton: View {
-    let title: String
-    let icon: String
-    let selected: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 12, weight: .medium))
-                Text(title).font(.system(size: 13, weight: .semibold))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .foregroundStyle(selected ? Color.white : Color.secondary)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(selected
-                          ? Color.accentColor.opacity(0.85)
-                          : Color.primary.opacity(hovering ? 0.08 : 0))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .animation(.easeOut(duration: 0.12), value: selected)
-        .pointerCursor()
     }
 }
 
@@ -446,7 +378,7 @@ private struct OracleChatView: View {
         HStack(spacing: 0) {
             if sessionRailShown {
                 OracleSessionRail()
-                    .frame(width: 156)
+                    .frame(width: 220)
                 Divider()
             }
             terminal
@@ -537,21 +469,30 @@ private struct OracleSessionRail: View {
         .background(Color.appPanelElevated)
     }
 
-    /// `number` labels Oracles in spawn order (oldest = 1) so several read distinctly,
-    /// since they share a cwd and often a title.
+    /// A session row leads with its auto-derived title — the CLI's own model-written
+    /// conversation title, picked up by the title poll (SessionTitle.swift) — so the
+    /// rail reads as a list of conversations, not anonymous "Oracle N" slots. Until
+    /// the CLI writes one the title is still the spawn placeholder ("<agent> · <dir>",
+    /// identical for every Oracle since they share the control dir), so we fall back
+    /// to the spawn-order number (oldest = 1) to keep rows distinct.
     private func row(_ meta: SessionMeta, number: Int) -> some View {
         let selected = oracle.oracleSessionId == meta.id
-        return HStack(spacing: 6) {
+        let placeholder = meta.title.hasPrefix(Providers.spec(for: meta.provider).label + " ·")
+        return HStack(alignment: .top, spacing: 7) {
             Circle()
                 .fill(sessionDotColor(live: model.isLive(meta.id), activity: model.activity(meta.id)))
                 .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Oracle \(number)").font(.system(size: 11)).lineLimit(1)
-                Text(meta.title).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(placeholder ? "Oracle \(number)" : meta.title)
+                    .font(.system(size: 12)).lineLimit(2)
+                if !placeholder {
+                    Text("Oracle \(number)").font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8).padding(.vertical, 5)
+        .padding(.horizontal, 10).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
