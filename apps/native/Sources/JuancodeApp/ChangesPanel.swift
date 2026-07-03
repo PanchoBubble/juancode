@@ -352,7 +352,13 @@ struct ChangesPanel: View {
         if let err = model.changesError(sessionId), diff == nil {
             centered(err)
         } else if loading && diff == nil {
-            centered(loadingMessage)
+            // First load only — once a diff is cached it stays visible through a
+            // refresh (stale-while-revalidate) instead of blanking to this state.
+            VStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(loadingMessage).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let d = diff, !d.git {
             centered("Not a git repository — nothing to diff.")
         } else if (diff?.files ?? []).isEmpty {
@@ -580,26 +586,28 @@ private struct FileCard: View {
     /// Identifies a coordinate space local to one file's diff line stack.
     private var dragSpace: String { "diff-lines-\(file.path)" }
 
-    private var hunks: [DiffHunk] { parseUnifiedDiff(file.diff) }
+    /// Parse + per-line syntax highlighting for this card, computed ONCE off-main
+    /// (see the `.task` below) — never in a body evaluation. Before this, `hunks`
+    /// was a computed property calling `parseUnifiedDiff` and every row re-ran the
+    /// highlighter per render, so each drag-select tick re-parsed the whole diff —
+    /// the panel's jank (juancode-it1). Kept across re-collapse so re-expanding is
+    /// instant.
+    @State private var renderedDiff: RenderedFileDiff?
 
-    /// Every visible diff line flattened to a single indexed list, so a drag offset
-    /// can address any row regardless of which hunk it lives in. The drag-select
-    /// gesture and its highlight both index into this list.
-    private var flatLines: [DiffLine] { hunks.flatMap(\.lines) }
-
-    /// The (side, line) pairs present in this file's diff, so we can tell which
-    /// findings anchor to a real row and which fall to the orphan strip.
-    private var anchoredPairs: Set<String> {
-        Set(flatLines.compactMap { $0.anchor.map { "\($0.side.rawValue):\($0.line)" } })
-    }
+    /// Whether this card has textual content that needs a render model at all.
+    private var wantsRender: Bool { !file.binary && !file.truncated && !file.diff.isEmpty }
 
     /// Findings that can't be anchored onto a row in the current diff (file-level,
     /// or a line no longer present) — rendered in a strip under the header, mirroring
     /// the web `orphanFindings`.
     private var orphanFindings: [ReviewFinding] {
-        findings.filter { f in
+        // While the render model is still computing (a few ms), show nothing rather
+        // than flashing every finding as an orphan.
+        if wantsRender, renderedDiff == nil { return [] }
+        let anchored = renderedDiff?.anchoredPairs ?? []
+        return findings.filter { f in
             guard let line = f.line else { return true }
-            return !anchoredPairs.contains("\(f.side.rawValue):\(line)")
+            return !anchored.contains("\(f.side.rawValue):\(line)")
         }
     }
 
@@ -621,16 +629,34 @@ private struct FileCard: View {
                     note("Binary file — diff not shown.")
                 } else if file.truncated {
                     note("Diff too large to display.")
-                } else if hunks.isEmpty {
-                    note("No textual changes.")
+                } else if let rd = renderedDiff {
+                    if rd.hunks.isEmpty {
+                        note("No textual changes.")
+                    } else {
+                        hunkBody(rd)
+                    }
+                } else if wantsRender {
+                    // First compute in flight — single-digit ms off-main.
+                    note("Rendering…")
                 } else {
-                    hunkBody
+                    note("No textual changes.")
                 }
             }
         }
         .background(Color(NSColor.textBackgroundColor).opacity(0.4))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+        // Recompute when the card is (or becomes) expanded and the diff text changes.
+        // Collapsed cards never pay for a parse/highlight (they're the default state).
+        .task(id: collapsed ? nil : file.diff) {
+            guard !collapsed, wantsRender, renderedDiff?.source != file.diff else { return }
+            let gen = (renderedDiff?.generation ?? 0) + 1
+            let (diffText, path) = (file.diff, file.path)
+            let out = await Task.detached(priority: .userInitiated) {
+                RenderedFileDiff.compute(diff: diffText, path: path, generation: gen)
+            }.value
+            if !Task.isCancelled { renderedDiff = out }
+        }
     }
 
     private var cardHeader: some View {
@@ -670,19 +696,30 @@ private struct FileCard: View {
     /// pressing a line and dragging across others highlights the spanned rows, and
     /// releasing opens the composer anchored to that range. A press with no drag falls
     /// through to the per-row tap (single-line comment), preserving 3bq's behavior.
-    private var hunkBody: some View {
-        // Pair each flat row with its global index so frame reports and the drag-select
-        // highlight share one index space.
-        let indexed = Array(flatLines.enumerated())
+    private func hunkBody(_ rd: RenderedFileDiff) -> some View {
+        // Each flat row is addressed by its global index so frame reports and the
+        // drag-select highlight share one index space.
         return VStack(spacing: 0) {
-            ForEach(indexed, id: \.offset) { idx, line in
+            ForEach(rd.flatLines.indices, id: \.self) { idx in
+                let line = rd.flatLines[idx]
                 DiffLineRow(
-                    line: line,
-                    path: file.path,
+                    generation: rd.generation,
+                    index: idx,
+                    kind: line.kind,
+                    oldLine: line.oldLine,
+                    newLine: line.newLine,
+                    side: line.anchor?.side,
+                    anchorLine: line.anchor?.line,
+                    text: rd.rendered[idx],
                     selected: isRowSelected(idx),
-                    onComment: { anchor in
-                        beginCompose(ComposeAnchor(side: anchor.side, line: anchor.line, endLine: anchor.line))
+                    onComment: { side, ln in
+                        beginCompose(ComposeAnchor(side: side, line: ln, endLine: ln))
                     })
+                    // `.equatable()` is load-bearing: the closure field means SwiftUI
+                    // can't memcmp-diff the row, so without it every row body re-runs
+                    // on every drag tick. The explicit == compares (generation, index,
+                    // selected) only — content changes always bump `generation`.
+                    .equatable()
                     // Report this row's frame (in the stack's coordinate space) so the
                     // drag gesture can hit-test the cursor against actual row geometry —
                     // robust to the comments/composer interspersed below.
@@ -778,7 +815,7 @@ private struct FileCard: View {
     /// whatever line numbers are available, normalized low→high.
     private func beginRangeCompose(start: Int, end: Int) {
         let range = normalizedLineRange(anchor: start, current: end)
-        let rows = flatLines
+        let rows = renderedDiff?.flatLines ?? []
         let anchors = range.compactMap { rows.indices.contains($0) ? rows[$0].anchor : nil }
         guard let first = anchors.first, let last = anchors.last else { return }
         // Prefer keeping both endpoints on one side; if they differ, take the new side.
@@ -842,22 +879,98 @@ private struct RowFramesKey: PreferenceKey {
     }
 }
 
+/// Precomputed render model for one file's diff: parse + per-line syntax
+/// highlighting done ONCE (off-main via `FileCard`'s `.task`), never in a body
+/// evaluation. Equality is a generation stamp so SwiftUI diffing never walks the
+/// line arrays or AttributedString contents.
+struct RenderedFileDiff: Equatable, Sendable {
+    /// Monotonic per-compute stamp; any content change comes from a new `compute`
+    /// which bumps it, so rows can compare (generation, index) instead of text.
+    let generation: Int
+    /// The diff text this model was computed from — lets the card skip a recompute
+    /// when a re-expand re-fires its `.task` over the same content.
+    let source: String
+    let hunks: [DiffHunk]
+    /// Every visible diff line flattened to a single indexed list, so a drag offset
+    /// can address any row regardless of which hunk it lives in.
+    let flatLines: [DiffLine]
+    /// The "side:line" pairs present in the diff — anchors findings vs orphans.
+    let anchoredPairs: Set<String>
+    /// Index-aligned with `flatLines`: tinted +/-/space marker + syntax colors.
+    let rendered: [AttributedString]
+
+    static func == (a: Self, b: Self) -> Bool { a.generation == b.generation }
+
+    /// Pure — safe to run in `Task.detached`.
+    static func compute(diff: String, path: String, generation: Int) -> RenderedFileDiff {
+        let hunks = parseUnifiedDiff(diff)
+        let flat = hunks.flatMap(\.lines)
+        let pairs = Set(flat.compactMap { $0.anchor.map { "\($0.side.rawValue):\($0.line)" } })
+        // The leading +/-/space marker, tinted by diff kind, plus the line content
+        // with per-language vim syntax colors layered on top. The marker keeps the
+        // diff add/remove semantics legible; the content gets the warm vim palette.
+        let rendered = flat.map { line -> AttributedString in
+            var out = AttributedString(marker(for: line.kind))
+            out.foregroundColor = markerColor(for: line.kind)
+            out.append(VimSyntaxPalette.attributed(line.text, path: path))
+            return out
+        }
+        return RenderedFileDiff(generation: generation, source: diff, hunks: hunks,
+                                flatLines: flat, anchoredPairs: pairs, rendered: rendered)
+    }
+
+    private static func marker(for kind: DiffLine.Kind) -> String {
+        switch kind {
+        case .insert: return "+"
+        case .delete: return "-"
+        case .context: return " "
+        }
+    }
+
+    private static func markerColor(for kind: DiffLine.Kind) -> Color {
+        switch kind {
+        case .insert: return VimSyntaxPalette.diffAdd
+        case .delete: return VimSyntaxPalette.diffRemove
+        case .context: return .secondary
+        }
+    }
+}
+
 /// One diff line. A single click on it starts a single-line comment on that side+line
 /// (3bq behavior); a press-and-drag across rows is handled by the parent's gesture,
 /// which sets `selected` to highlight the spanned lines.
-private struct DiffLineRow: View {
-    let line: DiffLine
-    /// File path, so the syntax highlighter can pick a per-language profile.
-    let path: String
+///
+/// Equatable so the `.equatable()` wrapper at the use site can skip unchanged rows
+/// (the closure field defeats SwiftUI's memberwise diffing). `==` deliberately
+/// compares only (generation, index, selected): comparing AttributedString contents
+/// would be O(chars) per drag tick — as bad as the re-parse this replaced. Safe
+/// because any content change comes via a new `RenderedFileDiff.compute`, which
+/// bumps `generation`.
+private struct DiffLineRow: View, Equatable {
+    let generation: Int
+    /// Global flat-row index in the card's line stack.
+    let index: Int
+    let kind: DiffLine.Kind
+    let oldLine: Int?
+    let newLine: Int?
+    /// Flattened `DiffLine.anchor` (tuples don't sit well in Equatable fields).
+    let side: CommentSide?
+    let anchorLine: Int?
+    /// Precomputed marker + syntax-highlighted content (see RenderedFileDiff).
+    let text: AttributedString
     /// True while a drag-select spans this row — draws the selection overlay.
     let selected: Bool
-    let onComment: ((side: CommentSide, line: Int)) -> Void
+    let onComment: (CommentSide, Int) -> Void
+
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.generation == b.generation && a.index == b.index && a.selected == b.selected
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            gutter(line.oldLine)
-            gutter(line.newLine)
-            Text(highlighted)
+            gutter(oldLine)
+            gutter(newLine)
+            Text(text)
                 .font(.system(size: 11, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 4)
@@ -869,7 +982,7 @@ private struct DiffLineRow: View {
         .overlay(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
-            if let a = line.anchor { onComment(a) }
+            if let side, let anchorLine { onComment(side, anchorLine) }
         }
         .help("Click to comment on this line, or click-drag to select a range")
     }
@@ -882,34 +995,8 @@ private struct DiffLineRow: View {
             .padding(.trailing, 4)
     }
 
-    private var marker: String {
-        switch line.kind {
-        case .insert: return "+"
-        case .delete: return "-"
-        case .context: return " "
-        }
-    }
-
-    /// The leading +/-/space marker, tinted by diff kind, plus the line content with
-    /// per-language vim syntax colors layered on top. The marker keeps the diff
-    /// add/remove semantics legible; the content gets the warm vim palette.
-    private var highlighted: AttributedString {
-        var out = AttributedString(marker)
-        out.foregroundColor = markerColor
-        out.append(VimSyntaxPalette.attributed(line.text, path: path))
-        return out
-    }
-
-    private var markerColor: Color {
-        switch line.kind {
-        case .insert: return VimSyntaxPalette.diffAdd
-        case .delete: return VimSyntaxPalette.diffRemove
-        case .context: return .secondary
-        }
-    }
-
     private var bgColor: Color {
-        switch line.kind {
+        switch kind {
         case .insert: return Color.green.opacity(0.10)
         case .delete: return Color.red.opacity(0.10)
         case .context: return .clear

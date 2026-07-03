@@ -14,12 +14,19 @@ struct RootView: View {
 
     var body: some View {
         @Bindable var model = model
+        // Screen-size-proportional default sidebar width (~20% of the window,
+        // capped). `ideal` only applies until the user drags the split divider —
+        // macOS autosaves manual column widths, so "manual wins" holds natively.
+        let sidebarIdeal = PanelAutoSize.width(window: model.windowWidth,
+                                               fraction: 0.20, min: 280, max: 380)
         return NavigationSplitView {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 280)
+                .navigationSplitViewColumnWidth(min: 220, ideal: sidebarIdeal)
         } detail: {
             DetailView()
         }
+        // Publish the window content width; drives all auto panel defaults.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { model.windowWidth = $0 }
         .preferredColorScheme(model.themePreference.colorScheme)
         .background(WindowBackground(color: .appWindow))
         // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
@@ -1778,10 +1785,19 @@ struct SessionContainer: View {
     @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.changes.rawValue
     /// Whether the right-side panel is shown. Toggled from the header CTA.
     @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
-    /// Persisted width of the right-side panel in the split.
-    @AppStorage("session.sidePanel.width") private var panelWidth: Double = 420
+    /// Width of the right-side panel, persisted once the user drags its edge. Nil =
+    /// never resized → the screen-size-proportional default applies (juancode-it1).
+    @AppStorage("session.sidePanel.width") private var storedPanelWidth: Double?
     /// Persisted height of the bottom terminal panel in the split.
     @AppStorage("session.bottomPanel.height") private var bottomHeight: Double = 240
+
+    /// Effective panel width: the user's persisted width if they ever dragged the
+    /// edge, else ~32% of the window (capped — the cap bounds the auto default
+    /// only; a manual drag can go wider).
+    private var panelWidth: Double {
+        storedPanelWidth ?? PanelAutoSize.width(window: model.windowWidth,
+                                                fraction: 0.32, min: 420, max: 640)
+    }
 
     private var tab: SidePanelTab {
         get { SidePanelTab(rawValue: tabRaw) ?? .changes }
@@ -1823,7 +1839,8 @@ struct SessionContainer: View {
                 Button {
                     // The panel floats over the terminal (see the overlay below), so
                     // toggling it never relayouts the terminal — no transition gate.
-                    panelShown.toggle()
+                    // Animated: it slides in from the right edge instead of popping.
+                    withAnimation(.easeOut(duration: 0.18)) { panelShown.toggle() }
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
                 }
@@ -1863,13 +1880,20 @@ struct SessionContainer: View {
                 if panelShown {
                     HStack(spacing: 0) {
                         // Live resize is fine here: the drag moves only the floating
-                        // panel's edge, never the terminal grid.
-                        DragResizeHandle(axis: .vertical, value: $panelWidth, min: 280, max: .infinity)
+                        // panel's edge, never the terminal grid. Writing through the
+                        // binding persists the width — manual wins over the auto default.
+                        DragResizeHandle(axis: .vertical,
+                                         value: Binding(get: { panelWidth },
+                                                        set: { storedPanelWidth = $0 }),
+                                         min: 280, max: .infinity)
                         sidePanel
                             .frame(width: CGFloat(panelWidth))
                     }
                     .background(Color.appPanel)
                     .shadow(color: .black.opacity(0.45), radius: 14, x: -6, y: 0)
+                    // Slide in/out over the terminal — safe to animate because the
+                    // panel is an overlay: the pty grid never reflows.
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
         }

@@ -70,6 +70,12 @@ final class AppModel {
     }
     var showingNewSession = false
 
+    /// Live window content width, published by `RootView`. Drives the screen-size-
+    /// proportional *default* widths of the sidebar / Changes panel / Oracle dock —
+    /// only until the user drags a panel edge, after which the persisted manual
+    /// width wins (see `PanelAutoSize`).
+    var windowWidth: CGFloat = 0
+
     // MARK: Keyboard navigation (juancode-vgm)
     //
     // Vim-style sidebar nav + ⌃H/⌃L pane focus, driven by a window-scoped NSEvent

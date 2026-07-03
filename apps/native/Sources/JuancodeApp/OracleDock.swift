@@ -10,15 +10,30 @@ import JuancodeServices
 /// the live-reflow fragility of a free-floating resizable panel).
 struct OracleDock: View {
     @Environment(OracleModel.self) private var oracle
-    /// Persisted panel width (drag the left edge). Floored so the agent CLI never
-    /// renders into too few columns (which garbles its TUI).
-    @AppStorage("oracle.panel.width") private var panelWidth: Double = 600
+    @Environment(AppModel.self) private var model
+    /// Panel width (drag the left edge), persisted once the user drags it. Nil =
+    /// never resized → the screen-size-proportional default applies (juancode-it1).
+    /// Floored so the agent CLI never renders into too few columns (which garbles
+    /// its TUI).
+    @AppStorage("oracle.panel.width") private var storedPanelWidth: Double?
     /// Whether the chat tab's mini session rail (juancode-cwa) is shown. Shared with
     /// `OracleChatView` via the same @AppStorage key so the header toggle and the rail
     /// stay in lock-step.
     @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
     private static let minWidth: Double = 460
-    private static let maxWidth: Double = 1100
+
+    /// Effective width: the user's persisted width if they ever dragged the edge,
+    /// else ~38% of the window (capped — the cap bounds the auto default only).
+    private var panelWidth: Double {
+        storedPanelWidth ?? PanelAutoSize.width(window: model.windowWidth,
+                                                fraction: 0.38, min: 600, max: 900)
+    }
+
+    /// Manual-drag ceiling: scales with the window (70%, up to 1400) but never
+    /// below the historical 1100 so existing wide setups don't get clamped down.
+    private var maxWidth: Double {
+        max(1100, min(Double(model.windowWidth) * 0.7, 1400))
+    }
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -64,19 +79,22 @@ struct OracleDock: View {
     /// How far to push the collapsed panel past the right edge so nothing (incl. its
     /// shadow + drag handle) peeks back in.
     private var hiddenOffset: Double {
-        min(Self.maxWidth, max(Self.minWidth, panelWidth)) + 60
+        min(maxWidth, max(Self.minWidth, panelWidth)) + 60
     }
 
     private var panel: some View {
         @Bindable var oracle = oracle
-        let w = min(Self.maxWidth, max(Self.minWidth, panelWidth))
+        let w = min(maxWidth, max(Self.minWidth, panelWidth))
         return HStack(spacing: 0) {
             // Drag the left edge to widen/narrow the drawer (drag left grows it). A
             // preview-only drag: the CLI's full-screen TUI garbles if it repaints at
             // every intermediate width, so we show a guide line and commit the new
-            // width once on release — a single clean reflow.
-            DragResizeHandle(axis: .vertical, value: $panelWidth,
-                             min: Self.minWidth, max: Self.maxWidth, invert: true,
+            // width once on release — a single clean reflow. Writing through the
+            // binding persists the width — manual wins over the auto default.
+            DragResizeHandle(axis: .vertical,
+                             value: Binding(get: { panelWidth },
+                                            set: { storedPanelWidth = $0 }),
+                             min: Self.minWidth, max: maxWidth, invert: true,
                              previewOnly: true)
             VStack(spacing: 0) {
                 header

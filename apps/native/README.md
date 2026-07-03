@@ -187,10 +187,41 @@ the control dir (tests do).
 
 ## Run
 
+Requires macOS 14+, a Swift 6 toolchain (Xcode 16 / recent Swift), and
+`claude`/`codex` on your `PATH` and authenticated (the app spawns the real CLIs —
+tests don't need them, they use a fake resolver).
+
+### The app (recommended)
+
 ```sh
 cd apps/native
+scripts/dev-app.sh               # build + run the SwiftUI app in the foreground
+```
+
+Run the app through `scripts/dev-app.sh`, **not** `swift run juancode`. The script
+wraps the binary in a minimal `.app` bundle and execs the inner binary straight
+from your terminal. That matters for two reasons:
+
+- **Bundle identity.** A bare SPM executable has no bundle, so macOS file panels
+  (`NSOpenPanel` / SwiftUI `.fileImporter`) hang and the Dock icon is flaky.
+- **Env fidelity (the prime directive).** Exec'ing the binary from your shell (not
+  via Finder/`open`) hands the app your full environment — `PATH`, MCP config, keys
+  — which `claude`/`codex` must inherit. Launching via `open` would give it
+  launchd's stripped environment and break that.
+
+Useful knobs:
+
+```sh
+JUANCODE_CONFIG=release scripts/dev-app.sh   # optimized build
+JUANCODE_SWIFTTERM=1     scripts/dev-app.sh   # SwiftTerm terminal backend (default is GhosttyKit)
+JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control dir
+scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
+```
+
+### Other targets
+
+```sh
 swift test                       # unit + integration (core + persistence + services + server)
-swift run juancode               # the native SwiftUI app (local shell + embedded server)
 swift run juancode-smoke claude  # smoke the core against the real claude CLI
 swift run juancode-serve         # boot the embedded WS+HTTP server (headless) on :4280
 ```
@@ -198,4 +229,5 @@ swift run juancode-serve         # boot the embedded WS+HTTP server (headless) o
 With `juancode-serve` running, point the web dev server at it
 (`pnpm --filter @juancode/web dev`) — Vite proxies `/api` + `/ws` to `:4280`.
 
-Requires `claude`/`codex` on PATH for the smoke; tests need neither (fake resolver).
+(`swift run juancode` does build and launch the app, but without the `.app`
+wrapper — expect hanging file pickers and a flaky Dock icon. Use `dev-app.sh`.)

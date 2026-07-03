@@ -43,6 +43,21 @@ private struct ClickCursorModifier: ViewModifier {
     }
 }
 
+// MARK: - Screen-size-proportional panel defaults
+
+/// Screen-size-proportional default panel widths. Each panel's width is a
+/// fraction of the window, clamped to a band — the band's `max` caps the *auto*
+/// default only; the user can still drag past it (up to the panel's own drag
+/// max). Used only while the panel's width key has never been written: the first
+/// manual drag persists via @AppStorage and wins from then on ("manual wins").
+enum PanelAutoSize {
+    static func width(window: CGFloat, fraction: CGFloat,
+                      min lo: CGFloat, max hi: CGFloat) -> CGFloat {
+        guard window > 0 else { return lo }
+        return Swift.min(hi, Swift.max(lo, window * fraction))
+    }
+}
+
 // MARK: - Resize handle (juancode-n9y)
 
 /// A draggable splitter with a genuinely usable hit area and clear hover feedback —
