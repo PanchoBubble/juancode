@@ -83,7 +83,13 @@ private func readClaude(_ cand: Candidate) async -> ExternalSession? {
     var cwd: String?
     var aiTitle: String?
     var firstUser: String?
+    var isSidechain = false
     await forEachRecord(cand.path) { rec in
+        // A Task/subagent transcript (isSidechain: true) isn't a resumable top-level
+        // conversation. The `subagents/` path guard in claudeTranscriptFiles catches
+        // these already; this in-content check is a backstop against Claude Code
+        // writing sidechains to a different location in a future version.
+        if rec["isSidechain"] as? Bool == true { isSidechain = true; return false }
         if cwd == nil, let c = rec["cwd"] as? String { cwd = c }
         if aiTitle == nil, rec["type"] as? String == "ai-title", let t = rec["aiTitle"] as? String { aiTitle = t }
         if firstUser == nil, rec["type"] as? String == "user" { firstUser = claudeUserText(rec) }
@@ -93,6 +99,7 @@ private func readClaude(_ cand: Candidate) async -> ExternalSession? {
         let usableTitle = aiTitle != nil || (firstUser.map { !isInjectedPrompt($0) } ?? false)
         return (cwd != nil && usableTitle) ? false : nil
     }
+    if isSidechain { return nil }
     guard let cwd else { return nil }
     // Hide harness-internal transcripts — forked subagents and local slash-command
     // runs whose only "prompt" is injected boilerplate, not a real conversation you'd
@@ -148,11 +155,15 @@ private func readCodex(_ cand: Candidate, _ excluding: Set<String>) async -> Ext
 }
 
 /// Absolute paths of every Claude transcript `.jsonl`, gathered synchronously (the
-/// directory enumerator can't be driven from an async context).
+/// directory enumerator can't be driven from an async context). Transcripts under a
+/// `subagents/` directory are skipped: those are harness-internal Task/subagent
+/// sidechains (`agent-<hex>.jsonl`, `isSidechain: true`), not resumable top-level
+/// conversations — surfacing them floods the sidebar with `agent-…` folders.
 private func claudeTranscriptFiles(_ root: String) -> [String] {
     guard let enumerator = FileManager.default.enumerator(atPath: root) else { return [] }
     var out: [String] = []
     for case let rel as String in enumerator where rel.hasSuffix(".jsonl") {
+        if rel.hasPrefix("subagents/") || rel.contains("/subagents/") { continue }
         out.append((root as NSString).appendingPathComponent(rel))
     }
     return out

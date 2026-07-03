@@ -23,6 +23,10 @@ private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
+/// (added on top of the built-in suggestions).
+private let savedPortsKey = "juancode.killPort.savedPorts"
+
 /// UserDefaults keys for the estimated-cost budget (juancode-qoc): a USD ceiling
 /// (`0` = off) and the percent-of-budget at which the total turns amber.
 private let costBudgetUsdKey = "juancode.costBudgetUsd"
@@ -88,6 +92,13 @@ final class AppModel {
     /// left the pane mis-sized (black margins / clipped render) and the automatic
     /// resync was missed. Threaded into `GhosttyLive`/`SwiftTermLive.resyncToken`.
     var terminalResyncToken = 0
+    /// Bumped to force a full terminal repaint: folded into the live terminal view's
+    /// SwiftUI `.id`, so a change tears the view down and recreates it, which
+    /// re-subscribes with `replay: true` and repaints the whole scrollback from
+    /// scratch. The "hard refresh" escape hatch for a pane that's visually corrupted
+    /// (garbled glyphs, half-drawn TUI, frozen render) — stronger than a geometry
+    /// resync, which only re-asserts the grid size.
+    var terminalRefreshToken = 0
     /// While true (sidebar is being keyboard-navigated) a freshly-shown terminal must
     /// not auto-grab focus on appear, or each j/k would yank focus back into the pty.
     var suppressTerminalAutoFocus = false
@@ -112,6 +123,8 @@ final class AppModel {
     var sessionTemplates: [SessionTemplate] = []
     /// Controls the session-template launcher/manager sheet.
     var showingSessionTemplates = false
+    /// Controls the Kill Port utility sheet — find and free a stuck local dev port.
+    var showingKillPort = false
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -300,6 +313,13 @@ final class AppModel {
         terminalResyncToken &+= 1
     }
 
+    /// Hard-refresh the live terminal: rebuild the view so it replays the full
+    /// scrollback and repaints cleanly. Recovers a pane whose render is corrupted
+    /// (garbled glyphs / half-drawn TUI) — a geometry resync can't fix that.
+    func refreshTerminal() {
+        terminalRefreshToken &+= 1
+    }
+
     func scrollback(_ id: String) -> [UInt8] {
         appState.registry.get(id)?.getScrollback() ?? appState.store.getScrollback(id) ?? []
     }
@@ -423,6 +443,23 @@ final class AppModel {
     /// drag-and-drop on the folder headers.
     var projectOrder: [String] = (UserDefaults.standard.array(forKey: projectOrderKey) as? [String]) ?? [] {
         didSet { UserDefaults.standard.set(projectOrder, forKey: projectOrderKey) }
+    }
+
+    /// Custom dev ports the user saved in the Kill Port utility, added on top of the
+    /// built-in suggestions. Persisted; kept sorted and unique.
+    var savedPorts: [Int] = (UserDefaults.standard.array(forKey: savedPortsKey) as? [Int]) ?? [] {
+        didSet { UserDefaults.standard.set(savedPorts, forKey: savedPortsKey) }
+    }
+
+    /// Save a custom port (no-op if out of range or already saved/suggested).
+    func addSavedPort(_ port: Int) {
+        guard (1...65535).contains(port), !savedPorts.contains(port) else { return }
+        savedPorts = (savedPorts + [port]).sorted()
+    }
+
+    /// Forget a saved custom port.
+    func removeSavedPort(_ port: Int) {
+        savedPorts.removeAll { $0 == port }
     }
 
     /// At a turn boundary — background work finishing or now needing your reply —

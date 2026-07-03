@@ -3,6 +3,19 @@ import AppKit
 import SwiftTerm
 import JuancodeCore
 
+/// SwiftUI identity for a live terminal view: its `Session` object plus a manual
+/// `refresh` counter. A change to *either* recreates the view — the session swap
+/// (a permissions flip mints a new `Session` behind the same pty) and the Refresh
+/// button (bumps the counter) both force a fresh subscribe-with-replay repaint.
+struct TerminalIdentity: Hashable {
+    let session: ObjectIdentifier
+    let refresh: Int
+    init(session: Session, refresh: Int) {
+        self.session = ObjectIdentifier(session)
+        self.refresh = refresh
+    }
+}
+
 /// Makes the mouse wheel work inside full-screen TUIs.
 ///
 /// SwiftTerm's stock `scrollWheel` only ever scrolls the *local* scrollback

@@ -56,6 +56,42 @@ final class ExternalDiscoveryTests: XCTestCase {
         XCTAssertEqual(titles, ["Add a dark mode toggle"])
     }
 
+    func testHidesSubagentSidechainTranscripts() async {
+        // Claude writes Task/subagent transcripts to
+        // <encoded-cwd>/<parent-session>/subagents/agent-<hex>.jsonl. Their first user
+        // record is a real task prompt (not fork boilerplate), so the isInjectedPrompt
+        // filter misses them — they must be excluded by their `subagents/` location, or
+        // the sidebar fills with `agent-<hex>` folders.
+        let root = (Self.tmp as NSString).appendingPathComponent("subagents")
+        writeClaude(root, id: "real-2", cwd: "/work/horizon", records: [user("Ship the login flow")])
+        let subDir = (root as NSString)
+            .appendingPathComponent("-Users-me-project/parent-session/subagents")
+        try! FileManager.default.createDirectory(atPath: subDir, withIntermediateDirectories: true)
+        let subPath = (subDir as NSString).appendingPathComponent("agent-a271cc6c76d2ca134.jsonl")
+        let sub = jsonl([
+            ["cwd": "/work/horizon", "isSidechain": true, "agentId": "a271cc6c76d2ca134"],
+            user("I'm in the pandora monorepo. Find the exact field names for the invoice model."),
+        ])
+        try! sub.write(toFile: subPath, atomically: true, encoding: .utf8)
+
+        let titles = await discover(root).map(\.title)
+        XCTAssertEqual(titles, ["Ship the login flow"])
+    }
+
+    func testHidesSidechainTranscriptOutsideSubagentsDir() async {
+        // Backstop for the path guard: even a transcript at the normal top-level
+        // location must be dropped if its records carry isSidechain: true.
+        let root = (Self.tmp as NSString).appendingPathComponent("sidechain-content")
+        writeClaude(root, id: "real-3", cwd: "/work/horizon", records: [user("Wire up settings page")])
+        writeClaude(root, id: "sidechain-1", cwd: "/work/horizon", records: [
+            ["type": "user", "isSidechain": true, "agentId": "a271cc6c76d2ca134",
+             "message": ["content": "Find the invoice model field names."]],
+        ])
+
+        let titles = await discover(root).map(\.title)
+        XCTAssertEqual(titles, ["Wire up settings page"])
+    }
+
     func testKeepsCaveatSessionWhenItHasAnAiTitle() async {
         // A slash-command run that became a real conversation (ai-title present) is
         // a genuine session — surface it with the model-generated title.

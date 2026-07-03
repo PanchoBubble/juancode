@@ -123,7 +123,8 @@ struct OracleDock: View {
                     sessionRailShown.toggle()
                 }
                 if oracle.session != nil {
-                    headerButton("arrow.clockwise", help: "Restart the Oracle agent") { oracle.restartAgent() }
+                    headerButton("arrow.clockwise", help: "Refresh terminal — rebuild and replay scrollback to fix a corrupted render") { oracle.refreshChat() }
+                    headerButton("arrow.triangle.2.circlepath", help: "Restart the Oracle agent") { oracle.restartAgent() }
                 }
             }
             headerButton("chevron.right", help: "Close (⌃Space)") { oracle.collapse() }
@@ -442,14 +443,16 @@ private struct OracleChatView: View {
             // GhosttyKit by default; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm.
             // The resizable dock is the key glitch test case.
             Group {
+                // `.id` folds in `chatRefreshToken`: the Refresh button bumps it,
+                // recreating the view so it replays scrollback and repaints clean.
                 if TerminalBackendChoice.useGhostty {
                     GhosttyLive(session: session, remembersSize: false,
                                 focusToken: oracle.chatFocusToken,
                                 onGrid: { cols, rows in oracle.rememberDockGrid(cols: cols, rows: rows) })
-                        .id(ObjectIdentifier(session))
+                        .id(TerminalIdentity(session: session, refresh: oracle.chatRefreshToken))
                 } else {
                     SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
-                        .id(ObjectIdentifier(session))
+                        .id(TerminalIdentity(session: session, refresh: oracle.chatRefreshToken))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

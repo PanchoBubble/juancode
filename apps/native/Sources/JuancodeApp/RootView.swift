@@ -127,6 +127,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingSessionTemplates) {
             SessionTemplatesView()
         }
+        .sheet(isPresented: $model.showingKillPort) {
+            KillPortSheet()
+        }
         // On-disk DB failed to open at launch → running in-memory; surface recovery.
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()
@@ -500,10 +503,13 @@ struct SidebarView: View {
                         }
                     } header: {
                         FolderHeader(group: group, collapsed: collapsedFolders.contains(group.cwd)) {
-                            if collapsedFolders.contains(group.cwd) {
-                                collapsedFolders.remove(group.cwd)
-                            } else {
-                                collapsedFolders.insert(group.cwd)
+                            // Animated so the section's rows slide in/out instead of snapping.
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                if collapsedFolders.contains(group.cwd) {
+                                    collapsedFolders.remove(group.cwd)
+                                } else {
+                                    collapsedFolders.insert(group.cwd)
+                                }
                             }
                         }
                         // Drag a header onto another to reorder projects (persisted).
@@ -616,7 +622,9 @@ struct SidebarView: View {
             ToolbarItem {
                 let anyExpanded = groups.contains { !collapsedFolders.contains($0.cwd) }
                 Button {
-                    collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
+                    }
                 } label: {
                     Image(systemName: anyExpanded
                           ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
@@ -632,6 +640,11 @@ struct SidebarView: View {
             ToolbarItem {
                 Button { showingStatus = true } label: { Image(systemName: "shield.lefthalf.filled") }
                     .help("Auth & MCP status")
+                    .clickCursor()
+            }
+            ToolbarItem {
+                Button { model.showingKillPort = true } label: { Image(systemName: "powerplug") }
+                    .help("Kill Port — free up a stuck local dev port")
                     .clickCursor()
             }
             ToolbarItem {
@@ -687,7 +700,7 @@ struct SidebarView: View {
             scrollBox(sessions, cwd: group.cwd)
         } else {
             ForEach(sessions.prefix(folderPreviewCount), id: \.id) { meta in nativeRow(meta) }
-            Button { expandedFolders.insert(group.cwd) } label: {
+            Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.insert(group.cwd) } } label: {
                 Label("Load more (\(sessions.count - folderPreviewCount))",
                       systemImage: "chevron.down.circle")
                     .font(.system(size: 11))
@@ -717,7 +730,7 @@ struct SidebarView: View {
             // Drag the divider down to grow the box / up to shrink it (persisted).
             DragResizeHandle(axis: .horizontal, value: $folderScrollMaxHeight,
                              min: 120, max: 800, invert: false)
-            Button { expandedFolders.remove(cwd) } label: {
+            Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.remove(cwd) } } label: {
                 Label("Show less", systemImage: "chevron.up.circle").font(.system(size: 11))
             }
             .buttonStyle(.borderless)
@@ -1787,6 +1800,13 @@ struct SessionContainer: View {
                         .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
                 }
                 Button {
+                    model.refreshTerminal()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh terminal — rebuild and replay scrollback to fix a corrupted / garbled render")
+                .clickCursor()
+                Button {
                     model.resyncTerminalGeometry()
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -1893,18 +1913,21 @@ struct SessionContainer: View {
             // the carried-forward scrollback.
             // GhosttyKit surface by default; JUANCODE_SWIFTTERM=1 falls back to
             // SwiftTerm (see GhosttyLive.swift / bd spike).
+            // The `.id` folds in `terminalRefreshToken`: bumping it (the Refresh
+            // button) recreates the view, which re-subscribes with replay:true and
+            // repaints the full scrollback — the hard-refresh escape hatch.
             if TerminalBackendChoice.useGhostty {
                 GhosttyLive(session: session,
                             focusToken: model.terminalFocusToken,
                             resyncToken: model.terminalResyncToken,
                             autoFocusOnAppear: !model.suppressTerminalAutoFocus)
-                    .id(ObjectIdentifier(session))
+                    .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
             } else {
                 SwiftTermLive(session: session,
                               focusToken: model.terminalFocusToken,
                               resyncToken: model.terminalResyncToken,
                               autoFocusOnAppear: !model.suppressTerminalAutoFocus)
-                    .id(ObjectIdentifier(session))
+                    .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
             }
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))

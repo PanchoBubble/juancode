@@ -50,6 +50,11 @@ final class OracleModel {
     /// view watches this and makes the terminal first responder on each change.
     var chatFocusToken = 0
 
+    /// Bumped to hard-refresh the chat terminal: folded into the terminal view's
+    /// `.id`, so a change rebuilds it and replays the full scrollback — the fix for a
+    /// corrupted/garbled Oracle render, short of a full `restartAgent()`.
+    var chatRefreshToken = 0
+
     /// Byte offset into `dispatch.jsonl` we've consumed up to. Initialized to the
     /// file's end at bootstrap so we only act on dispatches made this run.
     @ObservationIgnored private var dispatchOffset = 0
@@ -214,6 +219,13 @@ final class OracleModel {
         if let id = oracleSessionId { app.liveSession(id)?.kill() }
         oracleSessionId = nil
         spawnAgent()
+    }
+
+    /// Hard-refresh the chat terminal without touching the live CLI: rebuild the view
+    /// so it replays the full scrollback and repaints cleanly. Try this before
+    /// `restartAgent()` when only the render is corrupted, not the conversation.
+    func refreshChat() {
+        chatRefreshToken &+= 1
     }
 
     /// Spin up an additional Oracle agent and make it the active chat. Several Oracles
