@@ -128,6 +128,10 @@ struct EditorOverlay: View {
 /// thread (AppKit) since the pty callbacks arrive on a background queue.
 struct SwiftTermEphemeral: NSViewRepresentable {
     let pty: EphemeralPty
+    /// True while the hosting panel is kept mounted but collapsed (keep-alive
+    /// toggle, juancode-it1): freezes pty sizing so the collapse animation's
+    /// shrinking grids never reach the shell.
+    var hidden: Bool = false
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -145,7 +149,11 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         return host
     }
 
-    func updateNSView(_ nsView: TerminalHostView, context: Context) {}
+    // SwiftUI calls this in the same transaction that flips `hidden` — before any
+    // intermediate animation frame resizes the NSView — so the freeze lands first.
+    func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        context.coordinator.setHidden(hidden)
+    }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalHostView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? nsView.frame.width,
@@ -167,10 +175,32 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         private var cancelExit: (() -> Void)?
         private var wheelMonitor: Any?
         private var resizeWork: DispatchWorkItem?
+        /// True while the hosting panel is collapsed (keep-alive toggle): resize
+        /// requests are recorded but never forwarded to the pty. See the Ghostty
+        /// counterpart's `sizingFrozen`.
+        private var sizingFrozen = false
+        /// Latest grid the view reported while frozen; flushed once on unhide.
+        private var frozenGrid: (cols: Int, rows: Int)?
 
         init(pty: EphemeralPty, onExit: @escaping @Sendable () -> Void) {
             self.pty = pty
             self.onExit = onExit
+        }
+
+        /// Freeze/unfreeze pty sizing with the panel's visibility. On unhide, send
+        /// the current (restored-bounds) grid once.
+        @MainActor
+        func setHidden(_ hidden: Bool) {
+            guard hidden != sizingFrozen else { return }
+            sizingFrozen = hidden
+            if hidden {
+                resizeWork?.cancel(); resizeWork = nil
+            } else {
+                let g = view.map { (cols: $0.getTerminal().cols, rows: $0.getTerminal().rows) }
+                    ?? frozenGrid
+                frozenGrid = nil
+                if let g, g.cols >= 10, g.rows >= 3 { pty.resize(cols: g.cols, rows: g.rows) }
+            }
         }
 
         func attach(to tv: TerminalView) {
@@ -199,6 +229,14 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // Collapsed keep-alive panel: record the grid, never forward it — the
+            // unhide path flushes once. Also floor tiny grids (see the Ghostty
+            // counterpart's `send`): the collapse animation can produce a small-but-
+            // valid grid on its way to zero that would rewrap the shell's scrollback.
+            if sizingFrozen || newCols < 10 || newRows < 3 {
+                frozenGrid = (newCols, newRows)
+                return
+            }
             // Coalesce resize bursts into one SIGWINCH (see SwiftTermLive).
             resizeWork?.cancel()
             let work = DispatchWorkItem { [weak self] in self?.pty.resize(cols: newCols, rows: newRows) }

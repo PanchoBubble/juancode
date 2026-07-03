@@ -1860,8 +1860,20 @@ struct SessionContainer: View {
                     // and resize once on release for a single clean repaint.
                     DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720,
                                      previewOnly: true)
-                    BottomTerminalPanel(cwd: meta.cwd)
-                        .frame(height: CGFloat(bottomHeight))
+                }
+                // Keep-alive: once this folder has shells, the panel stays MOUNTED
+                // across toggles and slides to/from zero height (clipped) instead of
+                // being inserted/removed. Tearing it down recreated the terminal
+                // surface NSViews on every show — the toggle jank (juancode-it1).
+                // The `hidden` flag freezes pty sizing + pauses surface rendering
+                // while collapsed, so the animation's shrinking grids never reach
+                // the shells. Never mounts for folders that never opened a terminal.
+                if model.bottomTerminalShown || !model.terminalPanel(meta.cwd).isEmpty {
+                    BottomTerminalPanel(cwd: meta.cwd, hidden: !model.bottomTerminalShown)
+                        .frame(height: model.bottomTerminalShown ? CGFloat(bottomHeight) : 0,
+                               alignment: .top)
+                        .clipped()
+                        .allowsHitTesting(model.bottomTerminalShown)
                 }
             }
             // Breathing room so the terminal isn't glued to the window edges. Constant

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import AppKit
+import SwiftUI
 import JuancodeCore
 import JuancodeServices
 import JuancodePersistence
@@ -1981,9 +1982,19 @@ final class AppModel {
     /// button). No-op seeding if nothing is selected.
     func toggleBottomTerminal() {
         // Panel transition: the terminal coordinators must hold the intermediate
-        // grids this relayout produces and settle once (juancode-1th.2).
-        LayoutTransitionGate.shared.begin()
-        bottomTerminalShown.toggle()
+        // grids this relayout produces and settle once (juancode-1th.2). 500ms
+        // spans the 200ms slide plus both settle windows, so the animated reflow
+        // runs the same lockstep+settle path as a divider drag.
+        LayoutTransitionGate.shared.begin(for: .milliseconds(500))
+        // Animated: the panel is kept mounted and slides to/from zero height (see
+        // SessionContainer) — the surface NSViews are never recreated. easeInOut,
+        // not a spring: overshoot would fire extra grid flaps into the ptys.
+        withAnimation(.easeInOut(duration: 0.2)) { bottomTerminalShown.toggle() }
+        if !bottomTerminalShown {
+            // The collapsed shell must not keep first-responder status (it would
+            // type into an invisible terminal) — hand focus to the main terminal.
+            focusTerminal()
+        }
         guard bottomTerminalShown,
               let id = selection,
               let cwd = sessions.first(where: { $0.id == id })?.cwd,

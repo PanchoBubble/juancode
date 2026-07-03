@@ -13,6 +13,10 @@ import JuancodeServices
 struct BottomTerminalPanel: View {
     @Environment(AppModel.self) private var model
     let cwd: String
+    /// True while the panel is kept mounted but collapsed to zero height (the
+    /// keep-alive toggle, juancode-it1). Threaded into each pane's terminal wrapper,
+    /// which freezes pty sizing and pauses surface rendering until re-shown.
+    var hidden: Bool = false
 
     private var panel: TerminalPanelModel { model.terminalPanel(cwd) }
 
@@ -114,9 +118,9 @@ struct BottomTerminalPanel: View {
         if let pty = model.shellPty(pane) {
             Group {
                 if TerminalBackendChoice.useGhostty {
-                    GhosttyEphemeral(pty: pty, onExit: {})
+                    GhosttyEphemeral(pty: pty, hidden: hidden, onExit: {})
                 } else {
-                    SwiftTermEphemeral(pty: pty, onExit: {})
+                    SwiftTermEphemeral(pty: pty, hidden: hidden, onExit: {})
                 }
             }
             .background(Color.black)

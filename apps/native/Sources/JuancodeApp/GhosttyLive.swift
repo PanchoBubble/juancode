@@ -446,6 +446,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 /// nil. So we buffer pre-surface output and flush it on attach.
 struct GhosttyEphemeral: NSViewRepresentable {
     let pty: EphemeralPty
+    /// True while the hosting panel is kept mounted but collapsed (keep-alive
+    /// toggle, juancode-it1): freezes pty sizing so the collapse animation's
+    /// shrinking grids never reach the shell, and occludes the surface so a hidden
+    /// pane stops Metal-drawing on output.
+    var hidden: Bool = false
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -459,7 +464,11 @@ struct GhosttyEphemeral: NSViewRepresentable {
         return host
     }
 
-    func updateNSView(_ nsView: GhosttyHostView, context: Context) {}
+    // SwiftUI calls this in the same transaction that flips `hidden` — before any
+    // intermediate animation frame resizes the NSView — so the freeze lands first.
+    func updateNSView(_ nsView: GhosttyHostView, context: Context) {
+        context.coordinator.setHidden(hidden, host: nsView)
+    }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: GhosttyHostView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? nsView.frame.width,
@@ -490,10 +499,29 @@ struct GhosttyEphemeral: NSViewRepresentable {
         /// Output that arrived before the surface existed; flushed on attach.
         private var preSurfaceBuffer: [UInt8] = []
         private var surfaceReady = false
+        /// True while the hosting panel is collapsed (keep-alive toggle): surface
+        /// resizes are recorded but never forwarded to the pty, so the collapse
+        /// animation's shrinking grids can't rewrap the shell's scrollback.
+        private var sizingFrozen = false
 
         init(pty: EphemeralPty, onExit: @escaping @Sendable () -> Void) {
             self.pty = pty
             self.onExit = onExit
+        }
+
+        /// Freeze/unfreeze pty sizing and surface rendering with the panel's
+        /// visibility. On unhide, re-measure the restored bounds and flush the
+        /// grid once (deduped by `send` if nothing actually changed).
+        func setHidden(_ hidden: Bool, host: GhosttyHostView) {
+            guard hidden != sizingFrozen else { return }
+            sizingFrozen = hidden
+            // Occlusion also stops render-tick scheduling — a hidden pane running
+            // a build/tail stops Metal-drawing on every output burst.
+            host.terminal.setSurfaceVisible(!hidden)
+            if !hidden {
+                host.terminal.fitToSize()
+                flushSurfaceGrid()
+            }
         }
 
         func attach(to tv: TerminalView) {
@@ -557,6 +585,9 @@ struct GhosttyEphemeral: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
+            // Collapsed keep-alive panel: record the grid, never forward it. The
+            // unhide path re-measures and flushes once.
+            guard !sizingFrozen else { return }
             resizeWork?.cancel()
             if LayoutTransitionGate.shared.active {
                 let now = DispatchTime.now()
@@ -612,6 +643,11 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         @discardableResult
         private func send(cols: Int, rows: Int) -> Bool {
+            // Floor: the collapse animation can produce a tiny-but-valid grid on
+            // its way to zero (the final 0-size sync is skipped upstream, so a
+            // 2-row grid would stick and permanently rewrap the shell). The panel's
+            // min height is 120pt ≈ 7 rows — no legitimate grid is ever this small.
+            guard cols >= 10, rows >= 3 else { return false }
             lastResizeAt = .now()
             if let last = lastSent, last.cols == cols, last.rows == rows { return false }
             lastSent = (cols, rows)
