@@ -55,6 +55,13 @@ async function writeStore(sessions: TelegramSession[]): Promise<void> {
   await writeFile(sessionsFile(), JSON.stringify(sessions, null, 2), "utf8");
 }
 
+/** Every Telegram chat id that has an Oracle binding. This is the fan-out target
+ *  for observer subscriptions created OUTSIDE Telegram (the MCP tool / HTTP
+ *  endpoint), which carry no chat context of their own — see observer-trigger.ts. */
+export async function listTelegramChatIds(): Promise<number[]> {
+  return (await readStore()).map((s) => s.chatId);
+}
+
 /** The `claude` session id bound to a Telegram chat, or null if none yet (a fresh
  *  conversation — the bridge then starts one and records the id it gets back). */
 export async function getTelegramSession(chatId: number): Promise<string | null> {

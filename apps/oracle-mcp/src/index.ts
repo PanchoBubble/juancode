@@ -39,6 +39,12 @@ import {
   resetChat,
 } from "./oracle.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
+import {
+  observeSessionForOracle,
+  unobserveSessionForOracle,
+  outcomeLabel,
+  type ObserveOutcome,
+} from "./observer-trigger.ts";
 import { consoleHtml } from "./ui.ts";
 import {
   addSubscription,
@@ -239,7 +245,74 @@ function buildServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "oracle_observe_session",
+    {
+      title: "Observe a session (Telegram alerts)",
+      description:
+        "Subscribe to a running session's genuine state transitions and get pinged on Telegram when it NEEDS YOUR INPUT or FINISHES (no mid-run spam). Use this when asked to 'observe', 'watch', 'subscribe to', or 'keep me posted on' a session. Fans out to every known Telegram chat (message the bot once, or set ALLOWED_USER_IDS, so it knows where to notify). Reply to the Telegram notification to answer straight into that session.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id to observe (from oracle_list_sessions)"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(observeMessage(await observeSessionForOracle(args.sessionId)));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_unobserve_session",
+    {
+      title: "Stop observing a session",
+      description:
+        "Stop Telegram alerts for a session: unsubscribes every chat currently observing it. Use when asked to 'stop watching', 'unsubscribe from', or 'stop keeping me posted on' a session.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id to stop observing (from oracle_list_sessions)"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(unobserveMessage(await unobserveSessionForOracle(args.sessionId)));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
   return server;
+}
+
+/** Confirmation copy for an observe, shared by the MCP tool and POST /api/observe.
+ *  Distinguishes an unknown id (native app reachable, no match) and a missing
+ *  Telegram target (nothing to notify) so the user knows what to fix. */
+function observeMessage(o: ObserveOutcome): string {
+  if (o.reachable && !o.found) {
+    return `No session with id ${o.sessionId}. Use oracle_list_sessions to find the right id.`;
+  }
+  const label = outcomeLabel(o);
+  if (o.chatIds.length === 0) {
+    return `Recorded an observer for ${label}, but no Telegram chat is set up yet — message the Oracle bot once (or set ALLOWED_USER_IDS) so it knows where to ping you.`;
+  }
+  const n = o.chatIds.length;
+  const confirmed = o.reachable ? "" : " (native app unreachable — couldn't confirm the session, subscribed anyway)";
+  return `Observing ${label}${confirmed}. ${n} Telegram chat${n === 1 ? "" : "s"} will be pinged when it needs input or finishes. Reply to that message to answer into the session.`;
+}
+
+/** Confirmation copy for an unobserve, shared by the MCP tool and POST /api/unobserve. */
+function unobserveMessage(o: ObserveOutcome): string {
+  const label = outcomeLabel(o);
+  if (o.changed === 0) return `No one was observing ${label} — nothing to stop.`;
+  return `Stopped observing ${label} (cleared ${o.changed} subscription${o.changed === 1 ? "" : "s"}).`;
 }
 
 const app = express();
@@ -327,6 +400,36 @@ app.post("/api/ask", async (req: Request, res: Response) => {
     }
     await appendAsk(text);
     res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Observe / unobserve a session for Telegram alerts (juancode-nez), so the phone
+// console can toggle the same subscription the MCP tool / Telegram /observe do.
+app.post("/api/observe", async (req: Request, res: Response) => {
+  try {
+    const sessionId = (req.body ?? {}).sessionId;
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    const outcome = await observeSessionForOracle(sessionId);
+    res.json({ ok: true, message: observeMessage(outcome), ...outcome });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.post("/api/unobserve", async (req: Request, res: Response) => {
+  try {
+    const sessionId = (req.body ?? {}).sessionId;
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    const outcome = await unobserveSessionForOracle(sessionId);
+    res.json({ ok: true, message: unobserveMessage(outcome), ...outcome });
   } catch (e) {
     sendErr(res, e);
   }

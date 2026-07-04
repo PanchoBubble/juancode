@@ -388,7 +388,13 @@ const ORACLE_SYSTEM =
   "never read, edit, or run a project's contents yourself, even if it seems quick. " +
   "Only act inline when the request is purely global, or no project in state.json " +
   "matches (then say so and ask for the path). When unsure, assume it's project work " +
-  "and dispatch. You are talking to the user on a phone — keep replies short and skimmable.";
+  "and dispatch. " +
+  "OBSERVE: when the user asks you to 'observe', 'watch', or 'keep me posted on' a " +
+  "session, subscribe them to its Telegram alerts by POSTing its id to the sidecar: " +
+  "`curl -sS -X POST http://127.0.0.1:4281/api/observe -H 'content-type: application/json' " +
+  "-d '{\"sessionId\":\"<id>\"}'` (and /api/unobserve to stop). They'll then be pinged on " +
+  "Telegram only when that session needs input or finishes. " +
+  "You are talking to the user on a phone — keep replies short and skimmable.";
 
 async function runClaude(
   text: string,
