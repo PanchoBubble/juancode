@@ -978,7 +978,7 @@ private struct DiffLineRow: View, Equatable {
             gutter(oldLine)
             gutter(newLine)
             Text(text)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 14, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 4)
                 .textSelection(.enabled)
@@ -996,9 +996,9 @@ private struct DiffLineRow: View, Equatable {
 
     private func gutter(_ n: Int?) -> some View {
         Text(n.map(String.init) ?? "")
-            .font(.system(size: 10, design: .monospaced))
+            .font(.system(size: 13, design: .monospaced))
             .foregroundStyle(.secondary)
-            .frame(width: 34, alignment: .trailing)
+            .frame(width: 40, alignment: .trailing)
             .padding(.trailing, 4)
     }
 

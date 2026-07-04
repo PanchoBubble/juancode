@@ -993,7 +993,7 @@ final class AppModel {
     /// next-step prompts into its agent session — the Linear twin of `tracked`.
     var trackedIssues: [String: TrackedIssue] = [:]
     /// How often the poll loop revisits every tracked PR.
-    private let trackPollInterval: Duration = .seconds(20)
+    private let trackPollInterval: Duration = .seconds(120)
     private var trackLoop: Task<Void, Never>?
 
     /// While tracking is live, hold an idle-system-sleep assertion so the poll loop
@@ -1284,12 +1284,25 @@ final class AppModel {
                     await reactivate(entry.sessionId)
                     if let session = liveSession(entry.sessionId) {
                         session.autoSubmit(prompt)
+                    } else if let fresh = await create(
+                        provider: .claude, cwd: cwd, skipPermissions: true,
+                        isolateWorktree: false,
+                        initialInput: trackSeedPrompt(number: number, title: entry.title,
+                                                      branch: entry.branch, url: entry.url),
+                        select: false, model: "opus") {
+                        // The original conversation couldn't be resumed (e.g. nothing
+                        // recoverable). Rather than stall, open a fresh session seeded with
+                        // the PR context, rebind tracking to it, and queue the fix. Not
+                        // selected so it doesn't yank the user's view during a background
+                        // poll. Future polls target the new session.
+                        entry.sessionId = fresh.id
+                        fresh.autoSubmit(prompt)
                     } else {
-                        // Couldn't resume (e.g. no recoverable CLI conversation) — surface
-                        // it so the Tracked PRs panel shows the work is stuck rather than
-                        // dropping it. Dedupe so a persistently-offline session doesn't
-                        // raise the same notification on every poll.
-                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed."
+                        // Even a fresh spawn failed — surface it so the Tracked PRs panel
+                        // shows the work is stuck rather than dropping it. Dedupe so a
+                        // persistently-failing session doesn't raise the same notification
+                        // on every poll.
+                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed or respawned."
                         if !entry.notifications.contains(where: { $0.message == offlineMsg }) {
                             entry.notifications.append(TrackNotification(
                                 id: UUID().uuidString, prNumber: number,

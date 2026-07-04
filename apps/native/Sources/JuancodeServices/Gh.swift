@@ -185,6 +185,42 @@ public func getOpenPrs(_ cwd: String) async -> PrListResult {
     }
 }
 
+/// Backfill fetch for the PR popover: PRs matching a repo-scoped GitHub search.
+/// `getOpenPrs` caps at the newest `MAX_PRS` open PRs across all authors, so a
+/// user's own older PR (or an old PR matched by a text filter) can fall outside
+/// that firehose and never reach the client. The popover fires this in the
+/// background — with `search` built from the active Mine/Assigned/text filters
+/// (e.g. `"state:open author:octocat 403"`) — and unions the results into the
+/// cached list. Returns just the parsed PRs; viewer login and unresolved-thread
+/// counts stay owned by the base `getOpenPrs` load. Returns `[]` on any failure
+/// (gh missing, not a repo, bad search) so the caller simply keeps what it has.
+public func searchOpenPrs(_ cwd: String, search: String) async -> [PullRequest] {
+    let query = search.trimmingCharacters(in: .whitespaces)
+    guard !query.isEmpty else { return [] }
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(),
+            ["pr", "list", "--search", query, "--limit", String(MAX_PRS), "--json", FIELDS],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return [] }
+        let raw = try JSONDecoder().decode([RawPr].self, from: Data(r.stdout.utf8))
+        return parsePrs(raw)
+    } catch {
+        return []
+    }
+}
+
+/// Union `extra` PRs into `base` by PR number, keeping the existing entry for any
+/// number already present (it carries enrichment like `unresolvedComments` that
+/// the backfill fetch lacks) and appending only genuinely new PRs, then sorting
+/// newest-first. Pure; exposed for testing.
+public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [PullRequest] {
+    var byNumber = [Int: PullRequest]()
+    for pr in base { byNumber[pr.number] = pr }
+    for pr in extra where byNumber[pr.number] == nil { byNumber[pr.number] = pr }
+    return byNumber.values.sorted { $0.number > $1.number }
+}
+
 // MARK: - Unresolved review threads (the "active comments" count in the PR list)
 
 /// Overlay unresolved-review-thread counts onto parsed PRs, keyed by PR number.

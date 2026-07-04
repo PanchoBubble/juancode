@@ -229,4 +229,25 @@ final class UnresolvedThreadTests: XCTestCase {
         // PR without an entry keeps its default (0).
         XCTAssertEqual(merged[1].unresolvedComments, 0)
     }
+
+    func testMergePrListsUnionsByNumberNewestFirst() {
+        let base = [
+            PullRequest(number: 50, title: "new", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me", unresolvedComments: 4),
+            PullRequest(number: 40, title: "mid", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me"),
+        ]
+        let extra = [
+            // Already present: base entry (with its unresolvedComments) must win.
+            PullRequest(number: 50, title: "new", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me"),
+            // Genuinely new, older than the firehose cap: folds in.
+            PullRequest(number: 12, title: "old", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me"),
+        ]
+        let merged = mergePrLists(base, extra)
+        XCTAssertEqual(merged.map(\.number), [50, 40, 12])
+        // Existing enriched entry preserved, not clobbered by the backfill copy.
+        XCTAssertEqual(merged[0].unresolvedComments, 4)
+    }
 }

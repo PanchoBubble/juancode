@@ -338,6 +338,12 @@ public final class Session: @unchecked Sendable {
         /// Per-attempt budget to confirm the Enter submitted (agent went busy or
         /// the prompt left the input box).
         static let submitMs = 4_000
+        /// Settle gap between the bracketed-paste end (`ESC[201~`) and the
+        /// submitting Enter, so the CR never races the still-open paste and get
+        /// swallowed as a literal newline. Mirrors `pasteAndSubmit`'s delay; the
+        /// symptom without it shows up when the laptop is locked (App Nap
+        /// coalesces the land-poll to zero, so the CR would fire instantly).
+        static let submitSettleMs = 200
         static let pollMs = 150
         static let maxAttempts = 3
         /// Rows of the bottom screen region treated as the input-box area.
@@ -387,6 +393,14 @@ public final class Session: @unchecked Sendable {
     /// actor; every collaborator it touches (`write`, `isRunning`, `detector`) is
     /// thread-safe.
     private func deliverSeed(_ trimmed: String) async -> AutoSubmitOutcome {
+        // Keep App Nap from throttling the settle/land/submit timers while the
+        // laptop is locked or the app is occluded — coalesced `Task.sleep`s
+        // collapse the paste→Enter gap and the CR gets eaten as a newline, so
+        // the prompt lands but never submits.
+        let activityToken = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiated, reason: "Delivering initial prompt to a fresh session")
+        defer { ProcessInfo.processInfo.endActivity(activityToken) }
+
         let signature = InitialPromptDelivery.signature(for: trimmed)
 
         // 1) Wait for the TUI to settle so the input box exists before we paste.
@@ -410,6 +424,9 @@ public final class Session: @unchecked Sendable {
         }
 
         // 3) Submit, then confirm it went through (agent busy, or the box cleared).
+        // Let the paste-end sequence settle before the CR so the CLI is out of
+        // paste mode and reads the Enter as submit, not a literal newline.
+        try? await Task.sleep(for: .milliseconds(Seed.submitSettleMs))
         for _ in 0..<Seed.maxAttempts {
             guard isRunning else { return .failed(reason: "session exited before the prompt was submitted") }
             write("\r")
