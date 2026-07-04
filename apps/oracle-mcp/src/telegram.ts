@@ -54,6 +54,7 @@ import {
 } from "./telegram-format.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
 import { onSessionEvent, type SessionActivityEvent } from "./push.ts";
+import { makeTranscriber } from "./transcribe.ts";
 
 /** Telegram's hard per-message character cap. We chunk below it to stay safe. */
 const TELEGRAM_MAX_CHARS = 4096;
@@ -61,6 +62,11 @@ const CHUNK_LIMIT = 4000;
 
 /** Cap on sessions shown by /sessions, so the message + keyboard stay readable. */
 const LIST_CAP = 15;
+
+/** Longest voice/audio note we'll transcribe (juancode-lr5). A cap keeps a stray
+ *  hour-long file from wedging whisper for minutes; anything longer gets a friendly
+ *  "too long" reply. */
+const MAX_AUDIO_SECONDS = 600;
 
 export interface TelegramConfig {
   token: string;
@@ -133,12 +139,21 @@ interface TgUser {
 interface TgChat {
   id: number;
 }
+/** A Telegram `voice` (OGG/Opus note) or `audio` (music/file) attachment — only the
+ *  fields the bridge needs to download and size-check it (juancode-lr5). */
+interface TgAudio {
+  file_id?: string;
+  mime_type?: string;
+  duration?: number;
+}
 interface TgMessage {
   message_id?: number;
   chat?: TgChat;
   from?: TgUser;
   text?: string;
   reply_to_message?: { message_id?: number };
+  voice?: TgAudio;
+  audio?: TgAudio;
 }
 interface TgCallbackQuery {
   id?: string;
@@ -173,6 +188,27 @@ export function parseTextMessage(update: TgUpdate): {
   const replyTo =
     typeof msg?.reply_to_message?.message_id === "number" ? msg.reply_to_message.message_id : null;
   return { chatId, userId, messageId, replyTo, text: text.trim() };
+}
+
+/** Pull a well-formed voice/audio note out of an update, or null if the message has
+ *  no transcribable attachment (juancode-lr5). A `voice` note is preferred over an
+ *  `audio` file when both are somehow present. */
+export function parseVoiceMessage(update: TgUpdate): {
+  chatId: number;
+  userId: number;
+  messageId: number | null;
+  fileId: string;
+  durationSec: number | null;
+} | null {
+  const msg = update.message;
+  const chatId = msg?.chat?.id;
+  const userId = msg?.from?.id;
+  if (typeof chatId !== "number" || typeof userId !== "number") return null;
+  const media = msg?.voice ?? msg?.audio;
+  if (!media || typeof media.file_id !== "string" || !media.file_id) return null;
+  const messageId = typeof msg?.message_id === "number" ? msg.message_id : null;
+  const durationSec = typeof media.duration === "number" ? media.duration : null;
+  return { chatId, userId, messageId, fileId: media.file_id, durationSec };
 }
 
 /** Pull a well-formed inline-keyboard press out of an update, or null. */
@@ -260,6 +296,9 @@ export interface TelegramDeps {
   deliver: (sessionId: string, text: string) => Promise<void>;
   /** Queue text for in-order delivery on the session's next idle (busy sessions). */
   queue: (sessionId: string, texts: string[]) => Promise<void>;
+  /** Transcribe a Telegram voice/audio file to text (local whisper CLI). Throws on
+   *  download or transcription failure so the handler can reply with a clear error. */
+  transcribe: (fileId: string) => Promise<string>;
 }
 
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
@@ -283,6 +322,7 @@ function defaultDeps(token: string): TelegramDeps {
     outbound: { record: recordOutbound, lookup: lookupOutbound },
     deliver: deliverReply,
     queue: queueMessages,
+    transcribe: makeTranscriber(token),
   };
 }
 
@@ -294,7 +334,8 @@ const HELP_TEXT = [
   "/unobserve [n|id] — stop observing one (or all) sessions",
   "/new — start a fresh Oracle thread",
   "",
-  "Anything else goes to the Oracle. Reply to a session notification to send",
+  "Anything else goes to the Oracle. Send a voice note and it's transcribed",
+  "(locally) and sent to the Oracle. Reply to a session notification to send",
   "your answer into that exact session.",
 ].join("\n");
 
@@ -316,6 +357,18 @@ export async function handleUpdate(
       return;
     }
     await handleCallback(callback, deps, state);
+    return;
+  }
+
+  // A voice note or audio file is transcribed locally, then treated exactly like a
+  // typed message to the Oracle (juancode-lr5).
+  const voice = parseVoiceMessage(update);
+  if (voice) {
+    if (!isAllowed(voice.userId, allowed)) {
+      console.warn(`telegram: ignoring voice note from non-allowed user ${voice.userId}`);
+      return;
+    }
+    await handleVoiceMessage(voice, deps);
     return;
   }
 
@@ -367,6 +420,19 @@ export async function handleUpdate(
     return;
   }
 
+  await runOracleTurn(chatId, messageId, text, deps);
+}
+
+/** The shared "one message to the Oracle" turn: working indicator, backend call,
+ *  session persistence, chunked reply. Used by both typed text and transcribed voice
+ *  notes so the two stay in lockstep. `messageId` is the user's message to react on
+ *  (null ⇒ no reaction). */
+async function runOracleTurn(
+  chatId: number,
+  messageId: number | null,
+  text: string,
+  deps: TelegramDeps,
+): Promise<void> {
   // Immediate "Oracle is working" feedback before the (often slow) backend call: a 👀
   // reaction on the user's message plus a "typing…" chat action, refreshed every few
   // seconds since Telegram clears typing after ~5s. Both are best-effort and never throw.
@@ -389,6 +455,56 @@ export async function handleUpdate(
   const body = reply.reply.trim() || "(no reply)";
   const out = reply.isError ? `⚠️ ${body}` : body;
   for (const chunk of chunkMessage(out)) await deps.send(chatId, chunk);
+}
+
+/** Transcribe a voice/audio note locally and feed the transcript to the Oracle as if
+ *  it had been typed (juancode-lr5). The 👀/typing indicator covers the (slow) download
+ *  + whisper step. The transcript is echoed back (🎙️) so a mistranscription is visible
+ *  before Oracle acts on it. Over-long notes, transcription failures, and empty speech
+ *  each end the turn with a clear reply; the session is left untouched so the user can
+ *  simply try again. */
+async function handleVoiceMessage(
+  voice: NonNullable<ReturnType<typeof parseVoiceMessage>>,
+  deps: TelegramDeps,
+): Promise<void> {
+  const { chatId, messageId, durationSec } = voice;
+
+  if (durationSec !== null && durationSec > MAX_AUDIO_SECONDS) {
+    await deps.send(
+      chatId,
+      `⚠️ That audio is too long to transcribe (limit ${Math.floor(MAX_AUDIO_SECONDS / 60)} min). ` +
+        "Send a shorter note or type it out.",
+    );
+    return;
+  }
+
+  if (messageId !== null) await deps.react(chatId, messageId, "👀");
+  await deps.typing(chatId);
+  const typingTimer = setInterval(() => void deps.typing(chatId), 4000);
+
+  let transcript: string;
+  try {
+    transcript = (await deps.transcribe(voice.fileId)).trim();
+  } catch (e) {
+    console.error("telegram: transcription failed:", e instanceof Error ? e.message : e);
+    await deps.send(
+      chatId,
+      "⚠️ Couldn't transcribe that voice message. Please try again or type it out.",
+    );
+    return;
+  } finally {
+    clearInterval(typingTimer);
+    if (messageId !== null) await deps.react(chatId, messageId, null);
+  }
+
+  if (!transcript) {
+    await deps.send(chatId, "⚠️ I couldn't make out any speech in that audio.");
+    return;
+  }
+
+  // Show what was heard, then feed it to the Oracle exactly as if it had been typed.
+  await deps.send(chatId, `🎙️ ${transcript}`);
+  await runOracleTurn(chatId, messageId, transcript, deps);
 }
 
 // ── Session commands ─────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import {
   parseAllowedUserIds,
   parseCallbackQuery,
   parseTextMessage,
+  parseVoiceMessage,
   readTelegramConfig,
   type TelegramDeps,
   type TgUpdate,
@@ -155,9 +156,24 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
     },
     deliver: vi.fn(async () => {}),
     queue: vi.fn(async () => {}),
+    transcribe: vi.fn(async () => "transcribed text"),
     ...overrides,
   };
 }
+
+const voiceMsg = (
+  userId: number,
+  fileId: string,
+  { chatId = 100, messageId = 7, duration = 3 }: { chatId?: number; messageId?: number; duration?: number } = {},
+): TgUpdate => ({
+  update_id: 1,
+  message: {
+    message_id: messageId,
+    chat: { id: chatId },
+    from: { id: userId },
+    voice: { file_id: fileId, mime_type: "audio/ogg", duration },
+  },
+});
 
 const msg = (userId: number, text: string, chatId = 100, messageId = 7): TgUpdate => ({
   update_id: 1,
@@ -529,5 +545,107 @@ describe("notifySessionEvent", () => {
       newBridgeState(),
     );
     expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("aaaa-111"));
+  });
+});
+
+describe("parseVoiceMessage", () => {
+  it("parses a voice note", () => {
+    const u: TgUpdate = {
+      update_id: 1,
+      message: { message_id: 42, chat: { id: 9 }, from: { id: 5 }, voice: { file_id: "F1", duration: 4 } },
+    };
+    expect(parseVoiceMessage(u)).toEqual({
+      chatId: 9,
+      userId: 5,
+      messageId: 42,
+      fileId: "F1",
+      durationSec: 4,
+    });
+  });
+
+  it("parses an audio file the same as a voice note", () => {
+    const u: TgUpdate = {
+      update_id: 1,
+      message: { chat: { id: 9 }, from: { id: 5 }, audio: { file_id: "A1" } },
+    };
+    expect(parseVoiceMessage(u)).toEqual({
+      chatId: 9,
+      userId: 5,
+      messageId: null,
+      fileId: "A1",
+      durationSec: null,
+    });
+  });
+
+  it("returns null when there is no voice/audio attachment", () => {
+    expect(parseVoiceMessage({ update_id: 1 })).toBeNull();
+    expect(
+      parseVoiceMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: "hi" } }),
+    ).toBeNull();
+    // A voice object without a file_id is not actionable.
+    expect(
+      parseVoiceMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, voice: {} } }),
+    ).toBeNull();
+  });
+});
+
+describe("handleUpdate — voice messages", () => {
+  const allowed = new Set([5]);
+
+  it("transcribes, echoes the transcript, and routes it to the backend", async () => {
+    const deps = makeDeps({
+      transcribe: vi.fn(async () => "  what's the deploy status  "),
+      chat: vi.fn(async () => ({ reply: "all green", isError: false, sessionId: "sid" })),
+    });
+    await handleUpdate(voiceMsg(5, "FILE123"), allowed, deps);
+    expect(deps.transcribe).toHaveBeenCalledWith("FILE123");
+    // Transcript echoed with a mic marker, then the real reply.
+    expect(deps.send).toHaveBeenNthCalledWith(1, 100, "🎙️ what's the deploy status");
+    expect(deps.chat).toHaveBeenCalledWith("what's the deploy status", null);
+    expect(deps.setSession).toHaveBeenCalledWith(100, "sid");
+    expect(deps.send).toHaveBeenLastCalledWith(100, "all green");
+  });
+
+  it("shows the working indicator and clears it", async () => {
+    const deps = makeDeps();
+    await handleUpdate(voiceMsg(5, "F"), allowed, deps);
+    expect(deps.react).toHaveBeenNthCalledWith(1, 100, 7, "👀");
+    expect(deps.react).toHaveBeenLastCalledWith(100, 7, null);
+  });
+
+  it("ignores voice notes from non-allowed users without transcribing", async () => {
+    const deps = makeDeps();
+    await handleUpdate(voiceMsg(999, "F"), allowed, deps);
+    expect(deps.transcribe).not.toHaveBeenCalled();
+    expect(deps.chat).not.toHaveBeenCalled();
+    expect(deps.send).not.toHaveBeenCalled();
+  });
+
+  it("replies clearly when transcription fails and does not call the backend", async () => {
+    const deps = makeDeps({
+      transcribe: vi.fn(async () => {
+        throw new Error("whisper exploded");
+      }),
+    });
+    await handleUpdate(voiceMsg(5, "F"), allowed, deps);
+    expect(deps.chat).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledTimes(1);
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringMatching(/Couldn't transcribe/));
+    // Indicator still cleared on the error path.
+    expect(deps.react).toHaveBeenLastCalledWith(100, 7, null);
+  });
+
+  it("replies clearly when the transcript is empty", async () => {
+    const deps = makeDeps({ transcribe: vi.fn(async () => "   ") });
+    await handleUpdate(voiceMsg(5, "F"), allowed, deps);
+    expect(deps.chat).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringMatching(/couldn't make out/i));
+  });
+
+  it("rejects an over-long note before downloading it", async () => {
+    const deps = makeDeps();
+    await handleUpdate(voiceMsg(5, "F", { duration: 601 }), allowed, deps);
+    expect(deps.transcribe).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringMatching(/too long/i));
   });
 });
