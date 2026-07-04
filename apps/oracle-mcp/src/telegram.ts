@@ -1,27 +1,66 @@
-// Telegram bridge for the Oracle chat (juancode-c6y). Lets Juan chat with Oracle
-// from Telegram using the EXACT SAME backend as the browser console: every incoming
-// message is routed through `oracleChat` (oracle.ts → headless `claude -p` with
-// `--resume`), the same call `/api/chat` makes. No agent logic is forked here — this
-// module is purely a Telegram front-end + per-chat session plumbing.
+// Telegram bridge for the Oracle chat (juancode-c6y) and session control surface
+// (juancode-2l4 / juancode-zkx). Plain messages route through the EXACT SAME
+// backend as the browser console: `oracleChat` (oracle.ts → headless `claude -p`
+// with `--resume`). On top of that the bridge is a first-class phone control
+// surface for agent sessions:
 //
-// Transport is long-poll `getUpdates` (no webhook), so it works behind the existing
-// cloudflared `oracle` tunnel without exposing an inbound port. On startup, if
-// TELEGRAM_BOT_TOKEN is unset the bridge is a no-op; ALLOWED_USER_IDS is the allowlist
-// of Telegram user ids permitted to talk to it (anyone else is ignored). Each Telegram
-// chat keeps its own `claude` session id (telegram-store.ts), separate from the browser
-// thread; `/new` (or `/start`) resets it. Replies are chunked to Telegram's 4096-char
-// per-message limit.
+// - /sessions, /status list live sessions (title, project, live state) with
+//   inline observe/unobserve buttons; /observe and /unobserve take a number from
+//   the last printed list or an id prefix.
+// - Observed sessions ping this chat on genuine state transitions (needs input /
+//   finished a turn), reusing the native server's de-spammed `notify` flag via
+//   the push module's single WS listener (push.ts onSessionEvent).
+// - Replying (Telegram-native reply) to any session-scoped bot message routes the
+//   text into that exact session: typed straight into the pty when it's waiting
+//   or idle (deliverReply), queued for the next idle when it's busy
+//   (queueMessages). Delivery is confirmed, and the confirmation itself is
+//   reply-able so the thread stays connected to the session.
+//
+// The chat↔session mappings are durable: oracle-telegram-sessions.json (Oracle
+// chat continuity), oracle-telegram-observers.json (observe subscriptions), and
+// oracle-telegram-outbound.json (bot-message → session correlation) all live in
+// `JUANCODE_ORACLE_DIR` and survive restarts.
+//
+// Transport is long-poll `getUpdates` (no webhook), so it works behind the
+// existing cloudflared `oracle` tunnel without exposing an inbound port. On
+// startup, if TELEGRAM_BOT_TOKEN is unset the bridge is a no-op; ALLOWED_USER_IDS
+// is the allowlist of Telegram user ids permitted to talk to it (anyone else is
+// ignored). Replies are chunked to Telegram's 4096-char per-message limit.
 
 import {
   clearTelegramSession,
   getTelegramSession,
   setTelegramSession,
 } from "./telegram-store.ts";
-import { oracleChat, type ChatReply } from "./oracle.ts";
+import {
+  listObserved,
+  lookupOutbound,
+  observeSession,
+  observerChats,
+  recordOutbound,
+  unobserveSession,
+} from "./telegram-observe.ts";
+import {
+  classifyActivity,
+  formatSessionLine,
+  notifyIcon,
+  notifyText,
+  orderSessions,
+  parseSessionList,
+  projectName,
+  resolveSelector,
+  type LiveActivity,
+  type SessionSummary,
+} from "./telegram-format.ts";
+import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
+import { onSessionEvent, type SessionActivityEvent } from "./push.ts";
 
 /** Telegram's hard per-message character cap. We chunk below it to stay safe. */
 const TELEGRAM_MAX_CHARS = 4096;
 const CHUNK_LIMIT = 4000;
+
+/** Cap on sessions shown by /sessions, so the message + keyboard stay readable. */
+const LIST_CAP = 15;
 
 export interface TelegramConfig {
   token: string;
@@ -99,17 +138,31 @@ interface TgMessage {
   chat?: TgChat;
   from?: TgUser;
   text?: string;
+  reply_to_message?: { message_id?: number };
+}
+interface TgCallbackQuery {
+  id?: string;
+  from?: TgUser;
+  message?: { message_id?: number; chat?: TgChat };
+  data?: string;
 }
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
+  callback_query?: TgCallbackQuery;
 }
 
 /** Pull the well-formed `(chatId, userId, text)` out of an update, or null if it's
- *  not a text message we can act on (edits, photos, joins, etc. are ignored). */
-export function parseTextMessage(
-  update: TgUpdate,
-): { chatId: number; userId: number; messageId: number | null; text: string } | null {
+ *  not a text message we can act on (edits, photos, joins, etc. are ignored).
+ *  `replyTo` is the id of the bot message the user replied to, when it's a
+ *  Telegram-native reply. */
+export function parseTextMessage(update: TgUpdate): {
+  chatId: number;
+  userId: number;
+  messageId: number | null;
+  replyTo: number | null;
+  text: string;
+} | null {
   const msg = update.message;
   const chatId = msg?.chat?.id;
   const userId = msg?.from?.id;
@@ -117,7 +170,54 @@ export function parseTextMessage(
   if (typeof chatId !== "number" || typeof userId !== "number") return null;
   if (typeof text !== "string" || !text.trim()) return null;
   const messageId = typeof msg?.message_id === "number" ? msg.message_id : null;
-  return { chatId, userId, messageId, text: text.trim() };
+  const replyTo =
+    typeof msg?.reply_to_message?.message_id === "number" ? msg.reply_to_message.message_id : null;
+  return { chatId, userId, messageId, replyTo, text: text.trim() };
+}
+
+/** Pull a well-formed inline-keyboard press out of an update, or null. */
+export function parseCallbackQuery(update: TgUpdate): {
+  callbackId: string;
+  chatId: number;
+  userId: number;
+  data: string;
+} | null {
+  const cb = update.callback_query;
+  if (!cb) return null;
+  const callbackId = cb.id;
+  const userId = cb.from?.id;
+  const chatId = cb.message?.chat?.id;
+  const data = cb.data;
+  if (typeof callbackId !== "string" || !callbackId) return null;
+  if (typeof userId !== "number" || typeof chatId !== "number") return null;
+  if (typeof data !== "string" || !data) return null;
+  return { callbackId, chatId, userId, data };
+}
+
+// ── Bridge state + dependency injection ──────────────────────────────────────
+
+/** One inline-keyboard button: `data` becomes the callback_data. */
+export interface InlineButton {
+  text: string;
+  data: string;
+}
+
+export interface SendOptions {
+  keyboard?: InlineButton[][];
+}
+
+/** Per-process (non-durable) bridge state: the numbered list each chat last saw
+ *  (so "/observe 2" resolves), the last-known live activity per session (warmed
+ *  by the connect-time snapshot the native WS sends), and the last notification
+ *  kind per chat+session (a second de-dup layer over the server's gate). */
+export interface BridgeState {
+  lastList: Map<number, string[]>;
+  activity: Map<string, LiveActivity>;
+  lastNotified: Map<string, string>;
+}
+
+export function newBridgeState(): BridgeState {
+  return { lastList: new Map(), activity: new Map(), lastNotified: new Map() };
 }
 
 /** The side-effecting collaborators the update handler needs. Injected so the handler
@@ -127,42 +227,112 @@ export interface TelegramDeps {
   getSession: (chatId: number) => Promise<string | null>;
   setSession: (chatId: number, sessionId: string) => Promise<void>;
   clearSession: (chatId: number) => Promise<void>;
-  send: (chatId: number, text: string) => Promise<void>;
+  /** Send a message; resolves to the sent message's id (null when unknown). */
+  send: (chatId: number, text: string, opts?: SendOptions) => Promise<number | null>;
   /** Best-effort "typing…" chat action; never throws (a failed hint must not stall a reply). */
   typing: (chatId: number) => Promise<void>;
   /** Best-effort message reaction. `emoji === null` removes the reaction. Never throws. */
   react: (chatId: number, messageId: number, emoji: string | null) => Promise<void>;
+  /** Best-effort answer to an inline-keyboard press (clears the client spinner). */
+  answerCallback: (callbackId: string, text?: string) => Promise<void>;
+  /** The native server's session list, already parsed into summaries. */
+  sessions: () => Promise<SessionSummary[]>;
+  observers: {
+    list: (chatId: number) => Promise<string[]>;
+    add: (chatId: number, sessionId: string) => Promise<void>;
+    remove: (chatId: number, sessionId?: string) => Promise<number>;
+    chatsFor: (sessionId: string) => Promise<number[]>;
+  };
+  outbound: {
+    record: (ref: {
+      chatId: number;
+      messageId: number;
+      sessionId: string;
+      title: string;
+      at: number;
+    }) => Promise<void>;
+    lookup: (
+      chatId: number,
+      messageId: number,
+    ) => Promise<{ sessionId: string; title: string } | null>;
+  };
+  /** Type text straight into a session's pty (waiting/idle sessions). */
+  deliver: (sessionId: string, text: string) => Promise<void>;
+  /** Queue text for in-order delivery on the session's next idle (busy sessions). */
+  queue: (sessionId: string, texts: string[]) => Promise<void>;
 }
 
-/** The real collaborators, wired to the shared Oracle backend + per-chat store. */
+/** The real collaborators, wired to the shared Oracle backend + durable stores. */
 function defaultDeps(token: string): TelegramDeps {
   return {
     chat: (text, sessionId) => oracleChat(text, sessionId),
     getSession: getTelegramSession,
     setSession: setTelegramSession,
     clearSession: clearTelegramSession,
-    send: (chatId, text) => sendMessage(token, chatId, text),
+    send: (chatId, text, opts) => sendMessage(token, chatId, text, opts),
     typing: (chatId) => sendChatAction(token, chatId, "typing"),
     react: (chatId, messageId, emoji) => setMessageReaction(token, chatId, messageId, emoji),
+    answerCallback: (callbackId, text) => answerCallbackQuery(token, callbackId, text),
+    sessions: async () => parseSessionList(await listSessions()),
+    observers: {
+      list: listObserved,
+      add: observeSession,
+      remove: unobserveSession,
+      chatsFor: observerChats,
+    },
+    outbound: { record: recordOutbound, lookup: lookupOutbound },
+    deliver: deliverReply,
+    queue: queueMessages,
   };
 }
 
-/** Handle one update: enforce the allowlist, route `/new` + `/start` to a session
- *  reset, and send everything else through the shared Oracle backend, persisting the
+const HELP_TEXT = [
+  "Oracle bot commands:",
+  "/sessions — list agent sessions (live state, observe buttons)",
+  "/status — your observed sessions right now",
+  "/observe <n|id> — get pinged when a session needs input or finishes",
+  "/unobserve [n|id] — stop observing one (or all) sessions",
+  "/new — start a fresh Oracle thread",
+  "",
+  "Anything else goes to the Oracle. Reply to a session notification to send",
+  "your answer into that exact session.",
+].join("\n");
+
+/** Handle one update: enforce the allowlist, route commands and session replies,
+ *  and send everything else through the shared Oracle backend, persisting the
  *  returned session id so the chat stays continuous. Non-allowed users are ignored
  *  (logged, no reply) so the private bot doesn't announce itself to strangers. */
 export async function handleUpdate(
   update: TgUpdate,
   allowed: Set<number>,
   deps: TelegramDeps,
+  state: BridgeState = newBridgeState(),
 ): Promise<void> {
+  const callback = parseCallbackQuery(update);
+  if (callback) {
+    if (!isAllowed(callback.userId, allowed)) {
+      console.warn(`telegram: ignoring callback from non-allowed user ${callback.userId}`);
+      await deps.answerCallback(callback.callbackId);
+      return;
+    }
+    await handleCallback(callback, deps, state);
+    return;
+  }
+
   const parsed = parseTextMessage(update);
   if (!parsed) return;
-  const { chatId, userId, messageId, text } = parsed;
+  const { chatId, userId, messageId, replyTo, text } = parsed;
 
   if (!isAllowed(userId, allowed)) {
     console.warn(`telegram: ignoring message from non-allowed user ${userId}`);
     return;
+  }
+
+  // A Telegram-native reply to one of our session-scoped messages routes into that
+  // session — never into the Oracle chat (replying is an explicit targeting act).
+  if (replyTo !== null) {
+    const handled = await handleSessionReply(chatId, messageId, replyTo, text, deps, state);
+    if (handled) return;
   }
 
   const command = text.toLowerCase();
@@ -171,9 +341,29 @@ export async function handleUpdate(
     await deps.send(
       chatId,
       command === "/start"
-        ? "👋 Oracle here. Send a message to start. /new resets this thread."
+        ? "👋 Oracle here. Send a message to start, /sessions to drive agents. /help lists commands."
         : "🆕 Started a fresh Oracle thread.",
     );
+    return;
+  }
+  if (command === "/help") {
+    await deps.send(chatId, HELP_TEXT);
+    return;
+  }
+  if (command === "/sessions") {
+    await handleSessionsCommand(chatId, deps, state);
+    return;
+  }
+  if (command === "/status") {
+    await handleStatusCommand(chatId, deps, state);
+    return;
+  }
+  if (command === "/observe" || command.startsWith("/observe ")) {
+    await handleObserveCommand(chatId, text.slice("/observe".length).trim(), deps, state);
+    return;
+  }
+  if (command === "/unobserve" || command.startsWith("/unobserve ")) {
+    await handleUnobserveCommand(chatId, text.slice("/unobserve".length).trim(), deps, state);
     return;
   }
 
@@ -201,21 +391,312 @@ export async function handleUpdate(
   for (const chunk of chunkMessage(out)) await deps.send(chatId, chunk);
 }
 
+// ── Session commands ─────────────────────────────────────────────────────────
+
+/** Fetch + order sessions, tolerating the native app being down with a clear
+ *  message to the chat. Returns null after messaging on failure. */
+async function fetchOrdered(chatId: number, deps: TelegramDeps): Promise<SessionSummary[] | null> {
+  try {
+    return orderSessions(await deps.sessions());
+  } catch (e) {
+    await deps.send(chatId, `⚠️ ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+async function handleSessionsCommand(
+  chatId: number,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  const ordered = await fetchOrdered(chatId, deps);
+  if (!ordered) return;
+  const list = ordered.slice(0, LIST_CAP);
+  if (list.length === 0) {
+    await deps.send(chatId, "No sessions right now. Ask the Oracle to dispatch one.");
+    return;
+  }
+  const observed = new Set(await deps.observers.list(chatId));
+  state.lastList.set(
+    chatId,
+    list.map((s) => s.id),
+  );
+  const lines = list.map((s, i) =>
+    formatSessionLine(i + 1, s, state.activity.get(s.id), observed.has(s.id)),
+  );
+  const more = ordered.length > list.length ? `\n…and ${ordered.length - list.length} more` : "";
+  const keyboard = buttonRows(
+    list.map((s, i) =>
+      observed.has(s.id)
+        ? { text: `✓${i + 1}`, data: `u:${s.id}` }
+        : { text: `👁${i + 1}`, data: `o:${s.id}` },
+    ),
+  );
+  await deps.send(chatId, lines.join("\n") + more, { keyboard });
+}
+
+async function handleStatusCommand(
+  chatId: number,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  const observedIds = await deps.observers.list(chatId);
+  if (observedIds.length === 0) {
+    await deps.send(chatId, "You're not observing any sessions. /sessions to pick some.");
+    return;
+  }
+  const ordered = await fetchOrdered(chatId, deps);
+  if (!ordered) return;
+  const byId = new Map(ordered.map((s) => [s.id, s]));
+  state.lastList.set(chatId, observedIds);
+  const lines = observedIds.map((id, i) => {
+    const s = byId.get(id);
+    if (!s) return `${i + 1}. ❔ ${id.slice(0, 8)} (gone — /unobserve ${i + 1})`;
+    return formatSessionLine(i + 1, s, state.activity.get(id), false);
+  });
+  const keyboard = buttonRows(
+    observedIds.map((id, i) => ({ text: `🚫${i + 1}`, data: `u:${id}` })),
+  );
+  await deps.send(chatId, `Observing ${observedIds.length}:\n` + lines.join("\n"), { keyboard });
+}
+
+async function handleObserveCommand(
+  chatId: number,
+  selector: string,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  if (!selector) {
+    await deps.send(chatId, "Usage: /observe <n|id> — n from the last /sessions list.");
+    return;
+  }
+  const ordered = await fetchOrdered(chatId, deps);
+  if (!ordered) return;
+  const id = resolveSelector(selector, ordered, state.lastList.get(chatId));
+  if (!id) {
+    await deps.send(chatId, `No session matches “${selector}”. /sessions to list them.`);
+    return;
+  }
+  await deps.observers.add(chatId, id);
+  const s = ordered.find((x) => x.id === id);
+  const name = s ? `${s.title} — ${projectName(s.cwd)}` : id.slice(0, 8);
+  await deps.send(chatId, `👁 Observing ${name}. I'll ping you here when it needs input or finishes.`);
+}
+
+async function handleUnobserveCommand(
+  chatId: number,
+  selector: string,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  if (!selector || selector.toLowerCase() === "all") {
+    const removed = await deps.observers.remove(chatId);
+    await deps.send(
+      chatId,
+      removed > 0 ? `🚫 Stopped observing ${removed} session(s).` : "You weren't observing anything.",
+    );
+    return;
+  }
+  // Resolve against the durable observed list too, so an exited/gone session can
+  // still be unobserved by its /status index or id prefix.
+  const observedIds = await deps.observers.list(chatId);
+  let id: string | null = null;
+  if (/^\d+$/.test(selector)) {
+    const last = state.lastList.get(chatId);
+    const ids = last && last.length > 0 ? last : observedIds;
+    const n = Number(selector);
+    id = n >= 1 && n <= ids.length ? ids[n - 1]! : null;
+  } else {
+    const matches = observedIds.filter((x) => x === selector || x.startsWith(selector));
+    id = matches.length === 1 ? matches[0]! : null;
+  }
+  if (!id) {
+    await deps.send(chatId, `No observed session matches “${selector}”. /status to list them.`);
+    return;
+  }
+  const removed = await deps.observers.remove(chatId, id);
+  await deps.send(chatId, removed > 0 ? "🚫 Stopped observing it." : "You weren't observing that one.");
+}
+
+/** Chunk one flat button list into keyboard rows of up to 5. */
+function buttonRows(buttons: InlineButton[], perRow = 5): InlineButton[][] {
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < buttons.length; i += perRow) rows.push(buttons.slice(i, i + perRow));
+  return rows;
+}
+
+// ── Inline-keyboard presses ──────────────────────────────────────────────────
+
+async function handleCallback(
+  cb: { callbackId: string; chatId: number; userId: number; data: string },
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  const sep = cb.data.indexOf(":");
+  const op = sep === -1 ? cb.data : cb.data.slice(0, sep);
+  const sessionId = sep === -1 ? "" : cb.data.slice(sep + 1);
+  if (!sessionId || (op !== "o" && op !== "u")) {
+    await deps.answerCallback(cb.callbackId);
+    return;
+  }
+  try {
+    if (op === "o") {
+      await deps.observers.add(cb.chatId, sessionId);
+      await deps.answerCallback(cb.callbackId, "👁 Observing — I'll ping you here.");
+    } else {
+      const removed = await deps.observers.remove(cb.chatId, sessionId);
+      await deps.answerCallback(
+        cb.callbackId,
+        removed > 0 ? "🚫 Stopped observing." : "Wasn't observing that one.",
+      );
+    }
+    // De-dup memory is per subscription; a fresh observe should notify afresh.
+    state.lastNotified.delete(`${cb.chatId}:${sessionId}`);
+  } catch (e) {
+    await deps.answerCallback(cb.callbackId, `Failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// ── Reply-to-notification → session injection ────────────────────────────────
+
+/** Route a Telegram-native reply into the session its target message was about.
+ *  Returns false when the replied-to message isn't one of ours (the caller then
+ *  treats the text as a normal Oracle message). */
+async function handleSessionReply(
+  chatId: number,
+  messageId: number | null,
+  replyTo: number,
+  text: string,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<boolean> {
+  const ref = await deps.outbound.lookup(chatId, replyTo);
+  if (!ref) return false;
+  try {
+    const busy = state.activity.get(ref.sessionId) === "busy";
+    if (busy) await deps.queue(ref.sessionId, [text]);
+    else await deps.deliver(ref.sessionId, text);
+    if (messageId !== null) await deps.react(chatId, messageId, "👍");
+    const confirmation = busy
+      ? `📥 Queued for “${ref.title}” — delivers when it next goes idle. Reply here to send more.`
+      : `✅ Sent to “${ref.title}”. Reply here to send more.`;
+    const mid = await deps.send(chatId, confirmation);
+    // The confirmation is itself a session-scoped message: replying to it chains.
+    if (mid !== null) {
+      await deps.outbound.record({
+        chatId,
+        messageId: mid,
+        sessionId: ref.sessionId,
+        title: ref.title,
+        at: Date.now(),
+      });
+    }
+  } catch (e) {
+    await deps.send(
+      chatId,
+      `⚠️ Couldn't deliver to “${ref.title}”: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return true;
+}
+
+// ── Observer notifications ───────────────────────────────────────────────────
+
+/**
+ * Fan one native activity event out to the chats observing that session. Fires
+ * only on genuine, alert-worthy transitions: the server's notificationGate sets
+ * `notify`, and `classifyActivity` keeps just needs-input / finished-turn. A
+ * per-chat last-kind memory suppresses byte-identical repeats (e.g. after a WS
+ * reconnect replays a state). Every non-notify event still lands in the activity
+ * cache so /sessions and /status stay accurate.
+ */
+export async function notifySessionEvent(
+  ev: SessionActivityEvent,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  state.activity.set(ev.sessionId, ev.state);
+  const kind = classifyActivity(ev.state, ev.notify);
+  if (!kind) return;
+  const chats = await deps.observers.chatsFor(ev.sessionId);
+  if (chats.length === 0) return;
+
+  // One list fetch per event (only when someone is observing) for title + project.
+  let title = ev.sessionId.slice(0, 8);
+  let project = "";
+  try {
+    const s = (await deps.sessions()).find((x) => x.id === ev.sessionId);
+    if (s) {
+      title = s.title;
+      project = projectName(s.cwd);
+    }
+  } catch {
+    // Native app unreachable — notify with the id slice rather than staying silent.
+  }
+
+  const header = project ? `${title} — ${project}` : title;
+  const hint =
+    kind === "needs_input"
+      ? "↩️ Reply to this message to answer it."
+      : "↩️ Reply to this message to send a follow-up.";
+  const text = `${notifyIcon(kind)} ${header}\n${notifyText(kind)}\n${hint}`;
+
+  for (const chatId of chats) {
+    const key = `${chatId}:${ev.sessionId}`;
+    if (state.lastNotified.get(key) === kind) continue;
+    state.lastNotified.set(key, kind);
+    try {
+      const mid = await deps.send(chatId, text);
+      if (mid !== null) {
+        await deps.outbound.record({
+          chatId,
+          messageId: mid,
+          sessionId: ev.sessionId,
+          title,
+          at: Date.now(),
+        });
+      }
+    } catch (e) {
+      console.warn("telegram notify failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 // ── Telegram HTTP API ────────────────────────────────────────────────────────
 
 const apiBase = (token: string) => `https://api.telegram.org/bot${token}`;
 
-/** Send a plain-text message (no parse_mode → no Markdown/HTML escaping pitfalls). */
-async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+/** Send a plain-text message (no parse_mode → no Markdown/HTML escaping pitfalls),
+ *  optionally with an inline keyboard. Resolves to the sent message id (null when
+ *  Telegram's response doesn't carry one). */
+async function sendMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  opts?: SendOptions,
+): Promise<number | null> {
+  const body: Record<string, unknown> = { chat_id: chatId, text };
+  if (opts?.keyboard && opts.keyboard.length > 0) {
+    body.reply_markup = {
+      inline_keyboard: opts.keyboard.map((row) =>
+        row.map((b) => ({ text: b.text, callback_data: b.data })),
+      ),
+    };
+  }
   const res = await fetch(`${apiBase(token)}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new Error(`telegram sendMessage ${res.status}: ${detail.slice(0, 200)}`);
   }
+  const data = (await res.json().catch(() => null)) as {
+    result?: { message_id?: unknown };
+  } | null;
+  const mid = data?.result?.message_id;
+  return typeof mid === "number" ? mid : null;
 }
 
 /** Best-effort "typing…" chat action. Swallows failures: a missing typing hint must
@@ -262,11 +743,29 @@ async function setMessageReaction(
   }
 }
 
-/** One long-poll `getUpdates` call (timeout=50s server-side), scoped to message
- *  updates. Returns the updates array (possibly empty). */
+/** Best-effort acknowledgement of an inline-keyboard press. `text` shows as a small
+ *  toast on the phone. Swallows failures — an unacked spinner times out on its own. */
+async function answerCallbackQuery(token: string, callbackId: string, text?: string): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase(token)}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId, ...(text ? { text } : {}) }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.warn(`telegram answerCallbackQuery ${res.status}: ${detail.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.warn("telegram answerCallbackQuery failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+/** One long-poll `getUpdates` call (timeout=50s server-side), scoped to message +
+ *  inline-keyboard updates. Returns the updates array (possibly empty). */
 async function getUpdates(token: string, offset: number): Promise<TgUpdate[]> {
   const url = `${apiBase(token)}/getUpdates?timeout=50&offset=${offset}&allowed_updates=${encodeURIComponent(
-    '["message"]',
+    '["message","callback_query"]',
   )}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new Error(`telegram getUpdates ${res.status}`);
@@ -278,7 +777,12 @@ async function getUpdates(token: string, offset: number): Promise<TgUpdate[]> {
 /** Background long-poll loop: drain updates, advance the offset past each handled
  *  one, and isolate per-update failures so one bad message can't stall the loop.
  *  Backs off briefly on a poll error (e.g. transient network/Telegram outage). */
-async function pollLoop(config: TelegramConfig, deps: TelegramDeps, signal: AbortSignal): Promise<void> {
+async function pollLoop(
+  config: TelegramConfig,
+  deps: TelegramDeps,
+  state: BridgeState,
+  signal: AbortSignal,
+): Promise<void> {
   let offset = 0;
   while (!signal.aborted) {
     let updates: TgUpdate[];
@@ -293,7 +797,7 @@ async function pollLoop(config: TelegramConfig, deps: TelegramDeps, signal: Abor
     for (const update of updates) {
       offset = update.update_id + 1;
       try {
-        await handleUpdate(update, config.allowedUserIds, deps);
+        await handleUpdate(update, config.allowedUserIds, deps, state);
       } catch (e) {
         console.error("telegram handleUpdate failed:", e instanceof Error ? e.message : e);
       }
@@ -302,10 +806,13 @@ async function pollLoop(config: TelegramConfig, deps: TelegramDeps, signal: Abor
 }
 
 /** Start the Telegram bridge if TELEGRAM_BOT_TOKEN is set; otherwise a logged no-op.
- *  Returns an AbortController to stop the poll loop (used by tests / shutdown). */
+ *  Also subscribes to the push module's native session-event stream so observed
+ *  sessions notify their Telegram chats. Returns an AbortController to stop the
+ *  poll loop (used by tests / shutdown). `subscribe` is injectable for tests. */
 export function startTelegramBridge(
   config: TelegramConfig | null = readTelegramConfig(),
   deps?: TelegramDeps,
+  subscribe: (listener: (ev: SessionActivityEvent) => void) => void = onSessionEvent,
 ): AbortController | null {
   if (!config) {
     console.log("telegram bridge disabled (set TELEGRAM_BOT_TOKEN to enable)");
@@ -319,8 +826,14 @@ export function startTelegramBridge(
   }
   const controller = new AbortController();
   const resolved = deps ?? defaultDeps(config.token);
+  const state = newBridgeState();
+  subscribe((ev) => {
+    void notifySessionEvent(ev, resolved, state).catch((e) =>
+      console.error("telegram session notify failed:", e instanceof Error ? e.message : e),
+    );
+  });
   console.log(`telegram bridge listening (allowed users: ${[...config.allowedUserIds].join(", ") || "none"})`);
-  void pollLoop(config, resolved, controller.signal).catch((e) =>
+  void pollLoop(config, resolved, state, controller.signal).catch((e) =>
     console.error("telegram bridge crashed:", e),
   );
   return controller;

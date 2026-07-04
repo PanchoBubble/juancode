@@ -135,6 +135,37 @@ async function sendOne(sub: StoredPushSubscription, body: string): Promise<void>
 // push import surface.
 export { addSubscription, removeSubscription };
 
+// ── Session-event fan-out (juancode-2l4) ─────────────────────────────────────
+// This module already owns the one long-lived WS to the native backend; other
+// consumers (the Telegram bridge) subscribe here instead of opening their own
+// socket. Every `activity` broadcast is re-emitted — including notify:false ones,
+// so subscribers can keep a warm per-session state cache — and the `notify` flag
+// carries the server's de-spam gate through unchanged.
+
+export interface SessionActivityEvent {
+  sessionId: string;
+  state: "busy" | "idle" | "waiting_input";
+  notify: boolean;
+}
+
+type SessionEventListener = (ev: SessionActivityEvent) => void;
+const sessionEventListeners: SessionEventListener[] = [];
+
+/** Subscribe to native session activity events. Listener errors are isolated. */
+export function onSessionEvent(listener: SessionEventListener): void {
+  sessionEventListeners.push(listener);
+}
+
+function emitSessionEvent(ev: SessionActivityEvent): void {
+  for (const listener of sessionEventListeners) {
+    try {
+      listener(ev);
+    } catch (e) {
+      console.warn("oracle-mcp session event listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 // ── WS client: native backend → push ─────────────────────────────────────────
 
 let ws: WebSocket | null = null;
@@ -201,9 +232,13 @@ async function handleMessage(raw: string): Promise<void> {
   }
   const type = msg.type;
 
-  if (type === "activity" && msg.notify === true) {
+  if (type === "activity") {
     const state = typeof msg.state === "string" ? msg.state : "";
     const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
+    if (sessionId && (state === "busy" || state === "idle" || state === "waiting_input")) {
+      emitSessionEvent({ sessionId, state, notify: msg.notify === true });
+    }
+    if (msg.notify !== true) return;
     const body =
       state === "waiting_input"
         ? "needs your input"

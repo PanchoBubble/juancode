@@ -3,12 +3,16 @@ import {
   chunkMessage,
   handleUpdate,
   isAllowed,
+  newBridgeState,
+  notifySessionEvent,
   parseAllowedUserIds,
+  parseCallbackQuery,
   parseTextMessage,
   readTelegramConfig,
   type TelegramDeps,
   type TgUpdate,
 } from "./telegram.ts";
+import type { SessionSummary } from "./telegram-format.ts";
 import type { ChatReply } from "./oracle.ts";
 
 describe("readTelegramConfig", () => {
@@ -67,11 +71,36 @@ describe("parseTextMessage", () => {
       update_id: 1,
       message: { message_id: 42, chat: { id: 9 }, from: { id: 5 }, text: " hi " },
     };
-    expect(parseTextMessage(u)).toEqual({ chatId: 9, userId: 5, messageId: 42, text: "hi" });
+    expect(parseTextMessage(u)).toEqual({
+      chatId: 9,
+      userId: 5,
+      messageId: 42,
+      replyTo: null,
+      text: "hi",
+    });
   });
   it("returns a null messageId when message_id is absent", () => {
     const u: TgUpdate = { update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: "hi" } };
-    expect(parseTextMessage(u)).toEqual({ chatId: 9, userId: 5, messageId: null, text: "hi" });
+    expect(parseTextMessage(u)).toEqual({
+      chatId: 9,
+      userId: 5,
+      messageId: null,
+      replyTo: null,
+      text: "hi",
+    });
+  });
+  it("captures the replied-to message id", () => {
+    const u: TgUpdate = {
+      update_id: 1,
+      message: {
+        message_id: 42,
+        chat: { id: 9 },
+        from: { id: 5 },
+        text: "yes",
+        reply_to_message: { message_id: 33 },
+      },
+    };
+    expect(parseTextMessage(u)?.replyTo).toBe(33);
   });
   it("ignores non-text / malformed updates", () => {
     expect(parseTextMessage({ update_id: 1 })).toBeNull();
@@ -82,15 +111,50 @@ describe("parseTextMessage", () => {
   });
 });
 
+const SESSIONS: SessionSummary[] = [
+  {
+    id: "aaaa-1111",
+    provider: "claude",
+    cwd: "/Users/juan/workdir/juancode",
+    title: "fix tests",
+    status: "running",
+    archived: false,
+    updatedAt: 2000,
+  },
+  {
+    id: "bbbb-2222",
+    provider: "codex",
+    cwd: "/Users/juan/workdir/t3code",
+    title: "refactor auth",
+    status: "running",
+    archived: false,
+    updatedAt: 1000,
+  },
+];
+
 function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
   return {
     chat: vi.fn(async (): Promise<ChatReply> => ({ reply: "ok", isError: false, sessionId: "s1" })),
     getSession: vi.fn(async () => null),
     setSession: vi.fn(async () => {}),
     clearSession: vi.fn(async () => {}),
-    send: vi.fn(async () => {}),
+    send: vi.fn(async () => 900),
     typing: vi.fn(async () => {}),
     react: vi.fn(async () => {}),
+    answerCallback: vi.fn(async () => {}),
+    sessions: vi.fn(async () => SESSIONS),
+    observers: {
+      list: vi.fn(async () => [] as string[]),
+      add: vi.fn(async () => {}),
+      remove: vi.fn(async () => 1),
+      chatsFor: vi.fn(async () => [] as number[]),
+    },
+    outbound: {
+      record: vi.fn(async () => {}),
+      lookup: vi.fn(async () => null),
+    },
+    deliver: vi.fn(async () => {}),
+    queue: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -186,5 +250,284 @@ describe("handleUpdate", () => {
     });
     await handleUpdate(msg(5, "hello"), allowed, deps);
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("parseCallbackQuery", () => {
+  it("extracts id, chat, user, and data", () => {
+    const u: TgUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 5 },
+        message: { message_id: 3, chat: { id: 100 } },
+        data: "o:aaaa-1111",
+      },
+    };
+    expect(parseCallbackQuery(u)).toEqual({
+      callbackId: "cb1",
+      chatId: 100,
+      userId: 5,
+      data: "o:aaaa-1111",
+    });
+  });
+  it("returns null for malformed callbacks", () => {
+    expect(parseCallbackQuery({ update_id: 1 })).toBeNull();
+    expect(parseCallbackQuery({ update_id: 1, callback_query: { id: "x" } })).toBeNull();
+  });
+});
+
+describe("session commands", () => {
+  const allowed = new Set([5]);
+
+  it("/sessions lists sessions with state + observe buttons and remembers the order", async () => {
+    const deps = makeDeps();
+    const state = newBridgeState();
+    state.activity.set("aaaa-1111", "waiting_input");
+    await handleUpdate(msg(5, "/sessions"), allowed, deps, state);
+    const [chatId, text, opts] = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(chatId).toBe(100);
+    expect(text).toContain("1. 🟡 fix tests");
+    expect(text).toContain("juancode · claude · waiting for input");
+    expect(text).toContain("2.");
+    expect(opts.keyboard[0][0]).toEqual({ text: "👁1", data: "o:aaaa-1111" });
+    expect(state.lastList.get(100)).toEqual(["aaaa-1111", "bbbb-2222"]);
+    expect(deps.chat).not.toHaveBeenCalled();
+  });
+
+  it("/sessions reports the native app being down instead of throwing", async () => {
+    const deps = makeDeps({
+      sessions: vi.fn(async () => {
+        throw new Error("Couldn't reach the juancode app");
+      }),
+    });
+    await handleUpdate(msg(5, "/sessions"), allowed, deps);
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("⚠️"));
+  });
+
+  it("/observe <n> resolves against the last printed list and subscribes", async () => {
+    const deps = makeDeps();
+    const state = newBridgeState();
+    state.lastList.set(100, ["bbbb-2222", "aaaa-1111"]);
+    await handleUpdate(msg(5, "/observe 2"), allowed, deps, state);
+    expect(deps.observers.add).toHaveBeenCalledWith(100, "aaaa-1111");
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("fix tests"));
+  });
+
+  it("/observe with an id prefix works without a prior list", async () => {
+    const deps = makeDeps();
+    await handleUpdate(msg(5, "/observe bbbb"), allowed, deps);
+    expect(deps.observers.add).toHaveBeenCalledWith(100, "bbbb-2222");
+  });
+
+  it("/observe with no match explains itself", async () => {
+    const deps = makeDeps();
+    await handleUpdate(msg(5, "/observe zzz"), allowed, deps);
+    expect(deps.observers.add).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("No session matches"));
+  });
+
+  it("/unobserve with no arg drops every subscription", async () => {
+    const deps = makeDeps({
+      observers: {
+        list: vi.fn(async () => ["aaaa-1111", "bbbb-2222"]),
+        add: vi.fn(async () => {}),
+        remove: vi.fn(async () => 2),
+        chatsFor: vi.fn(async () => []),
+      },
+    });
+    await handleUpdate(msg(5, "/unobserve"), allowed, deps);
+    expect(deps.observers.remove).toHaveBeenCalledWith(100);
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("2 session(s)"));
+  });
+
+  it("/status shows observed sessions and flags gone ones", async () => {
+    const deps = makeDeps({
+      observers: {
+        list: vi.fn(async () => ["aaaa-1111", "dead-9999"]),
+        add: vi.fn(async () => {}),
+        remove: vi.fn(async () => 1),
+        chatsFor: vi.fn(async () => []),
+      },
+    });
+    await handleUpdate(msg(5, "/status"), allowed, deps);
+    const [, text, opts] = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(text).toContain("fix tests");
+    expect(text).toContain("gone");
+    expect(opts.keyboard[0]).toHaveLength(2);
+  });
+
+  it("observe button press subscribes and acks the callback", async () => {
+    const deps = makeDeps();
+    const update: TgUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 5 },
+        message: { message_id: 3, chat: { id: 100 } },
+        data: "o:aaaa-1111",
+      },
+    };
+    await handleUpdate(update, allowed, deps);
+    expect(deps.observers.add).toHaveBeenCalledWith(100, "aaaa-1111");
+    expect(deps.answerCallback).toHaveBeenCalledWith("cb1", expect.stringContaining("Observing"));
+  });
+
+  it("callback from a non-allowed user is acked but ignored", async () => {
+    const deps = makeDeps();
+    const update: TgUpdate = {
+      update_id: 1,
+      callback_query: {
+        id: "cb1",
+        from: { id: 999 },
+        message: { message_id: 3, chat: { id: 100 } },
+        data: "o:aaaa-1111",
+      },
+    };
+    await handleUpdate(update, allowed, deps);
+    expect(deps.observers.add).not.toHaveBeenCalled();
+    expect(deps.answerCallback).toHaveBeenCalledWith("cb1");
+  });
+});
+
+describe("reply-to-notification routing", () => {
+  const allowed = new Set([5]);
+  const replyMsg = (text: string, replyTo: number): TgUpdate => ({
+    update_id: 1,
+    message: {
+      message_id: 8,
+      chat: { id: 100 },
+      from: { id: 5 },
+      text,
+      reply_to_message: { message_id: replyTo },
+    },
+  });
+
+  it("delivers straight into the session when it is not busy, and confirms", async () => {
+    const deps = makeDeps({
+      outbound: {
+        record: vi.fn(async () => {}),
+        lookup: vi.fn(async () => ({ sessionId: "aaaa-1111", title: "fix tests" })),
+      },
+    });
+    await handleUpdate(replyMsg("yes, option 2", 33), allowed, deps);
+    expect(deps.deliver).toHaveBeenCalledWith("aaaa-1111", "yes, option 2");
+    expect(deps.queue).not.toHaveBeenCalled();
+    expect(deps.chat).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("✅ Sent to “fix tests”"));
+    // The confirmation itself is recorded so replying to it chains.
+    expect(deps.outbound.record).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 100, messageId: 900, sessionId: "aaaa-1111" }),
+    );
+  });
+
+  it("queues instead when the session is busy", async () => {
+    const deps = makeDeps({
+      outbound: {
+        record: vi.fn(async () => {}),
+        lookup: vi.fn(async () => ({ sessionId: "aaaa-1111", title: "fix tests" })),
+      },
+    });
+    const state = newBridgeState();
+    state.activity.set("aaaa-1111", "busy");
+    await handleUpdate(replyMsg("also do X", 33), allowed, deps, state);
+    expect(deps.queue).toHaveBeenCalledWith("aaaa-1111", ["also do X"]);
+    expect(deps.deliver).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("📥 Queued"));
+  });
+
+  it("falls back to the Oracle chat when the replied-to message is not ours", async () => {
+    const deps = makeDeps();
+    await handleUpdate(replyMsg("hello", 12345), allowed, deps);
+    expect(deps.deliver).not.toHaveBeenCalled();
+    expect(deps.chat).toHaveBeenCalledWith("hello", null);
+  });
+
+  it("reports a delivery failure instead of throwing", async () => {
+    const deps = makeDeps({
+      outbound: {
+        record: vi.fn(async () => {}),
+        lookup: vi.fn(async () => ({ sessionId: "aaaa-1111", title: "fix tests" })),
+      },
+      deliver: vi.fn(async () => {
+        throw new Error("native app is down");
+      }),
+    });
+    await handleUpdate(replyMsg("yes", 33), allowed, deps);
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("⚠️ Couldn't deliver"));
+    expect(deps.chat).not.toHaveBeenCalled();
+  });
+});
+
+describe("notifySessionEvent", () => {
+  const observers = (chats: number[]) => ({
+    list: vi.fn(async () => [] as string[]),
+    add: vi.fn(async () => {}),
+    remove: vi.fn(async () => 1),
+    chatsFor: vi.fn(async () => chats),
+  });
+
+  it("notifies observer chats on a needs-input transition and records the outbound ref", async () => {
+    const deps = makeDeps({ observers: observers([100, 200]) });
+    const state = newBridgeState();
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "waiting_input", notify: true },
+      deps,
+      state,
+    );
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(2);
+    expect(sends[0]![1]).toContain("🟡 fix tests — juancode");
+    expect(sends[0]![1]).toContain("needs your input");
+    expect(deps.outbound.record).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 100, messageId: 900, sessionId: "aaaa-1111" }),
+    );
+    expect(state.activity.get("aaaa-1111")).toBe("waiting_input");
+  });
+
+  it("stays silent on non-notify transitions but still tracks activity", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    await notifySessionEvent({ sessionId: "aaaa-1111", state: "busy", notify: false }, deps, state);
+    expect(deps.send).not.toHaveBeenCalled();
+    expect(state.activity.get("aaaa-1111")).toBe("busy");
+  });
+
+  it("stays silent when nobody observes the session", async () => {
+    const deps = makeDeps();
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "waiting_input", notify: true },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).not.toHaveBeenCalled();
+  });
+
+  it("de-dupes an identical consecutive notification per chat, and resets on a new kind", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    const waiting = { sessionId: "aaaa-1111", state: "waiting_input" as const, notify: true };
+    await notifySessionEvent(waiting, deps, state);
+    await notifySessionEvent(waiting, deps, state);
+    expect(deps.send).toHaveBeenCalledTimes(1);
+    await notifySessionEvent({ sessionId: "aaaa-1111", state: "idle", notify: true }, deps, state);
+    expect(deps.send).toHaveBeenCalledTimes(2);
+    await notifySessionEvent(waiting, deps, state);
+    expect(deps.send).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back to the id slice when the native list is unreachable", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      sessions: vi.fn(async () => {
+        throw new Error("down");
+      }),
+    });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("aaaa-111"));
   });
 });
