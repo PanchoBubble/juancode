@@ -10,6 +10,7 @@
   "packageManager": "pnpm@10.24.0",
   "scripts": {
     "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "loose": "node scripts/worktree-status.mjs",
     "dev:server": "pnpm --filter @juancode/server dev",
     "dev:web": "pnpm --filter @juancode/web dev",
     "build": "pnpm --filter \"./apps/*\" build",
