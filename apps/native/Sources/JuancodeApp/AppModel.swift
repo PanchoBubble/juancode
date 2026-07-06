@@ -420,9 +420,10 @@ final class AppModel {
     /// While on, hold a power assertion that blocks the Mac from idle-sleeping, so a
     /// long-running prompt isn't cut off when you step away (the app already opts out
     /// of App Nap in `AppDelegate`, but that variant still permits idle system sleep —
-    /// this is the stronger, user-controlled version). Persisted; off by default.
-    /// Toggle from the View menu (⌃⇧A).
-    var keepAwake: Bool = UserDefaults.standard.bool(forKey: keepAwakeDefaultsKey) {
+    /// this is the stronger, user-controlled version). Persisted; on by default so a
+    /// walked-away Mac never idle-sleeps mid-prompt unless you opt out.
+    /// Toggle from the top toolbar (cup, next to the bell) or the View menu (⌃⇧A).
+    var keepAwake: Bool = (UserDefaults.standard.object(forKey: keepAwakeDefaultsKey) as? Bool) ?? true {
         didSet {
             UserDefaults.standard.set(keepAwake, forKey: keepAwakeDefaultsKey)
             applyKeepAwake()
@@ -2341,6 +2342,19 @@ final class AppModel {
         if let wt = meta?.worktreePath {
             Task { try? await removeWorktree(wt) }
         }
+    }
+
+    /// Force-terminate a session's running agent (SIGTERM then SIGKILL via the
+    /// pty) while KEEPING the session record, scrollback, and any worktree so it
+    /// can be inspected afterwards — the non-destructive counterpart to
+    /// `delete(_:)`/`closeSessions(_:)`. Added for stuck/frozen sessions
+    /// (juancode-101), e.g. a dispatched ticket whose prompt never submitted.
+    /// No-op if the session isn't live. The process exit drives status → .exited
+    /// through the normal `handleExit` path.
+    func killSession(_ id: String) {
+        guard let session = appState.registry.get(id) else { return }
+        session.kill()
+        refresh()
     }
 
     /// Close (kill + delete) every given session in one pass — the per-project

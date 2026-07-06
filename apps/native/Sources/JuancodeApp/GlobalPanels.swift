@@ -640,6 +640,8 @@ private struct SessionHealthRow: View {
     @Environment(AppModel.self) private var model
     let report: SessionHealthReport
     let dismiss: () -> Void
+    /// Pending "kill this stuck agent" confirmation (juancode-101).
+    @State private var confirmingKill = false
 
     /// The persisted meta for this session, for its title + folder.
     private var meta: SessionMeta? { model.sessions.first { $0.id == report.id } }
@@ -679,6 +681,15 @@ private struct SessionHealthRow: View {
                           : "Try to recover and resume this session")
                     .clickCursor()
                 }
+                // A stale session is live but stuck (busy, no output) — offer a
+                // direct force-terminate so it doesn't have to be hunted down in
+                // the sidebar (juancode-101).
+                if report.state == .stale {
+                    Button("Kill") { confirmingKill = true }
+                        .buttonStyle(.borderless).font(.system(size: 11))
+                        .help("Force-terminate this stuck agent (keeps the session so you can inspect it)")
+                        .clickCursor()
+                }
                 Button("Go to session") { dismiss(); model.selection = report.id }
                     .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
                 Button("Dismiss") { model.dismissHealth(report.id) }
@@ -688,6 +699,15 @@ private struct SessionHealthRow: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
+        .confirmationDialog(
+            "Kill the agent in \(meta?.title ?? report.id)?",
+            isPresented: $confirmingKill, titleVisibility: .visible
+        ) {
+            Button("Kill Agent", role: .destructive) { model.killSession(report.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Stops the running agent immediately. The session and its output are kept so you can inspect what happened.")
+        }
     }
 
     private var reason: String {

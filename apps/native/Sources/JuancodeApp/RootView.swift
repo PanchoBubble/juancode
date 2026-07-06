@@ -41,6 +41,18 @@ struct RootView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 NotificationsBell()
+                // Keep Awake indicator + quick toggle, sitting next to the bell (also on
+                // View menu, ⌃⇧A). Filled + tinted while the idle-sleep assertion is held;
+                // dimmed cup when off — so it's clear at a glance whether sessions are
+                // protected from idle sleep. On by default (see AppModel.keepAwake).
+                Button { model.keepAwake.toggle() } label: {
+                    Label("Keep Awake", systemImage: model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                }
+                .foregroundStyle(model.keepAwake ? Color.accentColor : Color.secondary)
+                .help(model.keepAwake
+                      ? "Keep Awake is on — the Mac won't idle-sleep. Click to turn off (⌃⇧A)"
+                      : "Keep Awake is off — click to stop the Mac idle-sleeping while sessions run (⌃⇧A)")
+                .clickCursor()
                 Button { model.showingTrackedPrs = true } label: {
                     Label("Tracked PRs", systemImage: "checklist")
                 }
@@ -370,6 +382,8 @@ struct SidebarView: View {
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
+    /// Pending "kill the running agent" confirmation (juancode-101).
+    @State private var confirmingKill: SessionMeta?
     /// Whether the full-text transcript search sheet is open (juancode-wx9).
     @State private var showingSearch = false
     /// Whether the auth & MCP status sheet is open (juancode-daw).
@@ -503,6 +517,21 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var model = model
         return VStack(spacing: 0) {
+            // Persistent "add a project" entry point pinned to the top of the left
+            // panel, above the filter and the collapsible session list — so starting
+            // a session in a new folder (which is how a folder becomes a project) is
+            // always one obvious click away, not buried at the bottom.
+            Button { model.showingNewSession = true } label: {
+                Label("New project…", systemImage: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
+            .help("Start a session in any folder — it appears here as a project")
             TextField("Filter sessions…", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12))
@@ -588,21 +617,6 @@ struct SidebarView: View {
                 withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
             }
             }
-            Divider()
-            // Always-visible "add a project" entry point: opens the New Session
-            // sheet (its Choose… picker is how a folder becomes a sidebar project),
-            // so adding a project doesn't depend on the toolbar "+" or a shortcut.
-            Button { model.showingNewSession = true } label: {
-                Label("New project…", systemImage: "plus")
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .clickCursor()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .help("Start a session in any folder — it appears here as a project")
             if let total = totalUsage, let label = total.badgeLabel {
                 Divider()
                 // Colour + budget progress when a cost budget is set (juancode-qoc):
@@ -668,20 +682,6 @@ struct SidebarView: View {
                     .clickCursor()
             }
             ToolbarItem {
-                // Visible Keep Awake indicator + quick toggle (also on View menu, ⌃⇧A).
-                // Filled + tinted while the idle-sleep assertion is held; dimmed cup
-                // when off. So you can always tell at a glance whether sessions are
-                // protected from idle sleep.
-                Button { model.keepAwake.toggle() } label: {
-                    Image(systemName: model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
-                        .foregroundStyle(model.keepAwake ? Color.accentColor : Color.secondary)
-                }
-                .help(model.keepAwake
-                      ? "Keep Awake is on — the Mac won't idle-sleep. Click to turn off (⌃⇧A)"
-                      : "Keep Awake is off — click to stop the Mac idle-sleeping while sessions run (⌃⇧A)")
-                .clickCursor()
-            }
-            ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
                     .clickCursor()
@@ -704,6 +704,22 @@ struct SidebarView: View {
                 if let target = renaming { model.rename(target.id, to: renameText) }
                 renaming = nil
             }
+        }
+        .confirmationDialog(
+            confirmingKill.map { "Kill the agent in \($0.title)?" } ?? "Kill agent?",
+            isPresented: Binding(
+                get: { confirmingKill != nil },
+                set: { if !$0 { confirmingKill = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Kill Agent", role: .destructive) {
+                if let target = confirmingKill { model.killSession(target.id) }
+                confirmingKill = nil
+            }
+            Button("Cancel", role: .cancel) { confirmingKill = nil }
+        } message: {
+            Text("Stops the running agent immediately. The session, its output, and any worktree are kept so you can inspect what happened.")
         }
         .perfTrackBody()
     }
@@ -831,6 +847,11 @@ struct SidebarView: View {
                 Button("Untrack issue \(trackedIssue.identifier)") { model.untrackIssue(trackedIssue.id) }
             }
             Divider()
+            // Force-terminate a still-running agent without deleting the session,
+            // so a stuck/frozen one can be stopped and then inspected (juancode-101).
+            if model.isLive(meta.id) {
+                Button("Kill Agent", role: .destructive) { confirmingKill = meta }
+            }
             Button("Delete", role: .destructive) { model.delete(meta.id) }
         }
     }
@@ -888,16 +909,16 @@ private struct FolderHeader: View {
         return (main, worktrees)
     }
 
-    /// Tooltip for the main-checkout badge: what exactly is at risk there.
-    private func mainRiskHelp(_ r: WorkAtRisk) -> String {
-        var parts: [String] = []
-        if r.dirtyFiles > 0 { parts.append("\(r.dirtyFiles) uncommitted file(s)") }
-        if r.ahead > 0 {
-            parts.append("\(r.ahead) unpushed commit(s)\(r.noUpstream ? " (no upstream)" : "")")
-        }
-        let what = parts.joined(separator: ", ")
+    /// Tooltip for the main-checkout uncommitted badge.
+    private func mainDirtyHelp(_ r: WorkAtRisk) -> String {
         let branch = r.branch.map { " on \($0)" } ?? ""
-        return "Main checkout: \(what)\(branch)"
+        return "Main checkout: \(r.dirtyFiles) uncommitted file(s)\(branch)"
+    }
+
+    /// Tooltip for the main-checkout unpushed badge.
+    private func mainAheadHelp(_ r: WorkAtRisk) -> String {
+        let branch = r.branch.map { " on \($0)" } ?? ""
+        return "Main checkout: \(r.ahead) unpushed commit(s)\(r.noUpstream ? " (no upstream)" : "")\(branch)"
     }
 
     /// Own sessions we can close in bulk. Discovered/external sessions aren't ours
@@ -1033,18 +1054,32 @@ private struct FolderHeader: View {
                         .help("\(unreadCount) session(s) here with unread activity")
                     }
                     // Work-at-risk roll-up per checkout, not per session (juancode-64z):
-                    // yellow pencil = the main checkout itself holds uncommitted/unpushed
-                    // work (count: dirty files + unpushed commits); orange warning = how
-                    // many distinct WORKTREES hold at-risk work.
+                    // the main checkout's uncommitted and unpushed work get separate
+                    // badges (yellow pencil = dirty files, blue arrow.up = unpushed
+                    // commits) so the two states read distinctly instead of summing into
+                    // one ambiguous number; orange warning = how many distinct WORKTREES
+                    // hold at-risk work.
                     if let main = risk.main {
-                        HStack(spacing: 3) {
-                            Image(systemName: "pencil.circle.fill")
-                                .font(.system(size: 9))
-                            Text("\(main.dirtyFiles + main.ahead)")
-                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        if main.dirtyFiles > 0 {
+                            HStack(spacing: 3) {
+                                Image(systemName: "pencil.circle.fill")
+                                    .font(.system(size: 9))
+                                Text("\(main.dirtyFiles)")
+                                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            }
+                            .foregroundStyle(.yellow)
+                            .help(mainDirtyHelp(main))
                         }
-                        .foregroundStyle(.yellow)
-                        .help(mainRiskHelp(main))
+                        if main.ahead > 0 {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.circle.fill")
+                                    .font(.system(size: 9))
+                                Text("\(main.ahead)")
+                                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            }
+                            .foregroundStyle(.blue)
+                            .help(mainAheadHelp(main))
+                        }
                     }
                     if risk.worktrees > 0 {
                         HStack(spacing: 3) {
