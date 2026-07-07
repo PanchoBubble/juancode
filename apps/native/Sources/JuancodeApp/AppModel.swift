@@ -191,10 +191,32 @@ final class AppModel {
     /// owns it / it's unclaimed.
     func remoteGridOwner(_ id: String) -> String? { remoteGridOwners[id] }
 
+    /// sessionId → active "restored from disk" banner phase (juancode-mya), or absent
+    /// when hidden. Keyed by id so switching sessions never leaks one pane's banner
+    /// onto another; the SwiftUI overlay reads only the visible pane's entry.
+    private(set) var restoredBanners: [String: SessionRestoredBanner.Phase] = [:]
+
+    /// Sessions persisted (and not live) at app launch — the disk-restore candidates
+    /// whose first auto-revive this run gets the banner. A cold restart empties the
+    /// pty registry, so this is every persisted session that isn't already running.
+    private let launchRestoredIds: Set<String>
+
+    /// Restore candidates already revived once this run, so re-opening one within the
+    /// same run (after it exits again, say) doesn't re-announce a restore.
+    private var revivedRestoresThisRun: Set<String> = []
+
+    /// Live-output subscription cancels for restored panes awaiting their first live
+    /// byte — the auto-dismiss hook for the `.resuming` banner.
+    private var restoreOutputCancels: [String: () -> Void] = [:]
+
     init(appState: AppState, degradedReason: String? = nil, corruptDbPath: String? = nil) {
         self.appState = appState
         self.degradedReason = degradedReason
         self.corruptDbPath = corruptDbPath
+        // Snapshot the disk-restore candidates before anything revives: persisted
+        // sessions not already live in the (post-restart, usually empty) registry.
+        let liveAtLaunch = Set(appState.registry.all().map(\.id))
+        self.launchRestoredIds = Set(appState.store.list().map(\.id)).subtracting(liveAtLaunch)
         appState.registry.onCreate { [weak self] s in
             Task { @MainActor in self?.watch(s); self?.refresh() }
         }
@@ -1656,6 +1678,74 @@ final class AppModel {
         meta.status = .exited
         appState.store.update(meta, scrollback: priorScrollback)
         refresh()
+    }
+
+    // MARK: - Session-restored banner (juancode-mya)
+
+    /// The "restored from disk" banner phase for `id`, or nil when hidden.
+    func restoredBannerPhase(_ id: String) -> SessionRestoredBanner.Phase? { restoredBanners[id] }
+
+    /// Auto-revive a pane opened from the sidebar, announcing a "restored from disk"
+    /// banner when this is the first revival of a session that was persisted (and not
+    /// live) at launch. The banner distinguishes a booting resume (`.resuming`, which
+    /// auto-dismisses on the first live byte or after a short grace) from a pane that
+    /// couldn't be resumed (`.unresumable`, dismissible with its X). Non-restore opens
+    /// (already live, or revived earlier this run) just fall through to `reactivate`.
+    func openPersistedPane(_ id: String) async {
+        guard !isLive(id) else { return }
+        let announce = launchRestoredIds.contains(id) && !revivedRestoresThisRun.contains(id)
+        if announce {
+            revivedRestoresThisRun.insert(id)
+            applyRestoredBannerEvent(id, .restoreBegan)
+        }
+        let resumed = await reactivate(id)
+        guard announce else { return }
+        if resumed {
+            watchFirstLiveOutput(id)
+            scheduleRestoreGrace(id)
+        } else {
+            applyRestoredBannerEvent(id, .resumeFailed)
+        }
+    }
+
+    /// Dismiss the restored banner for `id` (the overlay's X — the only way to clear
+    /// the replay-only `.unresumable` case).
+    func dismissRestoredBanner(_ id: String) { applyRestoredBannerEvent(id, .dismissed) }
+
+    /// Fold an event through the pure banner machine and reflect the result: a nil
+    /// phase clears the entry and tears down any pending live-output watch.
+    private func applyRestoredBannerEvent(_ id: String, _ event: SessionRestoredBanner.Event) {
+        let next = SessionRestoredBanner.reduce(restoredBanners[id], on: event)
+        if let next {
+            restoredBanners[id] = next
+        } else {
+            restoredBanners.removeValue(forKey: id)
+            cancelRestoreOutputWatch(id)
+        }
+    }
+
+    /// Auto-dismiss the `.resuming` banner on the first LIVE (non-replay) pty byte —
+    /// the moment the resumed CLI proves it's driving the pane, not just showing
+    /// replayed history.
+    private func watchFirstLiveOutput(_ id: String) {
+        guard let session = liveSession(id) else { return }
+        cancelRestoreOutputWatch(id)
+        restoreOutputCancels[id] = session.subscribeOutput(replay: false) { [weak self] _ in
+            Task { @MainActor in self?.applyRestoredBannerEvent(id, .liveOutput) }
+        }
+    }
+
+    private func cancelRestoreOutputWatch(_ id: String) {
+        restoreOutputCancels.removeValue(forKey: id)?()
+    }
+
+    /// Backstop the live-output dismiss: a resumed-but-idle agent may emit nothing, so
+    /// fold the banner away after the grace window regardless.
+    private func scheduleRestoreGrace(_ id: String) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(SessionRestoredBanner.resumeGraceSeconds))
+            self?.applyRestoredBannerEvent(id, .graceElapsed)
+        }
     }
 
     /// Rename a session. Trims the input; an empty name is ignored. Updates the

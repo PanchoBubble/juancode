@@ -1984,6 +1984,7 @@ struct SessionContainer: View {
                     // the visible pane container, not the pooled panes inside `terminal`.
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
                     .overlay(alignment: .topTrailing) { remoteDriveBadge }
+                    .overlay(alignment: .topLeading) { sessionRestoredBadge }
                     // In-pane find bar (⌘F, juancode-972) — overlays the visible
                     // session's pane; never reflows the pty grid.
                     .overlay(alignment: .top) {
@@ -2053,11 +2054,12 @@ struct SessionContainer: View {
         .perfTrackBody()
         // Opening an exited session auto-revives it — no manual "Reactivate" click.
         // Fires once per id change (the container itself is no longer keyed);
-        // `reactivate` no-ops if already live and degrades to replay if it can't
-        // resume. The pane-pool note backstops the synchronous one in the
+        // `openPersistedPane` no-ops if already live, reactivates otherwise, and
+        // announces a "restored from disk" banner (juancode-mya) on a session's first
+        // revival this run. The pane-pool note backstops the synchronous one in the
         // `selection` setter for opens that reach here by another route.
         .task(id: meta.id) {
-            if !model.isLive(meta.id) { await model.reactivate(meta.id) }
+            await model.openPersistedPane(meta.id)
             model.noteLivePaneVisible(meta.id)
         }
         // The live Session OBJECT behind the selected id can change while we're
@@ -2106,6 +2108,20 @@ struct SessionContainer: View {
         if model.isLive(meta.id), let owner = model.remoteGridOwner(meta.id) {
             RemoteDriveOverlay(owner: owner) { model.resyncTerminalGeometry() }
                 .id(owner)
+                .padding(10)
+        }
+    }
+
+    /// "Restored from disk" banner (juancode-mya): shown top-leading over a pane a
+    /// cold launch replayed from persisted scrollback, so a frozen-looking wall of
+    /// old output is self-explaining. Keyed by session id so switching panes shows
+    /// the new one's banner (or none). Stacks beside the top-trailing remote-drive
+    /// badge instead of overlapping it.
+    @ViewBuilder
+    private var sessionRestoredBadge: some View {
+        if let phase = model.restoredBannerPhase(meta.id) {
+            SessionRestoredOverlay(phase: phase) { model.dismissRestoredBanner(meta.id) }
+                .id(meta.id)
                 .padding(10)
         }
     }
