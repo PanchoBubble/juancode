@@ -40,4 +40,18 @@ import Testing
     @Test func emptySignatureNeverMatches() {
         #expect(!InitialPromptDelivery.region("anything at all", contains: ""))
     }
+
+    @Test func detectsCollapsedPasteChip() {
+        // Claude collapses a large/multi-line paste into a chip; the literal first
+        // line never renders, so the chip is the only proof the paste landed.
+        let box = "╭───────────────╮\n│ > [Pasted text #1 +29 lines]  │\n╰───────────────╯"
+        #expect(InitialPromptDelivery.regionShowsCollapsedPaste(box))
+        let sig = InitialPromptDelivery.signature(for: "Implement the new billing module")
+        #expect(!InitialPromptDelivery.region(box, contains: sig))
+    }
+
+    @Test func ordinaryInputBoxHasNoPasteChip() {
+        let box = "╭───────────────╮\n│ > Fix the login bug        │\n╰───────────────╯"
+        #expect(!InitialPromptDelivery.regionShowsCollapsedPaste(box))
+    }
 }

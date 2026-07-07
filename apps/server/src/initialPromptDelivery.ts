@@ -32,6 +32,17 @@ export function regionContains(screenRegion: string, signature: string): boolean
 }
 
 /**
+ * Claude collapses a large or multi-line bracketed paste into a placeholder chip
+ * (`[Pasted text #1 +29 lines]`) instead of echoing the literal text, so the prompt
+ * signature never appears on screen even though the paste is sitting in the input
+ * box. Detect that chip so delivery can treat the paste as landed (and, on submit,
+ * wait for the chip itself to clear). See {@link Session.autoSubmit}.
+ */
+export function regionShowsCollapsedPaste(screenRegion: string): boolean {
+  return normalize(screenRegion).includes("pasted text");
+}
+
+/**
  * Lowercase and collapse every run of whitespace (incl. newlines) to a single
  * space, trimming the ends — the canonical form both sides are compared in.
  */

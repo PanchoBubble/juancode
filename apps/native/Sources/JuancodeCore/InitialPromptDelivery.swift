@@ -33,6 +33,16 @@ public enum InitialPromptDelivery {
         return normalize(screenRegion).contains(sig)
     }
 
+    /// Claude collapses a large or multi-line bracketed paste into a placeholder
+    /// chip (`[Pasted text #1 +29 lines]`) instead of echoing the literal text, so
+    /// the prompt `signature` never appears on screen even though the paste is
+    /// sitting in the input box. Detect that chip so delivery can treat the paste as
+    /// landed (and, on submit, wait for the chip itself to clear). See
+    /// `Session.autoSubmit`.
+    public static func regionShowsCollapsedPaste(_ screenRegion: String) -> Bool {
+        normalize(screenRegion).contains("pasted text")
+    }
+
     /// Lowercase and collapse every run of whitespace (incl. newlines) to a single
     /// space, trimming the ends — the canonical form both sides are compared in.
     static func normalize(_ s: String) -> String {

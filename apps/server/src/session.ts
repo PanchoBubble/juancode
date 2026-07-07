@@ -15,7 +15,11 @@ import { GridArbiter } from "./gridArbiter.ts";
 import { notificationGate } from "./notificationGate.ts";
 import { messageQueue } from "./messageQueue.ts";
 import { TranscriptTail } from "./structuredTranscript.ts";
-import { promptSignature, regionContains } from "./initialPromptDelivery.ts";
+import {
+  promptSignature,
+  regionContains,
+  regionShowsCollapsedPaste,
+} from "./initialPromptDelivery.ts";
 import type {
   ProviderId,
   ScreenRow,
@@ -342,7 +346,8 @@ export class Session {
       landed = await this.waitUntil(
         SEED.landMs,
         SEED.pollMs,
-        () => this.isBusy() || this.inputBoxContains(signature),
+        () =>
+          this.isBusy() || this.inputBoxContains(signature) || this.inputBoxShowsCollapsedPaste(),
       );
       if (this.isBusy()) return { ok: true };
       if (landed) break;
@@ -362,7 +367,9 @@ export class Session {
       const submitted = await this.waitUntil(
         SEED.submitMs,
         SEED.pollMs,
-        () => this.isBusy() || !this.inputBoxContains(signature),
+        () =>
+          this.isBusy() ||
+          (!this.inputBoxContains(signature) && !this.inputBoxShowsCollapsedPaste()),
       );
       if (submitted) return { ok: true };
     }
@@ -381,6 +388,15 @@ export class Session {
   private inputBoxContains(signature: string): boolean {
     if (!signature) return true; // nothing distinctive to verify
     return regionContains(this.detector.inputRegionSnapshot(SEED.inputRows), signature);
+  }
+
+  /**
+   * True if the input-box region shows a collapsed-paste chip (Claude renders one
+   * for a large/multi-line paste in place of the literal text), which the seed loop
+   * treats as the paste having landed. See {@link regionShowsCollapsedPaste}.
+   */
+  private inputBoxShowsCollapsedPaste(): boolean {
+    return regionShowsCollapsedPaste(this.detector.inputRegionSnapshot(SEED.inputRows));
   }
 
   /**

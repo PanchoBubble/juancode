@@ -763,7 +763,7 @@ final class AppModel {
 
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
-                isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true,
+                isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
                 worktreeName: String? = nil) async -> Session? {
         do {
@@ -857,7 +857,9 @@ final class AppModel {
 
     /// Start a new session directly in a given folder + provider, bypassing the
     /// NewSessionView sheet. Mirrors the web sidebar's per-folder "+" agent menu
-    /// (accept-all off, no worktree). Selects the new session on success.
+    /// (accept-all off, no worktree). Created in the background — `create` no longer
+    /// steals focus by default; the session appears in the sidebar without switching
+    /// the grid to it.
     func createInFolder(provider: ProviderId, cwd: String) {
         Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false) }
     }

@@ -422,6 +422,7 @@ public final class Session: @unchecked Sendable {
             paste(trimmed)
             landed = await waitUntil(maxMs: Seed.landMs, pollMs: Seed.pollMs) {
                 self.activity == .busy || self.inputBoxContains(signature)
+                    || self.inputBoxShowsCollapsedPaste()
             }
             if activity == .busy { return .submitted }
             if landed { break }
@@ -438,7 +439,8 @@ public final class Session: @unchecked Sendable {
             guard isRunning else { return .failed(reason: "session exited before the prompt was submitted") }
             write("\r")
             let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
-                self.activity == .busy || !self.inputBoxContains(signature)
+                self.activity == .busy
+                    || (!self.inputBoxContains(signature) && !self.inputBoxShowsCollapsedPaste())
             }
             if submitted { return .submitted }
         }
@@ -452,6 +454,13 @@ public final class Session: @unchecked Sendable {
         guard !signature.isEmpty else { return true }
         return InitialPromptDelivery.region(detector.inputRegionSnapshot(rows: Seed.inputRows),
                                             contains: signature)
+    }
+
+    /// True if the input-box region shows a collapsed-paste chip (Claude renders one
+    /// for a large/multi-line paste in place of the literal text), which the seed
+    /// loop treats as the paste having landed. See `InitialPromptDelivery`.
+    private func inputBoxShowsCollapsedPaste() -> Bool {
+        InitialPromptDelivery.regionShowsCollapsedPaste(detector.inputRegionSnapshot(rows: Seed.inputRows))
     }
 
     /// Poll until the rendered screen stops changing (two identical, non-empty
