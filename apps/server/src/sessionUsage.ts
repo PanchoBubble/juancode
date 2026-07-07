@@ -8,23 +8,23 @@ import {
 import type { ProviderId, SessionUsage } from "./protocol.ts";
 
 /**
- * Derives per-session token usage (and an estimated cost) from the CLI's own
- * transcript files — the same robust source `sessionTitle.ts` reads, rather
- * than scraping the ANSI TUI stream.
+ * Derives per-session token usage (and a real cost, when the CLI reports one)
+ * from the CLI's own transcript files — the same robust source
+ * `sessionTitle.ts` reads, rather than scraping the ANSI TUI stream.
  *
  *   - Claude writes one `assistant` record per API turn into
  *     `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`, each carrying a
  *     `message.usage` block. The same turn can be logged more than once, so we
  *     dedup by `message.id` + `requestId` (the key `ccusage` uses) before
- *     summing. Cost is summed per message using that message's model.
+ *     summing.
  *   - Codex emits a running `token_count` event whose `info.total_token_usage`
  *     is cumulative — we just take the last one.
  *
- * Cost is a best-effort *estimate* from published per-MTok rates (below). For a
- * model we don't have a price for — or Codex, which doesn't expose a per-token
- * price (and is usually a subscription) — `costUsd` is null and only tokens are
- * shown. Subscription users pay nothing per token regardless, so the figure is
- * labelled an estimate in the UI.
+ * Cost is never estimated. We only report a dollar figure when the transcript
+ * itself carries a real per-turn cost (`costUSD`); otherwise `costUsd` is null
+ * and only tokens are shown. On a subscription plan the CLI reports no per-turn
+ * cost, so cost simply doesn't appear — which is the intent: show cost only
+ * when there's a real cost.
  *
  * Returns null when no usage is available yet (e.g. before the first turn).
  */
@@ -33,33 +33,6 @@ import type { ProviderId, SessionUsage } from "./protocol.ts";
 export interface UsageRoots {
   claudeProjects?: string;
   codexSessions?: string;
-}
-
-/** Published input/output price per **million** tokens, by model-id match. */
-interface ModelPrice {
-  /** Matches against the transcript's model id (substring/prefix). */
-  match: RegExp;
-  inputPerMTok: number;
-  outputPerMTok: number;
-}
-
-/**
- * Current Claude pricing (USD per 1M tokens). Cache reads bill at ~0.1× input
- * and cache writes at ~1.25× input (5-minute TTL, the default), applied below.
- * Ordered most-specific first; the first match wins.
- */
-const MODEL_PRICES: readonly ModelPrice[] = [
-  { match: /opus/i, inputPerMTok: 5, outputPerMTok: 25 },
-  { match: /sonnet/i, inputPerMTok: 3, outputPerMTok: 15 },
-  { match: /haiku/i, inputPerMTok: 1, outputPerMTok: 5 },
-  { match: /fable|mythos/i, inputPerMTok: 10, outputPerMTok: 50 },
-];
-
-const CACHE_READ_MULT = 0.1;
-const CACHE_WRITE_MULT = 1.25;
-
-function priceFor(model: string): ModelPrice | null {
-  return MODEL_PRICES.find((p) => p.match.test(model)) ?? null;
 }
 
 /**
@@ -74,10 +47,10 @@ const empty = (): SessionUsage => ({
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
   totalTokens: 0,
-  costUsd: 0,
+  costUsd: null,
 });
 
-/** Token usage + estimated cost for a Claude session, summed across messages. */
+/** Token usage (+ real cost, if the transcript reports one) for a Claude session. */
 export async function deriveClaudeUsage(
   cliSessionId: string,
   root: string = CLAUDE_PROJECTS,
@@ -93,9 +66,6 @@ export async function deriveClaudeUsage(
   const usage = empty();
   const seen = new Set<string>();
   let sawTurn = false;
-  // Stays true only while every priced turn had a known model; a `<synthetic>`
-  // (local, no API call) message contributes no tokens and no cost.
-  let costKnown = true;
 
   await forEachRecord(file, (rec) => {
     if (rec.type !== "assistant") return;
@@ -113,34 +83,21 @@ export async function deriveClaudeUsage(
     const model = msg?.model ?? "";
     if (model === "<synthetic>") return; // local message, not a billed API call
 
-    const input = u.input_tokens ?? 0;
-    const output = u.output_tokens ?? 0;
-    const cacheRead = u.cache_read_input_tokens ?? 0;
-    const cacheWrite = u.cache_creation_input_tokens ?? 0;
-
     sawTurn = true;
-    usage.inputTokens += input;
-    usage.outputTokens += output;
-    usage.cacheReadTokens += cacheRead;
-    usage.cacheWriteTokens += cacheWrite;
+    usage.inputTokens += u.input_tokens ?? 0;
+    usage.outputTokens += u.output_tokens ?? 0;
+    usage.cacheReadTokens += u.cache_read_input_tokens ?? 0;
+    usage.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
 
-    const price = priceFor(model);
-    if (price) {
-      usage.costUsd! +=
-        (input * price.inputPerMTok +
-          cacheRead * price.inputPerMTok * CACHE_READ_MULT +
-          cacheWrite * price.inputPerMTok * CACHE_WRITE_MULT +
-          output * price.outputPerMTok) /
-        1_000_000;
-    } else {
-      costKnown = false; // an un-priced model means the total is only partial
-    }
+    // Only a real cost the CLI wrote — never estimated. Absent on subscription
+    // plans, so cost stays null and only tokens are shown.
+    const cost = typeof rec.costUSD === "number" ? rec.costUSD : null;
+    if (cost != null) usage.costUsd = (usage.costUsd ?? 0) + cost;
   });
 
   if (!sawTurn) return null;
   usage.totalTokens =
     usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-  if (!costKnown) usage.costUsd = null;
   return usage;
 }
 

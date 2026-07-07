@@ -2,9 +2,9 @@ import type { SessionUsage } from "../protocol.ts";
 import { formatCost, formatTokens, usageTooltip } from "../lib/usage.ts";
 
 /**
- * Compact token (and estimated cost) readout for a session or an aggregate.
- * Renders nothing when there's no usage yet. The full per-bucket breakdown is
- * in the hover tooltip; cost is omitted when it can't be estimated (Codex).
+ * Compact token (and cost) readout for a session or an aggregate. Renders
+ * nothing when there's no usage yet. The full per-bucket breakdown is in the
+ * hover tooltip; cost is shown only when the CLI reported a real one.
  */
 export function UsageBadge({
   usage,

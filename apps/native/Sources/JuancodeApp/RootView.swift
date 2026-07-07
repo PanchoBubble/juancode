@@ -196,6 +196,75 @@ private struct WindowBackground: NSViewRepresentable {
     }
 }
 
+/// An `NSScrollView` that keeps its scroll wheel events to itself: within bounds it
+/// scrolls natively, but once pinned at the top/bottom it swallows the gesture instead
+/// of forwarding it up the responder chain to an enclosing scroll view. Nesting a
+/// plain SwiftUI `ScrollView` inside the sidebar `List` bubbled overscroll to the List,
+/// which yanked the whole sidebar ("pushes content in a weird way"). It also sizes
+/// itself: intrinsic height = content height, capped at `maxContentHeight`, so a short
+/// folder stays short and a long one scrolls internally.
+private final class ContainingScrollView: NSScrollView {
+    var maxContentHeight: CGFloat = 220 {
+        didSet { if maxContentHeight != oldValue { invalidateIntrinsicContentSize() } }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let contentHeight = documentView?.fittingSize.height ?? 0
+        return NSSize(width: NSView.noIntrinsicMetric,
+                      height: min(max(contentHeight, 0), maxContentHeight))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let doc = documentView else { super.scrollWheel(with: event); return }
+        let maxY = max(0, doc.frame.height - contentView.bounds.height)
+        // Content fits — nothing to scroll here, so swallow (no bounce, no bubble).
+        if maxY <= 0 { return }
+        let y = contentView.bounds.origin.y
+        let dy = event.scrollingDeltaY // > 0 scrolls toward the top (natural scrolling)
+        let atTop = y <= 0.5, atBottom = y >= maxY - 0.5
+        // Pinned at the edge the gesture pushes past: consume it so it can't scroll the
+        // parent List. Everything else scrolls natively via super.
+        if (atTop && dy > 0) || (atBottom && dy < 0) { return }
+        super.scrollWheel(with: event)
+    }
+}
+
+/// SwiftUI wrapper around `ContainingScrollView`, hosting arbitrary SwiftUI content.
+/// Height is driven by the content (capped at `maxHeight`), so `.frame` isn't needed.
+private struct ContainedScroll<Content: View>: NSViewRepresentable {
+    var maxHeight: CGFloat
+    @ViewBuilder var content: Content
+
+    func makeNSView(context: Context) -> ContainingScrollView {
+        let scroll = ContainingScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.drawsBackground = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        let hosting = NSHostingView(rootView: AnyView(content))
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = hosting
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+        ])
+        context.coordinator.hosting = hosting
+        scroll.maxContentHeight = maxHeight
+        return scroll
+    }
+
+    func updateNSView(_ nsView: ContainingScrollView, context: Context) {
+        context.coordinator.hosting?.rootView = AnyView(content)
+        nsView.maxContentHeight = maxHeight
+        nsView.invalidateIntrinsicContentSize()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var hosting: NSHostingView<AnyView>? }
+}
+
 /// Hidden bridge that installs the window-scoped keyboard monitor for vim-style
 /// sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm). The monitor must sit ahead
 /// of the terminal in the responder chain, which only an NSEvent local monitor can do.
@@ -766,8 +835,8 @@ struct SidebarView: View {
     @ViewBuilder
     private func scrollBox(_ sessions: [SessionMeta], cwd: String) -> some View {
         VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(spacing: 0) {
+            ContainedScroll(maxHeight: CGFloat(folderScrollMaxHeight)) {
+                VStack(spacing: 0) {
                     ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
                         // Match the List path's minimal inter-row hairline.
                         if index > 0 {
@@ -777,7 +846,6 @@ struct SidebarView: View {
                     }
                 }
             }
-            .frame(maxHeight: CGFloat(folderScrollMaxHeight))
             // Drag the divider down to grow the box / up to shrink it (persisted).
             DragResizeHandle(axis: .horizontal, value: $folderScrollMaxHeight,
                              min: 120, max: 800, invert: false)
@@ -1645,12 +1713,20 @@ struct SessionRow: View {
 
     @State private var hovering = false
 
+    /// The title renders at 13pt. A firstTextBaseline HStack pins non-text ornaments
+    /// to the title's baseline, which sits below the text's optical center — so a bare
+    /// dot reads as too low. Shifting each ornament up by half the title's cap height
+    /// re-centers it on the title line.
+    // nonisolated(unsafe): an immutable CGFloat computed once, read from the
+    // @Sendable alignment-guide closures.
+    nonisolated(unsafe) private static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
+
     var body: some View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             statusIndicator
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             VStack(alignment: .leading, spacing: 2) {
                 Text(meta.title).lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
@@ -1693,7 +1769,7 @@ struct SessionRow: View {
                 .font(.system(size: 9))
                 .foregroundStyle(.orange)
                 .help("Uncommitted or unpushed work in this worktree")
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
         if external, let onResume, hovering || selected {
             Button(action: onResume) {
@@ -1702,7 +1778,7 @@ struct SessionRow: View {
             .buttonStyle(.borderless)
             .help("From your terminal — resume in juancode")
             .clickCursor()
-            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
     }
 
@@ -1869,8 +1945,9 @@ struct SessionStateGlyph: View {
     }
 }
 
-/// Status-dot color for a session: busy = orange, waiting = amber, idle = quiet grey
-/// (deliberately not green — green is reserved for the done-unseen check, juancode-t9p),
+/// Status-dot color for a session: busy = orange, waiting = amber, live-but-idle =
+/// blue (reads as "running/ready" and stays clearly distinct from the faint grey of
+/// an exited session — green is reserved for the done-unseen check, juancode-t9p),
 /// exited = dimmer grey. Shared by the sidebar `SessionRow` and the Oracle dock's
 /// session rail (juancode-cwa) so the two stay visually in sync.
 func sessionDotColor(live: Bool, activity: SessionActivity?) -> Color {
@@ -1878,7 +1955,7 @@ func sessionDotColor(live: Bool, activity: SessionActivity?) -> Color {
     switch activity {
     case .busy: return .orange
     case .waitingInput: return .yellow
-    case .idle, .none: return .secondary.opacity(0.8)
+    case .idle, .none: return .blue
     }
 }
 

@@ -24,10 +24,13 @@ struct WorktreesSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmRemove: Worktree?
+    /// Pending "clean up all safe-to-delete worktrees" confirmation.
+    @State private var confirmCleanup = false
     /// Repo ids (main worktree paths) the user has collapsed; expanded by default.
     @State private var collapsed: Set<String> = []
 
     var body: some View {
+        let safe = model.safeToRemoveWorktrees
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Worktrees").font(.title3).bold()
@@ -35,6 +38,12 @@ struct WorktreesSheet: View {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
+                Button("Clean up") { confirmCleanup = true }
+                    .disabled(safe.isEmpty)
+                    .help(safe.isEmpty
+                          ? "No worktrees are safe to remove — the rest are in use or hold unsaved work"
+                          : "Remove \(safe.count) worktree(s) with no live session and no unsaved work")
+                    .clickCursor()
                 Button { model.loadWorktrees() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Rescan").clickCursor()
                 Button("Done") { dismiss() }.clickCursor()
@@ -56,6 +65,17 @@ struct WorktreesSheet: View {
         } message: {
             Text("This deletes the worktree directory — uncommitted changes there are lost. "
                 + "The branch is kept.\n\n\(confirmRemove?.path ?? "")")
+        }
+        .alert("Clean up worktrees?", isPresented: $confirmCleanup) {
+            Button("Cancel", role: .cancel) { confirmCleanup = false }
+            Button("Clean up", role: .destructive) {
+                model.cleanupSafeWorktrees()
+                confirmCleanup = false
+            }
+        } message: {
+            Text("Removes \(safe.count) worktree(s) with no live session and no uncommitted "
+                + "or unpushed work. Branches are kept. In-use and at-risk worktrees are left "
+                + "untouched.")
         }
     }
 

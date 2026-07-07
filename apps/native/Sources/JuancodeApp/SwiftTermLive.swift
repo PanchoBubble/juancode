@@ -58,6 +58,33 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
     }
 }
 
+/// Shift+Enter → drop a newline into the agent's prompt instead of submitting.
+///
+/// The claude/codex CLIs treat a backslash immediately followed by Enter as a soft
+/// newline (line continuation) rather than a submit, so we map Shift+Enter to exactly
+/// those bytes — `\` then CR — giving the familiar chat gesture. A window-level keyDown
+/// monitor sits ahead of the terminal surface (which would otherwise swallow the key);
+/// it only fires for the pane that is actually first responder, so each terminal routes
+/// to its own session and typing elsewhere is untouched.
+func installShiftEnterNewline(view: NSView, session: Session) -> Any? {
+    let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak view] keyCode, mods in
+        // Return (36) or keypad Enter (76), with Shift the only modifier held.
+        guard keyCode == 36 || keyCode == 76,
+              mods.intersection([.command, .control, .option, .shift]) == .shift,
+              let view, let window = view.window, window.isKeyWindow,
+              window.attachedSheet == nil, window.firstResponder === view
+        else { return false }
+        session.write("\\\r")
+        return true
+    }
+    return NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        let keyCode = event.keyCode
+        let mods = event.modifierFlags
+        let consumed = MainActor.assumeIsolated { handle(keyCode, mods) }
+        return consumed ? nil : event
+    }
+}
+
 /// Vim-style sidebar navigation + ⌃H/⌃L pane focus (juancode-vgm).
 ///
 /// The live terminal makes itself first responder and SwiftTerm swallows every
@@ -439,6 +466,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private weak var view: TerminalView?
         private var cancel: (() -> Void)?
         private var wheelMonitor: Any?
+        /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
+        private var shiftEnterMonitor: Any?
         private var resizeWork: DispatchWorkItem?
         /// Last (cols,rows) we pushed to the pty, so we never send a redundant
         /// SIGWINCH (which makes the agent's TUI repaint for no reason).
@@ -469,6 +498,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         @MainActor func attach(to tv: TerminalView) {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
+            shiftEnterMonitor = installShiftEnterNewline(view: tv, session: session)
             // Follow the global terminal font-zoom level (juancode-fry). SwiftTerm's
             // surface is live immediately (no lazy attach), so apply the current level now.
             baseFontPoints = Double(tv.font.pointSize)
@@ -611,6 +641,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+            if let m = shiftEnterMonitor { NSEvent.removeMonitor(m); shiftEnterMonitor = nil }
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil

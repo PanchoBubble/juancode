@@ -1,5 +1,7 @@
 # juancode
 
+> One code with Juancode
+
 A light web harness for running the **real** Claude Code and Codex CLIs from your
 browser — with all your MCP servers, auth, and slash commands intact.
 

@@ -2663,6 +2663,36 @@ final class AppModel {
         }
     }
 
+    /// Linked worktrees that are safe to remove in one sweep: not the main worktree,
+    /// not backing a live session, and holding no uncommitted/unpushed work per the
+    /// at-risk scan. These are the leftover `juancode/*` trees whose sessions are gone
+    /// and whose work is already committed and pushed.
+    var safeToRemoveWorktrees: [Worktree] {
+        worktreeGroups.flatMap { $0.children }.filter { wt in
+            !wt.main
+                && !worktreeInUse(wt.path)
+                && workAtRiskByPath[WorkAtRiskScan.normalize(wt.path)] == nil
+        }
+    }
+
+    /// Remove every safe-to-delete worktree in one batched pass, then refresh. The
+    /// "clean up" affordance in the worktrees sheet. Skips in-use/at-risk trees by
+    /// construction, so nothing with unsaved work or a live session is touched.
+    func cleanupSafeWorktrees() {
+        let paths = safeToRemoveWorktrees.map(\.path)
+        guard !paths.isEmpty else { return }
+        Task {
+            var failures = 0
+            for path in paths {
+                do { try await removeWorktree(path) } catch { failures += 1 }
+            }
+            if failures > 0 {
+                errorMessage = "Couldn't remove \(failures) of \(paths.count) worktree(s)."
+            }
+            loadWorktrees()
+        }
+    }
+
     func delete(_ id: String) {
         let meta = appState.store.get(id)
         appState.registry.get(id)?.kill()

@@ -139,8 +139,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   return (
     <aside className="flex h-full w-[85vw] max-w-xs shrink-0 flex-col border-r border-neutral-800 bg-neutral-950 md:w-64">
       <div className="flex items-center justify-between px-4 py-3">
-        <Link to="/" className="text-sm font-semibold tracking-tight">
-          juancode
+        <Link to="/" className="flex flex-col leading-tight">
+          <span className="text-sm font-semibold tracking-tight">juancode</span>
+          <span className="text-[10px] text-neutral-500">One code with Juancode</span>
         </Link>
         <div className="flex items-center gap-1.5">
           <button

@@ -7,7 +7,7 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Estimated cost as a short USD string, or null when cost is unknown. */
+/** Cost as a short USD string, or null when there's no real cost to show. */
 export function formatCost(usd: number | null): string | null {
   if (usd == null) return null;
   if (usd === 0) return "$0.00";
@@ -25,15 +25,14 @@ export function usageTooltip(u: SessionUsage): string {
     `Total: ${u.totalTokens.toLocaleString()} tokens`,
   ];
   const cost = formatCost(u.costUsd);
-  if (cost) lines.push(`Est. cost: ${cost}`);
+  if (cost) lines.push(`Cost: ${cost}`);
   return lines.join("\n");
 }
 
 /**
  * Sum usage across sessions. `totalTokens` always sums; `costUsd` sums only the
- * sessions that have a cost (null otherwise) and goes null only when none do —
- * so a mix of priced (Claude) and unpriced (Codex) sessions still shows the
- * partial dollar estimate it can compute.
+ * sessions that report a real cost and stays null when none do — so a mix of
+ * sessions with and without a reported cost still shows the partial total.
  */
 export function aggregateUsage(sessions: SessionMeta[]): SessionUsage | null {
   const withUsage = sessions.filter((s) => s.usage);

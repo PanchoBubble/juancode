@@ -1,0 +1,59 @@
+name: native-release
+
+# Builds an installable (unsigned) macOS .dmg of the native app.
+# - Push a tag like `native-v0.3.0` -> builds and publishes a GitHub Release.
+# - Manual run (workflow_dispatch) -> builds and uploads a DMG artifact only.
+on:
+  push:
+    tags:
+      - "native-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version (e.g. 0.3.0-dev)"
+        default: "0.0.0-dev"
+
+jobs:
+  build:
+    runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
+    permissions:
+      contents: write # create the release / upload assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Derive version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME#native-v}"
+          else
+            V="${{ inputs.version }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Build & package DMG
+        id: pkg
+        env:
+          JUANCODE_VERSION: ${{ steps.v.outputs.version }}
+          JUANCODE_BUILD: ${{ github.run_number }}
+        run: |
+          DMG="$(apps/native/scripts/package-app.sh)"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: juancode-${{ steps.v.outputs.version }}-dmg
+          path: ${{ steps.pkg.outputs.dmg }}
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.dmg }}
+          body: |
+            Unsigned build. On first launch macOS Gatekeeper will block it:
+            right-click the app > **Open**, or run
+            `xattr -dr com.apple.quarantine /Applications/juancode.app`.

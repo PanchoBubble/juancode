@@ -30,14 +30,16 @@ const assistant = (
   requestId: string,
   usage: Record<string, number>,
   model = "claude-opus-4-8",
+  costUSD?: number,
 ) => ({
   type: "assistant",
   requestId,
+  ...(costUSD !== undefined ? { costUSD } : {}),
   message: { id: msgId, model, usage },
 });
 
 describe("deriveClaudeUsage", () => {
-  it("sums tokens across turns and estimates opus cost", async () => {
+  it("sums tokens across turns and reports no cost when none is logged", async () => {
     const id = "11111111-1111-1111-1111-111111111111";
     const root = claudeFixture(id, [
       { type: "user", message: "hi" },
@@ -55,10 +57,19 @@ describe("deriveClaudeUsage", () => {
     expect(u.cacheReadTokens).toBe(5000);
     expect(u.cacheWriteTokens).toBe(800);
     expect(u.totalTokens).toBe(1010 + 600 + 5000 + 800);
-    // opus: $5/MTok in, $25/MTok out, cache read 0.1x, cache write 1.25x.
-    // (1010*5 + 5000*0.5 + 800*6.25 + 600*25) / 1e6
-    const expected = (1010 * 5 + 5000 * 0.5 + 800 * 6.25 + 600 * 25) / 1_000_000;
-    expect(u.costUsd).toBeCloseTo(expected, 9);
+    // No `costUSD` in the transcript (subscription plan) → cost is null, never estimated.
+    expect(u.costUsd).toBeNull();
+  });
+
+  it("sums a real per-turn cost when the transcript reports one", async () => {
+    const id = "1a1a1a1a-1a1a-1a1a-1a1a-1a1a1a1a1a1a";
+    const root = claudeFixture(id, [
+      assistant("m1", "r1", { input_tokens: 100, output_tokens: 50 }, "claude-opus-4-8", 0.02),
+      assistant("m2", "r2", { input_tokens: 10, output_tokens: 20 }, "claude-opus-4-8", 0.005),
+    ]);
+    const u = (await deriveClaudeUsage(id, root))!;
+    expect(u.totalTokens).toBe(180);
+    expect(u.costUsd).toBeCloseTo(0.025, 9);
   });
 
   it("dedups turns logged twice by message id + requestId", async () => {
@@ -81,7 +92,7 @@ describe("deriveClaudeUsage", () => {
     expect(u.outputTokens).toBe(20);
   });
 
-  it("returns null cost for an unknown model but still counts tokens", async () => {
+  it("counts tokens regardless of model and reports null cost without a cost field", async () => {
     const id = "44444444-4444-4444-4444-444444444444";
     const root = claudeFixture(id, [
       assistant("m1", "r1", { input_tokens: 10, output_tokens: 20 }, "some-future-model"),

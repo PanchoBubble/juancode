@@ -263,6 +263,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var cancelGrid: (() -> Void)?
         private var streaming = false
+        /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
+        private var shiftEnterMonitor: Any?
         private var resizeWork: DispatchWorkItem?
         private var lastSent: (cols: Int, rows: Int)?
         /// The most recent grid the surface actually reported, recorded on EVERY
@@ -341,6 +343,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             tv.controller = TerminalController(theme: juancodeGhosttyTheme)
             tv.configuration = TerminalSurfaceOptions(backend: .inMemory(gs))
             tv.delegate = self
+            shiftEnterMonitor = installShiftEnterNewline(view: tv, session: session)
             // On each return to the front, verify the grid instead of nudging
             // blindly: `repairWakeDrift` reads the grid the pty actually applied
             // and fires a SIGWINCH only on true drift, so a clean pane's TUI never
@@ -520,6 +523,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // This local view is going away — release the shared grid so a remote
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
+            if let m = shiftEnterMonitor { NSEvent.removeMonitor(m); shiftEnterMonitor = nil }
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }
             activeObservers.removeAll()

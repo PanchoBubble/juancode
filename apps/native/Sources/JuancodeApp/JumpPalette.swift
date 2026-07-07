@@ -21,10 +21,16 @@ struct JumpPaletteView: View {
     @FocusState private var searchFocused: Bool
 
     /// Same population as the sidebar: own + discovered sessions in the workspace,
-    /// minus the pinned Oracle session and (always) archived ones.
+    /// minus the pinned Oracle session and (always) archived ones. A session can
+    /// surface in both `sessions` and `externalSessions`, so dedupe by id (first
+    /// wins) — otherwise the id→meta lookup below would trap on duplicate keys.
     private var visibleSessions: [SessionMeta] {
-        (model.sessions + model.externalSessions).filter {
-            $0.cwd != OraclePaths.controlDir && Config.isUnderWorkspaceRoot($0.cwd) && !$0.archived
+        var seen = Set<String>()
+        return (model.sessions + model.externalSessions).filter { meta in
+            guard meta.cwd != OraclePaths.controlDir,
+                  Config.isUnderWorkspaceRoot(meta.cwd),
+                  !meta.archived else { return false }
+            return seen.insert(meta.id).inserted
         }
     }
 
