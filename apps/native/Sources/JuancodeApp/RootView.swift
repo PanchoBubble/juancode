@@ -1860,8 +1860,11 @@ struct DetailView: View {
 
     var body: some View {
         if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
+            // Deliberately NOT keyed by id: the container must survive session
+            // switches so the keep-alive terminal panes inside it stay mounted
+            // (juancode-073). Per-session subviews that assume a fresh identity
+            // (Changes/Issues panels) are keyed individually inside.
             SessionContainer(meta: meta)
-                .id(id) // fresh terminal per session
         } else {
             ContentUnavailableView(
                 "No session selected",
@@ -2010,10 +2013,20 @@ struct SessionContainer: View {
         .navigationTitle(meta.title)
         .perfTrackBody()
         // Opening an exited session auto-revives it — no manual "Reactivate" click.
-        // The container is keyed by id in DetailView, so this fires once per open;
-        // `reactivate` no-ops if already live and degrades to replay if it can't resume.
+        // Fires once per id change (the container itself is no longer keyed);
+        // `reactivate` no-ops if already live and degrades to replay if it can't
+        // resume. The pane-pool note backstops the synchronous one in the
+        // `selection` setter for opens that reach here by another route.
         .task(id: meta.id) {
             if !model.isLive(meta.id) { await model.reactivate(meta.id) }
+            model.noteLivePaneVisible(meta.id)
+        }
+        // The live Session OBJECT behind the selected id can change while we're
+        // showing it — a reactivation or a permissions flip mints a new one. The
+        // pool keys panes by object identity, so re-note to mount the new pty's
+        // pane (the stale entry is pruned by `AppModel.refresh`).
+        .onChange(of: model.liveSession(meta.id).map(ObjectIdentifier.init)) { _, _ in
+            model.noteLivePaneVisible(meta.id)
         }
     }
 
@@ -2030,9 +2043,12 @@ struct SessionContainer: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             Divider()
+            // Keyed explicitly: the container is no longer recreated per session
+            // (keep-alive terminal pool, juancode-073), but these panels hold
+            // per-session/per-folder @State seeded in onAppear.
             switch tab {
-            case .changes: ChangesPanel(sessionId: meta.id)
-            case .issues: IssuesPanel(cwd: meta.cwd)
+            case .changes: ChangesPanel(sessionId: meta.id).id(meta.id)
+            case .issues: IssuesPanel(cwd: meta.cwd).id(meta.cwd)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2040,29 +2056,42 @@ struct SessionContainer: View {
 
     @ViewBuilder
     private var terminal: some View {
-        if let session = model.liveSession(meta.id) {
-            // Key by the Session's object identity: a permissions flip swaps in a
-            // brand-new Session (same juancode id) behind the same pty, so this
-            // forces a fresh terminal that subscribes to the new pty and replays
-            // the carried-forward scrollback.
-            // GhosttyKit surface by default; JUANCODE_SWIFTTERM=1 falls back to
-            // SwiftTerm (see GhosttyLive.swift / bd spike).
-            // The `.id` folds in `terminalRefreshToken`: bumping it (the Refresh
-            // button) recreates the view, which re-subscribes with replay:true and
-            // repaints the full scrollback — the hard-refresh escape hatch.
-            if TerminalBackendChoice.useGhostty {
-                GhosttyLive(session: session,
-                            focusToken: model.terminalFocusToken,
-                            resyncToken: model.terminalResyncToken,
-                            autoFocusOnAppear: !model.suppressTerminalAutoFocus)
-                    .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
-            } else {
-                SwiftTermLive(session: session,
-                              focusToken: model.terminalFocusToken,
-                              resyncToken: model.terminalResyncToken,
-                              autoFocusOnAppear: !model.suppressTerminalAutoFocus)
-                    .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
+        // Keep-alive pane pool (juancode-073): every recently-viewed live session
+        // keeps its Ghostty surface MOUNTED here, hidden panes with rendering
+        // suspended and pty sizing frozen (`GhosttyLive.hidden`). Switching
+        // sessions just flips which pane is visible — no teardown, so returning
+        // never replays raw scrollback (the replay-garble bug class). Pool
+        // membership/eviction lives in `AppModel.livePanes`; each pane's identity
+        // is its Session object + the refresh token it mounted with, so the
+        // Refresh CTA (token bump on the visible entry) and a permissions flip
+        // (new Session object) still fully recreate that one pane.
+        if TerminalBackendChoice.useGhostty {
+            let current = model.liveSession(meta.id)
+            ZStack {
+                ForEach(model.livePanes.entries) { entry in
+                    let visible = entry.session === current
+                    GhosttyLive(session: entry.session,
+                                focusToken: model.terminalFocusToken,
+                                resyncToken: model.terminalResyncToken,
+                                autoFocusOnAppear: !model.suppressTerminalAutoFocus,
+                                hidden: !visible)
+                        .opacity(visible ? 1 : 0)
+                        .allowsHitTesting(visible)
+                }
+                if current == nil {
+                    SwiftTermReplay(scrollback: model.scrollback(meta.id))
+                }
             }
+        } else if let session = model.liveSession(meta.id) {
+            // SwiftTerm fallback (JUANCODE_SWIFTTERM=1): no keep-alive pool —
+            // the old behavior, one live pane keyed by Session object identity
+            // (permissions flip) + refresh token (Refresh CTA), teardown+replay
+            // on every switch.
+            SwiftTermLive(session: session,
+                          focusToken: model.terminalFocusToken,
+                          resyncToken: model.terminalResyncToken,
+                          autoFocusOnAppear: !model.suppressTerminalAutoFocus)
+                .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
         }

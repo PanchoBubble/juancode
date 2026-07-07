@@ -67,6 +67,11 @@ final class AppModel {
             // Viewing a session clears its pending turn-end notification (and the
             // Dock badge count it contributed).
             if let sel = selection { clearUnread(sel) }
+            // Synchronously, so the pane pool already contains the new selection
+            // when SwiftUI renders this switch — the previous pane hides instead
+            // of unmounting, and the new one mounts (or is revealed) in the same
+            // frame (juancode-073).
+            if let sel = selection { noteLivePaneVisible(sel) }
         }
     }
     var showingNewSession = false
@@ -106,6 +111,13 @@ final class AppModel {
     /// (garbled glyphs, half-drawn TUI, frozen render) — stronger than a geometry
     /// resync, which only re-asserts the grid size.
     var terminalRefreshToken = 0
+    /// Keep-alive pool of main terminal panes (juancode-073): the surfaces of the
+    /// most recently viewed live sessions stay MOUNTED (hidden, rendering
+    /// suspended) across session switches, so returning to one never replays raw
+    /// scrollback — the root of the replay-garble bug class. Capped small: each
+    /// mounted pane holds a Metal surface. Evicted panes fall back to
+    /// teardown+replay. Rendered by `SessionContainer.terminal` (Ghostty only).
+    var livePanes = LivePanePool<Session>(cap: 5)
     /// While true (sidebar is being keyboard-navigated) a freshly-shown terminal must
     /// not auto-grab focus on appear, or each j/k would yank focus back into the pty.
     var suppressTerminalAutoFocus = false
@@ -245,6 +257,10 @@ final class AppModel {
         let persisted = appState.store.list()
         let live = Dictionary(appState.registry.all().map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
         sessions = persisted.map { live[$0.id] ?? $0 }
+        // Every registry change routes through here (create / exit / swap), so this
+        // is where pooled keep-alive panes whose session died or was replaced get
+        // unmounted rather than lingering hidden on a dead pty subscription.
+        livePanes.prune { [appState] in appState.registry.get($0) }
         refreshWorktreeMap()
     }
 
@@ -346,9 +362,24 @@ final class AppModel {
     /// wait out view recreation + surface attach + replay.
     func refreshTerminal() {
         terminalRefreshToken &+= 1
+        // Re-key only the visible pooled pane: its SwiftUI identity folds the
+        // token, so the bump recreates just that pane (fresh subscribe + full
+        // replay) while the hidden keep-alive panes stay mounted untouched.
+        if let sel = selection { livePanes.bumpRefresh(sel, to: terminalRefreshToken) }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
             self?.terminalResyncToken &+= 1
+        }
+    }
+
+    /// The detail view is showing session `id` live: make sure the keep-alive pane
+    /// pool has its entry at the MRU front (juancode-073). Called synchronously
+    /// from the `selection` setter for ordinary switches, and again from the
+    /// detail view once a reactivation or a permissions flip mints a new live
+    /// `Session` behind the same id.
+    func noteLivePaneVisible(_ id: String) {
+        livePanes.noteVisible(id, refresh: terminalRefreshToken) { [appState] in
+            appState.registry.get($0)
         }
     }
 

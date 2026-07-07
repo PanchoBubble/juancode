@@ -48,6 +48,13 @@ struct GhosttyLive: View {
     /// `AppModel.terminalResyncToken`.
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    /// True while this pane is kept MOUNTED but off-screen by the keep-alive pool
+    /// (juancode-073): rendering is suspended (surface occluded), pty sizing and
+    /// surface layout are frozen, and local grid ownership is released so a remote
+    /// viewer can drive the pty. Flipping back to false runs the reveal recovery:
+    /// unfreeze, one fit at the live bounds, re-claim + flush the grid (deduped),
+    /// and a settled-frame repaint. Mirrors `GhosttyEphemeral.hidden`.
+    var hidden: Bool = false
     /// Reports the real grid Ghostty measures for the current bounds (cols, rows).
     /// Lets a caller persist a surface-specific spawn size — e.g. the Oracle dock,
     /// which can't use the shared `TerminalGrid` (that's the main panes') and must
@@ -59,7 +66,8 @@ struct GhosttyLive: View {
             GhosttyRepresentable(session: session, targetSize: proxy.size,
                                  remembersSize: remembersSize, focusToken: focusToken,
                                  resyncToken: resyncToken,
-                                 autoFocusOnAppear: autoFocusOnAppear, onGrid: onGrid)
+                                 autoFocusOnAppear: autoFocusOnAppear,
+                                 hidden: hidden, onGrid: onGrid)
         }
     }
 }
@@ -73,6 +81,13 @@ final class GhosttyHostView: NSView {
     let terminal: TerminalView
     var onDrop: ((String) -> Void)?
     var focusOnAppear = false
+    /// True while this pane is kept mounted but off-screen (the keep-alive pool,
+    /// juancode-073): the surface neither follows our bounds nor re-fits. A hidden
+    /// surface must keep the exact grid the pty last heard — bytes the CLI streams
+    /// while we're hidden are laid out for THAT grid, and letting the surface
+    /// reflow underneath them would mis-wrap its state the same way raw-scrollback
+    /// replay does. Reveal unfreezes and runs a single fit at the live bounds.
+    var layoutFrozen = false
     private var didAutoFocus = false
 
     init(terminal: TerminalView) {
@@ -109,7 +124,7 @@ final class GhosttyHostView: NSView {
     /// and adopts the final bounds exactly once in `viewDidEndLiveResize`. Orca
     /// (xterm.js) makes the same trade: no mid-drag resizes, one fit at settle.
     private func pin() {
-        guard !inLiveResize else { return }
+        guard !inLiveResize, !layoutFrozen else { return }
         if terminal.frame != bounds { terminal.frame = bounds }
         terminal.fitToSize()
     }
@@ -122,7 +137,7 @@ final class GhosttyHostView: NSView {
         guard size.width > 1, size.height > 1 else { return }
         // Mid-drag SwiftUI sizes flow through here too; the final one is
         // re-applied from `viewDidEndLiveResize` via `pin()` (bounds are current).
-        guard !inLiveResize else { return }
+        guard !inLiveResize, !layoutFrozen else { return }
         let f = NSRect(origin: .zero, size: size)
         if terminal.frame != f { terminal.frame = f }
         terminal.fitToSize()
@@ -164,6 +179,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     var focusToken: Int = 0
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    var hidden: Bool = false
     var onGrid: ((Int, Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
@@ -187,14 +203,26 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
         context.coordinator.onGrid = onGrid
+        // Hide/reveal first: on hide the freeze must land before this pass's
+        // `applySize` (which is a no-op while frozen); on reveal the unfreeze must
+        // land before it, so the fit below already runs at the live bounds.
+        let revealed = context.coordinator.setHidden(hidden, host: nsView)
         nsView.applySize(targetSize)
+        if revealed {
+            context.coordinator.completeReveal()
+            if autoFocusOnAppear { nsView.focusTerminal() }
+        }
+        // Token bumps target the VISIBLE pane. Hidden keep-alive panes record them
+        // (so nothing fires spuriously on reveal) but never act: a hidden pane
+        // must not steal focus, and a resync nudge would fight whatever remote
+        // viewer owns the grid while we're off-screen.
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken
-            nsView.focusTerminal()
+            if !hidden { nsView.focusTerminal() }
         }
         if resyncToken != context.coordinator.lastResyncToken {
             context.coordinator.lastResyncToken = resyncToken
-            context.coordinator.forceResync()
+            if !hidden { context.coordinator.forceResync() }
         }
     }
 
@@ -255,6 +283,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// re-lay-out the window without the surface hearing a frame change.
         private var activeObservers: [Any] = []
         private let remembersSize: Bool
+        /// True while this pane is pool-hidden (juancode-073): surface resizes are
+        /// recorded but never forwarded to the pty, and wake/heal machinery stays
+        /// quiet. Mirrors `GhosttyEphemeral.sizingFrozen`.
+        private var sizingFrozen = false
         var lastFocusToken = 0
         var lastResyncToken = 0
         /// Surface-specific grid sink (see `GhosttyLive.onGrid`).
@@ -337,11 +369,68 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// differs from the surface's — the verified version of the blind
         /// activation nudge, so an app-switch never makes a clean TUI re-lay-out.
         private func repairWakeDrift() {
+            // Pool-hidden pane: nothing to repaint (occluded), and the pty may be
+            // legitimately owned by a remote viewer at a different grid — a nudge
+            // here would fight it. The reveal recovery re-asserts our grid.
+            guard !sizingFrozen else { return }
             view?.fitToSize()
             guard let g = lastSurfaceGrid, g.cols > 0, g.rows > 0 else { return }
             guard let applied = session.appliedGrid() else { return }
             if applied.cols != g.cols || applied.rows != g.rows {
                 nudge(cols: g.cols, rows: g.rows)
+            }
+        }
+
+        /// Suspend/resume this pane with the keep-alive pool's visibility
+        /// (juancode-073). Hiding freezes pty sizing + surface layout, occludes
+        /// the surface (no Metal draws on output bursts), drops any pending
+        /// resize/heal work, resigns focus, and releases the shared grid so a
+        /// remote viewer (web / phone) can drive the pty size off-screen
+        /// (juancode-1th.1). The output subscription stays live — Ghostty's
+        /// terminal state keeps advancing, which is exactly what makes the reveal
+        /// replay-free. Returns true on a hidden → visible transition; the caller
+        /// re-applies the live bounds and then runs `completeReveal()`.
+        func setHidden(_ hidden: Bool, host: GhosttyHostView) -> Bool {
+            guard hidden != sizingFrozen else { return false }
+            sizingFrozen = hidden
+            host.layoutFrozen = hidden
+            // SwiftUI's opacity is visual-only at the AppKit layer: the NSView
+            // would still hit-test and its tracking areas still fire, so clicks,
+            // wheel scrolls, and mouse reports over the terminal area could land
+            // in an off-screen pane's pty. AppKit-hiding the host excludes it from
+            // all event routing; the Ghostty surface survives (its lifecycle keys
+            // off window membership, which isHidden doesn't change).
+            host.isHidden = hidden
+            // Occlusion also stops render-tick scheduling — a hidden pane running
+            // a streaming agent stops Metal-drawing on every output burst.
+            host.terminal.setSurfaceVisible(!hidden)
+            guard hidden else { return true }
+            resizeWork?.cancel(); resizeWork = nil
+            healWork?.cancel(); healWork = nil
+            resizeHealArmed = false
+            sawStreamDuringHeal = false
+            // A hidden pane must not keep swallowing keystrokes.
+            if host.window?.firstResponder === host.terminal {
+                host.window?.makeFirstResponder(nil)
+            }
+            session.releaseGrid(owner: GridArbiter.localOwner)
+            return false
+        }
+
+        /// Reveal recovery, run after the host re-applied its live bounds: flush
+        /// the surface grid to the pty unconditionally (`lastSent` cleared — a
+        /// remote viewer may have driven the pty to its own size while we were
+        /// hidden, which a dedup would wrongly skip), re-claiming local grid
+        /// ownership in the same call. A genuine size change delivers the SIGWINCH
+        /// that makes the CLI repaint at our grid; an unchanged size is a no-op at
+        /// the kernel, so a clean reveal never disturbs the TUI. The delayed fit
+        /// is the settled-frame repaint — same rationale as the attach path above.
+        func completeReveal() {
+            lastSent = nil
+            flushSurfaceGrid()
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+                guard let self, !self.sizingFrozen else { return }
+                self.view?.fitToSize()
             }
         }
 
@@ -383,6 +472,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
+            // Pool-hidden pane (juancode-073): record the grid, never forward it —
+            // the host's layout freeze should prevent reflows entirely, but an
+            // in-flight resize can still land here after the hide. The reveal
+            // recovery re-measures and flushes once.
+            guard !sizingFrozen else { return }
             resizeWork?.cancel()
             if LayoutTransitionGate.shared.active {
                 let now = DispatchTime.now()
