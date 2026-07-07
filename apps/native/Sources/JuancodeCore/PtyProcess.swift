@@ -208,6 +208,17 @@ public final class PtyProcess: @unchecked Sendable {
         return got.ws_col == UInt16(cols) && got.ws_row == UInt16(rows)
     }
 
+    /// The grid the pty has actually applied (`TIOCGWINSZ` readback). Lets a
+    /// client verify its surface grid against the pty's real one and repair only
+    /// on true drift, instead of nudging blindly. Nil when the master is closed
+    /// or the ioctl fails.
+    public func currentGrid() -> (cols: Int, rows: Int)? {
+        guard !fdClosed else { return nil }
+        var ws = winsize()
+        guard ioctl(masterFd, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0, ws.ws_row > 0 else { return nil }
+        return (cols: Int(ws.ws_col), rows: Int(ws.ws_row))
+    }
+
     /// Hang up: send a graceful SIGTERM to the group and close the master so the
     /// slave EOFs and the child exits (the universal "terminal closed" path,
     /// reliable even for a shell blocked on a foreground child). The waitpid

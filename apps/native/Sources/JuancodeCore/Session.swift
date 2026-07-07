@@ -625,6 +625,14 @@ public final class Session: @unchecked Sendable {
         resizeGrid(owner: GridArbiter.localOwner, cols: cols, rows: rows).applied
     }
 
+    /// The grid the live pty has actually applied (`TIOCGWINSZ` readback), or nil
+    /// when the session isn't running. A client compares this against its surface
+    /// grid to repair only on true drift — verifying beats re-sending blindly,
+    /// because every forced SIGWINCH makes the CLI's TUI repaint for nothing.
+    public func appliedGrid() -> (cols: Int, rows: Int)? {
+        isRunning ? proc?.currentGrid() : nil
+    }
+
     /// Release this session's grid ownership held by `owner` — its client
     /// disconnected, or (for the local view) its terminal was torn down — so the
     /// next client's resize can take over the grid (juancode-1th.1). No-op if

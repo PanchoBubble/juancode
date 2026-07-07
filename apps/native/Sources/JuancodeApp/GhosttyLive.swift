@@ -100,7 +100,16 @@ final class GhosttyHostView: NSView {
     /// Pin the surface to our exact bounds, then let Ghostty re-measure. Unlike
     /// SwiftTerm we don't poke `needsDisplay` — the Metal surface schedules its own
     /// redraw from `fitToSize()`'s immediate tick.
+    ///
+    /// Frozen during a live window-edge drag (`inLiveResize`): every intermediate
+    /// frame would reflow Ghostty's grid and push a SIGWINCH into a possibly
+    /// streaming CLI, whose bytes for the old grid then land permanently
+    /// mis-wrapped in scrollback — the "resize breaks the screen" bug. The surface
+    /// keeps rendering at its pre-drag size (letterboxed against the moving edge)
+    /// and adopts the final bounds exactly once in `viewDidEndLiveResize`. Orca
+    /// (xterm.js) makes the same trade: no mid-drag resizes, one fit at settle.
     private func pin() {
+        guard !inLiveResize else { return }
         if terminal.frame != bounds { terminal.frame = bounds }
         terminal.fitToSize()
     }
@@ -111,6 +120,9 @@ final class GhosttyHostView: NSView {
 
     func applySize(_ size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
+        // Mid-drag SwiftUI sizes flow through here too; the final one is
+        // re-applied from `viewDidEndLiveResize` via `pin()` (bounds are current).
+        guard !inLiveResize else { return }
         let f = NSRect(origin: .zero, size: size)
         if terminal.frame != f { terminal.frame = f }
         terminal.fitToSize()
@@ -238,6 +250,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// SIGWINCH handling, so we skip the extra flap there.
         private var sawStreamDuringHeal = false
         private var healWork: DispatchWorkItem?
+        /// Observers that verify the grid when the app/window comes back to the
+        /// front — a fullscreen / Space / display change while we were away can
+        /// re-lay-out the window without the surface hearing a frame change.
+        private var activeObservers: [Any] = []
         private let remembersSize: Bool
         var lastFocusToken = 0
         var lastResyncToken = 0
@@ -264,6 +280,17 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             tv.controller = TerminalController(theme: juancodeGhosttyTheme)
             tv.configuration = TerminalSurfaceOptions(backend: .inMemory(gs))
             tv.delegate = self
+            // On each return to the front, verify the grid instead of nudging
+            // blindly: `repairWakeDrift` reads the grid the pty actually applied
+            // and fires a SIGWINCH only on true drift, so a clean pane's TUI never
+            // repaints for nothing. (Coordinator is @MainActor ⇒ Sendable; the
+            // observers fire on .main.)
+            for name in [NSApplication.didBecomeActiveNotification, NSWindow.didDeminiaturizeNotification] {
+                activeObservers.append(NotificationCenter.default.addObserver(
+                    forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.repairWakeDrift() }
+                })
+            }
             // NB: we deliberately do NOT subscribe to the pty yet. The surface is
             // created lazily once the view enters a window; `receive()` drops bytes
             // while the surface is nil, so an early scrollback replay would vanish.
@@ -305,10 +332,25 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         func terminalDidDetachSurface() {}
 
+        /// The app/window came back to the front. Repaint the surface, then repair
+        /// the pty only when the grid it actually applied (TIOCGWINSZ readback)
+        /// differs from the surface's — the verified version of the blind
+        /// activation nudge, so an app-switch never makes a clean TUI re-lay-out.
+        private func repairWakeDrift() {
+            view?.fitToSize()
+            guard let g = lastSurfaceGrid, g.cols > 0, g.rows > 0 else { return }
+            guard let applied = session.appliedGrid() else { return }
+            if applied.cols != g.cols || applied.rows != g.rows {
+                nudge(cols: g.cols, rows: g.rows)
+            }
+        }
+
         func detach() {
             // This local view is going away — release the shared grid so a remote
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
+            activeObservers.forEach { NotificationCenter.default.removeObserver($0) }
+            activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
             healWork?.cancel(); healWork = nil
             resizeHealArmed = false

@@ -325,8 +325,22 @@ final class AppModel {
     /// Hard-refresh the live terminal: rebuild the view so it replays the full
     /// scrollback and repaints cleanly. Recovers a pane whose render is corrupted
     /// (garbled glyphs / half-drawn TUI) — a geometry resync can't fix that.
+    ///
+    /// The replay alone can't heal the visible screen: scrollback is raw bytes
+    /// recorded at whatever widths the session lived through, so after a resize
+    /// the tail re-renders just as mis-wrapped — and re-sending an unchanged grid
+    /// is a no-op SIGWINCH the CLI never hears, so it never repaints ("refresh
+    /// just breaks it"). Chase the replay with a geometry resync — a genuine
+    /// SIGWINCH — so the CLI redraws the live screen at the current grid; history
+    /// above stays best-effort. Delayed because the recreated view seeds its
+    /// resync-token cache at creation: a bump before it exists is invisible, so
+    /// wait out view recreation + surface attach + replay.
     func refreshTerminal() {
         terminalRefreshToken &+= 1
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            self?.terminalResyncToken &+= 1
+        }
     }
 
     /// Whether the projects (sessions-by-folder) sidebar column is visible. RootView
