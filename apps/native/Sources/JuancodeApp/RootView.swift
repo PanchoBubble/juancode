@@ -821,6 +821,7 @@ struct SidebarView: View {
                           tracked: external ? nil : model.trackedPr(forSession: meta.id),
                           trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                           unread: model.unreadSessions.contains(meta.id),
+                          unseenDone: model.unseenCompletions.contains(meta.id),
                           atRisk: !external && model.workAtRisk(forSession: meta) != nil,
                           worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
@@ -1610,6 +1611,9 @@ struct SessionRow: View {
     var trackedIssue: TrackedIssue? = nil
     /// Pending turn-end notification for this session — shows an unread dot until viewed.
     var unread: Bool = false
+    /// The agent finished a turn while this session wasn't selected (juancode-t9p) —
+    /// shows the green "done since you last looked" check until viewed.
+    var unseenDone: Bool = false
     /// This session's folder holds uncommitted/unpushed work (juancode-rxu) — shows
     /// a small warning capsule on the trailing edge.
     var atRisk: Bool = false
@@ -1779,25 +1783,52 @@ struct SessionRow: View {
         }
     }
 
-    /// Status glyph in the leading slot. A session awaiting the user's answer to a
-    /// question shows a distinctive question-mark icon instead of the plain dot, so
-    /// "your turn to reply" stands out from the busy/idle dots. Both variants sit in
-    /// a fixed-width slot so row titles stay aligned regardless of which is shown.
+    /// The row's agent-state vocabulary (juancode-t9p), one glyph per state so the
+    /// sidebar answers "who's working / who needs me / who finished" at a glance:
+    /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
+    /// green check (only until the session is viewed), idle/exited = quiet grey dot.
+    private enum StateGlyph { case working, waiting, doneUnseen, dot }
+
+    private var stateGlyph: StateGlyph {
+        guard live else { return .dot }
+        switch activity {
+        case .busy: return .working
+        case .waitingInput: return .waiting
+        default: return unseenDone ? .doneUnseen : .dot
+        }
+    }
+
+    /// Status glyph in the leading slot, per `stateGlyph`. All variants sit in a
+    /// fixed-width slot so row titles stay aligned regardless of which is shown.
     @ViewBuilder
     private var statusIndicator: some View {
         Group {
-            if live, activity == .waitingInput {
+            switch stateGlyph {
+            case .working:
+                // Pulsing reads as motion without a spinner's churn in a long list.
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.orange)
+                    .symbolEffect(.pulse)
+                    .help("Agent is working")
+            case .waiting:
                 Image(systemName: "questionmark.circle.fill")
                     .font(.system(size: 12))
                     .foregroundStyle(.yellow)
                     .help("Waiting for your reply")
-            } else {
+            case .doneUnseen:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.green)
+                    .help("Finished since you last looked — click to view")
+            case .dot:
                 Circle().fill(dotColor).frame(width: 8, height: 8)
             }
         }
         .frame(width: 12, alignment: .center)
         .overlay(alignment: .topTrailing) {
-            if unread {
+            // The green check already says "unseen", so skip the red dot there.
+            if unread, stateGlyph != .doneUnseen {
                 Circle()
                     .fill(Color.red)
                     .frame(width: 6, height: 6)
@@ -1811,15 +1842,16 @@ struct SessionRow: View {
     private var dotColor: Color { sessionDotColor(live: live, activity: activity) }
 }
 
-/// Status-dot color for a session: grey when not live, else activity-tinted (busy =
-/// orange, waiting = blue, idle = green). Shared by the sidebar `SessionRow` and the
-/// Oracle dock's session rail (juancode-cwa) so the two stay visually in sync.
+/// Status-dot color for a session: busy = orange, waiting = amber, idle = quiet grey
+/// (deliberately not green — green is reserved for the done-unseen check, juancode-t9p),
+/// exited = dimmer grey. Shared by the sidebar `SessionRow` and the Oracle dock's
+/// session rail (juancode-cwa) so the two stay visually in sync.
 func sessionDotColor(live: Bool, activity: SessionActivity?) -> Color {
     guard live else { return .secondary.opacity(0.4) }
     switch activity {
     case .busy: return .orange
-    case .waitingInput: return .blue
-    case .idle, .none: return .green
+    case .waitingInput: return .yellow
+    case .idle, .none: return .secondary.opacity(0.8)
     }
 }
 

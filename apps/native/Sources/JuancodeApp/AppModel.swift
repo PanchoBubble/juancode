@@ -195,6 +195,14 @@ final class AppModel {
     /// session or return to the app.
     private(set) var unreadSessions: Set<String> = []
 
+    /// Sessions whose agent finished a turn (busy → idle) while they weren't the
+    /// current selection — drives the sidebar's green "done since you last looked"
+    /// check (juancode-t9p). Cleared through the same choke point as unread
+    /// (`clearUnread`: selection, app re-activation, delete) and when a new turn
+    /// starts. Deliberately independent of `notifyOnTurnEnd`: muting Dock bounces
+    /// shouldn't hide the sidebar state vocabulary.
+    private(set) var unseenCompletions: Set<String> = []
+
     /// Whether the Oracle dock is currently expanded. Oracle's own sessions are hidden
     /// from the sidebar, so their unread can never clear by selection (the Dock badge
     /// would stay stuck). Instead the dock acts as their "viewer": while it's open we
@@ -210,6 +218,7 @@ final class AppModel {
     }
 
     private func clearUnread(_ id: String) {
+        unseenCompletions.remove(id)
         guard unreadSessions.remove(id) != nil else { return }
         updateDockBadge()
     }
@@ -380,6 +389,14 @@ final class AppModel {
                 guard let self else { return }
                 let prev = self.activities[s.id]
                 self.activities[s.id] = st
+                // Sidebar "done since you last looked" check (juancode-t9p): set on
+                // a turn finishing off-screen, dropped when a new turn starts.
+                switch unseenCompletionEffect(prev: prev, next: st, notify: notify,
+                                              isSelected: self.selection == s.id) {
+                case .set: self.unseenCompletions.insert(s.id)
+                case .clear: self.unseenCompletions.remove(s.id)
+                case .none: break
+                }
                 // `notify` marks a real turn boundary (the agent finished or now
                 // needs you). Bounce the Dock + bump the badge so background work is
                 // noticeable. See `notifyTurnEnd`.
