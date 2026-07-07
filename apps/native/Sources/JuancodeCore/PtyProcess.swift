@@ -174,11 +174,37 @@ public final class PtyProcess: @unchecked Sendable {
 
     /// Keystrokes / paste -> child stdin. Safe to call from any thread.
     public func write(_ bytes: [UInt8]) {
-        guard !bytes.isEmpty else { return }
+        write(bytes) { _ in }
+    }
+
+    /// Write `bytes`, invoking `completion(true)` on the work queue once the whole
+    /// buffer has flushed to the child (or `completion(false)` if the fd is closed
+    /// or the write errored). Loops over short writes / `EINTR` so a large chunk is
+    /// never silently truncated — the old single-shot `Darwin.write` dropped any
+    /// bytes past the first short write. Lets a chunked paste apply backpressure:
+    /// the next chunk waits for this one to flush instead of piling a giant buffer
+    /// onto a possibly-stalled pty.
+    public func write(_ bytes: [UInt8], completion: @escaping @Sendable (Bool) -> Void) {
+        guard !bytes.isEmpty else { completion(true); return }
         let fd = masterFd
         queue.async { [weak self] in
-            guard let self, !self.fdClosed else { return }
-            _ = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+            guard let self, !self.fdClosed else { completion(false); return }
+            let wrote = bytes.withUnsafeBytes { raw -> Bool in
+                guard let base = raw.baseAddress else { return true }
+                var offset = 0
+                while offset < raw.count {
+                    let n = Darwin.write(fd, base + offset, raw.count - offset)
+                    if n > 0 {
+                        offset += n
+                    } else if n < 0 && errno == EINTR {
+                        continue
+                    } else {
+                        break // fd error / EOF — report the partial as a failure
+                    }
+                }
+                return offset == raw.count
+            }
+            completion(wrote)
         }
     }
 

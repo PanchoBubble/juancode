@@ -1523,7 +1523,10 @@ final class AppModel {
             }
             if !reasons.isEmpty, let session = liveSession(entry.sessionId) {
                 let prompt = issueActivityPrompt(identifier: identifier, reasons: reasons)
-                session.write("\(prompt)\r")
+                // Bracketed paste + separate Enter (via `submit`), not a raw
+                // `"\(prompt)\r"` burst — the CLI reads that burst as a paste and
+                // keeps the CR literal, so the prompt lands but never submits.
+                session.submit(prompt)
             }
             trackedIssues[key] = entry
         }
@@ -2328,9 +2331,16 @@ final class AppModel {
         let files = diffBySession[id]?.files ?? []
         let prompt = composeReviewPrompt(files: files, comments: comments(id), finalNote: finalNote)
         guard !prompt.isEmpty else { return }
-        // Write as if typed (idle → runs, busy → queued by the CLI). The user
-        // reviews the multi-line prompt and presses Enter to send.
-        session.write(prompt)
+        // Bracketed paste, no auto-submit: the user reviews the multi-line prompt
+        // and presses Enter to send. A raw write would type the review's embedded
+        // newlines as keystrokes and submit at the first one, sending a fragment.
+        // Surface an oversize/abort as a status note instead of silently dropping.
+        session.insert(prompt) { [weak self] outcome in
+            guard case let .rejected(reason) = outcome else { return }
+            Task { @MainActor in
+                self?.gitNoteBySession[id] = GitNote(ok: false, text: reason)
+            }
+        }
         commentsBySession[id] = []
     }
 

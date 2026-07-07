@@ -31,8 +31,26 @@ public struct ProviderSpec: Sendable {
     /// so the resumable id is known immediately. False when it must be
     /// discovered from the CLI's session files after spawn (Codex).
     public let pinsSessionId: Bool
+    /// Whether the program reads bracketed-paste markers (`ESC[200~ … ESC[201~`).
+    /// Both claude and codex do; a future program that doesn't can opt out so the
+    /// paste engine delivers raw text instead of wrapping it.
+    public let bracketedPaste: Bool
     public let startArgs: @Sendable (_ juancodeId: String, _ opts: SpawnOptions) -> [String]
     public let resumeArgs: @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String]
+
+    public init(id: ProviderId,
+                label: String,
+                pinsSessionId: Bool,
+                bracketedPaste: Bool = true,
+                startArgs: @escaping @Sendable (_ juancodeId: String, _ opts: SpawnOptions) -> [String],
+                resumeArgs: @escaping @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String]) {
+        self.id = id
+        self.label = label
+        self.pinsSessionId = pinsSessionId
+        self.bracketedPaste = bracketedPaste
+        self.startArgs = startArgs
+        self.resumeArgs = resumeArgs
+    }
 }
 
 public enum Providers {

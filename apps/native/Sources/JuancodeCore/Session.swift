@@ -495,37 +495,95 @@ public final class Session: @unchecked Sendable {
     /// away. Same bracketed-paste + separate-Enter delivery: writing
     /// `"\(text)\r"` in one burst lets the CLI misread the chunk as a paste and
     /// keep the CR as a literal newline, leaving the prompt unsent in the box.
-    public func submit(_ text: String) {
+    public func submit(_ text: String, onResult: (@Sendable (PasteOutcome) -> Void)? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        pasteAndSubmit(trimmed)
+        guard !trimmed.isEmpty else { onResult?(.delivered); return }
+        deliverPaste(trimmed, submit: true, onResult: onResult)
     }
 
     /// Insert `text` into an already-live session's prompt **without** submitting
     /// — a bracketed paste with no trailing Enter, so the user can review/edit it
     /// before sending. Used by the ⌘K prompt-template palette's "insert" action
-    /// (juancode-2vd). `submit` is the same delivery plus the separate Enter.
-    public func insert(_ text: String) {
+    /// (juancode-2vd) and the batched review submission. `submit` is the same
+    /// delivery plus the separate Enter. `onResult` reports oversize rejection /
+    /// mid-paste abort so the caller can surface it.
+    public func insert(_ text: String, onResult: (@Sendable (PasteOutcome) -> Void)? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        paste(trimmed)
+        guard !trimmed.isEmpty else { onResult?(.delivered); return }
+        deliverPaste(trimmed, submit: false, onResult: onResult)
     }
 
-    /// Deliver `trimmed` as a bracketed paste, then send the submitting Enter as
-    /// a separate keystroke a beat later so the CR registers as submit.
-    private func pasteAndSubmit(_ trimmed: String) {
-        paste(trimmed)
-        // Let the paste settle in the prompt before the submitting Enter.
-        workQueue.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
-            self?.write("\r")
+    /// Tunables for chunked programmatic paste delivery (`PasteEngine`).
+    private enum Paste {
+        /// Settle gap between the paste and the submitting Enter, so the CR isn't
+        /// swallowed as a literal newline inside a still-open paste. Mirrors the
+        /// seed path's `submitSettleMs`.
+        static let submitSettleMs = 150
+        /// Per-chunk write budget. A chunk that doesn't flush within this (child
+        /// wedged, pty buffer stuck) aborts the operation loudly instead of hanging
+        /// the caller forever.
+        static let chunkTimeoutMs = 5_000
+    }
+
+    /// Program-aware paste policy for this session (bracketed iff the CLI reads
+    /// bracketed-paste markers).
+    private var pastePolicy: PasteEngine.Policy {
+        var policy = PasteEngine.Policy.agentPrompt
+        policy.bracketed = spec.bracketedPaste
+        return policy
+    }
+
+    /// Plan `text` through the `PasteEngine`, then deliver its chunks serially with
+    /// backpressure and a per-chunk timeout. Over-size text is rejected up front; a
+    /// session that dies (or a chunk that stalls) mid-paste aborts loudly via
+    /// `onResult` rather than silently wedging the TUI. Delivery runs off the main
+    /// thread; every collaborator it touches is thread-safe.
+    private func deliverPaste(_ text: String, submit: Bool, onResult: (@Sendable (PasteOutcome) -> Void)?) {
+        switch PasteEngine.plan(text, policy: pastePolicy) {
+        case .reject(let reason):
+            onResult?(.rejected(reason: reason))
+        case .deliver(let chunks):
+            guard !chunks.isEmpty else { onResult?(.delivered); return }
+            guard isRunning else { onResult?(.aborted(reason: "session isn't running")); return }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { onResult?(.aborted(reason: "session was released")); return }
+                onResult?(self.runPasteDelivery(chunks: chunks, submit: submit))
+            }
         }
+    }
+
+    /// Write `chunks` one at a time, waiting for each to flush before the next
+    /// (backpressure), then optionally send the submitting Enter after a settle
+    /// gap. Blocks its background thread on a per-chunk semaphore; a stall past
+    /// `chunkTimeoutMs` or a dead session returns `.aborted`.
+    private func runPasteDelivery(chunks: [[UInt8]], submit: Bool) -> PasteOutcome {
+        for chunk in chunks {
+            guard isRunning, let proc else { return .aborted(reason: "session exited during paste") }
+            let sem = DispatchSemaphore(value: 0)
+            let ok = FlagBox()
+            proc.write(chunk) { flushed in
+                ok.value = flushed
+                sem.signal()
+            }
+            if sem.wait(timeout: .now() + .milliseconds(Paste.chunkTimeoutMs)) == .timedOut {
+                return .aborted(reason: "paste stalled — a chunk didn't flush within \(Paste.chunkTimeoutMs)ms")
+            }
+            guard ok.value else { return .aborted(reason: "the pty rejected the paste (session may be exiting)") }
+        }
+        if submit {
+            guard isRunning else { return .aborted(reason: "session exited before the paste was submitted") }
+            Thread.sleep(forTimeInterval: Double(Paste.submitSettleMs) / 1000)
+            guard isRunning else { return .aborted(reason: "session exited before the paste was submitted") }
+            write([0x0D]) // carriage return submits
+        }
+        return .delivered
     }
 
     /// Write `trimmed` as a bracketed paste (`ESC[200~ … ESC[201~`) without the
     /// submitting Enter — `autoSubmit` pastes, verifies it landed, then submits
-    /// separately.
+    /// separately. Fire-and-forget; the seed loop verifies the landing itself.
     private func paste(_ trimmed: String) {
-        write("\u{1B}[200~\(trimmed)\u{1B}[201~")
+        deliverPaste(trimmed, submit: false, onResult: nil)
     }
 
     // MARK: - outbound message queue (oracle-cj3 / juancode-r82)
@@ -581,7 +639,7 @@ public final class Session: @unchecked Sendable {
 
         while isRunning && activity == .idle {
             guard let item = env.messageQueue.peek(id) else { break }
-            pasteAndSubmit(item.text)
+            deliverPaste(item.text, submit: true, onResult: nil)
             if !isRunning { break }
             let accepted = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
                 self.activity == .busy || !self.isRunning
@@ -887,6 +945,15 @@ public final class Session: @unchecked Sendable {
         }
         env.store.update(meta, scrollback: bytes)
     }
+}
+
+/// `@unchecked Sendable` one-shot boolean, written in a pty-write completion and
+/// read after the paste-delivery semaphore is signalled. The semaphore
+/// signal→wait pair establishes the happens-before ordering, so the plain field
+/// needs no lock of its own.
+final class FlagBox: @unchecked Sendable {
+    var value = false
+    init() {}
 }
 
 /// `@unchecked Sendable`: a one-shot, lock-guarded slot for a subscriber cancel
