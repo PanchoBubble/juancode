@@ -302,6 +302,21 @@ struct JuancodeApp: App {
                     performShortcut(.findInTerminal, model: model, oracle: oracle)
                 }
                 .appShortcut(.findInTerminal, shortcuts)
+                // Terminal font zoom (juancode-fry): one global level across every
+                // pane, the Oracle dock, and the bottom panel. ⌘= / ⌘− / ⌘0 (⌘+ also
+                // zooms in via the key monitor). Applied live — no surface rebuild.
+                Button("Increase Terminal Font") {
+                    performShortcut(.terminalZoomIn, model: model, oracle: oracle)
+                }
+                .appShortcut(.terminalZoomIn, shortcuts)
+                Button("Decrease Terminal Font") {
+                    performShortcut(.terminalZoomOut, model: model, oracle: oracle)
+                }
+                .appShortcut(.terminalZoomOut, shortcuts)
+                Button("Reset Terminal Font") {
+                    performShortcut(.terminalZoomReset, model: model, oracle: oracle)
+                }
+                .appShortcut(.terminalZoomReset, shortcuts)
             }
         }
 

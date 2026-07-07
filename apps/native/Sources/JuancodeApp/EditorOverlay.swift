@@ -181,6 +181,9 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         private var sizingFrozen = false
         /// Latest grid the view reported while frozen; flushed once on unhide.
         private var frozenGrid: (cols: Int, rows: Int)?
+        /// Default font size captured on attach — anchors zoom level 0 (juancode-fry).
+        private var baseFontPoints: Double = 0
+        private var zoomObserver: Any?
 
         init(pty: EphemeralPty, onExit: @escaping @Sendable () -> Void) {
             self.pty = pty
@@ -203,7 +206,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
             }
         }
 
-        func attach(to tv: TerminalView) {
+        @MainActor func attach(to tv: TerminalView) {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
             cancelOutput = pty.onOutput { [weak tv] bytes in
@@ -213,10 +216,18 @@ struct SwiftTermEphemeral: NSViewRepresentable {
             // closure doesn't pull in the non-Sendable Coordinator.
             let fire = onExit
             cancelExit = pty.onExit { _ in fire() }
+            // Follow the global terminal font-zoom level (juancode-fry).
+            baseFontPoints = Double(tv.font.pointSize)
+            applySwiftTermZoom(view: tv, basePoints: baseFontPoints)
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak tv, base = baseFontPoints] _ in
+                MainActor.assumeIsolated { applySwiftTermZoom(view: tv, basePoints: base) }
+            }
         }
 
         func detach() {
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+            if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             resizeWork?.cancel(); resizeWork = nil
             cancelOutput?(); cancelOutput = nil
             cancelExit?(); cancelExit = nil

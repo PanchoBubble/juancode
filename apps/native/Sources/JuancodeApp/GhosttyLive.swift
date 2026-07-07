@@ -172,6 +172,25 @@ private func ghosttyShellQuote(_ path: String) -> String {
     return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
+/// Move a live Ghostty surface to the global terminal font-zoom level (juancode-fry),
+/// returning the level now applied. Emits one 1pt binding action per step of delta
+/// (mirroring libghostty's own pinch-zoom loop). If the surface isn't live yet the
+/// first action returns false and we leave the applied level unchanged so the caller
+/// retries on attach. After a real change we re-measure: the font resizes the grid for
+/// the same pixel bounds, so `fitToSize()` fires the resize delegate and the existing
+/// choreography (throttled SIGWINCH + resize-heal) re-lays-out the CLI — a streaming
+/// agent is protected exactly as by a drag resize.
+@MainActor
+private func applyGhosttyZoom(view: TerminalView?, applied: Int) -> Int {
+    let target = TerminalZoom.shared.level
+    let steps = TerminalFontZoom.bindingSteps(from: applied, to: target)
+    guard !steps.isEmpty else { return target }
+    guard let tv = view else { return applied }
+    for step in steps where !tv.performBindingAction(step) { return applied }
+    tv.fitToSize()
+    return target
+}
+
 private struct GhosttyRepresentable: NSViewRepresentable {
     let session: Session
     var targetSize: CGSize
@@ -294,6 +313,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var sizingFrozen = false
         var lastFocusToken = 0
         var lastResyncToken = 0
+        /// The font-zoom level currently applied to this surface (juancode-fry). A
+        /// fresh surface renders at the backend default = level 0; `syncZoom` walks it
+        /// to the global level on attach and on every zoom change.
+        private var appliedZoomLevel = 0
+        private var zoomObserver: Any?
         /// Surface-specific grid sink (see `GhosttyLive.onGrid`).
         var onGrid: ((Int, Int) -> Void)?
 
@@ -339,6 +363,13 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                     }
                 }
             }
+            // Follow the global terminal font-zoom level (juancode-fry): re-sync this
+            // surface whenever ⌘+/⌘−/⌘0 change it. The initial sync happens on surface
+            // attach (`terminalDidAttachSurface`), once the surface can take the action.
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.syncZoom() }
+            }
             // NB: we deliberately do NOT subscribe to the pty yet. The surface is
             // created lazily once the view enters a window; `receive()` drops bytes
             // while the surface is nil, so an early scrollback replay would vanish.
@@ -376,9 +407,18 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak view] in
                 view?.fitToSize()
             }
+            // Surface is live — seed it at the current global zoom level so a
+            // freshly-spawned (or re-attached) pane opens already zoomed (juancode-fry).
+            syncZoom()
         }
 
         func terminalDidDetachSurface() {}
+
+        /// Walk this surface to the global font-zoom level (juancode-fry). No-op when
+        /// already there or the surface isn't live yet (retried on attach).
+        private func syncZoom() {
+            appliedZoomLevel = applyGhosttyZoom(view: view, applied: appliedZoomLevel)
+        }
 
         /// The app/window came back to the front. Repaint the surface, then repair
         /// the pty only when the grid it actually applied (TIOCGWINSZ readback)
@@ -480,6 +520,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // This local view is going away — release the shared grid so a remote
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
+            if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }
             activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
@@ -769,6 +810,9 @@ struct GhosttyEphemeral: NSViewRepresentable {
         /// resizes are recorded but never forwarded to the pty, so the collapse
         /// animation's shrinking grids can't rewrap the shell's scrollback.
         private var sizingFrozen = false
+        /// Global font-zoom level applied to this shell surface (juancode-fry).
+        private var appliedZoomLevel = 0
+        private var zoomObserver: Any?
 
         init(pty: EphemeralPty, onExit: @escaping @Sendable () -> Void) {
             self.pty = pty
@@ -818,15 +862,26 @@ struct GhosttyEphemeral: NSViewRepresentable {
             }
             let fire = onExit
             cancelExit = pty.onExit { _ in fire() }
+            // Follow the global terminal font-zoom level (juancode-fry).
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.syncZoom() }
+            }
         }
 
         func detach() {
             resizeWork?.cancel(); resizeWork = nil
             cancelOutput?(); cancelOutput = nil
             cancelExit?(); cancelExit = nil
+            if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             preSurfaceBuffer = []
             surfaceReady = false
             gsession = nil
+        }
+
+        /// Walk this shell surface to the global font-zoom level (juancode-fry).
+        private func syncZoom() {
+            appliedZoomLevel = applyGhosttyZoom(view: view, applied: appliedZoomLevel)
         }
 
         // MARK: TerminalSurfaceLifecycleDelegate
@@ -837,6 +892,8 @@ struct GhosttyEphemeral: NSViewRepresentable {
                 gsession?.receive(Data(preSurfaceBuffer))
                 preSurfaceBuffer = []
             }
+            // Open at the current global zoom level (juancode-fry).
+            syncZoom()
         }
 
         func terminalDidDetachSurface() { surfaceReady = false }

@@ -92,6 +92,15 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             performShortcut(action, model: model, oracle: oracle)
             return true
         }
+        // ⌘+ (physically ⌘⇧=) also zooms the terminal in — cmd-plus is the macOS
+        // convention, while the rebindable primary is ⌘= (juancode-fry). Handled
+        // as a fixed alias here because a shifted "=" can't match a shift-less
+        // binding through the generic matcher above.
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == [.command, .shift],
+           ["+", "="].contains(event.charactersIgnoringModifiers ?? "") {
+            TerminalZoom.shared.zoomIn()
+            return true
+        }
         // ⌃N mirrors ⌘N while the Oracle dock is open: start a new Oracle session.
         // Only intercepted with the dock up — otherwise ⌃N stays the pty's (readline
         // next-history / cursor-down).
@@ -307,6 +316,23 @@ private func shellQuote(_ path: String) -> String {
     return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
+/// Apply the global terminal font-zoom level to a SwiftTerm surface (juancode-fry),
+/// anchoring level 0 to `basePoints` (the view's default font size) so the unzoomed
+/// look is unchanged. Setting `font` re-lays-out and fires `sizeChanged`, so the
+/// coordinator's existing debounced resize path pushes the SIGWINCH — no extra
+/// choreography needed. The family is kept by rebuilding from the live font's
+/// descriptor (only the size changes with zoom); deduped on point size so a redundant
+/// sync is a no-op. `basePoints` is a plain Double so it captures cleanly into the
+/// `@Sendable` notification closure (NSFont isn't Sendable). Used by both the live
+/// pane and the ephemeral shell coordinators.
+@MainActor
+func applySwiftTermZoom(view: TerminalView?, basePoints: Double) {
+    guard let tv = view, basePoints > 0 else { return }
+    let size = TerminalFontZoom.points(forLevel: TerminalZoom.shared.level, base: basePoints)
+    guard let font = NSFont(descriptor: tv.font.fontDescriptor, size: CGFloat(size)) else { return }
+    if abs(tv.font.pointSize - font.pointSize) > 0.01 { tv.font = font }
+}
+
 /// SwiftUI wrapper around SwiftTerm's `TerminalView`, driven by a live `Session`.
 ///
 /// The size is driven from SwiftUI's authoritative geometry (a `GeometryReader`)
@@ -430,15 +456,27 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         var lastFocusToken = 0
         /// Last resync-request token honored, so a recalc only fires when it changes.
         var lastResyncToken = 0
+        /// The view's default font size, captured on attach — anchors zoom level 0 so
+        /// the unzoomed look is unchanged (juancode-fry).
+        private var baseFontPoints: Double = 0
+        private var zoomObserver: Any?
 
         init(session: Session, remembersSize: Bool) {
             self.session = session
             self.remembersSize = remembersSize
         }
 
-        func attach(to tv: TerminalView) {
+        @MainActor func attach(to tv: TerminalView) {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
+            // Follow the global terminal font-zoom level (juancode-fry). SwiftTerm's
+            // surface is live immediately (no lazy attach), so apply the current level now.
+            baseFontPoints = Double(tv.font.pointSize)
+            applySwiftTermZoom(view: tv, basePoints: baseFontPoints)
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak tv, base = baseFontPoints] _ in
+                MainActor.assumeIsolated { applySwiftTermZoom(view: tv, basePoints: base) }
+            }
             // Replay scrollback, then stream live output. Feed must happen on the
             // main thread (AppKit); the pty callback arrives on a background queue.
             cancel = session.subscribeOutput(replay: true) { [weak tv] bytes in
@@ -573,6 +611,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // viewer (web / phone) can take control of the pty size (juancode-1th.1).
             session.releaseGrid(owner: GridArbiter.localOwner)
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+            if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
             cancel?()

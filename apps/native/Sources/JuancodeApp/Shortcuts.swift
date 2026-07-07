@@ -30,6 +30,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case toggleChanges
     case toggleProjects
     case findInTerminal
+    case terminalZoomIn
+    case terminalZoomOut
+    case terminalZoomReset
 
     var id: String { rawValue }
 
@@ -52,6 +55,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleChanges: return "Toggle Code Changes"
         case .toggleProjects: return "Toggle Projects Panel"
         case .findInTerminal: return "Find in Terminal"
+        case .terminalZoomIn: return "Increase Terminal Font"
+        case .terminalZoomOut: return "Decrease Terminal Font"
+        case .terminalZoomReset: return "Reset Terminal Font"
         }
     }
 
@@ -77,6 +83,12 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
         // ⌃F (focusSessionSearch) stays the sidebar session filter.
         case .findInTerminal: return KeyBinding(key: "f", command: true)
+        // Terminal font zoom (juancode-fry). ⌘= is the rebindable primary (the
+        // key you can press without shift); ⌘+ (⌘⇧=) is handled as a fixed alias
+        // in the window key monitor, the macOS convention for "zoom in".
+        case .terminalZoomIn: return KeyBinding(key: "=", command: true)
+        case .terminalZoomOut: return KeyBinding(key: "-", command: true)
+        case .terminalZoomReset: return KeyBinding(key: "0", command: true)
         }
     }
 }
@@ -248,5 +260,8 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .toggleChanges: model.toggleChangesPanel()
     case .toggleProjects: model.toggleProjectsSidebar()
     case .findInTerminal: model.showFindBar()
+    case .terminalZoomIn: TerminalZoom.shared.zoomIn()
+    case .terminalZoomOut: TerminalZoom.shared.zoomOut()
+    case .terminalZoomReset: TerminalZoom.shared.reset()
     }
 }
