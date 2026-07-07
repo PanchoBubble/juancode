@@ -83,6 +83,23 @@ import Testing
         #expect(sink.text.contains("ping"))
     }
 
+    /// A fire-and-forget programmatic paste (no `onResult`) must still reach the
+    /// child. Regression guard for the optional-chaining footgun where
+    /// `onResult?(runPasteDelivery(...))` short-circuited the whole expression when
+    /// the callback was nil, so seed / queue-flush pastes never delivered.
+    @Test func fireAndForgetPasteReachesTheChild() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .claude, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        let sink = ByteSink()
+        s.subscribeOutput { sink.add($0) }
+        await poll { sink.text.contains("READY") }
+        s.insert("PASTEPING") // no onResult — the nil-callback path
+        await poll { sink.text.contains("PASTEPING") } // tty echo of the delivered paste
+        #expect(sink.text.contains("PASTEPING"))
+    }
+
     @Test func killTransitionsToExitedAndNotifies() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
         let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)

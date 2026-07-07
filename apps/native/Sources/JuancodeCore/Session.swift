@@ -569,7 +569,13 @@ public final class Session: @unchecked Sendable {
             guard isRunning else { onResult?(.aborted(reason: "session isn't running")); return }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { onResult?(.aborted(reason: "session was released")); return }
-                onResult?(self.runPasteDelivery(chunks: chunks, submit: submit))
+                // Evaluate the delivery FIRST, then report it. Writing it as
+                // `onResult?(runPasteDelivery(...))` short-circuits the whole
+                // expression when `onResult` is nil — Swift never evaluates the
+                // argument — so a fire-and-forget paste (seed/queue flush, which pass
+                // no callback) would never actually deliver.
+                let outcome = self.runPasteDelivery(chunks: chunks, submit: submit)
+                onResult?(outcome)
             }
         }
     }
