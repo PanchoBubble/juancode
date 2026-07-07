@@ -162,6 +162,11 @@ final class AppModel {
     private var activityCancels: [String: () -> Void] = [:]
     private var gridCancels: [String: () -> Void] = [:]
 
+    /// OS-notification plumbing for background sessions (juancode-bao). The
+    /// should-notify decision is the pure `agentNotificationEffect`; this only
+    /// delivers, coalesces per session, and routes a click back to the session.
+    private let agentNotifier = AgentNotifier()
+
     /// sessionId → remote client id, for sessions whose pty grid a web/phone
     /// viewer currently owns (juancode-2t4). Bridged from `Session.onGridChange`
     /// in `watch` the same way activity edges flow; drives the "remote is
@@ -183,6 +188,13 @@ final class AppModel {
         }
         for s in appState.registry.all() { watch(s) }
         refresh()
+        // Route a clicked agent notification back to its session (juancode-bao):
+        // activate the app and select that pane (or open the Oracle dock for its
+        // sidebar-hidden sessions). Same landing path as the ⌘K jump palette.
+        agentNotifier.onSelect = { [weak self] id in
+            Task { @MainActor in self?.revealSession(id) }
+        }
+        agentNotifier.start()
         restoreTracked()
         restoreRecurringTasks()
         restorePromptTemplates()
@@ -246,6 +258,9 @@ final class AppModel {
 
     private func clearUnread(_ id: String) {
         unseenCompletions.remove(id)
+        // Drop any lingering OS notification so a seen session doesn't leave a stale
+        // ding in Notification Center (juancode-bao).
+        agentNotifier.clear(sessionId: id)
         guard unreadSessions.remove(id) != nil else { return }
         updateDockBadge()
     }
@@ -447,6 +462,15 @@ final class AppModel {
                 // needs you). Bounce the Dock + bump the badge so background work is
                 // noticeable. See `notifyTurnEnd`.
                 if notify { self.notifyTurnEnd(sessionId: s.id, state: st) }
+                // Same edge, off-device surfacing: an OS notification for a session
+                // that isn't the one you're watching (juancode-bao). The pure
+                // `agentNotificationEffect` owns the suppression (watched session,
+                // teardown resets, non-boundary edges).
+                if let kind = agentNotificationEffect(
+                    prev: prev, next: st, notify: notify,
+                    isSelected: self.selection == s.id, appActive: NSApp.isActive) {
+                    self.postAgentNotification(sessionId: s.id, kind: kind)
+                }
                 // The agent stays `busy` through a turn (including any file edits) and
                 // flips to idle / waiting-input when it finishes — so a busy → non-busy
                 // transition is the moment the working tree has settled. Re-diff then so
@@ -606,6 +630,39 @@ final class AppModel {
         updateDockBadge()
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
         fireNotificationWebhook(sessionId: sessionId, state: state)
+    }
+
+    /// Deliver (or replace) the OS notification for a background session at a turn
+    /// boundary (juancode-bao). Whether to fire at all is already decided by
+    /// `agentNotificationEffect` at the call site; this only builds the copy, applies
+    /// the same global mute (`notifyOnTurnEnd`) and Oracle-dock suppression the Dock
+    /// bounce respects, and hands off to the thin `AgentNotifier`.
+    private func postAgentNotification(sessionId: String, kind: AgentNotificationKind) {
+        guard notifyOnTurnEnd else { return }
+        // The open Oracle dock is the "viewer" for Oracle's own (sidebar-hidden)
+        // sessions — mirror `notifyTurnEnd`'s suppression.
+        if NSApp.isActive, oracleDockExpanded, isOracleSession(sessionId) { return }
+        let meta = (sessions + externalSessions).first { $0.id == sessionId }
+        let folder = meta.map { ($0.cwd as NSString).lastPathComponent } ?? ""
+        agentNotifier.post(
+            sessionId: sessionId,
+            title: meta?.title ?? "Agent",
+            subtitle: folder,
+            body: kind == .waitingForInput ? "Waiting for your input" : "Finished a turn",
+            critical: kind == .waitingForInput)
+    }
+
+    /// Land on the session a clicked notification points at (juancode-bao): bring the
+    /// app forward and select that pane, or open the Oracle dock for its own
+    /// sidebar-hidden sessions. Selection clears the pending unread + OS notification
+    /// through `clearUnread`.
+    func revealSession(_ id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        if isOracleSession(id) {
+            oracleDockExpanded = true
+        } else {
+            selection = id
+        }
     }
 
     /// POST a Slack-compatible notification to the user's configured webhook, if any
