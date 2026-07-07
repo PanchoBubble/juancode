@@ -189,6 +189,7 @@ struct JumpPaletteView: View {
             // (juancode-073); no remount, no replay.
             model.selection = meta.id
         }
+        model.flashFocusRim() // flash the landed pane's rim (juancode-vz1)
         dismiss()
     }
 }

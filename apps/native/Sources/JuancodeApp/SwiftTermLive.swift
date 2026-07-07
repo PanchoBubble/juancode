@@ -124,13 +124,13 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         if fr is NSTextView { return false }
 
         // Sidebar pane.
-        if ctrl, keyCode == 37 { model.focusTerminal(); return true } // ⌃L → terminal
+        if ctrl, keyCode == 37 { model.focusTerminal(); model.flashFocusRim(); return true } // ⌃L → terminal
         // Let modified keys through so app-level shortcuts keep working.
         if !mods.intersection([.command, .control, .option]).isEmpty { return false }
         switch keyCode {
         case 38, 125: model.moveSelection(by: 1); return true   // j / ↓
         case 40, 126: model.moveSelection(by: -1); return true  // k / ↑
-        case 36, 76, 37: model.focusTerminal(); return true     // ⏎ / enter / l → open
+        case 36, 76, 37: model.focusTerminal(); model.flashFocusRim(); return true // ⏎ / enter / l → open (juancode-vz1)
         case 5: mods.contains(.shift) ? model.selectLast() : model.selectFirst(); return true // g / G
         case 53: return false                                   // Esc passes through
         default: return true                                    // swallow; don't leak to the pty

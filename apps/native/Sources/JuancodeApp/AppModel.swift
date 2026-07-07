@@ -140,6 +140,12 @@ final class AppModel {
     /// Bumped to (re)focus the find bar's text field — lets a second ⌘F while the
     /// bar is already open pull focus back to it instead of no-opping.
     var findFocusToken = 0
+    /// Bumped on a "teleport" landing (⌘K jump palette, notification click-through,
+    /// sidebar keyboard-nav open) to flash the visible pane's rim so the eye finds
+    /// the right pane (juancode-vz1). NOT bumped on plain mouse clicks or routine
+    /// sidebar mouse switching — only the paths where visual context may be lost.
+    /// A repeated bump restarts the fade cleanly (see `FocusRimFlash`).
+    var focusRimFlashToken = 0
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
     /// `addTemplate`/`updateTemplate`/`deleteTemplate`, which persist on every change.
     var promptTemplates: [PromptTemplate] = []
@@ -374,6 +380,14 @@ final class AppModel {
     func focusTerminal() {
         suppressTerminalAutoFocus = false
         terminalFocusToken &+= 1
+    }
+
+    /// Flash the visible pane's rim (juancode-vz1). Called from the teleport paths
+    /// only — the ⌘K jump palette, a clicked notification's `revealSession`, and the
+    /// sidebar keyboard-nav open — so the eye lands on the pane the jump chose. Each
+    /// call restarts the fade from full opacity (see `FocusRimFlash`).
+    func flashFocusRim() {
+        focusRimFlashToken &+= 1
     }
 
     /// Open (or refocus) the in-pane find bar over the visible session (⌘F,
@@ -683,6 +697,7 @@ final class AppModel {
             oracleDockExpanded = true
         } else {
             selection = id
+            flashFocusRim() // land the eye on the pane the notification pointed at
         }
     }
 

@@ -1980,6 +1980,9 @@ struct SessionContainer: View {
             VStack(spacing: 0) {
                 terminal
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // Focus rim flash on teleport landings (juancode-vz1): belongs to
+                    // the visible pane container, not the pooled panes inside `terminal`.
+                    .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
                     .overlay(alignment: .topTrailing) { remoteDriveBadge }
                     // In-pane find bar (⌘F, juancode-972) — overlays the visible
                     // session's pane; never reflows the pty grid.
@@ -2148,6 +2151,31 @@ struct SessionContainer: View {
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
         }
+    }
+}
+
+/// An accent rim that flashes on a teleport landing (juancode-vz1). Each `token`
+/// bump snaps the rim to full opacity with animations disabled, then fades it out
+/// over ~1.5s — the SwiftUI equivalent of orca's remove-class + forced-reflow +
+/// re-add, so a bump mid-fade restarts cleanly from full instead of continuing the
+/// in-flight fade. Purely decorative: never hit-tests, so clicks fall through to
+/// the terminal beneath.
+private struct FocusRimFlash: View {
+    let token: Int
+    @State private var opacity: Double = 0
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .strokeBorder(Color.accentColor, lineWidth: 2.5)
+            .shadow(color: Color.accentColor.opacity(0.6), radius: 6)
+            .opacity(opacity)
+            .allowsHitTesting(false)
+            .onChange(of: token) { _, _ in
+                var snap = Transaction()
+                snap.disablesAnimations = true
+                withTransaction(snap) { opacity = 1 }
+                withAnimation(.easeOut(duration: 1.5)) { opacity = 0 }
+            }
     }
 }
 
