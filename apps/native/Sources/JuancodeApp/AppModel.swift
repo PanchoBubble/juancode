@@ -134,6 +134,12 @@ final class AppModel {
     var showingPromptPalette = false
     /// ⌘K session jump palette (juancode-dr0): fuzzy-find and switch sessions.
     var showingJumpPalette = false
+    /// ⌘F in-pane find bar (juancode-972): search the visible session's scrollback.
+    /// Scoped to `selection`; the bar overlays that session's terminal pane.
+    var showingFindBar = false
+    /// Bumped to (re)focus the find bar's text field — lets a second ⌘F while the
+    /// bar is already open pull focus back to it instead of no-opping.
+    var findFocusToken = 0
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
     /// `addTemplate`/`updateTemplate`/`deleteTemplate`, which persist on every change.
     var promptTemplates: [PromptTemplate] = []
@@ -368,6 +374,21 @@ final class AppModel {
     func focusTerminal() {
         suppressTerminalAutoFocus = false
         terminalFocusToken &+= 1
+    }
+
+    /// Open (or refocus) the in-pane find bar over the visible session (⌘F,
+    /// juancode-972). Idempotent when already open — the token bump pulls focus
+    /// back to the field so a repeat ⌘F re-arms it.
+    func showFindBar() {
+        showingFindBar = true
+        findFocusToken &+= 1
+    }
+
+    /// Close the find bar and return keyboard focus to the terminal (Esc).
+    func closeFindBar() {
+        guard showingFindBar else { return }
+        showingFindBar = false
+        focusTerminal()
     }
 
     /// Manually re-measure the live terminal and force a SIGWINCH — recovers a pane

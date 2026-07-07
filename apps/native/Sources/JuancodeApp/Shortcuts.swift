@@ -29,6 +29,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case refreshTerminal
     case toggleChanges
     case toggleProjects
+    case findInTerminal
 
     var id: String { rawValue }
 
@@ -50,6 +51,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .refreshTerminal: return "Refresh Terminal"
         case .toggleChanges: return "Toggle Code Changes"
         case .toggleProjects: return "Toggle Projects Panel"
+        case .findInTerminal: return "Find in Terminal"
         }
     }
 
@@ -72,6 +74,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .refreshTerminal: return KeyBinding(key: "z", control: true)
         case .toggleChanges: return KeyBinding(key: "c", command: true)
         case .toggleProjects: return KeyBinding(key: "s", control: true)
+        // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
+        // ⌃F (focusSessionSearch) stays the sidebar session filter.
+        case .findInTerminal: return KeyBinding(key: "f", command: true)
         }
     }
 }
@@ -242,5 +247,6 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         if oracle.expanded { oracle.refreshChat() } else { model.refreshTerminal() }
     case .toggleChanges: model.toggleChangesPanel()
     case .toggleProjects: model.toggleProjectsSidebar()
+    case .findInTerminal: model.showFindBar()
     }
 }

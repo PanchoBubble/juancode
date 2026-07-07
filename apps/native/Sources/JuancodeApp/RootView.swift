@@ -1981,6 +1981,14 @@ struct SessionContainer: View {
                 terminal
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(alignment: .topTrailing) { remoteDriveBadge }
+                    // In-pane find bar (⌘F, juancode-972) — overlays the visible
+                    // session's pane; never reflows the pty grid.
+                    .overlay(alignment: .top) {
+                        if model.showingFindBar {
+                            TerminalFindBar(sessionId: meta.id)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
                 if model.bottomTerminalShown {
                     // previewOnly: this divider borders the live terminal panes
                     // (main + bottom). Committing the size live reflows the CLI's

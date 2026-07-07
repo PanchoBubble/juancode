@@ -296,6 +296,12 @@ struct JuancodeApp: App {
                     performShortcut(.focusSessionSearch, model: model, oracle: oracle)
                 }
                 .appShortcut(.focusSessionSearch, shortcuts)
+                // ⌘F opens the in-pane find bar over the visible terminal — search
+                // that session's scrollback (juancode-972).
+                Button("Find in Terminal") {
+                    performShortcut(.findInTerminal, model: model, oracle: oracle)
+                }
+                .appShortcut(.findInTerminal, shortcuts)
             }
         }
 
