@@ -67,6 +67,13 @@ const SEED = {
   readyPollMs: 200,
   /** Per-attempt budget to confirm the paste landed in the input box. */
   landMs: 2_000,
+  /**
+   * Total budget for the paste to land, re-pasting every `landMs`. Generous so an
+   * input box that only becomes interactive several seconds after the screen first
+   * looks stable (concurrent spawns, slow MCP startup) is still caught, instead of
+   * giving up after a couple of tries.
+   */
+  landDeadlineMs: 24_000,
   /** Per-attempt budget to confirm the Enter submitted. */
   submitMs: 4_000,
   pollMs: 150,
@@ -337,8 +344,14 @@ export class Session {
     if (!this.isRunning) return { ok: false, reason: "session exited during startup" };
 
     // 2) Paste, then confirm the prompt actually landed in the input box.
+    // `waitForStableScreen` can report "settled" on an early partial paint — the
+    // banner is up but the input box isn't interactive yet — especially when several
+    // sessions spawn at once and contend for CPU. So don't give up after a fixed few
+    // tries: keep re-pasting until it lands or a generous deadline passes, so a box
+    // that only becomes ready seconds later is still caught.
     let landed = false;
-    for (let i = 0; i < SEED.maxAttempts; i++) {
+    let elapsedMs = 0;
+    while (elapsedMs < SEED.landDeadlineMs) {
       if (!this.isRunning)
         return { ok: false, reason: "session exited before the prompt was typed" };
       if (this.isBusy()) return { ok: true }; // already working
@@ -351,11 +364,12 @@ export class Session {
       );
       if (this.isBusy()) return { ok: true };
       if (landed) break;
+      elapsedMs += SEED.landMs;
     }
     if (!landed) {
       return {
         ok: false,
-        reason: `the prompt never appeared in the input box after ${SEED.maxAttempts} tries`,
+        reason: `the prompt never appeared in the input box after ${SEED.landDeadlineMs / 1000}s`,
       };
     }
 

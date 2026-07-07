@@ -342,6 +342,11 @@ public final class Session: @unchecked Sendable {
         static let readyPollMs = 200
         /// Per-attempt budget to confirm the paste landed in the input box.
         static let landMs = 2_000
+        /// Total budget for the paste to land, re-pasting every `landMs`. Generous so
+        /// an input box that only becomes interactive several seconds after the screen
+        /// first looks stable (concurrent spawns, slow MCP startup) is still caught,
+        /// instead of giving up after a couple of tries.
+        static let landDeadlineMs = 24_000
         /// Per-attempt budget to confirm the Enter submitted (agent went busy or
         /// the prompt left the input box).
         static let submitMs = 4_000
@@ -415,8 +420,14 @@ public final class Session: @unchecked Sendable {
         guard isRunning else { return .failed(reason: "session exited during startup") }
 
         // 2) Paste, then confirm the prompt actually landed in the input box.
+        // `waitForStableScreen` can report "settled" on an early partial paint — the
+        // banner is up but the input box isn't interactive yet — especially when
+        // several sessions spawn at once and contend for CPU. So don't give up after
+        // a fixed few tries: keep re-pasting until it lands or a generous deadline
+        // passes, so a box that only becomes ready seconds later is still caught.
         var landed = false
-        for _ in 0..<Seed.maxAttempts {
+        var elapsedMs = 0
+        while elapsedMs < Seed.landDeadlineMs {
             guard isRunning else { return .failed(reason: "session exited before the prompt was typed") }
             if activity == .busy { return .submitted } // already working — nothing to do
             paste(trimmed)
@@ -426,9 +437,11 @@ public final class Session: @unchecked Sendable {
             }
             if activity == .busy { return .submitted }
             if landed { break }
+            elapsedMs += Seed.landMs
         }
         guard landed else {
-            return .failed(reason: "the prompt never appeared in the input box after \(Seed.maxAttempts) tries")
+            return .failed(
+                reason: "the prompt never appeared in the input box after \(Seed.landDeadlineMs / 1000)s")
         }
 
         // 3) Submit, then confirm it went through (agent busy, or the box cleared).
