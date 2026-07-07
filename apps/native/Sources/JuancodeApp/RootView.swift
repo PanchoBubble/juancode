@@ -1953,6 +1953,7 @@ struct SessionContainer: View {
             VStack(spacing: 0) {
                 terminal
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(alignment: .topTrailing) { remoteDriveBadge }
                 if model.bottomTerminalShown {
                     // previewOnly: this divider borders the live terminal panes
                     // (main + bottom). Committing the size live reflows the CLI's
@@ -2052,6 +2053,23 @@ struct SessionContainer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// "Remote is driving" overlay (juancode-2t4): while a web/phone viewer owns
+    /// this session's pty grid, badge the visible pane and offer a one-click
+    /// take-back. Take-back is the existing geometry resync — its forced local
+    /// SIGWINCH preempts the remote owner by policy (juancode-1th.1) and the
+    /// resulting grid change dismisses the badge through `remoteGridOwner`.
+    /// Keyed by owner so a different viewer taking over restarts the overlay's
+    /// collapse timer. Hidden pool panes deliberately released their grid
+    /// (juancode-073) — they're off-screen, so only the visible pane is badged.
+    @ViewBuilder
+    private var remoteDriveBadge: some View {
+        if model.isLive(meta.id), let owner = model.remoteGridOwner(meta.id) {
+            RemoteDriveOverlay(owner: owner) { model.resyncTerminalGeometry() }
+                .id(owner)
+                .padding(10)
+        }
     }
 
     @ViewBuilder

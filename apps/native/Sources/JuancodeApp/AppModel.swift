@@ -158,6 +158,19 @@ final class AppModel {
     private var prsBackfillTasks: [String: Task<Void, Never>] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
+    private var gridCancels: [String: () -> Void] = [:]
+
+    /// sessionId → remote client id, for sessions whose pty grid a web/phone
+    /// viewer currently owns (juancode-2t4). Bridged from `Session.onGridChange`
+    /// in `watch` the same way activity edges flow; drives the "remote is
+    /// driving" overlay on the visible pane (`RemoteDriveOverlay`). Only remote
+    /// owners are recorded — a local claim or a release removes the entry, so
+    /// the overlay auto-dismisses the moment this pane re-takes the grid.
+    private(set) var remoteGridOwners: [String: String] = [:]
+
+    /// The remote client id driving `id`'s pty grid, or nil when the local pane
+    /// owns it / it's unclaimed.
+    func remoteGridOwner(_ id: String) -> String? { remoteGridOwners[id] }
 
     init(appState: AppState, degradedReason: String? = nil, corruptDbPath: String? = nil) {
         self.appState = appState
@@ -446,6 +459,23 @@ final class AppModel {
             }
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
+        // Grid-ownership bridge (juancode-2t4): seed from the current owner (a
+        // remote may already be driving when this model attaches — app relaunch
+        // while a phone viewer holds the grid), then follow arbitrated changes.
+        // The listener fires on the resizing client's queue; hop to main.
+        gridCancels[s.id]?()
+        setRemoteGridOwner(s.id, gridOwner: s.gridOwner())
+        gridCancels[s.id] = s.onGridChange { [weak self] owner, _, _ in
+            Task { @MainActor in self?.setRemoteGridOwner(s.id, gridOwner: owner) }
+        }
+    }
+
+    private func setRemoteGridOwner(_ id: String, gridOwner: String?) {
+        if let remote = RemoteDriveBadge.remoteOwner(from: gridOwner) {
+            remoteGridOwners[id] = remote
+        } else {
+            remoteGridOwners.removeValue(forKey: id)
+        }
     }
 
     /// Whether a session reaching a turn boundary notifies you (Dock bounce + badge).
@@ -2398,6 +2428,8 @@ final class AppModel {
         appState.registry.get(id)?.kill()
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
+        gridCancels[id]?(); gridCancels[id] = nil
+        remoteGridOwners.removeValue(forKey: id)
         if selection == id { selection = nil }
         clearUnread(id)
         refresh()
@@ -2430,6 +2462,8 @@ final class AppModel {
             appState.registry.get(id)?.kill()
             appState.store.delete(id)
             activityCancels[id]?(); activityCancels[id] = nil
+            gridCancels[id]?(); gridCancels[id] = nil
+            remoteGridOwners.removeValue(forKey: id)
             if selection == id { selection = nil }
             clearUnread(id)
         }
