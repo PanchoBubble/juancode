@@ -228,61 +228,54 @@ final class DiffParseTests: XCTestCase {
         XCTAssertEqual(commentRangeLabel(side: .new, line: 10, endLine: 14), "L10–14")
     }
 
-    func testComposeReviewPromptReflectsRange() {
-        let files = [diffFile("a.swift")]
-        let ranged = DiffComment(id: "1", sessionId: "s", file: "a.swift", side: .new,
-                                 line: 10, endLine: 14, body: "tidy this block", createdAt: 0)
-        let out = composeReviewPrompt(files: files, comments: [ranged], finalNote: "")
-        XCTAssertTrue(out.contains("- L10–14: tidy this block"))
-    }
+    // MARK: - quotedDiffLines (juancode-ck4)
 
-    // MARK: - composeReviewPrompt
-
-    private func comment(_ file: String, _ line: Int, _ body: String, side: CommentSide = .new) -> DiffComment {
-        DiffComment(id: UUID().uuidString, sessionId: "s", file: file, side: side,
-                    line: line, endLine: line, body: body, createdAt: 0)
-    }
-
-    private func diffFile(_ path: String) -> DiffFile {
-        DiffFile(path: path, oldPath: nil, status: .modified, additions: 0, deletions: 0,
-                 binary: false, diff: "", truncated: false)
-    }
-
-    func testComposeGroupsByFileInDiffOrderWithNote() {
-        let files = [diffFile("a.swift"), diffFile("b.swift")]
-        let comments = [
-            comment("b.swift", 5, "second file"),
-            comment("a.swift", 20, "later line"),
-            comment("a.swift", 3, "earlier line"),
-        ]
-        let out = composeReviewPrompt(files: files, comments: comments, finalNote: "  ship it  ")
-        let expected = """
-        Here are my review comments on the current working-tree changes:
-
-        ### a.swift
-        - L3: earlier line
-        - L20: later line
-
-        ### b.swift
-        - L5: second file
-
-        ship it
+    /// The parsed flat lines of a small mixed hunk: context "one", delete "two",
+    /// inserts "TWO"/"two-and-a-half", context "three".
+    private func sampleFlatLines() -> [DiffLine] {
+        let diff = """
+        diff --git a/f.txt b/f.txt
+        index 111..222 100644
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1,3 +1,4 @@
+         one
+        -two
+        +TWO
+        +two-and-a-half
+         three
         """
-        XCTAssertEqual(out, expected)
+        return parseUnifiedDiff(diff).flatMap(\.lines)
     }
 
-    func testComposeIncludesCommentsForFilesNotInDiff() {
-        let out = composeReviewPrompt(
-            files: [], comments: [comment("ghost.swift", 1, "orphan")], finalNote: "")
-        XCTAssertTrue(out.contains("### ghost.swift"))
-        XCTAssertTrue(out.contains("- L1: orphan"))
-        // No trailing blank line / note.
-        XCTAssertFalse(out.hasSuffix("\n"))
+    func testQuotedDiffLinesSingleInsertKeepsMarker() {
+        let lines = sampleFlatLines()
+        // New line 2 is the "+TWO" insert.
+        XCTAssertEqual(quotedDiffLines(lines, side: .new, from: 2, through: 2), "+TWO")
     }
 
-    func testComposeIndentsMultilineBodies() {
-        let out = composeReviewPrompt(
-            files: [diffFile("a")], comments: [comment("a", 1, "line one\nline two")], finalNote: "")
-        XCTAssertTrue(out.contains("- L1: line one\n  line two"))
+    func testQuotedDiffLinesRangeSpansNewSide() {
+        let lines = sampleFlatLines()
+        // New lines 1–3: context "one", insert "TWO", insert "two-and-a-half".
+        XCTAssertEqual(
+            quotedDiffLines(lines, side: .new, from: 1, through: 3),
+            " one\n+TWO\n+two-and-a-half")
+    }
+
+    func testQuotedDiffLinesOldSidePicksDelete() {
+        let lines = sampleFlatLines()
+        // Old line 2 is the "-two" delete.
+        XCTAssertEqual(quotedDiffLines(lines, side: .old, from: 2, through: 2), "-two")
+    }
+
+    func testQuotedDiffLinesNormalizesReversedRange() {
+        let lines = sampleFlatLines()
+        XCTAssertEqual(
+            quotedDiffLines(lines, side: .new, from: 3, through: 1),
+            quotedDiffLines(lines, side: .new, from: 1, through: 3))
+    }
+
+    func testQuotedDiffLinesEmptyWhenNoMatch() {
+        XCTAssertEqual(quotedDiffLines(sampleFlatLines(), side: .new, from: 99, through: 99), "")
     }
 }

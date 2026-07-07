@@ -267,36 +267,24 @@ public func commentRangeLabel(side: CommentSide, line: Int, endLine: Int) -> Str
     return side == .old ? "\(lines) (old)" : lines
 }
 
-/// Compose every pending comment (+ an optional closing note) into one prompt for
-/// the agent, grouped by file in diff order. Mirrors the web `composeReviewPrompt`
-/// so the native "submit review" injects the same text the web pastes into the pty.
-public func composeReviewPrompt(files: [DiffFile], comments: [DiffComment], finalNote: String) -> String {
-    var byFile: [String: [DiffComment]] = [:]
-    var fileOrder: [String] = []
-    for c in comments {
-        if byFile[c.file] == nil { byFile[c.file] = []; fileOrder.append(c.file) }
-        byFile[c.file]?.append(c)
+/// The annotated diff line(s) for a comment's anchored range — each prefixed with its
+/// +/-/space marker so the review composer (`composeReviewFeedback`) can quote exactly
+/// what the user highlighted (juancode-ck4). Picks the flat lines whose anchor is on
+/// `side` within the inclusive `from...through` range, in diff order, newline-joined.
+public func quotedDiffLines(_ lines: [DiffLine], side: CommentSide, from: Int, through: Int) -> String {
+    let lo = Swift.min(from, through)
+    let hi = Swift.max(from, through)
+    return lines.compactMap { line -> String? in
+        guard let a = line.anchor, a.side == side, a.line >= lo, a.line <= hi else { return nil }
+        return diffLineMarker(line.kind) + line.text
+    }.joined(separator: "\n")
+}
+
+/// The leading unified-diff marker for a line kind (`+`/`-`/space).
+private func diffLineMarker(_ kind: DiffLine.Kind) -> String {
+    switch kind {
+    case .insert: return "+"
+    case .delete: return "-"
+    case .context: return " "
     }
-    var out: [String] = ["Here are my review comments on the current working-tree changes:", ""]
-    // Walk files in diff order, then any commented files not in the current diff.
-    var order = files.map(\.path)
-    order.append(contentsOf: fileOrder)
-    var seen = Set<String>()
-    for path in order {
-        if seen.contains(path) { continue }
-        seen.insert(path)
-        guard let list = byFile[path], !list.isEmpty else { continue }
-        out.append("### \(path)")
-        for c in list.sorted(by: { $0.line < $1.line }) {
-            // Indent any continuation lines so multi-line bodies stay under the bullet.
-            let body = c.body.replacingOccurrences(of: "\n", with: "\n  ")
-            out.append("- \(commentRangeLabel(side: c.side, line: c.line, endLine: c.endLine)): \(body)")
-        }
-        out.append("")
-    }
-    let note = finalNote.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !note.isEmpty { out.append(note) }
-    // .trimEnd() — drop trailing whitespace/newlines.
-    return out.joined(separator: "\n").replacingOccurrences(
-        of: "\\s+$", with: "", options: .regularExpression)
 }

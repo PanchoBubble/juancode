@@ -39,9 +39,6 @@ struct ChangesPanel: View {
     /// One-shot guard so the programmatic tree selection on load scrolls to the
     /// first card without expanding it (keeps "all collapsed by default" honest).
     @State private var suppressSelectExpand = false
-    /// Closing-note composer for "Submit review".
-    @State private var showSubmit = false
-    @State private var finalNote = ""
     /// Persisted width of the tree pane in the split.
     @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
     /// Whether the left file-tree pane is shown (toggled from the header).
@@ -508,37 +505,26 @@ struct ChangesPanel: View {
 
     // MARK: - Submit-review bar
 
+    /// The review basket bar (juancode-ck4): a count, a "Send to agent" that composes
+    /// the annotations into one feedback prompt and steers it into the session (idle →
+    /// runs now, busy → queued by the CLI), and a "Discard" that clears them.
     private var submitBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if showSubmit {
-                TextEditor(text: $finalNote)
-                    .font(.system(size: 12))
-                    .frame(height: 48)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-                Text("Comments are written into the terminal prompt — press Enter there to send.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            HStack {
-                let n = model.comments(sessionId).count
-                Text("\(n) comment\(n == 1 ? "" : "s") pending")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
-                if showSubmit {
-                    Button("Cancel") { showSubmit = false }.controlSize(.small).clickCursor()
-                }
-                Button(showSubmit ? "Send to agent" : "Submit review →") {
-                    if showSubmit {
-                        model.submitReview(sessionId, finalNote: finalNote)
-                        showSubmit = false
-                        finalNote = ""
-                    } else {
-                        showSubmit = true
-                    }
-                }
+        HStack {
+            let n = model.comments(sessionId).count
+            Text("\(n) comment\(n == 1 ? "" : "s")")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer()
+            Button("Discard") { model.discardComments(sessionId) }
+                .controlSize(.small)
+                .clickCursor()
+            Button("Send to agent") { model.submitReview(sessionId) }
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
+                .disabled(model.liveSession(sessionId) == nil)
+                .help(model.liveSession(sessionId) == nil
+                      ? "Session isn't live — start it to send review feedback"
+                      : "Send the annotations to the agent as review feedback")
                 .clickCursor()
-            }
         }
         .padding(10)
     }
@@ -844,20 +830,34 @@ private struct FileCard: View {
                 .frame(height: 44)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
             HStack {
-                Button("Comment") {
-                    model.addComment(sessionId, file: file.path, side: anchor.side,
-                                     line: anchor.line, endLine: anchor.endLine, body: draft)
-                    composing = nil
-                    draft = ""
-                }
-                .controlSize(.small)
-                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                .clickCursor()
-                Button("Cancel") { composing = nil }.controlSize(.small).clickCursor()
+                Button("Comment") { commitComposer(anchor) }
+                    .controlSize(.small)
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .clickCursor()
+                Button("Cancel") { cancelComposer() }.controlSize(.small).clickCursor()
             }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.06))
+        // Esc dismisses the open editor (juancode-ck4).
+        .onExitCommand { cancelComposer() }
+    }
+
+    /// Stage the draft as a comment, capturing the annotated diff line(s) so the
+    /// review composer can quote the highlighted hunk back to the agent.
+    private func commitComposer(_ anchor: ComposeAnchor) {
+        let quote = renderedDiff.map {
+            quotedDiffLines($0.flatLines, side: anchor.side, from: anchor.line, through: anchor.endLine)
+        }
+        model.addComment(sessionId, file: file.path, side: anchor.side,
+                         line: anchor.line, endLine: anchor.endLine, body: draft,
+                         quote: (quote?.isEmpty ?? true) ? nil : quote)
+        cancelComposer()
+    }
+
+    private func cancelComposer() {
+        composing = nil
+        draft = ""
     }
 
     private func note(_ text: String) -> some View {

@@ -66,11 +66,17 @@ public struct DiffComment: Codable, Sendable, Equatable {
     public var endLine: Int
     public var body: String
     public var createdAt: Int
+    /// The annotated diff line(s), each with its +/-/space marker intact, newline-joined
+    /// — captured when the comment is staged so the review composer can quote exactly
+    /// what the user highlighted (juancode-ck4). Optional/nil for comments staged
+    /// without a diff snapshot (e.g. the REST path); decodes to nil for older rows.
+    public var quote: String?
 
     public init(id: String, sessionId: String, file: String, side: CommentSide,
-                line: Int, endLine: Int, body: String, createdAt: Int) {
+                line: Int, endLine: Int, body: String, createdAt: Int, quote: String? = nil) {
         self.id = id; self.sessionId = sessionId; self.file = file; self.side = side
         self.line = line; self.endLine = endLine; self.body = body; self.createdAt = createdAt
+        self.quote = quote
     }
 }
 

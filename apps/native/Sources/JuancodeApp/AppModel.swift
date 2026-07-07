@@ -2341,14 +2341,17 @@ final class AppModel {
         shellPtys.removeValue(forKey: pane)?.kill()
     }
 
-    /// Add an inline comment to a session's staging area.
-    func addComment(_ id: String, file: String, side: CommentSide, line: Int, endLine: Int, body: String) {
+    /// Add an inline comment to a session's staging area. `quote` is the annotated
+    /// diff line(s) captured from the rendered diff (with +/- markers) so the review
+    /// composer can quote exactly what was highlighted (juancode-ck4).
+    func addComment(_ id: String, file: String, side: CommentSide, line: Int, endLine: Int,
+                    body: String, quote: String? = nil) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let c = DiffComment(
             id: UUID().uuidString, sessionId: id, file: file, side: side,
             line: min(line, endLine), endLine: max(line, endLine),
-            body: trimmed, createdAt: Int(Date().timeIntervalSince1970 * 1000))
+            body: trimmed, createdAt: Int(Date().timeIntervalSince1970 * 1000), quote: quote)
         commentsBySession[id, default: []].append(c)
     }
 
@@ -2357,23 +2360,25 @@ final class AppModel {
         commentsBySession[id]?.removeAll { $0.id == commentId }
     }
 
-    /// Submit the batched review: compose the comments (+ closing note) into one
-    /// prompt and inject it into the session as if typed, then clear them. Mirrors
-    /// the web "Submit review" (which bracket-pastes into the pty); here we write it
-    /// straight to the live session. No-op without a live session.
-    func submitReview(_ id: String, finalNote: String) {
+    /// Discard the whole review basket for a session without sending (juancode-ck4).
+    func discardComments(_ id: String) {
+        commentsBySession[id] = []
+    }
+
+    /// Submit the batched review (juancode-ck4): compose the staged line annotations
+    /// into one deterministic feedback prompt (file:line + quoted hunk + comment) and
+    /// deliver it through the same steer path programmatic prompts use — `submit` does
+    /// a bracketed paste + Enter, so the CLI runs it now when idle and queues it when
+    /// the agent is busy. Clears the basket on send. No-op without a live session.
+    func submitReview(_ id: String) {
         guard let session = liveSession(id) else {
             gitNoteBySession[id] = GitNote(ok: false, text: "Session isn't live — can't send review.")
             return
         }
-        let files = diffBySession[id]?.files ?? []
-        let prompt = composeReviewPrompt(files: files, comments: comments(id), finalNote: finalNote)
+        let prompt = composeReviewFeedback(comments(id))
         guard !prompt.isEmpty else { return }
-        // Bracketed paste, no auto-submit: the user reviews the multi-line prompt
-        // and presses Enter to send. A raw write would type the review's embedded
-        // newlines as keystrokes and submit at the first one, sending a fragment.
         // Surface an oversize/abort as a status note instead of silently dropping.
-        session.insert(prompt) { [weak self] outcome in
+        session.submit(prompt) { [weak self] outcome in
             guard case let .rejected(reason) = outcome else { return }
             Task { @MainActor in
                 self?.gitNoteBySession[id] = GitNote(ok: false, text: reason)
