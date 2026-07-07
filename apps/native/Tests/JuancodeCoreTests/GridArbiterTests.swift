@@ -58,4 +58,14 @@ import Testing
         g.release(GridArbiter.localOwner)
         #expect(g.request("remote") == true)
     }
+
+    @Test func releaseReportsWhetherOwnershipWasFreed() {
+        let g = GridArbiter()
+        _ = g.request("a")
+        // A non-owner's release must not read as a transition, or observers
+        // would see spurious "grid went unclaimed" events (juancode-slz).
+        #expect(g.release("b") == false)
+        #expect(g.release("a") == true)
+        #expect(g.release("a") == false) // already free
+    }
 }

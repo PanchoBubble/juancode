@@ -44,9 +44,15 @@ public final class GridArbiter: @unchecked Sendable {
 
     /// Release ownership held by `owner` (its client disconnected / its view was
     /// torn down) so the next client's request can claim the grid. No-op if
-    /// `owner` isn't the current owner.
-    public func release(_ owner: String) {
-        lock.withLock { if self.owner == owner { self.owner = nil } }
+    /// `owner` isn't the current owner. Returns whether ownership was actually
+    /// freed, so a caller can notify observers on the real transition only.
+    @discardableResult
+    public func release(_ owner: String) -> Bool {
+        lock.withLock {
+            guard self.owner == owner else { return false }
+            self.owner = nil
+            return true
+        }
     }
 
     /// The current controlling owner, or nil when the grid is unclaimed.

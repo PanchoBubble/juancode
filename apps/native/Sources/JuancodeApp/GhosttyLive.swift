@@ -236,12 +236,13 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, TerminalSurfaceResizeDelegate, TerminalSurfaceBellDelegate,
+    final class Coordinator: NSObject, TerminalSurfaceGridResizeDelegate, TerminalSurfaceBellDelegate,
                              TerminalSurfaceLifecycleDelegate {
         private let session: Session
         private weak var view: TerminalView?
         private var gsession: InMemoryTerminalSession?
         private var cancel: (() -> Void)?
+        private var cancelGrid: (() -> Void)?
         private var streaming = false
         private var resizeWork: DispatchWorkItem?
         private var lastSent: (cols: Int, rows: Int)?
@@ -252,6 +253,10 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// never be the last thing the pty hears (which stranded the CLI at a smaller
         /// grid than the surface — the black band below its output after a panel drag).
         private var lastSurfaceGrid: (cols: Int, rows: Int)?
+        /// Ghostty's cell metrics in surface pixels, captured off every resize
+        /// report. Lets the pool-hidden adoption path (juancode-slz) size the
+        /// frozen surface to exactly a remote owner's grid.
+        private var cellPixels: (w: Int, h: Int)?
         /// When we last pushed a grid to the pty, for the resize throttle below.
         private var lastResizeAt: DispatchTime?
         /// Max SIGWINCH cadence during a drag (~30fps). Small enough that the pty
@@ -322,6 +327,17 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                     forName: name, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.repairWakeDrift() }
                 })
+            }
+            // While this pane is pool-hidden a remote viewer may take the grid
+            // (juancode-073 released it); adopt its dims so the frozen surface
+            // reflows in lockstep with the pty (juancode-slz). Fires from the
+            // resize's own queue — hop to main for the surface.
+            cancelGrid = session.onGridChange { [weak self] owner, cols, rows in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self?.adoptRemoteGridIfNeeded(owner: owner, cols: cols, rows: rows)
+                    }
+                }
             }
             // NB: we deliberately do NOT subscribe to the pty yet. The surface is
             // created lazily once the view enters a window; `receive()` drops bytes
@@ -423,15 +439,41 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// hidden, which a dedup would wrongly skip), re-claiming local grid
         /// ownership in the same call. A genuine size change delivers the SIGWINCH
         /// that makes the CLI repaint at our grid; an unchanged size is a no-op at
-        /// the kernel, so a clean reveal never disturbs the TUI. The delayed fit
-        /// is the settled-frame repaint — same rationale as the attach path above.
+        /// the kernel, so a clean reveal never disturbs the TUI. The delayed pass
+        /// is the take-back repair (juancode-slz): a settled-frame repaint plus a
+        /// drift-only pty verification — `repairWakeDrift` reads the grid the pty
+        /// actually applied and nudges only on true drift, so a take-back from a
+        /// same-sized remote never makes a clean TUI re-lay-out.
         func completeReveal() {
             lastSent = nil
             flushSurfaceGrid()
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
                 guard let self, !self.sizingFrozen else { return }
-                self.view?.fitToSize()
+                self.repairWakeDrift()
             }
+        }
+
+        /// Adopt a remote grid owner's dimensions while this pane is pool-hidden
+        /// (juancode-slz, Orca's mobile fit override): size the frozen surface
+        /// frame to exactly (cols, rows) so Ghostty reflows in lockstep with the
+        /// pty — bytes the CLI streams for the remote grid land correctly instead
+        /// of mis-wrapping against our stale pane-bounds grid. The resize report
+        /// this triggers is recorded but never forwarded (`sizingFrozen`), so no
+        /// SIGWINCH fights the remote owner. Skipped when cell metrics aren't
+        /// known yet — then the surface just stays at pane bounds and stays quiet
+        /// (the acceptable fallback). Take-back restores the pane fit (reveal's
+        /// `applySize`) and verifies via the drift-only repair above.
+        private func adoptRemoteGridIfNeeded(owner: String?, cols: Int, rows: Int) {
+            guard sizingFrozen, RemoteGridFit.isRemote(owner: owner) else { return }
+            guard let cell = cellPixels, let tv = view else { return }
+            let scale = tv.window?.backingScaleFactor
+                ?? NSScreen.main?.backingScaleFactor ?? 2
+            let size = RemoteGridFit.surfacePointSize(cols: cols, rows: rows,
+                                                      cellWidthPx: cell.w, cellHeightPx: cell.h,
+                                                      scale: scale)
+            guard size.width > 0, size.height > 0 else { return }
+            tv.frame = NSRect(x: 0, y: 0, width: size.width, height: size.height)
+            tv.fitToSize()
         }
 
         func detach() {
@@ -444,6 +486,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             healWork?.cancel(); healWork = nil
             resizeHealArmed = false
             cancel?(); cancel = nil
+            cancelGrid?(); cancelGrid = nil
             streaming = false
             gsession = nil
         }
@@ -469,6 +512,17 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// heal (juancode-qxb). What a transition still needs over a plain drag is
         /// the settle pass: once the layout stays quiet it makes sure the CLI
         /// repainted at the settled grid — see `settleAfterTransition`.
+        /// Metrics-bearing variant the surface coordinator prefers when the
+        /// delegate conforms to `TerminalSurfaceGridResizeDelegate`: same grid
+        /// flow as below, plus the cell pixel sizes the remote-grid adoption
+        /// needs (juancode-slz).
+        func terminalDidResize(_ size: TerminalGridMetrics) {
+            if size.cellWidthPixels > 0, size.cellHeightPixels > 0 {
+                cellPixels = (w: Int(size.cellWidthPixels), h: Int(size.cellHeightPixels))
+            }
+            terminalDidResize(columns: Int(size.columns), rows: Int(size.rows))
+        }
+
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)

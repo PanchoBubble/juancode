@@ -58,4 +58,14 @@ describe("GridArbiter", () => {
     g.release(LOCAL_GRID_OWNER);
     expect(g.request("remote")).toBe(true);
   });
+
+  it("reports whether a release actually freed ownership", () => {
+    const g = new GridArbiter();
+    g.request("a");
+    // A non-owner's release must not read as a transition, or observers would
+    // see spurious "grid went unclaimed" events (mirrors the Swift twin).
+    expect(g.release("b")).toBe(false);
+    expect(g.release("a")).toBe(true);
+    expect(g.release("a")).toBe(false); // already free
+  });
 });

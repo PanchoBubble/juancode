@@ -91,6 +91,12 @@ public final class Session: @unchecked Sendable {
     public typealias OutputListener = @Sendable (_ bytes: [UInt8]) -> Void
     public typealias ExitListener = @Sendable (_ exitCode: Int?) -> Void
     public typealias ActivityListener = @Sendable (_ state: SessionActivity, _ notify: Bool) -> Void
+    /// Fires on every granted arbitrated resize (`owner` + the new dims) and on a
+    /// real ownership release (`owner` nil, dims = last desired grid). The render
+    /// side uses it to adopt a remote owner's grid while the local pane isn't
+    /// driving (juancode-slz); the UI layer can watch it for "remote is driving"
+    /// state (juancode-2t4).
+    public typealias GridChangeListener = @Sendable (_ owner: String?, _ cols: Int, _ rows: Int) -> Void
 
     private let lock = NSRecursiveLock()
     private var _meta: SessionMeta
@@ -102,6 +108,7 @@ public final class Session: @unchecked Sendable {
     private var outputListeners: [Int: OutputListener] = [:]
     private var exitListeners: [Int: ExitListener] = [:]
     private var activityListeners: [Int: ActivityListener] = [:]
+    private var gridListeners: [Int: GridChangeListener] = [:]
     private var nextToken = 0
 
     private let workQueue: DispatchQueue
@@ -614,7 +621,9 @@ public final class Session: @unchecked Sendable {
                 desiredRows = rows
             }
         }
-        return (applied: resize(cols: cols, rows: rows), denied: false)
+        let applied = resize(cols: cols, rows: rows)
+        emitGridChange(owner: owner, cols: cols, rows: rows)
+        return (applied: applied, denied: false)
     }
 
     /// Grid resize from the in-process local view (the native app's own terminal),
@@ -638,7 +647,24 @@ public final class Session: @unchecked Sendable {
     /// next client's resize can take over the grid (juancode-1th.1). No-op if
     /// `owner` isn't the current owner.
     public func releaseGrid(owner: String) {
-        grid.release(owner)
+        guard grid.release(owner) else { return }
+        let (cols, rows) = lock.withLock { (desiredCols, desiredRows) }
+        emitGridChange(owner: nil, cols: cols, rows: rows)
+    }
+
+    /// The client currently controlling this session's pty grid
+    /// (`GridArbiter.current`), or nil when unclaimed. `GridArbiter.localOwner`
+    /// is the native app's own pane; anything else is a remote viewer.
+    public func gridOwner() -> String? {
+        grid.current
+    }
+
+    /// True while a remote viewer (web / phone) owns the pty grid — the native
+    /// pane should render at the remote grid instead of fighting for ownership
+    /// (juancode-slz); the UI layer can surface "remote is driving" from this
+    /// (juancode-2t4).
+    public var isGridRemotelyOwned: Bool {
+        RemoteGridFit.isRemote(owner: grid.current)
     }
 
     /// Re-assert the desired grid once the TUI is up (juancode-1th.3). A CLI that
@@ -723,6 +749,24 @@ public final class Session: @unchecked Sendable {
             return t
         }
         return { [weak self] in self?.lock.withLock { _ = self?.activityListeners.removeValue(forKey: token) } }
+    }
+
+    /// Subscribe to arbitrated grid-state changes (see `GridChangeListener`).
+    /// Listeners are invoked on the caller's queue of the resize/release that
+    /// triggered them — hop to your own executor before touching UI.
+    @discardableResult
+    public func onGridChange(_ listener: @escaping GridChangeListener) -> Cancel {
+        let token = lock.withLock { () -> Int in
+            let t = nextToken; nextToken += 1
+            gridListeners[t] = listener
+            return t
+        }
+        return { [weak self] in self?.lock.withLock { _ = self?.gridListeners.removeValue(forKey: token) } }
+    }
+
+    private func emitGridChange(owner: String?, cols: Int, rows: Int) {
+        let listeners = lock.withLock { Array(gridListeners.values) }
+        for l in listeners { l(owner, cols, rows) }
     }
 
     private func snapshotOutput() -> [OutputListener] {

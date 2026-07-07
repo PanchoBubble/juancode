@@ -45,10 +45,13 @@ export class GridArbiter {
   /**
    * Release ownership held by `owner` (its client disconnected / its view was torn
    * down) so the next client's request can claim the grid. No-op if `owner` isn't
-   * the current owner.
+   * the current owner. Returns whether ownership was actually freed, so a caller
+   * can notify observers on the real transition only.
    */
-  release(owner: string): void {
-    if (this.owner === owner) this.owner = null;
+  release(owner: string): boolean {
+    if (this.owner !== owner) return false;
+    this.owner = null;
+    return true;
   }
 
   /** The current controlling owner, or null when the grid is unclaimed. */
