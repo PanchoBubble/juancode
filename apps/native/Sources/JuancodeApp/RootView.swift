@@ -2160,12 +2160,27 @@ struct NewSessionView: View {
     // New sessions default to accept-all (skip permission prompts); toggle off per session.
     @State private var skipPermissions = true
     @State private var isolateWorktree = false
+    // Opening prompt, auto-submitted once the CLI is ready (Session.autoSubmit).
+    @State private var prompt = ""
+    // Fan-out: how many parallel agents (each its own worktree) to spawn with the
+    // same prompt. Only meaningful when `isolateWorktree` is on; >1 requires it.
+    @State private var agentCount = 1
     @State private var creating = false
     @State private var showingDirPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New Session").font(.title2).bold()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Opening prompt").font(.system(size: 13, weight: .semibold))
+                TextEditor(text: $prompt)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(height: 64)
+                    .padding(4)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3)))
+                Text("Submitted once the CLI is ready. Leave blank to start idle.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             Form {
                 Picker("Agent", selection: $provider) {
                     ForEach(ProviderId.allCases, id: \.self) { p in
@@ -2179,12 +2194,22 @@ struct NewSessionView: View {
                 }
                 Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
                 Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
+                // Fan-out only appears once worktree isolation is on — >1 agent on a
+                // shared checkout would collide. Toggling worktree off resets to 1.
+                if isolateWorktree {
+                    Stepper(value: $agentCount, in: 1...FanOut.maxAgents) {
+                        Text(agentCount == 1
+                             ? "Run 1 agent"
+                             : "Fan out to \(agentCount) agents (compare results)")
+                    }
+                }
             }
+            .onChange(of: isolateWorktree) { _, on in if !on { agentCount = 1 } }
             continueExisting
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).clickCursor()
-                Button(creating ? "Starting…" : "Start") { start() }
+                Button(startLabel) { start() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(creating || cwd.trimmingCharacters(in: .whitespaces).isEmpty)
                     .clickCursor()
@@ -2263,13 +2288,30 @@ struct NewSessionView: View {
         if model.adoptResumable(s, cwd: cwd) != nil { dismiss() }
     }
 
+    private var startLabel: String {
+        if creating { return "Starting…" }
+        return (isolateWorktree && agentCount > 1) ? "Start \(agentCount) agents" : "Start"
+    }
+
     private func start() {
         creating = true
+        let seed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let initialInput = seed.isEmpty ? nil : seed
         Task {
-            let session = await model.create(provider: provider, cwd: cwd,
-                                             skipPermissions: skipPermissions, isolateWorktree: isolateWorktree)
+            let started: Bool
+            if isolateWorktree, agentCount > 1 {
+                let sessions = await model.createFanOut(
+                    provider: provider, cwd: cwd, skipPermissions: skipPermissions,
+                    count: agentCount, initialInput: initialInput)
+                started = !sessions.isEmpty
+            } else {
+                let session = await model.create(
+                    provider: provider, cwd: cwd, skipPermissions: skipPermissions,
+                    isolateWorktree: isolateWorktree, initialInput: initialInput)
+                started = session != nil
+            }
             creating = false
-            if session != nil { dismiss() }
+            if started { dismiss() }
         }
     }
 }

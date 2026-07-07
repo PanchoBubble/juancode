@@ -727,12 +727,14 @@ final class AppModel {
     @discardableResult
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = true,
-                cols: Int? = nil, rows: Int? = nil, model: String? = nil) async -> Session? {
+                cols: Int? = nil, rows: Int? = nil, model: String? = nil,
+                worktreeName: String? = nil) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
             if isolateWorktree {
-                let wt = try await createWorktree(cwd, String(UUID().uuidString.prefix(8)).lowercased())
+                let name = worktreeName ?? String(UUID().uuidString.prefix(8)).lowercased()
+                let wt = try await createWorktree(cwd, name)
                 workCwd = wt.path
                 worktreePath = wt.path
             }
@@ -778,6 +780,42 @@ final class AppModel {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
             return nil
         }
+    }
+
+    /// Fan one opening prompt across `count` parallel sessions, each in its OWN fresh
+    /// git worktree, so their results can be compared side by side (the "Parallel
+    /// Worktrees" flow). Every variant shares a random branch stem with a distinct
+    /// letter suffix (`<stem>-a`, `<stem>-b`, …) and a pinned `"<stem> · A"`-style
+    /// title so the group reads as one family in the sidebar. Worktree isolation is
+    /// mandatory here — the same checkout can't back N concurrent agents — so callers
+    /// only reach this when the worktree toggle is on. Keeps every session that
+    /// starts and surfaces a single aggregate error for any that don't; selects the
+    /// first success. Returns the sessions that started (possibly fewer than `count`).
+    @discardableResult
+    func createFanOut(provider: ProviderId, cwd: String, skipPermissions: Bool,
+                      count: Int, initialInput: String?) async -> [Session] {
+        let letters = FanOut.letters(count: count)
+        let branchStem = String(UUID().uuidString.prefix(6)).lowercased()
+        let titleStem = FanOut.titleStem(for: initialInput ?? "")
+        var created: [Session] = []
+        for (i, letter) in letters.enumerated() {
+            let s = await create(
+                provider: provider, cwd: cwd, skipPermissions: skipPermissions,
+                isolateWorktree: true, initialInput: initialInput, select: i == 0,
+                worktreeName: FanOut.worktreeName(stem: branchStem, letter: letter))
+            if let s {
+                s.setTitle(FanOut.groupTitle(stem: titleStem, letter: letter))
+                created.append(s)
+            }
+        }
+        let failures = letters.count - created.count
+        if failures > 0 {
+            errorMessage = created.isEmpty
+                ? "Fan-out failed: couldn't start any of \(letters.count) sessions."
+                : "Fan-out: started \(created.count) of \(letters.count) sessions; \(failures) failed."
+        }
+        refresh()
+        return created
     }
 
     /// Start a new session directly in a given folder + provider, bypassing the
