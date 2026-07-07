@@ -148,6 +148,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingPromptPalette) {
             PromptPaletteView()
         }
+        .sheet(isPresented: $model.showingJumpPalette) {
+            JumpPaletteView()
+        }
         .sheet(isPresented: $model.showingSessionTemplates) {
             SessionTemplatesView()
         }
@@ -446,12 +449,12 @@ struct SidebarView: View {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
         return byCwd.map { cwd, sessions in
-            // Within a project, most-recently-active session first. `updatedAt` is
-            // bumped on every output flush, so live sessions float to the top as they
-            // work; ties (and identical timestamps) fall back to createdAt for stable
-            // order.
+            // Within a project, attention-first smart sort (juancode-dr0): sessions
+            // waiting for a reply, then finished-unseen, then working, then quiet
+            // live ones, exited last — recency (updatedAt, then createdAt) breaks
+            // ties inside each bucket, so active sessions still float as they work.
             let ordered = sessions.sorted {
-                $0.updatedAt != $1.updatedAt ? $0.updatedAt > $1.updatedAt : $0.createdAt > $1.createdAt
+                smartSortPrecedes(smartSortKey($0), smartSortKey($1))
             }
             return FolderGroup(
                 cwd: cwd,
@@ -471,6 +474,18 @@ struct SidebarView: View {
             case (nil, nil): return a.cwd.localizedCompare(b.cwd) == .orderedAscending
             }
         }
+    }
+
+    /// The smart-sort inputs for one session, from the same live state that drives
+    /// its row's status glyph — so what sorts first is what glows in the sidebar.
+    private func smartSortKey(_ meta: SessionMeta) -> SessionSortKey {
+        SessionSortKey(
+            attention: sessionAttention(
+                live: model.isLive(meta.id),
+                activity: model.activity(meta.id),
+                unseenDone: model.unseenCompletions.contains(meta.id)),
+            updatedAt: meta.updatedAt,
+            createdAt: meta.createdAt)
     }
 
     /// Collapse any folder we haven't seen before, so projects are minimized by
@@ -1783,13 +1798,27 @@ struct SessionRow: View {
         }
     }
 
-    /// The row's agent-state vocabulary (juancode-t9p), one glyph per state so the
-    /// sidebar answers "who's working / who needs me / who finished" at a glance:
-    /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
-    /// green check (only until the session is viewed), idle/exited = quiet grey dot.
-    private enum StateGlyph { case working, waiting, doneUnseen, dot }
+    /// Status glyph in the leading slot — the shared agent-state vocabulary.
+    private var statusIndicator: some View {
+        SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone, unread: unread)
+    }
+}
 
-    private var stateGlyph: StateGlyph {
+/// The agent-state vocabulary (juancode-t9p), one glyph per state so a session
+/// list answers "who's working / who needs me / who finished" at a glance:
+/// working = pulsing orange dot, waiting = amber question mark, done-unseen =
+/// green check (only until the session is viewed), idle/exited = quiet grey dot.
+/// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
+/// the two surfaces never drift into different vocabularies.
+struct SessionStateGlyph: View {
+    let live: Bool
+    let activity: SessionActivity?
+    let unseenDone: Bool
+    var unread: Bool = false
+
+    private enum Glyph { case working, waiting, doneUnseen, dot }
+
+    private var glyph: Glyph {
         guard live else { return .dot }
         switch activity {
         case .busy: return .working
@@ -1798,12 +1827,11 @@ struct SessionRow: View {
         }
     }
 
-    /// Status glyph in the leading slot, per `stateGlyph`. All variants sit in a
-    /// fixed-width slot so row titles stay aligned regardless of which is shown.
-    @ViewBuilder
-    private var statusIndicator: some View {
+    /// All variants sit in a fixed-width slot so row titles stay aligned
+    /// regardless of which is shown.
+    var body: some View {
         Group {
-            switch stateGlyph {
+            switch glyph {
             case .working:
                 // Pulsing reads as motion without a spinner's churn in a long list.
                 Image(systemName: "circle.fill")
@@ -1822,13 +1850,14 @@ struct SessionRow: View {
                     .foregroundStyle(.green)
                     .help("Finished since you last looked — click to view")
             case .dot:
-                Circle().fill(dotColor).frame(width: 8, height: 8)
+                Circle().fill(sessionDotColor(live: live, activity: activity))
+                    .frame(width: 8, height: 8)
             }
         }
         .frame(width: 12, alignment: .center)
         .overlay(alignment: .topTrailing) {
             // The green check already says "unseen", so skip the red dot there.
-            if unread, stateGlyph != .doneUnseen {
+            if unread, glyph != .doneUnseen {
                 Circle()
                     .fill(Color.red)
                     .frame(width: 6, height: 6)
@@ -1838,8 +1867,6 @@ struct SessionRow: View {
             }
         }
     }
-
-    private var dotColor: Color { sessionDotColor(live: live, activity: activity) }
 }
 
 /// Status-dot color for a session: busy = orange, waiting = amber, idle = quiet grey

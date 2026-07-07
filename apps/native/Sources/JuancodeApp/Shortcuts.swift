@@ -16,6 +16,7 @@ import AppKit
 enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case newSessionSameProject
     case newSessionSheet
+    case jumpPalette
     case promptTemplates
     case sessionTemplates
     case togglePerfHud
@@ -36,6 +37,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .newSessionSameProject: return "New Session (same agent & folder)"
         case .newSessionSheet: return "New Session…"
+        case .jumpPalette: return "Jump to Session…"
         case .promptTemplates: return "Prompt Templates…"
         case .sessionTemplates: return "Session Templates…"
         case .togglePerfHud: return "Toggle Performance HUD"
@@ -56,7 +58,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .newSessionSameProject: return KeyBinding(key: "n", command: true)
         case .newSessionSheet: return KeyBinding(key: "n", command: true, shift: true)
-        case .promptTemplates: return KeyBinding(key: "k", command: true)
+        // ⌘K is the jump palette (juancode-dr0); prompt templates moved to ⌘⇧K.
+        case .jumpPalette: return KeyBinding(key: "k", command: true)
+        case .promptTemplates: return KeyBinding(key: "k", command: true, shift: true)
         case .sessionTemplates: return KeyBinding(key: "l", command: true)
         case .togglePerfHud: return KeyBinding(key: "p", command: true, shift: true)
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
@@ -222,6 +226,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         // the surface you're looking at (⌘N and ⌃N both land here via the monitor).
         if oracle.expanded { oracle.newOracle() } else { model.quickNewSession() }
     case .newSessionSheet: model.showingNewSession = true
+    case .jumpPalette: model.showingJumpPalette = true
     case .promptTemplates: model.showingPromptPalette = true
     case .sessionTemplates: model.showingSessionTemplates = true
     case .togglePerfHud: PerfMonitor.shared.visible.toggle()

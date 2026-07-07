@@ -4,7 +4,7 @@ import JuancodeServices
 
 // MARK: - Prompt-template palette (juancode-2vd)
 //
-// A ⌘K command palette for saved prompt templates — quick-insert reusable prompts
+// A ⌘⇧K command palette for saved prompt templates — quick-insert reusable prompts
 // into the active session's composer. These are juancode-side templates (stored in
 // UserDefaults via `AppModel`), distinct from the CLI's own slash commands, which
 // pass through the pty untouched.
@@ -15,7 +15,7 @@ import JuancodeServices
 // folder has no live session, a fresh Claude session is seeded with the prompt.
 
 /// Presented as a sheet from `RootView`, toggled by `model.showingPromptPalette`
-/// (⌘K). Self-contained: owns the query + selection + edit state.
+/// (⌘⇧K). Self-contained: owns the query + selection + edit state.
 struct PromptPaletteView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -135,8 +135,8 @@ struct PromptPaletteView: View {
 
     private var footer: some View {
         HStack(spacing: 16) {
-            shortcut("return", "Insert")
-            shortcut("⌘ return", "Insert & send")
+            PaletteKeyHint(key: "return", label: "Insert")
+            PaletteKeyHint(key: "⌘ return", label: "Insert & send")
             Spacer()
             Button("Close") { dismiss() }.clickCursor()
                 .keyboardShortcut(.cancelAction)
@@ -149,16 +149,6 @@ struct PromptPaletteView: View {
         .font(.system(size: 11))
     }
 
-    private func shortcut(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 5) {
-            Text(key)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 5).padding(.vertical, 1)
-                .background(Color.secondary.opacity(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
-            Text(label).foregroundStyle(.secondary)
-        }
-    }
-
     // MARK: empty / no-match
 
     private var emptyState: some View {
@@ -166,7 +156,7 @@ struct PromptPaletteView: View {
             Spacer()
             Image(systemName: "text.badge.plus").font(.largeTitle).foregroundStyle(.secondary)
             Text("No saved templates yet.").foregroundStyle(.secondary).font(.system(size: 13))
-            Text("Save a prompt you reuse — then ⌘K to insert it into any session.")
+            Text("Save a prompt you reuse — then ⌘⇧K to insert it into any session.")
                 .font(.system(size: 11)).foregroundStyle(.tertiary).multilineTextAlignment(.center)
             Button { editing = .new } label: { Label("New Template", systemImage: "plus") }
                 .clickCursor().padding(.top, 4)

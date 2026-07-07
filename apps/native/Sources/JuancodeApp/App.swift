@@ -222,7 +222,14 @@ struct JuancodeApp: App {
                     performShortcut(.newSessionSheet, model: model, oracle: oracle)
                 }
                 .appShortcut(.newSessionSheet, shortcuts)
-                // ⌘K opens the prompt-template palette: pick a saved prompt and
+                // ⌘K opens the session jump palette: fuzzy-find any session or
+                // worktree and switch to it; needs-attention sessions sort first
+                // (juancode-dr0).
+                Button("Jump to Session…") {
+                    performShortcut(.jumpPalette, model: model, oracle: oracle)
+                }
+                .appShortcut(.jumpPalette, shortcuts)
+                // ⌘⇧K opens the prompt-template palette: pick a saved prompt and
                 // insert (or insert+send) it into the active session (juancode-2vd).
                 Button("Prompt Templates…") {
                     performShortcut(.promptTemplates, model: model, oracle: oracle)

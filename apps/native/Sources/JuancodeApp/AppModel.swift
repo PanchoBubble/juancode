@@ -130,8 +130,10 @@ final class AppModel {
     var showingSessionHealth = false
     /// Recurring-tasks create/manage panel (juancode-46g).
     var showingRecurringTasks = false
-    /// ⌘K prompt-template palette (juancode-2vd): quick-insert saved prompts.
+    /// ⌘⇧K prompt-template palette (juancode-2vd): quick-insert saved prompts.
     var showingPromptPalette = false
+    /// ⌘K session jump palette (juancode-dr0): fuzzy-find and switch sessions.
+    var showingJumpPalette = false
     /// Saved prompt templates, loaded from `UserDefaults` on launch. Mutated through
     /// `addTemplate`/`updateTemplate`/`deleteTemplate`, which persist on every change.
     var promptTemplates: [PromptTemplate] = []
