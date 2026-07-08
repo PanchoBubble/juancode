@@ -19,6 +19,11 @@ struct KillPortSheet: View {
     @State private var busy: Set<Int> = []
     @State private var newPort = ""
 
+    /// Stuck `vitest` worker trees (no listening port, so the port scan misses them).
+    @State private var trees: [VitestTree] = []
+    /// Tree roots with a reap in flight, so their row shows a spinner.
+    @State private var reaping: Set<Int32> = []
+
     /// Suggested + saved, deduped and sorted — the rows to show.
     private var ports: [Int] {
         Array(Set(Self.suggested + model.savedPorts)).sorted()
@@ -30,8 +35,8 @@ struct KillPortSheet: View {
                 Text("Kill Port").font(.title3).bold()
                 if !busy.isEmpty { ProgressView().controlSize(.small) }
                 Spacer()
-                Button { Task { await scanAll() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).help("Rescan all ports").clickCursor()
+                Button { Task { await refreshAll() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Rescan ports and stuck processes").clickCursor()
                 Button("Done") { dismiss() }.clickCursor()
             }
             .padding()
@@ -47,13 +52,35 @@ struct KillPortSheet: View {
                                 forget: { model.removeSavedPort(port) })
                         Divider()
                     }
+                    if !trees.isEmpty { stuckSection }
                 }
             }
             Divider()
             addPortBar
         }
         .frame(width: 420, height: 480)
-        .task { await scanAll() }
+        .task { await refreshAll() }
+    }
+
+    /// Stuck vitest trees the port scan can't see — these hold no port, just RAM.
+    private var stuckSection: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Stuck processes").font(.caption).bold().foregroundStyle(.secondary)
+                Spacer()
+                Button("Reap all") { Task { await reapAll() } }
+                    .controlSize(.small)
+                    .disabled(!reaping.isEmpty)
+                    .help("Kill every stuck vitest tree").clickCursor()
+            }
+            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
+            ForEach(trees) { tree in
+                VitestRow(tree: tree,
+                          busy: reaping.contains(tree.rootPid),
+                          kill: { Task { await reap(tree) } })
+                Divider()
+            }
+        }
     }
 
     private var addPortBar: some View {
@@ -109,6 +136,34 @@ struct KillPortSheet: View {
         defer { busy.remove(port) }
         let result = await PortKiller.kill(port: port)
         listeners[port] = result.stillInUse ? await PortKiller.listeners(on: port) : []
+    }
+
+    /// Scan ports and stuck processes together.
+    private func refreshAll() async {
+        async let ports: Void = scanAll()
+        async let procs: Void = scanTrees()
+        _ = await (ports, procs)
+    }
+
+    private func scanTrees() async {
+        trees = await ProcessReaper.stuckVitestTrees()
+    }
+
+    /// Reap one stuck vitest tree, then rescan.
+    private func reap(_ tree: VitestTree) async {
+        reaping.insert(tree.rootPid)
+        defer { reaping.remove(tree.rootPid) }
+        await ProcessReaper.kill(tree: tree)
+        trees = await ProcessReaper.stuckVitestTrees()
+    }
+
+    /// Reap every stuck vitest tree, then rescan.
+    private func reapAll() async {
+        let current = trees
+        for t in current { reaping.insert(t.rootPid) }
+        defer { reaping.removeAll() }
+        for t in current { await ProcessReaper.kill(tree: t) }
+        trees = await ProcessReaper.stuckVitestTrees()
     }
 }
 
@@ -168,5 +223,41 @@ private struct PortRow: View {
         } else {
             Text("—").foregroundStyle(.secondary).font(.system(size: 12))
         }
+    }
+}
+
+/// One stuck vitest tree: launcher command, pid, process count, RAM, and a Kill.
+private struct VitestRow: View {
+    let tree: VitestTree
+    let busy: Bool
+    let kill: () -> Void
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .memory
+        return f
+    }()
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label(tree.command, systemImage: "circle.fill")
+                    .labelStyle(.titleAndIcon)
+                    .foregroundStyle(.orange)
+                    .font(.system(size: 12))
+                    .lineLimit(1).truncationMode(.middle)
+                Text("pid \(String(tree.rootPid)) · \(tree.processCount) procs · ~\(Self.byteFormatter.string(fromByteCount: tree.totalRSSBytes))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                Button("Kill", action: kill)
+                    .help("Kill this vitest tree (\(tree.processCount) processes)")
+                    .clickCursor()
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
     }
 }
