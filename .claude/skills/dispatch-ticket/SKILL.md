@@ -7,7 +7,7 @@ description: Dispatch a bd (beads) ticket to a fresh, autonomous headless `claud
 
 Hand a bd ticket to a **separate, autonomous `claude` session** that implements it
 end-to-end on this repo, then commits and pushes — mirroring how juancode's Oracle
-dispatches real CLI sessions into projects. This keeps the *current* session's
+dispatches real CLI sessions into projects. This keeps the _current_ session's
 context free: the dispatched session runs headless in the background and reports
 when it exits.
 
@@ -25,13 +25,16 @@ or run `bd ready` and offer the top items. Never guess an id.
 
 1. **Fetch the ticket** (daemon-safe — bd's cold-start can stall pipes, so always
    redirect stdio):
+
    ```bash
    sh -c 'bd show <id> 2>&1 </dev/null'
    ```
+
    Confirm it exists and read its title + description. Abort if it's already
    `closed` (tell the user) or `in_progress` under another owner.
 
 2. **Claim it:**
+
    ```bash
    sh -c 'bd update <id> --status in_progress --json >/dev/null 2>&1 </dev/null'
    ```
@@ -41,19 +44,23 @@ or run `bd ready` and offer the top items. Never guess an id.
    - The ticket id, title, and full description (paste from step 1).
    - The repo path and the **juancode conventions block** below.
    - The **finish-line policy** (see "Autonomy" — default: commit + push to main).
-   Write with a real heredoc (real newlines, not `\n`):
+     Write with a real heredoc (real newlines, not `\n`):
+
    ```bash
    cat > "$SCRATCH/dispatch-<id>.txt" <<'PROMPT'
    <the full prompt>
    PROMPT
    ```
+
    (`$SCRATCH` = the session scratchpad dir from the system prompt.)
 
 4. **Dispatch** a fresh headless session in the repo, in the background:
+
    ```bash
    cd <repo-root> && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
      claude -p "$(cat "$SCRATCH/dispatch-<id>.txt")" --dangerously-skip-permissions
    ```
+
    Run it with `run_in_background: true`. `--dangerously-skip-permissions` is what
    makes it autonomous (no approval prompts), matching the Oracle's `skipPermissions`
    dispatch. **Unset `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`** (as shown): a parent
@@ -73,14 +80,15 @@ or run `bd ready` and offer the top items. Never guess an id.
 You are an autonomous coding session on the juancode repo at <REPO_ROOT>.
 Implement bd ticket <ID> end-to-end: investigate, implement, test, commit, push, close.
 
-Repo shape: pnpm workspaces (Node ≥22). apps/server (Express+ws+node-pty+sqlite),
-apps/web (Vite+React+xterm), apps/oracle-mcp (phone sidecar), apps/native (SwiftUI
-macOS app that IS the server — Swift package under apps/native).
+Repo shape: apps/native (SwiftUI macOS app that IS the server — Swift package,
+the primary surface), apps/oracle-mcp (Node Telegram/phone sidecar; pnpm
+workspace, Node ≥22). The old apps/web + apps/server (browser harness) were
+removed — native + Telegram only.
 
 Hard rules:
-- The WS wire protocol is mirrored in THREE files — keep them in sync when touching
-  any of them: apps/server/src/protocol.ts, apps/web/src/protocol.ts,
-  apps/native/Sources/JuancodeServer/WireProtocol.swift.
+- The WS wire protocol lives in apps/native/Sources/JuancodeServer/WireProtocol.swift;
+  the sidecar's client mirror is apps/oracle-mcp/src/native-events.ts — keep them in
+  sync when touching either.
 - TypeScript: verbatimModuleSyntax is on — use `import type` for type-only imports.
 - Use real newlines in generated content. Prefer extracting shared logic over
   duplicating. Prime directive: never inject a shadow HOME/CODEX_HOME or override

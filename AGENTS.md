@@ -2,41 +2,39 @@
 
 ## What juancode is
 
-A **light web harness** for running the real `claude` (Claude Code) and `codex` CLIs
-from a browser. Unlike t3code, it does **not** reimplement the agents or their MCP
-plumbing — it spawns the genuine CLI binaries in a pseudo-terminal (`node-pty`) with
-the user's environment inherited untouched. That means user-scope MCP servers
-(`~/.claude.json`), account connectors, `~/.codex/config.toml`, and project `.mcp.json`
-all load exactly as they do in a normal terminal. Preserving that faithfulness is the
-core value of this project — never inject a shadow `HOME`/`CODEX_HOME` or override
+A **native macOS harness** for running the real `claude` (Claude Code) and `codex` CLIs,
+with a Node **Telegram/phone sidecar** for remote steering. Unlike t3code, it does **not**
+reimplement the agents or their MCP plumbing — it spawns the genuine CLI binaries in a
+pseudo-terminal with the user's environment inherited untouched. That means user-scope MCP
+servers (`~/.claude.json`), account connectors, `~/.codex/config.toml`, and project
+`.mcp.json` all load exactly as they do in a normal terminal. Preserving that faithfulness
+is the core value of this project — never inject a shadow `HOME`/`CODEX_HOME` or override
 `mcpServers`.
 
 ## Stack
 
-- **Backend** `apps/server`: Express 5 + `ws` + `node-pty` + `better-sqlite3`, TypeScript, run via `tsx`.
-- **Frontend** `apps/web`: Vite + React 19 + TanStack Router + TanStack Query + Tailwind v4 + xterm.js.
-- pnpm workspaces, Node ≥ 22.
+- **`apps/native`** (primary surface): Swift / SwiftUI macOS app. The app _is_ the server —
+  an in-process registry owns the real ptys (`forkpty`) and fans output to the local
+  SwiftUI view and remote clients over an embedded WebSocket + HTTP server on `:4280`. See
+  [apps/native/README.md](./apps/native/README.md).
+- **`apps/oracle-mcp`**: Node sidecar (Express 5 + `ws` + MCP SDK, TypeScript via `tsx`).
+  MCP server + Telegram bridge + a small phone web console; talks to the native app's
+  embedded server on `:4280`. Telegram is the notification/remote-steering path.
+- pnpm workspaces, Node ≥ 22 (for the sidecar only; the native app builds with SwiftPM).
 
 ## Architecture (one paragraph)
 
-The browser holds one shared WebSocket (`apps/web/src/lib/socket.ts`) to the server's
-`/ws`. Each session is one pty running a real CLI (`apps/server/src/session.ts`),
-tracked live in an in-memory registry and persisted (metadata + capped scrollback) to
-sqlite (`apps/server/src/db.ts`) so history survives restarts. xterm.js renders the pty
-stream faithfully; keystrokes flow back as `input` messages. The wire protocol lives in
-`apps/server/src/protocol.ts` and is mirrored in `apps/web/src/protocol.ts` — **keep the
-two in sync**.
-
-## UI components — IMPORTANT
-
-Before building any non-trivial UI component from scratch, first check
-**https://github.com/brillout/awesome-react-components** for a well-maintained existing
-library that fits. Prefer a vetted component over a hand-rolled one. Only build custom
-when nothing suitable exists or the dependency cost isn't justified.
+The native app owns the ptys and the wire protocol
+(`apps/native/Sources/JuancodeServer/WireProtocol.swift`), broadcasting session `activity`
+over `/ws`. The oracle sidecar keeps a single long-lived WS client to that server
+(`apps/oracle-mcp/src/native-events.ts`) and fans session events out in-process to the
+Telegram bridge (`telegram.ts`), which pings the relevant chat when a session needs input
+or finishes and routes replies back into the session's pty. Notifications go over Telegram —
+there is no Web Push.
 
 ## Conventions
 
-- All TypeScript. `verbatimModuleSyntax` is on — use `import type` for type-only imports.
+- Sidecar is all TypeScript. `verbatimModuleSyntax` is on — use `import type` for type-only imports.
 - Use real newlines, not escaped ones, in any generated content.
 - Prefer extracting shared logic into a module over duplicating it across files.
 
@@ -53,11 +51,13 @@ vitest on staged files.
 
 ## Run it locally
 
-- `pnpm dev` — runs server (`:4280`) and web (`:5280`) together. Open http://localhost:5280.
+- Native app: `cd apps/native && swift run juancode-app` (embedded server on `:4280`).
+- Sidecar: `pnpm dev:oracle` (or `pnpm dev` for every `apps/*` Node package).
 - Requires `claude` and/or `codex` on PATH and authenticated. Override binary paths with
   `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` if needed.
 
 <!-- BEGIN BEADS INTEGRATION -->
+
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -165,6 +165,7 @@ For more details, see README.md and docs/QUICKSTART.md.
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push

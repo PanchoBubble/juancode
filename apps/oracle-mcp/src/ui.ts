@@ -11,7 +11,7 @@ export const consoleHtml = /* html */ `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0b0d12" />
 <meta name="color-scheme" content="dark" />
-<!-- PWA install + web-push (juancode-6f0) -->
+<!-- PWA install (add to home screen) -->
 <link rel="manifest" href="/manifest.webmanifest" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -259,27 +259,6 @@ export const consoleHtml = /* html */ `<!doctype html>
     color: var(--faint); font-size: 17px; margin: -4px -6px 0 0;
   }
 
-  /* ── Notifications opt-in ─────────────────────────────── */
-  .push {
-    display: flex; align-items: center; gap: 12px; padding: 14px;
-  }
-  .push .ic {
-    width: 38px; height: 38px; flex: none; border-radius: 11px; display: grid; place-items: center;
-    font-size: 18px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line);
-  }
-  .push.on .ic { background: rgba(88,224,140,.14); box-shadow: inset 0 0 0 1px rgba(88,224,140,.3); }
-  .push .tx { flex: 1; min-width: 0; }
-  .push .tx .h { font-size: 14.5px; font-weight: 640; }
-  .push .tx .d { font-size: 12.5px; color: var(--dim); margin-top: 2px; }
-  .push .act {
-    flex: none; min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px;
-    background: linear-gradient(180deg, var(--tint), var(--tint-strong)); color: var(--tint-ink);
-    font-size: 13.5px; font-weight: 700; box-shadow: 0 2px 10px rgba(60,110,230,.25);
-  }
-  .push .act.off { background: var(--panel-2); color: var(--txt); box-shadow: inset 0 0 0 1px var(--line); }
-  .push .act.muted { background: var(--panel-2); color: var(--faint); box-shadow: inset 0 0 0 1px var(--line-soft); }
-  .push .act:disabled { opacity: .6; }
-
   /* ── Chat ─────────────────────────────────────────────── */
   #chat-wrap { display: flex; flex-direction: column; height: 100%; }
   #log { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
@@ -505,7 +484,6 @@ export const consoleHtml = /* html */ `<!doctype html>
     <!-- ── Issues ─────────────────────────────────────── -->
     <section id="issues" class="tab active">
       <div id="install-hint"></div>
-      <div id="push-panel"></div>
 
       <details class="create">
         <summary>＋ New global issue<span class="chev">›</span></summary>
@@ -721,7 +699,7 @@ async function loadSessions(){
       + '<textarea class="sreply-in" placeholder="Reply to this agent…" rows="1"></textarea>'
       + '<button class="sreply-send" aria-label="Send reply">➤</button></div></div>';
     }).join("");
-    // A push notification may have asked us to open a specific session's reply box.
+    // A ?session=<id> deep-link may have asked us to open a specific session's reply box.
     if (pendingReplyId) { openSessionReply(pendingReplyId); pendingReplyId = null; }
   } catch(e){ setConn(false); el.innerHTML = errState(e.message, "sessions"); }
 }
@@ -741,8 +719,8 @@ $("#d-go").onclick = async () => {
 
 // ── Reply into a live session ─────────────────────────────
 // Tap a running session card to reveal an inline reply box; the text is delivered
-// into that session's pty (POST /api/reply). A push notification deep-links here via
-// ?session=<id>, which opens the matching card's box once the list renders.
+// into that session's pty (POST /api/reply). A ?session=<id> deep-link opens the
+// matching card's box once the list renders.
 let pendingReplyId = null;
 function openSessionReply(id){
   const sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
@@ -1226,95 +1204,11 @@ function renderInstallHint(){
     + '<div class="tx">Add Oracle to your Home Screen'
     + '<div class="small">Tap '
     + '<svg class="share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M5 12v7a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-7"/></svg>'
-    + ' then <b>Add to Home Screen</b>. Needed for push alerts on iPhone.</div></div>'
+    + ' then <b>Add to Home Screen</b> for quick access.</div></div>'
     + '<button class="x" id="install-x" aria-label="Dismiss">✕</button></div>';
   $("#install-x").onclick = () => { localStorage.setItem("oracle-install-dismissed", "1"); host.innerHTML = ""; };
 }
 renderInstallHint();
-
-// ── Notifications opt-in ──────────────────────────────────
-// Registers /sw.js, requests permission, subscribes with the VAPID key from
-// /api/push/vapid, and POSTs the subscription to /api/push/subscribe. Off-path
-// hits /api/push/unsubscribe. Renders a stateful card with clear copy.
-function urlBase64ToUint8Array(base64String){
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = atob(base64);
-  const out = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; i++) out[i] = rawData.charCodeAt(i);
-  return out;
-}
-const pushSupported = ("serviceWorker" in navigator) && ("PushManager" in window) && ("Notification" in window);
-
-// Render the opt-in card for a given state: on | default | denied | unsupported | working
-function renderPush(state){
-  const host = $("#push-panel"); if (!host) return;
-  // iOS requires the PWA be installed before push is available at all.
-  if (pushSupported && !isStandalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) { host.innerHTML = ""; return; }
-  if (!pushSupported) {
-    host.innerHTML = '<div class="card push"><span class="ic">🔕</span>'
-      + '<div class="tx"><div class="h">Alerts unavailable</div>'
-      + '<div class="d">This browser can\\'t do push notifications.</div></div></div>';
-    return;
-  }
-  let ic = "🔔", h = "Get alerts on this phone", d = "Push when a session needs you or finishes.";
-  let act = '<button class="act" id="push-act">Turn on</button>', cls = "";
-  if (state === "working") { act = '<button class="act" id="push-act" disabled>…</button>'; }
-  else if (state === "on") { cls = "on"; h = "Alerts are on"; d = "You'll be pinged for sessions & tracked PRs.";
-    act = '<button class="act off" id="push-act">Turn off</button>'; }
-  else if (state === "denied") { ic = "🔕"; h = "Alerts are blocked";
-    d = "Enable notifications for this site in your browser settings.";
-    act = '<button class="act muted" id="push-act" disabled>Blocked</button>'; }
-  host.innerHTML = '<div class="card push '+cls+'"><span class="ic">'+ic+'</span>'
-    + '<div class="tx"><div class="h">'+h+'</div><div class="d">'+d+'</div></div>'+act+'</div>';
-  const a = $("#push-act");
-  if (a && !a.disabled) a.onclick = state === "on" ? disablePush : enablePush;
-}
-async function refreshPushState(){
-  if (!pushSupported) { renderPush("unsupported"); return; }
-  if (Notification.permission === "denied") { renderPush("denied"); return; }
-  if (Notification.permission === "granted") {
-    try {
-      const reg = await navigator.serviceWorker.getRegistration();
-      const sub = reg && await reg.pushManager.getSubscription();
-      renderPush(sub ? "on" : "default");
-    } catch(_) { renderPush("default"); }
-    return;
-  }
-  renderPush("default");
-}
-async function enablePush(){
-  renderPush("working");
-  try {
-    const reg = await navigator.serviceWorker.register("/sw.js");
-    const perm = await Notification.requestPermission();
-    if (perm !== "granted") { refreshPushState(); return; }
-    const { publicKey } = await api("/api/push/vapid");
-    if (!publicKey) throw new Error("the server has no VAPID key");
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey),
-      });
-    }
-    await api("/api/push/subscribe", { method:"POST", body: JSON.stringify(sub) });
-    renderPush("on");
-  } catch(e){ alert("Couldn't turn on alerts: " + e.message); refreshPushState(); }
-}
-async function disablePush(){
-  renderPush("working");
-  try {
-    const reg = await navigator.serviceWorker.getRegistration();
-    const sub = reg && await reg.pushManager.getSubscription();
-    if (sub) {
-      await api("/api/push/unsubscribe", { method:"POST", body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(()=>{});
-      await sub.unsubscribe().catch(()=>{});
-    }
-  } catch(_){}
-  renderPush("default");
-}
-refreshPushState();
 
 // ── Resume / reconnect ────────────────────────────────────
 // Mobile Safari/Chrome suspend the page and drop in-flight requests while the phone is
@@ -1340,7 +1234,7 @@ window.addEventListener("pageshow", onResume); // bfcache restore
 window.addEventListener("offline", () => setConn(false));
 
 // ── Boot ──────────────────────────────────────────────────
-// Deep-link from a push notification: /?session=<id> jumps to the Sessions tab and
+// Deep-link: /?session=<id> jumps to the Sessions tab and
 // opens that session's reply box once the list renders (pendingReplyId is consumed
 // by loadSessions). Otherwise land on Issues as usual.
 (function () {
@@ -1357,3 +1251,92 @@ window.addEventListener("offline", () => setConn(false));
 </script>
 </body>
 </html>`;
+
+// ── PWA install assets ───────────────────────────────────────────────────────
+// Served so the phone console can be added to the home screen and launch
+// standalone. Notifications are handled over Telegram, so there is no service
+// worker or Web Push here.
+
+export const webManifest = {
+  name: "Oracle",
+  short_name: "Oracle",
+  start_url: "/",
+  display: "standalone",
+  theme_color: "#0b0d12",
+  background_color: "#0b0d12",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+  ],
+};
+
+/** A tiny solid-color PNG (the app's --bg navy), generated in-code so we don't
+ *  ship a binary asset. Same single pixel for both /icon-192 and /icon-512 — the
+ *  browser scales it. */
+export function iconPng(): Buffer {
+  return buildSolidPng(0x0b, 0x0d, 0x12);
+}
+
+function buildSolidPng(r: number, g: number, b: number): Buffer {
+  // Minimal 1x1 8-bit RGB PNG.
+  const crcTable = (() => {
+    const t: number[] = [];
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  const crc32 = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]!)! & 0xff]! ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const typeBuf = Buffer.from(type, "ascii");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+    return Buffer.concat([len, typeBuf, data, crc]);
+  };
+
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0); // width
+  ihdr.writeUInt32BE(1, 4); // height
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: truecolor RGB
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  // raw scanline: filter byte 0 + RGB
+  const raw = Buffer.from([0, r, g, b]);
+  // zlib stored block (no compression): 0x78 0x01 header, then deflate stored.
+  const zlibHeader = Buffer.from([0x78, 0x01]);
+  const blockHeader = Buffer.from([0x01]); // final stored block
+  const lenLE = Buffer.alloc(4);
+  lenLE.writeUInt16LE(raw.length, 0);
+  lenLE.writeUInt16LE(~raw.length & 0xffff, 2);
+  const adler = (() => {
+    let a = 1;
+    let bb = 0;
+    for (let i = 0; i < raw.length; i++) {
+      a = (a + raw[i]!) % 65521;
+      bb = (bb + a) % 65521;
+    }
+    const out = Buffer.alloc(4);
+    out.writeUInt32BE((bb << 16) | a, 0);
+    return out;
+  })();
+  const idatData = Buffer.concat([zlibHeader, blockHeader, lenLE, raw, adler]);
+
+  return Buffer.concat([
+    sig,
+    chunk("IHDR", ihdr),
+    chunk("IDAT", idatData),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}

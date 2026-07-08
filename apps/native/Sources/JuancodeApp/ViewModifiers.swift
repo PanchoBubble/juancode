@@ -25,6 +25,32 @@ extension View {
     }
 }
 
+/// Selection + hover background for a session row. When selected, draws the accent
+/// highlight (unless `drawSelection` is false, i.e. the native `List` already draws
+/// its own selection); otherwise draws a faint fill on hover so the row visibly
+/// reacts to the pointer. Matches `ClickCursorModifier`'s hover feel.
+struct SelectableRowBackground: ViewModifier {
+    let selected: Bool
+    /// Set false on the native `List` path, where the List owns the selection
+    /// highlight and we only want to add the missing hover feedback.
+    var drawSelection: Bool = true
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(fill)
+            )
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.10), value: hovering)
+    }
+
+    private var fill: Color {
+        if selected { return drawSelection ? Color.accentColor.opacity(0.25) : .clear }
+        return Color.primary.opacity(hovering ? 0.10 : 0)
+    }
+}
+
 private struct ClickCursorModifier: ViewModifier {
     @State private var hovering = false
 

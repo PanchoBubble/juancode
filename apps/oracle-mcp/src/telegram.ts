@@ -9,7 +9,7 @@
 //   the last printed list or an id prefix.
 // - Observed sessions ping this chat on genuine state transitions (needs input /
 //   finished a turn), reusing the native server's de-spammed `notify` flag via
-//   the push module's single WS listener (push.ts onSessionEvent).
+//   the native-events module's single WS listener (native-events.ts onSessionEvent).
 // - Replying (Telegram-native reply) to any session-scoped bot message routes the
 //   text into that exact session: typed straight into the pty when it's waiting
 //   or idle (deliverReply), queued for the next idle when it's busy
@@ -27,11 +27,7 @@
 // is the allowlist of Telegram user ids permitted to talk to it (anyone else is
 // ignored). Replies are chunked to Telegram's 4096-char per-message limit.
 
-import {
-  clearTelegramSession,
-  getTelegramSession,
-  setTelegramSession,
-} from "./telegram-store.ts";
+import { clearTelegramSession, getTelegramSession, setTelegramSession } from "./telegram-store.ts";
 import {
   listObserved,
   lookupOutbound,
@@ -53,7 +49,7 @@ import {
   type SessionSummary,
 } from "./telegram-format.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
-import { onSessionEvent, type SessionActivityEvent } from "./push.ts";
+import { onSessionEvent, type SessionActivityEvent } from "./native-events.ts";
 import { makeTranscriber } from "./transcribe.ts";
 
 /** Telegram's hard per-message character cap. We chunk below it to stay safe. */
@@ -596,7 +592,10 @@ async function handleObserveCommand(
   await deps.observers.add(chatId, id);
   const s = ordered.find((x) => x.id === id);
   const name = s ? `${s.title} — ${projectName(s.cwd)}` : id.slice(0, 8);
-  await deps.send(chatId, `👁 Observing ${name}. I'll ping you here when it needs input or finishes.`);
+  await deps.send(
+    chatId,
+    `👁 Observing ${name}. I'll ping you here when it needs input or finishes.`,
+  );
 }
 
 async function handleUnobserveCommand(
@@ -609,7 +608,9 @@ async function handleUnobserveCommand(
     const removed = await deps.observers.remove(chatId);
     await deps.send(
       chatId,
-      removed > 0 ? `🚫 Stopped observing ${removed} session(s).` : "You weren't observing anything.",
+      removed > 0
+        ? `🚫 Stopped observing ${removed} session(s).`
+        : "You weren't observing anything.",
     );
     return;
   }
@@ -631,7 +632,10 @@ async function handleUnobserveCommand(
     return;
   }
   const removed = await deps.observers.remove(chatId, id);
-  await deps.send(chatId, removed > 0 ? "🚫 Stopped observing it." : "You weren't observing that one.");
+  await deps.send(
+    chatId,
+    removed > 0 ? "🚫 Stopped observing it." : "You weren't observing that one.",
+  );
 }
 
 /** Chunk one flat button list into keyboard rows of up to 5. */
@@ -861,7 +865,11 @@ async function setMessageReaction(
 
 /** Best-effort acknowledgement of an inline-keyboard press. `text` shows as a small
  *  toast on the phone. Swallows failures — an unacked spinner times out on its own. */
-async function answerCallbackQuery(token: string, callbackId: string, text?: string): Promise<void> {
+async function answerCallbackQuery(
+  token: string,
+  callbackId: string,
+  text?: string,
+): Promise<void> {
   try {
     const res = await fetch(`${apiBase(token)}/answerCallbackQuery`, {
       method: "POST",
@@ -922,7 +930,7 @@ async function pollLoop(
 }
 
 /** Start the Telegram bridge if TELEGRAM_BOT_TOKEN is set; otherwise a logged no-op.
- *  Also subscribes to the push module's native session-event stream so observed
+ *  Also subscribes to the native-events module's session-event stream so observed
  *  sessions notify their Telegram chats. Returns an AbortController to stop the
  *  poll loop (used by tests / shutdown). `subscribe` is injectable for tests. */
 export function startTelegramBridge(
@@ -948,7 +956,9 @@ export function startTelegramBridge(
       console.error("telegram session notify failed:", e instanceof Error ? e.message : e),
     );
   });
-  console.log(`telegram bridge listening (allowed users: ${[...config.allowedUserIds].join(", ") || "none"})`);
+  console.log(
+    `telegram bridge listening (allowed users: ${[...config.allowedUserIds].join(", ") || "none"})`,
+  );
   void pollLoop(config, resolved, state, controller.signal).catch((e) =>
     console.error("telegram bridge crashed:", e),
   );

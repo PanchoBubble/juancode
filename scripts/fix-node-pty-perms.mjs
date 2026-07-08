@@ -23,7 +23,7 @@ function* walk(dir, depth = 0) {
 }
 
 let fixed = 0;
-for (const root of ["node_modules", "apps/server/node_modules"]) {
+for (const root of ["node_modules"]) {
   for (const helper of walk(root)) {
     try {
       const mode = statSync(helper).mode;

@@ -58,6 +58,44 @@ public func smartSortPrecedes(_ a: SessionSortKey, _ b: SessionSortKey) -> Bool 
     return a.createdAt > b.createdAt
 }
 
+/// Attention states that pull a session above the user's manual order — the two
+/// that want the user to act: a reply is due, or a finished turn is unseen.
+/// Working/idle/exited sessions rest in their manual slot instead.
+public func attentionBubblesAboveManualOrder(_ attention: SessionAttention) -> Bool {
+    attention == .waitingInput || attention == .doneUnseen
+}
+
+/// One session's inputs for the sidebar's "manual order + attention bubbling"
+/// sort: its smart-sort key plus its slot in the user's persisted drag order
+/// (`nil` when the user hasn't placed it yet).
+public struct ManualSortKey: Sendable, Equatable {
+    public var key: SessionSortKey
+    public var manualIndex: Int?
+
+    public init(key: SessionSortKey, manualIndex: Int?) {
+        self.key = key
+        self.manualIndex = manualIndex
+    }
+}
+
+/// Strict-weak ordering blending a user's manual drag order with attention
+/// bubbling (juancode-dy7): sessions wanting action float to the top (smart-sorted
+/// among themselves), and the rest sit in `manualIndex` order — placed sessions
+/// before unplaced, unplaced falling back to the smart sort. So a waiting session
+/// bubbles up, then drops back to its manual slot once the user has handled it.
+public func manualWithBubblePrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
+    let aBubble = attentionBubblesAboveManualOrder(a.key.attention)
+    let bBubble = attentionBubblesAboveManualOrder(b.key.attention)
+    if aBubble != bBubble { return aBubble }
+    if aBubble { return smartSortPrecedes(a.key, b.key) }
+    switch (a.manualIndex, b.manualIndex) {
+    case let (x?, y?): return x < y
+    case (_?, nil): return true
+    case (nil, _?): return false
+    case (nil, nil): return smartSortPrecedes(a.key, b.key)
+    }
+}
+
 /// Case-insensitive subsequence match of `query` in `text`, scored; nil when the
 /// query is not a subsequence. Greedy left-to-right — cheap and predictable, not
 /// an optimal alignment. Scoring favours what a jump palette wants: prefix

@@ -76,6 +76,12 @@ final class AppModel {
     }
     var showingNewSession = false
 
+    /// Sessions whose exited pane is currently being resumed (async `reactivate` in
+    /// flight), so the sidebar row can show a spinner instead of the idle dot until
+    /// the pty is back. Set/cleared by `openPersistedPane`.
+    private(set) var activatingSessions: Set<String> = []
+    func isActivating(_ id: String) -> Bool { activatingSessions.contains(id) }
+
     /// Live window content width, published by `RootView`. Drives the screen-size-
     /// proportional *default* widths of the sidebar / Changes panel / Oracle dock —
     /// only until the user drags a panel edge, after which the persisted manual
@@ -218,7 +224,12 @@ final class AppModel {
         let liveAtLaunch = Set(appState.registry.all().map(\.id))
         self.launchRestoredIds = Set(appState.store.list().map(\.id)).subtracting(liveAtLaunch)
         appState.registry.onCreate { [weak self] s in
-            Task { @MainActor in self?.watch(s); self?.refresh() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.watch(s)
+                self.pruneSessionsPerProject()
+                self.refresh()
+            }
         }
         for s in appState.registry.all() { watch(s) }
         refresh()
@@ -326,6 +337,19 @@ final class AppModel {
         // unmounted rather than lingering hidden on a dead pty subscription.
         livePanes.prune { [appState] in appState.registry.get($0) }
         refreshWorktreeMap()
+    }
+
+    /// Enforce the per-project session retention cap (juancode-477): hard-delete the
+    /// oldest persisted sessions once a project exceeds `Config.sessionsPerProjectCap`.
+    /// Uses the runtime worktree→repo map (same folding as the sidebar) so linked
+    /// worktrees share their repo's cap, and never prunes a live pty.
+    private func pruneSessionsPerProject() {
+        let live = Set(appState.registry.all().map(\.id))
+        let repoRoots = worktreeRepoRoots
+        appState.store.enforceSessionCap(
+            projectKey: { repoRoots[$0] ?? projectCwd(for: $0) },
+            keepIds: live
+        )
     }
 
     // MARK: - Worktree → repo grouping
@@ -857,11 +881,11 @@ final class AppModel {
 
     /// Start a new session directly in a given folder + provider, bypassing the
     /// NewSessionView sheet. Mirrors the web sidebar's per-folder "+" agent menu
-    /// (accept-all off, no worktree). Created in the background — `create` no longer
-    /// steals focus by default; the session appears in the sidebar without switching
-    /// the grid to it.
+    /// (accept-all off, no worktree). Both callers — the folder "+" popover and ⌘N
+    /// (`quickNewSession`) — are explicit "give me a new session" gestures, so we
+    /// select it and move the grid + terminal focus to it once it's up.
     func createInFolder(provider: ProviderId, cwd: String) {
-        Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false) }
+        Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false, select: true) }
     }
 
     /// ⌘N: open a new session mirroring the current selection's agent + working
@@ -1695,6 +1719,10 @@ final class AppModel {
     /// (already live, or revived earlier this run) just fall through to `reactivate`.
     func openPersistedPane(_ id: String) async {
         guard !isLive(id) else { return }
+        // Drive a per-row spinner while the (async, up to ~5s) resume is in flight, so
+        // clicking an exited session gives immediate "working on it" feedback.
+        activatingSessions.insert(id)
+        defer { activatingSessions.remove(id) }
         let announce = launchRestoredIds.contains(id) && !revivedRestoresThisRun.contains(id)
         if announce {
             revivedRestoresThisRun.insert(id)

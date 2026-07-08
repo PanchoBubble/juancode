@@ -36,6 +36,14 @@ public enum Config {
         env["JUANCODE_SCROLLBACK"].flatMap(Int.init) ?? 256 * 1024
     }
 
+    /// Max persisted sessions kept per project (worktrees folded into their repo,
+    /// see `projectCwd`). Older sessions beyond the cap are hard-deleted at startup
+    /// and on each new session (`JUANCODE_SESSIONS_PER_PROJECT`, default 20). A
+    /// value ≤ 0 disables the cap.
+    public static var sessionsPerProjectCap: Int {
+        env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init) ?? 20
+    }
+
     /// Root the directory picker opens at. Prefers `JUANCODE_DEFAULT_CWD`, then
     /// `~/workdir` if present, else the home directory.
     public static var defaultCwd: String {
@@ -57,5 +65,12 @@ public enum Config {
         let root = (workspaceRoot as NSString).standardizingPath
         let p = (path as NSString).standardizingPath
         return p == root || p.hasPrefix(root + "/")
+    }
+
+    /// How long a session must be verifiably idle before the reaper kills its CLI
+    /// process tree to free RAM, leaving a dormant, resumable tile (juancode-lgq).
+    /// `JUANCODE_REAP_IDLE_MINUTES`, default 30; a value ≤ 0 disables reaping.
+    public static var reapIdleMinutes: Int {
+        env["JUANCODE_REAP_IDLE_MINUTES"].flatMap(Int.init) ?? 30
     }
 }

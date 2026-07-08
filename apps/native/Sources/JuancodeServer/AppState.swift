@@ -19,6 +19,9 @@ public final class AppState: @unchecked Sendable {
     /// Server-side tracked-PR engine (juancode-bt2) — drives PR tracking over the
     /// wire for the remote web/phone client, mirroring the GUI's in-process tracking.
     public let prTracking: PrTrackingEngine
+    /// Idle-session reaper (juancode-lgq) — kills verifiably idle CLI process
+    /// trees to free RAM, leaving each session dormant and resumable on demand.
+    public let sessionReaper: SessionReaper
 
     public init(store: GRDBStore) {
         self.store = store
@@ -31,9 +34,15 @@ public final class AppState: @unchecked Sendable {
         let registry = SessionRegistry(env: .live(store: store, messageQueue: messageQueue))
         self.registry = registry
         self.prTracking = PrTrackingEngine(registry: registry, store: store)
+        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue)
+        self.sessionReaper = sessionReaper
+        Task { await sessionReaper.start() }
         // Any session still "running" in the db is stale — its pty died with the
         // previous process. Mark them exited so the UI shows truth.
         store.markOrphansExited()
+        // Enforce the per-project retention cap on the persisted history (juancode-477).
+        // Nothing is live this early, so no ids need protecting.
+        store.enforceSessionCap()
     }
 
     public convenience init(dbPath: String? = nil) throws {

@@ -62,6 +62,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
                     worktree_path    TEXT,
                     usage            TEXT,
                     archived         INTEGER NOT NULL DEFAULT 0,
+                    dormant          INTEGER NOT NULL DEFAULT 0,
                     created_at       INTEGER NOT NULL,
                     updated_at       INTEGER NOT NULL
                 );
@@ -84,6 +85,9 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
             }
             if !cols.contains("archived") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            }
+            if !cols.contains("dormant") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dormant INTEGER NOT NULL DEFAULT 0")
             }
 
             try db.execute(sql: """
@@ -165,7 +169,8 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
             skipPermissions: (r["skip_permissions"] as Int) == 1,
             worktreePath: r["worktree_path"],
             usage: Self.decodeUsage(r["usage"]),
-            archived: (r["archived"] as Int? ?? 0) == 1
+            archived: (r["archived"] as Int? ?? 0) == 1,
+            dormant: (r["dormant"] as Int? ?? 0) == 1
         )
     }
 
@@ -199,13 +204,13 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
         try? dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id,
-                                      scrollback, skip_permissions, worktree_path, usage, archived, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     meta.id, meta.provider.rawValue, meta.cwd, meta.title, meta.status.rawValue,
                     meta.exitCode, meta.cliSessionId, meta.skipPermissions ? 1 : 0,
                     meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
-                    meta.createdAt, meta.updatedAt,
+                    meta.dormant ? 1 : 0, meta.createdAt, meta.updatedAt,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: "")
         }
@@ -217,12 +222,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?, scrollback = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId, text,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.updatedAt, meta.id,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: text)
         }
@@ -313,6 +318,35 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
             try db.execute(sql: "DELETE FROM sessions WHERE id = ?", arguments: [id])
             return db.changesCount > 0
         }) ?? false
+    }
+
+    /// Retention cap (juancode-477): keep at most `perProject` sessions per project,
+    /// hard-deleting the oldest beyond the cap. Sessions are grouped by
+    /// `projectKey(cwd)` (defaults to `projectCwd`, folding worktrees into their
+    /// repo); within a group the newest `perProject` by `created_at` survive.
+    /// `keepIds` are never deleted — pass the currently-live session ids so an
+    /// in-flight pty is never pruned even if it sorts past the cap. A `perProject`
+    /// ≤ 0 disables the cap (no-op). Returns the deleted ids.
+    @discardableResult
+    public func enforceSessionCap(
+        perProject: Int = Config.sessionsPerProjectCap,
+        projectKey: (String) -> String = { projectCwd(for: $0) },
+        keepIds: Set<String> = []
+    ) -> [String] {
+        guard perProject > 0 else { return [] }
+        // Newest-first, so a simple running count per project keeps the top N.
+        var seen: [String: Int] = [:]
+        var toDelete: [String] = []
+        for meta in list() {
+            let key = projectKey(meta.cwd)
+            let count = (seen[key] ?? 0) + 1
+            seen[key] = count
+            if count > perProject, !keepIds.contains(meta.id) {
+                toDelete.append(meta.id)
+            }
+        }
+        for id in toDelete { delete(id) }
+        return toDelete
     }
 
     public func markOrphansExited() {

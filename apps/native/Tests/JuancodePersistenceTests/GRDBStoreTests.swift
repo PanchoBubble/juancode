@@ -266,4 +266,57 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(reopened.get("persist")?.id, "persist")
         XCTAssertEqual(reopened.getScrollback("persist"), Array("scroll".utf8))
     }
+
+    // MARK: - per-project retention cap (juancode-477)
+
+    private func metaIn(_ id: String, cwd: String, createdAt: Int) -> SessionMeta {
+        SessionMeta(
+            id: id, provider: .claude, cwd: cwd, title: id, status: .exited,
+            exitCode: 0, createdAt: createdAt, updatedAt: createdAt,
+            cliSessionId: nil, skipPermissions: false, worktreePath: nil, usage: nil
+        )
+    }
+
+    func testEnforceSessionCapKeepsNewestPerProject() {
+        // 25 sessions in one project; the 5 oldest should be pruned.
+        for i in 0..<25 { store.insert(metaIn("p-\(i)", cwd: "/repo", createdAt: 1000 + i)) }
+        let deleted = store.enforceSessionCap(perProject: 20)
+        XCTAssertEqual(Set(deleted), Set((0..<5).map { "p-\($0)" }))
+        let remaining = store.list().map(\.id)
+        XCTAssertEqual(remaining.count, 20)
+        XCTAssertFalse(remaining.contains("p-0"))
+        XCTAssertTrue(remaining.contains("p-24"))
+    }
+
+    func testEnforceSessionCapIsPerProjectAndFoldsWorktrees() {
+        // A repo and one of its juancode worktrees share a single cap.
+        for i in 0..<15 { store.insert(metaIn("r-\(i)", cwd: "/w/repo", createdAt: i)) }
+        for i in 0..<15 { store.insert(metaIn("wt-\(i)", cwd: "/w/repo-worktrees/a", createdAt: 100 + i)) }
+        // A second, separate project stays untouched.
+        for i in 0..<5 { store.insert(metaIn("o-\(i)", cwd: "/w/other", createdAt: i)) }
+
+        let deleted = store.enforceSessionCap(perProject: 20)
+        // 30 sessions fold into /w/repo → 10 oldest pruned; /w/other (5) untouched.
+        XCTAssertEqual(deleted.count, 10)
+        XCTAssertTrue(deleted.allSatisfy { $0.hasPrefix("r-") })
+        XCTAssertEqual(store.list().filter { $0.cwd == "/w/other" }.count, 5)
+    }
+
+    func testEnforceSessionCapNeverPrunesKeptIds() {
+        for i in 0..<25 { store.insert(metaIn("k-\(i)", cwd: "/repo", createdAt: i)) }
+        // Protect an old one that would otherwise be pruned.
+        let deleted = store.enforceSessionCap(perProject: 20, keepIds: ["k-0"])
+        XCTAssertFalse(deleted.contains("k-0"))
+        XCTAssertNotNil(store.get("k-0"))
+        // It still occupies a slot in the count, so the survivors shrink by one
+        // rather than the cap absorbing the protected id: only 4 of the 5 overflow
+        // rows are pruned.
+        XCTAssertEqual(Set(deleted), Set(["k-1", "k-2", "k-3", "k-4"]))
+    }
+
+    func testEnforceSessionCapDisabledWhenNonPositive() {
+        for i in 0..<25 { store.insert(metaIn("z-\(i)", cwd: "/repo", createdAt: i)) }
+        XCTAssertEqual(store.enforceSessionCap(perProject: 0), [])
+        XCTAssertEqual(store.list().count, 25)
+    }
 }

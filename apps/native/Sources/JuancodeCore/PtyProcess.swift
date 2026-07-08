@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// Owns a real pty whose child is an UNMODIFIED CLI binary (claude/codex),
 /// spawned via `forkpty` + `execvp`. Promoted from the u34.1 spike and the
@@ -20,11 +21,12 @@ import Foundation
 /// exits, exactly as when a terminal window closes) plus a graceful SIGTERM to
 /// the process group for any child that doesn't exit on stdin EOF.
 /// `@unchecked Sendable`: `masterFd`/`pid`/`queue`/`onData`/`onExit` are immutable
-/// (`let`), and every mutable field (`readSource`, `exited`, `fdClosed`) is only
-/// ever read or written on the serial `queue` — the read source, exit watcher,
-/// `write`, and `terminate` all funnel their state access through it. That serial
-/// confinement is the synchronization invariant, so the cross-thread captures
-/// below (`[weak self]` from the waitpid thread / dispatch closures) are sound.
+/// (`let`), and every mutable field (`readSource`, `exited`, `fdClosed`,
+/// `pendingWrites`, `flushScheduled`) is only ever read or written on the serial
+/// `queue` — the read source, exit watcher, `write`, and `terminate` all funnel
+/// their state access through it. That serial confinement is the synchronization
+/// invariant, so the cross-thread captures below (`[weak self]` from the waitpid
+/// thread / dispatch closures) are sound.
 public final class PtyProcess: @unchecked Sendable {
     public let masterFd: Int32
     public let pid: pid_t
@@ -35,6 +37,11 @@ public final class PtyProcess: @unchecked Sendable {
     private let queue: DispatchQueue
     private var exited = false
     private var fdClosed = false
+    /// Flipped true the instant the waitpid thread reaps the child — independent of
+    /// the serial `queue`, so the off-queue kill path in `terminate()` can tell a
+    /// live child (safe to signal) from a reaped one (whose pid may be recycled)
+    /// even when `queue` is wedged and `exited`/`finish()` haven't run yet.
+    private let reaped = OSAllocatedUnfairLock(initialState: false)
 
     public init?(
         executable: String,
@@ -88,6 +95,16 @@ public final class PtyProcess: @unchecked Sendable {
         self.masterFd = master
         self.pid = childPid
         Self.disableSuspendChar(master)
+        // Non-blocking master. Writes must NEVER block: the write path shares the
+        // serial `queue` with the read source, so a write blocked on a full pty
+        // input buffer (child busy repainting, not draining stdin) starves our
+        // reads, the child then blocks writing its own output, never returns to
+        // read stdin, and both sides deadlock permanently — the frozen session at
+        // claude's options menu (juancode-3mg). With O_NONBLOCK the write returns
+        // EAGAIN instead and the pending buffer retries (see `flushPendingWrites`),
+        // while reads keep draining so the child can always make progress.
+        let flags = fcntl(master, F_GETFL, 0)
+        _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
         startReading()
         startExitWatch()
     }
@@ -122,6 +139,9 @@ public final class PtyProcess: @unchecked Sendable {
             let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
             if n > 0 {
                 self.onData(Array(buf[0..<n]))
+            } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                // The master is O_NONBLOCK (see init): a spurious readability
+                // wakeup drains to EAGAIN. Not EOF — wait for the next event.
             } else {
                 // EOF/EIO: nothing more to read. Stop reading (which closes the
                 // fd via the cancel handler). Exit itself is reported by the
@@ -151,6 +171,11 @@ public final class PtyProcess: @unchecked Sendable {
             // immutable value rather than the mutated `var`.
             let finalStatus = status
             guard let self else { return }
+            // Mark reaped at the true reap moment, before hopping to `queue` — so a
+            // concurrent `terminate()` escalation never signals a recycled pid, and
+            // so it stops escalating even if `queue` is wedged and `finish()` is
+            // still pending.
+            self.reaped.withLock { $0 = true }
             self.queue.async { [weak self] in
                 guard let self else { return }
                 self.finish(finalStatus)
@@ -170,6 +195,7 @@ public final class PtyProcess: @unchecked Sendable {
         guard !fdClosed else { return }
         fdClosed = true
         close(masterFd)
+        failPendingWrites()
     }
 
     /// Keystrokes / paste -> child stdin. Safe to call from any thread.
@@ -179,33 +205,97 @@ public final class PtyProcess: @unchecked Sendable {
 
     /// Write `bytes`, invoking `completion(true)` on the work queue once the whole
     /// buffer has flushed to the child (or `completion(false)` if the fd is closed
-    /// or the write errored). Loops over short writes / `EINTR` so a large chunk is
-    /// never silently truncated — the old single-shot `Darwin.write` dropped any
-    /// bytes past the first short write. Lets a chunked paste apply backpressure:
-    /// the next chunk waits for this one to flush instead of piling a giant buffer
-    /// onto a possibly-stalled pty.
+    /// or the write errored). Chunks are queued FIFO and flushed with non-blocking
+    /// writes — a full pty input buffer (child not draining stdin) parks the
+    /// remainder in `pendingWrites` for a short retry instead of blocking the
+    /// serial queue, which would starve the read source and deadlock against a
+    /// child blocked on its own output (juancode-3mg). Short writes / `EINTR` are
+    /// looped over so a large chunk is never silently truncated. Lets a chunked
+    /// paste apply backpressure: the next chunk waits for this one to flush
+    /// instead of piling a giant buffer onto a possibly-stalled pty.
     public func write(_ bytes: [UInt8], completion: @escaping @Sendable (Bool) -> Void) {
         guard !bytes.isEmpty else { completion(true); return }
-        let fd = masterFd
         queue.async { [weak self] in
             guard let self, !self.fdClosed else { completion(false); return }
-            let wrote = bytes.withUnsafeBytes { raw -> Bool in
-                guard let base = raw.baseAddress else { return true }
-                var offset = 0
-                while offset < raw.count {
-                    let n = Darwin.write(fd, base + offset, raw.count - offset)
+            self.pendingWrites.append(PendingWrite(bytes: bytes, completion: completion))
+            self.flushPendingWrites()
+        }
+    }
+
+    /// One queued input chunk: `offset` tracks partial-flush progress across
+    /// EAGAIN retries. Confined to `queue`.
+    private struct PendingWrite {
+        let bytes: [UInt8]
+        var offset = 0
+        let completion: @Sendable (Bool) -> Void
+    }
+
+    /// Input chunks not yet fully flushed to the child, FIFO. Confined to `queue`.
+    private var pendingWrites: [PendingWrite] = []
+    /// True while an EAGAIN retry is scheduled, so a burst of writes arms one
+    /// retry rather than one per chunk. Confined to `queue`.
+    private var flushScheduled = false
+
+    /// Flush queued chunks to the (non-blocking) master in order. On EAGAIN —
+    /// pty input buffer full, child not reading right now — keep the remainder
+    /// and retry shortly; the queue stays free so reads keep draining, which is
+    /// exactly what lets the child make progress and empty the input buffer.
+    /// On a hard error (EIO after exit) fail everything queued.
+    private func flushPendingWrites() {
+        enum Outcome { case flushed, wouldBlock, failed }
+        while !pendingWrites.isEmpty {
+            guard !fdClosed else { failPendingWrites(); return }
+            var entry = pendingWrites[0]
+            let outcome: Outcome = entry.bytes.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return .flushed }
+                while entry.offset < raw.count {
+                    let n = Darwin.write(masterFd, base + entry.offset, raw.count - entry.offset)
                     if n > 0 {
-                        offset += n
+                        entry.offset += n
                     } else if n < 0 && errno == EINTR {
                         continue
+                    } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        return .wouldBlock
                     } else {
-                        break // fd error / EOF — report the partial as a failure
+                        return .failed
                     }
                 }
-                return offset == raw.count
+                return .flushed
             }
-            completion(wrote)
+            switch outcome {
+            case .flushed:
+                pendingWrites.removeFirst()
+                entry.completion(true)
+            case .wouldBlock:
+                pendingWrites[0].offset = entry.offset // keep partial progress
+                scheduleFlushRetry()
+                return
+            case .failed:
+                failPendingWrites()
+                return
+            }
         }
+    }
+
+    /// Re-attempt the flush after a short beat. 15ms is far below human input
+    /// cadence (a stalled paste chunk resumes imperceptibly) yet coarse enough
+    /// not to spin while the child is busy.
+    private func scheduleFlushRetry() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        queue.asyncAfter(deadline: .now() + .milliseconds(15)) { [weak self] in
+            guard let self else { return }
+            self.flushScheduled = false
+            self.flushPendingWrites()
+        }
+    }
+
+    /// The fd is gone (or errored): every queued chunk's completion gets a
+    /// definitive `false` so no paste-backpressure waiter hangs forever.
+    private func failPendingWrites() {
+        let pending = pendingWrites
+        pendingWrites = []
+        for entry in pending { entry.completion(false) }
     }
 
     /// Propagate a view resize into the pty so the CLI re-lays out its TUI.
@@ -249,20 +339,33 @@ public final class PtyProcess: @unchecked Sendable {
     /// slave EOFs and the child exits (the universal "terminal closed" path,
     /// reliable even for a shell blocked on a foreground child). The waitpid
     /// thread then reports the exit.
+    ///
+    /// The kill signals are delivered OFF the serial `queue` as defense in depth:
+    /// writes are non-blocking now (juancode-3mg — a blocking write once wedged
+    /// `queue` behind a child that stopped draining stdin, so "Kill Agent did
+    /// nothing"), but signaling directly costs nothing and keeps kill working even
+    /// if the queue is ever busy or stalled for another reason. `killpg`/`kill`
+    /// are thread-safe. Killing the group makes the master EIO once every slave
+    /// fd is gone, the read source EOFs, and the waitpid thread reports the exit.
     public func terminate() {
+        // Already reaped: pid may be recycled — never signal it.
+        guard !reaped.withLock({ $0 }) else { return }
+        _ = killpg(pid, SIGTERM)
+        // Escalate on a dedicated thread, NOT on `queue` (which may be wedged): a
+        // child stuck such that SIGTERM can't unwind it still dies on SIGKILL.
+        // Skipped if the child was reaped in the meantime (recycled-pid guard).
+        Thread.detachNewThread { [weak self] in
+            Thread.sleep(forTimeInterval: 0.2)
+            guard let self, !self.reaped.withLock({ $0 }) else { return }
+            _ = killpg(self.pid, SIGKILL)
+            _ = kill(self.pid, SIGKILL)
+        }
+        // Healthy-queue path (unchanged for the common case): close the master so
+        // a child blocked on stdin EOFs out gracefully. When the queue is wedged
+        // this simply doesn't run; the SIGKILL escalation above covers that case.
         queue.async { [weak self] in
             guard let self, !self.exited else { return }
-            _ = killpg(self.pid, SIGTERM)
             self.readSource?.cancel() // cancel handler closes the master fd
-            // Escalate: a shell (or any child) blocked on a foreground child can
-            // defer SIGTERM and won't always exit on terminal hangup, so force it
-            // down if it hasn't gone away shortly after. Real CLIs exit on the
-            // SIGTERM above well before this fires.
-            self.queue.asyncAfter(deadline: .now() + .milliseconds(200)) { [weak self] in
-                guard let self, !self.exited else { return }
-                _ = killpg(self.pid, SIGKILL)
-                _ = kill(self.pid, SIGKILL)
-            }
         }
     }
 }

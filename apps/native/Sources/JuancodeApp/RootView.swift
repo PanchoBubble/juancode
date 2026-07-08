@@ -292,19 +292,8 @@ private struct PaneNavInstaller: NSViewRepresentable {
     final class Coordinator { var monitor: Any? }
 }
 
-/// The repo a working directory belongs to, for sidebar grouping. A juancode
-/// worktree lives in a sibling `<repo>-worktrees/<name>` dir (see `createWorktree`);
-/// map it back to `<repo>` so its sessions nest under the project instead of
-/// floating as their own hash-named folder. Any other path is its own project.
-func projectCwd(for cwd: String) -> String {
-    let url = URL(fileURLWithPath: cwd)
-    let parent = url.deletingLastPathComponent()
-    let parentName = parent.lastPathComponent
-    guard parentName.hasSuffix("-worktrees") else { return cwd }
-    let repoBase = String(parentName.dropLast("-worktrees".count))
-    guard !repoBase.isEmpty else { return cwd }
-    return parent.deletingLastPathComponent().appendingPathComponent(repoBase).path
-}
+/// `projectCwd(for:)` (the worktree→repo folding used for sidebar grouping) now
+/// lives in JuancodeCore so the store's retention cap can share it.
 
 /// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
 private struct FolderGroup: Identifiable {
@@ -872,9 +861,17 @@ struct SidebarView: View {
             .listRowSeparatorTint(Color.appHairline(0.12))
             .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
             .contextMenu { rowContextMenu(meta) }
-        // Pointing-hand on hover for the clickable (selectable) rows; external
-        // rows aren't selectable, so they keep the default cursor.
-        if external { row } else { row.pointerCursor() }
+        // Pointing-hand + hover fill for the clickable (selectable) rows; external
+        // rows aren't selectable, so they keep the default cursor and no hover fill.
+        // The List owns the selection highlight, so we add hover feedback only.
+        if external {
+            row
+        } else {
+            row
+                .modifier(SelectableRowBackground(selected: model.selection == meta.id,
+                                                  drawSelection: false))
+                .pointerCursor()
+        }
     }
 
     /// A row inside the scroll box: manual tap-to-select + highlight (the List's own
@@ -886,15 +883,20 @@ struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 1)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(model.selection == meta.id ? Color.accentColor.opacity(0.25) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
             .onTapGesture { if !external { model.selection = meta.id } }
             .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
             .contextMenu { rowContextMenu(meta) }
-        // Pointing-hand on hover for the clickable rows; external rows can't be
-        // selected by tap, so they keep the default cursor.
-        if external { row } else { row.pointerCursor() }
+        // Selection accent + pointing-hand + hover fill for the clickable rows;
+        // external rows can't be selected by tap, so they keep the default cursor
+        // and no hover feedback.
+        if external {
+            row
+        } else {
+            row
+                .modifier(SelectableRowBackground(selected: model.selection == meta.id))
+                .pointerCursor()
+        }
     }
 
     private func sessionRow(_ meta: SessionMeta) -> SessionRow {
@@ -908,7 +910,8 @@ struct SidebarView: View {
                           atRisk: !external && model.workAtRisk(forSession: meta) != nil,
                           worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
-                          selected: model.selection == meta.id)
+                          selected: model.selection == meta.id,
+                          activating: model.isActivating(meta.id))
     }
 
     @ViewBuilder
@@ -955,7 +958,6 @@ private struct FolderHeader: View {
     let collapsed: Bool
     let toggle: () -> Void
     @State private var showingAgentPicker = false
-    @State private var confirmingCloseAll = false
     @State private var plusHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
@@ -1204,21 +1206,8 @@ private struct FolderHeader: View {
         .contextMenu {
             if !closableSessions.isEmpty {
                 Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
-                       role: .destructive) { confirmingCloseAll = true }
+                       role: .destructive) { model.closeSessions(closableSessions.map(\.id)) }
             }
-        }
-        .confirmationDialog("Close all sessions in \(group.name)?",
-                            isPresented: $confirmingCloseAll, titleVisibility: .visible) {
-            Button("Close \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
-                   role: .destructive) {
-                model.closeSessions(closableSessions.map(\.id))
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            let running = closableSessions.filter { model.isLive($0.id) }.count
-            Text(running > 0
-                 ? "\(running) of these are still running. This stops every agent here and removes the sessions."
-                 : "This removes every session in this project.")
         }
         .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
@@ -1710,6 +1699,9 @@ struct SessionRow: View {
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
+    /// The session's exited pane is being resumed right now (juancode click-to-open
+    /// feedback) — swaps the status glyph for a spinner until the pty is back.
+    var activating: Bool = false
 
     @State private var hovering = false
 
@@ -1717,9 +1709,7 @@ struct SessionRow: View {
     /// to the title's baseline, which sits below the text's optical center — so a bare
     /// dot reads as too low. Shifting each ornament up by half the title's cap height
     /// re-centers it on the title line.
-    // nonisolated(unsafe): an immutable CGFloat computed once, read from the
-    // @Sendable alignment-guide closures.
-    nonisolated(unsafe) private static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
+    private static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
 
     var body: some View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
@@ -1876,7 +1866,8 @@ struct SessionRow: View {
 
     /// Status glyph in the leading slot — the shared agent-state vocabulary.
     private var statusIndicator: some View {
-        SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone, unread: unread)
+        SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
+                          unread: unread, activating: activating)
     }
 }
 
@@ -1891,6 +1882,8 @@ struct SessionStateGlyph: View {
     let activity: SessionActivity?
     let unseenDone: Bool
     var unread: Bool = false
+    /// The session is being resumed right now — show a spinner in the glyph slot.
+    var activating: Bool = false
 
     private enum Glyph { case working, waiting, doneUnseen, dot }
 
@@ -1907,6 +1900,14 @@ struct SessionStateGlyph: View {
     /// regardless of which is shown.
     var body: some View {
         Group {
+            if activating {
+                // Resume in flight — a spinner reads as "opening…" until the pty is back.
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .scaleEffect(0.55)
+                    .help("Resuming session…")
+            } else {
             switch glyph {
             case .working:
                 // Pulsing reads as motion without a spinner's churn in a long list.
@@ -1928,6 +1929,7 @@ struct SessionStateGlyph: View {
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
                     .frame(width: 8, height: 8)
+            }
             }
         }
         .frame(width: 12, alignment: .center)
@@ -2428,7 +2430,7 @@ struct NewSessionView: View {
             } else {
                 let session = await model.create(
                     provider: provider, cwd: cwd, skipPermissions: skipPermissions,
-                    isolateWorktree: isolateWorktree, initialInput: initialInput)
+                    isolateWorktree: isolateWorktree, initialInput: initialInput, select: true)
                 started = session != nil
             }
             creating = false

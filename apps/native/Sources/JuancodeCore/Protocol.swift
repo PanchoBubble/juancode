@@ -73,6 +73,14 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// Archived sessions are kept in the store but hidden from the default
     /// sidebar list (reachable via a "Show archived" toggle). Defaults to false.
     public var archived: Bool
+    /// True when the idle reaper killed this session's pty to free RAM
+    /// (juancode-lgq) — the CLI process is gone but the conversation is intact
+    /// and resumable, so the UI should render it as "sleeping" rather than
+    /// crashed/exited. Deliberately a flag next to `status == .exited` (not a new
+    /// `SessionStatus` case): the status enum crosses the wire and a case old
+    /// clients can't decode would break them, while an extra bool is ignored.
+    /// Cleared on resume. Defaults to false.
+    public var dormant: Bool
 
     public init(
         id: String,
@@ -87,7 +95,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         skipPermissions: Bool,
         worktreePath: String?,
         usage: SessionUsage?,
-        archived: Bool = false
+        archived: Bool = false,
+        dormant: Bool = false
     ) {
         self.id = id
         self.provider = provider
@@ -102,6 +111,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.worktreePath = worktreePath
         self.usage = usage
         self.archived = archived
+        self.dormant = dormant
     }
 
     // Custom decode so payloads predating `archived` (older db rows / wire
@@ -121,6 +131,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
         usage = try c.decodeIfPresent(SessionUsage.self, forKey: .usage)
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
+        dormant = try c.decodeIfPresent(Bool.self, forKey: .dormant) ?? false
     }
 }
 

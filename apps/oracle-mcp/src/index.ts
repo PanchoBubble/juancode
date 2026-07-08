@@ -45,17 +45,8 @@ import {
   outcomeLabel,
   type ObserveOutcome,
 } from "./observer-trigger.ts";
-import { consoleHtml } from "./ui.ts";
-import {
-  addSubscription,
-  initPush,
-  iconPng,
-  removeSubscription,
-  serviceWorkerJs,
-  startActivityListener,
-  vapidPublicKey,
-  webManifest,
-} from "./push.ts";
+import { consoleHtml, iconPng, webManifest } from "./ui.ts";
+import { startActivityListener } from "./native-events.ts";
 import { startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
@@ -227,7 +218,10 @@ function buildServer(): McpServer {
       description:
         "Queue one or more messages to a running agent session for in-order delivery. Unlike a direct reply, queued messages are held and released one at a time on the session's next idle, so they're delivered in order even while the agent is still busy. The native app must be running.",
       inputSchema: {
-        sessionId: z.string().min(1).describe("The session id to queue to (from oracle_list_sessions)"),
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id to queue to (from oracle_list_sessions)"),
         messages: z
           .array(z.string().min(1))
           .min(1)
@@ -304,7 +298,9 @@ function observeMessage(o: ObserveOutcome): string {
     return `Recorded an observer for ${label}, but no Telegram chat is set up yet — message the Oracle bot once (or set ALLOWED_USER_IDS) so it knows where to ping you.`;
   }
   const n = o.chatIds.length;
-  const confirmed = o.reachable ? "" : " (native app unreachable — couldn't confirm the session, subscribed anyway)";
+  const confirmed = o.reachable
+    ? ""
+    : " (native app unreachable — couldn't confirm the session, subscribed anyway)";
   return `Observing ${label}${confirmed}. ${n} Telegram chat${n === 1 ? "" : "s"} will be pinged when it needs input or finishes. Reply to that message to answer into the session.`;
 }
 
@@ -592,47 +588,9 @@ app.post("/api/chat/reset", async (_req: Request, res: Response) => {
   }
 });
 
-// ── Web Push (juancode-mov) ──────────────────────────────────────────────────
-// The sidecar owns the push subsystem: VAPID keys, subscription store, the PWA
-// service worker + manifest, and (started below) a WS client to the native
-// backend that pushes on notify-worthy events.
-
-app.get("/api/push/vapid", (_req: Request, res: Response) => {
-  res.json({ publicKey: vapidPublicKey() });
-});
-
-app.post("/api/push/subscribe", async (req: Request, res: Response) => {
-  try {
-    const sub = req.body;
-    if (!sub || typeof sub.endpoint !== "string" || !sub.keys) {
-      res.status(400).send("a PushSubscription JSON (endpoint + keys) is required");
-      return;
-    }
-    await addSubscription(sub);
-    res.json({ ok: true });
-  } catch (e) {
-    sendErr(res, e);
-  }
-});
-
-app.post("/api/push/unsubscribe", async (req: Request, res: Response) => {
-  try {
-    const endpoint = (req.body ?? {}).endpoint;
-    if (typeof endpoint !== "string" || !endpoint) {
-      res.status(400).send("endpoint is required");
-      return;
-    }
-    await removeSubscription(endpoint);
-    res.json({ ok: true });
-  } catch (e) {
-    sendErr(res, e);
-  }
-});
-
-app.get("/sw.js", (_req: Request, res: Response) => {
-  res.set("Service-Worker-Allowed", "/");
-  res.type("application/javascript").send(serviceWorkerJs);
-});
+// ── PWA install assets ───────────────────────────────────────────────────────
+// The phone console can be added to the home screen and launched standalone.
+// Notifications are handled over Telegram — no service worker or Web Push here.
 
 app.get("/manifest.webmanifest", (_req: Request, res: Response) => {
   res.type("application/manifest+json").json(webManifest);
@@ -671,11 +629,9 @@ const port = Number(process.env.ORACLE_MCP_PORT ?? 4281);
 const host = process.env.ORACLE_MCP_HOST ?? "127.0.0.1";
 app.listen(port, host, () => {
   console.log(`oracle-mcp listening on http://${host}:${port}/mcp`);
-  // Web Push (juancode-mov): load/generate VAPID keys, then watch the native
-  // backend over WS and push notify-worthy events to the phone.
-  void initPush()
-    .then(() => startActivityListener())
-    .catch((e) => console.error("oracle-mcp push init failed:", e));
+  // Watch the native backend over WS and fan session activity out to subscribers
+  // (the Telegram bridge). Owns the single long-lived client socket.
+  startActivityListener();
   // Telegram bridge (juancode-c6y): if TELEGRAM_BOT_TOKEN is set, long-poll Telegram
   // and route messages through the same Oracle backend as the browser chat.
   startTelegramBridge();

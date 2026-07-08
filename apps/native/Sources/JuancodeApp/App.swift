@@ -110,37 +110,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// Quit guard (juancode-rxu): if the last work-at-risk scan found folders with
-    /// uncommitted/unpushed work, summarize them before letting the app die —
-    /// quitting is exactly the moment that work gets forgotten. Reads the cached
-    /// scan only (no fresh git on the quit path).
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // The delegate callback arrives on the main thread; hop into the actor.
-        let atRisk = MainActor.assumeIsolated { AppEnv.model?.workAtRiskList ?? [] }
-        guard !atRisk.isEmpty else { return .terminateNow }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = atRisk.count == 1
-            ? "You have uncommitted or unpushed work in 1 folder"
-            : "You have uncommitted or unpushed work in \(atRisk.count) folders"
-        let listed = atRisk.prefix(5).map { risk in
-            "• \((risk.path as NSString).abbreviatingWithTildeInPath)"
-        }
-        let more = atRisk.count > 5 ? "\n…and \(atRisk.count - 5) more" : ""
-        alert.informativeText = listed.joined(separator: "\n") + more
-        alert.addButton(withTitle: "Review")
-        alert.addButton(withTitle: "Quit Anyway")
-        if alert.runModal() == .alertFirstButtonReturn {
-            MainActor.assumeIsolated {
-                AppEnv.model?.showingWorktrees = true
-                AppEnv.model?.loadWorktrees()
-            }
-            return .terminateCancel
-        }
-        return .terminateNow
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         AppEnv.state?.shutdown() // kill live sessions + ephemeral ptys on quit
     }

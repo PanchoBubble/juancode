@@ -149,10 +149,24 @@ public final class Session: @unchecked Sendable {
     /// poll stops clobbering their chosen name.
     private var titleIsManual = false
 
+    /// ms-since-epoch of the last input written to the pty (keystrokes, pastes,
+    /// queue deliveries — everything funnels through `write`). Seeded with the
+    /// spawn time. The idle reaper (juancode-lgq) uses it so a half-typed,
+    /// unsubmitted prompt — invisible to the activity detector and the transcript
+    /// — still protects the session from being reaped. Guarded by `lock`.
+    private var _lastInputMs: Int
+
     public var meta: SessionMeta { lock.withLock { _meta } }
     public var id: String { lock.withLock { _meta.id } }
     public var isRunning: Bool { lock.withLock { _meta.status == .running } }
     public var activity: SessionActivity { detector.activity }
+    public var lastInputMs: Int { lock.withLock { _lastInputMs } }
+
+    /// The pty child's pid while the session is running, nil once exited. The
+    /// idle reaper walks its descendants for the OS-ground-truth idle checks.
+    public var childPid: pid_t? {
+        lock.withLock { _meta.status == .running ? proc?.pid : nil }
+    }
 
     // MARK: - factories
 
@@ -203,6 +217,7 @@ public final class Session: @unchecked Sendable {
         var meta = prev
         meta.status = .running
         meta.exitCode = nil
+        meta.dormant = false // waking a reaped session — it's live again
         meta.updatedAt = nowMs()
         let opts = SpawnOptions(skipPermissions: meta.skipPermissions)
         return try Session(meta: meta, args: spec.resumeArgs(cliSessionId, opts), cols: cols, rows: rows,
@@ -222,6 +237,7 @@ public final class Session: @unchecked Sendable {
     ) throws {
         self._meta = meta
         self.env = env
+        self._lastInputMs = nowMs()
         self.spec = Providers.spec(for: meta.provider)
         self.scroll = Scrollback(limit: env.scrollbackLimit, seed: seedScrollback)
         self.workQueue = DispatchQueue(label: "juancode.session.\(meta.id)")
@@ -326,6 +342,7 @@ public final class Session: @unchecked Sendable {
     // MARK: - input / lifecycle
 
     public func write(_ bytes: [UInt8]) {
+        lock.withLock { _lastInputMs = nowMs() }
         if isRunning { proc?.write(bytes) }
     }
 
@@ -796,6 +813,16 @@ public final class Session: @unchecked Sendable {
         stopTitleWatch()
         stopActivityTailIfNeeded()
         if isRunning { proc?.terminate() }
+    }
+
+    /// Mark the session dormant and persist the flag, then let the caller `kill()`
+    /// it: the idle reaper (juancode-lgq) flags *before* killing so the persisted
+    /// row `handleExit` finalises already carries `dormant = true` and the UI can
+    /// tell "reaped while idle, wake me on demand" from a crash/exit. The flag is
+    /// cleared by `Session.resume`.
+    public func markDormant() {
+        lock.withLock { _meta.dormant = true }
+        persistNow()
     }
 
     public func getScrollback() -> [UInt8] {
