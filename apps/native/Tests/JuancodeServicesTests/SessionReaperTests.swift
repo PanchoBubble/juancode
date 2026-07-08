@@ -281,7 +281,7 @@ final class SessionReaperTests: XCTestCase {
         XCTAssertEqual(store.get(session.id)?.dormant, false)
     }
 
-    func testSweepSkipsBusySessions() async throws {
+    func testSweepSparesSessionWithQueuedMessages() async throws {
         let store = InMemorySessionStore()
         let queue = MessageQueue()
         let registry = SessionRegistry(env: SessionEnvironment(
