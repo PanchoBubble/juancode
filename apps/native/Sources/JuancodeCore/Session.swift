@@ -40,12 +40,13 @@ public struct SessionEnvironment: Sendable {
     /// from `JuancodeServices` so the core stays dependency-free; the default is a
     /// no-op (screen-only detection, e.g. in tests). The session passes a *getter* for
     /// the CLI session id (Codex discovers it after spawn) and an `onBatch` callback
-    /// receiving each parsed batch of transcript kinds plus a `reset` flag (true for
-    /// the one-shot backlog). Returns a stop handle the session calls on exit/kill.
+    /// receiving each parsed batch of transcript kinds + tool ids plus a `reset` flag
+    /// (true for the one-shot backlog). Returns a stop handle the session calls on
+    /// exit/kill.
     public var startActivityTail: @Sendable (
         _ provider: ProviderId,
         _ cliSessionId: @escaping @Sendable () -> String?,
-        _ onBatch: @escaping @Sendable (_ kinds: [StructuredEventKind], _ reset: Bool) -> Void
+        _ onBatch: @escaping @Sendable (_ batch: StructuredEventBatch, _ reset: Bool) -> Void
     ) -> (@Sendable () -> Void)
 
     public init(
@@ -61,7 +62,7 @@ public struct SessionEnvironment: Sendable {
         startActivityTail: @escaping @Sendable (
             ProviderId,
             @escaping @Sendable () -> String?,
-            @escaping @Sendable ([StructuredEventKind], Bool) -> Void
+            @escaping @Sendable (StructuredEventBatch, Bool) -> Void
         ) -> (@Sendable () -> Void) = { _, _, _ in {} }
     ) {
         self.resolver = resolver
@@ -265,8 +266,8 @@ public final class Session: @unchecked Sendable {
         let stop = env.startActivityTail(
             meta.provider,
             { [weak self] in self?.meta.cliSessionId },
-            { [weak self] kinds, reset in
-                if !reset { self?.detector.feedStructured(kinds) }
+            { [weak self] batch, reset in
+                if !reset { self?.detector.feedStructured(batch) }
             }
         )
         lock.withLock { stopActivityTail = stop }

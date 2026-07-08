@@ -22,6 +22,27 @@ public func batchHasAgentActivity(_ kinds: [StructuredEventKind]) -> Bool {
     kinds.contains { agentEventKinds.contains($0) }
 }
 
+/// One normalized transcript batch: the event kinds plus which `tool_use` ids the
+/// batch opened and which it resolved (a `tool_result` record carries its
+/// `tool_use_id`). The ids let the detector know a call is still in flight — a
+/// delegated subagent is one open `tool_use` for its whole lifetime — so a long
+/// silent stretch between `tool_use` and `tool_result` never reads as idle.
+public struct StructuredEventBatch: Sendable {
+    public var kinds: [StructuredEventKind]
+    public var openedToolUseIds: [String]
+    public var resolvedToolUseIds: [String]
+
+    public init(
+        kinds: [StructuredEventKind],
+        openedToolUseIds: [String] = [],
+        resolvedToolUseIds: [String] = []
+    ) {
+        self.kinds = kinds
+        self.openedToolUseIds = openedToolUseIds
+        self.resolvedToolUseIds = resolvedToolUseIds
+    }
+}
+
 /// Infers whether an agent session is working, finished a turn, or is waiting for
 /// the user, fusing two signals (mirrors `apps/server/src/activityDetector.ts`):
 ///
@@ -31,7 +52,10 @@ public func batchHasAgentActivity(_ kinds: [StructuredEventKind]) -> Bool {
 ///    with each batch of normalized kinds. A batch carrying an agent-produced kind
 ///    is a wording-independent "the agent is working" pulse — robust to CLI footer
 ///    copy changes. `structuredTurn` then lets settle classify on the screen's
-///    prompt/quiet state instead of waiting for the footer to be erased.
+///    prompt/quiet state instead of waiting for the footer to be erased. Batches
+///    also carry `tool_use` ids: while one is unresolved the turn is held busy —
+///    a slow tool or delegated subagent goes transcript- *and* screen-quiet for
+///    minutes, which must not read as idle.
 ///
 /// 2. **Rendered PTY screen** (fallback). The raw byte stream feeds a headless
 ///    `TerminalScreen`, so the detector reads the *actual rendered screen*. Both
@@ -58,6 +82,10 @@ public final class ActivityDetector: @unchecked Sendable {
     /// Longer silence after which a still-"busy" footer is treated as stale (the
     /// spinner repaints while truly working, so this much silence means done).
     private let watchdogMs: Int
+    /// Ceiling on how long an unresolved `tool_use` may hold busy, measured from the
+    /// last structured pulse. A crashed tool never writes its `tool_result`, so past
+    /// the cap the hold is released and settle classifies normally.
+    private let toolHoldCapMs: Int
 
     private let queue: DispatchQueue
     private let onChange: ChangeListener
@@ -71,17 +99,27 @@ public final class ActivityDetector: @unchecked Sendable {
     /// Label of the last `PromptPattern` that matched, for debugging which shape
     /// tripped a `waitingInput` classification.
     private var lastMatchedPrompt: String?
+    /// `tool_use` ids the transcript has opened but not yet resolved. While any is
+    /// pending, settle refuses to leave busy (a slow tool / delegated subagent goes
+    /// transcript- and screen-quiet for minutes) — a visible prompt still wins, since
+    /// the tool may be waiting on permission. Cleared on any leave-busy and capped by
+    /// `toolHoldCapMs` so a crashed tool can't pin busy forever.
+    private var pendingToolUseIds: Set<String> = []
+    /// When the last structured agent pulse arrived; anchors the `toolHoldCapMs` cap.
+    private var lastStructuredAt = Date.distantPast
 
     public init(
         cols: Int = 120,
         rows: Int = 40,
         settleMs: Int = 250,
         watchdogMs: Int = 8000,
+        toolHoldCapMs: Int = 30 * 60 * 1000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
         onChange: @escaping ChangeListener
     ) {
         self.settleMs = settleMs
         self.watchdogMs = watchdogMs
+        self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
         self.onChange = onChange
         self.screen = TerminalScreen(cols: cols, rows: rows)
@@ -115,12 +153,19 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.async { self._feed(data) }
     }
 
-    /// Feed a batch of normalized structured-event kinds from the session's
-    /// transcript tail (the preferred signal). A batch carrying an agent-produced
-    /// kind is a wording-independent "the agent is working" pulse: it enters/keeps
-    /// busy and (re)arms the settle/watchdog clocks exactly like footer output does.
+    /// Feed a batch of normalized structured events from the session's transcript
+    /// tail (the preferred signal). A batch carrying an agent-produced kind is a
+    /// wording-independent "the agent is working" pulse: it enters/keeps busy and
+    /// (re)arms the settle/watchdog clocks exactly like footer output does. The
+    /// batch's tool ids also update the pending set that holds busy across the long
+    /// silence of an in-flight tool call.
+    public func feedStructured(_ batch: StructuredEventBatch) {
+        queue.async { self._feedStructured(batch) }
+    }
+
+    /// Kinds-only convenience for callers with no tool-id plumbing.
     public func feedStructured(_ kinds: [StructuredEventKind]) {
-        queue.async { self._feedStructured(kinds) }
+        feedStructured(StructuredEventBatch(kinds: kinds))
     }
 
     /// Keep the screen model in step with the pty size so cursor/erase math stays
@@ -134,6 +179,7 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.async {
             self.generation += 1
             self.structuredTurn = false
+            self.pendingToolUseIds.removeAll()
             self.transition(.idle, notify: false)
         }
     }
@@ -167,14 +213,29 @@ public final class ActivityDetector: @unchecked Sendable {
         }
     }
 
-    private func _feedStructured(_ kinds: [StructuredEventKind]) {
-        guard batchHasAgentActivity(kinds) else { return }
+    private func _feedStructured(_ batch: StructuredEventBatch) {
+        pendingToolUseIds.formUnion(batch.openedToolUseIds)
+        pendingToolUseIds.subtract(batch.resolvedToolUseIds)
+        guard batchHasAgentActivity(batch.kinds) else { return }
+        lastStructuredAt = Date()
         // A structured pulse is authoritative for this turn, whether it starts the
         // turn or upgrades one the screen path already opened (so settle no longer
         // waits on the footer being erased).
         structuredTurn = true
         if state != .busy { transition(.busy, notify: false) }
         armTimers()
+    }
+
+    /// True while an unresolved `tool_use` should keep the turn busy. Past the cap
+    /// the pending set is dropped (a crashed tool never writes its `tool_result`),
+    /// so classification returns to normal.
+    private func holdsOpenToolUse() -> Bool {
+        guard !pendingToolUseIds.isEmpty else { return false }
+        if Date().timeIntervalSince(lastStructuredAt) * 1000 >= Double(toolHoldCapMs) {
+            pendingToolUseIds.removeAll()
+            return false
+        }
+        return true
     }
 
     /// (Re)arm both the short settle timer and the long stuck-busy watchdog. The
@@ -212,9 +273,22 @@ public final class ActivityDetector: @unchecked Sendable {
         if !demoteStaleFooter, !structuredTurn, Self.workingRe.firstMatch(in: normalizedScreen()) {
             return // still working (screen path) — leave it busy
         }
-        let next: SessionActivity = matchPrompt() != nil ? .waitingInput : .idle
+        if matchPrompt() != nil {
+            // A visible prompt beats the open-tool hold: a tool_use is written to the
+            // transcript *before* its permission menu is answered, and the user must
+            // be pinged. Leaving busy drops the hold (see `transition`).
+            transition(.waitingInput, notify: true)
+            return
+        }
+        if holdsOpenToolUse() {
+            // A tool call (or delegated subagent) is still in flight — transcript and
+            // screen both go quiet for minutes here, including past the watchdog.
+            // Re-arm so the tool_result, a late prompt, or the cap ends the hold.
+            armTimers()
+            return
+        }
         // We're leaving busy on a real turn boundary, so notify.
-        transition(next, notify: true)
+        transition(.idle, notify: true)
     }
 
     /// Re-classify a non-busy screen: a prompt in the trusted region enters
@@ -247,7 +321,12 @@ public final class ActivityDetector: @unchecked Sendable {
     private func transition(_ next: SessionActivity, notify: Bool) {
         if next == state { return }
         state = next
-        if next != .busy { structuredTurn = false }
+        if next != .busy {
+            structuredTurn = false
+            // Any legitimate exit from busy abandons the open-tool hold; a tool that
+            // is still running re-enters busy through its own output/records.
+            pendingToolUseIds.removeAll()
+        }
         onChange(next, notify)
     }
 

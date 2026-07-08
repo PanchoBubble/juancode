@@ -57,9 +57,9 @@ final class StructuredTranscriptTests: XCTestCase {
     /// Thread-safe batch collector for the @Sendable listener.
     private final class Batches: @unchecked Sendable {
         private let lock = NSLock()
-        private var items: [(kinds: [StructuredEventKind], reset: Bool)] = []
-        func add(_ kinds: [StructuredEventKind], _ reset: Bool) { lock.withLock { items.append((kinds, reset)) } }
-        var all: [(kinds: [StructuredEventKind], reset: Bool)] { lock.withLock { items } }
+        private var items: [(batch: StructuredEventBatch, reset: Bool)] = []
+        func add(_ batch: StructuredEventBatch, _ reset: Bool) { lock.withLock { items.append((batch, reset)) } }
+        var all: [(batch: StructuredEventBatch, reset: Bool)] { lock.withLock { items } }
     }
 
     // MARK: - resolveTranscriptFile
@@ -94,12 +94,12 @@ final class StructuredTranscriptTests: XCTestCase {
             provider: .claude,
             cliSessionId: { "tail-1" },
             roots: TitleRoots(claudeProjects: root)
-        ) { kinds, reset in batches.add(kinds, reset) }
+        ) { batch, reset in batches.add(batch, reset) }
 
         await tail.poll()
         XCTAssertEqual(batches.all.count, 1)
         XCTAssertTrue(batches.all[0].reset)
-        XCTAssertEqual(batches.all[0].kinds, [.user, .assistant])
+        XCTAssertEqual(batches.all[0].batch.kinds, [.user, .assistant])
 
         // A poll with no new bytes emits nothing further.
         await tail.poll()
@@ -112,7 +112,40 @@ final class StructuredTranscriptTests: XCTestCase {
         await tail.poll()
         XCTAssertEqual(batches.all.count, 2)
         XCTAssertFalse(batches.all[1].reset)
-        XCTAssertEqual(batches.all[1].kinds, [.assistant])
+        XCTAssertEqual(batches.all[1].batch.kinds, [.assistant])
+    }
+
+    func testCarriesClaudeToolUseIdsThroughTheTail() async {
+        let (root, file) = claudeFixture("tail-tools", [
+            ["type": "user", "message": ["role": "user", "content": "go"]],
+        ])
+        let batches = Batches()
+        let tail = TranscriptActivityTail(
+            provider: .claude,
+            cliSessionId: { "tail-tools" },
+            roots: TitleRoots(claudeProjects: root)
+        ) { batch, reset in batches.add(batch, reset) }
+        await tail.poll() // swallow the backlog
+
+        append(file, jsonl([
+            ["type": "assistant", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_1", "name": "Task", "input": [:]],
+            ]]],
+        ]))
+        await tail.poll()
+        XCTAssertEqual(batches.all[1].batch.kinds, [.toolUse])
+        XCTAssertEqual(batches.all[1].batch.openedToolUseIds, ["toolu_1"])
+        XCTAssertEqual(batches.all[1].batch.resolvedToolUseIds, [])
+
+        append(file, jsonl([
+            ["type": "user", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"],
+            ]]],
+        ]))
+        await tail.poll()
+        XCTAssertEqual(batches.all[2].batch.kinds, [.toolResult])
+        XCTAssertEqual(batches.all[2].batch.openedToolUseIds, [])
+        XCTAssertEqual(batches.all[2].batch.resolvedToolUseIds, ["toolu_1"])
     }
 
     func testStaysQuietWhileTranscriptUnresolved() async {
@@ -121,7 +154,7 @@ final class StructuredTranscriptTests: XCTestCase {
             provider: .claude,
             cliSessionId: { "tail-missing" },
             roots: TitleRoots(claudeProjects: (Self.tmp as NSString).appendingPathComponent("claude-tail-1"))
-        ) { kinds, reset in batches.add(kinds, reset) }
+        ) { batch, reset in batches.add(batch, reset) }
         await tail.poll()
         XCTAssertEqual(batches.all.count, 0)
     }
@@ -140,7 +173,7 @@ final class StructuredTranscriptTests: XCTestCase {
             provider: .claude,
             cliSessionId: { box.value },
             roots: TitleRoots(claudeProjects: root)
-        ) { kinds, reset in batches.add(kinds, reset) }
+        ) { batch, reset in batches.add(batch, reset) }
 
         await tail.poll() // id still nil — nothing emitted yet
         XCTAssertEqual(batches.all.count, 0)
@@ -148,14 +181,14 @@ final class StructuredTranscriptTests: XCTestCase {
         box.value = "tail-late" // discovered after spawn
         await tail.poll()
         XCTAssertEqual(batches.all.count, 1)
-        XCTAssertEqual(batches.all[0].kinds, [.user, .assistant])
+        XCTAssertEqual(batches.all[0].batch.kinds, [.user, .assistant])
     }
 
     func testCodexKindMapping() async {
         let (root, _) = codexFixture("tail-codex", [
             ["payload": ["type": "user_message", "message": "go"]],
-            ["payload": ["type": "function_call", "name": "shell", "arguments": "{}"]],
-            ["payload": ["type": "function_call_output", "output": "ok"]],
+            ["payload": ["type": "function_call", "name": "shell", "arguments": "{}", "call_id": "call_1"]],
+            ["payload": ["type": "function_call_output", "output": "ok", "call_id": "call_1"]],
             ["payload": ["type": "agent_message", "message": "done"]],
         ])
         let batches = Batches()
@@ -163,8 +196,10 @@ final class StructuredTranscriptTests: XCTestCase {
             provider: .codex,
             cliSessionId: { "tail-codex" },
             roots: TitleRoots(codexSessions: root)
-        ) { kinds, reset in batches.add(kinds, reset) }
+        ) { batch, reset in batches.add(batch, reset) }
         await tail.poll()
-        XCTAssertEqual(batches.all[0].kinds, [.user, .toolUse, .toolResult, .assistant])
+        XCTAssertEqual(batches.all[0].batch.kinds, [.user, .toolUse, .toolResult, .assistant])
+        XCTAssertEqual(batches.all[0].batch.openedToolUseIds, ["call_1"])
+        XCTAssertEqual(batches.all[0].batch.resolvedToolUseIds, ["call_1"])
     }
 }

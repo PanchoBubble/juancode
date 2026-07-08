@@ -204,6 +204,81 @@ import Testing
         #expect(c.snapshot.last?.0 == .idle)
     }
 
+    // ── open tool_use hold (juancode-yno) ──────────────────────────────────────
+
+    /// The headline fix: a tool_use with no tool_result yet (slow tool, delegated
+    /// subagent) goes transcript- and screen-quiet for minutes; the watchdog must
+    /// not demote busy while the call is still in flight.
+    @Test func openToolUseHoldsBusyAcrossWatchdog() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        await sleepMs(400) // several watchdog windows of total silence
+        #expect(c.states == [.busy]) // never demoted
+    }
+
+    @Test func toolResultReleasesHoldAndSettles() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        await sleepMs(250) // held busy past the watchdog
+        #expect(c.states == [.busy])
+        det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t1"]))
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.states == [.busy, .idle])
+        #expect(c.snapshot.last?.1 == true)
+    }
+
+    @Test func holdWaitsForEveryPendingToolUse() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse, .toolUse], openedToolUseIds: ["t1", "t2"]))
+        det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t1"]))
+        await sleepMs(250) // t2 still open — held
+        #expect(c.states == [.busy])
+        det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t2"]))
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+    }
+
+    @Test func resetClearsPendingToolUses() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        await poll { c.snapshot.contains { $0.0 == .busy } }
+        det.reset()
+        await poll { c.snapshot.last?.0 == .idle }
+        // A fresh turn with no ids must settle normally — t1 must not linger.
+        det.feedStructured([.assistant])
+        await poll { c.snapshot.last?.0 == .busy }
+        await poll { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+    }
+
+    /// A crashed tool never writes its tool_result; past the cap the hold releases
+    /// and normal settle classification demotes.
+    @Test func holdCapAllowsDemotionAfterExpiry() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, toolHoldCapMs: 200) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        await sleepMs(120) // inside the cap — still held
+        #expect(c.states == [.busy])
+        await poll(2.0) { c.snapshot.last?.0 == .idle }
+        #expect(c.snapshot.last?.0 == .idle)
+    }
+
+    /// A tool_use is written to the transcript *before* its permission menu is
+    /// answered, so a visible prompt must beat the hold — the user needs the ping.
+    @Test func promptBeatsOpenToolUseHold() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        det.feed("Do you want to proceed?\n ❯ 1. Yes\n   2. No\n")
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+        #expect(c.snapshot.last?.1 == true)
+    }
+
     @Test func batchHasAgentActivityDistinguishesUser() {
         #expect(batchHasAgentActivity([.user, .assistant]))
         #expect(batchHasAgentActivity([.toolUse]))
