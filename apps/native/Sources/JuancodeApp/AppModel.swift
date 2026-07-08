@@ -2221,6 +2221,8 @@ final class AppModel {
         case base
         /// An existing PR's diff, loaded via `gh pr diff`.
         case pr(PullRequest)
+        /// A single commit's diff (juancode-5u2). Full sha + subject for labels.
+        case commit(sha: String, subject: String)
     }
     /// Per-session diff source. Absent ⇒ `.workingTree`.
     var changesSourceBySession: [String: ChangesSource] = [:]
@@ -2233,6 +2235,10 @@ final class AppModel {
     var prCiLogsBySession: [String: String] = [:]
     /// Sessions whose CI-log fetch is in flight (for the banner spinner).
     private var prCiLogsLoading: Set<String> = []
+    /// Recent commits for the ChangesPanel's commit picker (juancode-5u2), per session.
+    var recentCommitsBySession: [String: [RecentCommit]] = [:]
+    /// Sessions whose commit-list fetch is in flight (for the picker spinner).
+    private var recentCommitsLoading: Set<String> = []
 
     struct GitNote: Equatable { var ok: Bool; var text: String }
 
@@ -2246,6 +2252,22 @@ final class AppModel {
     func changesError(_ id: String) -> String? { changesErrorBySession[id] }
     func prCiLogs(_ id: String) -> String? { prCiLogsBySession[id] }
     func isLoadingPrCiLogs(_ id: String) -> Bool { prCiLogsLoading.contains(id) }
+    func recentCommits(_ id: String) -> [RecentCommit] { recentCommitsBySession[id] ?? [] }
+    func isLoadingRecentCommits(_ id: String) -> Bool { recentCommitsLoading.contains(id) }
+
+    /// Load (or refresh) the last ~50 commits for the ChangesPanel's commit picker
+    /// (juancode-5u2). Off the main actor; coalesces concurrent requests.
+    func loadRecentCommits(_ id: String) {
+        guard let cwd = cwd(of: id), !recentCommitsLoading.contains(id) else { return }
+        recentCommitsLoading.insert(id)
+        Task {
+            let commits = await Task.detached(priority: .utility) {
+                await listRecentCommits(cwd, limit: 50)
+            }.value
+            recentCommitsBySession[id] = commits
+            recentCommitsLoading.remove(id)
+        }
+    }
 
     /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel
     /// (`gh run view --log-failed` for each red Actions check). Off the main actor;
@@ -2455,10 +2477,16 @@ final class AppModel {
                     body: String, quote: String? = nil) {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let c = DiffComment(
+        var c = DiffComment(
             id: UUID().uuidString, sessionId: id, file: file, side: side,
             line: min(line, endLine), endLine: max(line, endLine),
             body: trimmed, createdAt: Int(Date().timeIntervalSince1970 * 1000), quote: quote)
+        // Comments staged on a commit diff point at that commit (juancode-5u2), so
+        // the review composer can label them and the panel can scope rendering.
+        if case let .commit(sha, subject) = changesSource(id) {
+            c.commitSha = sha
+            c.commitSubject = subject
+        }
         commentsBySession[id, default: []].append(c)
     }
 
@@ -2921,6 +2949,12 @@ private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) 
     case .pr(let pr):
         do {
             return LoadedDiff(diff: try await getPrDiff(cwd, number: pr.number), base: nil, error: nil)
+        } catch {
+            return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
+        }
+    case .commit(let sha, _):
+        do {
+            return LoadedDiff(diff: try await getCommitDiff(cwd, sha: sha), base: nil, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
         }

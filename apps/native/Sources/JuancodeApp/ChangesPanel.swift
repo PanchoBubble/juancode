@@ -39,6 +39,8 @@ struct ChangesPanel: View {
     /// One-shot guard so the programmatic tree selection on load scrolls to the
     /// first card without expanding it (keeps "all collapsed by default" honest).
     @State private var suppressSelectExpand = false
+    /// Whether the commit-picker popover is open (juancode-5u2).
+    @State private var showCommitPicker = false
     /// Persisted width of the tree pane in the split.
     @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
     /// Whether the left file-tree pane is shown (toggled from the header).
@@ -81,6 +83,7 @@ struct ChangesPanel: View {
         case .workingTree: return "Working tree"
         case .base: return "vs " + (model.changesBaseLabel(sessionId) ?? "base")
         case .pr(let pr): return "PR #\(pr.number)"
+        case .commit(let sha, let subject): return "Commit \(sha.prefix(7)) – \(subject)"
         }
     }
 
@@ -89,7 +92,14 @@ struct ChangesPanel: View {
         case .workingTree: return "pencil"
         case .base: return "arrow.triangle.branch"
         case .pr: return "arrow.triangle.pull"
+        case .commit: return "smallcircle.filled.circle"
         }
+    }
+
+    /// The sha of the commit currently shown, when the source is a commit.
+    private var currentCommitSha: String? {
+        if case .commit(let sha, _) = currentSource { return sha }
+        return nil
     }
 
     /// Dropdown to point the viewer at the working tree, the base branch, or any
@@ -102,6 +112,13 @@ struct ChangesPanel: View {
             }
             Button { model.setChangesSource(sessionId, .base) } label: {
                 sourceItemLabel("Against base branch", selected: currentSource == .base)
+            }
+            Divider()
+            Button {
+                model.loadRecentCommits(sessionId)
+                showCommitPicker = true
+            } label: {
+                sourceItemLabel("Commit…", selected: currentCommitSha != nil)
             }
             if !prs.isEmpty {
                 Section("Pull requests") {
@@ -121,7 +138,10 @@ struct ChangesPanel: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Choose what to diff: the working tree, the base branch, or a PR")
+        .help("Choose what to diff: the working tree, the base branch, a PR, or a commit")
+        .popover(isPresented: $showCommitPicker, arrowEdge: .bottom) {
+            CommitPickerPopover(sessionId: sessionId, isPresented: $showCommitPicker)
+        }
     }
 
     @ViewBuilder
@@ -370,6 +390,7 @@ struct ChangesPanel: View {
         case .workingTree: return "Loading changes…"
         case .base: return "Diffing against base…"
         case .pr(let pr): return "Loading PR #\(pr.number)…"
+        case .commit(let sha, _): return "Loading commit \(sha.prefix(7))…"
         }
     }
 
@@ -378,6 +399,7 @@ struct ChangesPanel: View {
         case .workingTree: return "No changes in the working tree."
         case .base: return "No changes vs \(model.changesBaseLabel(sessionId) ?? "base")."
         case .pr: return "This PR has no file changes."
+        case .commit: return "This commit has no file changes."
         }
     }
 
@@ -465,7 +487,11 @@ struct ChangesPanel: View {
                             FileCard(
                                 sessionId: sessionId,
                                 file: file,
-                                comments: model.comments(sessionId).filter { $0.file == file.path },
+                                // Scope inline rendering to the source the comment was
+                                // staged against — line numbers only line up there.
+                                comments: model.comments(sessionId).filter {
+                                    $0.file == file.path && $0.commitSha == currentCommitSha
+                                },
                                 findings: ReviewPresentation.findings(
                                     for: file.path, in: model.review(sessionId)?.findings ?? []),
                                 collapsed: collapsedFiles.contains(file.path),
@@ -527,6 +553,84 @@ struct ChangesPanel: View {
                 .clickCursor()
         }
         .padding(10)
+    }
+}
+
+// MARK: - Commit picker (juancode-5u2)
+
+/// Searchable list of the session's recent commits, opened from the source menu's
+/// "Commit…" entry. Picking a row points the panel at that commit's diff.
+private struct CommitPickerPopover: View {
+    @Environment(AppModel.self) private var model
+    let sessionId: String
+    @Binding var isPresented: Bool
+    @State private var search = ""
+
+    private var filtered: [RecentCommit] {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return model.recentCommits(sessionId) }
+        return model.recentCommits(sessionId).filter {
+            $0.sha.lowercased().hasPrefix(q) || $0.subject.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Search commits…", text: $search)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+            if model.isLoadingRecentCommits(sessionId) && model.recentCommits(sessionId).isEmpty {
+                ProgressView().controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else if filtered.isEmpty {
+                Text(search.isEmpty ? "No commits." : "No commits match “\(search)”.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered) { commit in
+                            commitRow(commit)
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .padding(10)
+        .frame(width: 400)
+    }
+
+    private func commitRow(_ commit: RecentCommit) -> some View {
+        Button {
+            model.setChangesSource(sessionId, .commit(sha: commit.sha, subject: commit.subject))
+            isPresented = false
+        } label: {
+            HStack(spacing: 6) {
+                Text(commit.shortSha)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text(commit.subject)
+                    .font(.system(size: 11)).lineLimit(1)
+                if commit.aheadOfBase {
+                    Text("ahead")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.green.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.green)
+                        .help("Not on the base branch yet")
+                }
+                Spacer(minLength: 8)
+                Text(commit.relativeAge)
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .clickCursor()
     }
 }
 

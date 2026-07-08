@@ -5,6 +5,8 @@ import Foundation
 /// Changes panel into a review surface. Each comment becomes a numbered
 /// `<file>:<line> — <comment>` entry with the annotated diff line (its +/- marker
 /// intact) quoted beneath it, so the agent sees exactly which line each note lands on.
+/// Comments staged against a commit diff (juancode-5u2) are grouped under an
+/// `On commit <sha> – <subject>:` header; numbering runs continuously across groups.
 ///
 /// Pure and SwiftUI-free so it is unit-testable without a view or a live session; the
 /// quote capture and the steer-vs-submit delivery live in the app/services layer.
@@ -15,20 +17,40 @@ public func composeReviewFeedback(_ comments: [DiffComment]) -> String {
     }
     guard !usable.isEmpty else { return "" }
 
+    // Group by the commit each comment points at (nil = working tree), keeping
+    // first-appearance order so the prompt reads in the order the user staged.
+    var groupOrder: [String?] = []
+    var groups: [String?: [DiffComment]] = [:]
+    for c in usable {
+        if groups[c.commitSha] == nil { groupOrder.append(c.commitSha) }
+        groups[c.commitSha, default: []].append(c)
+    }
+
     var lines: [String] = ["Review feedback on your changes:"]
-    for (i, c) in usable.enumerated() {
-        let bodyLines = c.body
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        lines.append("\(i + 1). \(reviewLocationLabel(c)) — \(bodyLines.first ?? "")")
-        // Continuation lines of a multi-line comment sit under the entry.
-        for cont in bodyLines.dropFirst() { lines.append("   \(cont)") }
-        // Quote the highlighted diff line(s) verbatim (markers + code indentation
-        // preserved); only the surrounding newlines are trimmed.
-        if let quote = c.quote?.trimmingCharacters(in: .newlines), !quote.isEmpty {
-            for q in quote.split(separator: "\n", omittingEmptySubsequences: false) {
-                lines.append("   > \(q)")
+    var n = 0
+    for sha in groupOrder {
+        // Working-tree comments stay unlabeled — the header line already says
+        // "your changes"; only commit groups get an explicit pointer.
+        if let sha {
+            let subject = groups[sha]?.first?.commitSubject
+            let label = subject.map { "\(sha.prefix(7)) – \($0)" } ?? String(sha.prefix(7))
+            lines.append("On commit \(label):")
+        }
+        for c in groups[sha] ?? [] {
+            n += 1
+            let bodyLines = c.body
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            lines.append("\(n). \(reviewLocationLabel(c)) — \(bodyLines.first ?? "")")
+            // Continuation lines of a multi-line comment sit under the entry.
+            for cont in bodyLines.dropFirst() { lines.append("   \(cont)") }
+            // Quote the highlighted diff line(s) verbatim (markers + code indentation
+            // preserved); only the surrounding newlines are trimmed.
+            if let quote = c.quote?.trimmingCharacters(in: .newlines), !quote.isEmpty {
+                for q in quote.split(separator: "\n", omittingEmptySubsequences: false) {
+                    lines.append("   > \(q)")
+                }
             }
         }
     }

@@ -314,6 +314,101 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(after.ahead, 0)
     }
 
+    // MARK: - listRecentCommits (juancode-5u2)
+
+    func testListRecentCommitsNewestFirst() async throws {
+        for (i, msg) in ["first", "second", "third"].enumerated() {
+            writeFile(join(dir, "f.txt"), "v\(i)\n")
+            try runGit(["add", "-A"])
+            try runGit(["commit", "-qm", msg])
+        }
+        let commits = await listRecentCommits(dir)
+        XCTAssertEqual(commits.map(\.subject), ["third", "second", "first"])
+        for c in commits {
+            XCTAssertEqual(c.sha.count, 40)
+            XCTAssertTrue(c.sha.hasPrefix(c.shortSha))
+            XCTAssertFalse(c.relativeAge.isEmpty)
+        }
+    }
+
+    func testListRecentCommitsMarksAheadOfBase() async throws {
+        writeFile(join(dir, "f.txt"), "base\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "on main"])
+        try runGit(["branch", "-M", "main"])
+        try runGit(["checkout", "-qb", "feature"])
+        for i in 1...2 {
+            writeFile(join(dir, "f.txt"), "feature \(i)\n")
+            try runGit(["commit", "-aqm", "feature \(i)"])
+        }
+        let commits = await listRecentCommits(dir)
+        XCTAssertEqual(commits.map(\.aheadOfBase), [true, true, false])
+    }
+
+    func testListRecentCommitsEmptyForNonGitAndEmptyRepo() async throws {
+        let plain = mkdtemp("juancode-plain-")
+        defer { rmrf(plain) }
+        let nonGit = await listRecentCommits(plain)
+        XCTAssertTrue(nonGit.isEmpty)
+        // `dir` is a fresh repo with no commits (no HEAD) at this point.
+        let emptyRepo = await listRecentCommits(dir)
+        XCTAssertTrue(emptyRepo.isEmpty)
+    }
+
+    // MARK: - getCommitDiff (juancode-5u2)
+
+    func testGetCommitDiffRootCommit() async throws {
+        writeFile(join(dir, "a.txt"), "alpha\nbeta\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "root"])
+        let sha = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let r = try await getCommitDiff(dir, sha: sha)
+        XCTAssertTrue(r.git)
+        XCTAssertEqual(r.files.count, 1)
+        XCTAssertEqual(r.files.first?.path, "a.txt")
+        XCTAssertEqual(r.files.first?.status, .added)
+        XCTAssertEqual(r.files.first?.additions, 2)
+    }
+
+    func testGetCommitDiffOrdinaryCommit() async throws {
+        writeFile(join(dir, "a.txt"), "one\ntwo\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        writeFile(join(dir, "a.txt"), "one\ntwo\nthree\n")
+        try runGit(["commit", "-aqm", "grow"])
+        let sha = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Dirty the working tree to prove the diff is the commit's, not the tree's.
+        writeFile(join(dir, "a.txt"), "unrelated\n")
+
+        let r = try await getCommitDiff(dir, sha: sha)
+        XCTAssertTrue(r.git)
+        XCTAssertEqual(r.files.count, 1)
+        XCTAssertEqual(r.files.first?.status, .modified)
+        XCTAssertEqual(r.files.first?.additions, 1)
+        XCTAssertEqual(r.files.first?.deletions, 0)
+    }
+
+    func testGetCommitDiffUnknownShaThrowsGitError() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        do {
+            _ = try await getCommitDiff(dir, sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            XCTFail("expected GitError")
+        } catch let e as GitError {
+            XCTAssertTrue(e.message.contains("deadbee"))
+        }
+    }
+
+    func testGetCommitDiffNonGitDir() async throws {
+        let plain = mkdtemp("juancode-plain-")
+        defer { rmrf(plain) }
+        let r = try await getCommitDiff(plain, sha: "deadbeef")
+        XCTAssertEqual(r, DiffResult(git: false, files: []))
+    }
+
     // MARK: - util
 
     /// `path.resolve` equivalent for comparing worktree paths regardless of symlinks

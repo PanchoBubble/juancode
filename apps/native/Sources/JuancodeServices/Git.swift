@@ -201,6 +201,87 @@ public func defaultBaseBranch(_ cwd: String) async -> String? {
     return nil
 }
 
+/// One commit in the ChangesPanel's commit picker (juancode-5u2), newest first.
+public struct RecentCommit: Sendable, Equatable, Identifiable {
+    public var id: String { sha }
+    public let sha: String         // full %H
+    public let shortSha: String    // %h
+    public let subject: String     // %s
+    public let relativeAge: String // %cr, e.g. "3 hours ago"
+    /// Whether the commit is in `<base>..HEAD`, i.e. not on the base branch yet.
+    public let aheadOfBase: Bool
+
+    public init(sha: String, shortSha: String, subject: String, relativeAge: String,
+                aheadOfBase: Bool) {
+        self.sha = sha; self.shortSha = shortSha; self.subject = subject
+        self.relativeAge = relativeAge; self.aheadOfBase = aheadOfBase
+    }
+}
+
+/// Last `limit` commits of HEAD, newest first, with the ones not yet on the base
+/// branch marked. Never throws — returns [] for a non-git cwd, an empty repo
+/// (no HEAD), or any git failure, so the picker just shows an empty state.
+public func listRecentCommits(_ cwd: String, limit: Int = 50) async -> [RecentCommit] {
+    guard let inside = try? await git(cwd, ["rev-parse", "--is-inside-work-tree"]),
+          inside.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    else { return [] }
+
+    // Unit-separator field delimiter: subjects can contain tabs/spaces.
+    guard let log = try? await git(
+        cwd, ["log", "-n", String(limit), "--format=%H%x1f%h%x1f%s%x1f%cr"])
+    else { return [] }
+
+    // Commits ahead of the inferred base branch. The --max-count cap is safe: any
+    // base..HEAD commit within the first `limit` log entries is also within the
+    // first `limit` rev-list entries. Failures just leave every mark false.
+    var ahead: Set<String> = []
+    if let base = await defaultBaseBranch(cwd),
+       let revs = try? await git(cwd, ["rev-list", "--max-count=\(limit)", "\(base)..HEAD"]) {
+        ahead = Set(revs.split(separator: "\n").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+    }
+
+    return log.split(separator: "\n").compactMap { line in
+        let fields = line.components(separatedBy: "\u{1f}")
+        guard fields.count >= 4 else { return nil }
+        return RecentCommit(sha: fields[0], shortSha: fields[1], subject: fields[2],
+                            relativeAge: fields[3], aheadOfBase: ahead.contains(fields[0]))
+    }
+}
+
+/// The diff a single commit introduced, in the same per-file shape `getDiff`
+/// produces (juancode-5u2). Root commits diff against the empty tree; merge
+/// commits diff against their FIRST parent (a plain two-point `git diff` — `git
+/// show` emits combined `@@@` hunks for merges that `parseMultiFileDiff` can't
+/// parse). Returns `{ git: false }` for a non-git cwd; throws `GitError` when the
+/// sha doesn't resolve (e.g. rewritten or rebased away).
+public func getCommitDiff(_ cwd: String, sha: String) async throws -> DiffResult {
+    guard let inside = try? await git(cwd, ["rev-parse", "--is-inside-work-tree"]),
+          inside.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    else { return DiffResult(git: false, files: []) }
+
+    let parents: String
+    do {
+        parents = try await git(cwd, ["rev-list", "--parents", "-n", "1", sha])
+    } catch {
+        throw GitError("Commit \(sha.prefix(7)) not found — it may have been rewritten or rebased away.")
+    }
+    let tokens = parents.trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: " ").map(String.init)
+    guard !tokens.isEmpty else {
+        throw GitError("Commit \(sha.prefix(7)) not found — it may have been rewritten or rebased away.")
+    }
+    let parent = tokens.count > 1 ? tokens[1] : EMPTY_TREE
+
+    let patch = try await git(cwd, ["diff", "-M", parent, tokens[0]])
+    var files = parseMultiFileDiff(patch)
+    let truncatedFiles = files.count > MAX_FILES
+    if truncatedFiles { files = Array(files.prefix(MAX_FILES)) }
+    files.sort { $0.path.localizedCompare($1.path) == .orderedAscending }
+    return DiffResult(git: true, root: nil, files: files, truncatedFiles: truncatedFiles)
+}
+
 /// Build the per-file diff set of a known git work tree against `base`: every
 /// tracked change (name-status, renames via -M) plus untracked files, each as its
 /// own unified diff. Shared by the working-tree diff (`getDiff`, base = HEAD) and

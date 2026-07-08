@@ -71,12 +71,20 @@ public struct DiffComment: Codable, Sendable, Equatable {
     /// what the user highlighted (juancode-ck4). Optional/nil for comments staged
     /// without a diff snapshot (e.g. the REST path); decodes to nil for older rows.
     public var quote: String?
+    /// When the comment was staged against a single commit's diff (juancode-5u2):
+    /// the full sha + subject of that commit, so the review composer can label the
+    /// group and the panel can scope rendering to the matching source. Nil for
+    /// working-tree/base/PR comments.
+    public var commitSha: String?
+    public var commitSubject: String?
 
     public init(id: String, sessionId: String, file: String, side: CommentSide,
-                line: Int, endLine: Int, body: String, createdAt: Int, quote: String? = nil) {
+                line: Int, endLine: Int, body: String, createdAt: Int, quote: String? = nil,
+                commitSha: String? = nil, commitSubject: String? = nil) {
         self.id = id; self.sessionId = sessionId; self.file = file; self.side = side
         self.line = line; self.endLine = endLine; self.body = body; self.createdAt = createdAt
         self.quote = quote
+        self.commitSha = commitSha; self.commitSubject = commitSubject
     }
 }
 

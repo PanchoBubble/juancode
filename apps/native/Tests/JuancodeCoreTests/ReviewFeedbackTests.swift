@@ -6,9 +6,11 @@ import Testing
 /// the location label, and the empty/edge cases.
 @Suite struct ReviewFeedbackTests {
     private func comment(_ file: String, side: CommentSide = .new, line: Int, endLine: Int? = nil,
-                         body: String, quote: String? = nil) -> DiffComment {
+                         body: String, quote: String? = nil,
+                         commitSha: String? = nil, commitSubject: String? = nil) -> DiffComment {
         DiffComment(id: file + "\(line)", sessionId: "s", file: file, side: side,
-                    line: line, endLine: endLine ?? line, body: body, createdAt: 0, quote: quote)
+                    line: line, endLine: endLine ?? line, body: body, createdAt: 0, quote: quote,
+                    commitSha: commitSha, commitSubject: commitSubject)
     }
 
     @Test func composesNumberedEntriesWithQuotedLines() {
@@ -75,5 +77,70 @@ import Testing
     @Test func emptyWhenNoUsableComments() {
         #expect(composeReviewFeedback([]) == "")
         #expect(composeReviewFeedback([comment("a", line: 1, body: "  \n ")]) == "")
+    }
+
+    // ── Commit-pointed comments (juancode-5u2) ──────────────────────────────
+
+    @Test func commitCommentsGroupUnderLabeledHeader() {
+        let sha = "abc1234def5678900000000000000000000000000"
+        let out = composeReviewFeedback([
+            comment("a", line: 1, body: "fix this", quote: "+x",
+                    commitSha: sha, commitSubject: "add widget"),
+            comment("b", line: 2, body: "and this", commitSha: sha, commitSubject: "add widget"),
+        ])
+        #expect(out == """
+        Review feedback on your changes:
+        On commit abc1234 – add widget:
+        1. a:1 — fix this
+           > +x
+        2. b:2 — and this
+        Please address each point.
+        """)
+    }
+
+    @Test func mixedBasketKeepsWorkingTreeUnlabeledAndNumberingContinuous() {
+        let out = composeReviewFeedback([
+            comment("a", line: 1, body: "tree note"),
+            comment("b", line: 2, body: "commit note",
+                    commitSha: "1111111aaaa", commitSubject: "first"),
+            comment("c", line: 3, body: "another tree note"),
+        ])
+        // Grouping pulls the two tree notes together; numbering follows the
+        // emitted order and stays continuous across the commit header.
+        #expect(out == """
+        Review feedback on your changes:
+        1. a:1 — tree note
+        2. c:3 — another tree note
+        On commit 1111111 – first:
+        3. b:2 — commit note
+        Please address each point.
+        """)
+    }
+
+    @Test func distinctCommitsGetSeparateHeadersInFirstAppearanceOrder() {
+        let out = composeReviewFeedback([
+            comment("a", line: 1, body: "on second", commitSha: "2222222bbbb", commitSubject: "second"),
+            comment("b", line: 2, body: "on first", commitSha: "1111111aaaa", commitSubject: "first"),
+        ])
+        #expect(out == """
+        Review feedback on your changes:
+        On commit 2222222 – second:
+        1. a:1 — on second
+        On commit 1111111 – first:
+        2. b:2 — on first
+        Please address each point.
+        """)
+    }
+
+    @Test func commitHeaderFallsBackToShaWhenSubjectMissing() {
+        let out = composeReviewFeedback([
+            comment("a", line: 1, body: "note", commitSha: "3333333cccc"),
+        ])
+        #expect(out == """
+        Review feedback on your changes:
+        On commit 3333333:
+        1. a:1 — note
+        Please address each point.
+        """)
     }
 }
