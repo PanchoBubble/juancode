@@ -142,20 +142,37 @@ public protocol BinaryResolver: Sendable {
 /// login shell, so we ask the login shell to resolve the command. Faithful
 /// environment is the whole point — we never inject a shadow HOME/PATH.
 public func resolveBin(_ cmd: String, override: String?) -> String {
+    // An explicit override short-circuits before the cache, so a test can still
+    // point a binary at a stub via its env var (`JUANCODE_*_BIN`) on any call.
     if let override, !override.isEmpty { return override }
+
+    // Memoize the no-override resolution per command (juancode-8fp). The result is
+    // stable for the process (PATH and the login shell don't change under us), and
+    // the resolver is hit on every git/gh/bd spawn — without this, a Finder/stripped
+    // -PATH launch pays the blocking `lookupViaLoginShell` probe below on every call,
+    // which starves the concurrency pool when several spawns fan out at once.
+    if let cached = resolveBinCache.get(cmd) { return cached }
 
     // Fast path: resolve against the inherited PATH directly, no subprocess. When
     // juancode is launched from a terminal it already has the user's full PATH, so
     // this finds claude/codex instantly — and avoids spawning the user's login
     // shell at all (a slow or hanging interactive rc must never wedge a spawn).
-    if let direct = lookupInPath(cmd) { return direct }
+    // Fallback (e.g. launched from Finder with a stripped PATH): ask the login shell
+    // where the command is, capped by a timeout so a slow/hanging rc can't block —
+    // falling back to the bare name (execvp resolves it via PATH).
+    let resolved = lookupInPath(cmd) ?? lookupViaLoginShell(cmd, timeout: 5) ?? cmd
+    resolveBinCache.set(cmd, resolved)
+    return resolved
+}
 
-    // Fallback (e.g. launched from Finder with a stripped PATH): ask the login
-    // shell where the command is, but cap it with a timeout so a slow/hanging rc
-    // can't block — falling back to the bare name (execvp resolves it via PATH).
-    if let viaShell = lookupViaLoginShell(cmd, timeout: 5) { return viaShell }
+/// Process-lifetime memo of `resolveBin`'s no-override results, keyed by command.
+private let resolveBinCache = ResolveBinCache()
 
-    return cmd
+private final class ResolveBinCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var map: [String: String] = [:]
+    func get(_ key: String) -> String? { lock.lock(); defer { lock.unlock() }; return map[key] }
+    func set(_ key: String, _ value: String) { lock.lock(); map[key] = value; lock.unlock() }
 }
 
 /// Search the process's inherited `PATH` for an executable named `cmd`.

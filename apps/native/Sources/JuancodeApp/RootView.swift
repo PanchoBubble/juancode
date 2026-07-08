@@ -443,8 +443,6 @@ struct SidebarView: View {
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
-    /// Pending "kill the running agent" confirmation (juancode-101).
-    @State private var confirmingKill: SessionMeta?
     /// Whether the full-text transcript search sheet is open (juancode-wx9).
     @State private var showingSearch = false
     /// Whether the auth & MCP status sheet is open (juancode-daw).
@@ -507,12 +505,13 @@ struct SidebarView: View {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
         return byCwd.map { cwd, sessions in
-            // Within a project, attention-first smart sort (juancode-dr0): sessions
-            // waiting for a reply, then finished-unseen, then working, then quiet
-            // live ones, exited last — recency (updatedAt, then createdAt) breaks
-            // ties inside each bucket, so active sessions still float as they work.
+            // Within a project, a stable order that doesn't churn as agents work
+            // (juancode-05u): live sessions hold a fixed newest-first place and
+            // only dead ones (exited/dormant) sink to the bottom. The status glyph
+            // still reflects busy/idle/waiting live — the row just re-glyphs in
+            // place instead of jumping around on every activity tick.
             let ordered = sessions.sorted {
-                smartSortPrecedes(smartSortKey($0), smartSortKey($1))
+                sinkDownPrecedes(sinkSortKey($0), sinkSortKey($1))
             }
             return FolderGroup(
                 cwd: cwd,
@@ -534,16 +533,11 @@ struct SidebarView: View {
         }
     }
 
-    /// The smart-sort inputs for one session, from the same live state that drives
-    /// its row's status glyph — so what sorts first is what glows in the sidebar.
-    private func smartSortKey(_ meta: SessionMeta) -> SessionSortKey {
-        SessionSortKey(
-            attention: sessionAttention(
-                live: model.isLive(meta.id),
-                activity: model.activity(meta.id),
-                unseenDone: model.unseenCompletions.contains(meta.id)),
-            updatedAt: meta.updatedAt,
-            createdAt: meta.createdAt)
+    /// The stable-sort inputs for one session: only its liveness (dead ones sink)
+    /// and its creation identity — deliberately not its activity/attention, so a
+    /// working session stays put and merely changes glyph instead of jumping.
+    private func sinkSortKey(_ meta: SessionMeta) -> SinkSortKey {
+        SinkSortKey(down: !model.isLive(meta.id), createdAt: meta.createdAt, id: meta.id)
     }
 
     /// Collapse any folder we haven't seen before, so projects are minimized by
@@ -675,6 +669,10 @@ struct SidebarView: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
+            // Slide rows to their new slot when a session dies and sinks, instead
+            // of snapping (juancode-05u). Keyed on the per-group ordered id lists so
+            // it fires only on an actual reorder, not on every activity tick.
+            .animation(.easeInOut(duration: 0.28), value: groups.map { $0.sessions.map(\.id) })
             .focused($listFocused)
             // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
             .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
@@ -777,22 +775,6 @@ struct SidebarView: View {
                 if let target = renaming { model.rename(target.id, to: renameText) }
                 renaming = nil
             }
-        }
-        .confirmationDialog(
-            confirmingKill.map { "Kill the agent in \($0.title)?" } ?? "Kill agent?",
-            isPresented: Binding(
-                get: { confirmingKill != nil },
-                set: { if !$0 { confirmingKill = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Kill Agent", role: .destructive) {
-                if let target = confirmingKill { model.killSession(target.id) }
-                confirmingKill = nil
-            }
-            Button("Cancel", role: .cancel) { confirmingKill = nil }
-        } message: {
-            Text("Stops the running agent immediately. The session, its output, and any worktree are kept so you can inspect what happened.")
         }
         .perfTrackBody()
     }
@@ -936,8 +918,12 @@ struct SidebarView: View {
             Divider()
             // Force-terminate a still-running agent without deleting the session,
             // so a stuck/frozen one can be stopped and then inspected (juancode-101).
+            // Killed straight from the menu like Delete below: routing it through a
+            // @State + .confirmationDialog never presented from a context menu on
+            // macOS, so the item read as a no-op (juancode-05u). Kill is
+            // non-destructive (session, scrollback and worktree are all kept).
             if model.isLive(meta.id) {
-                Button("Kill Agent", role: .destructive) { confirmingKill = meta }
+                Button("Kill Agent", role: .destructive) { model.killSession(meta.id) }
             }
             Button("Delete", role: .destructive) { model.delete(meta.id) }
         }

@@ -1502,20 +1502,33 @@ final class AppModel {
     /// classify what changed, inject auto-fix prompts into the agent session, and
     /// raise notifications for changes that need a human decision.
     func pollTrackedOnce() async {
-        for (key, pr) in tracked {
-            let cwd = pr.cwd, number = pr.number
-            let polled = await Task.detached(priority: .utility, operation: {
-                // Fetch the PR's activity and the authenticated `gh` login together so
-                // the classifier can ignore the agent's own comments (no echo loop).
-                async let activity = getPrActivity(cwd, number: number)
-                async let viewer = getViewerLogin(cwd)
-                return (await activity, await viewer)
-            }).value
-            guard let activity = polled.0 else { continue }
-            let viewerLogin = polled.1
+        // Fetch every tracked PR's activity concurrently off the main actor
+        // (juancode-hmu): a pass is now one round of parallel `gh` spawns instead of
+        // N sequential ones. `getViewerLogin` is process-cached after the first call,
+        // so the fan-out only multiplies the `gh pr view` round-trips. The `activity`
+        // + `viewer` for one PR are still fetched together so the classifier can
+        // ignore the agent's own comments (no echo loop). Results are applied
+        // serially below, back on the main actor.
+        let toPoll = tracked.values.map { (key: $0.id, cwd: $0.cwd, number: $0.number) }
+        guard !toPoll.isEmpty else { return }
+        let fetched = await withTaskGroup(of: (String, PrActivity?, String).self) { group in
+            for item in toPoll {
+                group.addTask(priority: .utility) {
+                    async let activity = getPrActivity(item.cwd, number: item.number)
+                    async let viewer = getViewerLogin(item.cwd)
+                    return (item.key, await activity, await viewer)
+                }
+            }
+            var out: [(String, PrActivity?, String)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
 
+        for (key, activity, viewerLogin) in fetched {
+            guard let activity else { continue }
             // The entry may have been untracked while we were off-actor.
             guard var entry = tracked[key] else { continue }
+            let cwd = entry.cwd, number = entry.number
             let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()

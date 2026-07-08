@@ -465,6 +465,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private let session: Session
         private weak var view: TerminalView?
         private var cancel: (() -> Void)?
+        /// Batches pty output into one `feed()` per runloop turn (juancode-kdn).
+        private var feedCoalescer: TerminalFeedCoalescer?
         private var wheelMonitor: Any?
         /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
         private var shiftEnterMonitor: Any?
@@ -509,11 +511,14 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             }
             // Replay scrollback, then stream live output. Feed must happen on the
             // main thread (AppKit); the pty callback arrives on a background queue.
-            cancel = session.subscribeOutput(replay: true) { [weak tv] bytes in
-                DispatchQueue.main.async {
-                    PerfMonitor.recordFeed(bytes.count)
-                    tv?.feed(byteArray: bytes[...])
-                }
+            // Coalesce bursts into one feed per runloop turn (juancode-kdn) so N
+            // mounted, streaming sessions don't each parse+reflow per chunk on main.
+            let coalescer = TerminalFeedCoalescer { [weak tv] bytes in
+                tv?.feed(byteArray: bytes[...])
+            }
+            feedCoalescer = coalescer
+            cancel = session.subscribeOutput(replay: true) { bytes in
+                coalescer.append(bytes)
             }
             let session = self.session
             // A fullscreen / display / Space change, or coming back from a minimize or

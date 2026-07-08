@@ -263,6 +263,12 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var cancelGrid: (() -> Void)?
         private var streaming = false
+        /// Set at surface attach; cleared when streaming actually starts. We defer
+        /// the first write until the surface reports a grid, so a write never lands
+        /// on an unsized surface (deadlocks `ghostty_surface_write_buffer`).
+        private var streamPending = false
+        /// Batches pty output into one `receive()` per runloop turn (juancode-kdn).
+        private var feedCoalescer: TerminalFeedCoalescer?
         /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
         private var shiftEnterMonitor: Any?
         private var resizeWork: DispatchWorkItem?
@@ -381,38 +387,48 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         // MARK: TerminalSurfaceLifecycleDelegate
 
-        /// Surface is live — now it's safe to replay scrollback + stream live output.
+        /// Surface is live — but writing into it before the renderer has sized and
+        /// started pumping deadlocks `ghostty_surface_write_buffer` (a race that
+        /// bites when many panes attach at once). So we don't replay here: arm the
+        /// pending flag and let the surface's first grid report (`terminalDidResize`)
+        /// start streaming. If a grid already landed before attach, start now.
         func terminalDidAttachSurface(_: TerminalSurface) {
-            guard !streaming else { return }
+            guard !streaming, !streamPending else { return }
+            streamPending = true
+            // Seed the current global zoom level (juancode-fry) and provoke the first
+            // layout so the grid report that starts streaming lands promptly.
+            syncZoom()
+            view?.fitToSize()
+            if lastSurfaceGrid != nil { beginStreaming() }
+        }
+
+        /// Replay scrollback then stream live output, once the surface is sized.
+        /// Gated behind the surface's first grid report (see `terminalDidAttachSurface`).
+        private func beginStreaming() {
+            guard streamPending, !streaming else { return }
+            streamPending = false
             streaming = true
             // Replay scrollback then stream live output, pushed into the surface.
             // The pty callback is on a background queue; surface writes must be on main.
-            cancel = session.subscribeOutput(replay: true) { [weak self, weak gsession] bytes in
-                let data = Data(bytes)
-                DispatchQueue.main.async {
-                    PerfMonitor.recordFeed(bytes.count)
-                    gsession?.receive(data)
-                    self?.noteOutputForHeal()
-                }
+            // Coalesce bursts into one receive() per runloop turn (juancode-kdn) so N
+            // mounted, streaming sessions don't each reflow per chunk on main.
+            let coalescer = TerminalFeedCoalescer { [weak self, weak gsession] bytes in
+                gsession?.receive(Data(bytes))
+                self?.noteOutputForHeal()
             }
-            // `subscribeOutput` delivers the whole scrollback synchronously above, so
-            // its `receive()` is already queued on main ahead of this block. Writing
-            // bytes into a freshly-attached Ghostty surface doesn't itself schedule a
-            // frame (only live wakeups do), so on a session switch the replayed history
-            // sits un-drawn until a user event forces a tick — the "blank until you
-            // select all the text" bug. Nudge one redraw right after the replay lands.
+            feedCoalescer = coalescer
+            cancel = session.subscribeOutput(replay: true) { bytes in
+                coalescer.append(bytes)
+            }
+            // Freshly-replayed history doesn't schedule a frame on its own, so on a
+            // session switch it sits un-drawn until a user event forces a tick — the
+            // "blank until you select all the text" bug. Nudge one redraw right after
+            // the replay lands, and again after layout has certainly settled (the
+            // immediate tick can race the surface's first real layout and be skipped).
             DispatchQueue.main.async { [weak view] in view?.fitToSize() }
-            // The immediate nudge can race the surface's first real layout — a tick
-            // requested before the frame is renderable is skipped silently, which is
-            // why a hard Refresh could still land on a stale render. One delayed
-            // retry after layout has certainly settled flushes it; a repeat tick on
-            // an already-clean surface is a no-op repaint.
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak view] in
                 view?.fitToSize()
             }
-            // Surface is live — seed it at the current global zoom level so a
-            // freshly-spawned (or re-attached) pane opens already zoomed (juancode-fry).
-            syncZoom()
         }
 
         func terminalDidDetachSurface() {}
@@ -533,6 +549,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             cancel?(); cancel = nil
             cancelGrid?(); cancelGrid = nil
             streaming = false
+            streamPending = false
             gsession = nil
         }
 
@@ -571,6 +588,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
+            // Surface is now sized: safe to start the deferred replay/stream.
+            if streamPending { beginStreaming() }
             // Pool-hidden pane (juancode-073): record the grid, never forward it —
             // the host's layout freeze should prevent reflows entirely, but an
             // in-flight resize can still land here after the hide. The reveal
@@ -857,7 +876,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     PerfMonitor.recordFeed(bytes.count)
-                    if self.surfaceReady {
+                    if self.surfaceReady, self.lastSurfaceGrid != nil {
                         self.gsession?.receive(Data(bytes))
                     } else {
                         self.preSurfaceBuffer.append(contentsOf: bytes)
@@ -892,12 +911,20 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         func terminalDidAttachSurface(_: TerminalSurface) {
             surfaceReady = true
-            if !preSurfaceBuffer.isEmpty {
-                gsession?.receive(Data(preSurfaceBuffer))
-                preSurfaceBuffer = []
-            }
-            // Open at the current global zoom level (juancode-fry).
+            // Open at the current global zoom level (juancode-fry) and provoke the
+            // first layout; buffered output is flushed once the surface reports a grid
+            // (writing into an unsized surface deadlocks write_buffer).
             syncZoom()
+            view?.fitToSize()
+            flushIfSized()
+        }
+
+        /// Flush pre-surface output once the surface has attached AND reported a grid.
+        /// Gated on the grid so the first write never lands on an unsized surface.
+        private func flushIfSized() {
+            guard surfaceReady, lastSurfaceGrid != nil, !preSurfaceBuffer.isEmpty else { return }
+            gsession?.receive(Data(preSurfaceBuffer))
+            preSurfaceBuffer = []
         }
 
         func terminalDidDetachSurface() { surfaceReady = false }
@@ -912,6 +939,8 @@ struct GhosttyEphemeral: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
+            // Surface is now sized: safe to flush any buffered pre-surface output.
+            flushIfSized()
             // Collapsed keep-alive panel: record the grid, never forward it. The
             // unhide path re-measures and flushes once.
             guard !sizingFrozen else { return }

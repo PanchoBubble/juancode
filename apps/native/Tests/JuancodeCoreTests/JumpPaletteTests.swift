@@ -59,6 +59,42 @@ import Testing
         #expect(smartSortPrecedes(b, a))
     }
 
+    // MARK: stable sink order (juancode-05u)
+
+    @Test func liveSessionsPrecedeDeadOnes() {
+        let live = SinkSortKey(down: false, createdAt: 1, id: "a")
+        let dead = SinkSortKey(down: true, createdAt: 9_999, id: "b")
+        #expect(sinkDownPrecedes(live, dead))
+        #expect(!sinkDownPrecedes(dead, live))
+    }
+
+    @Test func amongLiveNewestComesFirst() {
+        let older = SinkSortKey(down: false, createdAt: 100, id: "a")
+        let newer = SinkSortKey(down: false, createdAt: 200, id: "b")
+        #expect(sinkDownPrecedes(newer, older))
+        #expect(!sinkDownPrecedes(older, newer))
+    }
+
+    @Test func activityIsIrrelevantToTheOrder() {
+        // A busy and an idle session with the same liveness + createdAt sort only
+        // by id — nothing about their activity can reorder them (no jumping).
+        let a = SinkSortKey(down: false, createdAt: 100, id: "a")
+        let b = SinkSortKey(down: false, createdAt: 100, id: "b")
+        #expect(sinkDownPrecedes(a, b))
+        #expect(!sinkDownPrecedes(b, a))
+    }
+
+    @Test func deadOnesSinkAndStayNewestFirstAmongThemselves() {
+        let keys = [
+            SinkSortKey(down: true, createdAt: 300, id: "d-new"),
+            SinkSortKey(down: false, createdAt: 100, id: "l-old"),
+            SinkSortKey(down: true, createdAt: 50, id: "d-old"),
+            SinkSortKey(down: false, createdAt: 200, id: "l-new"),
+        ]
+        let order = keys.sorted(by: sinkDownPrecedes).map(\.id)
+        #expect(order == ["l-new", "l-old", "d-new", "d-old"])
+    }
+
     // MARK: fuzzy matching
 
     @Test func emptyQueryMatchesEverything() {

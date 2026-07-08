@@ -24,10 +24,13 @@ public enum Config {
         return h.isEmpty ? "127.0.0.1" : h
     }
 
-    /// Where the sqlite database lives (`JUANCODE_DATA_DIR`, default `./data`).
+    /// Where the sqlite database lives. Defaults to `~/.juancode/data` so the store
+    /// is stable no matter which directory the app is launched from; override with
+    /// `JUANCODE_DATA_DIR`. (Previously `./data`, which silently used a different
+    /// database per launch directory.)
     public static var dataDir: String {
-        env["JUANCODE_DATA_DIR"] ?? (FileManager.default.currentDirectoryPath as NSString)
-            .appendingPathComponent("data")
+        if let override = env["JUANCODE_DATA_DIR"], !override.isEmpty { return override }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/data")
     }
 
     /// Max bytes of terminal output retained (and persisted) per session for

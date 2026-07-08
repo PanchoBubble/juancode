@@ -65,6 +65,33 @@ public func attentionBubblesAboveManualOrder(_ attention: SessionAttention) -> B
     attention == .waitingInput || attention == .doneUnseen
 }
 
+/// One session's inputs for the sidebar's stable "sink dead ones" order. `down`
+/// is true when the session is no longer live (exited, crashed, or reaped-while-
+/// idle/dormant); `createdAt` is ms-since-epoch and `id` is the stable tie-break.
+public struct SinkSortKey: Sendable, Equatable {
+    public var down: Bool
+    public var createdAt: Int
+    public var id: String
+
+    public init(down: Bool, createdAt: Int, id: String) {
+        self.down = down
+        self.createdAt = createdAt
+        self.id = id
+    }
+}
+
+/// Strict-weak ordering that keeps live sessions from churning as they work
+/// (juancode-05u): live sessions hold a fixed newest-first (`createdAt` desc)
+/// place, and only "down" (exited/dormant) sessions sink to the bottom. Unlike
+/// `smartSortPrecedes`, it reads no activity/attention/`updatedAt`, so a session
+/// flipping busy↔idle↔waiting never moves — it just re-glyphs in place. `id`
+/// breaks ties so bulk-spawned sessions (shared `createdAt`) stay deterministic.
+public func sinkDownPrecedes(_ a: SinkSortKey, _ b: SinkSortKey) -> Bool {
+    if a.down != b.down { return !a.down }
+    if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+    return a.id < b.id
+}
+
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
 /// sort: its smart-sort key plus its slot in the user's persisted drag order
 /// (`nil` when the user hasn't placed it yet).
