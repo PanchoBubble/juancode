@@ -195,39 +195,17 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .reactivate(sessionId, cols, rows):
             if state.registry.get(sessionId) != nil { return } // already live
-            guard var meta = state.store.get(sessionId) else {
-                send(.error(sessionId: sessionId, message: "Session not found")); return
-            }
-            // Old sessions predate id capture; try to recover it from the CLI's
-            // own transcript so they can be resumed like newer ones.
-            if meta.cliSessionId == nil {
-                if let recovered = await recoverCliSessionId(
-                    meta.provider, cwd: meta.cwd, createdAtMs: meta.createdAt,
-                    excludeIds: state.store.usedCliSessionIds()
-                ) {
-                    state.store.setCliSessionId(meta.id, cliSessionId: recovered)
-                    meta.cliSessionId = recovered
-                }
-            }
-            guard meta.cliSessionId != nil else {
-                send(.unresumable(sessionId: sessionId,
-                                  reason: "No prior CLI conversation could be found to resume this session."))
-                return
-            }
-            do {
-                // Carry persisted scrollback into the revived session (with a
-                // separator before the CLI repaints its TUI underneath).
-                let prior = state.store.getScrollback(meta.id) ?? []
-                let seed: [UInt8] = prior.isEmpty
-                    ? []
-                    : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
-                let session = try state.registry.resume(meta, cols: cols, rows: rows, priorScrollback: seed)
+            switch await reviveSession(sessionId, registry: state.registry, store: state.store,
+                                       cols: cols, rows: rows) {
+            case let .success(session):
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
                                scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
                                session: session.meta))
-            } catch {
-                send(.error(sessionId: sessionId, message: "Failed to resume: \(errMsg(error))"))
+            case .failure(.unresumable):
+                send(.unresumable(sessionId: sessionId, reason: ReviveFailure.unresumable.message))
+            case let .failure(failure):
+                send(.error(sessionId: sessionId, message: failure.message))
             }
 
         case let .adoptExternal(provider, cliSessionId, cwd, startMs, cols, rows):
@@ -292,7 +270,13 @@ final class WebSocketConnection: @unchecked Sendable {
             }
 
         case let .input(sessionId, data, seq):
-            resolvePty(sessionId)?.write(Array(data.utf8))
+            if let pty = resolvePty(sessionId) {
+                pty.write(Array(data.utf8))
+            } else {
+                // The session process is gone — revive-then-deliver instead of
+                // silently dropping a remote message (juancode-23m).
+                await reviveForRemoteMessage(sessionId, data: data)
+            }
             // Acknowledge sequenced input so the client can clear it from its
             // unacked buffer (juancode-1u3). Acked after the write attempt
             // regardless of whether the pty still exists — the ack means the
@@ -336,7 +320,18 @@ final class WebSocketConnection: @unchecked Sendable {
             state.messageQueue.add(sessionId, text: trimmed)
             // Deliver right away if the session is already idle; otherwise it
             // flushes on the next idle edge.
-            state.registry.get(sessionId)?.kickQueue()
+            if let live = state.registry.get(sessionId) {
+                live.kickQueue()
+            } else {
+                // Dead session: revive it so the queued message can land — the
+                // boot's busy→idle edge flushes the queue (juancode-23m). The
+                // message stays persisted in the queue either way; a failed
+                // revival is surfaced instead of leaving it silently pending.
+                if case let .failure(failure) = await reviveSession(
+                    sessionId, registry: state.registry, store: state.store) {
+                    send(.error(sessionId: sessionId, message: failure.message))
+                }
+            }
 
         case let .dequeueMessage(sessionId, messageId):
             state.messageQueue.remove(sessionId, messageId)
@@ -375,4 +370,44 @@ final class WebSocketConnection: @unchecked Sendable {
             break
         }
     }
+
+    // MARK: - revive-then-deliver for dead sessions (juancode-23m)
+
+    /// Handle `input` addressed to a session whose process is gone.
+    ///
+    /// Only *message-like* input revives: one complete bracketed paste per frame,
+    /// which is exactly how the oracle sidecar delivers a Telegram/phone reply
+    /// (`deliverReply` in oracle.ts). The text lands via `autoSubmit`, which waits
+    /// for the resumed TUI's input box before pasting + submitting — a raw `write`
+    /// into a booting CLI gets swallowed. Raw keystrokes to a dead session stay
+    /// silently dropped, as before: reviving per keystroke would spawn a revival
+    /// storm, and an error per byte would spam interactive clients — those gate
+    /// typing on the live pty and reactivate explicitly. A failed revival is
+    /// surfaced as an `error` frame instead of vanishing.
+    private func reviveForRemoteMessage(_ sessionId: String, data: String) async {
+        guard let text = bracketedPasteMessage(data),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        switch await reviveSession(sessionId, registry: state.registry, store: state.store) {
+        case let .success(session):
+            session.autoSubmit(text)
+        case let .failure(failure):
+            send(.error(sessionId: sessionId, message: failure.message))
+        }
+    }
+}
+
+/// If a remote `input` frame is one complete bracketed paste (`ESC[200~ … ESC[201~`,
+/// optionally followed by a submitting CR/LF), return the pasted text — the exact
+/// shape the oracle sidecar's reply path sends. Anything else (raw keystrokes,
+/// partial pastes, several pastes in one frame) returns nil.
+func bracketedPasteMessage(_ data: String) -> String? {
+    let start = "\u{1B}[200~", end = "\u{1B}[201~"
+    guard data.hasPrefix(start) else { return nil }
+    var rest = String(data.dropFirst(start.count))
+    // "\r\n" is one grapheme in Swift, so check it explicitly alongside lone CR/LF.
+    while rest.hasSuffix("\r\n") || rest.hasSuffix("\r") || rest.hasSuffix("\n") { rest.removeLast() }
+    guard rest.hasSuffix(end) else { return nil }
+    let body = String(rest.dropLast(end.count))
+    guard !body.contains(start), !body.contains(end) else { return nil }
+    return body
 }

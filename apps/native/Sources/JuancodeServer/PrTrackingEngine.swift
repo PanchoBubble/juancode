@@ -195,7 +195,7 @@ public actor PrTrackingEngine {
                 } else {
                     // The driving session is offline (typically after a restart).
                     // Revive it lazily, then seed the fix via autoSubmit.
-                    await reactivate(entry.sessionId)
+                    _ = await reviveSession(entry.sessionId, registry: registry, store: store)
                     if let session = registry.get(entry.sessionId) {
                         session.autoSubmit(prompt)
                     } else {
@@ -215,26 +215,6 @@ public actor PrTrackingEngine {
         }
         persist()
         broadcastTracked()
-    }
-
-    /// Revive an exited driving session so a queued auto-fix prompt can land. A
-    /// trimmed port of `AppModel.reactivate` (no UI side effects).
-    private func reactivate(_ id: String) async {
-        if registry.get(id) != nil { return }
-        guard var meta = store.get(id) else { return }
-        if meta.cliSessionId == nil {
-            if let recovered = await recoverCliSessionId(
-                meta.provider, cwd: meta.cwd, createdAtMs: meta.createdAt,
-                excludeIds: store.usedCliSessionIds()) {
-                store.setCliSessionId(id, cliSessionId: recovered)
-                meta.cliSessionId = recovered
-            }
-        }
-        guard meta.cliSessionId != nil else { return }
-        let prior = store.getScrollback(id) ?? []
-        let seed: [UInt8] = prior.isEmpty
-            ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
-        _ = try? registry.resume(meta, cols: 120, rows: 32, priorScrollback: seed)
     }
 
     // MARK: - persistence (shares AppModel's UserDefaults key)
