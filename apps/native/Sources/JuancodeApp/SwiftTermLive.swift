@@ -16,6 +16,32 @@ struct TerminalIdentity: Hashable {
     }
 }
 
+/// A `TerminalView` that copies the highlighted text to the pasteboard as soon as
+/// a selection is made (copy-on-select), matching iTerm/Terminal.app muscle memory.
+///
+/// `selectionChanged` fires on every mutation while dragging, so we debounce: the
+/// copy lands ~120ms after the selection stops changing — one write per highlight,
+/// not dozens of partial ones (which would spam clipboard-history tools). Opt out
+/// with `defaults write dev.juancode.app terminal.copyOnSelect -bool false`.
+final class CopyOnSelectTerminalView: TerminalView {
+    private var copyWork: DispatchWorkItem?
+
+    override func selectionChanged(source: Terminal) {
+        super.selectionChanged(source: source)
+        copyWork?.cancel()
+        let enabled = UserDefaults.standard.object(forKey: "terminal.copyOnSelect") as? Bool ?? true
+        guard enabled, selectionActive else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.selectionActive,
+                  let text = self.getSelection(), !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+        copyWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
+    }
+}
+
 /// Makes the mouse wheel work inside full-screen TUIs.
 ///
 /// SwiftTerm's stock `scrollWheel` only ever scrolls the *local* scrollback
@@ -417,7 +443,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         // resync nudge on every newly-opened terminal). See GhosttyRepresentable.
         context.coordinator.lastFocusToken = focusToken
         context.coordinator.lastResyncToken = resyncToken
-        let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         tv.terminalDelegate = context.coordinator
         // Stop SwiftTerm from auto-forwarding mouse motion/clicks to the pty. When a
         // TUI enables motion tracking (DECSET 1002/1003) the view encodes every
@@ -693,7 +719,7 @@ struct SwiftTermReplay: NSViewRepresentable {
     let scrollback: [UInt8]
 
     func makeNSView(context: Context) -> TerminalHostView {
-        let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         if !scrollback.isEmpty { tv.feed(byteArray: scrollback[...]) }
         // No `onDrop`: an exited session is read-only. The host still gives it
         // correct resize behaviour.
