@@ -61,6 +61,11 @@ final class AppModel {
     let corruptDbPath: String?
 
     var sessions: [SessionMeta] = []
+    /// Every SessionMeta seen this run, keyed by id and NOT purged by the retention
+    /// cap. Lets `reactivate` revive a session whose db row the cap deleted out from
+    /// under an open pane — re-inserting from the last-known meta instead of failing
+    /// with "not found".
+    private var metaCache: [String: SessionMeta] = [:]
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
         didSet {
@@ -179,6 +184,7 @@ final class AppModel {
 
     private var activityCancels: [String: () -> Void] = [:]
     private var gridCancels: [String: () -> Void] = [:]
+    private var metaCancels: [String: () -> Void] = [:]
 
     /// OS-notification plumbing for background sessions (juancode-bao). The
     /// should-notify decision is the pure `agentNotificationEffect`; this only
@@ -332,6 +338,7 @@ final class AppModel {
         let persisted = appState.store.list()
         let live = Dictionary(appState.registry.all().map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
         sessions = persisted.map { live[$0.id] ?? $0 }
+        for m in sessions { metaCache[m.id] = m }
         // Every registry change routes through here (create / exit / swap), so this
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
@@ -342,13 +349,17 @@ final class AppModel {
     /// Enforce the per-project session retention cap (juancode-477): hard-delete the
     /// oldest persisted sessions once a project exceeds `Config.sessionsPerProjectCap`.
     /// Uses the runtime worktree→repo map (same folding as the sidebar) so linked
-    /// worktrees share their repo's cap, and never prunes a live pty.
+    /// worktrees share their repo's cap, and never prunes a live pty, the session
+    /// currently selected, or one whose pane is mid-resume — so an exited session you
+    /// have open can't be deleted out from under its pane.
     private func pruneSessionsPerProject() {
-        let live = Set(appState.registry.all().map(\.id))
+        var keep = Set(appState.registry.all().map(\.id))
+        if let sel = selection { keep.insert(sel) }
+        keep.formUnion(activatingSessions)
         let repoRoots = worktreeRepoRoots
         appState.store.enforceSessionCap(
             projectKey: { repoRoots[$0] ?? projectCwd(for: $0) },
-            keepIds: live
+            keepIds: keep
         )
     }
 
@@ -566,6 +577,13 @@ final class AppModel {
             }
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
+        // A CLI-derived title / usage landing from the title poll (or a rename /
+        // archive) mutates the live meta without a turn edge. Rebuild the list so
+        // the sidebar leaves the "Claude Code · <project>" fallback (juancode).
+        metaCancels[s.id]?()
+        metaCancels[s.id] = s.onMetaChange { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
         // Grid-ownership bridge (juancode-2t4): seed from the current owner (a
         // remote may already be driving when this model attaches — app relaunch
         // while a phone viewer holds the grid), then follow arbitrated changes.
@@ -1657,7 +1675,11 @@ final class AppModel {
     @discardableResult
     func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil) async -> Bool {
         if isLive(id) { return true }
-        guard var meta = appState.store.get(id) else { return false }
+        // The db row can be gone if the retention cap pruned it after this pane was
+        // opened; fall back to the run-lifetime meta cache and re-insert so opening
+        // an old session revives it instead of failing with "not found" (juancode).
+        guard var meta = appState.store.get(id) ?? metaCache[id] else { return false }
+        if appState.store.get(id) == nil { appState.store.insert(meta) }
         if meta.cliSessionId == nil {
             if let recovered = await recoverCliSessionId(
                 meta.provider, cwd: meta.cwd, createdAtMs: meta.createdAt,
@@ -2768,6 +2790,7 @@ final class AppModel {
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
         gridCancels[id]?(); gridCancels[id] = nil
+        metaCancels[id]?(); metaCancels[id] = nil
         remoteGridOwners.removeValue(forKey: id)
         if selection == id { selection = nil }
         clearUnread(id)
