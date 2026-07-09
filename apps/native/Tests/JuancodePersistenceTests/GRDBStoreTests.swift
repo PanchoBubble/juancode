@@ -319,4 +319,20 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.enforceSessionCap(perProject: 0), [])
         XCTAssertEqual(store.list().count, 25)
     }
+
+    func testEnforceSessionCapExcludesArchived() {
+        // 5 archived + 20 live in one project, cap 20. Archived neither count toward
+        // the cap nor get pruned, so nothing is deleted.
+        for i in 0..<5 {
+            var m = metaIn("a-\(i)", cwd: "/repo", createdAt: i)
+            m.archived = true
+            store.insert(m)
+        }
+        for i in 0..<20 { store.insert(metaIn("p-\(i)", cwd: "/repo", createdAt: 100 + i)) }
+        let deleted = store.enforceSessionCap(perProject: 20)
+        XCTAssertTrue(deleted.isEmpty)
+        XCTAssertEqual(store.list().count, 25)
+        // Even the oldest archived survives despite sitting far past the cap.
+        XCTAssertNotNil(store.get("a-0"))
+    }
 }

@@ -40,11 +40,12 @@ public enum Config {
     }
 
     /// Max persisted sessions kept per project (worktrees folded into their repo,
-    /// see `projectCwd`). Older sessions beyond the cap are hard-deleted at startup
-    /// and on each new session (`JUANCODE_SESSIONS_PER_PROJECT`, default 20). A
+    /// see `projectCwd`). Archived sessions don't count toward the cap and are never
+    /// pruned. Older unarchived sessions beyond the cap are hard-deleted at startup
+    /// and on each new session (`JUANCODE_SESSIONS_PER_PROJECT`, default 50). A
     /// value ≤ 0 disables the cap.
     public static var sessionsPerProjectCap: Int {
-        env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init) ?? 20
+        env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init) ?? 50
     }
 
     /// Root the directory picker opens at. Prefers `JUANCODE_DEFAULT_CWD`, then

@@ -171,6 +171,25 @@ import Testing
         #expect(sink.text.contains("RESUMED"))
     }
 
+    /// A meta-field edit (rename here; the title/usage poll shares the path) must
+    /// fan out to `onMetaChange` so the sidebar rebuilds instead of stranding the
+    /// "Claude Code · <project>" fallback until an unrelated refresh.
+    @Test func metaChangeFiresOnRename() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        let seen = ByteSink()
+        s.onMetaChange { seen.add(Array($0.title.utf8)) }
+        s.setTitle("Renamed")
+        await poll { seen.text == "Renamed" }
+        #expect(seen.text == "Renamed")
+
+        // An unchanged rename is a no-op — no spurious fan-out.
+        s.setTitle("Renamed")
+        #expect(seen.text == "Renamed")
+    }
+
     @Test func onCreateFiresForNewSessions() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
         let seen = ByteSink()

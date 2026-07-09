@@ -98,6 +98,11 @@ public final class Session: @unchecked Sendable {
     /// driving (juancode-slz); the UI layer can watch it for "remote is driving"
     /// state (juancode-2t4).
     public typealias GridChangeListener = @Sendable (_ owner: String?, _ cols: Int, _ rows: Int) -> Void
+    /// Fires when a persisted meta field changes out-of-band from a turn edge —
+    /// the title/usage poll landing a CLI-generated title, a manual rename, an
+    /// archive/dormant flip. The sidebar rebuilds its list from this; without it
+    /// a derived title only surfaces on the next unrelated `refresh()` (juancode).
+    public typealias MetaChangeListener = @Sendable (_ meta: SessionMeta) -> Void
 
     private let lock = NSRecursiveLock()
     private var _meta: SessionMeta
@@ -110,6 +115,7 @@ public final class Session: @unchecked Sendable {
     private var exitListeners: [Int: ExitListener] = [:]
     private var activityListeners: [Int: ActivityListener] = [:]
     private var gridListeners: [Int: GridChangeListener] = [:]
+    private var metaListeners: [Int: MetaChangeListener] = [:]
     private var nextToken = 0
 
     private let workQueue: DispatchQueue
@@ -822,7 +828,7 @@ public final class Session: @unchecked Sendable {
     /// cleared by `Session.resume`.
     public func markDormant() {
         lock.withLock { _meta.dormant = true }
-        persistNow()
+        persistNow(notify: true)
     }
 
     public func getScrollback() -> [UInt8] {
@@ -883,6 +889,23 @@ public final class Session: @unchecked Sendable {
         for l in listeners { l(owner, cols, rows) }
     }
 
+    /// Subscribe to persisted meta changes (see `MetaChangeListener`). Fires on
+    /// the queue that made the edit (the title-poll timer, a caller thread) — hop
+    /// to your own executor before touching UI.
+    @discardableResult
+    public func onMetaChange(_ listener: @escaping MetaChangeListener) -> Cancel {
+        let token = lock.withLock { () -> Int in
+            let t = nextToken; nextToken += 1
+            metaListeners[t] = listener
+            return t
+        }
+        return { [weak self] in self?.lock.withLock { _ = self?.metaListeners.removeValue(forKey: token) } }
+    }
+
+    private func emitMetaChange(_ meta: SessionMeta) {
+        for l in lock.withLock({ Array(metaListeners.values) }) { l(meta) }
+    }
+
     private func snapshotOutput() -> [OutputListener] {
         lock.withLock { Array(outputListeners.values) }
     }
@@ -925,7 +948,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistNow() }
+        if changed { persistNow(notify: true) }
     }
 
     /// Archive / unarchive the live session and persist the flag.
@@ -935,7 +958,7 @@ public final class Session: @unchecked Sendable {
             _meta.archived = archived
             return true
         }
-        if changed { persistNow() }
+        if changed { persistNow(notify: true) }
     }
 
     /// Read the CLI's generated title (or first prompt) and persist if changed.
@@ -949,7 +972,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistNow() }
+        if changed { persistNow(notify: true) }
     }
 
     /// Read the CLI transcript's token usage and persist if it changed.
@@ -962,7 +985,7 @@ public final class Session: @unchecked Sendable {
             _meta.usage = usage
             return true
         }
-        if changed { persistNow() }
+        if changed { persistNow(notify: true) }
     }
 
     // MARK: - codex id discovery + persistence
@@ -993,13 +1016,18 @@ public final class Session: @unchecked Sendable {
         }
     }
 
-    private func persistNow() {
+    /// Persist the current meta + scrollback. Pass `notify: true` for a meta-field
+    /// edit (title/usage/archive/dormant) so subscribers rebuild the sidebar;
+    /// scrollback-only flushes leave it false to avoid a list rebuild per output
+    /// debounce.
+    private func persistNow(notify: Bool = false) {
         let (meta, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             _meta.updatedAt = nowMs()
             persistGeneration += 1 // cancel any pending debounce
             return (_meta, scroll.replay)
         }
         env.store.update(meta, scrollback: bytes)
+        if notify { emitMetaChange(meta) }
     }
 }
 

@@ -16,6 +16,41 @@ struct TerminalIdentity: Hashable {
     }
 }
 
+/// The palette SwiftTerm renders live panes with. Mirrors the `afterglow`-on-black
+/// theme the Ghostty backend ships (`juancodeGhosttyTheme`) so both terminal
+/// backends look identical. Left bare, SwiftTerm falls back to its stock
+/// `terminalAppColors`, which reads muted/washed on the app's pure-black surface.
+/// The app runs forced-dark, so only a dark variant is needed.
+private enum SwiftTermTheme {
+    static let background = "000000"
+    static let foreground = "d0d0d0"
+    /// 16 ANSI colors, indices 0-15, copied verbatim from libghostty's afterglow.
+    static let palette = [
+        "151515", "ac4142", "7e8e50", "e5b567", "6c99bb", "9f4e85", "7dd6cf", "d0d0d0",
+        "505050", "ac4142", "7e8e50", "e5b567", "6c99bb", "9f4e85", "7dd6cf", "f5f5f5",
+    ]
+
+    /// Parse a 6-digit "rrggbb" hex into a SwiftTerm `Color` (16-bit channels).
+    private static func color(_ hex: String) -> SwiftTerm.Color {
+        let v = UInt32(hex, radix: 16) ?? 0
+        let r = UInt16((v >> 16) & 0xff), g = UInt16((v >> 8) & 0xff), b = UInt16(v & 0xff)
+        return SwiftTerm.Color(red: r * 257, green: g * 257, blue: b * 257)
+    }
+
+    @MainActor static func apply(to tv: TerminalView) {
+        tv.installColors(palette.map(color))
+        tv.nativeForegroundColor = NSColor(color(foreground))
+        tv.nativeBackgroundColor = NSColor(color(background))
+    }
+}
+
+private extension NSColor {
+    convenience init(_ c: SwiftTerm.Color) {
+        self.init(srgbRed: CGFloat(c.red) / 65535, green: CGFloat(c.green) / 65535,
+                  blue: CGFloat(c.blue) / 65535, alpha: 1)
+    }
+}
+
 /// A `TerminalView` that copies the highlighted text to the pasteboard as soon as
 /// a selection is made (copy-on-select), matching iTerm/Terminal.app muscle memory.
 ///
@@ -451,6 +486,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         // consume them cleanly they land as junk in the input line. Wheel scrolling
         // stays alive via `installWheelForwarding`, which sends button events directly.
         tv.allowMouseReporting = false
+        SwiftTermTheme.apply(to: tv)
         context.coordinator.attach(to: tv)
         let host = TerminalHostView(terminal: tv)
         host.focusOnAppear = autoFocusOnAppear
@@ -497,6 +533,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
         private var shiftEnterMonitor: Any?
         private var resizeWork: DispatchWorkItem?
+        /// One-shot repaint fired after the attach-time scrollback replay lands
+        /// (see `attach`). Held so `detach` can cancel it before the pane tears down.
+        private var replayRepaintWork: DispatchWorkItem?
         /// Last (cols,rows) we pushed to the pty, so we never send a redundant
         /// SIGWINCH (which makes the agent's TUI repaint for no reason).
         private var lastSent: (cols: Int, rows: Int)?
@@ -564,6 +603,24 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // the server: `Session.reapplyGridWhenReady` re-asserts the desired grid
             // once the TUI settles (juancode-1th.3). This view only handles later
             // window relayouts (the reactivation nudge above) and manual `forceResync`.
+
+            // Refresh/switch on this (pool-less) SwiftTerm path rebuilds the pane and
+            // replays raw scrollback into a fresh grid. For a full-screen agent that
+            // means feeding alt-screen frames captured at *earlier* widths (e.g. from
+            // before a window resize) into the current grid — the stale frames overflow
+            // and are only partially overwritten, so the render lands garbled. The pty
+            // itself is untouched by a client rebuild, so the agent never repaints on
+            // its own. Once the replay has drained, force a genuine SIGWINCH so a live
+            // alt-screen agent fully repaints at the true current grid, overwriting the
+            // stale replay. Gated on alt-buffer so a plain shell (line-based, reflows
+            // correctly) isn't nudged for nothing.
+            let repaint = DispatchWorkItem { [weak self] in
+                guard let self, let tv = self.view, let t = tv.terminal,
+                      self.session.isRunning, t.isCurrentBufferAlternate else { return }
+                self.forceResync()
+            }
+            replayRepaintWork = repaint
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: repaint)
         }
 
         /// Nudge the pty to the view's live grid: send `rows-1` then the real `rows` a
@@ -675,6 +732,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if let m = shiftEnterMonitor { NSEvent.removeMonitor(m); shiftEnterMonitor = nil }
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
+            replayRepaintWork?.cancel(); replayRepaintWork = nil
             resizeWork?.cancel(); resizeWork = nil
             cancel?()
             cancel = nil
@@ -720,6 +778,7 @@ struct SwiftTermReplay: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalHostView {
         let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        SwiftTermTheme.apply(to: tv)
         if !scrollback.isEmpty { tv.feed(byteArray: scrollback[...]) }
         // No `onDrop`: an exited session is read-only. The host still gives it
         // correct resize behaviour.

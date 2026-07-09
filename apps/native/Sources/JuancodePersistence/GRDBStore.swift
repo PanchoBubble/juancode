@@ -324,9 +324,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
     /// hard-deleting the oldest beyond the cap. Sessions are grouped by
     /// `projectKey(cwd)` (defaults to `projectCwd`, folding worktrees into their
     /// repo); within a group the newest `perProject` by `created_at` survive.
-    /// `keepIds` are never deleted — pass the currently-live session ids so an
-    /// in-flight pty is never pruned even if it sorts past the cap. A `perProject`
-    /// ≤ 0 disables the cap (no-op). Returns the deleted ids.
+    /// Archived sessions are skipped entirely — they neither consume a cap slot nor
+    /// get deleted, so archiving is how you keep a session past the cap. `keepIds`
+    /// are never deleted — pass the currently-live and currently-viewed session ids
+    /// so an in-flight pty (or a session open in a pane) is never pruned even if it
+    /// sorts past the cap. A `perProject` ≤ 0 disables the cap (no-op). Returns the
+    /// deleted ids.
     @discardableResult
     public func enforceSessionCap(
         perProject: Int = Config.sessionsPerProjectCap,
@@ -338,6 +341,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
         var seen: [String: Int] = [:]
         var toDelete: [String] = []
         for meta in list() {
+            if meta.archived { continue }
             let key = projectKey(meta.cwd)
             let count = (seen[key] ?? 0) + 1
             seen[key] = count
