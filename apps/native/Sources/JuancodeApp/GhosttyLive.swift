@@ -7,19 +7,20 @@ import JuancodeServices
 /// SPIKE (juancode bd: replace SwiftTerm with GhosttyKit): a drop-in alternative
 /// to `SwiftTermLive`, rendering the live pty with libghostty's GPU surface instead
 /// of SwiftTerm's CoreGraphics one. Same public `View` interface so the call site
-/// can A/B between them: Ghostty is the default, `JUANCODE_SWIFTTERM=1` opts back
-/// to SwiftTerm for comparison (see `TerminalBackendChoice`).
+/// can A/B between them: SwiftTerm is the default, `JUANCODE_GHOSTTY=1` opts into
+/// libghostty for comparison (see `TerminalBackendChoice`).
 ///
 /// The architecture is preserved: *we* own the pty (local `forkpty` / remote
 /// `node-pty`); libghostty's `InMemoryTerminalSession` is a host-driven backend —
 /// pty output is pushed in via `receive(_:)`, user input comes back via the `write`
 /// callback, and grid changes arrive via the resize delegate → our SIGWINCH. No
 /// process is spawned by Ghostty.
-/// Which terminal surface the live panes use. GhosttyKit (libghostty) is the
-/// default; set `JUANCODE_SWIFTTERM=1` to fall back to SwiftTerm for comparison.
+/// Which terminal surface the live panes use. SwiftTerm is the default; libghostty's
+/// host-managed write path (`ghostty_surface_write_buffer`) can deadlock the main
+/// thread under load (juancode-d89), so it's opt-in via `JUANCODE_GHOSTTY=1`.
 enum TerminalBackendChoice {
     static var useGhostty: Bool {
-        ProcessInfo.processInfo.environment["JUANCODE_SWIFTTERM"] != "1"
+        ProcessInfo.processInfo.environment["JUANCODE_GHOSTTY"] == "1"
     }
 }
 
@@ -263,10 +264,6 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private var cancel: (() -> Void)?
         private var cancelGrid: (() -> Void)?
         private var streaming = false
-        /// Set at surface attach; cleared when streaming actually starts. We defer
-        /// the first write until the surface reports a grid, so a write never lands
-        /// on an unsized surface (deadlocks `ghostty_surface_write_buffer`).
-        private var streamPending = false
         /// Batches pty output into one `receive()` per runloop turn (juancode-kdn).
         private var feedCoalescer: TerminalFeedCoalescer?
         /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
@@ -387,26 +384,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         // MARK: TerminalSurfaceLifecycleDelegate
 
-        /// Surface is live — but writing into it before the renderer has sized and
-        /// started pumping deadlocks `ghostty_surface_write_buffer` (a race that
-        /// bites when many panes attach at once). So we don't replay here: arm the
-        /// pending flag and let the surface's first grid report (`terminalDidResize`)
-        /// start streaming. If a grid already landed before attach, start now.
+        /// Surface is live — now it's safe to replay scrollback + stream live output.
         func terminalDidAttachSurface(_: TerminalSurface) {
-            guard !streaming, !streamPending else { return }
-            streamPending = true
-            // Seed the current global zoom level (juancode-fry) and provoke the first
-            // layout so the grid report that starts streaming lands promptly.
-            syncZoom()
-            view?.fitToSize()
-            if lastSurfaceGrid != nil { beginStreaming() }
-        }
-
-        /// Replay scrollback then stream live output, once the surface is sized.
-        /// Gated behind the surface's first grid report (see `terminalDidAttachSurface`).
-        private func beginStreaming() {
-            guard streamPending, !streaming else { return }
-            streamPending = false
+            guard !streaming else { return }
             streaming = true
             // Replay scrollback then stream live output, pushed into the surface.
             // The pty callback is on a background queue; surface writes must be on main.
@@ -429,6 +409,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak view] in
                 view?.fitToSize()
             }
+            // Seed the surface at the current global font-zoom level (juancode-fry).
+            syncZoom()
         }
 
         func terminalDidDetachSurface() {}
@@ -549,7 +531,6 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             cancel?(); cancel = nil
             cancelGrid?(); cancelGrid = nil
             streaming = false
-            streamPending = false
             gsession = nil
         }
 
@@ -588,8 +569,6 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
-            // Surface is now sized: safe to start the deferred replay/stream.
-            if streamPending { beginStreaming() }
             // Pool-hidden pane (juancode-073): record the grid, never forward it —
             // the host's layout freeze should prevent reflows entirely, but an
             // in-flight resize can still land here after the hide. The reveal
@@ -876,7 +855,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     PerfMonitor.recordFeed(bytes.count)
-                    if self.surfaceReady, self.lastSurfaceGrid != nil {
+                    if self.surfaceReady {
                         self.gsession?.receive(Data(bytes))
                     } else {
                         self.preSurfaceBuffer.append(contentsOf: bytes)
@@ -911,20 +890,12 @@ struct GhosttyEphemeral: NSViewRepresentable {
 
         func terminalDidAttachSurface(_: TerminalSurface) {
             surfaceReady = true
-            // Open at the current global zoom level (juancode-fry) and provoke the
-            // first layout; buffered output is flushed once the surface reports a grid
-            // (writing into an unsized surface deadlocks write_buffer).
+            if !preSurfaceBuffer.isEmpty {
+                gsession?.receive(Data(preSurfaceBuffer))
+                preSurfaceBuffer = []
+            }
+            // Open at the current global zoom level (juancode-fry).
             syncZoom()
-            view?.fitToSize()
-            flushIfSized()
-        }
-
-        /// Flush pre-surface output once the surface has attached AND reported a grid.
-        /// Gated on the grid so the first write never lands on an unsized surface.
-        private func flushIfSized() {
-            guard surfaceReady, lastSurfaceGrid != nil, !preSurfaceBuffer.isEmpty else { return }
-            gsession?.receive(Data(preSurfaceBuffer))
-            preSurfaceBuffer = []
         }
 
         func terminalDidDetachSurface() { surfaceReady = false }
@@ -939,8 +910,6 @@ struct GhosttyEphemeral: NSViewRepresentable {
         func terminalDidResize(columns: Int, rows: Int) {
             guard columns > 0, rows > 0 else { return }
             lastSurfaceGrid = (columns, rows)
-            // Surface is now sized: safe to flush any buffered pre-surface output.
-            flushIfSized()
             // Collapsed keep-alive panel: record the grid, never forward it. The
             // unhide path re-measures and flushes once.
             guard !sizingFrozen else { return }
