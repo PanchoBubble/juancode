@@ -455,6 +455,17 @@ struct SidebarView: View {
     /// How many archived sessions exist (for the toggle label / visibility).
     private var archivedCount: Int { model.sessions.filter(\.archived).count }
 
+    /// Sessions that would show with no filter applied (same visibility rules as
+    /// `groups`, minus the query) — the denominator for the "showing N of M" hint.
+    private var unfilteredVisibleCount: Int {
+        let nonOracle = (model.sessions + model.externalSessions).filter { $0.cwd != OraclePaths.controlDir }
+        let inWorkspace = nonOracle.filter { Config.isUnderWorkspaceRoot($0.cwd) }
+        return (showArchived ? inWorkspace : inWorkspace.filter { !$0.archived }).count
+    }
+
+    /// Sessions currently shown after the filter is applied.
+    private var filteredVisibleCount: Int { groups.reduce(0) { $0 + $1.sessions.count } }
+
     /// Aggregate token/cost usage across visible non-archived sessions, for the
     /// sidebar footer total. Nil when nothing has usage yet.
     private var totalUsage: SessionUsage? {
@@ -599,14 +610,59 @@ struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.top, 6)
             .help("Start a session in any folder — it appears here as a project")
-            TextField("Filter sessions…", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
-                .focused($searchFocused)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                // ⌃F (via `focusSessionSearch`) jumps focus straight to the filter.
-                .onChange(of: model.sessionSearchFocusToken) { _, _ in searchFocused = true }
+            let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty
+            HStack(spacing: 6) {
+                Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill"
+                                            : "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(filtering ? Color.accentColor : Color.secondary)
+                TextField("Filter sessions…", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($searchFocused)
+                    // ⌃F (via `focusSessionSearch`) jumps focus straight to the filter.
+                    .onChange(of: model.sessionSearchFocusToken) { _, _ in searchFocused = true }
+                    // Esc clears an active filter (only while the field is focused).
+                    .onKeyPress(.escape) {
+                        guard filtering else { return .ignored }
+                        query = ""
+                        return .handled
+                    }
+                if filtering {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .clickCursor()
+                    .help("Clear filter (Esc)")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(filtering ? Color.accentColor.opacity(0.12) : Color.clear))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(filtering ? Color.accentColor : Color.secondary.opacity(0.25),
+                              lineWidth: filtering ? 1.5 : 1))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            if filtering {
+                HStack(spacing: 6) {
+                    Text("Showing \(filteredVisibleCount) of \(unfilteredVisibleCount)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear") { query = "" }
+                        .font(.system(size: 10, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                        .clickCursor()
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
+            }
             ScrollViewReader { proxy in
             List(selection: $model.selection) {
                 ForEach(groups) { group in
