@@ -69,7 +69,10 @@ struct ChangesPanel: View {
             if diff == nil { model.loadChanges(sessionId) }
             // Populate the source switcher's PR list for this folder.
             if let cwd = model.sessionCwd(sessionId) { model.loadPrs(cwd) }
+            // Live-refresh the diff on external edits only while the panel is open.
+            model.startWatchingChanges(sessionId)
         }
+        .onDisappear { model.stopWatchingChanges(sessionId) }
         .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
         .perfTrackBody()
     }

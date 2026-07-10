@@ -186,6 +186,24 @@ final class AppModel {
     private var gridCancels: [String: () -> Void] = [:]
     private var metaCancels: [String: () -> Void] = [:]
 
+    /// Shared FSEvents watchers, one stream per worktree path, so an open Changes
+    /// panel refreshes on external edits without a manual Refresh. Consumers (open
+    /// panels) hold `changesWatchTokens`; the stream is torn down when the last is
+    /// released, so idle CPU stays at zero with many worktrees open.
+    private let worktreeWatchers = WorktreeWatcherRegistry()
+    /// sessionId → live worktree-watch subscription while its Changes panel is open.
+    private var changesWatchTokens: [String: WorktreeWatchToken] = [:]
+
+    /// Latest whole-tree `git status --porcelain` snapshot per worktree path,
+    /// refreshed by the watcher. Groundwork for a file-tree sidebar / Quick Open
+    /// index; the ChangesPanel itself reads the richer `diffBySession`.
+    private(set) var worktreeStatusByPath: [String: [WorktreeStatusEntry]] = [:]
+
+    /// The watched change snapshot for `path` (empty until first refresh).
+    func worktreeStatus(_ path: String) -> [WorktreeStatusEntry] {
+        worktreeStatusByPath[path] ?? []
+    }
+
     /// OS-notification plumbing for background sessions (juancode-bao). The
     /// should-notify decision is the pure `agentNotificationEffect`; this only
     /// delivers, coalesces per session, and routes a click back to the session.
@@ -2491,6 +2509,42 @@ final class AppModel {
         }
     }
 
+    /// Begin live-watching a session's worktree while its Changes panel is open, so
+    /// external edits (the agent mid-turn, an embedded editor, the user) refresh the
+    /// diff within ~1s without a manual Refresh. Shares one FSEvents stream per
+    /// worktree path across sessions; idempotent per session.
+    func startWatchingChanges(_ id: String) {
+        guard changesWatchTokens[id] == nil, let cwd = cwd(of: id) else { return }
+        let token = worktreeWatchers.watch(path: cwd) { [weak self] in
+            Task { @MainActor in self?.onWorktreeChanged(sessionId: id, path: cwd) }
+        }
+        if let token { changesWatchTokens[id] = token }
+    }
+
+    /// Stop live-watching a session's worktree (its Changes panel closed or the
+    /// session went away). Idempotent.
+    func stopWatchingChanges(_ id: String) {
+        changesWatchTokens.removeValue(forKey: id)?.cancel()
+    }
+
+    private func onWorktreeChanged(sessionId: String, path: String) {
+        // A base/PR/commit diff isn't moved by local edits — only re-diff when the
+        // panel is showing the working tree, so background sources don't re-shell git.
+        if case .workingTree = changesSource(sessionId) {
+            loadChanges(sessionId)
+        }
+        refreshWorktreeStatus(path)
+    }
+
+    private func refreshWorktreeStatus(_ path: String) {
+        Task {
+            let entries = await Task.detached(priority: .utility) {
+                await computeWorktreeStatus(path)
+            }.value
+            worktreeStatusByPath[path] = entries
+        }
+    }
+
     /// Spawn the user's real editor (`$VISUAL`/`$EDITOR`, default nvim) on `file`,
     /// confined to the session's cwd, via an ephemeral pty. Returns the live pty for
     /// the overlay to render + drive, or nil if there's no cwd or the spawn/path
@@ -2893,6 +2947,7 @@ final class AppModel {
         activityCancels[id]?(); activityCancels[id] = nil
         gridCancels[id]?(); gridCancels[id] = nil
         metaCancels[id]?(); metaCancels[id] = nil
+        stopWatchingChanges(id)
         remoteGridOwners.removeValue(forKey: id)
         if selection == id { selection = nil }
         clearUnread(id)
@@ -2927,6 +2982,7 @@ final class AppModel {
             appState.store.delete(id)
             activityCancels[id]?(); activityCancels[id] = nil
             gridCancels[id]?(); gridCancels[id] = nil
+            stopWatchingChanges(id)
             remoteGridOwners.removeValue(forKey: id)
             if selection == id { selection = nil }
             clearUnread(id)

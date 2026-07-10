@@ -500,6 +500,14 @@ public func getGitState(_ cwd: String) async -> GitState {
                     ahead: ahead, behind: behind, dirty: dirty, remote: remote)
 }
 
+/// Whole-tree change snapshot for `cwd` via `git status --porcelain` — the light
+/// model a live file-tree / Quick Open index consumes, refreshed by the worktree
+/// watcher. Never throws: returns `[]` for a non-git cwd or any git failure.
+public func computeWorktreeStatus(_ cwd: String) async -> [WorktreeStatusEntry] {
+    guard let out = try? await git(cwd, ["status", "--porcelain"]) else { return [] }
+    return parseWorktreeStatus(out)
+}
+
 /// Stage every change (`git add -A`) and commit it with `message`.
 public func commitAll(_ cwd: String, _ message: String) async throws -> CommitResult {
     _ = try await gitStrict(cwd, ["add", "-A"])
