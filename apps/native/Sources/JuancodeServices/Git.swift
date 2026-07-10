@@ -509,6 +509,28 @@ public func computeWorktreeStatus(_ cwd: String) async -> [WorktreeStatusEntry] 
     return parseWorktreeStatus(out)
 }
 
+/// The Quick Open file index for `cwd`: tracked files plus untracked-but-not-ignored
+/// files, worktree-relative, deduped and sorted. `git ls-files` is fast and honours
+/// `.gitignore` (so `node_modules`/`.build` never enter the list) — cheaper and safer
+/// than walking the tree. `-z` keeps unusual filenames intact. Capped at `limit` so a
+/// pathological repo can't blow up the palette. Never throws: returns `[]` for a
+/// non-git cwd or any git failure.
+public func listTrackedFiles(_ cwd: String, limit: Int = 20_000) async -> [String] {
+    guard let out = try? await git(
+        cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    else { return [] }
+    var seen = Set<String>()
+    var files: [String] = []
+    for raw in out.split(separator: "\0", omittingEmptySubsequences: true) {
+        let path = String(raw)
+        if path.isEmpty || !seen.insert(path).inserted { continue }
+        files.append(path)
+        if files.count >= limit { break }
+    }
+    files.sort { $0.localizedCompare($1) == .orderedAscending }
+    return files
+}
+
 /// A cheap change summary for `cwd`: the changed-file count + total line
 /// additions/deletions vs HEAD, plus a signature of the name-status list for
 /// debouncing the review badge. Reuses the porcelain snapshot for the file

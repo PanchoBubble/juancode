@@ -157,6 +157,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingJumpPalette) {
             JumpPaletteView()
         }
+        .sheet(isPresented: $model.showingQuickOpen) {
+            QuickOpenView()
+        }
         .sheet(isPresented: $model.showingSessionTemplates) {
             SessionTemplatesView()
         }

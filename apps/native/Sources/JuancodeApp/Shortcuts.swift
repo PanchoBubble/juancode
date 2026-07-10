@@ -17,6 +17,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case newSessionSameProject
     case newSessionSheet
     case jumpPalette
+    case quickOpen
     case promptTemplates
     case sessionTemplates
     case togglePerfHud
@@ -44,6 +45,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .newSessionSameProject: return "New Session (same agent & folder)"
         case .newSessionSheet: return "New Session…"
         case .jumpPalette: return "Jump to Session…"
+        case .quickOpen: return "Quick Open File…"
         case .promptTemplates: return "Prompt Templates…"
         case .sessionTemplates: return "Session Templates…"
         case .togglePerfHud: return "Toggle Performance HUD"
@@ -72,6 +74,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .newSessionSheet: return KeyBinding(key: "n", command: true, shift: true)
         // ⌘K is the jump palette (juancode-dr0); prompt templates moved to ⌘⇧K.
         case .jumpPalette: return KeyBinding(key: "k", command: true)
+        // ⌘P is Quick Open — fuzzy file open in the selected session's worktree.
+        case .quickOpen: return KeyBinding(key: "p", command: true)
         case .promptTemplates: return KeyBinding(key: "k", command: true, shift: true)
         case .sessionTemplates: return KeyBinding(key: "l", command: true)
         case .togglePerfHud: return KeyBinding(key: "p", command: true, shift: true)
@@ -253,6 +257,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         if oracle.expanded { oracle.newOracle() } else { model.quickNewSession() }
     case .newSessionSheet: model.showingNewSession = true
     case .jumpPalette: model.showingJumpPalette = true
+    case .quickOpen: model.openQuickOpen()
     case .promptTemplates: model.showingPromptPalette = true
     case .sessionTemplates: model.showingSessionTemplates = true
     case .togglePerfHud: PerfMonitor.shared.visible.toggle()

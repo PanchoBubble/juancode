@@ -198,6 +198,13 @@ struct JuancodeApp: App {
                     performShortcut(.jumpPalette, model: model, oracle: oracle)
                 }
                 .appShortcut(.jumpPalette, shortcuts)
+                // ⌘P Quick Open: fuzzy-find and open a file in the selected session's
+                // worktree (open in the editor pane, reveal in Changes, or reference it
+                // in the prompt).
+                Button("Quick Open File…") {
+                    performShortcut(.quickOpen, model: model, oracle: oracle)
+                }
+                .appShortcut(.quickOpen, shortcuts)
                 // ⌘⇧K opens the prompt-template palette: pick a saved prompt and
                 // insert (or insert+send) it into the active session (juancode-2vd).
                 Button("Prompt Templates…") {

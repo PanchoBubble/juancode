@@ -172,6 +172,8 @@ final class AppModel {
     var showingPromptPalette = false
     /// ⌘K session jump palette (juancode-dr0): fuzzy-find and switch sessions.
     var showingJumpPalette = false
+    /// ⌘P Quick Open palette: fuzzy-find a file in the selected session's worktree.
+    var showingQuickOpen = false
     /// ⌘F in-pane find bar (juancode-972): search the visible session's scrollback.
     /// Scoped to `selection`; the bar overlays that session's terminal pane.
     var showingFindBar = false
@@ -230,6 +232,21 @@ final class AppModel {
     func worktreeStatus(_ path: String) -> [WorktreeStatusEntry] {
         worktreeStatusByPath[path] ?? []
     }
+
+    // MARK: - Quick Open file index (juancode-dlr)
+
+    /// Per-worktree `git ls-files` cache backing the ⌘P Quick Open palette, invalidated
+    /// by the shared FSEvents watcher. `@ObservationIgnored` — the view observes the
+    /// published `quickOpenFiles` snapshot, not the cache.
+    @ObservationIgnored private var fileIndex = FileIndex()
+    /// worktree path → live watch subscription that invalidates the file index on change.
+    @ObservationIgnored private var fileIndexWatchTokens: [String: WorktreeWatchToken] = [:]
+    /// The worktree the Quick Open palette is currently indexing.
+    private(set) var quickOpenCwd: String?
+    /// The file list the palette matches against (cached snapshot for `quickOpenCwd`).
+    private(set) var quickOpenFiles: [String] = []
+    /// True while a fresh `git ls-files` for the palette is in flight.
+    private(set) var quickOpenLoading = false
 
     /// OS-notification plumbing for background sessions (juancode-bao). The
     /// should-notify decision is the pure `agentNotificationEffect`; this only
@@ -2651,6 +2668,87 @@ final class AppModel {
             }.value
             worktreeStatusByPath[path] = entries
         }
+    }
+
+    // MARK: - Quick Open (⌘P) — fuzzy file open scoped to the session's worktree
+
+    /// Open the Quick Open palette for the selected session, scoped to its effective
+    /// worktree. Serves the cached file list instantly (a 10k-file repo opens with no
+    /// wait), refreshes the dirty snapshot so the reveal-in-Changes action is accurate,
+    /// re-indexes in the background on a cold cache, and starts an FSEvents watch that
+    /// keeps the index fresh while the tree changes underneath.
+    func openQuickOpen() {
+        guard let sel = selection, let cwd = effectiveCwd(of: sel) else { return }
+        quickOpenCwd = cwd
+        quickOpenFiles = fileIndex.files(for: cwd) ?? []
+        watchFileIndex(cwd)
+        refreshWorktreeStatus(cwd)
+        if !fileIndex.isCached(cwd) { loadFileIndex(cwd) }
+        showingQuickOpen = true
+    }
+
+    /// (Re)index a worktree with `git ls-files` off the main actor, then publish the
+    /// snapshot if the palette is still on that worktree. Coalesces trivially: a change
+    /// burst re-arms via the watcher's debounce, not per event.
+    private func loadFileIndex(_ path: String) {
+        quickOpenLoading = true
+        Task {
+            let files = await Task.detached(priority: .userInitiated) {
+                await listTrackedFiles(path)
+            }.value
+            fileIndex.store(files, for: path)
+            if quickOpenCwd == path { quickOpenFiles = files }
+            quickOpenLoading = false
+        }
+    }
+
+    /// Subscribe once per worktree to the shared FSEvents watcher: on change, drop the
+    /// cached list and re-index while the palette is open on that path (debounced by the
+    /// watcher). Idempotent — a second Quick Open on the same worktree reuses the token.
+    private func watchFileIndex(_ path: String) {
+        guard fileIndexWatchTokens[path] == nil else { return }
+        let token = worktreeWatchers.watch(path: path) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.fileIndex.invalidate(path)
+                if self.showingQuickOpen, self.quickOpenCwd == path { self.loadFileIndex(path) }
+            }
+        }
+        if let token { fileIndexWatchTokens[path] = token }
+    }
+
+    /// Whether a Quick Open result has uncommitted changes — drives the "reveal in
+    /// Changes" affordance. Reads the watched porcelain snapshot for the palette's
+    /// worktree; `path` is worktree-relative, matching `WorktreeStatusEntry.path`.
+    func quickOpenIsDirty(_ path: String) -> Bool {
+        guard let cwd = quickOpenCwd else { return false }
+        return worktreeStatus(cwd).contains { $0.path == path }
+    }
+
+    /// Open a Quick Open result in the session's editor pane (nvim/$EDITOR), rooted in
+    /// its worktree with the file open. Routes through the file-taking editor path.
+    func quickOpenInEditor(_ path: String) {
+        guard let sel = selection else { return }
+        openEditorSession(sel, file: path)
+        showingQuickOpen = false
+    }
+
+    /// Reveal a (dirty) Quick Open result in the Changes panel — opens the working-tree
+    /// diff for the selected session and clears its review badge.
+    func quickOpenReveal(_ path: String) {
+        guard let sel = selection else { return }
+        openChanges(for: sel)
+        showingQuickOpen = false
+    }
+
+    /// Insert a Quick Open result's worktree-relative path into the selected session's
+    /// prompt (no submit), so the user can reference the file in their next message.
+    func quickOpenCopyPath(_ path: String) {
+        guard let sel = selection, let session = liveSession(sel) else { return }
+        session.insert(path)
+        selection = sel
+        focusTerminal()
+        showingQuickOpen = false
     }
 
     /// Spawn the user's real editor (`$VISUAL`/`$EDITOR`, default nvim) on `file`,
