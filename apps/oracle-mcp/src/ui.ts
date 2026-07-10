@@ -419,6 +419,64 @@ export const consoleHtml = /* html */ `<!doctype html>
   .sdel:active { background: var(--panel-2); color: var(--bad); }
   .sdel.armed { background: var(--bad); color: #fff; font-size: 12px; font-weight: 600; padding: 5px 9px; }
 
+  /* ── Live session view ────────────────────────────────── */
+  .slive {
+    flex: none; min-height: 30px; padding: 0 12px; border: 0; border-radius: 999px;
+    background: rgba(138,180,255,.14); color: var(--tint);
+    box-shadow: inset 0 0 0 1px rgba(138,180,255,.22);
+    font-size: 12.5px; font-weight: 640; transition: transform .08s;
+  }
+  .slive:active { transform: scale(.96); }
+  .live-back {
+    position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column;
+    background: var(--bg);
+    padding: calc(var(--sat) + 10px) calc(var(--sar) + 10px) calc(var(--sab) + 8px) calc(var(--sal) + 10px);
+  }
+  .live-back[hidden] { display: none; }
+  .live-head { display: flex; align-items: center; gap: 10px; padding: 2px 2px 10px; }
+  .live-head .lt { flex: 1; min-width: 0; }
+  #live-title { font-size: 14.5px; font-weight: 640; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lst {
+    font: 600 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin-top: 3px;
+  }
+  .live-head .lx {
+    flex: none; width: 34px; height: 34px; border: 0; border-radius: 999px;
+    background: var(--panel); color: var(--dim); box-shadow: inset 0 0 0 1px var(--line-soft);
+    font-size: 15px;
+  }
+  .live-head .lx:active { background: var(--panel-2); color: var(--txt); }
+  /* Panel colors must match screen-html.ts DEFAULT_FG / DEFAULT_BG. */
+  .live-screen {
+    flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
+    background: #0b0e14; border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 8px;
+  }
+  .live-screen pre {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px; line-height: 1.35; color: #d6dbe5;
+  }
+  .live-screen .lrow { white-space: pre; min-height: 1.35em; }
+  .live-foot { display: flex; gap: 8px; align-items: flex-end; padding: 8px 0 0; }
+  .live-foot textarea {
+    flex: 1; min-width: 0; min-height: 40px; max-height: 120px; height: 40px;
+    border-radius: 12px; padding: 9px 13px; background: var(--panel);
+    resize: none; overflow-y: auto; scrollbar-width: none;
+  }
+  .live-foot textarea::-webkit-scrollbar { width: 0; height: 0; display: none; }
+  .live-foot .lq, .live-foot .ls {
+    width: 40px; height: 40px; flex: none; border: 0; border-radius: 50%;
+    display: grid; place-items: center; font-size: 16px;
+    transition: transform .08s, opacity .15s;
+  }
+  .live-foot .lq { background: var(--panel-2); color: var(--dim); box-shadow: inset 0 0 0 1px var(--line); }
+  .live-foot .ls {
+    background: linear-gradient(180deg, var(--tint), var(--tint-strong)); color: var(--tint-ink);
+    font-weight: 800; box-shadow: 0 3px 12px rgba(60,110,230,.3);
+  }
+  .live-foot .lq:active, .live-foot .ls:active { transform: scale(.94); }
+  .live-foot button:disabled { opacity: .45; }
+
   /* ── Settings (keyboard shortcuts) ── */
   .gear {
     flex: none; margin-left: 8px; width: 34px; height: 34px; border-radius: 999px;
@@ -560,6 +618,23 @@ export const consoleHtml = /* html */ `<!doctype html>
     </section>
   </main>
 
+  <!-- ── Live session view (read-only screen + quick reply) ── -->
+  <div id="live-view" class="live-back" hidden>
+    <div class="live-head">
+      <div class="lt">
+        <div id="live-title">Session</div>
+        <div id="live-status" class="lst">connecting…</div>
+      </div>
+      <button id="live-close" class="lx" aria-label="Close live view">✕</button>
+    </div>
+    <div id="live-screen" class="live-screen"><pre id="live-pre"></pre></div>
+    <div class="live-foot">
+      <textarea id="live-in" placeholder="Reply into this session…" rows="1"></textarea>
+      <button id="live-queue" class="lq" aria-label="Queue for next idle" title="Queue for next idle">⏳</button>
+      <button id="live-send" class="ls" aria-label="Send reply">➤</button>
+    </div>
+  </div>
+
   <!-- ── Settings: keyboard shortcuts ───────────────────── -->
   <div id="settings-modal" class="modal-back" hidden>
     <div class="modal" role="dialog" aria-label="Keyboard shortcuts">
@@ -688,8 +763,10 @@ async function loadSessions(){
       const live = st && st !== "exited" && st !== "closed" && st !== "done";
       const id = esc(s.id || s.cliSessionId || "");
       const del = id ? '<button class="sdel" data-del="'+id+'" aria-label="Delete session">✕</button>' : '';
+      const liveBtn = (live && id)
+        ? '<button class="slive" data-live="'+id+'" data-title="'+esc(s.title||"untitled")+'">Live</button>' : '';
       const head = '<div class="row"><span class="title">'+esc(s.title||"untitled")+'</span>'
-      + '<span class="badge b-open spacer">'+esc(s.provider||"agent")+'</span>'+del+'</div>'
+      + '<span class="badge b-open spacer">'+esc(s.provider||"agent")+'</span>'+liveBtn+del+'</div>'
       + '<div class="meta"><span class="mono">'+esc(s.cwd||"")+'</span>'
       + (s.status?'<span class="badge '+(live?"b-ready":"b-closed")+'">'+esc(s.status)+'</span>':'')+'</div>';
       if (!live || !id) return '<div class="card item">'+head+'</div>';
@@ -771,6 +848,8 @@ async function deleteSessionCard(btn){
 $("#sessions-list").addEventListener("click", (e) => {
   const delBtn = e.target.closest && e.target.closest("[data-del]");
   if (delBtn) { e.stopPropagation(); deleteSessionCard(delBtn); return; }
+  const liveBtn = e.target.closest && e.target.closest("[data-live]");
+  if (liveBtn) { e.stopPropagation(); openLiveView(liveBtn.dataset.live, liveBtn.dataset.title); return; }
   const sendBtn = e.target.closest && e.target.closest(".sreply-send");
   if (sendBtn) { sendReply(sendBtn.closest(".sess")); return; }
   if (e.target.closest && e.target.closest(".sreply")) return; // typing — don't toggle
@@ -792,6 +871,91 @@ $("#sessions-list").addEventListener("keydown", (e) => {
   if (t && t.classList && t.classList.contains("sreply-in") && e.key === "Enter" && !e.shiftKey) {
     e.preventDefault(); sendReply(t.closest(".sess"));
   }
+});
+
+// ── Live session view ─────────────────────────────────────
+// Read-only mirror of a running session's screen, streamed as SSE from the
+// sidecar (GET /api/sessions/<id>/screen). Rows arrive as pre-rendered HTML —
+// a full grid first, then only changed rows — and are patched in place. The
+// view never sends resize (EventSource is receive-only), so watching from the
+// phone can't disturb the Mac's terminal grid. The footer reuses /api/reply
+// (deliver now) and /api/queue (hold for next idle).
+let liveEs = null, liveGrid = { cols: 0, rows: 0, els: [] }, liveStatusBase = "";
+function setLiveStatus(t){ liveStatusBase = t; $("#live-status").textContent = t; }
+function flashLiveStatus(t){
+  $("#live-status").textContent = t;
+  setTimeout(() => { $("#live-status").textContent = liveStatusBase; }, 1600);
+}
+function openLiveView(id, title){
+  closeLiveView();
+  $("#live-view").dataset.id = id;
+  $("#live-title").textContent = title || id;
+  $("#live-pre").innerHTML = "";
+  liveGrid = { cols: 0, rows: 0, els: [] };
+  $("#live-view").hidden = false;
+  setLiveStatus("connecting…");
+  liveEs = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/screen");
+  liveEs.addEventListener("screen", (e) => {
+    let p; try { p = JSON.parse(e.data); } catch(_){ return; }
+    applyScreenPatch(p);
+    setConn(true);
+    setLiveStatus("live · " + p.cols + "×" + p.rows);
+  });
+  // EventSource reconnects on its own; the server re-primes with a full grid.
+  liveEs.onerror = () => setLiveStatus("reconnecting…");
+}
+function closeLiveView(){
+  if (liveEs){ liveEs.close(); liveEs = null; }
+  $("#live-view").hidden = true;
+}
+function applyScreenPatch(p){
+  const pre = $("#live-pre");
+  if (p.reset || p.rows !== liveGrid.rows || p.cols !== liveGrid.cols){
+    pre.innerHTML = "";
+    liveGrid = { cols: p.cols, rows: p.rows, els: [] };
+    for (let r = 0; r < p.rows; r++){
+      const d = document.createElement("div"); d.className = "lrow";
+      pre.appendChild(d); liveGrid.els.push(d);
+    }
+    fitLiveFont();
+  }
+  for (const l of p.lines){ const el = liveGrid.els[l.row]; if (el) el.innerHTML = l.html || ""; }
+}
+// Scale the monospace font so the pty's own column count fits the phone width
+// (within limits); beyond that the panel scrolls. ~0.6em per monospace cell.
+function fitLiveFont(){
+  if (!liveGrid.cols) return;
+  const w = $("#live-screen").clientWidth - 16;
+  const size = Math.max(6.5, Math.min(13, w / (liveGrid.cols * 0.602)));
+  $("#live-pre").style.fontSize = size.toFixed(2) + "px";
+}
+window.addEventListener("resize", fitLiveFont);
+async function liveDeliver(queue){
+  const id = $("#live-view").dataset.id;
+  const ta = $("#live-in"); const text = ta.value.trim();
+  if (!id || !text) { ta.focus(); return; }
+  const sb = $("#live-send"), qb = $("#live-queue");
+  sb.disabled = qb.disabled = true;
+  try {
+    const path = queue ? "/api/queue" : "/api/reply";
+    const body = queue ? { sessionId: id, messages: [text] } : { sessionId: id, text };
+    await api(path, { method: "POST", body: JSON.stringify(body) }); setConn(true);
+    ta.value = ""; ta.style.height = "";
+    flashLiveStatus(queue ? "queued ✓" : "sent ✓");
+  } catch(e){ setConn(false); alert("Couldn't deliver: " + e.message); }
+  sb.disabled = qb.disabled = false;
+}
+$("#live-close").onclick = closeLiveView;
+$("#live-send").onclick = () => liveDeliver(false);
+$("#live-queue").onclick = () => liveDeliver(true);
+$("#live-in").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); liveDeliver(false); }
+});
+$("#live-in").addEventListener("input", (e) => {
+  const t = e.target; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px";
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#live-view").hidden) closeLiveView();
 });
 
 // ── Keyboard shortcuts (juancode-oe4) ─────────────────────

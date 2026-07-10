@@ -46,6 +46,7 @@ import {
   type ObserveOutcome,
 } from "./observer-trigger.ts";
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
+import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { startActivityListener } from "./native-events.ts";
 import { startTelegramBridge } from "./telegram.ts";
 
@@ -483,6 +484,37 @@ app.post("/api/chat/stream", async (req: Request, res: Response) => {
   } finally {
     res.end();
   }
+});
+
+// Read-only live view of a session's screen, streamed as SSE. Frames arrive over
+// the sidecar's shared native WS (subscribeScreen row-diffs) and go out as
+// pre-rendered row HTML: a full grid on connect, then only changed rows. The
+// console never sends resize — it renders at the pty's own geometry, so watching
+// from the phone can't destabilize the desktop terminal. Same anti-buffering
+// headers as /api/chat/stream so frames reach the phone live through the tunnel.
+app.get("/api/sessions/:id/screen", (req: Request, res: Response) => {
+  const sessionId = typeof req.params.id === "string" ? req.params.id : "";
+  if (!sessionId) {
+    res.status(400).send("session id is required");
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(": open\n\n");
+  const send = (patch: ScreenPatch) => {
+    res.write(`event: screen\ndata: ${JSON.stringify(patch)}\n\n`);
+  };
+  const release = openScreenStream(sessionId, send);
+  // Periodic comment keeps the tunnel from idling the stream out between frames.
+  const heartbeat = setInterval(() => res.write(": hb\n\n"), 25_000);
+  res.on("close", () => {
+    clearInterval(heartbeat);
+    release();
+  });
 });
 
 // Accept an image/audio file's raw bytes from the phone composer, persist them, and
