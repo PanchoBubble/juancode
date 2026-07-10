@@ -190,6 +190,35 @@ import Testing
         #expect(seen.text == "Renamed")
     }
 
+    /// `restartFresh` boots a Claude session that couldn't be resumed as a brand-new
+    /// live conversation: same juancode id + db row, but a *fresh* pinned CLI session
+    /// id (never the old one, to dodge Claude's "session id already in use"), status
+    /// back to running.
+    @Test func restartFreshKeepsIdAndRepinsAFreshCliSession() async throws {
+        let store = InMemorySessionStore()
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'FRESH\\n'\ncat\n"), store: store))
+        let original = try reg.create(provider: .claude, cwd: cwd, cols: 80, rows: 24)
+        let oldMeta = original.meta
+        let oldCliId = oldMeta.cliSessionId
+        original.kill()
+        await poll { !original.isRunning }
+
+        let s = try reg.restartFresh(oldMeta, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        #expect(s.meta.id == oldMeta.id)                 // same pane / db row
+        #expect(s.meta.status == .running)
+        #expect(s.meta.cliSessionId != nil)              // still pinned (Claude)
+        #expect(s.meta.cliSessionId != oldCliId)         // but a fresh id, not the old one
+        #expect(s.meta.cliSessionId != oldMeta.id)       // and not the reused juancode id
+        #expect(store.usedCliSessionIds().contains(s.meta.cliSessionId!))
+
+        let sink = ByteSink()
+        s.subscribeOutput(replay: true) { sink.add($0) }
+        await poll { sink.text.contains("FRESH") }
+        #expect(sink.text.contains("FRESH"))
+    }
+
     @Test func onCreateFiresForNewSessions() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
         let seen = ByteSink()

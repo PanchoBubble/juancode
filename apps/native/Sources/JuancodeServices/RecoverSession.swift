@@ -212,6 +212,22 @@ public func recoverCliSessionId(
     return chooseNearest(cands, createdAtMs, excludeIds)
 }
 
+/// Whether a resumable Claude transcript for `cliSessionId` exists on disk under
+/// `cwd`. Claude writes a transcript only once a turn completes, so a pinned-id
+/// session that booted but never got a turn has none and `claude --resume <id>`
+/// would just fast-exit. Reuses the same candidate scan as `recoverCliSessionId`
+/// (basename = id, matched on the transcript's own `cwd`) so "exists" means exactly
+/// "recovery would accept it". Callers use this to skip a doomed resume and boot a
+/// fresh session in place instead.
+public func claudeConversationExists(
+    cliSessionId: String,
+    cwd: String,
+    roots: RecoverRoots = RecoverRoots()
+) -> Bool {
+    claudeCandidates(roots.claudeProjects ?? RECOVER_CLAUDE_PROJECTS, cwd)
+        .contains { $0.id == cliSessionId }
+}
+
 /// A resumable CLI conversation found on disk for a `cwd`: which CLI produced it,
 /// its resumable id, and when it began. The lightweight result of
 /// `listExternalSessions` — just enough to build a `SessionMeta` and adopt it

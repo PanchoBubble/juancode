@@ -123,4 +123,30 @@ final class RecoverSessionTests: XCTestCase {
         let got = await recover(root)
         XCTAssertNil(got)
     }
+
+    // MARK: - claudeConversationExists
+
+    private func exists(_ root: String, _ id: String, cwd: String? = nil) -> Bool {
+        claudeConversationExists(
+            cliSessionId: id, cwd: cwd ?? CWD,
+            roots: RecoverRoots(claudeProjects: root)
+        )
+    }
+
+    func testConversationExistsWhenTranscriptPresentForCwd() {
+        let root = claudeRoot("present", [(id: "abc", cwd: CWD, startMs: T0)])
+        XCTAssertTrue(exists(root, "abc"))
+    }
+
+    func testConversationMissingWhenNoTurnEverWritten() {
+        // The doomed-resume case: a session id with no transcript on disk (booted
+        // but never completed a turn).
+        let root = claudeRoot("present", [(id: "abc", cwd: CWD, startMs: T0)])
+        XCTAssertFalse(exists(root, "never-had-a-turn"))
+    }
+
+    func testConversationMissingWhenTranscriptIsForADifferentCwd() {
+        let root = claudeRoot("other-cwd", [(id: "abc", cwd: OTHER, startMs: T0)])
+        XCTAssertFalse(exists(root, "abc"))
+    }
 }
