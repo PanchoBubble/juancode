@@ -51,6 +51,20 @@ final class ProcessRunnerTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
+    /// A child that exits but leaves a backgrounded descendant holding the stdout
+    /// pipe open must still resolve promptly on the child's exit — not stall waiting
+    /// for an EOF that the leaked descendant will never send (the git background
+    /// `maintenance`/`gc --auto` stall class). `timeout` here is longer than the
+    /// post-termination grace but far shorter than the leaked child's lifetime, so a
+    /// regression would surface as a `timedOut` failure instead of a clean success.
+    func testResolvesWhenDescendantHoldsPipeOpen() async throws {
+        let r = try await ProcessRunner.run(
+            "/bin/sh", ["-c", "echo hi; sleep 3 &"], timeout: 2.0)
+        XCTAssertEqual(r.stdout.trimmingCharacters(in: .newlines), "hi")
+        XCTAssertEqual(r.exitCode, 0)
+        XCTAssertTrue(r.ok)
+    }
+
     func testStdinIsForwarded() async throws {
         let r = try await ProcessRunner.run("/bin/cat", [], stdin: "piped input")
         XCTAssertEqual(r.stdout, "piped input")

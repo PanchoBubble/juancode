@@ -109,40 +109,58 @@ public enum ProcessRunner {
         let ioQueue = DispatchQueue(label: "juancode.process.io")
         let box = Box()
         let group = DispatchGroup()
+        let handles = Handles(out: outPipe.fileHandleForReading, err: errPipe.fileHandleForReading)
+        let exit = ExitBox()
 
-        func drain(_ pipe: Pipe, appendingTo append: @escaping @Sendable (Data) -> Void) {
+        func drain(_ isOut: Bool, appendingTo append: @escaping @Sendable (Data) -> Void) {
             group.enter()
-            pipe.fileHandleForReading.readabilityHandler = { handle in
+            (isOut ? handles.out : handles.err).readabilityHandler = { handle in
                 let chunk = handle.availableData
                 if chunk.isEmpty {
-                    handle.readabilityHandler = nil
-                    group.leave()
+                    // EOF: every write end of this stream is closed.
+                    if handles.finish(isOut) { group.leave() }
                 } else {
                     ioQueue.sync { append(chunk) }
                 }
             }
         }
-        drain(outPipe) { d in if box.out.count < maxBytes { box.out.append(d) } }
-        drain(errPipe) { d in if box.err.count < maxBytes { box.err.append(d) } }
+        drain(true) { d in if box.out.count < maxBytes { box.out.append(d) } }
+        drain(false) { d in if box.err.count < maxBytes { box.err.append(d) } }
+
+        // Gate completion on the process terminating too, so the exit code is
+        // captured before we resolve (an EOF can otherwise be observed first).
+        group.enter()
 
         let state = ResultState()
+        group.notify(queue: ioQueue) {
+            state.finishOnce {
+                completion(.success(ProcessResult(
+                    stdout: String(decoding: box.out, as: UTF8.self),
+                    stderr: String(decoding: box.err, as: UTF8.self),
+                    exitCode: exit.code
+                )))
+            }
+        }
+
         proc.terminationHandler = { p in
-            group.notify(queue: ioQueue) {
-                state.finishOnce {
-                    completion(.success(ProcessResult(
-                        stdout: String(decoding: box.out, as: UTF8.self),
-                        stderr: String(decoding: box.err, as: UTF8.self),
-                        exitCode: p.terminationStatus
-                    )))
-                }
+            exit.code = p.terminationStatus
+            group.leave() // balances the process-lifetime `enter` above
+            // The child is gone. Give the drains a brief grace to flush whatever is
+            // still buffered, then force each stream closed regardless of EOF: a
+            // detached descendant (e.g. git's background `maintenance`/`gc --auto`)
+            // can inherit our pipe fds and never close them, so waiting for EOF
+            // would stall us until `timeout`.
+            ioQueue.asyncAfter(deadline: .now() + 0.2) {
+                if handles.finish(true) { group.leave() }
+                if handles.finish(false) { group.leave() }
             }
         }
 
         do {
             try proc.run()
         } catch {
-            outPipe.fileHandleForReading.readabilityHandler = nil
-            errPipe.fileHandleForReading.readabilityHandler = nil
+            handles.finish(true)
+            handles.finish(false)
             state.finishOnce {
                 completion(.failure(ProcessError(code: -1, stdout: "", stderr: "\(error)",
                                                  launchFailed: true, timedOut: false)))
@@ -159,6 +177,8 @@ public enum ProcessRunner {
             ioQueue.asyncAfter(deadline: .now() + timeout) {
                 guard !state.isFinished else { return }
                 proc.terminate()
+                handles.finish(true)
+                handles.finish(false)
                 state.finishOnce {
                     completion(.failure(ProcessError(
                         code: -1,
@@ -173,6 +193,50 @@ public enum ProcessRunner {
     private final class Box: @unchecked Sendable {
         var out = Data()
         var err = Data()
+    }
+
+    /// Child exit status, captured by the termination handler and read once the
+    /// process is confirmed gone. Locked so the read in `group.notify` can't race
+    /// the write in `terminationHandler`.
+    private final class ExitBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int32 = -1
+        var code: Int32 {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
+    }
+
+    /// Owns the two read handles and guarantees each stream is torn down (reader
+    /// cancelled, `DispatchGroup` signalled) exactly once — whether that's driven
+    /// by a real EOF, the post-termination grace, or the timeout. Prevents an
+    /// unbalanced `group.leave()` while letting us force-close a stream whose
+    /// write end a leaked child still holds open.
+    private final class Handles: @unchecked Sendable {
+        private let lock = NSLock()
+        let out: FileHandle
+        let err: FileHandle
+        private var outDone = false
+        private var errDone = false
+        init(out: FileHandle, err: FileHandle) { self.out = out; self.err = err }
+
+        /// Cancel a stream's reader once. Returns true only on the first call for
+        /// that stream, so the caller balances its `group.enter()` exactly once.
+        @discardableResult
+        func finish(_ isOut: Bool) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if isOut {
+                if outDone { return false }
+                outDone = true
+                out.readabilityHandler = nil
+                return true
+            } else {
+                if errDone { return false }
+                errDone = true
+                err.readabilityHandler = nil
+                return true
+            }
+        }
     }
 
     private final class ResultState: @unchecked Sendable {
