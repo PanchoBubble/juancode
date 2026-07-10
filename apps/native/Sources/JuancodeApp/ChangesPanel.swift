@@ -71,6 +71,9 @@ struct ChangesPanel: View {
             if !model.comments(sessionId).isEmpty {
                 Divider()
                 submitBar
+            } else if !model.archivedComments(sessionId).isEmpty {
+                Divider()
+                archivedBar
             }
         }
         .onAppear {
@@ -572,7 +575,8 @@ struct ChangesPanel: View {
                                 onToggleCollapse: { toggleFileCollapse(file.path) },
                                 onToggleViewed: { toggleViewed(file) },
                                 onEdit: { model.openEditorOverlay(sessionId, file: file.path) },
-                                collapsible: true)
+                                collapsible: true,
+                                revertable: currentSource == .workingTree)
                                 .id(file.path)
                                 .contextMenu {
                                     Button("Open in editor session") {
@@ -588,7 +592,11 @@ struct ChangesPanel: View {
                 .focused($paneFocused)
                 .focusEffectDisabled()
                 .onKeyPress { handleKey($0, proxy: proxy) }
-                .onAppear { paneFocused = true }
+                // Only take keyboard focus on an EXPLICIT open (⌘⇧C / the review
+                // badge), never on a plain appear — so switching sessions with the
+                // panel open leaves the terminal typable (qce.2 focus papercut).
+                .onAppear { consumeFocusRequest() }
+                .onChange(of: model.changesFocusRequest) { _, _ in consumeFocusRequest() }
                 // Clicking a file in the tree scrolls to its card (and expands it).
                 // The initial programmatic selection only scrolls — it leaves the
                 // card collapsed so the panel opens fully folded.
@@ -610,7 +618,16 @@ struct ChangesPanel: View {
     private var selectedFile: DiffFile? { visibleFiles.first { $0.path == selectedPath } }
 
     private func handleKey(_ press: KeyPress, proxy: ScrollViewProxy) -> KeyPress.Result {
-        // Leave modified combos to the app shortcuts / menu (⌘C toggle, etc.).
+        // shift-P → push + open the PR flow (the only modified combo we own here).
+        if press.characters.lowercased() == "p",
+           press.modifiers.contains(.shift),
+           !press.modifiers.contains(.command),
+           !press.modifiers.contains(.control),
+           !press.modifiers.contains(.option) {
+            model.requestGitFlow(sessionId, .pr)
+            return .handled
+        }
+        // Leave other modified combos to the app shortcuts / menu (⌘C toggle, etc.).
         guard press.modifiers.isEmpty else { return .ignored }
         switch press.characters {
         case "j": moveFile(1); return .handled
@@ -619,8 +636,37 @@ struct ChangesPanel: View {
         case "p": moveHunk(-1, proxy: proxy); return .handled
         case " ": toggleCollapseSelected(); return .handled
         case "v": markSelectedViewed(); return .handled
+        case "r": sendReviewToAgent(); return .handled
+        case "c": model.requestGitFlow(sessionId, .commit); return .handled
+        // Per-finding review-with-Claude keys, scoped to the selected file. Ignored
+        // (so they never shadow a future binding) unless that file has findings.
+        case "a" where selectedFileHasFindings: acceptSelectedFindings(); return .handled
+        case "x" where selectedFileHasFindings: dismissSelectedFindings(); return .handled
         default: return .ignored
         }
+    }
+
+    /// Send the staged comments to the agent via the message queue (never a mid-turn
+    /// paste) and hand focus back to the terminal to watch it respond. No-op when
+    /// there's nothing staged or the session isn't live.
+    private func sendReviewToAgent() {
+        guard !model.comments(sessionId).isEmpty, model.liveSession(sessionId) != nil else { return }
+        model.submitReview(sessionId)
+    }
+
+    private var selectedFileHasFindings: Bool {
+        guard let path = selectedPath else { return false }
+        return model.hasFindings(sessionId, file: path)
+    }
+
+    private func acceptSelectedFindings() {
+        guard let path = selectedPath else { return }
+        model.acceptFindings(sessionId, file: path)
+    }
+
+    private func dismissSelectedFindings() {
+        guard let path = selectedPath else { return }
+        model.dismissFindings(sessionId, file: path)
     }
 
     /// Move the selection to the next/prev file. Only scrolls (leaves the card folded)
@@ -664,6 +710,14 @@ struct ChangesPanel: View {
         if collapsedFiles.contains(path) { collapsedFiles.remove(path) } else { collapsedFiles.insert(path) }
     }
 
+    /// Honor a pending diff-pane focus request addressed to this session, then clear
+    /// it so it fires exactly once. Called on appear and when the request changes.
+    private func consumeFocusRequest() {
+        guard model.changesFocusRequest == sessionId else { return }
+        paneFocused = true
+        model.changesFocusRequest = nil
+    }
+
     private func centered(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -673,8 +727,9 @@ struct ChangesPanel: View {
     // MARK: - Submit-review bar
 
     /// The review basket bar (juancode-ck4): a count, a "Send to agent" that composes
-    /// the annotations into one feedback prompt and steers it into the session (idle →
-    /// runs now, busy → queued by the CLI), and a "Discard" that clears them.
+    /// the annotations into one feedback prompt and QUEUES it for the session so it
+    /// delivers on the next idle edge (never interrupts the agent mid-turn), archives
+    /// the batch, and returns focus to the terminal — and a "Discard" that clears them.
     private var submitBar: some View {
         HStack {
             let n = model.comments(sessionId).count
@@ -684,13 +739,30 @@ struct ChangesPanel: View {
             Button("Discard") { model.discardComments(sessionId) }
                 .controlSize(.small)
                 .clickCursor()
-            Button("Send to agent") { model.submitReview(sessionId) }
+            Button("Send to agent (r)") { model.submitReview(sessionId) }
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
                 .disabled(model.liveSession(sessionId) == nil)
                 .help(model.liveSession(sessionId) == nil
                       ? "Session isn't live — start it to send review feedback"
-                      : "Send the annotations to the agent as review feedback")
+                      : "Queue the annotations for the agent (delivers on idle, never mid-turn)")
+                .clickCursor()
+        }
+        .padding(10)
+    }
+
+    /// Shown after a review is sent: the archived batch stays retrievable (it no longer
+    /// silently vanishes), so it can be pulled back and re-sent.
+    private var archivedBar: some View {
+        HStack {
+            let n = model.archivedComments(sessionId).count
+            Image(systemName: "paperplane").font(.system(size: 10)).foregroundStyle(.secondary)
+            Text("Sent \(n) comment\(n == 1 ? "" : "s") to the agent")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer()
+            Button("Restore") { model.restoreArchivedComments(sessionId) }
+                .controlSize(.small)
+                .help("Re-stage the last sent review so you can edit or resend it")
                 .clickCursor()
         }
         .padding(10)
@@ -796,6 +868,14 @@ private struct FileCard: View {
     /// When false (the side-by-side diff pane), the collapse chevron is hidden — the
     /// single selected file is always shown fully expanded.
     var collapsible: Bool = true
+    /// Whether the destructive per-file / per-hunk revert is offered (working-tree
+    /// source only — reverting a PR/commit/base diff is meaningless). juancode-qce.3.
+    var revertable: Bool = false
+
+    /// A pending discard awaiting confirmation — the whole file or one hunk index.
+    /// Non-nil drives the confirmation dialog; revert never runs without it.
+    private enum RevertTarget: Equatable { case file; case hunk(Int) }
+    @State private var revertTarget: RevertTarget?
 
     /// The (side, line, endLine) range a new comment is being composed on, if any.
     /// A single-line click sets line == endLine; a drag-select widens the range.
@@ -867,7 +947,9 @@ private struct FileCard: View {
                 if !orphanFindings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(orphanFindings.enumerated()), id: \.offset) { _, f in
-                            FindingRow(finding: f)
+                            FindingRow(finding: f,
+                                       onAccept: { model.acceptFinding(sessionId, f) },
+                                       onDismiss: { model.dismissFinding(sessionId, f) })
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -908,6 +990,36 @@ private struct FileCard: View {
             }.value
             if !Task.isCancelled { renderedDiff = out }
         }
+        .confirmationDialog(revertConfirmTitle, isPresented: revertDialogBinding, titleVisibility: .visible) {
+            Button("Discard changes", role: .destructive) { performRevert() }
+            Button("Cancel", role: .cancel) { revertTarget = nil }
+        } message: {
+            Text("This permanently discards uncommitted work and can't be undone.")
+        }
+    }
+
+    private var revertConfirmTitle: String {
+        switch revertTarget {
+        case .hunk: return "Discard this hunk in \(file.path)?"
+        default: return "Discard all changes to \(file.path)?"
+        }
+    }
+
+    /// Bridges the optional `revertTarget` to the dialog's `isPresented` binding —
+    /// dismissing clears the pending target so a stray confirm can't fire later.
+    private var revertDialogBinding: Binding<Bool> {
+        Binding(get: { revertTarget != nil }, set: { if !$0 { revertTarget = nil } })
+    }
+
+    private func performRevert() {
+        guard let target = revertTarget else { return }
+        revertTarget = nil
+        switch target {
+        case .file:
+            Task { await model.revertFile(sessionId, path: file.path) }
+        case .hunk(let idx):
+            Task { await model.revertHunk(sessionId, path: file.path, hunkIndex: idx) }
+        }
     }
 
     private var cardHeader: some View {
@@ -945,6 +1057,14 @@ private struct FileCard: View {
             .disabled(file.status == .deleted)
             .help(file.status == .deleted ? "File was deleted" : "Open in your editor ($EDITOR)")
             .clickCursor()
+            if revertable {
+                Button { revertTarget = .file } label: {
+                    Image(systemName: "arrow.uturn.backward").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless).foregroundStyle(.red.opacity(0.8))
+                .help("Discard all changes to this file (asks to confirm)")
+                .clickCursor()
+            }
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.secondary.opacity(0.08))
@@ -967,6 +1087,19 @@ private struct FileCard: View {
                 if let hunkK = hunkStartAt[idx] {
                     // Zero-height scroll target for n/p hunk navigation.
                     Color.clear.frame(height: 0).id("\(file.path)#hunk\(hunkK)")
+                    if revertable {
+                        HStack(spacing: 4) {
+                            Spacer()
+                            Button { revertTarget = .hunk(hunkK) } label: {
+                                Label("Revert hunk", systemImage: "arrow.uturn.backward")
+                                    .font(.system(size: 9))
+                            }
+                            .buttonStyle(.borderless).foregroundStyle(.red.opacity(0.8))
+                            .help("Discard just this hunk (asks to confirm)")
+                            .clickCursor()
+                        }
+                        .padding(.horizontal, 8).padding(.top, 3)
+                    }
                 }
                 let line = rd.flatLines[idx]
                 DiffLineRow(
@@ -996,7 +1129,9 @@ private struct FileCard: View {
                     // the human comments, visually distinct (severity color + title).
                     ForEach(Array(findings.filter { $0.side == a.side && $0.line == a.line }.enumerated()),
                             id: \.offset) { _, f in
-                        FindingRow(finding: f)
+                        FindingRow(finding: f,
+                                   onAccept: { model.acceptFinding(sessionId, f) },
+                                   onDismiss: { model.dismissFinding(sessionId, f) })
                     }
                     // Existing comments whose range ENDS on this line (so a range comment
                     // shows once, under its last line — matching how it anchors).
@@ -1358,6 +1493,10 @@ private struct CommentRow: View {
 /// "✨ Claude" tag. Mirrors the web `FindingItem`.
 private struct FindingRow: View {
     let finding: ReviewFinding
+    /// Accept the finding as a staged comment, or dismiss it from the overlay
+    /// (juancode-qce.3). Nil (the default) hides the per-finding actions.
+    var onAccept: (() -> Void)?
+    var onDismiss: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -1383,6 +1522,18 @@ private struct FindingRow: View {
             }
             Text("✨ Claude")
                 .font(.system(size: 9)).foregroundStyle(ReviewSeverityStyle.accent)
+            if let onAccept {
+                Button(action: onAccept) { Image(systemName: "text.badge.plus").font(.system(size: 10)) }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Accept as a comment")
+                    .clickCursor()
+            }
+            if let onDismiss {
+                Button(action: onDismiss) { Image(systemName: "xmark").font(.system(size: 9)) }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Dismiss this finding")
+                    .clickCursor()
+            }
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(ReviewSeverityStyle.accent.opacity(0.06))
@@ -1465,6 +1616,36 @@ private struct GitActionsView: View {
                 .popover(isPresented: $showPr, arrowEdge: .bottom) { prForm }
                 .clickCursor()
             }
+            // Open the matching flow when the diff pane fires `c` / shift-P for us.
+            .onChange(of: model.gitFlowRequest) { _, req in handleFlow(req) }
+        }
+    }
+
+    /// React to a single-key git request from the diff pane: `c` opens the commit
+    /// popover and prefills an AI commit message; shift-P opens the PR popover (which
+    /// pushes on create). Ignores requests for other sessions or when the action isn't
+    /// currently valid (nothing to commit / no remote).
+    private func handleFlow(_ req: AppModel.GitFlowRequest?) {
+        guard let req, req.session == sessionId else { return }
+        switch req.flow {
+        case .commit:
+            guard dirty else { return }
+            prefillBranch()
+            showPr = false
+            showCommit = true
+            Task {
+                busy = true
+                if let m = await model.generateCommitMessage(sessionId),
+                   message.trimmingCharacters(in: .whitespaces).isEmpty {
+                    message = m
+                }
+                busy = false
+            }
+        case .pr:
+            guard (state?.remote ?? false), !(state?.detached ?? false) else { return }
+            prefillBranch()
+            showCommit = false
+            showPr = true
         }
     }
 

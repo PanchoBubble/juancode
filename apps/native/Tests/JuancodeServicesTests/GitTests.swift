@@ -409,6 +409,144 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(r, DiffResult(git: false, files: []))
     }
 
+    // MARK: - revert scope guard (pure)
+
+    func testRevertScopeGuardAcceptsInTreePath() {
+        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "src/a.txt"), "src/a.txt")
+        // A leading ./ normalizes; a request with the root prefix as an absolute path works too.
+        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "./src/a.txt"), "src/a.txt")
+        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "/repo/src/a.txt"), "src/a.txt")
+    }
+
+    func testRevertScopeGuardRefusesUnscopedOrEscaping() {
+        // Empty / whitespace → unscoped.
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: ""))
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "   "))
+        // The worktree root itself is not a single file — refuse (would be the whole tree).
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "."))
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/repo"))
+        // Traversal out of the tree.
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "../secret"))
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "src/../../secret"))
+        // Absolute path outside the tree.
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/etc/passwd"))
+        // A sibling that merely shares a name prefix must not pass the prefix check.
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/repo-other/a.txt"))
+        // Newline / NUL injection.
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "a\nb"))
+        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "a\0b"))
+    }
+
+    // MARK: - single-hunk patch extraction (pure)
+
+    func testSingleHunkPatchExtractsHeaderPlusOneHunk() {
+        let patch = """
+        diff --git a/f.txt b/f.txt
+        index 111..222 100644
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1,2 +1,2 @@
+        -one
+        +ONE
+         two
+        @@ -10,2 +10,2 @@
+        -ten
+        +TEN
+         eleven
+        """
+        let first = singleHunkPatch(patch, index: 0)
+        XCTAssertNotNil(first)
+        XCTAssertTrue(first!.contains("--- a/f.txt"))
+        XCTAssertTrue(first!.contains("@@ -1,2 +1,2 @@"))
+        XCTAssertTrue(first!.contains("+ONE"))
+        XCTAssertFalse(first!.contains("+TEN"))       // second hunk excluded
+        XCTAssertTrue(first!.hasSuffix("\n"))
+        let second = singleHunkPatch(patch, index: 1)
+        XCTAssertTrue(second!.contains("+TEN"))
+        XCTAssertFalse(second!.contains("+ONE"))
+        // Out of range / negative → nil.
+        XCTAssertNil(singleHunkPatch(patch, index: 2))
+        XCTAssertNil(singleHunkPatch(patch, index: -1))
+        XCTAssertNil(singleHunkPatch("", index: 0))
+    }
+
+    // MARK: - revert (real git)
+
+    func testRevertFileRestoresTrackedModification() async throws {
+        writeFile(join(dir, "a.txt"), "one\ntwo\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        writeFile(join(dir, "a.txt"), "one\ntwo\nthree\n")   // uncommitted change
+        try runGit(["add", "a.txt"])                          // even staged
+        let r = try await revertFile(dir, path: "a.txt")
+        XCTAssertEqual(r, RevertResult(path: "a.txt", reverted: true))
+        let restored = try String(contentsOfFile: join(dir, "a.txt"), encoding: .utf8)
+        XCTAssertEqual(restored, "one\ntwo\n")
+        // No diff remains for the file.
+        let diff = try await getDiff(dir)
+        XCTAssertFalse(diff.files.contains { $0.path == "a.txt" })
+    }
+
+    func testRevertFileDeletesUntracked() async throws {
+        writeFile(join(dir, "seed.txt"), "x\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        writeFile(join(dir, "new.txt"), "fresh\n")            // untracked
+        let r = try await revertFile(dir, path: "new.txt")
+        XCTAssertTrue(r.reverted)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: join(dir, "new.txt")))
+    }
+
+    func testRevertFileRefusesOutOfTreePath() async throws {
+        writeFile(join(dir, "a.txt"), "one\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        do {
+            _ = try await revertFile(dir, path: "../escape.txt")
+            XCTFail("expected refusal")
+        } catch let e as GitError {
+            XCTAssertTrue(e.message.lowercased().contains("unscoped") || e.message.lowercased().contains("out-of-tree"))
+        }
+    }
+
+    func testRevertHunkDiscardsOneHunkKeepsOthers() async throws {
+        // Ten lines committed; edit line 1 and line 10 → two separate hunks.
+        let base = (1...10).map { "line\($0)" }.joined(separator: "\n") + "\n"
+        writeFile(join(dir, "f.txt"), base)
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        var lines = (1...10).map { "line\($0)" }
+        lines[0] = "LINE1-changed"
+        lines[9] = "LINE10-changed"
+        writeFile(join(dir, "f.txt"), lines.joined(separator: "\n") + "\n")
+
+        // Sanity: two hunks present.
+        let before = try await getDiff(dir)
+        let file = try XCTUnwrap(before.files.first { $0.path == "f.txt" })
+        XCTAssertEqual(hunkCount(inDiff: file.diff), 2)
+
+        // Revert only the first hunk (line 1) — the line-10 change must survive.
+        let r = try await revertHunk(dir, path: "f.txt", hunkIndex: 0)
+        XCTAssertTrue(r.reverted)
+        let after = try String(contentsOfFile: join(dir, "f.txt"), encoding: .utf8)
+        XCTAssertTrue(after.contains("line1\n"))            // restored
+        XCTAssertFalse(after.contains("LINE1-changed"))     // first hunk gone
+        XCTAssertTrue(after.contains("LINE10-changed"))     // second hunk kept
+    }
+
+    func testRevertHunkRefusesUntracked() async throws {
+        writeFile(join(dir, "seed.txt"), "x\n")
+        try runGit(["add", "-A"])
+        try runGit(["commit", "-qm", "init"])
+        writeFile(join(dir, "new.txt"), "a\nb\n")            // untracked
+        do {
+            _ = try await revertHunk(dir, path: "new.txt", hunkIndex: 0)
+            XCTFail("expected refusal for untracked file")
+        } catch is GitError {
+            // expected
+        }
+    }
+
     // MARK: - util
 
     /// `path.resolve` equivalent for comparing worktree paths regardless of symlinks

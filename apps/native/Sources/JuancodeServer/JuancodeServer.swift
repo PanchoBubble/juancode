@@ -188,6 +188,25 @@ public enum JuancodeServer {
             } catch { throw APIError(.internalServerError, errMsg(error)) }
         }
 
+        // Discard uncommitted work — per-file or per-hunk (juancode-qce.3). A plain
+        // HTTP route (no WS wire change): `file` is required and validated inside the
+        // worktree; an optional `hunkIndex` scopes it to one hunk. Destructive, so it
+        // refuses anything unscoped and the UI gates it behind an explicit confirm.
+        router.post("/api/sessions/:id/revert") { req, ctx in
+            let m = try meta(ctx, store)
+            let body = try await req.decode(as: RevertBody.self, context: ctx)
+            guard !body.file.trimmingCharacters(in: .whitespaces).isEmpty else {
+                throw APIError(.badRequest, "file required")
+            }
+            let cwd = await resolveTargetCwd(m.cwd, body.cwd)
+            do {
+                if let hunk = body.hunkIndex {
+                    return try await revertHunk(cwd, path: body.file, hunkIndex: hunk)
+                }
+                return try await revertFile(cwd, path: body.file)
+            } catch { throw APIError(.internalServerError, errMsg(error)) }
+        }
+
         router.get("/api/sessions/:id/worktrees") { _, ctx in
             let m = try meta(ctx, store)
             return await listWorktrees(m.cwd)
@@ -403,6 +422,7 @@ struct CwdBody: Decodable { let cwd: String? }
 struct CommitBody: Decodable { let message: String; let cwd: String? }
 struct PrBody: Decodable { let title: String; let body: String?; let draft: Bool?; let cwd: String? }
 struct CommentBody: Decodable { let file: String; let side: String; let line: Int; let endLine: Int?; let body: String }
+struct RevertBody: Decodable { let file: String; let hunkIndex: Int?; let cwd: String? }
 struct FileContentResponse: Codable, ResponseEncodable { let path: String; let content: String }
 struct UploadResponse: Codable, ResponseEncodable { let path: String }
 struct DirEntry: Codable { let name: String; let path: String }

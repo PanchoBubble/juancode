@@ -52,10 +52,11 @@ func git(_ cwd: String, _ args: [String]) async throws -> String {
 
 /// Run git with no special-casing of exit codes — any non-zero rejects, so write
 /// operations (commit/push) surface real failures (hook rejected, no remote, …)
-/// instead of being swallowed like a `git diff` "has changes" exit-1.
-private func gitStrict(_ cwd: String, _ args: [String]) async throws -> (stdout: String, stderr: String) {
+/// instead of being swallowed like a `git diff` "has changes" exit-1. `stdin` feeds
+/// a patch to commands that read one (`git apply -`).
+private func gitStrict(_ cwd: String, _ args: [String], stdin: String? = nil) async throws -> (stdout: String, stderr: String) {
     let r = try await ProcessRunner.capture(
-        "git", ["-c", "core.quotepath=false"] + args, cwd: cwd, maxBytes: MAX_BUFFER)
+        "git", ["-c", "core.quotepath=false"] + args, cwd: cwd, stdin: stdin, maxBytes: MAX_BUFFER)
     guard r.ok else {
         throw ProcessError(code: r.exitCode, stdout: r.stdout, stderr: r.stderr,
                            launchFailed: false, timedOut: false)
@@ -582,6 +583,144 @@ public func pushCurrent(_ cwd: String) async throws -> PushResult {
     } catch {
         throw GitError(gitErr(error, "Push failed"))
     }
+}
+
+// MARK: - Revert (discard uncommitted work) — precise, guarded, destructive
+
+/// The outcome of a revert: the worktree-relative path acted on, and whether the
+/// discard actually ran. Codable so the HTTP route can hand it straight back.
+public struct RevertResult: Codable, Sendable, Equatable {
+    public let path: String
+    public let reverted: Bool
+    public init(path: String, reverted: Bool) { self.path = path; self.reverted = reverted }
+}
+
+/// Validate that `requested` names a single file STRICTLY inside `root`, returning
+/// the worktree-relative path (never empty, never escaping) when safe, else nil.
+/// Pure and unit-testable: the revert entry points refuse anything this rejects, so
+/// a traversal (`../`), an absolute path outside the tree, an empty/unscoped request,
+/// or the worktree root itself can never reach `git checkout` / `git apply`. This is
+/// the guard that keeps a destructive discard pinned to exactly one intended file.
+public func revertScopedRelativePath(root: String, requested: String) -> String? {
+    let trimmed = requested.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    // No NUL / newline injection into a path passed to git.
+    guard !trimmed.contains("\0"), !trimmed.contains("\n") else { return nil }
+    let rootPath = URL(fileURLWithPath: root).standardizedFileURL.path
+    // Join under the worktree root (absolute requests are taken as-is), then collapse
+    // `.`/`..` via standardization so the prefix check below sees the real target.
+    let joined = trimmed.hasPrefix("/") ? trimmed : rootPath + "/" + trimmed
+    let candidate = URL(fileURLWithPath: joined).standardizedFileURL.path
+    // Must be strictly inside root: not the root itself (that would be the whole tree),
+    // not a sibling/parent, not an escape.
+    guard candidate != rootPath, candidate.hasPrefix(rootPath + "/") else { return nil }
+    let rel = String(candidate.dropFirst(rootPath.count + 1))
+    return rel.isEmpty ? nil : rel
+}
+
+/// Confirm `cwd` is inside a git work tree and return its top-level path. Throws a
+/// clean `GitError` otherwise — the revert paths refuse to touch a non-repo.
+private func worktreeRoot(_ cwd: String) async throws -> String {
+    do {
+        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard inside == "true" else { throw GitError("Not a git repository.") }
+        return try await git(cwd, ["rev-parse", "--show-toplevel"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch let e as GitError {
+        throw e
+    } catch {
+        throw GitError("Not a git repository.")
+    }
+}
+
+/// Whether `rel` is a tracked path in `cwd` (`ls-files --error-unmatch` exits non-zero
+/// for an untracked path, which `gitStrict` surfaces as a throw).
+private func isTracked(_ cwd: String, _ rel: String) async -> Bool {
+    (try? await gitStrict(cwd, ["ls-files", "--error-unmatch", "--", rel])) != nil
+}
+
+/// Discard the uncommitted changes to ONE file, scoped precisely to that path and
+/// nothing else. A tracked file is restored from HEAD (`git checkout HEAD -- <path>`,
+/// discarding staged and unstaged edits); an untracked file is removed. Refuses any
+/// path `revertScopedRelativePath` rejects. Never `git checkout .` / `git reset
+/// --hard` — the blast radius is exactly the requested file.
+public func revertFile(_ cwd: String, path requested: String) async throws -> RevertResult {
+    let root = try await worktreeRoot(cwd)
+    guard let rel = revertScopedRelativePath(root: root, requested: requested) else {
+        throw GitError("Refusing to revert an unscoped or out-of-tree path.")
+    }
+    if await isTracked(root, rel) {
+        do {
+            _ = try await gitStrict(root, ["checkout", "HEAD", "--", rel])
+        } catch {
+            // A fresh repo has no HEAD to restore from; fall back to the index.
+            do { _ = try await gitStrict(root, ["checkout", "--", rel]) }
+            catch { throw GitError(gitErr(error, "Revert failed")) }
+        }
+    } else {
+        // Untracked: discarding a brand-new file means deleting it. Still scoped to
+        // the one validated path inside the worktree.
+        let abs = (root as NSString).appendingPathComponent(rel)
+        do { try FileManager.default.removeItem(atPath: abs) }
+        catch { throw GitError("Could not remove untracked file: \(rel)") }
+    }
+    return RevertResult(path: rel, reverted: true)
+}
+
+/// Discard ONE hunk of a tracked file's uncommitted change, leaving the rest intact.
+/// Re-derives the authoritative current patch (`git diff <base> -- <path>`), extracts
+/// exactly the requested hunk, and reverse-applies just that hunk to the working tree
+/// (`git apply --reverse`). Refuses an unscoped path or an out-of-range hunk; untracked
+/// files aren't supported at hunk granularity (revert the whole file instead).
+public func revertHunk(_ cwd: String, path requested: String, hunkIndex: Int) async throws -> RevertResult {
+    let root = try await worktreeRoot(cwd)
+    guard let rel = revertScopedRelativePath(root: root, requested: requested) else {
+        throw GitError("Refusing to revert an unscoped or out-of-tree path.")
+    }
+    guard hunkIndex >= 0 else { throw GitError("Invalid hunk index.") }
+    guard await isTracked(root, rel) else {
+        throw GitError("Per-hunk revert isn't supported for untracked files — revert the whole file.")
+    }
+    var base = "HEAD"
+    if (try? await gitStrict(root, ["rev-parse", "--verify", "HEAD"])) == nil { base = EMPTY_TREE }
+    let patch = try await git(root, ["diff", base, "--", rel])
+    guard let single = singleHunkPatch(patch, index: hunkIndex) else {
+        throw GitError("That hunk no longer exists — the file changed since the diff was shown.")
+    }
+    do {
+        _ = try await gitStrict(root, ["apply", "--reverse", "--recount"], stdin: single)
+    } catch {
+        throw GitError(gitErr(error, "Revert hunk failed"))
+    }
+    return RevertResult(path: rel, reverted: true)
+}
+
+/// Reassemble a single-hunk patch from a one-file unified diff: the file header (every
+/// line before the first `@@`) plus the hunk at `index`. Returns nil for an empty patch
+/// or an out-of-range index. Pure — unit-tested without git.
+public func singleHunkPatch(_ patch: String, index: Int) -> String? {
+    guard index >= 0, !patch.isEmpty else { return nil }
+    var header: [String] = []
+    var hunks: [[String]] = []
+    var cur: [String]? = nil
+    for line in patch.components(separatedBy: "\n") {
+        if line.hasPrefix("@@") {
+            if let c = cur { hunks.append(c) }
+            cur = [line]
+        } else if cur != nil {
+            cur?.append(line)
+        } else {
+            header.append(line)
+        }
+    }
+    if let c = cur { hunks.append(c) }
+    guard index < hunks.count else { return nil }
+    var out = header
+    out.append(contentsOf: hunks[index])
+    var joined = out.joined(separator: "\n")
+    if !joined.hasSuffix("\n") { joined += "\n" }
+    return joined
 }
 
 private func buildFile(_ path: String, _ oldPath: String?, _ status: FileStatus, _ diff: String) -> DiffFile {

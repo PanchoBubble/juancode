@@ -63,4 +63,5 @@ extension PrListResult: ResponseEncodable {}
 extension BeadsResult: ResponseEncodable {}
 extension ReviewResult: ResponseEncodable {}
 extension DiffComment: ResponseEncodable {}
+extension RevertResult: ResponseEncodable {}
 extension ProviderStatus: ResponseEncodable {}

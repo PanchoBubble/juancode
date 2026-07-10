@@ -114,6 +114,29 @@ final class AppModel {
     /// The window key monitor bails when set, so the panel's own `.onKeyPress` sees
     /// the plain keys instead of them being swallowed as sidebar nav.
     var changesKeyboardActive = false
+    /// A one-shot request for the Changes diff pane to grab keyboard focus, carrying
+    /// the session it targets (juancode-qce.3). Only the explicit "open changes" paths
+    /// (⌘⇧C, the review badge/banner) set it; a plain panel re-appear (e.g. switching
+    /// sessions with the panel open) does NOT, so the diff pane never steals focus from
+    /// the terminal on a session switch. The panel consumes and clears it.
+    var changesFocusRequest: String?
+    /// A one-shot git-action request from the diff pane's single keys (`c` = commit,
+    /// shift-P = push+PR). GitActionsView watches it and opens the matching flow for
+    /// its session, so acting on a review needs no mouse.
+    struct GitFlowRequest: Equatable { let token: Int; let session: String; let flow: GitFlow }
+    enum GitFlow: Equatable { case commit, pr }
+    private var gitFlowToken = 0
+    var gitFlowRequest: GitFlowRequest?
+
+    /// Ask the diff pane for `session` to take keyboard focus on its next appear /
+    /// change. Paired with the explicit open paths only.
+    func requestChangesFocus(_ session: String) { changesFocusRequest = session }
+
+    /// Fire a commit (`c`) or push+PR (shift-P) flow for `session` from the diff pane.
+    func requestGitFlow(_ session: String, _ flow: GitFlow) {
+        gitFlowToken &+= 1
+        gitFlowRequest = GitFlowRequest(token: gitFlowToken, session: session, flow: flow)
+    }
     /// Bumped to request the live terminal re-measure its bounds and force a genuine
     /// SIGWINCH — the manual "recalculate geometry" escape hatch for when a resize
     /// left the pane mis-sized (black margins / clipped render) and the automatic
@@ -2390,6 +2413,10 @@ final class AppModel {
     /// Per-session inline review comments. Held in-memory (in-process, no server
     /// round-trip) — they're a staging area pasted into the agent on "submit".
     var commentsBySession: [String: [DiffComment]] = [:]
+    /// Per-session archive of comment batches already sent to the agent (juancode-qce.3).
+    /// A sent review no longer silently vanishes — it moves here so it stays retrievable
+    /// (restore re-stages it) instead of being dropped on submit.
+    private(set) var archivedCommentsBySession: [String: [DiffComment]] = [:]
     /// Sessions whose diff is currently loading, so the panel can show a spinner.
     var diffLoading: Set<String> = []
     /// A transient git-action status line per session (commit/push result or error).
@@ -2564,6 +2591,9 @@ final class AppModel {
         d.set("Changes", forKey: "session.sidePanel.tab")
         d.set(true, forKey: "session.sidePanel.shown")
         markChangesViewed(id)
+        // Explicit open → let the diff pane grab the keyboard so j/k/n/p/r/c work
+        // immediately. A plain session-switch appear does not request this.
+        requestChangesFocus(id)
     }
 
     /// Load (or refresh) the diff + git state for a session, off the main actor
@@ -2797,26 +2827,110 @@ final class AppModel {
         commentsBySession[id] = []
     }
 
-    /// Submit the batched review (juancode-ck4): compose the staged line annotations
-    /// into one deterministic feedback prompt (file:line + quoted hunk + comment) and
-    /// deliver it through the same steer path programmatic prompts use — `submit` does
-    /// a bracketed paste + Enter, so the CLI runs it now when idle and queues it when
-    /// the agent is busy. Clears the basket on send. No-op without a live session.
+    /// A session's archived (already-sent) comment batches (juancode-qce.3).
+    func archivedComments(_ id: String) -> [DiffComment] { archivedCommentsBySession[id] ?? [] }
+
+    /// Re-stage a session's archived comments so a sent review can be pulled back and
+    /// edited/resent — the "not silently vanishing" retrieval path.
+    func restoreArchivedComments(_ id: String) {
+        let archived = archivedCommentsBySession[id] ?? []
+        guard !archived.isEmpty else { return }
+        commentsBySession[id, default: []].append(contentsOf: archived)
+        archivedCommentsBySession[id] = []
+    }
+
+    /// Submit the batched review (juancode-ck4, reworked for juancode-qce.3): compose
+    /// the staged line annotations into one deterministic feedback prompt (file:line +
+    /// quoted hunk + comment) and deliver it through the per-session MESSAGE QUEUE —
+    /// NOT a direct pty paste. The queue flushes on the next idle edge (kicked here in
+    /// case the session is already idle), so review feedback never interrupts the agent
+    /// mid-turn. The sent batch is archived (retrievable), the basket cleared, the
+    /// change badge cleared, and focus returned to the terminal so you watch the agent
+    /// respond. No-op without a live session.
     func submitReview(_ id: String) {
         guard let session = liveSession(id) else {
             gitNoteBySession[id] = GitNote(ok: false, text: "Session isn't live — can't send review.")
             return
         }
-        let prompt = composeReviewFeedback(comments(id))
+        let staged = comments(id)
+        let prompt = composeReviewFeedback(staged)
         guard !prompt.isEmpty else { return }
-        // Surface an oversize/abort as a status note instead of silently dropping.
-        session.submit(prompt) { [weak self] outcome in
-            guard case let .rejected(reason) = outcome else { return }
-            Task { @MainActor in
-                self?.gitNoteBySession[id] = GitNote(ok: false, text: reason)
-            }
-        }
+        appState.messageQueue.add(id, text: prompt)
+        session.kickQueue()
+        // Archive instead of dropping, so a sent review stays retrievable.
+        if !staged.isEmpty { archivedCommentsBySession[id, default: []].append(contentsOf: staged) }
         commentsBySession[id] = []
+        markChangesViewed(id)
+        focusTerminal()
+    }
+
+    /// Turn one AI review finding into a staged inline comment and drop it from the
+    /// overlay (juancode-qce.3) — the "accept" half of the per-finding treatment.
+    func acceptFinding(_ id: String, _ finding: ReviewFinding) {
+        let line = finding.line ?? 1
+        let body: String
+        if finding.title.isEmpty { body = finding.note }
+        else if finding.note.isEmpty { body = finding.title }
+        else { body = "\(finding.title)\n\(finding.note)" }
+        addComment(id, file: finding.file, side: finding.side, line: line, endLine: line, body: body)
+        dismissFinding(id, finding)
+    }
+
+    /// Drop one AI review finding from the overlay without acting on it — "dismiss".
+    func dismissFinding(_ id: String, _ finding: ReviewFinding) {
+        guard var r = reviewBySession[id] else { return }
+        r.findings.removeAll { $0 == finding }
+        reviewBySession[id] = r
+    }
+
+    /// Accept every finding on `file` as comments (the selected-file batch key).
+    func acceptFindings(_ id: String, file: String) {
+        for f in (reviewBySession[id]?.findings ?? []).filter({ $0.file == file }) {
+            acceptFinding(id, f)
+        }
+    }
+
+    /// Dismiss every finding on `file` (the selected-file batch key).
+    func dismissFindings(_ id: String, file: String) {
+        guard var r = reviewBySession[id] else { return }
+        r.findings.removeAll { $0.file == file }
+        reviewBySession[id] = r
+    }
+
+    /// Whether `file` currently has any AI review findings — gates the finding keys.
+    func hasFindings(_ id: String, file: String) -> Bool {
+        (reviewBySession[id]?.findings ?? []).contains { $0.file == file }
+    }
+
+    /// Discard the uncommitted changes to one file (juancode-qce.3) — destructive, so
+    /// the UI gates it behind an explicit confirm. Runs the scoped `git checkout` off
+    /// the main actor and refreshes the diff.
+    func revertFile(_ id: String, path: String) async {
+        guard let cwd = cwd(of: id) else { return }
+        do {
+            let r = try await Task.detached(priority: .userInitiated) {
+                try await JuancodeServices.revertFile(cwd, path: path)
+            }.value
+            gitNoteBySession[id] = GitNote(ok: true, text: "Reverted \(r.path)")
+            loadChanges(id)
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+        }
+    }
+
+    /// Discard one hunk of a file's uncommitted change (juancode-qce.3) — destructive,
+    /// confirm-gated. Reverse-applies exactly that hunk off the main actor.
+    func revertHunk(_ id: String, path: String, hunkIndex: Int) async {
+        guard let cwd = cwd(of: id) else { return }
+        do {
+            let r = try await Task.detached(priority: .userInitiated) {
+                try await JuancodeServices.revertHunk(cwd, path: path, hunkIndex: hunkIndex)
+            }.value
+            gitNoteBySession[id] = GitNote(ok: true, text: "Reverted a hunk in \(r.path)")
+            loadChanges(id)
+        } catch {
+            gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
+        }
     }
 
     /// Run an AI review pass over the session's working-tree diff (juancode-7ha):
