@@ -3,24 +3,25 @@ import JuancodeCore
 import JuancodeServices
 import JuancodePersistence
 
-/// Server-side tracked-PR engine (juancode-bt2): mirrors the in-process tracking
-/// the SwiftUI `AppModel` runs, but exposed over the wire so the remote web/phone
-/// client (`apps/web`) can start/stop tracking and observe status + needs-decision
-/// escalations.
+/// Tracked-PR engine (juancode-bt2 / juancode-b4m): the single owner of the
+/// tracked-PR watch list, its poll loop, and its persistence. The SwiftUI
+/// `AppModel` is a facade over this actor (a read-only mirror fed by
+/// `subscribe`), and the remote web/phone client drives it over the wire —
+/// one list, one poller, no double-driving.
 ///
-/// The semantics are a faithful port of `AppModel`'s PR tracking: clicking "Track"
-/// spawns a dedicated agent session seeded with the PR context + auto-fix-vs-escalate
-/// contract (`trackSeedPrompt`); a 20s poll loop diffs each PR's `gh` activity
-/// (`classifyPrActivity`), injects `autoFixPrompt`s into the agent session for
-/// auto-fixable changes, and raises `TrackNotification`s for changes that need a
-/// human decision. The pure classification + prompt logic is reused verbatim from
+/// The semantics: clicking "Track" spawns a dedicated agent session seeded with
+/// the PR context + auto-fix-vs-escalate contract (`trackSeedPrompt`); a 60s
+/// poll loop diffs each PR's `gh` activity (`classifyPrActivity`), injects
+/// `autoFixPrompt`s into the agent session for auto-fixable changes, and raises
+/// `TrackNotification`s for changes that need a human decision. The pure
+/// classification + prompt logic is reused verbatim from
 /// `JuancodeServices/TrackedPr.swift` — this layer only owns the watch list, the
-/// session plumbing, and broadcasting changes to subscribers.
+/// session plumbing, persistence, and broadcasting changes to subscribers.
 ///
 /// One process-wide instance lives on `AppState`; every `WebSocketConnection`
 /// subscribes to it for status/notification pushes and routes the tracking client
-/// messages through it. Persistence uses the same `UserDefaults` key as the GUI so
-/// the watch list survives a restart in either surface.
+/// messages through it. The watch list persists in the SQLite `tracked_prs`
+/// table (`TrackedPrStore`), so it survives a restart of either surface.
 public actor PrTrackingEngine {
     /// A change observers should react to: either the full watch list moved (status
     /// refresh) or a single needs-decision escalation fired (notification ping).
@@ -35,23 +36,43 @@ public actor PrTrackingEngine {
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`.
     private var tracked: [String: TrackedPr] = [:]
     private var pollLoop: Task<Void, Never>?
-    private let pollInterval: Duration = .seconds(20)
+    private let pollInterval: Duration = .seconds(60)
 
     private var nextObserverToken = 0
     private var observers: [Int: @Sendable (Change) -> Void] = [:]
 
-    /// Shared with the GUI (`AppModel.trackedDefaultsKey`) so a single watch list is
-    /// restored regardless of which surface last wrote it.
-    private static let defaultsKey = "juancode.trackedPrs.v1"
+    /// The pre-SQLite persistence key (juancode-b4m). Only read once, to import a
+    /// legacy watch list into the store; absence of the key is the migration marker.
+    private static let legacyDefaultsKey = "juancode.trackedPrs.v1"
 
-    public init(registry: SessionRegistry, store: GRDBStore) {
+    /// `legacyDefaultsSuite` is a seam for tests — the one-time legacy import reads
+    /// (and then deletes) the old UserDefaults blob from that suite instead of
+    /// `.standard`. (A suite name, not a `UserDefaults` instance, because the latter
+    /// isn't Sendable and can't cross into the actor init.)
+    public init(registry: SessionRegistry, store: GRDBStore, legacyDefaultsSuite: String? = nil) {
         self.registry = registry
         self.store = store
+        let defaults = legacyDefaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         // Restore the persisted watch list synchronously in init (the actor's
         // isolated state is initialised here), then kick the poll loop off-actor.
-        if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
-           let list = try? JSONDecoder().decode([TrackedPr].self, from: data) {
-            for pr in list { tracked[pr.id] = pr }
+        let payloads = store.loadTrackedPrPayloads()
+        if payloads.isEmpty {
+            // One-time import of the legacy UserDefaults list. Once imported the key
+            // is removed, so a later empty store (user untracked everything) can never
+            // resurrect a stale defaults copy.
+            if let data = defaults.data(forKey: Self.legacyDefaultsKey),
+               let list = try? JSONDecoder().decode([TrackedPr].self, from: data),
+               !list.isEmpty {
+                for pr in list { tracked[pr.id] = pr }
+                store.replaceTrackedPrPayloads(Self.encodePayloads(tracked))
+                defaults.removeObject(forKey: Self.legacyDefaultsKey)
+            }
+        } else {
+            for (id, payload) in payloads {
+                if let pr = try? JSONDecoder().decode(TrackedPr.self, from: Data(payload.utf8)) {
+                    tracked[id] = pr
+                }
+            }
         }
         if !tracked.isEmpty {
             Task { await self.startLoop() }
@@ -93,27 +114,31 @@ public actor PrTrackingEngine {
         for o in observers.values { o(.notification(trackedId: trackedId, prNumber: prNumber, notification: n)) }
     }
 
-    // MARK: - track / untrack (mirror AppModel.trackPr / untrackPr)
+    // MARK: - track / untrack
 
     /// Start tracking a PR: spawn a dedicated Claude session seeded with the PR's
     /// context + auto-fix-vs-escalate contract, register it, and ensure the poll
-    /// loop is running. No-op if already tracked.
-    public func track(_ pr: PullRequest, cwd: String) {
+    /// loop is running. Returns the new entry (so the GUI can select its spawned
+    /// session); nil when already tracked (no-op) or the spawn failed.
+    @discardableResult
+    public func track(_ pr: PullRequest, cwd: String) -> TrackedPr? {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
-        guard tracked[key] == nil else { return }
+        guard tracked[key] == nil else { return nil }
         let seed = trackSeedPrompt(number: pr.number, title: pr.title, branch: pr.branch, url: pr.url)
         let grid = (cols: 120, rows: 32)
         guard let session = try? registry.create(
             provider: .claude, cwd: cwd, cols: grid.cols, rows: grid.rows,
             opts: SpawnOptions(skipPermissions: true, model: "opus")
-        ) else { return }
+        ) else { return nil }
         if !seed.isEmpty { session.autoSubmit(seed) }
-        tracked[key] = TrackedPr(
+        let entry = TrackedPr(
             number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
             cwd: cwd, sessionId: session.id)
+        tracked[key] = entry
         persist()
         broadcastTracked()
         startLoop()
+        return entry
     }
 
     /// Stop tracking a PR. Leaves its agent session alone; just drops it from the
@@ -134,14 +159,14 @@ public actor PrTrackingEngine {
         broadcastTracked()
     }
 
-    // MARK: - poll loop (mirror AppModel.pollTrackedOnce)
+    // MARK: - poll loop
 
     private func startLoop() {
         guard pollLoop == nil else { return }
         pollLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: self?.pollInterval ?? .seconds(20))
+                try? await Task.sleep(for: self?.pollInterval ?? .seconds(60))
             }
         }
     }
@@ -150,14 +175,33 @@ public actor PrTrackingEngine {
     /// changed, inject auto-fix prompts into the agent session, and raise
     /// notifications for changes that need a human decision.
     func pollOnce() async {
-        for (key, pr) in tracked {
-            let cwd = pr.cwd, number = pr.number
-            guard let activity = await getPrActivity(cwd, number: number) else { continue }
-            // The authenticated `gh` login, so the classifier ignores the agent's own
-            // comments/reviews and doesn't echo-fire on them.
-            let viewerLogin = await getViewerLogin(cwd)
-            guard var entry = tracked[key] else { continue } // untracked while off-actor
+        // Fetch every tracked PR's activity concurrently (juancode-hmu): a pass is
+        // one round of parallel `gh` spawns instead of N sequential ones.
+        // `getViewerLogin` is process-cached after the first call, so the fan-out
+        // only multiplies the `gh pr view` round-trips. The `activity` + `viewer`
+        // for one PR are still fetched together so the classifier can ignore the
+        // agent's own comments (no echo loop). Results are applied serially below,
+        // back on the actor.
+        let toPoll = tracked.values.map { (key: $0.id, cwd: $0.cwd, number: $0.number) }
+        guard !toPoll.isEmpty else { return }
+        let fetched = await withTaskGroup(of: (String, PrActivity?, String).self) { group in
+            for item in toPoll {
+                group.addTask(priority: .utility) {
+                    async let activity = getPrActivity(item.cwd, number: item.number)
+                    async let viewer = getViewerLogin(item.cwd)
+                    return (item.key, await activity, await viewer)
+                }
+            }
+            var out: [(String, PrActivity?, String)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
 
+        for (key, activity, viewerLogin) in fetched {
+            guard let activity else { continue }
+            // The entry may have been untracked while we were off-actor.
+            guard var entry = tracked[key] else { continue }
+            let number = entry.number
             let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
             entry.snapshot = result.snapshot
             entry.lastPolledAt = nowMs()
@@ -198,8 +242,25 @@ public actor PrTrackingEngine {
                     _ = await reviveSession(entry.sessionId, registry: registry, store: store)
                     if let session = registry.get(entry.sessionId) {
                         session.autoSubmit(prompt)
+                    } else if let fresh = try? registry.create(
+                        provider: .claude, cwd: entry.cwd, cols: 120, rows: 32,
+                        opts: SpawnOptions(skipPermissions: true, model: "opus")
+                    ) {
+                        // The original conversation couldn't be resumed (e.g. nothing
+                        // recoverable). Rather than stall, open a fresh session seeded
+                        // with the PR context, rebind tracking to it, and queue the fix.
+                        // Future polls target the new session.
+                        let seed = trackSeedPrompt(number: number, title: entry.title,
+                                                   branch: entry.branch, url: entry.url)
+                        if !seed.isEmpty { fresh.autoSubmit(seed) }
+                        fresh.autoSubmit(prompt)
+                        entry.sessionId = fresh.id
                     } else {
-                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed."
+                        // Even a fresh spawn failed — surface it so the tracked-PR UI
+                        // shows the work is stuck rather than dropping it. Dedupe so a
+                        // persistently-failing session doesn't raise the same
+                        // notification on every poll.
+                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed or respawned."
                         if !entry.notifications.contains(where: { $0.message == offlineMsg }) {
                             let n = TrackNotification(id: UUID().uuidString, prNumber: number,
                                                       message: offlineMsg, createdAt: nowMs())
@@ -217,11 +278,19 @@ public actor PrTrackingEngine {
         broadcastTracked()
     }
 
-    // MARK: - persistence (shares AppModel's UserDefaults key)
+    // MARK: - persistence (SQLite `tracked_prs` via TrackedPrStore)
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(Array(tracked.values)) {
-            UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        store.replaceTrackedPrPayloads(Self.encodePayloads(tracked))
+    }
+
+    private static func encodePayloads(_ tracked: [String: TrackedPr]) -> [String: String] {
+        var payloads: [String: String] = [:]
+        for (id, pr) in tracked {
+            if let data = try? JSONEncoder().encode(pr) {
+                payloads[id] = String(decoding: data, as: UTF8.self)
+            }
         }
+        return payloads
     }
 }

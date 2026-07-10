@@ -12,7 +12,7 @@ import JuancodeCore
 /// (a lossy UTF-8 decode of the raw pty bytes) so the same data dir is readable
 /// by either implementation. Replay fidelity is preserved end to end because the
 /// trim happens on byte boundaries upstream (see `Scrollback`).
-public final class GRDBStore: PersistentStore, MessageQueuePersistence, @unchecked Sendable {
+public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedPrStore, @unchecked Sendable {
     private let dbQueue: DatabaseQueue
 
     /// Open (creating if needed) the database at `path`. Defaults to
@@ -115,6 +115,17 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
                     session_id  TEXT PRIMARY KEY,
                     payload     TEXT NOT NULL,
                     created_at  INTEGER NOT NULL
+                );
+                """)
+
+            // Tracked-PR watch list (juancode-b4m): id = TrackedPr.key(cwd:number:),
+            // payload = JSON-encoded TrackedPr. Owned exclusively by PrTrackingEngine;
+            // replaces the legacy `juancode.trackedPrs.v1` UserDefaults blob.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS tracked_prs (
+                    id         TEXT PRIMARY KEY,
+                    payload    TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
                 """)
 
@@ -460,6 +471,31 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
         } ?? nil
         guard let payload, let data = payload.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ReviewResult.self, from: data)
+    }
+
+    // MARK: - TrackedPrStore (juancode-b4m)
+
+    public func loadTrackedPrPayloads() -> [String: String] {
+        (try? dbQueue.read { db in
+            var out: [String: String] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT id, payload FROM tracked_prs") {
+                out[row["id"] as String] = row["payload"] as String
+            }
+            return out
+        }) ?? [:]
+    }
+
+    public func replaceTrackedPrPayloads(_ payloads: [String: String]) {
+        let now = nowMs()
+        try? dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM tracked_prs")
+            for (id, payload) in payloads {
+                try db.execute(
+                    sql: "INSERT INTO tracked_prs (id, payload, updated_at) VALUES (?, ?, ?)",
+                    arguments: [id, payload, now]
+                )
+            }
+        }
     }
 
     // MARK: - MessageQueuePersistence (oracle-cj3 / juancode-r82)
