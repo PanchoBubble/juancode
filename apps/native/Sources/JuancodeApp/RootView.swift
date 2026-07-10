@@ -53,6 +53,12 @@ struct RootView: View {
                       ? "Keep Awake is on — the Mac won't idle-sleep. Click to turn off (⌃⇧A)"
                       : "Keep Awake is off — click to stop the Mac idle-sleeping while sessions run (⌃⇧A)")
                 .clickCursor()
+                Button { model.openEditorForSelection() } label: {
+                    Label("Open Editor", systemImage: "pencil")
+                }
+                .help("Open the selected session's worktree in your editor ($EDITOR, ⌘E)")
+                .disabled(model.selection == nil)
+                .clickCursor()
                 Button { model.showingTrackedPrs = true } label: {
                     Label("Tracked PRs", systemImage: "checklist")
                 }
@@ -970,6 +976,9 @@ struct SidebarView: View {
             Button("Resume in juancode") { model.importExternalSession(meta.id) }
         } else {
             Button("Rename…") { beginRename(meta) }
+            if meta.kind != .editor {
+                Button("Open in Editor") { model.openEditorSession(meta.id) }
+            }
             if meta.archived {
                 Button("Unarchive") { model.setArchived(meta.id, false) }
             } else {

@@ -249,6 +249,12 @@ struct JuancodeApp: App {
                     performShortcut(.toggleTerminal, model: model, oracle: oracle)
                 }
                 .appShortcut(.toggleTerminal, shortcuts)
+                // ⌘E opens the selected session's worktree in $EDITOR (nvim) as a
+                // first-class session, so the editor lands in the agent's checkout.
+                Button("Open Editor for Session") {
+                    performShortcut(.openEditor, model: model, oracle: oracle)
+                }
+                .appShortcut(.openEditor, shortcuts)
                 // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
                 // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
                 Button("Oracle") {

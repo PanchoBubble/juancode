@@ -23,6 +23,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case keepAwake
     case recalcGeometry
     case toggleTerminal
+    case openEditor
     case oracle
     case globalIssues
     case focusSessionSearch
@@ -48,6 +49,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .keepAwake: return "Keep Awake"
         case .recalcGeometry: return "Recalculate Terminal Geometry"
         case .toggleTerminal: return "Toggle Terminal"
+        case .openEditor: return "Open Editor for Session"
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
         case .focusSessionSearch: return "Find Sessions"
@@ -74,6 +76,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
         case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
+        // ⌘E opens the selected session's worktree in $EDITOR (nvim) as a session.
+        case .openEditor: return KeyBinding(key: "e", command: true)
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
         case .focusSessionSearch: return KeyBinding(key: "f", control: true)
@@ -250,6 +254,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .keepAwake: model.keepAwake.toggle()
     case .recalcGeometry: model.resyncTerminalGeometry()
     case .toggleTerminal: model.toggleBottomTerminal()
+    case .openEditor: model.openEditorForSelection()
     case .oracle: oracle.toggleChatFocused()
     case .globalIssues: oracle.open(tab: .issues)
     case .focusSessionSearch: model.focusSessionSearch()

@@ -112,6 +112,10 @@ public final class Session: @unchecked Sendable {
     private let env: SessionEnvironment
     private let spec: ProviderSpec
     private var proc: PtyProcess?
+    /// Whether this session writes to the persistent store. False for `.editor`
+    /// sessions, which are transient (no transcript, no resume) — keeping them out
+    /// of the DB also keeps them out of the retention cap and the disk-restore set.
+    private let persistEnabled: Bool
 
     private var scroll: Scrollback
     private var outputListeners: [Int: OutputListener] = [:]
@@ -278,6 +282,43 @@ public final class Session: @unchecked Sendable {
                            isNew: false, env: env)
     }
 
+    /// Open an editor (`executable` + `args`, e.g. nvim + `["."]`) rooted in
+    /// `parent`'s effective working directory, as a first-class pty session linked
+    /// back to `parent`. Reuses the same forkpty path as an agent session so it
+    /// renders in the ordinary terminal surface and groups in the sidebar, but is
+    /// `.editor` kind — excluded from agent-turn notifications and never persisted.
+    public static func editor(
+        parent: SessionMeta,
+        executable: String,
+        args: [String],
+        cols: Int,
+        rows: Int,
+        env: SessionEnvironment
+    ) throws -> Session {
+        let cwd = parent.effectiveCwd
+        let now = nowMs()
+        let folder = (cwd as NSString).lastPathComponent
+        let editorName = (executable as NSString).lastPathComponent
+        let meta = SessionMeta(
+            id: UUID().uuidString.lowercased(),
+            provider: parent.provider,
+            cwd: cwd,
+            title: "\(editorName) · \(folder.isEmpty ? cwd : folder)",
+            status: .running,
+            exitCode: nil,
+            createdAt: now,
+            updatedAt: now,
+            cliSessionId: nil,
+            skipPermissions: false,
+            worktreePath: parent.worktreePath,
+            usage: nil,
+            kind: .editor,
+            parentSessionId: parent.id
+        )
+        return try Session(meta: meta, args: args, cols: cols, rows: rows,
+                           isNew: true, env: env, executableOverride: executable, persist: false)
+    }
+
     // MARK: - init
 
     private init(
@@ -287,10 +328,13 @@ public final class Session: @unchecked Sendable {
         rows: Int,
         isNew: Bool,
         env: SessionEnvironment,
-        seedScrollback: [UInt8] = []
+        seedScrollback: [UInt8] = [],
+        executableOverride: String? = nil,
+        persist: Bool = true
     ) throws {
         self._meta = meta
         self.env = env
+        self.persistEnabled = persist
         self._lastInputMs = nowMs()
         self.spec = Providers.spec(for: meta.provider)
         self.scroll = Scrollback(limit: env.scrollbackLimit, seed: seedScrollback)
@@ -304,7 +348,7 @@ public final class Session: @unchecked Sendable {
             self?.emitActivity(state, notify)
         }
 
-        let command = env.resolver.command(for: meta.provider)
+        let command = executableOverride ?? env.resolver.command(for: meta.provider)
         guard let proc = PtyProcess(
             executable: command,
             args: args,
@@ -319,32 +363,39 @@ public final class Session: @unchecked Sendable {
         }
         self.proc = proc
 
-        if isNew {
-            env.store.insert(meta)
-        } else {
-            env.store.update(meta, scrollback: scroll.replay)
-        }
-
-        // For Codex we can't pin the session id, so discover it from the rollout file.
-        if !spec.pinsSessionId && meta.cliSessionId == nil {
-            captureCliSessionId()
-        }
-
-        // Keep the title + usage in sync with the CLI's own transcript.
-        startTitleWatch()
-        // Preferred activity signal: pulse the detector busy on each batch of agent
-        // records the CLI appends to its transcript. The id is read via a getter so
-        // Codex (which discovers its id after spawn) starts tailing once it lands. The
-        // backlog (`reset: true`) is skipped so a resumed session's replayed prior turns
-        // don't spuriously pulse busy at startup — only newly appended records count.
-        let stop = env.startActivityTail(
-            meta.provider,
-            { [weak self] in self?.meta.cliSessionId },
-            { [weak self] batch, reset in
-                if !reset { self?.detector.feedStructured(batch) }
+        if persist {
+            if isNew {
+                env.store.insert(meta)
+            } else {
+                env.store.update(meta, scrollback: scroll.replay)
             }
-        )
-        lock.withLock { stopActivityTail = stop }
+        }
+
+        // The transcript-driven machinery below (codex id discovery, title/usage
+        // polling, structured activity tail) only makes sense for a real agent CLI.
+        // An editor session has no transcript, so it skips all of it.
+        if meta.kind == .agent {
+            // For Codex we can't pin the session id, so discover it from the rollout file.
+            if !spec.pinsSessionId && meta.cliSessionId == nil {
+                captureCliSessionId()
+            }
+
+            // Keep the title + usage in sync with the CLI's own transcript.
+            startTitleWatch()
+            // Preferred activity signal: pulse the detector busy on each batch of agent
+            // records the CLI appends to its transcript. The id is read via a getter so
+            // Codex (which discovers its id after spawn) starts tailing once it lands. The
+            // backlog (`reset: true`) is skipped so a resumed session's replayed prior turns
+            // don't spuriously pulse busy at startup — only newly appended records count.
+            let stop = env.startActivityTail(
+                meta.provider,
+                { [weak self] in self?.meta.cliSessionId },
+                { [weak self] batch, reset in
+                    if !reset { self?.detector.feedStructured(batch) }
+                }
+            )
+            lock.withLock { stopActivityTail = stop }
+        }
         // Seed the desired grid with the spawn size and re-assert it once the TUI is
         // up, so a slow-booting CLI that missed early SIGWINCHs still adopts it
         // (juancode-1th.3) — the server-side replacement for per-client retry timers.
@@ -1133,6 +1184,7 @@ public final class Session: @unchecked Sendable {
     /// reindex (juancode-5qw.1). Driven by the output debounce and the mid-burst
     /// byte-threshold flush; search is refreshed on the busy->idle edge / exit.
     private func flushScrollbackOnly() {
+        guard persistEnabled else { return }
         let (id, bytes, updatedAt) = lock.withLock { () -> (String, [UInt8], Int) in
             _meta.updatedAt = nowMs()
             persistGeneration += 1 // cancel any pending debounce
@@ -1151,7 +1203,7 @@ public final class Session: @unchecked Sendable {
             _meta.updatedAt = nowMs()
             return _meta
         }
-        env.store.updateMeta(meta, reindexTitleFts: titleChanged)
+        if persistEnabled { env.store.updateMeta(meta, reindexTitleFts: titleChanged) }
         emitMetaChange(meta)
     }
 
@@ -1165,7 +1217,7 @@ public final class Session: @unchecked Sendable {
             writeThrottle.didFullFlush()
             return (_meta, scroll.replay)
         }
-        env.store.update(meta, scrollback: bytes)
+        if persistEnabled { env.store.update(meta, scrollback: bytes) }
         if notify { emitMetaChange(meta) }
     }
 }
