@@ -23,11 +23,14 @@ struct TerminalIdentity: Hashable {
 /// The app runs forced-dark, so only a dark variant is needed.
 private enum SwiftTermTheme {
     static let background = "000000"
-    static let foreground = "d0d0d0"
-    /// 16 ANSI colors, indices 0-15, copied verbatim from libghostty's afterglow.
+    static let foreground = "e0e0e0"
+    /// 16 ANSI colors, indices 0-15. Same afterglow hue family as before but
+    /// saturated up so they don't read washed-out on pure black, and — critically —
+    /// the bright half (8-15) is now genuinely brighter than the normal half instead
+    /// of a near-duplicate, so bold/bright output actually pops.
     static let palette = [
-        "151515", "ac4142", "7e8e50", "e5b567", "6c99bb", "9f4e85", "7dd6cf", "d0d0d0",
-        "505050", "ac4142", "7e8e50", "e5b567", "6c99bb", "9f4e85", "7dd6cf", "f5f5f5",
+        "1c1c1c", "e0524f", "8fce4b", "e8c14a", "5ca8f0", "c678dd", "56c8d8", "d0d0d0",
+        "6a6a6a", "ff6b68", "a6e35c", "ffd866", "82c0ff", "e29aff", "7ee0ee", "ffffff",
     ]
 
     /// Parse a 6-digit "rrggbb" hex into a SwiftTerm `Color` (16-bit channels).
@@ -91,15 +94,22 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
     // All view access lives in this main-actor-isolated handler (so it's implicitly
     // Sendable). Returns true when it consumed the wheel. Args are plain scalars so
     // nothing non-Sendable crosses into the nonisolated monitor closure below.
-    let handle: @MainActor (Double, CGPoint) -> Bool = { [weak tv] deltaY, location in
+    let handle: @MainActor (Double, CGPoint, Int) -> Bool = { [weak tv] deltaY, location, windowNumber in
         // Gate on the program's requested mouseMode only — NOT on the view's
         // `allowMouseReporting`, which we deliberately disable (see `attach`) to stop
         // hover/motion from being typed into the pty. Our wheel events go through
         // `terminal.sendEvent` directly, which is independent of that view flag.
-        guard let tv, let terminal = tv.terminal,
-              terminal.mouseMode != .off,
-              // Only the terminal actually under the pointer should consume it.
-              tv.bounds.contains(tv.convert(location, from: nil)) else { return false }
+        guard let tv, let terminal = tv.terminal, terminal.mouseMode != .off,
+              // Only consume for the terminal that is genuinely under the pointer.
+              // A plain `tv.bounds.contains(...)` is wrong: overlays like the Oracle
+              // dock and Changes panel sit *on top of* the terminal's rectangle (and a
+              // backgrounded pane's detached view reports raw window coords), so bounds
+              // alone would swallow scrolls meant for whatever is actually on top and
+              // break scrolling over those panels. Hit-test the real view instead, and
+              // only in this terminal's key window.
+              let window = tv.window, window.isKeyWindow, window.windowNumber == windowNumber,
+              let hit = window.contentView?.hitTest(location),
+              hit === tv || hit.isDescendant(of: tv) else { return false }
         let ticks = max(1, min(6, Int(abs(deltaY))))
         // xterm encodes wheel-up as button 64 and wheel-down as 65. Position is
         // irrelevant for these apps' full-screen scroll regions, so report (0,0).
@@ -113,8 +123,9 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
         // cross into the main-actor handler.
         let deltaY = event.deltaY
         let location = event.locationInWindow
+        let windowNumber = event.windowNumber
         guard deltaY != 0 else { return event }
-        let consumed = MainActor.assumeIsolated { handle(deltaY, location) }
+        let consumed = MainActor.assumeIsolated { handle(deltaY, location, windowNumber) }
         return consumed ? nil : event
     }
 }

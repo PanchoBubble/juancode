@@ -849,11 +849,14 @@ private struct FileCard: View {
         }
     }
 
-    /// Press-drag-release over the line stack. `minimumDistance: 0` so we still see the
-    /// initial press location; we only treat it as a range-select once the cursor
-    /// actually moves to a different row, otherwise a plain click stays single-line.
+    /// Press-drag-release over the line stack. A non-zero `minimumDistance` is
+    /// load-bearing: a zero-distance drag wins gesture arbitration on the first
+    /// movement and starves the enclosing ScrollView, killing scroll over the diff.
+    /// The threshold lets a scroll start reach the ScrollView while a deliberate
+    /// click-drag (which spans rows, far past the threshold) still range-selects.
+    /// Single-line clicks are handled separately by each row's own tap gesture.
     private var dragSelectGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .named(dragSpace))
+        DragGesture(minimumDistance: 8, coordinateSpace: .named(dragSpace))
             .onChanged { value in
                 guard let start = rowIndex(at: value.startLocation),
                       let now = rowIndex(at: value.location) else { return }
