@@ -45,7 +45,11 @@ public enum JuancodeServer {
             // Server→client messages are produced from many threads (pty output,
             // activity); funnel them through a stream that one writer task drains.
             let (stream, cont) = AsyncStream<ServerMessage>.makeStream()
-            let conn = WebSocketConnection(state: state) { msg in cont.yield(msg) }
+            // The send gate tracks queued-but-unwritten frames so the connection's
+            // output coalescer can detect a stalled client and stop growing this
+            // stream without bound (juancode-5qw.7).
+            let gate = WSSendGate(cont: cont)
+            let conn = WebSocketConnection(state: state, gate: gate)
             conn.start()
             // Announce version + capabilities first, before any pty output, so
             // clients can feature-detect (juancode-tgc). Yielded onto the same
@@ -55,9 +59,13 @@ public enum JuancodeServer {
             let writer = Task {
                 for await msg in stream {
                     try? await outbound.writeTextMessage(msg.jsonString())
+                    // Mark the frame drained so the gate's backpressure signal
+                    // clears once the client catches up (juancode-5qw.7).
+                    gate.didWrite()
                 }
             }
             defer {
+                conn.stopOutput()
                 conn.close()
                 cont.finish()
                 writer.cancel()

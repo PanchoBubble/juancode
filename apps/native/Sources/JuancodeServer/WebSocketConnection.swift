@@ -35,6 +35,10 @@ final class WebSocketConnection: @unchecked Sendable {
     private let state: AppState
     /// Enqueue a server message for the writer task (thread-safe).
     let send: @Sendable (ServerMessage) -> Void
+    /// Coalesces + bounds this connection's server→client output stream
+    /// (juancode-5qw.7): one frame per session per tick, dropping-and-resyncing
+    /// past its byte cap so a stalled client can't exhaust server memory.
+    private let outputCoalescer: ServerOutputCoalescer
 
     /// Stable id for this connection, used as its grid-ownership token so a
     /// session's shared pty grid has a single controlling client instead of
@@ -54,10 +58,21 @@ final class WebSocketConnection: @unchecked Sendable {
     /// the client sends `subscribeTrackedPrs`.
     private var trackedPrsUnsub: (@Sendable () -> Void)?
 
-    init(state: AppState, send: @escaping @Sendable (ServerMessage) -> Void) {
+    init(state: AppState, gate: WSSendGate) {
         self.state = state
-        self.send = send
+        self.send = { msg in gate.send(msg) }
+        self.outputCoalescer = ServerOutputCoalescer(
+            isBackedUp: { [weak gate] in gate?.backedUp ?? false },
+            emitOutput: { [weak gate] id, bytes in
+                gate?.send(.output(sessionId: id, data: String(decoding: bytes, as: UTF8.self)))
+            })
+        // Repaint an overflowed session from fresh scrollback (reuses `attached`,
+        // so no new wire message). Set here — needs the fully-initialised self.
+        outputCoalescer.onResync = { [weak self] id in self?.resync(id) }
     }
+
+    /// Stop the output coalescer's timers and drop its buffer — called on teardown.
+    func stopOutput() { outputCoalescer.stop() }
 
     // MARK: - lifecycle
 
@@ -111,16 +126,30 @@ final class WebSocketConnection: @unchecked Sendable {
         if lock.withLock({ subscriptions[id] != nil }) { return }
         guard let pty = resolvePty(id) else { return }
         let offOut = pty.subscribeBytes { [weak self] bytes in
-            self?.send(.output(sessionId: id, data: String(decoding: bytes, as: UTF8.self)))
+            self?.outputCoalescer.append(id, bytes)
         }
         let offExit = pty.onExitHandler { [weak self] code in
+            // Flush any buffered output for this session first, so the client sees
+            // it before the exit rather than after (juancode-5qw.7).
+            self?.outputCoalescer.flushSession(id)
             self?.send(.exit(sessionId: id, exitCode: code))
         }
-        lock.withLock { subscriptions[id] = { offOut(); offExit() } }
+        lock.withLock { subscriptions[id] = { [weak self] in offOut(); offExit(); self?.outputCoalescer.forget(id) } }
     }
 
     private func unsubscribe(_ id: String) {
         lock.withLock { subscriptions.removeValue(forKey: id) }?()
+    }
+
+    /// Repaint an overflowed session (its incremental output was dropped to keep
+    /// the buffer bounded) by re-sending `attached` with current scrollback. Live
+    /// sessions only — ephemeral editor/terminal ptys have no scrollback to replay,
+    /// so a stalled one simply drops the missed bytes.
+    private func resync(_ id: String) {
+        guard let live = state.registry.get(id) else { return }
+        send(.attached(sessionId: id,
+                       scrollback: String(decoding: live.getScrollback(), as: UTF8.self),
+                       session: live.meta))
     }
 
     // MARK: - message-queue fan-out (oracle-cj3 / juancode-r82)
