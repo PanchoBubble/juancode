@@ -1692,6 +1692,15 @@ final class AppModel {
             errorMessage = "No prior CLI conversation could be found to resume this session."
             return false
         }
+        // Claude writes a transcript only once a turn completes, so a pinned-id
+        // session that booted but never got a turn has nothing to resume — `--resume`
+        // would just fast-exit and churn scrollback. Detect that up front and report
+        // unresumable so callers boot a fresh session in place instead.
+        if Providers.spec(for: meta.provider).pinsSessionId,
+           let cliId = meta.cliSessionId,
+           !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd) {
+            return false
+        }
         do {
             let prior = appState.store.getScrollback(id) ?? []
             let seed: [UInt8] = prior.isEmpty
@@ -1764,12 +1773,36 @@ final class AppModel {
             applyRestoredBannerEvent(id, .restoreBegan)
         }
         let resumed = await reactivate(id)
-        guard announce else { return }
         if resumed {
-            watchFirstLiveOutput(id)
-            scheduleRestoreGrace(id)
-        } else {
-            applyRestoredBannerEvent(id, .resumeFailed)
+            if announce {
+                watchFirstLiveOutput(id)
+                scheduleRestoreGrace(id)
+            }
+            return
+        }
+        // Couldn't resume the prior conversation (most often: the session never
+        // completed a turn, so Claude wrote no transcript). Rather than leave a dead
+        // replay-only pane, boot a fresh live session in place — re-pinning the same
+        // id means the first completed turn writes a transcript and future revives
+        // resume cleanly. Clear the banner + any resume error first.
+        if announce { applyRestoredBannerEvent(id, .dismissed) }
+        errorMessage = nil
+        await startFreshInPlace(id)
+    }
+
+    /// Boot a fresh CLI conversation for an exited session that couldn't be resumed,
+    /// keeping its juancode id and pane (see `SessionRegistry.restartFresh`). No-op
+    /// if it's already live or its meta is gone.
+    private func startFreshInPlace(_ id: String) async {
+        guard !isLive(id) else { return }
+        guard let meta = appState.store.get(id) ?? metaCache[id] else { return }
+        if appState.store.get(id) == nil { appState.store.insert(meta) }
+        do {
+            _ = try appState.registry.restartFresh(meta, cols: TerminalGrid.spawn.cols,
+                                                   rows: TerminalGrid.spawn.rows)
+            refresh()
+        } catch {
+            errorMessage = "Couldn't start a fresh session: \(error)"
         }
     }
 

@@ -230,6 +230,35 @@ public final class Session: @unchecked Sendable {
                            isNew: false, env: env, seedScrollback: priorScrollback)
     }
 
+    /// Restart an exited session as a brand-new CLI conversation in place, keeping
+    /// the same juancode id (and pane/db row). For pinned-id providers (Claude) a
+    /// *fresh* CLI session id is pinned so the first completed turn writes a resumable
+    /// transcript and future revives can `--resume` it; discovered providers (Codex)
+    /// reset to nil so post-spawn discovery recaptures the id. A fresh pin (rather
+    /// than reusing the old one) avoids Claude's "session id already in use" error
+    /// when a stale transcript for the old id lingers. Used when a session can't be
+    /// resumed because it never produced a transcript — booting fresh beats a dead
+    /// replay-only pane.
+    public static func restartFresh(
+        _ prev: SessionMeta,
+        cols: Int,
+        rows: Int,
+        env: SessionEnvironment
+    ) throws -> Session {
+        let spec = Providers.spec(for: prev.provider)
+        var meta = prev
+        meta.status = .running
+        meta.exitCode = nil
+        meta.dormant = false
+        meta.updatedAt = nowMs()
+        let freshPin = UUID().uuidString.lowercased()
+        meta.cliSessionId = spec.pinsSessionId ? freshPin : nil
+        let opts = SpawnOptions(skipPermissions: meta.skipPermissions)
+        let startId = spec.pinsSessionId ? freshPin : prev.id
+        return try Session(meta: meta, args: spec.startArgs(startId, opts), cols: cols, rows: rows,
+                           isNew: false, env: env)
+    }
+
     // MARK: - init
 
     private init(

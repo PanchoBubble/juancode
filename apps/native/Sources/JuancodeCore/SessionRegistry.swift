@@ -47,6 +47,14 @@ public final class SessionRegistry: @unchecked Sendable {
                                  priorScrollback: priorScrollback, env: env))
     }
 
+    /// Restart an exited session as a fresh CLI conversation, keeping its juancode id
+    /// (see `Session.restartFresh`). For sessions that can't be resumed because no
+    /// transcript was ever written.
+    @discardableResult
+    public func restartFresh(_ prev: SessionMeta, cols: Int, rows: Int) throws -> Session {
+        try track(Session.restartFresh(prev, cols: cols, rows: rows, env: env))
+    }
+
     /// Flip "accept all" on a live session. There's no way to change a running
     /// CLI's permission flag in place, so we kill the pty and resume the same
     /// conversation (keeping the juancode id + scrollback) with the new level.
