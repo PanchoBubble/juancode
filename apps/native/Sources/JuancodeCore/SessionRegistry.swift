@@ -16,8 +16,14 @@ public final class SessionRegistry: @unchecked Sendable {
     private var nextToken = 0
     private let env: SessionEnvironment
 
-    public init(env: SessionEnvironment = SessionEnvironment()) {
+    /// Hard ceiling on live ptys held at once (juancode-agy). See
+    /// `Config.maxLiveSessions` for the rationale; ≤ 0 disables the cap.
+    private let maxLive: Int
+
+    public init(env: SessionEnvironment = SessionEnvironment(),
+                maxLive: Int = Config.maxLiveSessions) {
         self.env = env
+        self.maxLive = maxLive
     }
 
     @discardableResult
@@ -29,7 +35,8 @@ public final class SessionRegistry: @unchecked Sendable {
         opts: SpawnOptions = SpawnOptions(),
         worktreePath: String? = nil
     ) throws -> Session {
-        try track(Session.create(
+        try enforceCapacity()
+        return try track(Session.create(
             provider: provider, cwd: cwd, cols: cols, rows: rows,
             opts: opts, worktreePath: worktreePath, env: env
         ))
@@ -43,8 +50,9 @@ public final class SessionRegistry: @unchecked Sendable {
         rows: Int,
         priorScrollback: [UInt8] = []
     ) throws -> Session {
-        try track(Session.resume(prev, cols: cols, rows: rows,
-                                 priorScrollback: priorScrollback, env: env))
+        try enforceCapacity()
+        return try track(Session.resume(prev, cols: cols, rows: rows,
+                                        priorScrollback: priorScrollback, env: env))
     }
 
     /// Restart an exited session as a fresh CLI conversation, keeping its juancode id
@@ -52,7 +60,18 @@ public final class SessionRegistry: @unchecked Sendable {
     /// transcript was ever written.
     @discardableResult
     public func restartFresh(_ prev: SessionMeta, cols: Int, rows: Int) throws -> Session {
-        try track(Session.restartFresh(prev, cols: cols, rows: rows, env: env))
+        try enforceCapacity()
+        return try track(Session.restartFresh(prev, cols: cols, rows: rows, env: env))
+    }
+
+    /// Refuse a new spawn once the live-session cap is full. Counts only ptys still
+    /// in the live map — dormant/exited tiles have already been dropped by their
+    /// exit cleanup and don't count. The check races benignly with a concurrent
+    /// spawn (worst case cap+1); it's a memory backstop, not an exact quota.
+    private func enforceCapacity() throws {
+        guard maxLive > 0 else { return }
+        let live = lock.withLock { sessions.count }
+        if live >= maxLive { throw SessionError.tooManyLive(cap: maxLive) }
     }
 
     /// Flip "accept all" on a live session. There's no way to change a running
@@ -89,7 +108,11 @@ public final class SessionRegistry: @unchecked Sendable {
                 off.cancel()
                 guard let self else { return }
                 do {
-                    cont.resume(returning: try self.resume(next, cols: cols, rows: rows, priorScrollback: seed))
+                    // Bypass the live-session cap: this is a net-zero replace (the
+                    // old pty was just killed), and its removal from the live map
+                    // races this callback, so a cap check here could spuriously fail.
+                    cont.resume(returning: try self.track(Session.resume(
+                        next, cols: cols, rows: rows, priorScrollback: seed, env: self.env)))
                 } catch {
                     cont.resume(throwing: error)
                 }

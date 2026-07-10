@@ -4,6 +4,9 @@ public enum SessionError: Error {
     case spawnFailed
     case notResumable
     case notRunning
+    /// The live-session cap (`Config.maxLiveSessions`) is full — refuse the spawn
+    /// rather than let another 100-400MB CLI tree pile on (juancode-agy).
+    case tooManyLive(cap: Int)
 }
 
 /// The result of seeding a fresh session with an initial prompt (`Session.autoSubmit`).
