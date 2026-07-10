@@ -585,16 +585,26 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                 forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak tv, base = baseFontPoints] _ in
                 MainActor.assumeIsolated { applySwiftTermZoom(view: tv, basePoints: base) }
             }
-            // Replay scrollback, then stream live output. Feed must happen on the
-            // main thread (AppKit); the pty callback arrives on a background queue.
-            // Coalesce bursts into one feed per runloop turn (juancode-kdn) so N
-            // mounted, streaming sessions don't each parse+reflow per chunk on main.
+            // Seed the fresh view from the shared headless model (juancode-a2h.2),
+            // then stream live output. The seed is a clean VT repaint synthesized
+            // from PARSED state (`SessionTerminalModel.seedBytes()`) — no raw byte
+            // replay, so no partial-escape / stale-alt-frame garble and no synthetic
+            // alt-screen resync prefix. Feed must happen on the main thread (AppKit);
+            // the pty callback arrives on a background queue. Coalesce live bursts
+            // into one feed per runloop turn (juancode-kdn).
             let coalescer = TerminalFeedCoalescer { [weak tv] bytes in
                 tv?.feed(byteArray: bytes[...])
             }
             feedCoalescer = coalescer
-            cancel = session.subscribeOutput(replay: true) { bytes in
-                coalescer.append(bytes)
+            if Config.useModelSeed {
+                tv.feed(byteArray: session.terminalModel.seedBytes()[...])
+                cancel = session.subscribeOutput(replay: false) { bytes in
+                    coalescer.append(bytes)
+                }
+            } else {
+                cancel = session.subscribeOutput(replay: true) { bytes in
+                    coalescer.append(bytes)
+                }
             }
             let session = self.session
             // A fullscreen / display / Space change, or coming back from a minimize or
@@ -615,16 +625,14 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // once the TUI settles (juancode-1th.3). This view only handles later
             // window relayouts (the reactivation nudge above) and manual `forceResync`.
 
-            // Refresh/switch on this (pool-less) SwiftTerm path rebuilds the pane and
-            // replays raw scrollback into a fresh grid. For a full-screen agent that
-            // means feeding alt-screen frames captured at *earlier* widths (e.g. from
-            // before a window resize) into the current grid — the stale frames overflow
-            // and are only partially overwritten, so the render lands garbled. The pty
-            // itself is untouched by a client rebuild, so the agent never repaints on
-            // its own. Once the replay has drained, force a genuine SIGWINCH so a live
-            // alt-screen agent fully repaints at the true current grid, overwriting the
-            // stale replay. Gated on alt-buffer so a plain shell (line-based, reflows
-            // correctly) isn't nudged for nothing.
+            // The model seed above paints the correct current screen, but it lands at
+            // the view's PLACEHOLDER grid (makeNSView size) — the real pane bounds only
+            // settle a beat later. The pty itself is untouched by a client rebuild, so a
+            // live full-screen agent won't repaint on its own to fill the settled grid.
+            // Once the bounds have settled, force a genuine SIGWINCH so the agent fully
+            // repaints at the true current grid, replacing the placeholder-sized seed.
+            // Gated on alt-buffer so a plain shell (line-based, reflows correctly) isn't
+            // nudged for nothing.
             let repaint = DispatchWorkItem { [weak self] in
                 guard let self, let tv = self.view, let t = tv.terminal,
                       self.session.isRunning, t.isCurrentBufferAlternate else { return }
