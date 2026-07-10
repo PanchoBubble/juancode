@@ -250,4 +250,18 @@ final class UnresolvedThreadTests: XCTestCase {
         // Existing enriched entry preserved, not clobbered by the backfill copy.
         XCTAssertEqual(merged[0].unresolvedComments, 4)
     }
+
+    func testSortPrsTrackedFirstIsStableWithinBands() {
+        func pr(_ n: Int) -> PullRequest {
+            PullRequest(number: n, title: "t\(n)", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me")
+        }
+        let prs = [pr(50), pr(40), pr(30), pr(20)]
+        let tracked: Set<Int> = [40, 20]
+        let ordered = sortPrsTrackedFirst(prs) { tracked.contains($0.number) }
+        // Tracked PRs lead; both bands keep their incoming (newest-first) order.
+        XCTAssertEqual(ordered.map(\.number), [40, 20, 50, 30])
+        // No tracked PRs → the list is unchanged.
+        XCTAssertEqual(sortPrsTrackedFirst(prs) { _ in false }.map(\.number), [50, 40, 30, 20])
+    }
 }

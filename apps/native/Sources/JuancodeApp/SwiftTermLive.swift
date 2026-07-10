@@ -217,6 +217,14 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         // While the Changes panel holds the keyboard, let its own `.onKeyPress` see
         // every plain key — don't pre-empt j/k/n/p as sidebar nav.
         if model.changesKeyboardActive { return false }
+        // Esc closes the GitHub overlay from anywhere in the window — including
+        // while a terminal holds first responder, where `.onExitCommand` on the
+        // overlay never fires (juancode-2t6).
+        if model.showingGitHub, keyCode == 53,
+           mods.intersection([.command, .shift, .control, .option]).isEmpty {
+            model.showingGitHub = false
+            return true
+        }
         let fr = window.firstResponder
         let ctrl = mods.contains(.control)
 

@@ -59,10 +59,10 @@ struct RootView: View {
                 .help("Open the selected session's worktree in your editor ($EDITOR, ⌘E)")
                 .disabled(model.selection == nil)
                 .clickCursor()
-                Button { model.showingTrackedPrs = true } label: {
-                    Label("Tracked PRs", systemImage: "checklist")
+                Button { model.openGitHub() } label: {
+                    Label("GitHub", systemImage: "arrow.triangle.pull")
                 }
-                .help("PRs under watch — CI-fix loops")
+                .help("GitHub — open PRs per project, tracked-PR loops (⌘⇧G)")
                 .clickCursor()
                 Button { model.showingTrackedIssues = true } label: {
                     Label("Tracked Issues", systemImage: "ticket")
@@ -135,9 +135,6 @@ struct RootView: View {
         .overlay { OracleDock() }
         .sheet(isPresented: $model.showingWorktrees) {
             WorktreesSheet()
-        }
-        .sheet(isPresented: $model.showingTrackedPrs) {
-            TrackedPrsSheet()
         }
         .sheet(isPresented: $model.showingTrackedIssues) {
             TrackedIssuesSheet()
@@ -635,6 +632,38 @@ struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.top, 6)
             .help("Start a session in any folder — it appears here as a project")
+            // Fixed GitHub row (juancode-2t6) — a plain Button, NOT a List row, so
+            // the List's selection semantics stay session-only.
+            Button { model.toggleGitHubView() } label: {
+                HStack(spacing: 6) {
+                    Label("GitHub", systemImage: "arrow.triangle.pull")
+                        .font(.system(size: 12, weight: .medium))
+                    if model.openPrTotal > 0 {
+                        Text("\(model.openPrTotal)")
+                            .font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.2))
+                            .clipShape(Capsule())
+                            .help("\(model.openPrTotal) open PR\(model.openPrTotal == 1 ? "" : "s") across projects")
+                    }
+                    if model.trackedPrNeedsAttention {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                            .help("A tracked PR needs your decision")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(model.showingGitHub ? Color.accentColor.opacity(0.18) : Color.clear)
+                .padding(.horizontal, 4))
+            .help("All open PRs per project (⌘⇧G)")
             let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty
             HStack(spacing: 6) {
                 Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill"
@@ -2068,18 +2097,27 @@ struct DetailView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
-            // Deliberately NOT keyed by id: the container must survive session
-            // switches so the keep-alive terminal panes inside it stay mounted
-            // (juancode-073). Per-session subviews that assume a fresh identity
-            // (Changes/Issues panels) are keyed individually inside.
-            SessionContainer(meta: meta)
-        } else {
-            ContentUnavailableView(
-                "No session selected",
-                systemImage: "terminal",
-                description: Text("Pick a session, or create one with +.")
-            )
+        // The GitHub view overlays the session content in a ZStack rather than
+        // replacing it: the container underneath must stay MOUNTED so the
+        // keep-alive terminal panes survive (juancode-073, juancode-2t6).
+        ZStack {
+            if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
+                // Deliberately NOT keyed by id: the container must survive session
+                // switches so the keep-alive terminal panes inside it stay mounted
+                // (juancode-073). Per-session subviews that assume a fresh identity
+                // (Changes/Issues panels) are keyed individually inside.
+                SessionContainer(meta: meta)
+            } else {
+                ContentUnavailableView(
+                    "No session selected",
+                    systemImage: "terminal",
+                    description: Text("Pick a session, or create one with +.")
+                )
+            }
+            if model.showingGitHub {
+                GitHubView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 }

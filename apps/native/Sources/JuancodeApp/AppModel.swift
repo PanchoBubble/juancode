@@ -77,6 +77,10 @@ final class AppModel {
             // of unmounting, and the new one mounts (or is revealed) in the same
             // frame (juancode-073).
             if let sel = selection { noteLivePaneVisible(sel) }
+            // Navigating to a session (jump palette, notification click-through,
+            // "Go to session", search hits) dismisses the GitHub overlay — every
+            // landing path routes through this setter (juancode-2t6).
+            showingGitHub = false
         }
     }
     var showingNewSession = false
@@ -161,9 +165,15 @@ final class AppModel {
     var suppressTerminalAutoFocus = false
     /// Top command-bar sheets (juancode-6sw / q6q / 38z).
     var showingWorktrees = false
-    var showingTrackedPrs = false
     /// Tracked Linear issues panel (juancode-7sa).
     var showingTrackedIssues = false
+    /// First-class GitHub view (juancode-2t6): overlays the detail area with all
+    /// open PRs per project. NOT a sheet — the session content stays mounted
+    /// underneath (juancode-073); `selection.didSet` auto-dismisses it so every
+    /// navigation path lands back on the session.
+    var showingGitHub = false
+    /// Selection + per-PR detail caches for the GitHub view (see GitHubPanel.swift).
+    let github = GitHubModel()
     /// Session-health panel (juancode-0me pillar 3 / juancode-02k).
     var showingSessionHealth = false
     /// Recurring-tasks create/manage panel (juancode-46g).
@@ -1294,6 +1304,59 @@ final class AppModel {
             await create(provider: .claude, cwd: cwd, skipPermissions: true,
                          isolateWorktree: false, initialInput: prPrompt(pr))
         }
+    }
+
+    // MARK: - GitHub view (juancode-2t6)
+
+    /// The project folders the GitHub view lists: the trackable project roots of
+    /// the current sessions unioned with every folder a PR list was already
+    /// loaded for, so a folder doesn't vanish from the view once its sessions
+    /// close.
+    var githubFolders: [String] {
+        Array(Set(trackableFolders).union(prsByCwd.keys)).sorted()
+    }
+
+    /// Total open PRs across every loaded folder — the sidebar GitHub row badge.
+    var openPrTotal: Int {
+        prsByCwd.values.filter(\.available).reduce(0) { $0 + $1.prs.count }
+    }
+
+    /// Whether any tracked PR has an unresolved decision — the sidebar row's
+    /// orange dot.
+    var trackedPrNeedsAttention: Bool {
+        tracked.values.contains { !$0.notifications.isEmpty }
+    }
+
+    /// Open the GitHub view and kick a PR refresh across every folder.
+    func openGitHub() {
+        showingGitHub = true
+        github.refresh(model: self)
+    }
+
+    func toggleGitHubView() {
+        if showingGitHub { showingGitHub = false } else { openGitHub() }
+    }
+
+    /// "Open diff" from the GitHub view: land on the best session for the PR with
+    /// its Changes panel showing the PR diff — the tracked PR's live session,
+    /// else the folder's focused/most-recent live session, else spawn a fresh
+    /// work-on session (decision D: no new diff renderer). Setting `selection`
+    /// dismisses the view via its didSet.
+    func openPrDiff(_ pr: PullRequest, cwd: String) {
+        let target = trackedPr(cwd: cwd, number: pr.number).flatMap { liveSession($0.sessionId) }
+            ?? focusedLiveSession(in: cwd)
+        guard let target else {
+            workOnPr(pr, cwd: cwd)
+            return
+        }
+        selection = target.id
+        setChangesSource(target.id, .pr(pr))
+        // Reveal the Changes panel (same UserDefaults contract as `openChanges`,
+        // which would reset the source to the working tree).
+        let d = UserDefaults.standard
+        d.set("Changes", forKey: "session.sidePanel.tab")
+        d.set(true, forKey: "session.sidePanel.shown")
+        requestChangesFocus(target.id)
     }
 
     // MARK: - Full-text transcript search (juancode-wx9)

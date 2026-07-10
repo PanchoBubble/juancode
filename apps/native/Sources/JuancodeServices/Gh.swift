@@ -221,6 +221,13 @@ public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [Pull
     return byNumber.values.sorted { $0.number > $1.number }
 }
 
+/// Order a folder's open PRs for the GitHub view: tracked PRs first (they're the
+/// ones being actively driven), each band keeping its incoming (newest-first)
+/// order. Pure; exposed for testing.
+public func sortPrsTrackedFirst(_ prs: [PullRequest], isTracked: (PullRequest) -> Bool) -> [PullRequest] {
+    prs.filter(isTracked) + prs.filter { !isTracked($0) }
+}
+
 // MARK: - Unresolved review threads (the "active comments" count in the PR list)
 
 /// Overlay unresolved-review-thread counts onto parsed PRs, keyed by PR number.

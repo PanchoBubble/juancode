@@ -293,98 +293,10 @@ private struct WorktreeRow: View {
     }
 }
 
-// MARK: - Tracked PRs (juancode-38z)
-
-/// The global view of every PR under watch and its CI-fix loop state. Tracking is
-/// started from a folder's PR list ("Track"); this panel lets you see them all in
-/// one place, jump to the driving session, untrack, and clear surfaced decisions.
-struct TrackedPrsSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Tracked PRs").font(.title3).bold()
-                Spacer()
-                Button("Done") { dismiss() }.clickCursor()
-            }
-            .padding()
-            Divider()
-            if model.trackedList.isEmpty {
-                VStack(spacing: 8) {
-                    Spacer()
-                    Image(systemName: "checklist").font(.largeTitle).foregroundStyle(.secondary)
-                    Text("No PRs tracked yet.").foregroundStyle(.secondary).font(.system(size: 13))
-                    Text("Open a folder's PR list and hit “Track” to start a CI-fix loop:\nthe agent watches the PR and auto-fixes lint/CI, escalating real decisions.")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(model.trackedList) { pr in
-                            TrackedPrRow(pr: pr) { dismiss() }
-                            Divider()
-                        }
-                    }
-                }
-            }
-        }
-        .frame(width: 660, height: 480)
-    }
-}
-
-private struct TrackedPrRow: View {
-    @Environment(AppModel.self) private var model
-    let pr: TrackedPr
-    let dismiss: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("#\(pr.number)").font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(pr.title).font(.system(size: 13)).lineLimit(1).help(pr.title)
-                TrackBadge(state: pr.state)
-                Spacer(minLength: 8)
-                Text((pr.cwd as NSString).lastPathComponent)
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-            HStack(spacing: 12) {
-                Text(pr.branch).font(.system(size: 10).monospaced()).foregroundStyle(.tertiary)
-                Spacer()
-                Button("Open ↗") {
-                    if let u = URL(string: pr.url) { NSWorkspace.shared.open(u) }
-                }
-                .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
-                Button("Go to session") { dismiss(); model.selection = pr.sessionId }
-                    .buttonStyle(.borderless).font(.system(size: 11)).clickCursor()
-                Button("Untrack") { model.untrackPr(pr.id) }
-                    .buttonStyle(.borderless).font(.system(size: 11))
-                    .help("Stop watching this PR (keeps the session)").clickCursor()
-            }
-            ForEach(pr.notifications) { note in
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9)).foregroundStyle(.orange)
-                    Text(note.message).font(.system(size: 11))
-                    Spacer(minLength: 4)
-                    Button("Dismiss") {
-                        model.resolveNotification(prId: pr.id, notificationId: note.id)
-                    }
-                    .buttonStyle(.borderless).font(.system(size: 9)).clickCursor()
-                }
-            }
-        }
-        .padding(.horizontal, 16).padding(.vertical, 10)
-    }
-}
-
 // MARK: - Tracked Linear issues (juancode-7sa)
 
-/// The global view of every Linear issue under watch — the twin of `TrackedPrsSheet`.
+/// The global view of every Linear issue under watch — the Linear twin of the
+/// GitHub view's tracked PRs.
 /// Start tracking a new issue (type its id or pick one assigned to you, choosing the
 /// folder its agent session runs in), see each one's workflow-state badge and surfaced
 /// decisions, jump to the driving session, and untrack.

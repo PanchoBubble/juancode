@@ -284,6 +284,12 @@ struct JuancodeApp: App {
                     performShortcut(.globalIssues, model: model, oracle: oracle)
                 }
                 .appShortcut(.globalIssues, shortcuts)
+                // ⌘⇧G toggles the GitHub view — all open PRs per project, tracked-PR
+                // loops (juancode-2t6).
+                Button("GitHub") {
+                    performShortcut(.githubView, model: model, oracle: oracle)
+                }
+                .appShortcut(.githubView, shortcuts)
                 // ⌃F drops focus into the sidebar's "Filter sessions…" field from
                 // anywhere so you can start a find without reaching for the mouse.
                 Button("Find Sessions") {

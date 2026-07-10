@@ -32,6 +32,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case toggleChanges
     case openChangesForCurrentSession
     case toggleFileTree
+    case githubView
     case toggleProjects
     case findInTerminal
     case terminalZoomIn
@@ -61,6 +62,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleChanges: return "Toggle Code Changes"
         case .openChangesForCurrentSession: return "Open Changes for Current Session"
         case .toggleFileTree: return "Toggle File Tree"
+        case .githubView: return "GitHub"
         case .toggleProjects: return "Toggle Projects Panel"
         case .findInTerminal: return "Find in Terminal"
         case .terminalZoomIn: return "Increase Terminal Font"
@@ -97,6 +99,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         // ⌘⇧E shows/hides the file-tree sidebar (the Files side-panel tab) — the
         // explorer convention, next to ⌘E which opens the editor session.
         case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
+        // ⌘⇧G toggles the GitHub view — all open PRs per project (juancode-2t6).
+        case .githubView: return KeyBinding(key: "g", command: true, shift: true)
         case .toggleProjects: return KeyBinding(key: "s", control: true)
         // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
         // ⌃F (focusSessionSearch) stays the sidebar session filter.
@@ -281,6 +285,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .openChangesForCurrentSession:
         if let id = model.selection { model.openChanges(for: id) }
     case .toggleFileTree: model.toggleFileTreePanel()
+    case .githubView: model.toggleGitHubView()
     case .toggleProjects: model.toggleProjectsSidebar()
     case .findInTerminal: model.showFindBar()
     case .terminalZoomIn: TerminalZoom.shared.zoomIn()
