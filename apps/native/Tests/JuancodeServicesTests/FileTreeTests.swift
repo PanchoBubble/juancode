@@ -111,4 +111,71 @@ final class FileTreeTests: XCTestCase {
     func testIgnoresEmptyPaths() {
         XCTAssertTrue(buildFileTree([file("")]).isEmpty)
     }
+
+    // MARK: - buildPathTree (file-tree sidebar: full worktree listing, no DiffFile)
+
+    func testPathTreeLeavesCarryNoFileAndKeepPathIds() {
+        let tree = buildPathTree(["src/a.swift", "src/b.swift", "README.md"])
+        XCTAssertEqual(tree.map(\.name), ["src", "README.md"])
+        let src = tree[0]
+        XCTAssertTrue(src.isDirectory)
+        XCTAssertEqual(src.children?.map(\.id), ["src/a.swift", "src/b.swift"])
+        XCTAssertTrue(src.children?.allSatisfy { !$0.isDirectory && $0.file == nil } ?? false)
+        XCTAssertNil(tree[1].file)
+        XCTAssertFalse(tree[1].isDirectory)
+    }
+
+    func testPathTreeSortsFoldersBeforeFilesCaseInsensitively() {
+        let tree = buildPathTree(["zfile.txt", "Afile.txt", "dir/x.txt", "aDir/y.txt"])
+        XCTAssertEqual(tree.map(\.name), ["aDir", "dir", "Afile.txt", "zfile.txt"])
+    }
+
+    func testPathTreeCollapsesSingleChildFolderChain() {
+        let tree = buildPathTree(["a/b/c/deep.swift"])
+        XCTAssertEqual(tree.count, 1)
+        XCTAssertEqual(tree[0].name, "a/b/c")
+        XCTAssertEqual(tree[0].id, "a/b/c")
+        XCTAssertEqual(tree[0].children?.map(\.id), ["a/b/c/deep.swift"])
+    }
+
+    func testPathTreeDoesNotCollapseThroughAFileLeaf() {
+        // A folder whose single child is a FILE must stay a folder row — the chain
+        // collapse only merges folder-into-folder.
+        let tree = buildPathTree(["a/file.txt"])
+        XCTAssertEqual(tree.count, 1)
+        XCTAssertEqual(tree[0].name, "a")
+        XCTAssertTrue(tree[0].isDirectory)
+        XCTAssertEqual(tree[0].children?.map(\.name), ["file.txt"])
+    }
+
+    func testPathTreeFolderWithFileAndSubfolderSortsFolderFirst() {
+        let tree = buildPathTree(["a/file.txt", "a/b/nested.txt"])
+        XCTAssertEqual(tree.count, 1)
+        XCTAssertEqual(tree[0].name, "a")
+        XCTAssertEqual(tree[0].children?.map(\.name), ["b", "file.txt"])
+    }
+
+    func testPathTreeIgnoresEmptyPaths() {
+        XCTAssertTrue(buildPathTree([""]).isEmpty)
+    }
+
+    // MARK: - changedAncestorDirIDs (changed-descendants rollup)
+
+    func testChangedAncestorDirIDsCollectsEveryPrefix() {
+        let dirs = changedAncestorDirIDs(["a/b/c.txt", "a/d.txt", "top.txt"])
+        XCTAssertEqual(dirs, ["a", "a/b"])
+    }
+
+    func testChangedAncestorDirIDsMatchesCollapsedChainNodeIds() {
+        // A collapsed chain node keeps the deepest folder's id ("a/b/c"), which is
+        // among the prefixes — so the rollup dot lands on the collapsed row too.
+        let tree = buildPathTree(["a/b/c/deep.swift", "other.txt"])
+        let dirs = changedAncestorDirIDs(["a/b/c/deep.swift"])
+        XCTAssertTrue(dirs.contains(tree[0].id))
+    }
+
+    func testChangedAncestorDirIDsEmptyForRootLevelChanges() {
+        XCTAssertTrue(changedAncestorDirIDs(["top.txt"]).isEmpty)
+        XCTAssertTrue(changedAncestorDirIDs([]).isEmpty)
+    }
 }

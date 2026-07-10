@@ -31,6 +31,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case refreshTerminal
     case toggleChanges
     case openChangesForCurrentSession
+    case toggleFileTree
     case toggleProjects
     case findInTerminal
     case terminalZoomIn
@@ -59,6 +60,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .refreshTerminal: return "Refresh Terminal"
         case .toggleChanges: return "Toggle Code Changes"
         case .openChangesForCurrentSession: return "Open Changes for Current Session"
+        case .toggleFileTree: return "Toggle File Tree"
         case .toggleProjects: return "Toggle Projects Panel"
         case .findInTerminal: return "Find in Terminal"
         case .terminalZoomIn: return "Increase Terminal Font"
@@ -92,6 +94,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         // ⌘⇧C jumps straight to the working-tree diff (and clears the review badge),
         // vs ⌘C which just toggles the panel's visibility.
         case .openChangesForCurrentSession: return KeyBinding(key: "c", command: true, shift: true)
+        // ⌘⇧E shows/hides the file-tree sidebar (the Files side-panel tab) — the
+        // explorer convention, next to ⌘E which opens the editor session.
+        case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
         case .toggleProjects: return KeyBinding(key: "s", control: true)
         // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
         // ⌃F (focusSessionSearch) stays the sidebar session filter.
@@ -275,6 +280,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .toggleChanges: model.toggleChangesPanel()
     case .openChangesForCurrentSession:
         if let id = model.selection { model.openChanges(for: id) }
+    case .toggleFileTree: model.toggleFileTreePanel()
     case .toggleProjects: model.toggleProjectsSidebar()
     case .findInTerminal: model.showFindBar()
     case .terminalZoomIn: TerminalZoom.shared.zoomIn()

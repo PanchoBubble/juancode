@@ -248,6 +248,20 @@ final class AppModel {
     /// True while a fresh `git ls-files` for the palette is in flight.
     private(set) var quickOpenLoading = false
 
+    // MARK: - File-tree sidebar (Files side-panel tab)
+
+    /// Full worktree file tree per path — the gitignore-aware `git ls-files` listing
+    /// folded into nested nodes for the Files tab. Shares the Quick Open `fileIndex`
+    /// cache; the shared FSEvents watcher invalidates and rebuilds it live.
+    private(set) var fileTreeByPath: [String: [FileTreeNode]] = [:]
+    /// Worktree paths with a tree (re)list in flight.
+    private(set) var fileTreeLoading: Set<String> = []
+    /// Expanded directory ids per worktree path. In-memory only — survives tab and
+    /// session switches within a run, resets on relaunch.
+    var fileTreeExpandedByPath: [String: Set<String>] = [:]
+    /// sessionId → live worktree-watch subscription while its Files tab is open.
+    @ObservationIgnored private var fileTreeWatchTokens: [String: WorktreeWatchToken] = [:]
+
     /// OS-notification plumbing for background sessions (juancode-bao). The
     /// should-notify decision is the pure `agentNotificationEffect`; this only
     /// delivers, coalesces per session, and routes a click back to the session.
@@ -2749,6 +2763,71 @@ final class AppModel {
         selection = sel
         focusTerminal()
         showingQuickOpen = false
+    }
+
+    // MARK: - File tree (Files side-panel tab)
+
+    /// Ensure a worktree's file tree is loaded and live-refresh it while a session's
+    /// Files tab is open: on change the shared per-path FSEvents stream invalidates
+    /// the Quick Open file index, re-lists, refolds the tree, and refreshes the
+    /// change snapshot the rows decorate from. Idempotent per session.
+    func startWatchingFileTree(_ id: String, path: String) {
+        if fileTreeByPath[path] == nil { loadFileTree(path) }
+        refreshWorktreeStatus(path)
+        guard fileTreeWatchTokens[id] == nil else { return }
+        let token = worktreeWatchers.watch(path: path) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.fileIndex.invalidate(path)
+                self.loadFileTree(path)
+                self.refreshWorktreeStatus(path)
+            }
+        }
+        if let token { fileTreeWatchTokens[id] = token }
+    }
+
+    /// Stop live-refreshing a session's file tree (its Files tab closed or the
+    /// session went away). The built tree stays cached for an instant re-open.
+    func stopWatchingFileTree(_ id: String) {
+        fileTreeWatchTokens.removeValue(forKey: id)?.cancel()
+    }
+
+    /// (Re)list a worktree — through the shared Quick Open file index so the two
+    /// surfaces never shell out twice for the same snapshot — and fold the flat
+    /// list into the directory tree off the main actor.
+    private func loadFileTree(_ path: String) {
+        fileTreeLoading.insert(path)
+        Task {
+            let files: [String]
+            if let cached = fileIndex.files(for: path) {
+                files = cached
+            } else {
+                files = await Task.detached(priority: .userInitiated) {
+                    await listTrackedFiles(path)
+                }.value
+                fileIndex.store(files, for: path)
+            }
+            let tree = await Task.detached(priority: .userInitiated) {
+                buildPathTree(files)
+            }.value
+            fileTreeByPath[path] = tree
+            fileTreeLoading.remove(path)
+        }
+    }
+
+    /// Toggle the session's right-side panel onto the Files tab (the file-tree
+    /// sidebar). Mirrors `toggleChangesPanel`: hides only when Files is already the
+    /// visible tab — from another tab it switches instead.
+    func toggleFileTreePanel() {
+        let d = UserDefaults.standard
+        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
+        let onFiles = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Files"
+        if shown && onFiles {
+            d.set(false, forKey: "session.sidePanel.shown")
+        } else {
+            d.set("Files", forKey: "session.sidePanel.tab")
+            d.set(true, forKey: "session.sidePanel.shown")
+        }
     }
 
     /// Spawn the user's real editor (`$VISUAL`/`$EDITOR`, default nvim) on `file`,

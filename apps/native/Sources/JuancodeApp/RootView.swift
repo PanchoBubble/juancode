@@ -2084,9 +2084,12 @@ struct DetailView: View {
     }
 }
 
-/// The two views the session's right-side panel can show: the working-tree
-/// changes panel (diff + inline comments + git actions) or the folder's bd issues.
-private enum SidePanelTab: String, CaseIterable { case changes = "Changes", issues = "Issues" }
+/// The views the session's right-side panel can show: the working-tree changes
+/// panel (diff + inline comments + git actions), the file-tree sidebar over the
+/// session's worktree, or the folder's bd issues.
+private enum SidePanelTab: String, CaseIterable {
+    case changes = "Changes", files = "Files", issues = "Issues"
+}
 
 struct SessionContainer: View {
     @Environment(AppModel.self) private var model
@@ -2154,7 +2157,7 @@ struct SessionContainer: View {
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
                 }
-                .help(panelShown ? "Hide the Changes / Issues panel" : "Show the Changes / Issues panel")
+                .help(panelShown ? "Hide the Changes / Files / Issues panel" : "Show the Changes / Files / Issues panel")
                 .clickCursor()
             }
             .padding(8)
@@ -2256,9 +2259,10 @@ struct SessionContainer: View {
         }
     }
 
-    /// The right-side panel: a Changes | Issues tab switcher hosting the existing
-    /// self-contained `ChangesPanel` (session diff) and `IssuesPanel` (folder bd
-    /// issues). The active tab is remembered app-wide via @AppStorage.
+    /// The right-side panel: a Changes | Files | Issues tab switcher hosting the
+    /// self-contained `ChangesPanel` (session diff), `FileTreePanel` (worktree
+    /// explorer), and `IssuesPanel` (folder bd issues). The active tab is
+    /// remembered app-wide via @AppStorage.
     private var sidePanel: some View {
         VStack(spacing: 0) {
             Picker("", selection: Binding(get: { tab }, set: { tab = $0 })) {
@@ -2274,6 +2278,7 @@ struct SessionContainer: View {
             // per-session/per-folder @State seeded in onAppear.
             switch tab {
             case .changes: ChangesPanel(sessionId: meta.id).id(meta.id)
+            case .files: FileTreePanel(sessionId: meta.id, root: meta.effectiveCwd).id(meta.id)
             case .issues: IssuesPanel(cwd: meta.cwd).id(meta.cwd)
             }
         }

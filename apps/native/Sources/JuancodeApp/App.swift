@@ -256,6 +256,12 @@ struct JuancodeApp: App {
                     performShortcut(.openChangesForCurrentSession, model: model, oracle: oracle)
                 }
                 .appShortcut(.openChangesForCurrentSession, shortcuts)
+                // ⌘⇧E shows/hides the file-tree sidebar over the selected session's
+                // worktree (the Files side-panel tab).
+                Button("Toggle File Tree") {
+                    performShortcut(.toggleFileTree, model: model, oracle: oracle)
+                }
+                .appShortcut(.toggleFileTree, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") {
