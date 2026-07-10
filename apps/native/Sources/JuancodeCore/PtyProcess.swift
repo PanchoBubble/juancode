@@ -68,6 +68,9 @@ public final class PtyProcess: @unchecked Sendable {
         argv[argvStrings.count] = nil
         let cExecutable = strdup(executable)
         let cCwd: UnsafeMutablePointer<CChar>? = cwd.isEmpty ? nil : strdup(cwd)
+        // Upper bound of the fd table, read in the PARENT so the child touches only
+        // async-signal-safe `close()` (see the fd-hygiene note below, juancode-1qf).
+        let maxFd = getdtablesize()
 
         var master: Int32 = 0
         var winp = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
@@ -80,6 +83,15 @@ public final class PtyProcess: @unchecked Sendable {
 
         if childPid == 0 {
             // ---- child ---- (async-signal-safe calls only)
+            // Close every inherited fd above the pty stdio (0/1/2, which forkpty just
+            // wired to the slave). Without this the child inherits the parent's open
+            // descriptors — most damagingly the embedded server's 127.0.0.1:4280 NIO
+            // listen socket, which a still-alive CLI child then keeps bound after the
+            // app exits, so the next launch can't rebind and the WS/API server (Oracle
+            // /phone/Telegram delivery) silently stays down (juancode-1qf). `close()`
+            // is async-signal-safe; a closed/absent fd just returns EBADF.
+            var fd: Int32 = 3
+            while fd < maxFd { close(fd); fd += 1 }
             if let cCwd { _ = chdir(cCwd) }
             execvp(cExecutable, argv)
             _exit(127)
