@@ -143,6 +143,15 @@ public final class Session: @unchecked Sendable {
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
 
+    /// Throttles how eagerly the (capped) scrollback ring is written back, keeping
+    /// the expensive full write (column + FTS reindex) off the per-output hot path.
+    /// Guarded by `lock`. See `ScrollbackWriteThrottle` (juancode-5qw.1).
+    private var writeThrottle = ScrollbackWriteThrottle(flushThresholdBytes: 128 * 1024)
+    /// Previous activity, tracked to fire a full (FTS-reindexing) flush on the edge
+    /// into idle — a turn boundary is when search wants the latest scrollback.
+    /// Guarded by `lock`.
+    private var prevPersistActivity: SessionActivity?
+
     private let titlePollMs = 4000
     private var titleTimer: DispatchSourceTimer?
 
@@ -347,9 +356,16 @@ public final class Session: @unchecked Sendable {
     // MARK: - pty callbacks (on workQueue)
 
     private func handleData(_ bytes: [UInt8]) {
-        lock.withLock { scroll.append(bytes) }
+        let flushNow = lock.withLock { () -> Bool in
+            scroll.append(bytes)
+            return writeThrottle.onOutput(bytes.count)
+        }
         detector.feed(String(decoding: bytes, as: UTF8.self))
         for l in snapshotOutput() { l(bytes) }
+        // Mid-burst crash-safety flush once enough new output has piled up (a
+        // continuously streaming session never pauses long enough to trip the
+        // trailing debounce), otherwise (re)arm the debounce for the tail.
+        if flushNow { flushScrollbackOnly() }
         schedulePersist()
     }
 
@@ -372,6 +388,19 @@ public final class Session: @unchecked Sendable {
     private func emitActivity(_ state: SessionActivity, _ notify: Bool) {
         for l in lock.withLock({ Array(activityListeners.values) }) { l(state, notify) }
         maybeFlushQueueOnEdge(state)
+        maybePersistOnIdleEdge(state)
+    }
+
+    /// On the edge into idle (a turn boundary), do a full flush so search picks up the
+    /// turn's output. No-op unless something new was written since the last full
+    /// flush, so a chattery detector flipping idle->busy->idle can't spam full writes.
+    private func maybePersistOnIdleEdge(_ state: SessionActivity) {
+        let shouldFlush = lock.withLock { () -> Bool in
+            let was = prevPersistActivity
+            prevPersistActivity = state
+            return state == .idle && was != nil && was != .idle && writeThrottle.ftsStale
+        }
+        if shouldFlush { persistNow() }
     }
 
     // MARK: - input / lifecycle
@@ -857,7 +886,7 @@ public final class Session: @unchecked Sendable {
     /// cleared by `Session.resume`.
     public func markDormant() {
         lock.withLock { _meta.dormant = true }
-        persistNow(notify: true)
+        persistMeta(titleChanged: false)
     }
 
     public func getScrollback() -> [UInt8] {
@@ -977,7 +1006,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistNow(notify: true) }
+        if changed { persistMeta(titleChanged: true) }
     }
 
     /// Archive / unarchive the live session and persist the flag.
@@ -987,7 +1016,7 @@ public final class Session: @unchecked Sendable {
             _meta.archived = archived
             return true
         }
-        if changed { persistNow(notify: true) }
+        if changed { persistMeta(titleChanged: false) }
     }
 
     /// Read the CLI's generated title (or first prompt) and persist if changed.
@@ -1001,7 +1030,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistNow(notify: true) }
+        if changed { persistMeta(titleChanged: true) }
     }
 
     /// Read the CLI transcript's token usage and persist if it changed.
@@ -1014,7 +1043,7 @@ public final class Session: @unchecked Sendable {
             _meta.usage = usage
             return true
         }
-        if changed { persistNow(notify: true) }
+        if changed { persistMeta(titleChanged: false) }
     }
 
     // MARK: - codex id discovery + persistence
@@ -1041,18 +1070,44 @@ public final class Session: @unchecked Sendable {
         let gen = lock.withLock { () -> Int in persistGeneration += 1; return persistGeneration }
         workQueue.asyncAfter(deadline: .now() + .milliseconds(persistDebounceMs)) { [weak self] in
             guard let self, self.lock.withLock({ gen == self.persistGeneration }) else { return }
-            self.persistNow()
+            self.flushScrollbackOnly()
         }
     }
 
-    /// Persist the current meta + scrollback. Pass `notify: true` for a meta-field
-    /// edit (title/usage/archive/dormant) so subscribers rebuild the sidebar;
-    /// scrollback-only flushes leave it false to avoid a list rebuild per output
-    /// debounce.
+    /// Crash-safety flush of the scrollback column only — no metadata write, no FTS
+    /// reindex (juancode-5qw.1). Driven by the output debounce and the mid-burst
+    /// byte-threshold flush; search is refreshed on the busy->idle edge / exit.
+    private func flushScrollbackOnly() {
+        let (id, bytes, updatedAt) = lock.withLock { () -> (String, [UInt8], Int) in
+            _meta.updatedAt = nowMs()
+            persistGeneration += 1 // cancel any pending debounce
+            writeThrottle.didFlushScrollback()
+            return (_meta.id, scroll.replay, _meta.updatedAt)
+        }
+        env.store.updateScrollback(id, scrollback: bytes, updatedAt: updatedAt)
+    }
+
+    /// Persist a metadata edit (title/usage/archive/dormant) via the meta-only write
+    /// path so it doesn't rewrite the scrollback column or re-tokenize its FTS row
+    /// (juancode-5qw.1). `titleChanged` reindexes the FTS title (reusing the stored
+    /// scrollback). Always notifies — a meta edit moves the sidebar.
+    private func persistMeta(titleChanged: Bool) {
+        let meta = lock.withLock { () -> SessionMeta in
+            _meta.updatedAt = nowMs()
+            return _meta
+        }
+        env.store.updateMeta(meta, reindexTitleFts: titleChanged)
+        emitMetaChange(meta)
+    }
+
+    /// Full persist: metadata + scrollback + FTS reindex — the heavy write, reserved
+    /// for the busy->idle edge and exit, where search needs to catch up. Pass
+    /// `notify: true` to rebuild the sidebar.
     private func persistNow(notify: Bool = false) {
         let (meta, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             _meta.updatedAt = nowMs()
             persistGeneration += 1 // cancel any pending debounce
+            writeThrottle.didFullFlush()
             return (_meta, scroll.replay)
         }
         env.store.update(meta, scrollback: bytes)

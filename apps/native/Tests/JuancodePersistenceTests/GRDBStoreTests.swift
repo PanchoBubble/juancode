@@ -169,6 +169,77 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(reopened.get("a3")?.archived, true)
     }
 
+    // MARK: - delta scrollback persistence + throttled FTS (juancode-5qw.1)
+
+    /// A meta-only update (title / usage / flags) must NOT rewrite the scrollback
+    /// column — that's the whole point of splitting the write paths.
+    func testUpdateMetaLeavesScrollbackUntouched() {
+        var m = meta("mo1", title: "before")
+        store.insert(m)
+        let scroll = Array("the persisted scrollback stays put".utf8)
+        store.update(m, scrollback: scroll)
+
+        m.title = "after"
+        m.status = .exited
+        store.updateMeta(m, reindexTitleFts: false)
+
+        XCTAssertEqual(store.get("mo1")?.title, "after")
+        XCTAssertEqual(store.get("mo1")?.status, .exited)
+        // Scrollback column is exactly what the last full write left.
+        XCTAssertEqual(store.getScrollback("mo1"), scroll)
+    }
+
+    /// Without `reindexTitleFts`, a meta update doesn't touch FTS at all: an old
+    /// title still matches and a renamed one is only searchable once reindexed.
+    func testUpdateMetaSkipsFtsUnlessTitleReindexRequested() {
+        let m = meta("mo2", title: "alpha")
+        store.insert(m)
+        store.update(m, scrollback: Array("body text".utf8))
+
+        var renamed = m
+        renamed.title = "bravo"
+        store.updateMeta(renamed, reindexTitleFts: false)
+        // FTS still holds the pre-rename title; new title not indexed yet.
+        XCTAssertEqual(store.search("alpha", limit: 10).map(\.meta.id), ["mo2"])
+        XCTAssertTrue(store.search("bravo", limit: 10).isEmpty)
+
+        store.updateMeta(renamed, reindexTitleFts: true)
+        XCTAssertEqual(store.search("bravo", limit: 10).map(\.meta.id), ["mo2"])
+        XCTAssertTrue(store.search("alpha", limit: 10).isEmpty)
+        // Scrollback stayed searchable across both meta updates.
+        XCTAssertEqual(store.search("body", limit: 10).map(\.meta.id), ["mo2"])
+    }
+
+    /// The crash-safety flush writes the scrollback column + `updated_at` but does
+    /// NOT reindex FTS — search of a running session catches up on the idle edge.
+    func testUpdateScrollbackPersistsBytesButDefersFts() {
+        let m = meta("ss1", title: "running", createdAt: 1000)
+        store.insert(m)
+
+        store.updateScrollback("ss1", scrollback: Array("needle in the stream".utf8), updatedAt: 5000)
+        XCTAssertEqual(store.getScrollback("ss1"), Array("needle in the stream".utf8))
+        XCTAssertEqual(store.get("ss1")?.updatedAt, 5000)
+        // Not yet searchable — FTS wasn't reindexed.
+        XCTAssertTrue(store.search("needle", limit: 10).isEmpty)
+    }
+
+    /// The busy->idle edge / exit path (`update`) reindexes FTS, so search finds the
+    /// session's content after it exits — the acceptance criterion.
+    func testFullUpdateReindexesFtsSoSearchFindsContentAfterExit() {
+        var m = meta("ex1", title: "task", status: .running)
+        store.insert(m)
+        // Simulate the running-session crash-safety flushes (no FTS).
+        store.updateScrollback("ex1", scrollback: Array("partial".utf8), updatedAt: 100)
+        XCTAssertTrue(store.search("distinctive", limit: 10).isEmpty)
+
+        // Exit: full flush with the final scrollback → FTS caught up.
+        m.status = .exited
+        m.exitCode = 0
+        store.update(m, scrollback: Array("a distinctive final line".utf8))
+        XCTAssertEqual(store.get("ex1")?.status, .exited)
+        XCTAssertEqual(store.search("distinctive", limit: 10).map(\.meta.id), ["ex1"])
+    }
+
     // MARK: - search (FTS5)
 
     func testSearchMatchesTitleAndScrollback() {

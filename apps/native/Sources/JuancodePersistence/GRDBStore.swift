@@ -233,6 +233,44 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, @uncheck
         }
     }
 
+    /// Persist a metadata edit without rewriting the (up to 256KiB) scrollback column
+    /// (juancode-5qw.1). `reindexTitleFts` reindexes the FTS row when the title
+    /// changed, reusing the already-stored scrollback text so it never re-serializes
+    /// the live ring; otherwise the FTS index is left alone.
+    public func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
+        try? dbQueue.write { db in
+            try db.execute(sql: """
+                UPDATE sessions
+                SET title = ?, status = ?, exit_code = ?, cli_session_id = ?,
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, updated_at = ?
+                WHERE id = ?
+                """, arguments: [
+                    meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId,
+                    meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.updatedAt, meta.id,
+                ])
+            if reindexTitleFts {
+                let scroll = try String.fetchOne(
+                    db, sql: "SELECT scrollback FROM sessions WHERE id = ?", arguments: [meta.id]) ?? ""
+                try syncFts(db, id: meta.id, title: meta.title, scrollback: scroll)
+            }
+        }
+    }
+
+    /// Crash-safety flush of a running session's scrollback — the column plus
+    /// `updated_at`, nothing else. Deliberately skips the FTS reindex (the tokenize of
+    /// the ring is the hot cost); search catches up on the busy->idle edge / exit via
+    /// `update`.
+    public func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int) {
+        let text = Self.scrollbackText(scrollback)
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET scrollback = ?, updated_at = ? WHERE id = ?",
+                arguments: [text, updatedAt, id]
+            )
+        }
+    }
+
     public func setCliSessionId(_ id: String, cliSessionId: String) {
         try? dbQueue.write { db in
             try db.execute(
