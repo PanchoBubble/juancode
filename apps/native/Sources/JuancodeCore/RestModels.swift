@@ -45,9 +45,15 @@ public struct Worktree: Codable, Sendable, Equatable {
     public var branch: String?
     public var head: String?
     public var main: Bool
+    /// The lock reason when the worktree is locked. Agent CLIs record their pid
+    /// here (e.g. Claude Code's "claude session <name> (pid 123 …)"), which is how
+    /// a session is matched to a worktree its agent created for itself.
+    public var lockedReason: String?
 
-    public init(path: String, branch: String?, head: String?, main: Bool) {
+    public init(path: String, branch: String?, head: String?, main: Bool,
+                lockedReason: String? = nil) {
         self.path = path; self.branch = branch; self.head = head; self.main = main
+        self.lockedReason = lockedReason
     }
 }
 

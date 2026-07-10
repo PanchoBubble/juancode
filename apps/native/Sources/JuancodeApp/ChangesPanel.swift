@@ -102,7 +102,14 @@ struct ChangesPanel: View {
 
     private var sourceLabel: String {
         switch currentSource {
-        case .workingTree: return "Working tree"
+        case .workingTree:
+            // Surface when the diff follows a worktree the agent entered on its
+            // own (e.g. Claude Code's EnterWorktree), so "Working tree" isn't
+            // silently a different directory than the session cwd.
+            if let wt = model.agentWorktree(sessionId) {
+                return "Working tree · \((wt as NSString).lastPathComponent)"
+            }
+            return "Working tree"
         case .base: return "vs " + (model.changesBaseLabel(sessionId) ?? "base")
         case .pr(let pr): return "PR #\(pr.number)"
         case .commit(let sha, let subject): return "Commit \(sha.prefix(7)) – \(subject)"

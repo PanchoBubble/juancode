@@ -351,6 +351,7 @@ public func listWorktrees(_ cwd: String) async -> [Worktree] {
         var path = ""
         var branch: String? = nil
         var head: String? = nil
+        var lockedReason: String? = nil
         for line in block.components(separatedBy: "\n") {
             if line.hasPrefix("worktree ") {
                 path = String(line.dropFirst("worktree ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -359,13 +360,33 @@ public func listWorktrees(_ cwd: String) async -> [Worktree] {
             } else if line.hasPrefix("branch ") {
                 let b = String(line.dropFirst("branch ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
                 branch = stripRefsHeadsPrefix(b)
+            } else if line.hasPrefix("locked ") {
+                lockedReason = String(line.dropFirst("locked ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
         if !path.isEmpty {
-            trees.append(Worktree(path: path, branch: branch, head: head, main: trees.isEmpty))
+            trees.append(Worktree(path: path, branch: branch, head: head, main: trees.isEmpty,
+                                  lockedReason: lockedReason))
         }
     }
     return trees
+}
+
+/// Find the linked worktree that the agent process `childPid` created for itself
+/// from inside its pty — e.g. Claude Code's EnterWorktree, which makes a worktree
+/// under `<repo>/.claude/worktrees/<name>` and locks it with a reason embedding
+/// its own pid ("claude session <name> (pid 123 start …)"). Matching on the pid
+/// keeps the mapping exact when several sessions share one repo. Returns the last
+/// match (an agent that hopped worktrees leaves earlier ones locked too), or nil
+/// when the agent never left `cwd`.
+public func detectAgentWorktree(_ cwd: String, childPid: pid_t) async -> String? {
+    let trees = await listWorktrees(cwd)
+    guard trees.count > 1 else { return nil }
+    let pattern = "\\bpid \(childPid)\\b"
+    return trees.dropFirst().last { tree in
+        guard let reason = tree.lockedReason else { return false }
+        return reason.range(of: pattern, options: .regularExpression) != nil
+    }?.path
 }
 
 /// Create a fresh linked worktree off the repo containing `repoCwd`, checked out
