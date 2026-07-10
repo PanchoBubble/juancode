@@ -121,6 +121,13 @@ public final class Session: @unchecked Sendable {
     private let workQueue: DispatchQueue
     private var detector: ActivityDetector!
 
+    /// Headless VT engine for this session (juancode-a2h.1): a real SwiftTerm
+    /// `Terminal` with no view, fed the pty stream once on `workQueue` in
+    /// `handleData`. Runs ALONGSIDE the byte ring and the byte-fed detector during
+    /// the epic's transition — nothing reads it yet; views become projections of it
+    /// in a2h.2. Internally locked, so it's an immutable collaborator like `workQueue`.
+    public let terminalModel: SessionTerminalModel
+
     /// Arbitrates which client controls this session's single shared pty grid, so
     /// two different-sized viewers can't flap it last-write-wins (juancode-1th.1).
     private let grid = GridArbiter()
@@ -285,6 +292,10 @@ public final class Session: @unchecked Sendable {
         self.spec = Providers.spec(for: meta.provider)
         self.scroll = Scrollback(limit: env.scrollbackLimit, seed: seedScrollback)
         self.workQueue = DispatchQueue(label: "juancode.session.\(meta.id)")
+        // Bound the parsed-scrollback memory sensibly against the byte-ring cap
+        // (~64 bytes/line is a conservative average for wrapped agent output).
+        self.terminalModel = SessionTerminalModel(
+            cols: cols, rows: rows, scrollbackLines: max(2000, env.scrollbackLimit / 64))
 
         self.detector = ActivityDetector(cols: cols, rows: rows) { [weak self] state, notify in
             self?.emitActivity(state, notify)
@@ -361,6 +372,9 @@ public final class Session: @unchecked Sendable {
             return writeThrottle.onOutput(bytes.count)
         }
         detector.feed(bytes)
+        // Parse into the headless model once, here on the workQueue (juancode-a2h.1).
+        // Additive during the epic's transition — no consumer yet.
+        terminalModel.feed(bytes)
         for l in snapshotOutput() { l(bytes) }
         // Mid-burst crash-safety flush once enough new output has piled up (a
         // continuously streaming session never pauses long enough to trip the
@@ -770,6 +784,7 @@ public final class Session: @unchecked Sendable {
     public func resize(cols: Int, rows: Int) -> Bool {
         let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
         detector.resize(cols: cols, rows: rows)
+        terminalModel.resize(cols: cols, rows: rows)
         return applied
     }
 

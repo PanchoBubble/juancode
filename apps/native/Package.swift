@@ -33,10 +33,13 @@ let package = Package(
     ],
     targets: [
         // The native core that replaces node-pty + the server's session layer
-        // (juancode-u34.2). Deliberately dependency-free: SwiftTerm, the embedded
-        // server, and the GRDB store are *consumers* of this core.
+        // (juancode-u34.2). The embedded server and the GRDB store are *consumers*
+        // of this core. SwiftTerm is the one exception: the headless VT engine
+        // (juancode-a2h — parse once in the core, views are projections) runs a real
+        // SwiftTerm `Terminal` with no view, so the core links SwiftTerm directly.
         .target(
-            name: "JuancodeCore"
+            name: "JuancodeCore",
+            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]
         ),
         // SQLite persistence (juancode-u34.5): GRDB-backed PersistentStore mirroring
         // db.ts — sessions (metadata + scrollback), diff comments, cached reviews,
@@ -92,7 +95,7 @@ let package = Package(
         ),
         .testTarget(
             name: "JuancodeCoreTests",
-            dependencies: ["JuancodeCore"]
+            dependencies: ["JuancodeCore", .product(name: "SwiftTerm", package: "SwiftTerm")]
         ),
         .testTarget(
             name: "JuancodePersistenceTests",
