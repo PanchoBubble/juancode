@@ -81,6 +81,38 @@ import Testing
         #expect(await poll { out.didExit })
     }
 
+    /// juancode-1qf: fds above the pty stdio must NOT leak into the CLI child.
+    /// The embedded server's 127.0.0.1:4280 NIO listen socket used to survive in a
+    /// still-alive child and block the next app launch from rebinding. Open a pipe
+    /// in the parent (an inheritable fd >= 3), then prove the forkpty child cannot
+    /// write into it — the write end is closed before `execvp`.
+    @Test func childDoesNotInheritParentFileDescriptors() async throws {
+        var fds: [Int32] = [0, 0]
+        #expect(pipe(&fds) == 0)
+        let readEnd = fds[0], writeEnd = fds[1]
+        defer { close(readEnd); close(writeEnd) }
+        #expect(writeEnd >= 3) // an inheritable fd above stdio
+
+        // Non-blocking read end so the post-run check can't hang.
+        let rflags = fcntl(readEnd, F_GETFL, 0)
+        _ = fcntl(readEnd, F_SETFL, rflags | O_NONBLOCK)
+
+        let out = Collector()
+        // If the child still holds the inherited fd, `printf x >&N` writes 'x' into
+        // the parent's pipe and prints LEAKED; otherwise the redirect fails (Bad
+        // file descriptor, swallowed) and it prints SEALED.
+        let script = "if printf x >&\(writeEnd) 2>/dev/null; then printf LEAKED; else printf SEALED; fi"
+        let proc = try #require(spawn(script, into: out))
+        defer { proc.terminate() }
+
+        #expect(await poll { out.didExit })
+
+        // Authoritative check: did anything reach the parent's pipe?
+        var buf = [UInt8](repeating: 0, count: 8)
+        let n = read(readEnd, &buf, buf.count)
+        #expect(n <= 0, "forkpty child inherited and wrote to the parent's pipe fd — fd leaked into the CLI child")
+    }
+
     /// Chunks still parked when the pty dies must complete `false` — a paste
     /// waiting on backpressure would otherwise hang forever.
     @Test func pendingWritesFailOnTerminate() async throws {
