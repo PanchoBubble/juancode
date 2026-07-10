@@ -283,6 +283,40 @@ final class GitTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: wt.path))
     }
 
+    func testDetectAgentWorktreeMatchesLockReasonPid() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        // Mirror Claude Code's EnterWorktree: a linked worktree under
+        // `.claude/worktrees/` locked with a reason embedding the agent's pid.
+        let wtDir = join(join(join(dir, ".claude"), "worktrees"), "fix-thing")
+        try runGit(["worktree", "add", "-b", "worktree-fix-thing", wtDir])
+        try runGit(["worktree", "lock", "--reason",
+                    "claude session fix-thing (pid 4242 start Fri Jul 10 15:36:13 2026)", wtDir])
+
+        let trees = await listWorktrees(dir)
+        let locked = trees.first(where: { resolvePath($0.path) == resolvePath(wtDir) })
+        XCTAssertNotNil(locked?.lockedReason?.range(of: "pid 4242"))
+
+        let hit = await detectAgentWorktree(dir, childPid: 4242)
+        XCTAssertEqual(hit.map(resolvePath), resolvePath(wtDir))
+        // A different pid must not match — nor may 4242 match pid 42421 anywhere.
+        let miss = await detectAgentWorktree(dir, childPid: 424)
+        XCTAssertNil(miss)
+    }
+
+    func testDetectAgentWorktreeNilWithoutLockedWorktrees() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        let noTrees = await detectAgentWorktree(dir, childPid: 4242)
+        XCTAssertNil(noTrees)
+
+        // An unlocked linked worktree still doesn't match any pid.
+        let wt = try await createWorktree(dir, "plainwt")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+        let unlocked = await detectAgentWorktree(dir, childPid: 4242)
+        XCTAssertNil(unlocked)
+    }
+
     func testCreateWorktreeRejectsNonGitDir() async throws {
         let plain = mkdtemp("juancode-plain-")
         defer { rmrf(plain) }

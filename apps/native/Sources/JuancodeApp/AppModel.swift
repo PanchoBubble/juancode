@@ -2538,7 +2538,7 @@ final class AppModel {
     /// Load (or refresh) the last ~50 commits for the ChangesPanel's commit picker
     /// (juancode-5u2). Off the main actor; coalesces concurrent requests.
     func loadRecentCommits(_ id: String) {
-        guard let cwd = cwd(of: id), !recentCommitsLoading.contains(id) else { return }
+        guard let cwd = gitCwd(of: id), !recentCommitsLoading.contains(id) else { return }
         recentCommitsLoading.insert(id)
         Task {
             let commits = await Task.detached(priority: .utility) {
@@ -2573,6 +2573,47 @@ final class AppModel {
     /// affordances (open PRs are keyed by folder cwd).
     func sessionCwd(_ id: String) -> String? { cwd(of: id) }
 
+    // MARK: - Agent-created worktrees (juancode-0sw)
+
+    /// Worktrees the agent inside a pty created for itself (Claude Code's
+    /// EnterWorktree → `<repo>/.claude/worktrees/<name>`), detected by matching the
+    /// session's child pid against worktree lock reasons. Kept out of
+    /// `meta.worktreePath` deliberately: that field means "juancode owns this
+    /// worktree" and drives removal on session close, while these belong to the
+    /// agent. Survives session exit so a finished session's diff stays reviewable.
+    private var agentWorktreeBySession: [String: String] = [:]
+
+    /// The agent-created worktree a session is working in, if one was detected.
+    func agentWorktree(_ id: String) -> String? { agentWorktreeBySession[id] }
+
+    /// The directory git operations for a session should run in: the worktree its
+    /// agent entered when one is detected, else the session cwd. Every diff-rooted
+    /// action (diff, commit, push, PR, revert, review, editor) resolves through
+    /// this so the panel follows the tree the agent actually edits.
+    private func gitCwd(of id: String) -> String? {
+        agentWorktreeBySession[id] ?? cwd(of: id)
+    }
+
+    /// Re-detect the session's agent-created worktree, off the main actor. Cheap
+    /// (one `git worktree list`), so callers run it on every diff/badge refresh —
+    /// the agent can enter or leave a worktree at any point mid-session. Only
+    /// resolvable while the session runs (the pid match needs a live child);
+    /// afterwards the last known value is kept.
+    private func resolveAgentWorktree(_ id: String) async {
+        guard let session = liveSession(id), let pid = session.childPid else { return }
+        let cwd = session.meta.cwd
+        let detected = await Task.detached(priority: .utility) {
+            await detectAgentWorktree(cwd, childPid: pid)
+        }.value
+        let previous = agentWorktreeBySession[id]
+        agentWorktreeBySession[id] = detected
+        // The diff watcher is rooted at gitCwd — re-arm it when that just moved.
+        if detected != previous, changesWatchTokens[id] != nil {
+            stopWatchingChanges(id)
+            startWatchingChanges(id)
+        }
+    }
+
     /// Switch what a session's ChangesPanel diffs and reload. No-op when the source
     /// is unchanged. Clears the stale diff so the panel shows a spinner, not the
     /// previous source's files, while the new one loads.
@@ -2604,8 +2645,10 @@ final class AppModel {
     /// edge). If its Changes panel is already open on the working tree, mark the
     /// result seen so a session you're actively reviewing never re-badges itself.
     private func refreshChangeStat(_ id: String) {
-        guard let cwd = effectiveCwd(of: id) else { return }
+        guard effectiveCwd(of: id) != nil else { return }
         Task {
+            await resolveAgentWorktree(id)
+            guard let cwd = agentWorktreeBySession[id] ?? effectiveCwd(of: id) else { return }
             let stat = await Task.detached(priority: .utility) {
                 await computeChangeStat(cwd)
             }.value
@@ -2652,11 +2695,17 @@ final class AppModel {
     /// (both shell out). The diff source (working tree / base branch / PR) is read
     /// from `changesSource`. Coalesces concurrent calls. Mirrors `loadPrs`.
     func loadChanges(_ id: String) {
-        guard let cwd = cwd(of: id), !diffInFlight.contains(id) else { return }
+        guard cwd(of: id) != nil, !diffInFlight.contains(id) else { return }
         let source = changesSource(id)
         diffInFlight.insert(id)
         diffLoading.insert(id)
         Task {
+            // The agent may have entered (or left) its own worktree since the last
+            // load — re-resolve so the diff follows the tree it actually edits.
+            await resolveAgentWorktree(id)
+            guard let cwd = gitCwd(of: id) else {
+                diffLoading.remove(id); diffInFlight.remove(id); return
+            }
             async let stateTask = Task.detached(priority: .utility) { await getGitState(cwd) }.value
             let loaded = await Task.detached(priority: .utility) { await loadDiffForSource(cwd, source) }.value
             let state = await stateTask
@@ -2674,7 +2723,7 @@ final class AppModel {
     /// diff within ~1s without a manual Refresh. Shares one FSEvents stream per
     /// worktree path across sessions; idempotent per session.
     func startWatchingChanges(_ id: String) {
-        guard changesWatchTokens[id] == nil, let cwd = cwd(of: id) else { return }
+        guard changesWatchTokens[id] == nil, let cwd = gitCwd(of: id) else { return }
         let token = worktreeWatchers.watch(path: cwd) { [weak self] in
             Task { @MainActor in self?.onWorktreeChanged(sessionId: id, path: cwd) }
         }
@@ -2857,7 +2906,7 @@ final class AppModel {
     /// check fails (a status note is set on failure). Mirrors the web `openEditor`
     /// handshake — the native overlay renders the returned pty directly (no WS hop).
     func openEditor(_ id: String, file: String, cols: Int, rows: Int) -> EphemeralPty? {
-        guard let cwd = cwd(of: id) else {
+        guard let cwd = gitCwd(of: id) else {
             gitNoteBySession[id] = GitNote(ok: false, text: "No working directory for this session.")
             return nil
         }
@@ -3104,7 +3153,7 @@ final class AppModel {
     /// the UI gates it behind an explicit confirm. Runs the scoped `git checkout` off
     /// the main actor and refreshes the diff.
     func revertFile(_ id: String, path: String) async {
-        guard let cwd = cwd(of: id) else { return }
+        guard let cwd = gitCwd(of: id) else { return }
         do {
             let r = try await Task.detached(priority: .userInitiated) {
                 try await JuancodeServices.revertFile(cwd, path: path)
@@ -3119,7 +3168,7 @@ final class AppModel {
     /// Discard one hunk of a file's uncommitted change (juancode-qce.3) — destructive,
     /// confirm-gated. Reverse-applies exactly that hunk off the main actor.
     func revertHunk(_ id: String, path: String, hunkIndex: Int) async {
-        guard let cwd = cwd(of: id) else { return }
+        guard let cwd = gitCwd(of: id) else { return }
         do {
             let r = try await Task.detached(priority: .userInitiated) {
                 try await JuancodeServices.revertHunk(cwd, path: path, hunkIndex: hunkIndex)
@@ -3139,7 +3188,7 @@ final class AppModel {
     /// without a cwd. The runner is async and shells out, so we hop off the main
     /// actor and publish the result back on it.
     func runReview(_ id: String) {
-        guard let cwd = cwd(of: id), !reviewRunning.contains(id) else { return }
+        guard let cwd = gitCwd(of: id), !reviewRunning.contains(id) else { return }
         let files = diffBySession[id]?.files ?? []
         let comments = comments(id)
         reviewRunning.insert(id)
@@ -3156,7 +3205,7 @@ final class AppModel {
     /// state and surfaces a status note on success/failure. Mirrors the web commit
     /// mutation in GitActions.
     func commit(_ id: String, message: String) async {
-        guard let cwd = cwd(of: id) else { return }
+        guard let cwd = gitCwd(of: id) else { return }
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !msg.isEmpty else { return }
         do {
@@ -3172,7 +3221,7 @@ final class AppModel {
 
     /// Push the current branch, off the main actor.
     func push(_ id: String) async {
-        guard let cwd = cwd(of: id) else { return }
+        guard let cwd = gitCwd(of: id) else { return }
         do {
             let r = try await Task.detached(priority: .userInitiated) {
                 try await pushCurrent(cwd)
@@ -3187,7 +3236,7 @@ final class AppModel {
     /// Open a PR for the session's branch (pushes first via gh), off the main actor.
     /// Returns the result for the UI to show the URL, or nil on failure (note set).
     func createPullRequest(_ id: String, title: String, body: String, draft: Bool) async -> PrCreateResult? {
-        guard let cwd = cwd(of: id) else { return nil }
+        guard let cwd = gitCwd(of: id) else { return nil }
         do {
             let r = try await Task.detached(priority: .userInitiated) {
                 try await createPr(cwd, title: title, body: body, draft: draft)
@@ -3206,7 +3255,7 @@ final class AppModel {
     /// Draft a commit message with Claude for the session's current diff, off the
     /// main actor. Returns the message, or nil on failure (note set).
     func generateCommitMessage(_ id: String) async -> String? {
-        guard let cwd = cwd(of: id) else { return nil }
+        guard let cwd = gitCwd(of: id) else { return nil }
         let files = diffBySession[id]?.files ?? []
         do {
             return try await Task.detached(priority: .userInitiated) {
@@ -3338,6 +3387,7 @@ final class AppModel {
         gridCancels[id]?(); gridCancels[id] = nil
         metaCancels[id]?(); metaCancels[id] = nil
         stopWatchingChanges(id)
+        agentWorktreeBySession.removeValue(forKey: id)
         remoteGridOwners.removeValue(forKey: id)
         if selection == id { selection = nil }
         clearUnread(id)
@@ -3373,6 +3423,7 @@ final class AppModel {
             activityCancels[id]?(); activityCancels[id] = nil
             gridCancels[id]?(); gridCancels[id] = nil
             stopWatchingChanges(id)
+            agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
             if selection == id { selection = nil }
             clearUnread(id)
