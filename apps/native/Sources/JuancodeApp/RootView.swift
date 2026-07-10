@@ -464,7 +464,9 @@ struct SidebarView: View {
     }
 
     /// Sessions currently shown after the filter is applied.
-    private var filteredVisibleCount: Int { groups.reduce(0) { $0 + $1.sessions.count } }
+    private func filteredVisibleCount(_ groups: [FolderGroup]) -> Int {
+        groups.reduce(0) { $0 + $1.sessions.count }
+    }
 
     /// Aggregate token/cost usage across visible non-archived sessions, for the
     /// sidebar footer total. Nil when nothing has usage yet.
@@ -492,7 +494,12 @@ struct SidebarView: View {
     /// Sessions filtered by `query` (case-insensitive over title + cwd) and the
     /// archived toggle, then grouped by folder and sorted stably by cwd — mirrors
     /// the web sidebar.
-    private var groups: [FolderGroup] {
+    ///
+    /// A method (not a computed property) so `body` computes it exactly once into a
+    /// local and threads that value through every consumer, instead of re-deriving
+    /// the whole filter/group/sort on each of the ~6 references per body eval
+    /// (juancode-5qw.8).
+    private func makeGroups() -> [FolderGroup] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         // Own sessions + discovered terminal sessions, grouped by project together.
         // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
@@ -565,7 +572,7 @@ struct SidebarView: View {
     /// drags are stable.
     private func reorderProjects(moving dragged: String, onto target: String) {
         guard dragged != target else { return }
-        var order = groups.map(\.cwd)
+        var order = makeGroups().map(\.cwd)
         guard let from = order.firstIndex(of: dragged) else { return }
         order.remove(at: from)
         guard let to = order.firstIndex(of: target) else { return }
@@ -581,7 +588,7 @@ struct SidebarView: View {
     /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
     /// and clipped previews respected, externals excluded) — what j/k steps through.
     /// Published into `model.navOrder` so the keyboard monitor can move the selection.
-    private var visibleOrderedIDs: [String] {
+    private func visibleOrderedIDs(from groups: [FolderGroup]) -> [String] {
         var ids: [String] = []
         for group in groups where !collapsedFolders.contains(group.cwd) {
             let s = group.sessions
@@ -594,6 +601,11 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var model = model
+        // Derive the grouped/sorted list once per body eval and thread it through
+        // every consumer below, instead of re-running the filter/group/sort on each
+        // reference (juancode-5qw.8).
+        let groups = makeGroups()
+        let visibleIDs = visibleOrderedIDs(from: groups)
         return VStack(spacing: 0) {
             // Persistent "add a project" entry point pinned to the top of the left
             // panel, above the filter and the collapsible session list — so starting
@@ -650,7 +662,7 @@ struct SidebarView: View {
             .padding(.vertical, 6)
             if filtering {
                 HStack(spacing: 6) {
-                    Text("Showing \(filteredVisibleCount) of \(unfilteredVisibleCount)")
+                    Text("Showing \(filteredVisibleCount(groups)) of \(unfilteredVisibleCount)")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -733,7 +745,7 @@ struct SidebarView: View {
             // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
             .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
             // Keep the keyboard monitor's nav order in sync with what's actually shown.
-            .onChange(of: visibleOrderedIDs) { _, ids in model.navOrder = ids }
+            .onChange(of: visibleIDs) { _, ids in model.navOrder = ids }
             // Minimize projects by default: collapse each folder the first time it
             // appears, then leave the user's manual toggles alone (juancode).
             .onChange(of: groups.map(\.cwd)) { _, cwds in collapseNewFolders(cwds) }
@@ -778,7 +790,7 @@ struct SidebarView: View {
             }
         }
         .background(Color.appSurface)
-        .onAppear { model.loadExternalSessions(); model.navOrder = visibleOrderedIDs }
+        .onAppear { model.loadExternalSessions(); model.navOrder = visibleIDs }
         .toolbar {
             ToolbarItem {
                 let anyExpanded = groups.contains { !collapsedFolders.contains($0.cwd) }

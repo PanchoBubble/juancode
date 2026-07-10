@@ -346,6 +346,25 @@ final class AppModel {
         refreshWorktreeMap()
     }
 
+    /// Apply a single live session's meta change (title/usage poll, rename, archive)
+    /// in place instead of rebuilding the whole list from `store.list()` — so
+    /// SwiftUI re-renders only the changed row (juancode-5qw.8). The incoming `meta`
+    /// is the live registry meta `refresh()` would itself prefer, so patching with
+    /// it matches a full rebuild without the DB round-trip, prune, or worktree scan.
+    /// Falls back to a full `refresh()` when the id isn't in the current list yet
+    /// (an unseen create/adopt — create/exit/adopt keep the full path).
+    func applyMetaPatch(_ meta: SessionMeta) {
+        switch metaPatchOutcome(for: meta, in: sessions) {
+        case .patch(let idx):
+            sessions[idx] = meta
+            metaCache[meta.id] = meta
+        case .noChange:
+            break
+        case .fullRefresh:
+            refresh()
+        }
+    }
+
     /// Enforce the per-project session retention cap (juancode-477): hard-delete the
     /// oldest persisted sessions once a project exceeds `Config.sessionsPerProjectCap`.
     /// Uses the runtime worktree→repo map (same folding as the sidebar) so linked
@@ -578,11 +597,13 @@ final class AppModel {
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
         // A CLI-derived title / usage landing from the title poll (or a rename /
-        // archive) mutates the live meta without a turn edge. Rebuild the list so
-        // the sidebar leaves the "Claude Code · <project>" fallback (juancode).
+        // archive) mutates the live meta without a turn edge. Patch that one row in
+        // place rather than rebuilding the whole list from `store.list()` every 4s
+        // per running session (juancode-5qw.8) — so the sidebar leaves the
+        // "Claude Code · <project>" fallback without re-deriving every row.
         metaCancels[s.id]?()
-        metaCancels[s.id] = s.onMetaChange { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        metaCancels[s.id] = s.onMetaChange { [weak self] meta in
+            Task { @MainActor in self?.applyMetaPatch(meta) }
         }
         // Grid-ownership bridge (juancode-2t4): seed from the current owner (a
         // remote may already be driving when this model attaches — app relaunch
