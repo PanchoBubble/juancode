@@ -29,6 +29,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case focusSessionSearch
     case refreshTerminal
     case toggleChanges
+    case openChangesForCurrentSession
     case toggleProjects
     case findInTerminal
     case terminalZoomIn
@@ -55,6 +56,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .focusSessionSearch: return "Find Sessions"
         case .refreshTerminal: return "Refresh Terminal"
         case .toggleChanges: return "Toggle Code Changes"
+        case .openChangesForCurrentSession: return "Open Changes for Current Session"
         case .toggleProjects: return "Toggle Projects Panel"
         case .findInTerminal: return "Find in Terminal"
         case .terminalZoomIn: return "Increase Terminal Font"
@@ -83,6 +85,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .focusSessionSearch: return KeyBinding(key: "f", control: true)
         case .refreshTerminal: return KeyBinding(key: "z", control: true)
         case .toggleChanges: return KeyBinding(key: "c", command: true)
+        // ⌘⇧C jumps straight to the working-tree diff (and clears the review badge),
+        // vs ⌘C which just toggles the panel's visibility.
+        case .openChangesForCurrentSession: return KeyBinding(key: "c", command: true, shift: true)
         case .toggleProjects: return KeyBinding(key: "s", control: true)
         // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
         // ⌃F (focusSessionSearch) stays the sidebar session filter.
@@ -263,6 +268,8 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         // dock is open, else the selected session's pane.
         if oracle.expanded { oracle.refreshChat() } else { model.refreshTerminal() }
     case .toggleChanges: model.toggleChangesPanel()
+    case .openChangesForCurrentSession:
+        if let id = model.selection { model.openChanges(for: id) }
     case .toggleProjects: model.toggleProjectsSidebar()
     case .findInTerminal: model.showFindBar()
     case .terminalZoomIn: TerminalZoom.shared.zoomIn()

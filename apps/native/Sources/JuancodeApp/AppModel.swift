@@ -622,6 +622,12 @@ final class AppModel {
                    self.diffBySession[s.id] != nil || self.selection == s.id {
                     self.loadChanges(s.id)
                 }
+                // Review nudge: on that same settle edge, compute a cheap change
+                // summary for every agent session so a dirty tree surfaces a badge
+                // (sidebar) + banner even for background work no panel has opened.
+                if shouldComputeChangeBadge(prev: prev, next: st, notify: notify, isEditor: isEditor) {
+                    self.refreshChangeStat(s.id)
+                }
             }
         }
         s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
@@ -2387,6 +2393,14 @@ final class AppModel {
 
     private var diffInFlight: Set<String> = []
 
+    /// Cheapest whole-tree change summary per session, recomputed when the agent
+    /// settles a turn in a dirty tree. Drives the sidebar review badge + the
+    /// session-view banner. Nil / absent ⇒ clean, no badge.
+    private(set) var changeStatBySession: [String: ChangeStat] = [:]
+    /// The change signature each session's Changes panel last showed — the debounce
+    /// key. A badge appears only while the latest stat differs from this.
+    private var viewedChangeSignatureBySession: [String: String] = [:]
+
     /// Per-session 'Review with Claude' result (juancode-7ha). The last AI review
     /// pass over the working-tree diff, cached so findings stay overlaid until the
     /// next run — the native analogue of the web's `useQuery(["review", …])`.
@@ -2486,6 +2500,66 @@ final class AppModel {
         changesErrorBySession[id] = nil
         prCiLogsBySession[id] = nil
         loadChanges(id)
+    }
+
+    /// The effective working directory an agent edits in — its linked worktree when
+    /// it runs in one, else its cwd. What the change badge measures.
+    private func effectiveCwd(of id: String) -> String? {
+        liveSession(id)?.meta.effectiveCwd ?? appState.store.get(id)?.effectiveCwd
+    }
+
+    /// The review badge for a session: the latest change summary, but only while it
+    /// differs from what its Changes panel last showed (else nil — cleared/clean).
+    func changeBadge(_ id: String) -> ChangeStat? {
+        let stat = changeStatBySession[id]
+        guard changeBadgeVisible(latest: stat, viewedSignature: viewedChangeSignatureBySession[id])
+        else { return nil }
+        return stat
+    }
+
+    /// Recompute a session's change summary off the main actor (the busy → settled
+    /// edge). If its Changes panel is already open on the working tree, mark the
+    /// result seen so a session you're actively reviewing never re-badges itself.
+    private func refreshChangeStat(_ id: String) {
+        guard let cwd = effectiveCwd(of: id) else { return }
+        Task {
+            let stat = await Task.detached(priority: .utility) {
+                await computeChangeStat(cwd)
+            }.value
+            changeStatBySession[id] = stat.isEmpty ? nil : stat
+            if !stat.isEmpty, isChangesPanelOpen(for: id) {
+                viewedChangeSignatureBySession[id] = stat.signature
+            }
+        }
+    }
+
+    /// Whether `id`'s Changes panel is the visible, working-tree source right now —
+    /// i.e. the user is already looking at this session's diff.
+    private func isChangesPanelOpen(for id: String) -> Bool {
+        guard selection == id else { return false }
+        let d = UserDefaults.standard
+        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
+        let onChanges = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Changes"
+        guard shown, onChanges else { return false }
+        if case .workingTree = changesSource(id) { return true }
+        return false
+    }
+
+    /// Record that a session's changes have been viewed — clears its badge by taking
+    /// the latest signature as seen. Called when the Changes panel appears.
+    func markChangesViewed(_ id: String) {
+        viewedChangeSignatureBySession[id] = changeStatBySession[id]?.signature ?? ""
+    }
+
+    /// Open the Changes panel for a session pre-loaded on the working tree and clear
+    /// its review badge. The action behind the sidebar badge, the session banner, and
+    /// the "Open Changes for current session" shortcut.
+    func openChanges(for id: String) {
+        setChangesSource(id, .workingTree)
+        let d = UserDefaults.standard
+        d.set("Changes", forKey: "session.sidePanel.tab")
+        d.set(true, forKey: "session.sidePanel.shown")
+        markChangesViewed(id)
     }
 
     /// Load (or refresh) the diff + git state for a session, off the main actor

@@ -508,6 +508,33 @@ public func computeWorktreeStatus(_ cwd: String) async -> [WorktreeStatusEntry] 
     return parseWorktreeStatus(out)
 }
 
+/// A cheap change summary for `cwd`: the changed-file count + total line
+/// additions/deletions vs HEAD, plus a signature of the name-status list for
+/// debouncing the review badge. Reuses the porcelain snapshot for the file
+/// set/signature and a single `--numstat` for the line totals — no per-file patch
+/// generation, so it's fine to run on every settle edge. Line totals cover tracked
+/// changes; untracked files still count toward `files`. Empty for a clean or
+/// non-git cwd.
+public func computeChangeStat(_ cwd: String) async -> ChangeStat {
+    let entries = await computeWorktreeStatus(cwd)
+    guard !entries.isEmpty else {
+        return ChangeStat(files: 0, additions: 0, deletions: 0, signature: "")
+    }
+    var additions = 0
+    var deletions = 0
+    if let out = try? await git(cwd, ["diff", "--numstat", "HEAD"]) {
+        for line in out.split(separator: "\n", omittingEmptySubsequences: true) {
+            let cols = line.split(separator: "\t", maxSplits: 2)
+            // Binary files report "-\t-"; `Int(...)` yields nil → contributes 0.
+            guard cols.count >= 2 else { continue }
+            additions += Int(cols[0]) ?? 0
+            deletions += Int(cols[1]) ?? 0
+        }
+    }
+    return ChangeStat(files: entries.count, additions: additions, deletions: deletions,
+                      signature: changeStatSignature(entries))
+}
+
 /// Stage every change (`git add -A`) and commit it with `message`.
 public func commitAll(_ cwd: String, _ message: String) async throws -> CommitResult {
     _ = try await gitStrict(cwd, ["add", "-A"])

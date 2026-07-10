@@ -243,6 +243,12 @@ struct JuancodeApp: App {
                     performShortcut(.toggleProjects, model: model, oracle: oracle)
                 }
                 .appShortcut(.toggleProjects, shortcuts)
+                // ⌘⇧C jumps straight to the selected session's working-tree diff and
+                // clears its review badge.
+                Button("Open Changes for Current Session") {
+                    performShortcut(.openChangesForCurrentSession, model: model, oracle: oracle)
+                }
+                .appShortcut(.openChangesForCurrentSession, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") {

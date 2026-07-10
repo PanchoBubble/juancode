@@ -965,6 +965,8 @@ struct SidebarView: View {
                           unseenDone: model.unseenCompletions.contains(meta.id),
                           atRisk: !external && model.workAtRisk(forSession: meta) != nil,
                           worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
+                          changeBadge: external ? nil : model.changeBadge(meta.id),
+                          onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
                           selected: model.selection == meta.id,
                           activating: model.isActivating(meta.id))
@@ -1757,6 +1759,12 @@ struct SessionRow: View {
     /// subtitle so worktree rows read distinctly from main-checkout rows. Nil for
     /// non-worktree sessions or until the branch is loaded.
     var worktreeBranch: String? = nil
+    /// The agent settled a turn with a dirty tree and the diff changed since it was
+    /// last viewed — a compact "N files · +X −Y" review badge. Nil when clean /
+    /// already reviewed.
+    var changeBadge: ChangeStat? = nil
+    /// Opens this session's Changes panel on the working tree (the badge's click target).
+    var onOpenChanges: (() -> Void)? = nil
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
@@ -1794,6 +1802,9 @@ struct SessionRow: View {
                         Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     .help(usageHelp)
+                }
+                if let changeBadge, let onOpenChanges {
+                    changeBadgeCapsule(changeBadge, onOpen: onOpenChanges)
                 }
             }
             Spacer(minLength: 6)
@@ -1833,6 +1844,25 @@ struct SessionRow: View {
             .clickCursor()
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
+    }
+
+    /// The "N files · +X −Y" review badge shown in the subtitle line once the agent
+    /// settles a turn with unreviewed changes. A button so a click opens the Changes
+    /// panel without also selecting the row.
+    private func changeBadgeCapsule(_ stat: ChangeStat, onOpen: @escaping () -> Void) -> some View {
+        Button(action: onOpen) {
+            HStack(spacing: 3) {
+                Image(systemName: "doc.text.magnifyingglass").font(.system(size: 8))
+                Text(stat.summary).font(.system(size: 10, weight: .medium).monospacedDigit())
+            }
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Color.accentColor.opacity(0.18))
+            .foregroundStyle(Color.accentColor)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help("Changed since you last looked — click to review (⌘⇧C)")
     }
 
     private func prCapsule(_ t: TrackedPr) -> some View {
@@ -2127,6 +2157,9 @@ struct SessionContainer: View {
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
                     .overlay(alignment: .topTrailing) { remoteDriveBadge }
                     .overlay(alignment: .topLeading) { sessionRestoredBadge }
+                    // Review nudge floated at the bottom edge — out of the way of the
+                    // top badges + find bar, and an overlay so the pty grid never reflows.
+                    .overlay(alignment: .bottom) { changeReviewBanner }
                     // In-pane find bar (⌘F, juancode-972) — overlays the visible
                     // session's pane; never reflows the pty grid.
                     .overlay(alignment: .top) {
@@ -2265,6 +2298,17 @@ struct SessionContainer: View {
             SessionRestoredOverlay(phase: phase) { model.dismissRestoredBanner(meta.id) }
                 .id(meta.id)
                 .padding(10)
+        }
+    }
+
+    /// Review nudge over the terminal once the agent settles a turn with unreviewed
+    /// changes; clears when its Changes panel is opened (see `AppModel.changeBadge`).
+    @ViewBuilder
+    private var changeReviewBanner: some View {
+        if let stat = model.changeBadge(meta.id) {
+            ChangeReviewBanner(summary: stat.summary) { model.openChanges(for: meta.id) }
+                .padding(10)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 

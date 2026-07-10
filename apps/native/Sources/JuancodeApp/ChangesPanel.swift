@@ -71,6 +71,8 @@ struct ChangesPanel: View {
             if let cwd = model.sessionCwd(sessionId) { model.loadPrs(cwd) }
             // Live-refresh the diff on external edits only while the panel is open.
             model.startWatchingChanges(sessionId)
+            // Seeing the panel clears the review nudge regardless of how it opened.
+            model.markChangesViewed(sessionId)
         }
         .onDisappear { model.stopWatchingChanges(sessionId) }
         .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
