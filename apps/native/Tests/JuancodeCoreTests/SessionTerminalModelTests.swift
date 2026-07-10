@@ -116,6 +116,49 @@ import SwiftTerm
         #expect(m.terminalTitle == "my-title")
     }
 
+    /// juancode-a2h.2: `seedBytes()` — the clean-repaint attach seed — reproduces
+    /// the model's visible screen (text, cursor, screen mode) when fed into a fresh
+    /// terminal, for both a normal styled screen and an alternate-buffer TUI screen.
+    /// This is the property the local pane relies on to switch instantly with no
+    /// replay-garble.
+    @Test func seedBytesReproduceVisibleScreen() {
+        let streams = [
+            esc("\u{1B}[2J\u{1B}[H\u{1B}[1;31mred\u{1B}[0m plain\r\nsecond row\r\n\u{1B}[4;3Hdeep"),
+            esc("\u{1B}[?1049h\u{1B}[2J\u{1B}[Halt row one\r\nalt row two\u{1B}[38;2;9;8;7mtc"),
+        ]
+        for stream in streams {
+            let m = SessionTerminalModel(cols: 24, rows: 6, scrollbackLines: 200)
+            m.feed(stream)
+
+            let seeded = SessionTerminalModel(cols: 24, rows: 6, scrollbackLines: 200)
+            seeded.feed(m.seedBytes())
+
+            #expect(seeded.isAlternateBuffer == m.isAlternateBuffer)
+            #expect(seeded.cursorPosition == m.cursorPosition)
+            for r in 0..<6 {
+                #expect(seeded.styledVisibleLine(at: r)?.text == m.styledVisibleLine(at: r)?.text,
+                        "row \(r) text mismatch after seed")
+            }
+        }
+    }
+
+    /// The seed preserves per-cell SGR (color + style), not just text.
+    @Test func seedBytesPreserveCellStyle() {
+        let m = SessionTerminalModel(cols: 24, rows: 3, scrollbackLines: 100)
+        m.feed(esc("\u{1B}[1;31mR\u{1B}[0m\u{1B}[38;2;9;8;7mT"))
+
+        let seeded = SessionTerminalModel(cols: 24, rows: 3, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        let cells = seeded.snapshot().lines[0].cells
+        #expect(cells[0].char == "R")
+        #expect(cells[0].fg == .ansi(1))
+        #expect(cells[0].style.contains(.bold))
+        #expect(cells[1].char == "T")
+        #expect(cells[1].fg == .trueColor(r: 9, g: 8, b: 7))
+        #expect(!cells[1].style.contains(.bold))
+    }
+
     /// Acceptance: the model's snapshot matches, line for line, what an independent
     /// SwiftTerm `Terminal` renders for the same byte stream — a compact golden
     /// exercising cursor moves, colors, a scroll, and alt-screen enter/exit.

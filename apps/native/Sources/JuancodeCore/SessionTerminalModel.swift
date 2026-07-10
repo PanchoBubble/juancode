@@ -243,6 +243,35 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         }
     }
 
+    /// A clean, well-formed VT byte stream that repaints the CURRENT visible screen
+    /// (juancode-a2h.2). Fed to a freshly-attached local view in place of raw byte
+    /// replay: because it is synthesized from PARSED state it carries no partial
+    /// escape sequences and no stale alt-screen frames, so a view seeded with it
+    /// lands the correct screen with no replay-garble and no synthetic alt-screen
+    /// resync prefix. Uses absolute cursor positioning per row so nothing scrolls.
+    ///
+    /// Scrollback history above the visible screen is not reproduced here — a live
+    /// program repaints on its next output, and the alt-screen TUIs keep no
+    /// scrollback anyway (see the scrollback-seed follow-up ticket).
+    public func seedBytes() -> [UInt8] {
+        lock.withLock {
+            let cols = terminal.cols
+            let rows = terminal.rows
+            let alt = terminal.isCurrentBufferAlternate
+            let cursor = terminal.getCursorLocation()
+            var enc = TerminalSeedEncoder()
+            enc.reset()
+            enc.setAlternateBuffer(alt)
+            enc.clearScreen()
+            for r in 0..<rows {
+                enc.paintRow(r, row(terminal.getLine(row: r), cols: cols))
+            }
+            enc.moveCursor(x: cursor.x, y: cursor.y)
+            enc.setCursorVisible(cursorVisible)
+            return enc.bytes
+        }
+    }
+
     /// The visible screen as text, trailing blank rows dropped. Equivalent to
     /// `snapshot().text` (same cell extraction, so a never-written cell reads as a
     /// blank), without allocating the full styled snapshot.

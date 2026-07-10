@@ -77,4 +77,13 @@ public enum Config {
     public static var reapIdleMinutes: Int {
         env["JUANCODE_REAP_IDLE_MINUTES"].flatMap(Int.init) ?? 30
     }
+
+    /// Seed a freshly-attached local terminal pane from the parsed headless model
+    /// (a clean repaint via `SessionTerminalModel.seedBytes()`) instead of replaying
+    /// the raw byte ring (juancode-a2h.2) — killing replay-garble and the synthetic
+    /// alt-screen resync. On by default; set `JUANCODE_RAW_REPLAY=1` to fall back to
+    /// the old raw byte replay if a seed rendering issue ever surfaces in the wild.
+    public static var useModelSeed: Bool {
+        env["JUANCODE_RAW_REPLAY"] != "1"
+    }
 }
