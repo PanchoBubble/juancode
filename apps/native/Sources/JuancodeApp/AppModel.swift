@@ -1565,17 +1565,72 @@ final class AppModel {
         Task { await appState.prTracking.untrack(id) }
     }
 
+    /// Queue a prompt into a session's message queue and kick it — the same
+    /// idle-edge delivery `submitReview` uses, so a "Send to agent" never
+    /// interrupts the agent mid-turn. Safe when the session isn't live: the
+    /// queue holds the message and the next revival flushes it.
+    func queuePrompt(sessionId: String, text: String) {
+        appState.messageQueue.add(sessionId, text: text)
+        liveSession(sessionId)?.kickQueue()
+    }
+
+    /// "Track & send" from the GitHub view: start tracking the PR (the engine
+    /// spawns + seeds the agent session and returns the entry synchronously),
+    /// then queue the prompt on that session. Unlike `trackPr` this does NOT
+    /// jump to the spawned session — the user is reading the PR conversation
+    /// and just handed one comment off. Returns false when tracking failed
+    /// (spawn failure) and nothing was queued.
+    func trackPrAndQueue(_ pr: PullRequest, cwd: String, prompt: String) async -> Bool {
+        if let entry = await appState.prTracking.track(pr, cwd: cwd) {
+            queuePrompt(sessionId: entry.sessionId, text: prompt)
+            return true
+        }
+        // `track` returns nil when already tracked (e.g. raced with another
+        // surface) — fall back to the mirror's session.
+        if let t = trackedPr(cwd: cwd, number: pr.number) {
+            queuePrompt(sessionId: t.sessionId, text: prompt)
+            return true
+        }
+        return false
+    }
+
     /// Mirror the engine-owned tracked-PR watch list into `tracked`. The engine
     /// hands the current snapshot synchronously on subscribe, so the mirror also
-    /// seeds itself at launch (including a restored watch list).
+    /// seeds itself at launch (including a restored watch list). Needs-decision
+    /// escalations ride the same subscription and surface as OS notifications.
     private func subscribeTrackedMirror() {
         let engine = appState.prTracking
         Task {
             _ = await engine.subscribe { [weak self] change in
-                guard case .tracked(let list) = change else { return }
-                Task { @MainActor [weak self] in self?.applyTrackedMirror(list) }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch change {
+                    case .tracked(let list):
+                        self.applyTrackedMirror(list)
+                    case let .notification(trackedId, prNumber, notification):
+                        self.notifyTrackedPrDecision(
+                            trackedId: trackedId, prNumber: prNumber, notification: notification)
+                    }
+                }
             }
         }
+    }
+
+    /// Surface an engine needs-decision escalation as an OS notification keyed by
+    /// the PR's agent session, so the existing click-through (`AgentNotifier` →
+    /// `revealSession`) lands on the session — and `selection`'s didSet dismisses
+    /// the GitHub view on the way.
+    private func notifyTrackedPrDecision(trackedId: String, prNumber: Int,
+                                         notification: TrackNotification) {
+        // The mirror still holds the entry at notification time (the engine
+        // broadcasts `.tracked` after per-poll notifications).
+        guard let entry = tracked[trackedId] else { return }
+        agentNotifier.post(
+            sessionId: entry.sessionId,
+            title: "PR #\(prNumber) needs a decision",
+            subtitle: (entry.cwd as NSString).lastPathComponent,
+            body: notification.message,
+            critical: true)
     }
 
     private func applyTrackedMirror(_ list: [TrackedPr]) {
