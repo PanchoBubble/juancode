@@ -597,8 +597,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             }
             feedCoalescer = coalescer
             if Config.useModelSeed {
-                tv.feed(byteArray: session.terminalModel.seedBytes()[...])
-                cancel = session.subscribeOutput(replay: false) { bytes in
+                // Atomically seed from the model and subscribe (juancode-a2h.2): the
+                // clean seed and the live stream partition with no gap, so a brand-new
+                // session's boot burst can't be dropped between seed and subscribe.
+                // `onBytes` fires on the session workQueue; the coalescer hops feeds
+                // to the main thread in order (seed first, then live chunks).
+                cancel = session.subscribeFromModelSeed { bytes in
                     coalescer.append(bytes)
                 }
             } else {
