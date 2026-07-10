@@ -35,6 +35,9 @@ final class WebSocketConnection: @unchecked Sendable {
     private let state: AppState
     /// Enqueue a server message for the writer task (thread-safe).
     let send: @Sendable (ServerMessage) -> Void
+    /// True while the writer task can't drain the socket — the coalescer and the
+    /// screen streamers both hold off emitting while this reports backpressure.
+    private let isBackedUp: @Sendable () -> Bool
     /// Coalesces + bounds this connection's server→client output stream
     /// (juancode-5qw.7): one frame per session per tick, dropping-and-resyncing
     /// past its byte cap so a stalled client can't exhaust server memory.
@@ -52,6 +55,9 @@ final class WebSocketConnection: @unchecked Sendable {
     /// (oracle-cj3 / juancode-r82). The queue itself persists; only the fan-out is
     /// torn down here.
     private var queueWatchers: [String: () -> Void] = [:]
+    /// Rendered-screen streams this connection opted into (juancode-a2h.3), one
+    /// per session; the stored closure tears the streamer + its exit watcher down.
+    private var screenStreams: [String: () -> Void] = [:]
     private var openedEditors: Set<String> = []
     private var openedTerminals: Set<String> = []
     /// Cancel handle for this tab's tracked-PR subscription (juancode-bt2), set when
@@ -61,6 +67,7 @@ final class WebSocketConnection: @unchecked Sendable {
     init(state: AppState, gate: WSSendGate) {
         self.state = state
         self.send = { msg in gate.send(msg) }
+        self.isBackedUp = { [weak gate] in gate?.backedUp ?? false }
         self.outputCoalescer = ServerOutputCoalescer(
             isBackedUp: { [weak gate] in gate?.backedUp ?? false },
             emitOutput: { [weak gate] id, bytes in
@@ -85,12 +92,13 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     func close() {
-        let (subs, watchers, queues, eds, terms, prsUnsub):
-            ([() -> Void], [() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
+        let (subs, watchers, queues, screens, eds, terms, prsUnsub):
+            ([() -> Void], [() -> Void], [() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
             lock.withLock {
                 let r = (Array(subscriptions.values), activityWatchers, Array(queueWatchers.values),
-                         openedEditors, openedTerminals, trackedPrsUnsub)
+                         Array(screenStreams.values), openedEditors, openedTerminals, trackedPrsUnsub)
                 subscriptions.removeAll(); activityWatchers.removeAll(); queueWatchers.removeAll()
+                screenStreams.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
                 trackedPrsUnsub = nil
                 return r
@@ -102,6 +110,7 @@ final class WebSocketConnection: @unchecked Sendable {
         for c in subs { c() }
         for w in watchers { w() }
         for q in queues { q() }
+        for s in screens { s() }
         prsUnsub?()
         // Editor + shell ptys are tab-scoped — tear them down with the connection.
         for id in eds { state.ephemeral.get(id)?.kill() }
@@ -170,6 +179,41 @@ final class WebSocketConnection: @unchecked Sendable {
 
     private func unsubscribeQueue(_ id: String) {
         lock.withLock { queueWatchers.removeValue(forKey: id) }?()
+    }
+
+    // MARK: - rendered-screen stream (juancode-a2h.3)
+
+    /// Start streaming a live session's rendered screen: a full snapshot now, then
+    /// coalesced row-diffs from the model's damage stream. Idempotent per session.
+    /// Deliberately never touches the grid arbiter — a screen viewer is read-only
+    /// and renders at the pty's own grid, so it can't steal or flap the desktop's
+    /// grid. Live sessions only: the model dies with the pty, and a screen client
+    /// reconnecting to a dead session should fall back to `attach`.
+    private func subscribeScreen(_ id: String) {
+        if lock.withLock({ screenStreams[id] != nil }) { return }
+        guard let live = state.registry.get(id) else {
+            send(.error(sessionId: id, message: "Session is not running")); return
+        }
+        let streamer = ScreenStreamer(
+            sessionId: id, model: live.terminalModel,
+            isBackedUp: isBackedUp,
+            send: send)
+        let offExit = live.onExit { [weak self, weak streamer] code in
+            // Paint the final screen before the exit lands, mirroring the byte
+            // path's flush-before-exit ordering.
+            streamer?.flushTick()
+            guard let self else { return }
+            // The byte-path subscription already reports this exit — don't double up.
+            if self.lock.withLock({ self.subscriptions[id] == nil && self.screenStreams[id] != nil }) {
+                self.send(.exit(sessionId: id, exitCode: code))
+            }
+        }
+        lock.withLock { screenStreams[id] = { streamer.stop(); offExit() } }
+        streamer.start()
+    }
+
+    private func unsubscribeScreen(_ id: String) {
+        lock.withLock { screenStreams.removeValue(forKey: id) }?()
     }
 
     // MARK: - message routing (mirrors ws.ts handle())
@@ -367,6 +411,13 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .dequeueMessage(sessionId, messageId):
             state.messageQueue.remove(sessionId, messageId)
+
+        // ── Rendered-screen stream (juancode-a2h.3) ────────────────────────────────
+        case let .subscribeScreen(sessionId):
+            subscribeScreen(sessionId)
+
+        case let .unsubscribeScreen(sessionId):
+            unsubscribeScreen(sessionId)
 
         // ── Tracked-PR registry (juancode-bt2) ───────────────────────────────────
         case .subscribeTrackedPrs:

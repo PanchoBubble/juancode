@@ -40,7 +40,7 @@ final class WireProtocolTests: XCTestCase {
     func testTSOnlyMessageTypeDegradesToUnknown() throws {
         // Types the Node server implements but the embedded native server doesn't
         // (a real case: the web client sends these) must degrade, not error.
-        for t in ["subscribeStructured", "subscribeScreen", "steerMessage", "reattachTerminal"] {
+        for t in ["subscribeStructured", "steerMessage", "reattachTerminal"] {
             guard case let .unknown(type) = try decode(#"{"type":"\#(t)","sessionId":"s-1"}"#) else {
                 return XCTFail("expected .unknown for \(t)")
             }
@@ -183,6 +183,59 @@ final class WireProtocolTests: XCTestCase {
             return XCTFail("expected .unsubscribeQueue")
         }
         XCTAssertEqual(b, "s-2")
+    }
+
+    // ── Rendered-screen stream (juancode-a2h.3) ──────────────────────────────────
+
+    func testDecodesSubscribeAndUnsubscribeScreen() throws {
+        guard case let .subscribeScreen(a) = try decode(#"{"type":"subscribeScreen","sessionId":"s-1"}"#) else {
+            return XCTFail("expected .subscribeScreen")
+        }
+        XCTAssertEqual(a, "s-1")
+        guard case let .unsubscribeScreen(b) = try decode(#"{"type":"unsubscribeScreen","sessionId":"s-2"}"#) else {
+            return XCTFail("expected .unsubscribeScreen")
+        }
+        XCTAssertEqual(b, "s-2")
+    }
+
+    func testEncodesScreenFrame() throws {
+        let msg = ServerMessage.screen(
+            sessionId: "s-1", reset: true, cols: 80, rows: 24,
+            cursorX: 3, cursorY: 5, cursorVisible: true, alt: false,
+            lines: [ScreenRowWire(row: 0, segs: [
+                ScreenSegmentWire(text: "hi", fg: .ansi(2), bg: .default, style: [.bold]),
+                ScreenSegmentWire(text: "!", fg: .trueColor(r: 255, g: 0, b: 16), bg: .defaultInverted, style: []),
+            ])])
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "screen")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        XCTAssertEqual(obj?["reset"] as? Bool, true)
+        XCTAssertEqual(obj?["cols"] as? Int, 80)
+        XCTAssertEqual(obj?["rows"] as? Int, 24)
+        XCTAssertEqual(obj?["cursorX"] as? Int, 3)
+        XCTAssertEqual(obj?["cursorY"] as? Int, 5)
+        XCTAssertEqual(obj?["cursorVisible"] as? Bool, true)
+        XCTAssertEqual(obj?["alt"] as? Bool, false)
+        let lines = obj?["lines"] as? [[String: Any]]
+        XCTAssertEqual(lines?.count, 1)
+        XCTAssertEqual(lines?[0]["row"] as? Int, 0)
+        let segs = lines?[0]["segs"] as? [[String: Any]]
+        XCTAssertEqual(segs?.count, 2)
+        // ANSI-256 encodes as a number; the default fg/bg and an empty style are
+        // omitted; truecolor is "#rrggbb"; default-inverted is "inv".
+        XCTAssertEqual(segs?[0]["text"] as? String, "hi")
+        XCTAssertEqual(segs?[0]["fg"] as? Int, 2)
+        XCTAssertNil(segs?[0]["bg"])
+        XCTAssertEqual(segs?[0]["st"] as? Int, 1)
+        XCTAssertEqual(segs?[1]["fg"] as? String, "#ff0010")
+        XCTAssertEqual(segs?[1]["bg"] as? String, "inv")
+        XCTAssertNil(segs?[1]["st"])
+    }
+
+    func testScreenCapabilityIsAdvertised() {
+        // A client sends `subscribeScreen` only after seeing this in `serverInfo`;
+        // connections that never opt in keep today's byte stream unchanged.
+        XCTAssertTrue(WireProtocol.capabilities.contains("screen"))
     }
 
     func testEncodesQueueServerMessage() throws {

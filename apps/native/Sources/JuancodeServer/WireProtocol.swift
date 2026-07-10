@@ -2,13 +2,13 @@ import Foundation
 import JuancodeCore
 import JuancodeServices
 
-/// The WebSocket wire protocol, a faithful Codable mirror of the `ClientMessage`
-/// / `ServerMessage` tagged unions in `apps/server/src/protocol.ts` (and its twin
-/// `apps/web/src/protocol.ts`). The discriminator is the `type` field; every
-/// other field sits flat alongside it, exactly as the TS JSON does — so the
-/// existing React web client talks to this embedded server unchanged.
+/// The WebSocket wire protocol: tagged unions whose discriminator is the `type`
+/// field; every other field sits flat alongside it. Originally a faithful mirror
+/// of the (since-deleted) Node server's `protocol.ts` — the shape is preserved so
+/// pre-existing clients keep working unchanged.
 ///
-/// Keep this in sync with the two protocol.ts files.
+/// The living TS mirror is the oracle sidecar's `apps/oracle-mcp/src/native-events.ts`;
+/// keep the two in sync (field names, casing, tags).
 
 // MARK: - Client → server
 
@@ -44,6 +44,17 @@ public enum ClientMessage: Sendable {
     case queueMessage(sessionId: String, text: String)
     /// Cancel a still-pending queued message before it's delivered.
     case dequeueMessage(sessionId: String, messageId: String)
+    // ── Rendered-screen stream (juancode-a2h.3) ──────────────────────────────────
+    /// Opt into the live rendered-screen stream for a session — the cheap,
+    /// phone-friendly alternative to the full xterm `output` byte stream. The
+    /// server replies immediately with a full snapshot (`screen` with
+    /// `reset: true`) and thereafter pushes only the rows that changed
+    /// (`reset: false`), coalesced on an ~80ms tick. Read-only: a screen viewer
+    /// never participates in grid ownership, so it cannot resize the pty.
+    /// Connections that never send this get the byte stream exactly as before.
+    case subscribeScreen(sessionId: String)
+    /// Stop the live screen stream for a session (the client closed that view).
+    case unsubscribeScreen(sessionId: String)
     case openEditor(cwd: String, file: String, cols: Int, rows: Int)
     case openTerminal(cwd: String, cols: Int, rows: Int, requestId: String)
     // ── Tracked-PR registry (juancode-bt2) — keep beside the PR server messages ──
@@ -130,6 +141,10 @@ extension ClientMessage: Decodable {
         case "dequeueMessage":
             self = .dequeueMessage(sessionId: try c.decode(String.self, forKey: .sessionId),
                                    messageId: try c.decode(String.self, forKey: .messageId))
+        case "subscribeScreen":
+            self = .subscribeScreen(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "unsubscribeScreen":
+            self = .unsubscribeScreen(sessionId: try c.decode(String.self, forKey: .sessionId))
         case "openEditor":
             self = .openEditor(cwd: try c.decode(String.self, forKey: .cwd),
                                file: try c.decode(String.self, forKey: .file),
@@ -168,7 +183,7 @@ extension ClientMessage: Decodable {
 /// via `serverInfo` rather than assuming parity.
 public enum WireProtocol {
     public static let version = 1
-    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck", "resizeAck"]
+    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck", "resizeAck", "screen"]
 }
 
 public enum ServerMessage: Sendable {
@@ -179,6 +194,15 @@ public enum ServerMessage: Sendable {
     case created(session: SessionMeta)
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
+    /// A frame of the live rendered-screen stream (juancode-a2h.3), projected from
+    /// the session's headless terminal model — not re-parsed from bytes.
+    /// `reset: true` carries the full grid (every row) — sent first after
+    /// `subscribeScreen` and again whenever the geometry or screen buffer flips;
+    /// `reset: false` carries only the rows that changed since the last frame.
+    /// Only sent to connections that opted in via `subscribeScreen`.
+    case screen(sessionId: String, reset: Bool, cols: Int, rows: Int,
+                cursorX: Int, cursorY: Int, cursorVisible: Bool, alt: Bool,
+                lines: [ScreenRowWire])
     /// Acknowledgement that the server wrote an `input` carrying a `seq`
     /// (juancode-1u3) — echoes `sessionId` + `seq` so the client clears that
     /// keystroke from its unacked buffer. Only sent when the input carried a seq.
@@ -255,6 +279,8 @@ extension ServerMessage: Encodable {
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
         case items
+        // Rendered-screen stream (juancode-a2h.3).
+        case reset, cursorX, cursorY, cursorVisible, alt, lines
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -276,6 +302,17 @@ extension ServerMessage: Encodable {
             try c.encode("output", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(data, forKey: .data)
+        case let .screen(sessionId, reset, cols, rows, cursorX, cursorY, cursorVisible, alt, lines):
+            try c.encode("screen", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(reset, forKey: .reset)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
+            try c.encode(cursorX, forKey: .cursorX)
+            try c.encode(cursorY, forKey: .cursorY)
+            try c.encode(cursorVisible, forKey: .cursorVisible)
+            try c.encode(alt, forKey: .alt)
+            try c.encode(lines, forKey: .lines)
         case let .inputAck(sessionId, seq):
             try c.encode("inputAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
