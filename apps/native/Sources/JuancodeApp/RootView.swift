@@ -226,14 +226,18 @@ private final class ContainingScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         guard let doc = documentView else { super.scrollWheel(with: event); return }
         let maxY = max(0, doc.frame.height - contentView.bounds.height)
-        // Content fits — nothing to scroll here, so swallow (no bounce, no bubble).
-        if maxY <= 0 { return }
+        // Content fits — nothing to scroll here, so hand the gesture to the parent List.
+        if maxY <= 0 { nextResponder?.scrollWheel(with: event); return }
         let y = contentView.bounds.origin.y
         let dy = event.scrollingDeltaY // > 0 scrolls toward the top (natural scrolling)
         let atTop = y <= 0.5, atBottom = y >= maxY - 0.5
-        // Pinned at the edge the gesture pushes past: consume it so it can't scroll the
-        // parent List. Everything else scrolls natively via super.
-        if (atTop && dy > 0) || (atBottom && dy < 0) { return }
+        // Pinned at the edge the gesture pushes past: forward it up the responder chain so
+        // the sidebar List keeps scrolling instead of getting stuck. Everything else
+        // scrolls natively via super.
+        if (atTop && dy > 0) || (atBottom && dy < 0) {
+            nextResponder?.scrollWheel(with: event)
+            return
+        }
         super.scrollWheel(with: event)
     }
 }
@@ -856,20 +860,23 @@ struct SidebarView: View {
         .perfTrackBody()
     }
 
-    /// A folder's session rows: all of them if ≤ the preview cap; otherwise the
-    /// first `folderPreviewCount` with a "Load more" affordance, and once expanded a
-    /// fixed-height box that scrolls internally so the sidebar doesn't grow.
+    /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
+    /// with a "Load more" affordance, and once expanded a fixed-height box that scrolls
+    /// internally so the sidebar doesn't grow. The preview always includes every active
+    /// (live) session — live sessions sort ahead of dead ones, so only dormant/exited
+    /// rows past `folderPreviewCount` hide behind "Load more".
     @ViewBuilder
     private func sessionList(_ group: FolderGroup) -> some View {
         let sessions = group.sessions
-        if sessions.count <= folderPreviewCount {
+        let previewCount = max(folderPreviewCount, group.running)
+        if sessions.count <= previewCount {
             ForEach(sessions, id: \.id) { meta in nativeRow(meta) }
         } else if expandedFolders.contains(group.cwd) {
             scrollBox(sessions, cwd: group.cwd)
         } else {
-            ForEach(sessions.prefix(folderPreviewCount), id: \.id) { meta in nativeRow(meta) }
+            ForEach(sessions.prefix(previewCount), id: \.id) { meta in nativeRow(meta) }
             Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.insert(group.cwd) } } label: {
-                Label("Load more (\(sessions.count - folderPreviewCount))",
+                Label("Load more (\(sessions.count - previewCount))",
                       systemImage: "chevron.down.circle")
                     .font(.system(size: 11))
             }
