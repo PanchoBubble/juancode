@@ -39,6 +39,14 @@ struct ChangesPanel: View {
     /// One-shot guard so the programmatic tree selection on load scrolls to the
     /// first card without expanding it (keeps "all collapsed by default" honest).
     @State private var suppressSelectExpand = false
+    /// Per-file viewed-state: path → the content hash the file had when marked viewed.
+    /// A file re-appears as unviewed only when ITS diff changed. Persisted per session.
+    @State private var viewedHashes: [String: String] = [:]
+    /// Whether the diff pane owns the keyboard (drives `AppModel.changesKeyboardActive`
+    /// so j/k/n/p/space/v reach `.onKeyPress` instead of the sidebar monitor).
+    @FocusState private var paneFocused: Bool
+    /// The hunk the last n/p landed on, within the selected file — reset on file change.
+    @State private var currentHunkIndex = 0
     /// Whether the commit-picker popover is open (juancode-5u2).
     @State private var showCommitPicker = false
     /// Persisted width of the tree pane in the split.
@@ -73,9 +81,15 @@ struct ChangesPanel: View {
             model.startWatchingChanges(sessionId)
             // Seeing the panel clears the review nudge regardless of how it opened.
             model.markChangesViewed(sessionId)
+            viewedHashes = loadViewedHashes()
         }
-        .onDisappear { model.stopWatchingChanges(sessionId) }
+        .onDisappear {
+            model.stopWatchingChanges(sessionId)
+            model.changesKeyboardActive = false
+        }
         .onChange(of: diff) { _, _ in syncSelectionAndExpansion() }
+        .onChange(of: paneFocused) { _, focused in model.changesKeyboardActive = focused }
+        .onChange(of: selectedPath) { _, _ in currentHunkIndex = 0 }
         .perfTrackBody()
     }
 
@@ -213,6 +227,47 @@ struct ChangesPanel: View {
             suppressSelectExpand = true
             selectedPath = files.first?.path
         }
+        // Drop viewed entries for files no longer present so the store stays bounded.
+        let pruned = prunedViewed(viewedHashes, keeping: files)
+        if pruned.count != viewedHashes.count {
+            viewedHashes = pruned
+            saveViewedHashes()
+        }
+    }
+
+    // MARK: - Viewed-state persistence
+
+    private var viewedDefaultsKey: String { "changes.viewed.\(sessionId)" }
+
+    private func loadViewedHashes() -> [String: String] {
+        guard let data = UserDefaults.standard.data(forKey: viewedDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    private func saveViewedHashes() {
+        if let data = try? JSONEncoder().encode(viewedHashes) {
+            UserDefaults.standard.set(data, forKey: viewedDefaultsKey)
+        }
+    }
+
+    /// Toggle a file's viewed-state at its current content hash and persist. Marking
+    /// viewed also folds the card (GitHub-style) so remaining work stays in view.
+    private func toggleViewed(_ file: DiffFile) {
+        if isFileViewed(file, viewed: viewedHashes) {
+            viewedHashes[file.path] = nil
+        } else {
+            viewedHashes = markingViewed(file, in: viewedHashes)
+            collapsedFiles.insert(file.path)
+        }
+        saveViewedHashes()
+    }
+
+    /// Paths that open collapsed by default (generated / oversized) — "expand all"
+    /// leaves these folded so a lockfile never floods the view.
+    private var defaultCollapsedPaths: Set<String> {
+        Set(visibleFiles.filter { isCollapsedByDefault($0) }.map(\.path))
     }
 
     // MARK: - Header (counts, filter, refresh, git actions)
@@ -259,10 +314,10 @@ struct ChangesPanel: View {
             .help("Collapse all files")
             .disabled(paths.isEmpty || collapsedFiles.isSuperset(of: paths))
             .clickCursor()
-        Button { collapsedFiles = [] } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+        Button { collapsedFiles = defaultCollapsedPaths } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
             .buttonStyle(.borderless)
-            .help("Expand all files")
-            .disabled(collapsedFiles.isEmpty)
+            .help("Expand all files (generated/large files stay folded)")
+            .disabled(collapsedFiles == defaultCollapsedPaths)
             .clickCursor()
         if let files = diff?.files {
             HStack(spacing: 6) {
@@ -270,6 +325,11 @@ struct ChangesPanel: View {
                     .foregroundStyle(.secondary)
                 Text("+\(totals.add)").foregroundStyle(.green)
                 Text("−\(totals.del)").foregroundStyle(.red)
+                let seen = viewedCount(files, viewed: viewedHashes)
+                if seen > 0 {
+                    Text("· \(seen)/\(files.count) viewed")
+                        .foregroundStyle(seen == files.count ? .green : .secondary)
+                }
                 if diff?.truncatedFiles == true {
                     Text("(list capped)").foregroundStyle(.orange)
                 }
@@ -369,6 +429,12 @@ struct ChangesPanel: View {
 
     private var tree: [FileTreeNode] { buildFileTree(visibleFiles) }
 
+    /// Paths currently viewed — passed to the tree so reviewed files dim out and the
+    /// remaining work stands out at a glance.
+    private var viewedPaths: Set<String> {
+        Set(visibleFiles.filter { isFileViewed($0, viewed: viewedHashes) }.map(\.path))
+    }
+
     @ViewBuilder
     private var content: some View {
         if let err = model.changesError(sessionId), diff == nil {
@@ -444,6 +510,7 @@ struct ChangesPanel: View {
                             FileTreeRows(
                                 node: node,
                                 depth: 0,
+                                viewedPaths: viewedPaths,
                                 selectedPath: $selectedPath,
                                 expanded: $expanded)
                         }
@@ -500,7 +567,10 @@ struct ChangesPanel: View {
                                 findings: ReviewPresentation.findings(
                                     for: file.path, in: model.review(sessionId)?.findings ?? []),
                                 collapsed: collapsedFiles.contains(file.path),
+                                viewed: isFileViewed(file, viewed: viewedHashes),
+                                selected: file.path == selectedPath,
                                 onToggleCollapse: { toggleFileCollapse(file.path) },
+                                onToggleViewed: { toggleViewed(file) },
                                 onEdit: { model.openEditorOverlay(sessionId, file: file.path) },
                                 collapsible: true)
                                 .id(file.path)
@@ -514,6 +584,11 @@ struct ChangesPanel: View {
                     }
                     .padding(10)
                 }
+                .focusable()
+                .focused($paneFocused)
+                .focusEffectDisabled()
+                .onKeyPress { handleKey($0, proxy: proxy) }
+                .onAppear { paneFocused = true }
                 // Clicking a file in the tree scrolls to its card (and expands it).
                 // The initial programmatic selection only scrolls — it leaves the
                 // card collapsed so the panel opens fully folded.
@@ -528,6 +603,61 @@ struct ChangesPanel: View {
                 }
             }
         }
+    }
+
+    // MARK: - Keyboard navigation (j/k files, n/p hunks, space collapse, v viewed)
+
+    private var selectedFile: DiffFile? { visibleFiles.first { $0.path == selectedPath } }
+
+    private func handleKey(_ press: KeyPress, proxy: ScrollViewProxy) -> KeyPress.Result {
+        // Leave modified combos to the app shortcuts / menu (⌘C toggle, etc.).
+        guard press.modifiers.isEmpty else { return .ignored }
+        switch press.characters {
+        case "j": moveFile(1); return .handled
+        case "k": moveFile(-1); return .handled
+        case "n": moveHunk(1, proxy: proxy); return .handled
+        case "p": moveHunk(-1, proxy: proxy); return .handled
+        case " ": toggleCollapseSelected(); return .handled
+        case "v": markSelectedViewed(); return .handled
+        default: return .ignored
+        }
+    }
+
+    /// Move the selection to the next/prev file. Only scrolls (leaves the card folded)
+    /// so j/k walk file headers fast; `space` expands the one you stop on.
+    private func moveFile(_ delta: Int) {
+        let files = visibleFiles
+        let current = files.firstIndex { $0.path == selectedPath }
+        guard let idx = steppedIndex(current: current, count: files.count, delta: delta) else { return }
+        suppressSelectExpand = true
+        selectedPath = files[idx].path
+    }
+
+    /// Step through the selected file's hunks, expanding it if needed and scrolling to
+    /// the hunk anchor. Bounded by the file's `@@`-header count.
+    private func moveHunk(_ delta: Int, proxy: ScrollViewProxy) {
+        guard let path = selectedPath, let file = selectedFile else { return }
+        let count = hunkCount(inDiff: file.diff)
+        guard count > 0 else { return }
+        let wasCollapsed = collapsedFiles.contains(path)
+        collapsedFiles.remove(path)
+        currentHunkIndex = steppedIndex(current: wasCollapsed ? nil : currentHunkIndex,
+                                        count: count, delta: delta) ?? 0
+        // A just-expanded card's hunk rows aren't laid out yet — scroll to the file
+        // header this pass; the next n/p lands on the hunk anchor.
+        let target = wasCollapsed ? path : "\(path)#hunk\(currentHunkIndex)"
+        withAnimation { proxy.scrollTo(target, anchor: .top) }
+    }
+
+    private func toggleCollapseSelected() {
+        guard let path = selectedPath else { return }
+        toggleFileCollapse(path)
+    }
+
+    private func markSelectedViewed() {
+        guard let file = selectedFile else { return }
+        toggleViewed(file)
+        moveFile(1)
     }
 
     private func toggleFileCollapse(_ path: String) {
@@ -656,7 +786,12 @@ private struct FileCard: View {
     /// their anchored line/side rows; unanchorable ones show in a strip up top.
     var findings: [ReviewFinding] = []
     let collapsed: Bool
+    /// GitHub-style viewed-state: the file was reviewed at its current content.
+    var viewed: Bool = false
+    /// Whether this is the keyboard-selected file (thin accent rule down its side).
+    var selected: Bool = false
     let onToggleCollapse: () -> Void
+    var onToggleViewed: () -> Void = {}
     let onEdit: () -> Void
     /// When false (the side-by-side diff pane), the collapse chevron is hidden — the
     /// single selected file is always shown fully expanded.
@@ -715,7 +850,20 @@ private struct FileCard: View {
     var body: some View {
         VStack(spacing: 0) {
             cardHeader
-            if !collapsed {
+            if collapsed {
+                // A folded generated/oversized file explains itself in one line so you
+                // can skip it without expanding (expand-on-demand via the chevron).
+                if let summary = collapseSummary(for: file) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                        Text(summary).font(.system(size: 11)).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        Text("Expand to view").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                }
+            } else {
                 if !orphanFindings.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Array(orphanFindings.enumerated()), id: \.offset) { _, f in
@@ -745,7 +893,9 @@ private struct FileCard: View {
             }
         }
         .background(Color(NSColor.textBackgroundColor).opacity(0.4))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(selected ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.25),
+                    lineWidth: selected ? 1.5 : 1))
         .clipShape(RoundedRectangle(cornerRadius: 6))
         // Recompute when the card is (or becomes) expanded and the diff text changes.
         // Collapsed cards never pay for a parse/highlight (they're the default state).
@@ -780,6 +930,14 @@ private struct FileCard: View {
             Spacer(minLength: 6)
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(.green)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(.red)
+            Button(action: onToggleViewed) {
+                Image(systemName: viewed ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 11))
+                    .foregroundStyle(viewed ? Color.green : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(viewed ? "Marked viewed — click to unmark (v)" : "Mark viewed (v)")
+            .clickCursor()
             Button(action: onEdit) {
                 Image(systemName: "square.and.pencil").font(.system(size: 10))
             }
@@ -790,6 +948,8 @@ private struct FileCard: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(Color.secondary.opacity(0.08))
+        // Viewed files read as "done" — dim the header so remaining work stands out.
+        .opacity(viewed ? 0.55 : 1)
     }
 
     /// The diff rows, comments, and composer, laid out top-to-bottom. The whole stack
@@ -800,8 +960,14 @@ private struct FileCard: View {
     private func hunkBody(_ rd: RenderedFileDiff) -> some View {
         // Each flat row is addressed by its global index so frame reports and the
         // drag-select highlight share one index space.
+        let hunkStartAt = rd.hunkFlatStarts.enumerated()
+            .reduce(into: [Int: Int]()) { $0[$1.element] = $1.offset }
         return VStack(spacing: 0) {
             ForEach(rd.flatLines.indices, id: \.self) { idx in
+                if let hunkK = hunkStartAt[idx] {
+                    // Zero-height scroll target for n/p hunk navigation.
+                    Color.clear.frame(height: 0).id("\(file.path)#hunk\(hunkK)")
+                }
                 let line = rd.flatLines[idx]
                 DiffLineRow(
                     generation: rd.generation,
@@ -1021,8 +1187,11 @@ struct RenderedFileDiff: Equatable, Sendable {
     let flatLines: [DiffLine]
     /// The "side:line" pairs present in the diff — anchors findings vs orphans.
     let anchoredPairs: Set<String>
-    /// Index-aligned with `flatLines`: tinted +/-/space marker + syntax colors.
+    /// Index-aligned with `flatLines`: tinted +/-/space marker + syntax colors, with
+    /// word-level intraline changes background-tinted on paired delete/insert lines.
     let rendered: [AttributedString]
+    /// The flat-line index at which each hunk begins — drives the n/p scroll anchors.
+    let hunkFlatStarts: [Int]
 
     static func == (a: Self, b: Self) -> Bool { a.generation == b.generation }
 
@@ -1031,17 +1200,48 @@ struct RenderedFileDiff: Equatable, Sendable {
         let hunks = parseUnifiedDiff(diff)
         let flat = hunks.flatMap(\.lines)
         let pairs = Set(flat.compactMap { $0.anchor.map { "\($0.side.rawValue):\($0.line)" } })
+        // Word-level changed spans per line, from each delete/insert pair in a hunk.
+        var intraline: [Int: [Range<Int>]] = [:]
+        for pair in intralinePairs(flat) {
+            let (old, new) = intralineWordRanges(old: flat[pair.delete].text, new: flat[pair.insert].text)
+            if !old.isEmpty { intraline[pair.delete] = old }
+            if !new.isEmpty { intraline[pair.insert] = new }
+        }
         // The leading +/-/space marker, tinted by diff kind, plus the line content
         // with per-language vim syntax colors layered on top. The marker keeps the
         // diff add/remove semantics legible; the content gets the warm vim palette.
-        let rendered = flat.map { line -> AttributedString in
+        let rendered = flat.indices.map { idx -> AttributedString in
+            let line = flat[idx]
             var out = AttributedString(marker(for: line.kind))
             out.foregroundColor = markerColor(for: line.kind)
-            out.append(VimSyntaxPalette.attributed(line.text, path: path))
+            var content = VimSyntaxPalette.attributed(line.text, path: path)
+            if let ranges = intraline[idx] {
+                applyIntralineHighlight(&content, ranges: ranges, kind: line.kind)
+            }
+            out.append(content)
             return out
         }
+        var starts: [Int] = []
+        var acc = 0
+        for h in hunks { starts.append(acc); acc += h.lines.count }
         return RenderedFileDiff(generation: generation, source: diff, hunks: hunks,
-                                flatLines: flat, anchoredPairs: pairs, rendered: rendered)
+                                flatLines: flat, anchoredPairs: pairs, rendered: rendered,
+                                hunkFlatStarts: starts)
+    }
+
+    /// Tint the changed character ranges of a line's content with the add/remove
+    /// intraline background. Offsets are into the content (marker-free) character view.
+    private static func applyIntralineHighlight(_ s: inout AttributedString, ranges: [Range<Int>],
+                                                kind: DiffLine.Kind) {
+        let bg = kind == .insert ? VimSyntaxPalette.intralineAdd : VimSyntaxPalette.intralineRemove
+        let chars = s.characters
+        for r in ranges {
+            guard r.lowerBound < r.upperBound,
+                  let lo = chars.index(chars.startIndex, offsetBy: r.lowerBound, limitedBy: chars.endIndex),
+                  let hi = chars.index(chars.startIndex, offsetBy: r.upperBound, limitedBy: chars.endIndex)
+            else { continue }
+            s[lo..<hi].backgroundColor = bg
+        }
     }
 
     private static func marker(for kind: DiffLine.Kind) -> String {
@@ -1358,6 +1558,7 @@ private struct GitActionsView: View {
 private struct FileTreeRows: View {
     let node: FileTreeNode
     let depth: Int
+    let viewedPaths: Set<String>
     @Binding var selectedPath: String?
     @Binding var expanded: Set<String>
 
@@ -1366,7 +1567,7 @@ private struct FileTreeRows: View {
             folderRow
             if expanded.contains(node.id), let kids = node.children {
                 ForEach(kids) { child in
-                    FileTreeRows(node: child, depth: depth + 1,
+                    FileTreeRows(node: child, depth: depth + 1, viewedPaths: viewedPaths,
                                  selectedPath: $selectedPath, expanded: $expanded)
                 }
             }
@@ -1397,6 +1598,7 @@ private struct FileTreeRows: View {
 
     private func fileRow(_ file: DiffFile) -> some View {
         let selected = selectedPath == file.path
+        let viewed = viewedPaths.contains(file.path)
         return Button {
             selectedPath = file.path
         } label: {
@@ -1408,17 +1610,23 @@ private struct FileTreeRows: View {
                     .frame(width: 18)
                 Text(node.name)
                     .font(.system(size: 11, design: .monospaced))
+                    .strikethrough(viewed, color: .secondary)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
-                if file.additions > 0 {
-                    Text("+\(file.additions)").font(.system(size: 9)).foregroundStyle(.green)
-                }
-                if file.deletions > 0 {
-                    Text("−\(file.deletions)").font(.system(size: 9)).foregroundStyle(.red)
+                if viewed {
+                    Image(systemName: "checkmark").font(.system(size: 8)).foregroundStyle(.green)
+                } else {
+                    if file.additions > 0 {
+                        Text("+\(file.additions)").font(.system(size: 9)).foregroundStyle(.green)
+                    }
+                    if file.deletions > 0 {
+                        Text("−\(file.deletions)").font(.system(size: 9)).foregroundStyle(.red)
+                    }
                 }
             }
             .padding(.leading, indent).padding(.trailing, 8).padding(.vertical, 3)
             .background(selected ? Color.accentColor.opacity(0.18) : .clear)
+            .opacity(viewed ? 0.5 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1456,6 +1664,11 @@ enum VimSyntaxPalette {
     // Diff marker tints (kept separate from the bg so semantics stay legible).
     static let diffAdd = Color(red: 0.45, green: 0.78, blue: 0.42)
     static let diffRemove = Color(red: 0.88, green: 0.42, blue: 0.40)
+
+    // Word-level intraline change tints — a stronger wash over the row's add/remove
+    // background so the exact changed span pops without recoloring the syntax text.
+    static let intralineAdd = Color.green.opacity(0.32)
+    static let intralineRemove = Color.red.opacity(0.32)
 
     // Warm vim palette.
     static let keyword = Color(red: 0.88, green: 0.55, blue: 0.30)   // Statement — warm orange/brown

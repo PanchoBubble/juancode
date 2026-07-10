@@ -110,6 +110,10 @@ final class AppModel {
     /// Bumped to request the sidebar's "Filter sessions…" field grab focus (⌃F).
     /// Drives a `@FocusState` in `SidebarView`.
     var sessionSearchFocusToken = 0
+    /// True while the Changes panel's diff pane owns the keyboard (j/k/n/p/space/v).
+    /// The window key monitor bails when set, so the panel's own `.onKeyPress` sees
+    /// the plain keys instead of them being swallowed as sidebar nav.
+    var changesKeyboardActive = false
     /// Bumped to request the live terminal re-measure its bounds and force a genuine
     /// SIGWINCH — the manual "recalculate geometry" escape hatch for when a resize
     /// left the pane mis-sized (black margins / clipped render) and the automatic

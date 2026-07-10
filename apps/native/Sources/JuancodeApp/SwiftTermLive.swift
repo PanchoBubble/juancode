@@ -214,6 +214,9 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
         else { return false }
+        // While the Changes panel holds the keyboard, let its own `.onKeyPress` see
+        // every plain key — don't pre-empt j/k/n/p as sidebar nav.
+        if model.changesKeyboardActive { return false }
         let fr = window.firstResponder
         let ctrl = mods.contains(.control)
 
