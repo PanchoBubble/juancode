@@ -258,3 +258,31 @@ public func autoFixPrompt(number: Int, branch: String, reasons: [String]) -> Str
     to `\(branch)`. If it needs a real decision, STOP and tell me what you need.
     """
 }
+
+/// The prompt queued into a session when the user clicks "Send to agent" on a
+/// single review comment in the GitHub view. Carries the comment verbatim (the
+/// agent shouldn't have to re-find it) and asks for a threaded reply via `gh`
+/// once addressed, so the reviewer sees it was handled.
+public func commentTaskPrompt(number: Int, path: String?, line: Int?,
+                              author: String, body: String, url: String) -> String {
+    let who = author.isEmpty ? "a reviewer" : "@\(author)"
+    let location: String
+    if let path {
+        let at = line.map { "\(path):\($0)" } ?? path
+        location = " on `\(at)`"
+    } else {
+        location = ""
+    }
+    return """
+    [juancode GitHub view] Please address this review comment from \(who)\(location) \
+    on PR #\(number):
+
+    \(body)
+
+    (\(url))
+
+    If it's an obvious fix, make the change, commit, and push. If it needs a real \
+    decision, STOP and tell me what you need. When you're done, reply on the comment \
+    thread via `gh` explaining what you did.
+    """
+}
