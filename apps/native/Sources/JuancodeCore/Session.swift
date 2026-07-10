@@ -360,7 +360,7 @@ public final class Session: @unchecked Sendable {
             scroll.append(bytes)
             return writeThrottle.onOutput(bytes.count)
         }
-        detector.feed(String(decoding: bytes, as: UTF8.self))
+        detector.feed(bytes)
         for l in snapshotOutput() { l(bytes) }
         // Mid-burst crash-safety flush once enough new output has piled up (a
         // continuously streaming session never pauses long enough to trip the

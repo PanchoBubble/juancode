@@ -107,6 +107,10 @@ public final class ActivityDetector: @unchecked Sendable {
     private var pendingToolUseIds: Set<String> = []
     /// When the last structured agent pulse arrived; anchors the `toolHoldCapMs` cap.
     private var lastStructuredAt = Date.distantPast
+    /// Trailing bytes of a multibyte UTF-8 sequence split across a `feed` boundary,
+    /// carried into the next chunk so the split glyph decodes intact rather than as
+    /// replacement characters. Touched only on `queue`. (juancode-5qw.6)
+    private var pendingBytes: [UInt8] = []
 
     public init(
         cols: Int = 120,
@@ -148,9 +152,21 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.sync { screen.bottomText(rows) }
     }
 
-    /// Feed a chunk of raw pty output.
+    /// Feed a chunk of raw pty output as bytes — the hot path from `Session`.
+    /// Decodes incrementally on the detector's queue, carrying an incomplete
+    /// trailing UTF-8 sequence across the chunk boundary so a multibyte glyph
+    /// (emoji, box-drawing char) split between two pty reads is never corrupted
+    /// into replacement characters before the screen/footer match sees it. No
+    /// `String` is allocated on the caller's (pty) thread (juancode-5qw.6).
+    public func feed(_ bytes: [UInt8]) {
+        queue.async { self._feedBytes(bytes) }
+    }
+
+    /// Feed a chunk of already-decoded output. Convenience for callers holding a
+    /// `String` (tests); routes through the same incremental decoder, which is a
+    /// no-op carry for a whole (always-complete) string.
     public func feed(_ data: String) {
-        queue.async { self._feed(data) }
+        feed(Array(data.utf8))
     }
 
     /// Feed a batch of normalized structured events from the session's transcript
@@ -180,11 +196,59 @@ public final class ActivityDetector: @unchecked Sendable {
             self.generation += 1
             self.structuredTurn = false
             self.pendingToolUseIds.removeAll()
+            self.pendingBytes.removeAll()
             self.transition(.idle, notify: false)
         }
     }
 
     // MARK: - internals (always on `queue`)
+
+    /// Incrementally decode `bytes`, prepending any carried tail from the previous
+    /// chunk and holding back a still-incomplete trailing sequence for the next one,
+    /// then feed the complete decoded prefix to `_feed`. Only a plausibly-incomplete
+    /// multibyte tail is carried; malformed bytes stay in the prefix so
+    /// `String(decoding:)` replaces them exactly as before.
+    private func _feedBytes(_ bytes: [UInt8]) {
+        let combined: [UInt8]
+        if pendingBytes.isEmpty {
+            combined = bytes
+        } else {
+            combined = pendingBytes + bytes
+            pendingBytes = []
+        }
+        let cut = Self.utf8CompletePrefixLength(combined)
+        if cut < combined.count { pendingBytes = Array(combined[cut...]) }
+        guard cut > 0 else { return } // whole chunk is an incomplete tail — nothing to feed yet
+        _feed(String(decoding: combined[0..<cut], as: UTF8.self))
+    }
+
+    /// Length of the longest prefix of `buf` that ends on a UTF-8 scalar boundary —
+    /// excludes an incomplete multibyte sequence at the tail so it can be carried into
+    /// the next chunk. A malformed or all-continuation tail is left in the prefix
+    /// (returns the full count) so behavior matches the old whole-chunk decode.
+    static func utf8CompletePrefixLength(_ buf: [UInt8]) -> Int {
+        let n = buf.count
+        guard n > 0 else { return 0 }
+        // Walk back over up to 3 continuation bytes (10xxxxxx) to the last lead byte.
+        var i = n - 1
+        var conts = 0
+        while i >= 0, buf[i] & 0xC0 == 0x80, conts < 3 { i -= 1; conts += 1 }
+        guard i >= 0 else { return n } // all-continuation tail: malformed, don't carry
+        let expected = Self.utf8SequenceLength(buf[i])
+        // Carry only a real multibyte lead whose continuation bytes haven't all arrived.
+        if expected >= 2, n - i < expected { return i }
+        return n
+    }
+
+    /// Total byte length a UTF-8 sequence should have given its lead byte: 1 for ASCII,
+    /// 2/3/4 for multibyte leads, 0 for a continuation byte or invalid lead.
+    private static func utf8SequenceLength(_ b: UInt8) -> Int {
+        if b & 0x80 == 0 { return 1 } // 0xxxxxxx
+        if b & 0xE0 == 0xC0 { return 2 } // 110xxxxx
+        if b & 0xF0 == 0xE0 { return 3 } // 1110xxxx
+        if b & 0xF8 == 0xF0 { return 4 } // 11110xxx
+        return 0 // 10xxxxxx continuation, or invalid
+    }
 
     private func _feed(_ data: String) {
         // The screen must see every byte to stay an accurate mirror.

@@ -349,4 +349,64 @@ import Testing
         await sleepMs(200)
         #expect(c.snapshot.isEmpty)
     }
+
+    // ── multibyte UTF-8 split across chunk boundaries (juancode-5qw.6) ──────────
+
+    /// The working footer opens with a 3-byte glyph (✻) and a 3-byte ellipsis (…).
+    /// A pty read can split a chunk anywhere, including mid-glyph. Feeding the raw
+    /// bytes split inside the leading "✻" must still go busy — the incremental
+    /// decoder carries the partial sequence so the screen reconstructs it intact,
+    /// exactly as the whole-sequence feed does.
+    @Test func goesBusyWhenMultibyteFooterSplitAcrossChunks() async {
+        let footer = "✻ Working… (esc to interrupt)"
+        let bytes = Array(footer.utf8)
+        // Split one byte into the first glyph (its lead byte alone in chunk 1).
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(Array(bytes[0..<1]))
+        det.feed(Array(bytes[1...]))
+        await poll { c.snapshot.contains { $0.0 == .busy } }
+        #expect(c.snapshot.contains { $0.0 == .busy }, "split-glyph footer should still go busy")
+        // Identical outcome to feeding the whole sequence in one chunk.
+        let whole = Collector()
+        let detWhole = ActivityDetector(settleMs: 60) { whole.record($0, $1) }
+        detWhole.feed(bytes)
+        await poll { whole.snapshot.contains { $0.0 == .busy } }
+        #expect(whole.states == c.states, "split feed must match whole-sequence detection")
+    }
+
+    /// The `select-cursor` prompt marker (❯, 3 bytes) is the CLI's own menu UI. If a
+    /// pty read splits it across two chunks, a naive per-chunk `String(decoding:)`
+    /// would decode replacement characters on both sides and the prompt would never
+    /// match. The carried-tail decoder keeps it intact, so waitingInput still fires.
+    @Test func detectsPromptWhenMultibyteCursorSplitAcrossChunks() async {
+        let head = Self.clear + String(repeating: "\n", count: 30) + "Do you want to proceed?\n "
+        let cursor = Array("❯".utf8) // [0xE2, 0x9D, 0xAF]
+        let tail = " 1. Yes\n   2. No\n"
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        det.feed(Array(head.utf8) + [cursor[0]])          // splits mid-glyph
+        det.feed(Array(cursor[1...]) + Array(tail.utf8))
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+        #expect(det.lastPromptMatch == "select-cursor")
+    }
+
+    @Test func utf8CompletePrefixLengthCarriesIncompleteTail() {
+        // Complete ASCII: nothing carried.
+        #expect(ActivityDetector.utf8CompletePrefixLength(Array("abc".utf8)) == 3)
+        // Complete multibyte: nothing carried.
+        let full = Array("a✻".utf8) // 1 + 3 bytes
+        #expect(ActivityDetector.utf8CompletePrefixLength(full) == full.count)
+        // Trailing lead byte of a 3-byte glyph, alone: carry 1.
+        #expect(ActivityDetector.utf8CompletePrefixLength([0x61, 0xE2]) == 1)
+        // Trailing lead + one continuation of a 3-byte glyph: carry 2.
+        #expect(ActivityDetector.utf8CompletePrefixLength([0x61, 0xE2, 0x9C]) == 1)
+        // A 4-byte emoji missing its last byte: carry 3.
+        let emoji = Array("😀".utf8) // [0xF0,0x9F,0x98,0x80]
+        #expect(ActivityDetector.utf8CompletePrefixLength(Array(emoji[0..<3])) == 0)
+        // Stray continuation byte with no lead: malformed, left in the prefix.
+        #expect(ActivityDetector.utf8CompletePrefixLength([0x80]) == 1)
+        #expect(ActivityDetector.utf8CompletePrefixLength([]) == 0)
+    }
 }
