@@ -219,6 +219,33 @@ import Testing
         #expect(sink.text.contains("FRESH"))
     }
 
+    /// juancode-a2h.2: `subscribeFromModelSeed` reproduces the session's current
+    /// screen (the model seed) AND then delivers subsequent live output, with no gap
+    /// — the property a freshly-attached pane relies on so a new session's boot burst
+    /// isn't dropped between seed and subscribe (the "new session shows blank" bug).
+    @Test func modelSeedReproducesScreenAndContinuesLive() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+
+        // Wait until the headless model has parsed the boot output.
+        await poll { s.terminalModel.visibleText().contains("READY") }
+
+        // A mirror model fed ONLY the seed + live bytes must match the real screen.
+        let mirror = SessionTerminalModel(cols: 80, rows: 24, scrollbackLines: 100)
+        let cancel = s.subscribeFromModelSeed { bytes in mirror.feed(bytes) }
+        defer { cancel() }
+
+        // The seed lands asynchronously on the workQueue.
+        await poll { mirror.visibleText().contains("READY") }
+        #expect(mirror.visibleText().contains("READY"))
+
+        // Live output after the subscription still flows (pty echo + cat).
+        s.write("echoback\n")
+        await poll { mirror.visibleText().contains("echoback") }
+        #expect(mirror.visibleText().contains("echoback"))
+    }
+
     @Test func onCreateFiresForNewSessions() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
         let seen = ByteSink()

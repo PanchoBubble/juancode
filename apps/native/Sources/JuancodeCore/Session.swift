@@ -924,6 +924,43 @@ public final class Session: @unchecked Sendable {
         return { [weak self] in self?.lock.withLock { _ = self?.outputListeners.removeValue(forKey: token) } }
     }
 
+    /// Seed a freshly-attached local view from the headless model and subscribe to
+    /// subsequent live output with NO gap and NO overlap (juancode-a2h.2). The work
+    /// runs on the session `workQueue`, so it is ordered against `handleData` (which
+    /// feeds the model, then fans bytes out to listeners): the model seed reflects
+    /// every byte parsed up to the subscription point, and `onBytes` then receives
+    /// only bytes fed *after* it. This closes the race that a separate
+    /// `seedBytes()` + `subscribeOutput(replay:false)` would leave — where the boot
+    /// burst of a brand-new session (the `?1049h` alt-screen switch, the first frame)
+    /// could be fanned out between the two calls and lost, leaving an idle pane blank.
+    ///
+    /// `onBytes` fires on the workQueue: first the one-shot clean seed, then each
+    /// live chunk. Hop to your executor before touching UI. Returns a cancel handle
+    /// safe to call before the async registration lands.
+    @discardableResult
+    public func subscribeFromModelSeed(_ onBytes: @escaping OutputListener) -> Cancel {
+        let deferred = DeferredCancel()
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            // Read the seed and register the listener in one uninterrupted block on
+            // the serial workQueue — no handleData can interleave, so seed + future
+            // bytes partition cleanly.
+            let seed = self.terminalModel.seedBytes()
+            let token = self.lock.withLock { () -> Int in
+                let t = self.nextToken; self.nextToken += 1
+                self.outputListeners[t] = onBytes
+                return t
+            }
+            let remove: @Sendable () -> Void = { [weak self] in
+                self?.lock.withLock { _ = self?.outputListeners.removeValue(forKey: token) }
+            }
+            // If cancel fired before we got here, undo the registration and skip the seed.
+            if deferred.arm(remove) { remove(); return }
+            onBytes(seed)
+        }
+        return { deferred.cancel() }
+    }
+
     @discardableResult
     public func onExit(_ listener: @escaping ExitListener) -> Cancel {
         let token = lock.withLock { () -> Int in
@@ -1161,5 +1198,35 @@ final class CancelBox: @unchecked Sendable {
             return h
         }
         h?()
+    }
+}
+
+/// Bridges a synchronously-returned cancel handle to work that finishes registering
+/// a listener LATER on another queue (`Session.subscribeFromModelSeed`). If cancel
+/// fires before registration lands, `arm` reports it so the registrant can undo
+/// immediately; if it fires after, the stored remover runs. Either way the listener
+/// never leaks. `@unchecked Sendable`: the two fields are only touched under `lock`.
+final class DeferredCancel: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var remove: (@Sendable () -> Void)?
+
+    /// Store the remover once the listener is registered. Returns true if cancel has
+    /// already fired — the caller must then undo the registration itself.
+    func arm(_ remove: @escaping @Sendable () -> Void) -> Bool {
+        lock.withLock {
+            if cancelled { return true }
+            self.remove = remove
+            return false
+        }
+    }
+
+    func cancel() {
+        let r: (@Sendable () -> Void)? = lock.withLock {
+            cancelled = true
+            let r = remove; remove = nil
+            return r
+        }
+        r?()
     }
 }
