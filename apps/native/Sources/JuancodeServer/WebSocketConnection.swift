@@ -111,6 +111,9 @@ final class WebSocketConnection: @unchecked Sendable {
     // MARK: - subscriptions
 
     private func watchActivity(_ s: Session) {
+        // Editor sessions aren't agent turns; broadcasting their screen churn would
+        // ping the oracle/Telegram bridge for a "finished" turn that never happened.
+        guard s.meta.kind == .agent else { return }
         send(.activity(sessionId: s.id, state: s.activity, notify: false))
         let off = s.onActivity { [weak self] st, notify in
             self?.send(.activity(sessionId: s.id, state: st, notify: notify))

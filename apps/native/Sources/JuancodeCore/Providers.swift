@@ -218,6 +218,17 @@ private func lookupViaLoginShell(_ cmd: String, timeout: TimeInterval) -> String
     return (resolved?.hasPrefix("/") == true) ? resolved : nil
 }
 
+/// Resolve the configured editor (`Config.editor`, i.e. `JUANCODE_EDITOR`, default
+/// nvim) into an absolute binary plus its leading args. The command string is split
+/// naively on whitespace — enough for the common single-binary case and flags like
+/// `"code -w"` — and the binary is resolved against the login-shell PATH (via
+/// `resolveBin`) so a Finder-launched app still finds it.
+public func resolveEditorCommand(_ raw: String = Config.editor) -> (executable: String, args: [String]) {
+    let parts = raw.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+    let cmd = parts.first ?? "nvim"
+    return (resolveBin(cmd, override: nil), Array(parts.dropFirst()))
+}
+
 /// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN`.
 public struct DefaultBinaryResolver: BinaryResolver {
     public init() {}

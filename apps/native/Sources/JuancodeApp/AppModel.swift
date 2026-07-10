@@ -336,8 +336,14 @@ final class AppModel {
     /// running ones so status/title/usage reflect the live pty.
     func refresh() {
         let persisted = appState.store.list()
-        let live = Dictionary(appState.registry.all().map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
-        sessions = persisted.map { live[$0.id] ?? $0 }
+        let liveSessions = appState.registry.all()
+        let live = Dictionary(liveSessions.map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
+        var merged = persisted.map { live[$0.id] ?? $0 }
+        // Live sessions the store doesn't hold — editor sessions aren't persisted
+        // (see `SessionKind.editor`) yet must still show in the sidebar while open.
+        let persistedIds = Set(persisted.map(\.id))
+        merged.append(contentsOf: liveSessions.map(\.meta).filter { !persistedIds.contains($0.id) })
+        sessions = merged
         for m in sessions { metaCache[m.id] = m }
         // Every registry change routes through here (create / exit / swap), so this
         // is where pooled keep-alive panes whose session died or was replaced get
@@ -555,12 +561,17 @@ final class AppModel {
 
     private func watch(_ s: Session) {
         activities[s.id] = s.activity
+        // Editor sessions (nvim etc.) aren't agent turns — their screen churn must
+        // never ding a notification, bump the Dock badge, or set the sidebar's
+        // "done" check. Their activity is still tracked for the spinner.
+        let isEditor = s.meta.kind == .editor
         activityCancels[s.id]?()
         activityCancels[s.id] = s.onActivity { [weak self] st, notify in
             Task { @MainActor in
                 guard let self else { return }
                 let prev = self.activities[s.id]
                 self.activities[s.id] = st
+                if isEditor { return }
                 // Sidebar "done since you last looked" check (juancode-t9p): set on
                 // a turn finishing off-screen, dropped when a new turn starts.
                 switch unseenCompletionEffect(prev: prev, next: st, notify: notify,
@@ -941,6 +952,40 @@ final class AppModel {
             return
         }
         createInFolder(provider: meta.provider, cwd: meta.cwd)
+    }
+
+    /// Open the user's editor (`JUANCODE_EDITOR`, default nvim) as a session rooted
+    /// in `sessionId`'s effective working directory — its worktree when isolated,
+    /// else its cwd — so the editor lands in the same checkout the agent edits.
+    /// `file`, when given and inside that directory, opens directly. Spawns off the
+    /// main actor (forkpty + login-shell binary resolution) like `create`, then
+    /// selects the new pane. No-op if the source session is unknown or is itself an
+    /// editor.
+    func openEditorSession(_ sessionId: String, file: String? = nil) {
+        guard let parent = appState.registry.get(sessionId)?.meta
+                ?? sessions.first(where: { $0.id == sessionId }),
+              parent.kind != .editor else { return }
+        let grid = TerminalGrid.spawn
+        let state = appState
+        Task {
+            do {
+                let s = try await Task.detached(priority: .userInitiated) {
+                    try state.registry.createEditor(parent: parent, file: file, cols: grid.cols, rows: grid.rows)
+                }.value
+                refresh()
+                selection = s.id
+                focusTerminal()
+            } catch {
+                errorMessage = "Couldn't open the editor: \(error)"
+            }
+        }
+    }
+
+    /// Open an editor session for the current selection (toolbar / shortcut). No-op
+    /// when nothing suitable is selected.
+    func openEditorForSelection() {
+        guard let sel = selection else { return }
+        openEditorSession(sel)
     }
 
     // MARK: - External (terminal) sessions

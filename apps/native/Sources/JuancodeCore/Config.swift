@@ -42,10 +42,11 @@ public enum Config {
     /// Max persisted sessions kept per project (worktrees folded into their repo,
     /// see `projectCwd`). Archived sessions don't count toward the cap and are never
     /// pruned. Older unarchived sessions beyond the cap are hard-deleted at startup
-    /// and on each new session (`JUANCODE_SESSIONS_PER_PROJECT`, default 50). A
-    /// value ≤ 0 disables the cap.
+    /// and on each new session. Disabled by default (a value ≤ 0 disables the cap)
+    /// because the delete is destructive and cost users sessions they wanted to keep;
+    /// set `JUANCODE_SESSIONS_PER_PROJECT` to a positive number to re-enable pruning.
     public static var sessionsPerProjectCap: Int {
-        env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init) ?? 50
+        env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init) ?? 0
     }
 
     /// Root the directory picker opens at. Prefers `JUANCODE_DEFAULT_CWD`, then
@@ -76,6 +77,15 @@ public enum Config {
     /// `JUANCODE_REAP_IDLE_MINUTES`, default 30; a value ≤ 0 disables reaping.
     public static var reapIdleMinutes: Int {
         env["JUANCODE_REAP_IDLE_MINUTES"].flatMap(Int.init) ?? 30
+    }
+
+    /// The editor an "open editor" session launches, rooted in the source
+    /// session's working directory (`JUANCODE_EDITOR`, default `nvim`). May carry
+    /// leading args (e.g. `"code -w"`); the launcher splits on whitespace and
+    /// resolves the binary against the login-shell PATH.
+    public static var editor: String {
+        let e = (env["JUANCODE_EDITOR"] ?? "").trimmingCharacters(in: .whitespaces)
+        return e.isEmpty ? "nvim" : e
     }
 
     /// Seed a freshly-attached local terminal pane from the parsed headless model

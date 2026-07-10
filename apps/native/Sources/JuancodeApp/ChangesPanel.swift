@@ -499,6 +499,12 @@ struct ChangesPanel: View {
                                 onEdit: { model.openEditorOverlay(sessionId, file: file.path) },
                                 collapsible: true)
                                 .id(file.path)
+                                .contextMenu {
+                                    Button("Open in editor session") {
+                                        model.openEditorSession(sessionId, file: file.path)
+                                    }
+                                    .disabled(file.status == .deleted)
+                                }
                         }
                     }
                     .padding(10)

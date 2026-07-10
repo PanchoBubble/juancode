@@ -42,6 +42,32 @@ public final class SessionRegistry: @unchecked Sendable {
         ))
     }
 
+    /// Open an editor session rooted in `parent`'s effective working directory
+    /// (worktree if isolated, else its cwd). Resolves the configured editor
+    /// (`Config.editor`) and, when `file` is given and lives under that directory,
+    /// opens it directly; otherwise opens the directory (`.`). The editor renders
+    /// as an ordinary pty session but is `.editor` kind and never persisted.
+    @discardableResult
+    public func createEditor(
+        parent: SessionMeta,
+        file: String? = nil,
+        cols: Int,
+        rows: Int
+    ) throws -> Session {
+        let cwd = parent.effectiveCwd
+        let (executable, baseArgs) = resolveEditorCommand()
+        var target = "."
+        if let file, !file.isEmpty {
+            let root = URL(fileURLWithPath: cwd).standardizedFileURL
+            let full = URL(fileURLWithPath: file, relativeTo: root).standardizedFileURL
+            if full.path == root.path || full.path.hasPrefix(root.path + "/") { target = full.path }
+        }
+        return try track(Session.editor(
+            parent: parent, executable: executable, args: baseArgs + [target],
+            cols: cols, rows: rows, env: env
+        ))
+    }
+
     /// Revive an exited session by resuming its prior CLI conversation.
     @discardableResult
     public func resume(
