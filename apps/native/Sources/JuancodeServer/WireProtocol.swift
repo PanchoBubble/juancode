@@ -225,7 +225,11 @@ public enum ServerMessage: Sendable {
     /// resize carried a seq.
     case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool, denied: Bool)
     case exit(sessionId: String, exitCode: Int?)
-    case activity(sessionId: String, state: SessionActivity, notify: Bool)
+    /// `changes` rides along only on the settle edge that computed it (a turn
+    /// finishing over a dirty tree — the same moment the desktop change badge
+    /// appears); nil everywhere else, and omitted from the JSON so old clients
+    /// ignore it.
+    case activity(sessionId: String, state: SessionActivity, notify: Bool, changes: ChangeStat?)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
     /// on `subscribeQueue` and after every change (queued, delivered, cancelled).
     /// Always the complete ordered list; replace wholesale.
@@ -273,6 +277,19 @@ struct TrackedPrWire: Encodable {
     }
 }
 
+/// Wire shape of a settled turn's whole-tree change rollup — `ChangeStat` minus
+/// its `signature`, which is a desktop-local debounce key remote clients have no
+/// use for.
+struct ChangeStatWire: Encodable {
+    let files: Int
+    let additions: Int
+    let deletions: Int
+
+    init(_ s: ChangeStat) {
+        files = s.files; additions = s.additions; deletions = s.deletions
+    }
+}
+
 extension ServerMessage: Encodable {
     private enum K: String, CodingKey {
         case type, session, sessionId, scrollback, data, exitCode, state, notify
@@ -289,6 +306,8 @@ extension ServerMessage: Encodable {
         case items
         // Rendered-screen stream (juancode-a2h.3).
         case reset, cursorX, cursorY, cursorVisible, alt, lines
+        // Settle-edge change rollup on `activity`.
+        case changes
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -339,11 +358,12 @@ extension ServerMessage: Encodable {
             // `exitCode: number | null` is always present in the TS — emit null,
             // not an omitted key, when there's no code.
             try c.encode(exitCode, forKey: .exitCode)
-        case let .activity(sessionId, state, notify):
+        case let .activity(sessionId, state, notify, changes):
             try c.encode("activity", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(state, forKey: .state)
             try c.encode(notify, forKey: .notify)
+            try c.encodeIfPresent(changes.map(ChangeStatWire.init), forKey: .changes)
         case let .queue(sessionId, items):
             try c.encode("queue", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

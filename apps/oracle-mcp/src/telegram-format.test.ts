@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  changesText,
   classifyActivity,
   dispatchResultText,
   formatSessionLine,
@@ -100,6 +101,20 @@ describe("classifyActivity", () => {
     expect(classifyActivity("busy", true)).toBeNull();
     expect(classifyActivity("waiting_input", false)).toBeNull();
     expect(classifyActivity("idle", false)).toBeNull();
+  });
+});
+
+describe("changesText", () => {
+  it("formats the change badge with plural files and a real minus sign", () => {
+    expect(changesText({ files: 3, additions: 120, deletions: 44 })).toBe(
+      "3 files changed (+120/−44)",
+    );
+    expect(changesText({ files: 1, additions: 2, deletions: 0 })).toBe("1 file changed (+2/−0)");
+  });
+
+  it("returns null when absent or when nothing changed", () => {
+    expect(changesText(undefined)).toBeNull();
+    expect(changesText({ files: 0, additions: 0, deletions: 0 })).toBeNull();
   });
 });
 

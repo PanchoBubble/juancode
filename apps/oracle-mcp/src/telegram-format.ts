@@ -5,6 +5,7 @@
 // "/observe 2"-style selectors.
 
 import type { DispatchResultRecord } from "./dispatch-results.ts";
+import type { SessionChanges } from "./native-events.ts";
 
 /** The slice of the native server's SessionMeta the Telegram surface needs. */
 export interface SessionSummary {
@@ -126,6 +127,14 @@ export function notifyIcon(kind: NotifyKind): string {
 
 export function notifyText(kind: NotifyKind): string {
   return kind === "needs_input" ? "needs your input" : "finished its turn";
+}
+
+/** The finish ping's change badge: "3 files changed (+120/−44)", real minus sign
+ *  like the desktop badge. Null when there's no rollup or nothing changed. */
+export function changesText(changes: SessionChanges | undefined): string | null {
+  if (!changes || changes.files <= 0) return null;
+  const files = `${changes.files} file${changes.files === 1 ? "" : "s"} changed`;
+  return `${files} (+${changes.additions}/−${changes.deletions})`;
 }
 
 /**

@@ -28,10 +28,22 @@ function nativeWsUrl(): string {
 // can keep a warm per-session state cache — and the `notify` flag carries the
 // server's de-spam gate through unchanged.
 
+/** Whole-tree change rollup a settled turn left behind (files changed, line
+ *  additions/deletions vs HEAD). Mirrors the native `ChangeStat`, minus its
+ *  desktop-local debounce signature. */
+export interface SessionChanges {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
 export interface SessionActivityEvent {
   sessionId: string;
   state: "busy" | "idle" | "waiting_input";
   notify: boolean;
+  /** Attached by the native server only on the settle edge (a turn finishing
+   *  over a dirty tree — when the desktop change badge appears); absent otherwise. */
+  changes?: SessionChanges;
 }
 
 type SessionEventListener = (ev: SessionActivityEvent) => void;
@@ -283,6 +295,20 @@ function handleMessage(raw: string): void {
   const state = typeof msg.state === "string" ? msg.state : "";
   const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
   if (sessionId && (state === "busy" || state === "idle" || state === "waiting_input")) {
-    emitSessionEvent({ sessionId, state, notify: msg.notify === true });
+    const ev: SessionActivityEvent = { sessionId, state, notify: msg.notify === true };
+    const changes = parseChanges(msg.changes);
+    if (changes) ev.changes = changes;
+    emitSessionEvent(ev);
   }
+}
+
+/** Parse the optional `changes` rollup off an activity broadcast; lenient like
+ *  the rest of this module — a malformed rollup is dropped, never thrown. */
+function parseChanges(raw: unknown): SessionChanges | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { files, additions, deletions } = raw as Record<string, unknown>;
+  if (typeof files !== "number" || typeof additions !== "number" || typeof deletions !== "number") {
+    return null;
+  }
+  return { files, additions, deletions };
 }

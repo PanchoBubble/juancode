@@ -537,6 +537,45 @@ describe("notifySessionEvent", () => {
     expect(deps.send).toHaveBeenCalledTimes(3);
   });
 
+  it("includes the change badge in a finished ping when the turn left changes", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    await notifySessionEvent(
+      {
+        sessionId: "aaaa-1111",
+        state: "idle",
+        notify: true,
+        changes: { files: 3, additions: 120, deletions: 44 },
+      },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).toHaveBeenCalledWith(
+      100,
+      expect.stringContaining("finished its turn, 3 files changed (+120/−44)"),
+    );
+  });
+
+  it("omits the badge when there is no rollup, and never badges needs-input", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    await notifySessionEvent({ sessionId: "aaaa-1111", state: "idle", notify: true }, deps, state);
+    await notifySessionEvent(
+      {
+        sessionId: "aaaa-1111",
+        state: "waiting_input",
+        notify: true,
+        changes: { files: 2, additions: 5, deletions: 1 },
+      },
+      deps,
+      state,
+    );
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(2);
+    expect(sends[0]![1]).toContain("finished its turn\n");
+    expect(sends[1]![1]).toContain("needs your input\n");
+    expect(sends[1]![1]).not.toContain("files changed");
+  });
+
   it("falls back to the id slice when the native list is unreachable", async () => {
     const deps = makeDeps({
       observers: observers([100]),

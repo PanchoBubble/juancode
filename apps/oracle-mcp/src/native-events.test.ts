@@ -177,6 +177,29 @@ describe("screen stream over the shared native WS", () => {
     expect(frames.length).toBe(1);
     expect(activity[1]).toEqual({ sessionId: "s-1", state: "idle", notify: true });
 
+    // A settle-edge broadcast carries the change rollup through; a malformed one
+    // is dropped rather than thrown.
+    server!.send(
+      JSON.stringify({
+        type: "activity",
+        sessionId: "s-1",
+        state: "idle",
+        notify: true,
+        changes: { files: 3, additions: 120, deletions: 44 },
+      }),
+    );
+    server!.send(
+      JSON.stringify({ type: "activity", sessionId: "s-1", state: "busy", notify: false, changes: { files: "x" } }),
+    );
+    await until(() => activity.length === 4);
+    expect(activity[2]).toEqual({
+      sessionId: "s-1",
+      state: "idle",
+      notify: true,
+      changes: { files: 3, additions: 120, deletions: 44 },
+    });
+    expect(activity[3]).toEqual({ sessionId: "s-1", state: "busy", notify: false });
+
     unsub();
     await until(() => received.some((m) => m.type === "unsubscribeScreen"));
   });

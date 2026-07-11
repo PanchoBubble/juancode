@@ -37,6 +37,7 @@ import {
   unobserveSession,
 } from "./telegram-observe.ts";
 import {
+  changesText,
   classifyActivity,
   dispatchResultText,
   formatSessionLine,
@@ -766,7 +767,10 @@ export async function notifySessionEvent(
     kind === "needs_input"
       ? "↩️ Reply to this message to answer it."
       : "↩️ Reply to this message to send a follow-up.";
-  const text = `${notifyIcon(kind)} ${header}\n${notifyText(kind)}\n${hint}`;
+  // Mirror the desktop change badge into the finish ping: "finished its turn,
+  // 3 files changed (+120/−44)" when the settled turn left unreviewed changes.
+  const badge = kind === "finished" ? changesText(ev.changes) : null;
+  const text = `${notifyIcon(kind)} ${header}\n${notifyText(kind)}${badge ? `, ${badge}` : ""}\n${hint}`;
 
   for (const chatId of chats) {
     const key = `${chatId}:${ev.sessionId}`;

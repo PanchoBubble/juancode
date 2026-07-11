@@ -273,6 +273,34 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertTrue(WireProtocol.capabilities.contains("screen"))
     }
 
+    // ── Settle-edge change rollup on `activity` ──────────────────────────────────
+
+    func testEncodesActivityWithChanges() throws {
+        let msg = ServerMessage.activity(
+            sessionId: "s-1", state: .idle, notify: true,
+            changes: ChangeStat(files: 3, additions: 120, deletions: 44, signature: "sig"))
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "activity")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        XCTAssertEqual(obj?["state"] as? String, "idle")
+        XCTAssertEqual(obj?["notify"] as? Bool, true)
+        let changes = obj?["changes"] as? [String: Any]
+        XCTAssertEqual(changes?["files"] as? Int, 3)
+        XCTAssertEqual(changes?["additions"] as? Int, 120)
+        XCTAssertEqual(changes?["deletions"] as? Int, 44)
+        // The signature is a desktop-local debounce key — never on the wire.
+        XCTAssertNil(changes?["signature"])
+    }
+
+    func testEncodesActivityOmitsChangesWhenNil() throws {
+        let msg = ServerMessage.activity(sessionId: "s-1", state: .busy, notify: false, changes: nil)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "activity")
+        XCTAssertEqual(obj?["state"] as? String, "busy")
+        // Omitted, not null — old clients (and the TS mirror) just never see the key.
+        XCTAssertNil(obj?["changes"])
+    }
+
     func testEncodesQueueServerMessage() throws {
         let msg = ServerMessage.queue(
             sessionId: "s-1",

@@ -63,6 +63,13 @@ final class WebSocketConnection: @unchecked Sendable {
     /// Cancel handle for this tab's tracked-PR subscription (juancode-bt2), set when
     /// the client sends `subscribeTrackedPrs`.
     private var trackedPrsUnsub: (@Sendable () -> Void)?
+    /// Previous activity per session, to spot the settle edge (busy → non-busy
+    /// with notify) that attaches the change rollup to the broadcast.
+    private var lastActivity: [String: SessionActivity] = [:]
+    /// Tail of each session's ordered activity-send chain: the settle edge shells
+    /// out to git before sending, so every send awaits its predecessor to keep
+    /// per-session activity ordering intact on the wire.
+    private var activityChains: [String: Task<Void, Never>] = [:]
 
     init(state: AppState, gate: WSSendGate) {
         self.state = state
@@ -101,6 +108,7 @@ final class WebSocketConnection: @unchecked Sendable {
                 screenStreams.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
                 trackedPrsUnsub = nil
+                lastActivity.removeAll(); activityChains.removeAll()
                 return r
             }
         // Release any session grids this client controlled so ownership falls to
@@ -123,11 +131,37 @@ final class WebSocketConnection: @unchecked Sendable {
         // Editor sessions aren't agent turns; broadcasting their screen churn would
         // ping the oracle/Telegram bridge for a "finished" turn that never happened.
         guard s.meta.kind == .agent else { return }
-        send(.activity(sessionId: s.id, state: s.activity, notify: false))
+        lock.withLock { lastActivity[s.id] = s.activity }
+        send(.activity(sessionId: s.id, state: s.activity, notify: false, changes: nil))
         let off = s.onActivity { [weak self] st, notify in
-            self?.send(.activity(sessionId: s.id, state: st, notify: notify))
+            self?.broadcastActivity(s, state: st, notify: notify)
         }
         lock.withLock { activityWatchers.append(off) }
+    }
+
+    /// Send one activity event, attaching the whole-tree change rollup on the
+    /// settle edge — the same busy → non-busy moment the desktop badge computes
+    /// its ChangeStat, so the remote path can badge "finished, N files changed"
+    /// too. The rollup shells out to git asynchronously, so sends chain FIFO per
+    /// session: a state flip landing while a settle's diff is still computing
+    /// waits behind it rather than overtaking it on the wire.
+    private func broadcastActivity(_ s: Session, state: SessionActivity, notify: Bool) {
+        let cwd = s.meta.cwd
+        lock.withLock {
+            let settled = shouldComputeChangeBadge(prev: lastActivity[s.id], next: state,
+                                                   notify: notify, isEditor: false)
+            lastActivity[s.id] = state
+            let prevTask = activityChains[s.id]
+            activityChains[s.id] = Task { [weak self] in
+                await prevTask?.value
+                var changes: ChangeStat?
+                if settled {
+                    let stat = await computeChangeStat(cwd)
+                    if !stat.isEmpty { changes = stat }
+                }
+                self?.send(.activity(sessionId: s.id, state: state, notify: notify, changes: changes))
+            }
+        }
     }
 
     private func resolvePty(_ id: String) -> PtyLike? {
