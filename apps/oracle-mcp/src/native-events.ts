@@ -44,6 +44,10 @@ export interface SessionActivityEvent {
   /** Attached by the native server only on the settle edge (a turn finishing
    *  over a dirty tree — when the desktop change badge appears); absent otherwise. */
   changes?: SessionChanges;
+  /** The Oracle dispatch this session was spawned from (persisted on its
+   *  SessionMeta), so lifecycle events route back to the dispatching chat;
+   *  absent for interactive sessions. */
+  dispatchId?: string;
 }
 
 type SessionEventListener = (ev: SessionActivityEvent) => void;
@@ -298,6 +302,7 @@ function handleMessage(raw: string): void {
     const ev: SessionActivityEvent = { sessionId, state, notify: msg.notify === true };
     const changes = parseChanges(msg.changes);
     if (changes) ev.changes = changes;
+    if (typeof msg.dispatchId === "string" && msg.dispatchId) ev.dispatchId = msg.dispatchId;
     emitSessionEvent(ev);
   }
 }

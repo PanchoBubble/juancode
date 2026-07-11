@@ -38,6 +38,7 @@ import {
   resetChat,
 } from "./oracle.ts";
 import { dispatch } from "./dispatch.ts";
+import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
   observeSessionForOracle,
@@ -151,7 +152,26 @@ function buildServer(): McpServer {
     async (args) => {
       try {
         const outcome = await dispatch(args);
-        return ok(outcome.message);
+        return ok(`${outcome.message} (dispatchId: ${outcome.dispatchId})`);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_dispatch_status",
+    {
+      title: "Check a dispatch's outcome",
+      description:
+        "Look up a dispatched agent by the dispatchId oracle_dispatch returned: the original dispatch args, the durable outcome (real sessionId, queued, or the actual error — including a queued dispatch that started later), and the session's current state when the native app knows it. Use this to answer 'what happened to my dispatch / did that agent finish'.",
+      inputSchema: {
+        dispatchId: z.string().min(1).describe("The dispatch id returned by oracle_dispatch"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(JSON.stringify(await getDispatchStatus(args.dispatchId), null, 2));
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -376,13 +396,32 @@ app.post("/api/sessions/delete", async (req: Request, res: Response) => {
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {
   try {
-    const { project, prompt, provider, worktree } = req.body ?? {};
+    const { project, prompt, provider, worktree, telegramChatId } = req.body ?? {};
     if (typeof project !== "string" || typeof prompt !== "string" || !project || !prompt) {
       res.status(400).send("project and prompt are required");
       return;
     }
-    const outcome = await dispatch({ project, prompt, provider, worktree: worktree === true });
+    const outcome = await dispatch({
+      project,
+      prompt,
+      provider,
+      worktree: worktree === true,
+      // The originating Telegram chat, when the caller (the headless Oracle mid-
+      // Telegram-turn) knows it — lifecycle pings then route back to that chat.
+      telegramChatId: typeof telegramChatId === "number" ? telegramChatId : null,
+    });
     res.json({ ok: true, ...outcome });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Recent dispatches with their durable outcomes + current session state, newest
+// first — the console/Oracle's answer to "what happened to my dispatches".
+app.get("/api/dispatches", async (req: Request, res: Response) => {
+  try {
+    const limit = Number(req.query.limit);
+    res.json(await listDispatchStatuses(Number.isInteger(limit) && limit > 0 ? limit : 50));
   } catch (e) {
     sendErr(res, e);
   }

@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { nativeApiBase, nativeWsUrl, oracleDir } from "./oracle.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
+import { recordDispatch } from "./dispatch-registry.ts";
 
 export interface DispatchRequest {
   /** Absolute path of the target project / work dir. */
@@ -31,6 +32,10 @@ export interface DispatchRequest {
   provider?: "claude" | "codex";
   /** Isolate the agent in a fresh git worktree off `project`. */
   worktree?: boolean;
+  /** The Telegram chat the dispatch originated from, when it did. Recorded in the
+   *  dispatch registry so lifecycle events (needs input / finished) route back to
+   *  that chat; never sent to the native app. */
+  telegramChatId?: number | null;
 }
 
 export interface DispatchOutcome {
@@ -74,7 +79,11 @@ type WsCreateReply =
 /** One `create` round-trip over a short-lived WS to the native server. Resolves
  *  (never rejects): connectivity problems come back as `unreachable` so the caller
  *  can queue, while a server-sent `error` is a genuine rejection. */
-function wsCreate(opts: DispatchRequest, dispatchId: string, timeoutMs: number): Promise<WsCreateReply> {
+function wsCreate(
+  opts: DispatchRequest,
+  dispatchId: string,
+  timeoutMs: number,
+): Promise<WsCreateReply> {
   return new Promise((resolve) => {
     let sock: WebSocket;
     try {
@@ -158,8 +167,32 @@ export async function dispatch(
   const dispatchId = randomUUID();
   const provider = opts.provider ?? "claude";
   const reply = await wsCreate(opts, dispatchId, timeoutMs);
+  // Every outcome lands in the durable dispatch registry (args + origin chat), so
+  // dispatch-status can answer for it later and lifecycle events can route back to
+  // the originating Telegram chat. Best-effort: a registry write failure must not
+  // fail (or mask) the dispatch itself.
+  const record = (
+    outcome: "started" | "queued" | "rejected",
+    sessionId: string | null,
+    error: string | null,
+  ) =>
+    recordDispatch({
+      dispatchId,
+      project: opts.project,
+      prompt: opts.prompt,
+      provider,
+      worktree: opts.worktree ?? false,
+      telegramChatId: opts.telegramChatId ?? null,
+      outcome,
+      sessionId,
+      error,
+      at: Date.now(),
+    }).catch((e) =>
+      console.warn("dispatch registry write failed:", e instanceof Error ? e.message : e),
+    );
   switch (reply.kind) {
     case "created":
+      await record("started", reply.sessionId, null);
       return {
         dispatchId,
         started: true,
@@ -170,12 +203,14 @@ export async function dispatch(
         }.`,
       };
     case "rejected":
+      await record("rejected", null, reply.message);
       throw new Error(reply.message);
     case "unreachable": {
       await appendDispatch(opts, dispatchId);
       // Remember the id so the results relay can confirm on Telegram when the
       // queued dispatch actually starts (or report why it didn't).
       markQueuedDispatch(dispatchId);
+      await record("queued", null, null);
       return {
         dispatchId,
         started: false,

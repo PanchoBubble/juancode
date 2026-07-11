@@ -317,6 +317,13 @@ export interface ChatReply {
   sessionId: string | null;
 }
 
+/** Where a chat turn came from, when the caller knows. A Telegram origin is
+ *  threaded into the Oracle's system prompt so dispatches it makes during the
+ *  turn carry the chat id — the lifecycle back-channel's correlation. */
+export interface ChatOrigin {
+  telegramChatId?: number;
+}
+
 /** Run one headless Oracle turn: `claude -p` in the control dir, returning clean
  *  text (no TUI) suitable for the phone console. We strip `ANTHROPIC_API_KEY` from
  *  the subprocess env so claude uses the user's claude.ai subscription + connectors
@@ -324,15 +331,33 @@ export interface ChatReply {
  *  ~/.zshrc, never in the GUI app's login env). Continuity comes from `--resume`
  *  with `sessionId`; if that id is stale we retry once fresh. The resulting session is
  *  recorded in the chat-session store so the console can list + continue it later. */
-export async function oracleChat(text: string, sessionId?: string | null): Promise<ChatReply> {
+export async function oracleChat(
+  text: string,
+  sessionId?: string | null,
+  origin?: ChatOrigin,
+): Promise<ChatReply> {
   const resume = sessionId && sessionId.length > 0 ? sessionId : null;
-  let result = await runClaude(text, resume);
+  const extraSystem = originSystemPrompt(origin);
+  let result = await runClaude(text, resume, extraSystem);
   // A stale/unknown resume id makes claude exit with "No conversation found" — start
   // a fresh conversation rather than surfacing that as the Oracle's answer.
-  if (result.processError && resume) result = await runClaude(text, null);
+  if (result.processError && resume) result = await runClaude(text, null, extraSystem);
   const reply = result.reply;
   await persistChatSession(resume, text, reply.sessionId);
   return reply;
+}
+
+/** The per-turn system-prompt addendum for a known origin; "" when there is none.
+ *  Exported for unit testing — this is the contract that makes Telegram-originated
+ *  dispatches carry their chat id. */
+export function originSystemPrompt(origin?: ChatOrigin): string {
+  if (origin?.telegramChatId == null) return "";
+  return (
+    `This request came from Telegram chat ${origin.telegramChatId}. ` +
+    `When you dispatch via POST /api/dispatch during this turn, include ` +
+    `"telegramChatId": ${origin.telegramChatId} in the JSON body so the dispatched ` +
+    `agent's lifecycle pings (needs input / finished) route back to this chat.`
+  );
 }
 
 /** Record a finished turn's session so the console can list + continue it. Continuing
@@ -363,23 +388,35 @@ const ORACLE_SYSTEM =
   "You are Oracle, the global orchestrator for this machine (see ./AGENTS.md). " +
   "Operate at the GLOBAL level across every project: manage the global bd tracker " +
   "(prefix oracle-), read ./state.json to see running sessions, and dispatch agents " +
-  "into projects by appending one JSON line to ./dispatch.jsonl. " +
+  "into projects through the sidecar: " +
+  "`curl -sS -X POST http://127.0.0.1:4281/api/dispatch -H 'content-type: application/json' " +
+  '-d \'{"project":"<abs path>","prompt":"<instruction>"}\'` (optional fields: ' +
+  '"provider":"codex", "worktree":true, and "telegramChatId":<id> when told the ' +
+  "request came from a Telegram chat). The reply carries the real outcome — dispatchId " +
+  "plus sessionId, queued, or the actual error — so report it instead of assuming success. " +
   "DISPATCH BY DEFAULT: you are an orchestrator, not a worker. Any task that touches " +
   "a project's code, files, tests, or git you dispatch to an agent in that project — " +
   "never read, edit, or run a project's contents yourself, even if it seems quick. " +
   "Only act inline when the request is purely global, or no project in state.json " +
   "matches (then say so and ask for the path). When unsure, assume it's project work " +
   "and dispatch. " +
+  "DISPATCH STATUS: to answer 'what happened to my dispatch / that agent', check " +
+  "`curl -sS http://127.0.0.1:4281/api/dispatches` — recent dispatches with their " +
+  "durable outcomes and current session state (remote MCP clients have the same data " +
+  "as the oracle_dispatch_status tool). Summarize conversationally: started/queued/" +
+  "failed, and whether the session is still running. " +
   "OBSERVE: when the user asks you to 'observe', 'watch', or 'keep me posted on' a " +
   "session, subscribe them to its Telegram alerts by POSTing its id to the sidecar: " +
   "`curl -sS -X POST http://127.0.0.1:4281/api/observe -H 'content-type: application/json' " +
-  "-d '{\"sessionId\":\"<id>\"}'` (and /api/unobserve to stop). They'll then be pinged on " +
-  "Telegram only when that session needs input or finishes. " +
+  '-d \'{"sessionId":"<id>"}\'` (and /api/unobserve to stop). They\'ll then be pinged on ' +
+  "Telegram only when that session needs input or finishes. Dispatches that carried a " +
+  "telegramChatId notify their originating chat automatically — no observe needed. " +
   "You are talking to the user on a phone — keep replies short and skimmable.";
 
 async function runClaude(
   text: string,
   resume: string | null,
+  extraSystem = "",
 ): Promise<{ reply: ChatReply; processError: boolean }> {
   const claude = process.env.JUANCODE_CLAUDE_BIN || "claude";
   const args = [
@@ -389,7 +426,7 @@ async function runClaude(
     "json",
     "--dangerously-skip-permissions",
     "--append-system-prompt",
-    ORACLE_SYSTEM,
+    extraSystem ? `${ORACLE_SYSTEM}\n${extraSystem}` : ORACLE_SYSTEM,
   ];
   if (resume) args.push("--resume", resume);
 

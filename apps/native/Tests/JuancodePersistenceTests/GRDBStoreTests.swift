@@ -88,6 +88,21 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.get(m.id)?.usage, usage)
     }
 
+    func testDispatchIdRoundTrips() {
+        // Dispatch correlation survives insert, meta update, and re-read; sessions
+        // without one stay nil (interactive creates).
+        var m = meta("dispatched")
+        m.dispatchId = "d-42"
+        store.insert(m)
+        XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
+        m.title = "renamed"
+        store.updateMeta(m, reindexTitleFts: false)
+        XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
+
+        store.insert(meta("interactive"))
+        XCTAssertNil(store.get("interactive")?.dispatchId)
+    }
+
     func testSetCliSessionIdAndUsedIds() {
         let m = meta()
         store.insert(m)

@@ -228,8 +228,11 @@ public enum ServerMessage: Sendable {
     /// `changes` rides along only on the settle edge that computed it (a turn
     /// finishing over a dirty tree — the same moment the desktop change badge
     /// appears); nil everywhere else, and omitted from the JSON so old clients
-    /// ignore it.
-    case activity(sessionId: String, state: SessionActivity, notify: Bool, changes: ChangeStat?)
+    /// ignore it. `dispatchId` is the session's originating Oracle dispatch when
+    /// it has one — the sidecar routes lifecycle pings back to the dispatching
+    /// chat off it; omitted otherwise so old clients ignore it.
+    case activity(sessionId: String, state: SessionActivity, notify: Bool, changes: ChangeStat?,
+                  dispatchId: String?)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
     /// on `subscribeQueue` and after every change (queued, delivered, cancelled).
     /// Always the complete ordered list; replace wholesale.
@@ -306,8 +309,8 @@ extension ServerMessage: Encodable {
         case items
         // Rendered-screen stream (juancode-a2h.3).
         case reset, cursorX, cursorY, cursorVisible, alt, lines
-        // Settle-edge change rollup on `activity`.
-        case changes
+        // Settle-edge change rollup + dispatch correlation on `activity`.
+        case changes, dispatchId
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -358,12 +361,13 @@ extension ServerMessage: Encodable {
             // `exitCode: number | null` is always present in the TS — emit null,
             // not an omitted key, when there's no code.
             try c.encode(exitCode, forKey: .exitCode)
-        case let .activity(sessionId, state, notify, changes):
+        case let .activity(sessionId, state, notify, changes, dispatchId):
             try c.encode("activity", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(state, forKey: .state)
             try c.encode(notify, forKey: .notify)
             try c.encodeIfPresent(changes.map(ChangeStatWire.init), forKey: .changes)
+            try c.encodeIfPresent(dispatchId, forKey: .dispatchId)
         case let .queue(sessionId, items):
             try c.encode("queue", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

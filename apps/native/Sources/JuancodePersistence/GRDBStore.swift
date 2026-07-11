@@ -63,6 +63,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     usage            TEXT,
                     archived         INTEGER NOT NULL DEFAULT 0,
                     dormant          INTEGER NOT NULL DEFAULT 0,
+                    dispatch_id      TEXT,
                     created_at       INTEGER NOT NULL,
                     updated_at       INTEGER NOT NULL
                 );
@@ -88,6 +89,9 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             }
             if !cols.contains("dormant") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dormant INTEGER NOT NULL DEFAULT 0")
+            }
+            if !cols.contains("dispatch_id") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dispatch_id TEXT")
             }
 
             try db.execute(sql: """
@@ -181,7 +185,8 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             worktreePath: r["worktree_path"],
             usage: Self.decodeUsage(r["usage"]),
             archived: (r["archived"] as Int? ?? 0) == 1,
-            dormant: (r["dormant"] as Int? ?? 0) == 1
+            dormant: (r["dormant"] as Int? ?? 0) == 1,
+            dispatchId: r["dispatch_id"]
         )
     }
 
@@ -215,13 +220,13 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         try? dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id,
-                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     meta.id, meta.provider.rawValue, meta.cwd, meta.title, meta.status.rawValue,
                     meta.exitCode, meta.cliSessionId, meta.skipPermissions ? 1 : 0,
                     meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
-                    meta.dormant ? 1 : 0, meta.createdAt, meta.updatedAt,
+                    meta.dormant ? 1 : 0, meta.dispatchId, meta.createdAt, meta.updatedAt,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: "")
         }
@@ -233,12 +238,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?, scrollback = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId, text,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: text)
         }
@@ -253,12 +258,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
                 ])
             if reindexTitleFts {
                 let scroll = try String.fetchOne(

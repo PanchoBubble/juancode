@@ -132,7 +132,8 @@ final class WebSocketConnection: @unchecked Sendable {
         // ping the oracle/Telegram bridge for a "finished" turn that never happened.
         guard s.meta.kind == .agent else { return }
         lock.withLock { lastActivity[s.id] = s.activity }
-        send(.activity(sessionId: s.id, state: s.activity, notify: false, changes: nil))
+        send(.activity(sessionId: s.id, state: s.activity, notify: false, changes: nil,
+                       dispatchId: s.meta.dispatchId))
         let off = s.onActivity { [weak self] st, notify in
             self?.broadcastActivity(s, state: st, notify: notify)
         }
@@ -147,6 +148,7 @@ final class WebSocketConnection: @unchecked Sendable {
     /// waits behind it rather than overtaking it on the wire.
     private func broadcastActivity(_ s: Session, state: SessionActivity, notify: Bool) {
         let cwd = s.meta.cwd
+        let dispatchId = s.meta.dispatchId
         lock.withLock {
             let settled = shouldComputeChangeBadge(prev: lastActivity[s.id], next: state,
                                                    notify: notify, isEditor: false)
@@ -159,7 +161,8 @@ final class WebSocketConnection: @unchecked Sendable {
                     let stat = await computeChangeStat(cwd)
                     if !stat.isEmpty { changes = stat }
                 }
-                self?.send(.activity(sessionId: s.id, state: state, notify: notify, changes: changes))
+                self?.send(.activity(sessionId: s.id, state: state, notify: notify, changes: changes,
+                                     dispatchId: dispatchId))
             }
         }
     }
@@ -294,7 +297,8 @@ final class WebSocketConnection: @unchecked Sendable {
                 let session = try state.registry.create(
                     provider: pid, cwd: workCwd, cols: cols, rows: rows,
                     opts: SpawnOptions(skipPermissions: skipPermissions ?? false),
-                    worktreePath: worktreePath
+                    worktreePath: worktreePath,
+                    dispatchId: dispatchId
                 )
                 if let initialInput, !initialInput.isEmpty { session.autoSubmit(initialInput) }
                 // The creating client controls the grid it just spawned the

@@ -66,6 +66,19 @@ export function parseDispatchResultLine(line: string): DispatchResultRecord | nu
   };
 }
 
+/** All durable dispatch outcomes on disk, oldest first. The lookup side of
+ *  dispatch-status: a queued dispatch's real start (or failure) only exists here. */
+export async function readDispatchResults(): Promise<DispatchResultRecord[]> {
+  const raw = await readFile(resultsFile(), "utf8").catch(() => "");
+  const out: DispatchResultRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const record = parseDispatchResultLine(line);
+    if (record) out.push(record);
+  }
+  return out;
+}
+
 /**
  * Poll `dispatch-results.jsonl` and invoke `onResult` for each complete line
  * appended after the watcher started (pre-existing records were handled — or are

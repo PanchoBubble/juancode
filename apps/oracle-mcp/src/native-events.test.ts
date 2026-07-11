@@ -51,9 +51,17 @@ describe("parseScreenFrame", () => {
   it("rejects non-screen and malformed frames", () => {
     expect(parseScreenFrame({ type: "output", sessionId: "s-1", data: "x" })).toBeNull();
     expect(parseScreenFrame({ type: "screen", sessionId: "s-1" })).toBeNull();
-    expect(parseScreenFrame({ type: "screen", sessionId: "", cols: 1, rows: 1, lines: [] })).toBeNull();
     expect(
-      parseScreenFrame({ type: "screen", sessionId: "s-1", cols: 1, rows: 1, lines: [{ segs: "no" }] }),
+      parseScreenFrame({ type: "screen", sessionId: "", cols: 1, rows: 1, lines: [] }),
+    ).toBeNull();
+    expect(
+      parseScreenFrame({
+        type: "screen",
+        sessionId: "s-1",
+        cols: 1,
+        rows: 1,
+        lines: [{ segs: "no" }],
+      }),
     ).toBeNull();
   });
 });
@@ -94,7 +102,15 @@ describe("ScreenMirror", () => {
 
   it("ignores out-of-range rows and tracks cursor state", () => {
     const m = new ScreenMirror();
-    m.apply(frame({ reset: false, cursorX: 4, cursorY: 2, cursorVisible: false, lines: [{ row: 99, segs: [{ text: "x" }] }] }));
+    m.apply(
+      frame({
+        reset: false,
+        cursorX: 4,
+        cursorY: 2,
+        cursorVisible: false,
+        lines: [{ row: 99, segs: [{ text: "x" }] }],
+      }),
+    );
     expect(m.text()).toBe("");
     expect(m.cursorX).toBe(4);
     expect(m.cursorY).toBe(2);
@@ -143,7 +159,9 @@ describe("screen stream over the shared native WS", () => {
     await until(() => server !== null);
 
     // Prove the client socket is fully open (it can receive) before subscribing.
-    server!.send(JSON.stringify({ type: "activity", sessionId: "s-1", state: "busy", notify: false }));
+    server!.send(
+      JSON.stringify({ type: "activity", sessionId: "s-1", state: "busy", notify: false }),
+    );
     await until(() => activity.length === 1);
 
     const unsub = onSessionScreen("s-1", (f) => frames.push(f));
@@ -170,9 +188,20 @@ describe("screen stream over the shared native WS", () => {
     expect(mirror.text()).toBe("ok");
 
     // Frames for other sessions don't reach this listener.
-    server!.send(JSON.stringify({ type: "screen", sessionId: "other", reset: true, cols: 1, rows: 1, lines: [] }));
+    server!.send(
+      JSON.stringify({
+        type: "screen",
+        sessionId: "other",
+        reset: true,
+        cols: 1,
+        rows: 1,
+        lines: [],
+      }),
+    );
     // Activity keeps flowing alongside the screen stream.
-    server!.send(JSON.stringify({ type: "activity", sessionId: "s-1", state: "idle", notify: true }));
+    server!.send(
+      JSON.stringify({ type: "activity", sessionId: "s-1", state: "idle", notify: true }),
+    );
     await until(() => activity.length === 2);
     expect(frames.length).toBe(1);
     expect(activity[1]).toEqual({ sessionId: "s-1", state: "idle", notify: true });
@@ -189,7 +218,13 @@ describe("screen stream over the shared native WS", () => {
       }),
     );
     server!.send(
-      JSON.stringify({ type: "activity", sessionId: "s-1", state: "busy", notify: false, changes: { files: "x" } }),
+      JSON.stringify({
+        type: "activity",
+        sessionId: "s-1",
+        state: "busy",
+        notify: false,
+        changes: { files: "x" },
+      }),
     );
     await until(() => activity.length === 4);
     expect(activity[2]).toEqual({
@@ -199,6 +234,35 @@ describe("screen stream over the shared native WS", () => {
       changes: { files: 3, additions: 120, deletions: 44 },
     });
     expect(activity[3]).toEqual({ sessionId: "s-1", state: "busy", notify: false });
+
+    // A dispatch-correlated broadcast surfaces the dispatchId; a non-string one
+    // is dropped like any other malformed optional.
+    server!.send(
+      JSON.stringify({
+        type: "activity",
+        sessionId: "s-1",
+        state: "idle",
+        notify: true,
+        dispatchId: "d-7",
+      }),
+    );
+    server!.send(
+      JSON.stringify({
+        type: "activity",
+        sessionId: "s-1",
+        state: "busy",
+        notify: false,
+        dispatchId: 42,
+      }),
+    );
+    await until(() => activity.length === 6);
+    expect(activity[4]).toEqual({
+      sessionId: "s-1",
+      state: "idle",
+      notify: true,
+      dispatchId: "d-7",
+    });
+    expect(activity[5]).toEqual({ sessionId: "s-1", state: "busy", notify: false });
 
     unsub();
     await until(() => received.some((m) => m.type === "unsubscribeScreen"));

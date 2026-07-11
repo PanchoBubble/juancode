@@ -55,6 +55,7 @@ import {
   startDispatchResultsWatcher,
   type DispatchResultRecord,
 } from "./dispatch-results.ts";
+import { dispatchOriginChat } from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
 import { onSessionEvent, type SessionActivityEvent } from "./native-events.ts";
@@ -263,7 +264,9 @@ export function newBridgeState(): BridgeState {
 /** The side-effecting collaborators the update handler needs. Injected so the handler
  *  is unit-testable without a real Telegram API or `claude` process. */
 export interface TelegramDeps {
-  chat: (text: string, sessionId: string | null) => Promise<ChatReply>;
+  /** One Oracle turn. `chatId` is the originating Telegram chat — threaded into
+   *  the Oracle so dispatches it makes are attributed to that chat. */
+  chat: (text: string, sessionId: string | null, chatId: number) => Promise<ChatReply>;
   getSession: (chatId: number) => Promise<string | null>;
   setSession: (chatId: number, sessionId: string) => Promise<void>;
   clearSession: (chatId: number) => Promise<void>;
@@ -296,6 +299,10 @@ export interface TelegramDeps {
       messageId: number,
     ) => Promise<{ sessionId: string; title: string } | null>;
   };
+  /** The Telegram chat a dispatch originated from (dispatch-registry.ts), so a
+   *  session event carrying a dispatchId notifies the chat that asked for the
+   *  work — observer subscription or not. Null when unknown. */
+  originChat: (dispatchId: string) => Promise<number | null>;
   /** Type text straight into a session's pty (waiting/idle sessions). */
   deliver: (sessionId: string, text: string) => Promise<void>;
   /** Queue text for in-order delivery on the session's next idle (busy sessions). */
@@ -308,7 +315,7 @@ export interface TelegramDeps {
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
 function defaultDeps(token: string): TelegramDeps {
   return {
-    chat: (text, sessionId) => oracleChat(text, sessionId),
+    chat: (text, sessionId, chatId) => oracleChat(text, sessionId, { telegramChatId: chatId }),
     getSession: getTelegramSession,
     setSession: setTelegramSession,
     clearSession: clearTelegramSession,
@@ -324,6 +331,7 @@ function defaultDeps(token: string): TelegramDeps {
       chatsFor: observerChats,
     },
     outbound: { record: recordOutbound, lookup: lookupOutbound },
+    originChat: dispatchOriginChat,
     deliver: deliverReply,
     queue: queueMessages,
     transcribe: makeTranscriber(token),
@@ -447,7 +455,7 @@ async function runOracleTurn(
   const sessionId = await deps.getSession(chatId);
   let reply: ChatReply;
   try {
-    reply = await deps.chat(text, sessionId);
+    reply = await deps.chat(text, sessionId, chatId);
   } finally {
     clearInterval(typingTimer);
     // Clear the working indicator now that the turn is done (typing stops on its own
@@ -731,9 +739,12 @@ async function handleSessionReply(
 // ── Observer notifications ───────────────────────────────────────────────────
 
 /**
- * Fan one native activity event out to the chats observing that session. Fires
- * only on genuine, alert-worthy transitions: the server's notificationGate sets
- * `notify`, and `classifyActivity` keeps just needs-input / finished-turn. A
+ * Fan one native activity event out to the chats observing that session — plus,
+ * when the event carries a `dispatchId`, the Telegram chat the dispatch
+ * originated from (the "your dispatched agent finished / is stuck" back-channel,
+ * no /observe needed). A chat that is both origin and observer is notified once.
+ * Fires only on genuine, alert-worthy transitions: the server's notificationGate
+ * sets `notify`, and `classifyActivity` keeps just needs-input / finished-turn. A
  * per-chat last-kind memory suppresses byte-identical repeats (e.g. after a WS
  * reconnect replays a state). Every non-notify event still lands in the activity
  * cache so /sessions and /status stay accurate.
@@ -746,7 +757,11 @@ export async function notifySessionEvent(
   state.activity.set(ev.sessionId, ev.state);
   const kind = classifyActivity(ev.state, ev.notify);
   if (!kind) return;
-  const chats = await deps.observers.chatsFor(ev.sessionId);
+  const chats = [...(await deps.observers.chatsFor(ev.sessionId))];
+  if (ev.dispatchId) {
+    const origin = await deps.originChat(ev.dispatchId);
+    if (origin !== null && !chats.includes(origin)) chats.push(origin);
+  }
   if (chats.length === 0) return;
 
   // One list fetch per event (only when someone is observing) for title + project.

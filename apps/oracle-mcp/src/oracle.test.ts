@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendAsk, deleteSession, oracleDir } from "./oracle.ts";
+import { appendAsk, deleteSession, oracleDir, originSystemPrompt } from "./oracle.ts";
 
 // The ask mailbox line shape is a contract with the Swift `OracleAsk` decoder in
 // apps/native — if these keys or types drift, the native app silently skips the
@@ -40,6 +40,20 @@ describe("Oracle mailbox line shapes", () => {
     await appendAsk("second");
     const lines = readFileSync(join(dir, "ask.jsonl"), "utf8").split("\n").filter(Boolean);
     expect(lines.map((l) => JSON.parse(l).text)).toEqual(["first", "second"]);
+  });
+});
+
+describe("originSystemPrompt", () => {
+  it("tells the Oracle to attribute dispatches to the originating Telegram chat", () => {
+    const prompt = originSystemPrompt({ telegramChatId: 555 });
+    expect(prompt).toContain("Telegram chat 555");
+    expect(prompt).toContain('"telegramChatId": 555');
+    expect(prompt).toContain("/api/dispatch");
+  });
+
+  it("is empty for turns with no known origin", () => {
+    expect(originSystemPrompt()).toBe("");
+    expect(originSystemPrompt({})).toBe("");
   });
 });
 

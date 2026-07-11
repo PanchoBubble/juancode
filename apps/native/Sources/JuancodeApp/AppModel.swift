@@ -977,7 +977,7 @@ final class AppModel {
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
-                worktreeName: String? = nil) async -> Session? {
+                worktreeName: String? = nil, dispatchId: String? = nil) async -> Session? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -1000,7 +1000,8 @@ final class AppModel {
             let s = try await Task.detached(priority: .userInitiated) {
                 try state.registry.create(
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
-                    opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt)
+                    opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt,
+                    dispatchId: dispatchId)
             }.value
             // Seed the session with an initial prompt once its TUI is up — the same
             // mechanism the WS `.create` path uses (Session.autoSubmit). Surface a

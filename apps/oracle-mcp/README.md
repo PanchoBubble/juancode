@@ -13,6 +13,7 @@ sidecar only **relays intent and reads state**:
 | `oracle_list_issues` | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle` |
 | `oracle_create_issue` | Create a global tracker item | `bd create` |
 | `oracle_dispatch` | Spawn/seed an agent in a project | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down |
+| `oracle_dispatch_status` | What happened to a dispatch | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions` |
 | `oracle_list_sessions` | List live + persisted sessions | `GET` the native app's `/api/sessions` |
 | `oracle_ask` | Ask the live Oracle agent | append `ask.jsonl` (native app tails it) |
 
@@ -23,6 +24,13 @@ app persists its mailbox offset and dedupes by `dispatchId`). Outcomes are also
 written to `dispatch-results.jsonl`, which the sidecar tails to relay failures —
 and queued-dispatch starts — to Telegram. `ask` requires the **native app to be
 running**. `list_issues`/`create_issue` work whenever `bd` is installed.
+
+Every dispatch this sidecar creates is also recorded in `oracle-dispatches.json`
+(args + outcome + the originating Telegram chat when there is one), the native app
+persists the `dispatchId` on the session it spawns, and the `activity` broadcast
+carries it back — so when a dispatched agent needs input or finishes, the bridge
+pings the chat that dispatched it, no `/observe` needed. `GET /api/dispatches`
+lists recent dispatches with their merged outcomes for the console.
 
 ## Two ways to reach it from a phone
 

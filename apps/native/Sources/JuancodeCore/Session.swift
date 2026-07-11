@@ -208,7 +208,9 @@ public final class Session: @unchecked Sendable {
 
     // MARK: - factories
 
-    /// Start a brand-new conversation.
+    /// Start a brand-new conversation. `dispatchId` (an Oracle dispatch's
+    /// sidecar-minted UUID) rides onto the persisted meta so lifecycle events can
+    /// be correlated back to the dispatch; nil for interactive creates.
     public static func create(
         provider: ProviderId,
         cwd: String,
@@ -216,6 +218,7 @@ public final class Session: @unchecked Sendable {
         rows: Int,
         opts: SpawnOptions = SpawnOptions(),
         worktreePath: String? = nil,
+        dispatchId: String? = nil,
         env: SessionEnvironment
     ) throws -> Session {
         let spec = Providers.spec(for: provider)
@@ -235,7 +238,8 @@ public final class Session: @unchecked Sendable {
             cliSessionId: spec.pinsSessionId ? id : nil,
             skipPermissions: opts.skipPermissions,
             worktreePath: worktreePath,
-            usage: nil
+            usage: nil,
+            dispatchId: dispatchId
         )
         return try Session(meta: meta, args: spec.startArgs(id, opts), cols: cols, rows: rows,
                            isNew: true, spawnMode: "create", env: env)

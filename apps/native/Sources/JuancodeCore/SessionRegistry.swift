@@ -27,11 +27,12 @@ public final class SessionRegistry: @unchecked Sendable {
         cols: Int,
         rows: Int,
         opts: SpawnOptions = SpawnOptions(),
-        worktreePath: String? = nil
+        worktreePath: String? = nil,
+        dispatchId: String? = nil
     ) throws -> Session {
         return try track(Session.create(
             provider: provider, cwd: cwd, cols: cols, rows: rows,
-            opts: opts, worktreePath: worktreePath, env: env
+            opts: opts, worktreePath: worktreePath, dispatchId: dispatchId, env: env
         ))
     }
 

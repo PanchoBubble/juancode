@@ -278,7 +278,8 @@ final class WireProtocolTests: XCTestCase {
     func testEncodesActivityWithChanges() throws {
         let msg = ServerMessage.activity(
             sessionId: "s-1", state: .idle, notify: true,
-            changes: ChangeStat(files: 3, additions: 120, deletions: 44, signature: "sig"))
+            changes: ChangeStat(files: 3, additions: 120, deletions: 44, signature: "sig"),
+            dispatchId: nil)
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "activity")
         XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
@@ -293,12 +294,52 @@ final class WireProtocolTests: XCTestCase {
     }
 
     func testEncodesActivityOmitsChangesWhenNil() throws {
-        let msg = ServerMessage.activity(sessionId: "s-1", state: .busy, notify: false, changes: nil)
+        let msg = ServerMessage.activity(sessionId: "s-1", state: .busy, notify: false,
+                                         changes: nil, dispatchId: nil)
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "activity")
         XCTAssertEqual(obj?["state"] as? String, "busy")
         // Omitted, not null — old clients (and the TS mirror) just never see the key.
         XCTAssertNil(obj?["changes"])
+    }
+
+    // ── Dispatch correlation on `activity` ───────────────────────────────────────
+
+    func testEncodesActivityWithDispatchId() throws {
+        let msg = ServerMessage.activity(sessionId: "s-1", state: .waitingInput, notify: true,
+                                         changes: nil, dispatchId: "d-42")
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "activity")
+        XCTAssertEqual(obj?["dispatchId"] as? String, "d-42")
+    }
+
+    func testEncodesActivityOmitsDispatchIdWhenNil() throws {
+        // Interactive sessions have no dispatch; the key must be absent, not null,
+        // so old clients (and the TS mirror's lenient parse) ignore it.
+        let msg = ServerMessage.activity(sessionId: "s-1", state: .idle, notify: true,
+                                         changes: nil, dispatchId: nil)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertNil(obj?["dispatchId"])
+    }
+
+    func testSessionMetaRoundTripsDispatchId() throws {
+        // The `created`/`attached` payloads and /api/sessions all serialize the full
+        // SessionMeta, so the correlation must survive an encode/decode round trip —
+        // and a payload predating the field must decode to nil.
+        let meta = SessionMeta(
+            id: "s-1", provider: .claude, cwd: "/p", title: "t", status: .running,
+            exitCode: nil, createdAt: 1, updatedAt: 2, cliSessionId: nil,
+            skipPermissions: true, worktreePath: nil, usage: nil, dispatchId: "d-42")
+        let data = try JSONEncoder().encode(meta)
+        let decoded = try JSONDecoder().decode(SessionMeta.self, from: data)
+        XCTAssertEqual(decoded.dispatchId, "d-42")
+        XCTAssertEqual(decoded, meta)
+
+        var legacy = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        legacy.removeValue(forKey: "dispatchId")
+        let old = try JSONDecoder().decode(
+            SessionMeta.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(old.dispatchId)
     }
 
     func testEncodesQueueServerMessage() throws {

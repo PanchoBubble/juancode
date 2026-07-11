@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
+import { dispatchOriginChat, getDispatch, listDispatches } from "./dispatch-registry.ts";
 
 // `dispatch` is WS-first: a `create` with an ack over the native server's WS, and
 // only when that's unreachable a durable `dispatch.jsonl` fallback. These tests
@@ -108,9 +109,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
   it("surfaces a server-side error verbatim and does NOT queue", async () => {
     await startServer((msg, sock) => {
       if (msg.type !== "create") return;
-      sock.send(
-        JSON.stringify({ type: "error", message: '"/nope" is not an existing directory' }),
-      );
+      sock.send(JSON.stringify({ type: "error", message: '"/nope" is not an existing directory' }));
     });
 
     await expect(dispatch({ project: "/nope", prompt: "x" })).rejects.toThrow(
@@ -156,6 +155,54 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(lines[0]!.dispatchId).toBe(out.dispatchId);
   });
 
+  it("records a Telegram-originated dispatch in the registry (chat mapping + args)", async () => {
+    await startServer((msg, sock) => {
+      if (msg.type !== "create") return;
+      sock.send(JSON.stringify({ type: "created", session: { id: "sess-7" } }));
+    });
+
+    const out = await dispatch({
+      project: "/abs/repo",
+      prompt: "from telegram",
+      telegramChatId: 555,
+    });
+
+    expect(await dispatchOriginChat(out.dispatchId)).toBe(555);
+    expect(await getDispatch(out.dispatchId)).toMatchObject({
+      project: "/abs/repo",
+      prompt: "from telegram",
+      provider: "claude",
+      telegramChatId: 555,
+      outcome: "started",
+      sessionId: "sess-7",
+    });
+    // The chat id is sidecar-side correlation only — never on the create frame.
+    expect(received[0]).not.toHaveProperty("telegramChatId");
+  });
+
+  it("records non-Telegram dispatches too, with a null origin", async () => {
+    // App unreachable → queued; the registry still captures args + outcome.
+    const out = await dispatch({ project: "/abs/repo", prompt: "later" });
+    expect(await getDispatch(out.dispatchId)).toMatchObject({
+      telegramChatId: null,
+      outcome: "queued",
+      sessionId: null,
+    });
+    expect(await dispatchOriginChat(out.dispatchId)).toBeNull();
+  });
+
+  it("records a rejection before rethrowing it", async () => {
+    await startServer((msg, sock) => {
+      if (msg.type !== "create") return;
+      sock.send(JSON.stringify({ type: "error", message: "bad path" }));
+    });
+    await expect(dispatch({ project: "/nope", prompt: "x", telegramChatId: 9 })).rejects.toThrow(
+      "bad path",
+    );
+    const recorded = (await listDispatches(1))[0]!;
+    expect(recorded).toMatchObject({ outcome: "rejected", error: "bad path", telegramChatId: 9 });
+  });
+
   it("appendDispatch writes one OracleDispatch JSON line + newline", async () => {
     await appendDispatch({ project: "/abs/repo", prompt: "do the thing" }, "id-1");
     await appendDispatch(
@@ -165,8 +212,20 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
 
     const lines = mailboxLines();
     expect(lines).toEqual([
-      { project: "/abs/repo", prompt: "do the thing", provider: "claude", worktree: false, dispatchId: "id-1" },
-      { project: "/other", prompt: "isolated", provider: "codex", worktree: true, dispatchId: "id-2" },
+      {
+        project: "/abs/repo",
+        prompt: "do the thing",
+        provider: "claude",
+        worktree: false,
+        dispatchId: "id-1",
+      },
+      {
+        project: "/other",
+        prompt: "isolated",
+        provider: "codex",
+        worktree: true,
+        dispatchId: "id-2",
+      },
     ]);
   });
 });

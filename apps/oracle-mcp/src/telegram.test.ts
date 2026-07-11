@@ -110,7 +110,9 @@ describe("parseTextMessage", () => {
   });
   it("ignores non-text / malformed updates", () => {
     expect(parseTextMessage({ update_id: 1 })).toBeNull();
-    expect(parseTextMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 } } })).toBeNull();
+    expect(
+      parseTextMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 } } }),
+    ).toBeNull();
     expect(
       parseTextMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: "  " } }),
     ).toBeNull();
@@ -159,6 +161,7 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
       record: vi.fn(async () => {}),
       lookup: vi.fn(async () => null),
     },
+    originChat: vi.fn(async () => null),
     deliver: vi.fn(async () => {}),
     queue: vi.fn(async () => {}),
     transcribe: vi.fn(async () => "transcribed text"),
@@ -169,7 +172,11 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
 const voiceMsg = (
   userId: number,
   fileId: string,
-  { chatId = 100, messageId = 7, duration = 3 }: { chatId?: number; messageId?: number; duration?: number } = {},
+  {
+    chatId = 100,
+    messageId = 7,
+    duration = 3,
+  }: { chatId?: number; messageId?: number; duration?: number } = {},
 ): TgUpdate => ({
   update_id: 1,
   message: {
@@ -201,7 +208,7 @@ describe("handleUpdate", () => {
       chat: vi.fn(async () => ({ reply: "the answer", isError: false, sessionId: "new-session" })),
     });
     await handleUpdate(msg(5, "what's up"), allowed, deps);
-    expect(deps.chat).toHaveBeenCalledWith("what's up", "prev-session");
+    expect(deps.chat).toHaveBeenCalledWith("what's up", "prev-session", 100);
     expect(deps.setSession).toHaveBeenCalledWith(100, "new-session");
     expect(deps.send).toHaveBeenCalledWith(100, "the answer");
   });
@@ -461,7 +468,7 @@ describe("reply-to-notification routing", () => {
     const deps = makeDeps();
     await handleUpdate(replyMsg("hello", 12345), allowed, deps);
     expect(deps.deliver).not.toHaveBeenCalled();
-    expect(deps.chat).toHaveBeenCalledWith("hello", null);
+    expect(deps.chat).toHaveBeenCalledWith("hello", null, 100);
   });
 
   it("reports a delivery failure instead of throwing", async () => {
@@ -576,6 +583,71 @@ describe("notifySessionEvent", () => {
     expect(sends[1]![1]).not.toContain("files changed");
   });
 
+  it("routes to the originating chat when the event carries a dispatchId", async () => {
+    // No observers at all — the dispatching chat still hears about its agent.
+    const deps = makeDeps({ originChat: vi.fn(async () => 300) });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "waiting_input", notify: true, dispatchId: "d-1" },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.originChat).toHaveBeenCalledWith("d-1");
+    expect(deps.send).toHaveBeenCalledTimes(1);
+    expect(deps.send).toHaveBeenCalledWith(300, expect.stringContaining("needs your input"));
+    // The ping is reply-able like any observer notification.
+    expect(deps.outbound.record).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 300, sessionId: "aaaa-1111" }),
+    );
+  });
+
+  it("does not double-send when the originating chat also observes the session", async () => {
+    const deps = makeDeps({
+      observers: observers([300]),
+      originChat: vi.fn(async () => 300),
+    });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true, dispatchId: "d-1" },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies both the observers and a distinct originating chat", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      originChat: vi.fn(async () => 300),
+    });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true, dispatchId: "d-1" },
+      deps,
+      newBridgeState(),
+    );
+    const sentTo = (deps.send as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(sentTo).toEqual([100, 300]);
+  });
+
+  it("ignores a dispatchId with no known origin (interactive observers only)", async () => {
+    const deps = makeDeps({ originChat: vi.fn(async () => null) });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true, dispatchId: "d-unknown" },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).not.toHaveBeenCalled();
+  });
+
+  it("never looks up an origin for events without a dispatchId", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.originChat).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to the id slice when the native list is unreachable", async () => {
     const deps = makeDeps({
       observers: observers([100]),
@@ -596,7 +668,12 @@ describe("parseVoiceMessage", () => {
   it("parses a voice note", () => {
     const u: TgUpdate = {
       update_id: 1,
-      message: { message_id: 42, chat: { id: 9 }, from: { id: 5 }, voice: { file_id: "F1", duration: 4 } },
+      message: {
+        message_id: 42,
+        chat: { id: 9 },
+        from: { id: 5 },
+        voice: { file_id: "F1", duration: 4 },
+      },
     };
     expect(parseVoiceMessage(u)).toEqual({
       chatId: 9,
@@ -624,7 +701,10 @@ describe("parseVoiceMessage", () => {
   it("returns null when there is no voice/audio attachment", () => {
     expect(parseVoiceMessage({ update_id: 1 })).toBeNull();
     expect(
-      parseVoiceMessage({ update_id: 1, message: { chat: { id: 9 }, from: { id: 5 }, text: "hi" } }),
+      parseVoiceMessage({
+        update_id: 1,
+        message: { chat: { id: 9 }, from: { id: 5 }, text: "hi" },
+      }),
     ).toBeNull();
     // A voice object without a file_id is not actionable.
     expect(
@@ -645,7 +725,7 @@ describe("handleUpdate — voice messages", () => {
     expect(deps.transcribe).toHaveBeenCalledWith("FILE123");
     // Transcript echoed with a mic marker, then the real reply.
     expect(deps.send).toHaveBeenNthCalledWith(1, 100, "🎙️ what's the deploy status");
-    expect(deps.chat).toHaveBeenCalledWith("what's the deploy status", null);
+    expect(deps.chat).toHaveBeenCalledWith("what's the deploy status", null, 100);
     expect(deps.setSession).toHaveBeenCalledWith(100, "sid");
     expect(deps.send).toHaveBeenLastCalledWith(100, "all green");
   });
@@ -722,23 +802,41 @@ describe("startDispatchResultRelay", () => {
       expect(emit).not.toBeNull();
 
       // A failure is always relayed.
-      emit!({ dispatchId: "d-1", project: "/x/proj", ok: false, sessionId: null,
-              error: "bad path", at: 1 });
+      emit!({
+        dispatchId: "d-1",
+        project: "/x/proj",
+        ok: false,
+        sessionId: null,
+        error: "bad path",
+        at: 1,
+      });
       await flush();
       expect(send).toHaveBeenCalledTimes(1);
       expect(send.mock.calls[0]![0]).toBe(7);
       expect(send.mock.calls[0]![1]).toContain("bad path");
 
       // A success this sidecar did NOT queue is not relayed (already acked live).
-      emit!({ dispatchId: "d-2", project: "/x/proj", ok: true, sessionId: "s-1",
-              error: null, at: 2 });
+      emit!({
+        dispatchId: "d-2",
+        project: "/x/proj",
+        ok: true,
+        sessionId: "s-1",
+        error: null,
+        at: 2,
+      });
       await flush();
       expect(send).toHaveBeenCalledTimes(1);
 
       // A success for a dispatch queued here IS relayed as a start confirmation.
       markQueuedDispatch("d-3");
-      emit!({ dispatchId: "d-3", project: "/x/proj", ok: true, sessionId: "s-2",
-              error: null, at: 3 });
+      emit!({
+        dispatchId: "d-3",
+        project: "/x/proj",
+        ok: true,
+        sessionId: "s-2",
+        error: null,
+        at: 3,
+      });
       await flush();
       expect(send).toHaveBeenCalledTimes(2);
       expect(send.mock.calls[1]![1]).toContain("s-2");

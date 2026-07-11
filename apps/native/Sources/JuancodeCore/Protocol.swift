@@ -99,6 +99,11 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// so the two read as linked. Nil for agents. Not persisted (editor sessions
     /// are transient) — it lives only on the in-memory registry meta.
     public var parentSessionId: String?
+    /// The Oracle dispatch (sidecar-minted UUID) this session was spawned from,
+    /// nil for ordinary interactive sessions. Persisted so the sidecar can
+    /// correlate lifecycle events back to the dispatch (and its originating
+    /// Telegram chat) for the whole life of the session, not just the create ack.
+    public var dispatchId: String?
 
     /// The directory an agent is actually working in: its juancode-owned worktree
     /// when isolated, otherwise its cwd. An "open editor" action roots the editor
@@ -121,7 +126,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         archived: Bool = false,
         dormant: Bool = false,
         kind: SessionKind = .agent,
-        parentSessionId: String? = nil
+        parentSessionId: String? = nil,
+        dispatchId: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -139,6 +145,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.dormant = dormant
         self.kind = kind
         self.parentSessionId = parentSessionId
+        self.dispatchId = dispatchId
     }
 
     // Custom decode so payloads predating `archived` (older db rows / wire
@@ -161,6 +168,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         dormant = try c.decodeIfPresent(Bool.self, forKey: .dormant) ?? false
         kind = try c.decodeIfPresent(SessionKind.self, forKey: .kind) ?? .agent
         parentSessionId = try c.decodeIfPresent(String.self, forKey: .parentSessionId)
+        dispatchId = try c.decodeIfPresent(String.self, forKey: .dispatchId)
     }
 }
 
