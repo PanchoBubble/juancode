@@ -11,10 +11,12 @@ import Testing
         isLive: Bool = true,
         activity: SessionActivity? = .idle,
         lastOutputMs: Int = 1_000,
-        resumable: Bool = true
+        resumable: Bool = true,
+        dormant: Bool = false
     ) -> SessionHealthInput {
         SessionHealthInput(id: id, status: status, isLive: isLive,
-                           activity: activity, lastOutputMs: lastOutputMs, resumable: resumable)
+                           activity: activity, lastOutputMs: lastOutputMs,
+                           resumable: resumable, dormant: dormant)
     }
 
     @Test func liveIdleSessionIsHealthy() {
@@ -36,6 +38,19 @@ import Testing
         // Store still says running, but the registry lost the pty (onExit never fired).
         let s = input(status: .running, isLive: false, activity: nil)
         #expect(SessionHealth.classify(s, nowMs: 10_000_000) == .dead)
+    }
+
+    @Test func dormantReapedSessionIsAsleepNotDead() {
+        // The reaper took the pty down on purpose — sleeping, not a crash.
+        let s = input(status: .exited, isLive: false, activity: nil, dormant: true)
+        #expect(SessionHealth.classify(s, nowMs: 10_000_000) == .healthy)
+    }
+
+    @Test func dormantFlagStillPersistedButLiveIsClassifiedNormally() {
+        // A revived session can briefly carry a stale dormant flag while live —
+        // live classification (incl. staleness) must still apply.
+        let s = input(activity: .busy, lastOutputMs: 0, dormant: true)
+        #expect(SessionHealth.classify(s, nowMs: SessionHealth.defaultStaleBusyMs + 1) == .stale)
     }
 
     @Test func busySessionWithNoOutputPastBudgetIsStale() {

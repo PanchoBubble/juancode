@@ -36,6 +36,9 @@ public struct SessionHealthInput: Sendable, Equatable {
     public var lastOutputMs: Int
     /// Whether a prior CLI conversation can be resumed (`cliSessionId != nil`).
     public var resumable: Bool
+    /// The reaper put this session to sleep on purpose (`meta.dormant`) — its pty
+    /// being gone is expected, not a fault.
+    public var dormant: Bool
 
     public init(
         id: String,
@@ -43,7 +46,8 @@ public struct SessionHealthInput: Sendable, Equatable {
         isLive: Bool,
         activity: SessionActivity?,
         lastOutputMs: Int,
-        resumable: Bool
+        resumable: Bool,
+        dormant: Bool = false
     ) {
         self.id = id
         self.status = status
@@ -51,6 +55,7 @@ public struct SessionHealthInput: Sendable, Equatable {
         self.activity = activity
         self.lastOutputMs = lastOutputMs
         self.resumable = resumable
+        self.dormant = dormant
     }
 }
 
@@ -79,6 +84,10 @@ public enum SessionHealth {
     public static func classify(
         _ s: SessionHealthInput, nowMs: Int, staleBusyMs: Int = defaultStaleBusyMs
     ) -> SessionHealthState {
+        // Asleep, not dead: the reaper took this pty down on purpose and any
+        // interaction revives it — flagging it "Dead" would misread intentional
+        // sleep as a crash.
+        if s.dormant, !s.isLive { return .healthy }
         // Dead: the store says it exited, or it claims to be running but isn't in
         // the live registry (the pty died without `onExit` landing — a desync we'd
         // otherwise never notice).

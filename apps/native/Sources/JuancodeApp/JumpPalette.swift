@@ -114,7 +114,8 @@ struct JumpPaletteView: View {
                 live: model.isLive(meta.id),
                 activity: model.activity(meta.id),
                 unseenDone: model.unseenCompletions.contains(meta.id),
-                unread: model.unreadSessions.contains(meta.id))
+                unread: model.unreadSessions.contains(meta.id),
+                dormant: meta.dormant)
             VStack(alignment: .leading, spacing: 2) {
                 Text(meta.title.isEmpty ? "Untitled" : meta.title)
                     .font(.system(size: 13, weight: .medium)).lineLimit(1)

@@ -1863,9 +1863,15 @@ struct SessionRow: View {
             Spacer(minLength: 6)
             trailingOrnament
         }
+        // A sleeping (reaped) row dims as a whole so it reads as resting, not
+        // failed — the moon glyph carries the "why".
+        .opacity(sleeping ? 0.55 : 1)
         .padding(.vertical, 3)
         .onHover { hovering = $0 }
     }
+
+    /// The reaper put this session to sleep and it hasn't been revived yet.
+    private var sleeping: Bool { !live && meta.dormant }
 
     /// At most one tracking capsule plus (for external rows) a hover-revealed
     /// resume button. Usage moved into the subtitle, so the trailing edge stays
@@ -2013,14 +2019,15 @@ struct SessionRow: View {
     /// Status glyph in the leading slot — the shared agent-state vocabulary.
     private var statusIndicator: some View {
         SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                          unread: unread, activating: activating)
+                          unread: unread, activating: activating, dormant: meta.dormant)
     }
 }
 
 /// The agent-state vocabulary (juancode-t9p), one glyph per state so a session
 /// list answers "who's working / who needs me / who finished" at a glance:
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
-/// green check (only until the session is viewed), idle/exited = quiet grey dot.
+/// green check (only until the session is viewed), idle/exited = quiet grey dot,
+/// sleeping (auto-slept by the reaper) = muted moon.
 /// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
 /// the two surfaces never drift into different vocabularies.
 struct SessionStateGlyph: View {
@@ -2030,11 +2037,14 @@ struct SessionStateGlyph: View {
     var unread: Bool = false
     /// The session is being resumed right now — show a spinner in the glyph slot.
     var activating: Bool = false
+    /// The reaper put this session to sleep (`meta.dormant`) — render a moon, not
+    /// the exited grey dot, so intentional sleep never reads as a crash.
+    var dormant: Bool = false
 
-    private enum Glyph { case working, waiting, doneUnseen, dot }
+    private enum Glyph { case working, waiting, doneUnseen, dot, sleeping }
 
     private var glyph: Glyph {
-        guard live else { return .dot }
+        guard live else { return dormant ? .sleeping : .dot }
         switch activity {
         case .busy: return .working
         case .waitingInput: return .waiting
@@ -2072,6 +2082,11 @@ struct SessionStateGlyph: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.green)
                     .help("Finished since you last looked — click to view")
+            case .sleeping:
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .help("Sleeping — auto-slept after idle. Open it to wake it up.")
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
                     .frame(width: 8, height: 8)

@@ -2420,7 +2420,7 @@ final class AppModel {
             return SessionHealthInput(
                 id: meta.id, status: meta.status, isLive: isLive(meta.id),
                 activity: activity(meta.id), lastOutputMs: meta.updatedAt,
-                resumable: meta.cliSessionId != nil)
+                resumable: meta.cliSessionId != nil, dormant: meta.dormant)
         }
         let reports = SessionHealth.sweep(inputs, nowMs: now)
         // Keep dismissals only for sessions that are still unhealthy; a recovered one
