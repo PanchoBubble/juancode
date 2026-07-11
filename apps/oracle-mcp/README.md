@@ -79,6 +79,7 @@ Environment variables (all optional):
 | `JUANCODE_BD_BIN` | `bd` | Path to the `bd` binary |
 | `TELEGRAM_BOT_TOKEN` | _(unset)_ | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
 | `ALLOWED_USER_IDS` | _(empty)_ | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored. |
+| `JUANCODE_GH_WEBHOOK_SECRET` | _(unset)_ | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below. |
 
 ### Telegram bridge (juancode-c6y)
 
@@ -155,6 +156,79 @@ This is what lets the phone authenticate. In **Zero Trust → Access → Applica
 > that — so the same **Managed OAuth** toggle covers this tunnel origin. Validate the
 > OAuth handshake end-to-end when you add the connector (step 4); that's the one part
 > to confirm live.
+
+## GitHub webhooks (tracked-PR fast path)
+
+The native app's PR tracker normally polls `gh` every 60s. With webhooks wired up,
+GitHub pushes events instead and the poll demotes to a **~5-minute slow reconciler**
+that only catches missed deliveries. The chain:
+
+```
+GitHub  →  https://oracle.<your-domain>/api/github-webhook   (sidecar, HMAC verify)
+        →  http://127.0.0.1:4280/api/pr-webhook              (native app, repo + PR number only)
+        →  PrTrackingEngine.refreshPr                        (re-fetches via gh, classify/inject/notify)
+```
+
+The event is a **trigger, not a payload** — the native side re-fetches PR state via
+`gh` itself, so nothing from the webhook body is trusted beyond repo + number.
+
+### Setup
+
+1. **Pick a secret** and export it as `JUANCODE_GH_WEBHOOK_SECRET` in **both** places:
+   - the sidecar's env (`apps/oracle-mcp/.env` or a shell export) — it verifies each
+     delivery's `X-Hub-Signature-256` against it; unset ⇒ the endpoint returns 503.
+   - the **native app's** environment (the shell you launch `dev-app.sh` / `swift run`
+     from) — seeing the var is what switches the tracker's poll from 60s to the 300s
+     reconciler (`Config.prPollInterval`). If only the sidecar sees it, webhooks work
+     but the app keeps fast-polling; if only the app sees it, you get slow polls and
+     **no** fast path.
+
+   ```sh
+   # generate one
+   openssl rand -hex 32
+   ```
+
+2. **Cloudflare Access bypass for the webhook path.** GitHub's webhook deliveries
+   can't complete Access's OAuth login, so the Access gate must exempt exactly this
+   path. Security for the path then rests **entirely on the HMAC secret** — that is
+   why the sidecar rejects unsigned/badly-signed requests before reading anything.
+
+   In **Zero Trust → Access → Applications**:
+
+   1. **Add an application → Self-hosted**, hostname `oracle.<your-domain>`,
+      path `api/github-webhook` (a path-scoped application; more specific paths
+      win over the site-wide app from step 3 above).
+   2. Give it a single policy with action **Bypass** → Include → *Everyone*.
+   3. Save. Everything else on the hostname stays behind the existing Access app.
+
+   (Equivalent via API: create an app with `domain: "oracle.<your-domain>/api/github-webhook"`
+   and a `decision: "bypass"` policy. The tunnel ingress needs no change — the path
+   still routes to the sidecar on `127.0.0.1:4281`.)
+
+3. **Create the repo webhook** (after step 2 is live, or deliveries bounce off the
+   Access login page):
+
+   ```sh
+   JUANCODE_GH_WEBHOOK_SECRET=... scripts/setup-github-webhook.sh owner/repo your-domain.com
+   ```
+
+   The script (repo root `scripts/`) resolves the repo via `gh`, skips creation if a
+   hook already points at the URL, and subscribes to `pull_request`,
+   `pull_request_review`, `issue_comment`, and `check_suite`. It never prints the
+   secret.
+
+### Verify rollout
+
+- [ ] `curl -s -X POST https://oracle.<your-domain>/api/github-webhook -d '{}'` returns
+      **401** (bad signature) — not an Access login page (bypass works), not 503
+      (secret is set), not 404 (tunnel/route works).
+- [ ] GitHub → repo → Settings → Webhooks → the hook shows a green tick on the
+      `ping` delivery ("Recent Deliveries" has a redeliver button).
+- [ ] Track a PR in the app, push a commit to its branch: the tracked entry reacts
+      within ~20s (webhook → debounce → refresh).
+- [ ] Kill the sidecar, push again: nothing happens immediately, then the slow
+      reconciler picks it up within ~5 min (native app must have the secret in env).
+- [ ] Restart the sidecar: webhook path resumes.
 
 ## 4. Add the connector on your phone
 

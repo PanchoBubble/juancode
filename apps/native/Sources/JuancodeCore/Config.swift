@@ -97,6 +97,27 @@ public enum Config {
         return e.isEmpty ? "nvim" : e
     }
 
+    /// Whether the GitHub webhook chain is configured for this process
+    /// (`JUANCODE_GH_WEBHOOK_SECRET` non-empty). The sidecar verifies webhook
+    /// HMACs with the same secret and forwards repo+number triggers to the native
+    /// `/api/pr-webhook`, making webhooks the fast path for tracked-PR updates.
+    public static var ghWebhookConfigured: Bool {
+        !(env["JUANCODE_GH_WEBHOOK_SECRET"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Tracked-PR poll cadence, gated on webhook mode: with webhooks delivering
+    /// changes in near-real-time, the poll demotes to a slow reconciler that only
+    /// catches what the webhook path missed (sidecar down, delivery dropped).
+    /// Without webhooks the poll stays the sole update path at the original 60s.
+    public static func prPollInterval(webhookConfigured: Bool) -> Duration {
+        webhookConfigured ? .seconds(300) : .seconds(60)
+    }
+
+    /// The effective tracked-PR poll interval for this process.
+    public static var prPollInterval: Duration {
+        prPollInterval(webhookConfigured: ghWebhookConfigured)
+    }
+
     /// Seed a freshly-attached local terminal pane from the parsed headless model
     /// (a clean repaint via `SessionTerminalModel.seedBytes()`) instead of replaying
     /// the raw byte ring (juancode-a2h.2) — killing replay-garble and the synthetic

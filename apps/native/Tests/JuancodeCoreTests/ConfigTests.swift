@@ -41,4 +41,31 @@ final class ConfigTests: XCTestCase {
         // `/Users/me/workdir-other` must not be treated as inside `/Users/me/workdir`.
         XCTAssertFalse(Config.isUnderWorkspaceRoot("/Users/me/workdir-other/repo"))
     }
+
+    // MARK: - tracked-PR poll interval (webhook-gated slow reconciler)
+
+    func testPrPollIntervalDemotesToSlowReconcilerInWebhookMode() {
+        XCTAssertEqual(Config.prPollInterval(webhookConfigured: false), .seconds(60))
+        XCTAssertEqual(Config.prPollInterval(webhookConfigured: true), .seconds(300))
+    }
+
+    func testGhWebhookConfiguredTracksSecretEnv() {
+        let saved = ProcessInfo.processInfo.environment["JUANCODE_GH_WEBHOOK_SECRET"]
+        defer {
+            if let saved { setenv("JUANCODE_GH_WEBHOOK_SECRET", saved, 1) }
+            else { unsetenv("JUANCODE_GH_WEBHOOK_SECRET") }
+        }
+
+        unsetenv("JUANCODE_GH_WEBHOOK_SECRET")
+        XCTAssertFalse(Config.ghWebhookConfigured)
+        XCTAssertEqual(Config.prPollInterval, .seconds(60))
+
+        // Whitespace-only is not configured.
+        setenv("JUANCODE_GH_WEBHOOK_SECRET", "  ", 1)
+        XCTAssertFalse(Config.ghWebhookConfigured)
+
+        setenv("JUANCODE_GH_WEBHOOK_SECRET", "dummy-test-value", 1)
+        XCTAssertTrue(Config.ghWebhookConfigured)
+        XCTAssertEqual(Config.prPollInterval, .seconds(300))
+    }
 }

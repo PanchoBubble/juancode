@@ -10,8 +10,10 @@ import JuancodePersistence
 /// one list, one poller, no double-driving.
 ///
 /// The semantics: clicking "Track" spawns a dedicated agent session seeded with
-/// the PR context + auto-fix-vs-escalate contract (`trackSeedPrompt`); a 60s
-/// poll loop diffs each PR's `gh` activity (`classifyPrActivity`), injects
+/// the PR context + auto-fix-vs-escalate contract (`trackSeedPrompt`); a poll
+/// loop (60s, or a 300s slow reconciler when the webhook chain is configured —
+/// see `Config.prPollInterval`) diffs each PR's `gh` activity
+/// (`classifyPrActivity`), injects
 /// `autoFixPrompt`s into the agent session for auto-fixable changes, and raises
 /// `TrackNotification`s for changes that need a human decision. The pure
 /// classification + prompt logic is reused verbatim from
@@ -36,7 +38,10 @@ public actor PrTrackingEngine {
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`.
     private var tracked: [String: TrackedPr] = [:]
     private var pollLoop: Task<Void, Never>?
-    private let pollInterval: Duration = .seconds(60)
+    /// Cadence of the poll loop. With webhooks configured this defaults to the slow
+    /// reconcile interval (`Config.prPollInterval`) — the poll only mops up events
+    /// the webhook path missed. Injectable for tests.
+    private let pollInterval: Duration
 
     private var nextObserverToken = 0
     private var observers: [Int: @Sendable (Change) -> Void] = [:]
@@ -62,10 +67,12 @@ public actor PrTrackingEngine {
     /// `.standard`. (A suite name, not a `UserDefaults` instance, because the latter
     /// isn't Sendable and can't cross into the actor init.)
     public init(registry: SessionRegistry, store: GRDBStore, legacyDefaultsSuite: String? = nil,
-                webhookDebounce: Duration = .seconds(2)) {
+                webhookDebounce: Duration = .seconds(2),
+                pollInterval: Duration = Config.prPollInterval) {
         self.registry = registry
         self.store = store
         self.webhookDebounce = webhookDebounce
+        self.pollInterval = pollInterval
         let defaults = legacyDefaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         // Restore the persisted watch list synchronously in init (the actor's
         // isolated state is initialised here), then kick the poll loop off-actor.
