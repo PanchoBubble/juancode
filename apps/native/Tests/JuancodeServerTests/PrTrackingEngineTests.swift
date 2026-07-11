@@ -27,10 +27,10 @@ final class PrTrackingEngineTests: XCTestCase {
     /// activity) without ever reaching the network.
     private static func ghostCwd() -> String { "/nonexistent/juancode-\(UUID().uuidString)" }
 
-    private static func samplePr(_ number: Int, cwd: String) -> TrackedPr {
+    private static func samplePr(_ number: Int, cwd: String, nwo: String? = nil) -> TrackedPr {
         TrackedPr(number: number, title: "PR \(number)", branch: "feat-\(number)",
                   url: "https://github.com/owner/repo/pull/\(number)",
-                  cwd: cwd, sessionId: "s-\(number)")
+                  cwd: cwd, sessionId: "s-\(number)", repoNwo: nwo)
     }
 
     private static func seed(_ store: GRDBStore, _ prs: [TrackedPr]) throws {
@@ -41,9 +41,19 @@ final class PrTrackingEngineTests: XCTestCase {
         store.replaceTrackedPrPayloads(payloads)
     }
 
-    private func makeEngine(store: GRDBStore) throws -> PrTrackingEngine {
+    private func makeEngine(store: GRDBStore,
+                            debounce: Duration = .seconds(2)) throws -> PrTrackingEngine {
         PrTrackingEngine(registry: SessionRegistry(env: SessionEnvironment()),
-                         store: store, legacyDefaultsSuite: suiteName)
+                         store: store, legacyDefaultsSuite: suiteName,
+                         webhookDebounce: debounce)
+    }
+
+    /// Thread-safe refresh counter for the probe seam.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func increment() { lock.lock(); n += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
     func testRestoresFromStore() async throws {
@@ -101,6 +111,91 @@ final class PrTrackingEngineTests: XCTestCase {
         await engine.untrack(a.id)
         XCTAssertEqual(Array(store.loadTrackedPrPayloads().keys), [b.id])
         XCTAssertNil(defaults.data(forKey: Self.legacyKey))
+    }
+
+    // MARK: - webhook ingest (repo identity, matching, debounce)
+
+    func testRepoNwoSurvivesPersistenceRoundtrip() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(4, cwd: Self.ghostCwd(), nwo: "acme/widgets")
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store)
+        let list = await engine.list()
+        XCTAssertEqual(list.first?.repoNwo, "acme/widgets")
+    }
+
+    func testFindByRepoNumberMatchesStoredNwoCaseInsensitively() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let cwd = Self.ghostCwd()
+        let a = Self.samplePr(1, cwd: cwd, nwo: "Acme/Widgets")
+        let b = Self.samplePr(2, cwd: cwd, nwo: "acme/widgets")
+        try Self.seed(store, [a, b])
+        let engine = try makeEngine(store: store)
+        let hits = await engine.findByRepoNumber("acme/WIDGETS", number: 1)
+        XCTAssertEqual(hits.map(\.id), [a.id])
+        let misses = await engine.findByRepoNumber("other/repo", number: 1)
+        XCTAssertTrue(misses.isEmpty)
+        let wrongNumber = await engine.findByRepoNumber("acme/widgets", number: 3)
+        XCTAssertTrue(wrongNumber.isEmpty)
+    }
+
+    func testFindByRepoNumberFallsBackToPrUrlWhenNwoMissing() async throws {
+        // A record persisted before repo identity existed (repoNwo nil, not yet
+        // backfilled) still matches via the owner/name in its PR url.
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(9, cwd: Self.ghostCwd())
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store)
+        let hits = await engine.findByRepoNumber("Owner/Repo", number: 9)
+        XCTAssertEqual(hits.map(\.id), [pr.id])
+    }
+
+    func testIngestWebhookIsNoOpForUntrackedRepo() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(5, cwd: Self.ghostCwd(), nwo: "owner/repo")
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store, debounce: .milliseconds(10))
+        let counter = Counter()
+        await engine.setRefreshProbe { _ in counter.increment() }
+        let matched = await engine.ingestWebhook(repo: "somebody/else", number: 5)
+        XCTAssertEqual(matched, 0)
+        let wrongNumber = await engine.ingestWebhook(repo: "owner/repo", number: 6)
+        XCTAssertEqual(wrongNumber, 0)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(counter.value, 0)
+    }
+
+    func testIngestWebhookCoalescesABurstIntoOneRefresh() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(5, cwd: Self.ghostCwd(), nwo: "owner/repo")
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store, debounce: .milliseconds(30))
+        let counter = Counter()
+        await engine.setRefreshProbe { _ in counter.increment() }
+        // One push fires several webhook events back to back — one refresh.
+        for _ in 0..<5 {
+            let matched = await engine.ingestWebhook(repo: "owner/repo", number: 5)
+            XCTAssertEqual(matched, 1)
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(counter.value, 1)
+        // A later event (after the window) schedules its own refresh.
+        await engine.ingestWebhook(repo: "OWNER/repo", number: 5)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(counter.value, 2)
+    }
+
+    func testUntrackCancelsAPendingWebhookRefresh() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(5, cwd: Self.ghostCwd(), nwo: "owner/repo")
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store, debounce: .milliseconds(50))
+        let counter = Counter()
+        await engine.setRefreshProbe { _ in counter.increment() }
+        await engine.ingestWebhook(repo: "owner/repo", number: 5)
+        await engine.untrack(pr.id)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(counter.value, 0)
     }
 
     func testPollOncePersistsThroughStoreNotDefaults() async throws {

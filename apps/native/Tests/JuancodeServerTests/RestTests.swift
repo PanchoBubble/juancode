@@ -124,6 +124,31 @@ final class RestTests: XCTestCase {
         }
     }
 
+    func testPrWebhookIngestIsANoOp200WhenNothingTracked() async throws {
+        try await withServer { client, _ in
+            let body = ByteBuffer(string: #"{"repo":"owner/repo","number":7}"#)
+            try await client.execute(uri: "/api/pr-webhook", method: .post,
+                                     headers: [.contentType: "application/json"], body: body) { res in
+                XCTAssertEqual(res.status, .ok)
+                let json = Self.json(res) as? [String: Any]
+                XCTAssertEqual(json?["ok"] as? Bool, true)
+                XCTAssertEqual(json?["matched"] as? Int, 0)
+            }
+        }
+    }
+
+    func testPrWebhookRejectsBlankRepoAndBadNumber() async throws {
+        try await withServer { client, _ in
+            for bad in [#"{"repo":"  ","number":7}"#, #"{"repo":"owner/repo","number":0}"#] {
+                try await client.execute(uri: "/api/pr-webhook", method: .post,
+                                         headers: [.contentType: "application/json"],
+                                         body: ByteBuffer(string: bad)) { res in
+                    XCTAssertEqual(res.status, .badRequest)
+                }
+            }
+        }
+    }
+
     func testDeleteSession() async throws {
         try await withServer { client, store in
             store.insert(Self.sampleMeta("s1"))

@@ -86,15 +86,21 @@ public struct TrackedPr: Sendable, Identifiable, Equatable, Codable {
     public var cwd: String
     /// The agent session seeded with this PR's context, where fix prompts land.
     public var sessionId: String
+    /// The repo's `owner/name` — the identity an inbound webhook carries, which
+    /// only knows the GitHub repo, never a local cwd. Resolved via `gh` when
+    /// tracking starts; nil on records that predate it (backfilled on poll), so
+    /// old persisted payloads keep decoding.
+    public var repoNwo: String?
     public var snapshot: PrTrackSnapshot
     public var notifications: [TrackNotification]
     public var lastPolledAt: Int?
 
     public init(number: Int, title: String, branch: String, url: String, cwd: String,
-                sessionId: String, snapshot: PrTrackSnapshot = .init(),
+                sessionId: String, repoNwo: String? = nil, snapshot: PrTrackSnapshot = .init(),
                 notifications: [TrackNotification] = [], lastPolledAt: Int? = nil) {
         self.number = number; self.title = title; self.branch = branch; self.url = url
-        self.cwd = cwd; self.sessionId = sessionId; self.snapshot = snapshot
+        self.cwd = cwd; self.sessionId = sessionId; self.repoNwo = repoNwo
+        self.snapshot = snapshot
         self.notifications = notifications; self.lastPolledAt = lastPolledAt
     }
 

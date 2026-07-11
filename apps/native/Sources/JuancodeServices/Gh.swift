@@ -145,6 +145,24 @@ public func getViewerLogin(_ cwd: String) async -> String {
     }
 }
 
+/// The folder's repo identity as `owner/name`, via the real `gh` CLI. This is
+/// the key a GitHub webhook carries (`repository.full_name`), so it's what lets
+/// an inbound event find the tracked PRs it concerns — a cwd means nothing to a
+/// webhook. Best-effort: nil when gh is missing, unauthenticated, or the cwd
+/// isn't a repo with a GitHub remote.
+public func getRepoNwo(_ cwd: String) async -> String? {
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(), ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return nil }
+        let nwo = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return nwo.isEmpty ? nil : nwo
+    } catch {
+        return nil
+    }
+}
+
 /// List a folder's open pull requests via the real `gh` CLI (the user's own auth,
 /// never a shadow env — same philosophy as spawning the genuine agent CLIs).
 ///
@@ -244,7 +262,7 @@ func mergeUnresolvedCounts(_ prs: [PullRequest], counts: [Int: Int]) -> [PullReq
 /// `owner`/`name` parsed from a `https://github.com/<owner>/<repo>/pull/<n>` url,
 /// so we can scope the GraphQL query without a separate `gh repo view` call. Pure;
 /// exposed for testing. Returns nil for anything that isn't a github.com PR url.
-func repoSlug(fromPrUrl url: String) -> (owner: String, name: String)? {
+public func repoSlug(fromPrUrl url: String) -> (owner: String, name: String)? {
     guard let m = firstMatch(in: url, pattern: "github\\.com/([^/]+)/([^/]+)/pull/",
                              group: 0, options: [.caseInsensitive]),
           !m.isEmpty else { return nil }

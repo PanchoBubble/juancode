@@ -242,6 +242,21 @@ public enum JuancodeServer {
             jsonResponse(await state.prTracking.list().map(TrackedPrWire.init))
         }
 
+        // Webhook-driven refresh trigger: the sidecar receives GitHub webhooks
+        // (verifying the HMAC signature there) and forwards just the repo + PR
+        // number here over localhost. The event is a trigger, not a payload — the
+        // engine re-fetches via `gh` on its normal classify/inject/notify path,
+        // and a repo/number nobody tracks is a 200 no-op.
+        router.post("/api/pr-webhook") { req, ctx in
+            let body = try await req.decode(as: PrWebhookBody.self, context: ctx)
+            let repo = body.repo.trimmingCharacters(in: .whitespaces)
+            guard !repo.isEmpty, body.number > 0 else {
+                throw APIError(.badRequest, "repo (owner/name) and positive number required")
+            }
+            let matched = await state.prTracking.ingestWebhook(repo: repo, number: body.number)
+            return jsonResponse(PrWebhookResponse(ok: true, matched: matched))
+        }
+
         router.get("/api/sessions/:id/beads") { _, ctx in
             let m = try meta(ctx, store)
             return await getBeads(m.cwd)
@@ -422,6 +437,8 @@ struct CwdBody: Decodable { let cwd: String? }
 struct CommitBody: Decodable { let message: String; let cwd: String? }
 struct PrBody: Decodable { let title: String; let body: String?; let draft: Bool?; let cwd: String? }
 struct CommentBody: Decodable { let file: String; let side: String; let line: Int; let endLine: Int?; let body: String }
+struct PrWebhookBody: Decodable { let repo: String; let number: Int }
+struct PrWebhookResponse: Encodable { let ok: Bool; let matched: Int }
 struct RevertBody: Decodable { let file: String; let hunkIndex: Int?; let cwd: String? }
 struct FileContentResponse: Codable, ResponseEncodable { let path: String; let content: String }
 struct UploadResponse: Codable, ResponseEncodable { let path: String }

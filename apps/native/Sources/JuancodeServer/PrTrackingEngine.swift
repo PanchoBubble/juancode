@@ -41,6 +41,18 @@ public actor PrTrackingEngine {
     private var nextObserverToken = 0
     private var observers: [Int: @Sendable (Change) -> Void] = [:]
 
+    /// Debounce window for webhook-triggered refreshes: a single push fires
+    /// several GitHub events within moments, and each should NOT cost its own
+    /// round of `gh` spawns — the burst coalesces into one refresh per PR.
+    private let webhookDebounce: Duration
+    /// In-flight debounce timers, keyed by tracked-PR id.
+    private var pendingRefresh: [String: Task<Void, Never>] = [:]
+
+    /// Test seam: observes each actual (post-guard) refresh so debounce
+    /// coalescing is assertable without a live `gh`.
+    private var refreshProbe: (@Sendable (String) -> Void)?
+    func setRefreshProbe(_ probe: @escaping @Sendable (String) -> Void) { refreshProbe = probe }
+
     /// The pre-SQLite persistence key (juancode-b4m). Only read once, to import a
     /// legacy watch list into the store; absence of the key is the migration marker.
     private static let legacyDefaultsKey = "juancode.trackedPrs.v1"
@@ -49,9 +61,11 @@ public actor PrTrackingEngine {
     /// (and then deletes) the old UserDefaults blob from that suite instead of
     /// `.standard`. (A suite name, not a `UserDefaults` instance, because the latter
     /// isn't Sendable and can't cross into the actor init.)
-    public init(registry: SessionRegistry, store: GRDBStore, legacyDefaultsSuite: String? = nil) {
+    public init(registry: SessionRegistry, store: GRDBStore, legacyDefaultsSuite: String? = nil,
+                webhookDebounce: Duration = .seconds(2)) {
         self.registry = registry
         self.store = store
+        self.webhookDebounce = webhookDebounce
         let defaults = legacyDefaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         // Restore the persisted watch list synchronously in init (the actor's
         // isolated state is initialised here), then kick the poll loop off-actor.
@@ -138,7 +152,20 @@ public actor PrTrackingEngine {
         persist()
         broadcastTracked()
         startLoop()
+        // Resolve the repo's owner/name off-actor (a `gh` round-trip) so track()
+        // stays snappy; webhook matching only needs it eventually, and a missed
+        // resolve here is backfilled on the next poll.
+        Task { [weak self] in
+            guard let nwo = await getRepoNwo(cwd) else { return }
+            await self?.setRepoNwo(key, nwo)
+        }
         return entry
+    }
+
+    private func setRepoNwo(_ id: String, _ nwo: String) {
+        guard tracked[id] != nil, tracked[id]?.repoNwo == nil else { return }
+        tracked[id]?.repoNwo = nwo
+        persist()
     }
 
     /// Stop tracking a PR. Leaves its agent session alone; just drops it from the
@@ -146,6 +173,8 @@ public actor PrTrackingEngine {
     public func untrack(_ id: String) {
         guard tracked[id] != nil else { return }
         tracked[id] = nil
+        pendingRefresh[id]?.cancel()
+        pendingRefresh[id] = nil
         persist()
         broadcastTracked()
         if tracked.isEmpty { pollLoop?.cancel(); pollLoop = nil }
@@ -182,100 +211,172 @@ public actor PrTrackingEngine {
         // for one PR are still fetched together so the classifier can ignore the
         // agent's own comments (no echo loop). Results are applied serially below,
         // back on the actor.
-        let toPoll = tracked.values.map { (key: $0.id, cwd: $0.cwd, number: $0.number) }
+        let toPoll = tracked.values.map { (key: $0.id, cwd: $0.cwd, number: $0.number, nwo: $0.repoNwo) }
         guard !toPoll.isEmpty else { return }
-        let fetched = await withTaskGroup(of: (String, PrActivity?, String).self) { group in
+        let fetched = await withTaskGroup(of: (String, PrActivity?, String, String?).self) { group in
             for item in toPoll {
                 group.addTask(priority: .utility) {
                     async let activity = getPrActivity(item.cwd, number: item.number)
                     async let viewer = getViewerLogin(item.cwd)
-                    return (item.key, await activity, await viewer)
+                    async let nwo = resolveRepoNwo(current: item.nwo, cwd: item.cwd)
+                    return (item.key, await activity, await viewer, await nwo)
                 }
             }
-            var out: [(String, PrActivity?, String)] = []
+            var out: [(String, PrActivity?, String, String?)] = []
             for await r in group { out.append(r) }
             return out
         }
 
-        for (key, activity, viewerLogin) in fetched {
+        for (key, activity, viewerLogin, repoNwo) in fetched {
             guard let activity else { continue }
-            // The entry may have been untracked while we were off-actor.
-            guard var entry = tracked[key] else { continue }
-            let number = entry.number
-            let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
-            entry.snapshot = result.snapshot
-            entry.lastPolledAt = nowMs()
-
-            // Terminal: the PR merged/closed. Ping observers once (so the client can
-            // toast / notify), then drop it from the watch list. Its session is left alone.
-            var closedReason: String?
-            for case .closed(let r) in result.events { closedReason = r; break }
-            if let reason = closedReason {
-                broadcastNotification(trackedId: key, prNumber: number, TrackNotification(
-                    id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
-                untrack(key)
-                continue
-            }
-
-            var fixReasons: [String] = []
-            var newNotifications: [TrackNotification] = []
-            for event in result.events {
-                switch event {
-                case .autoFix(let reason):
-                    fixReasons.append(reason)
-                case .needsDecision(let reason):
-                    newNotifications.append(TrackNotification(
-                        id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
-                case .closed:
-                    break  // handled above
-                }
-            }
-            entry.notifications.append(contentsOf: newNotifications)
-
-            if !fixReasons.isEmpty {
-                let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
-                if let session = registry.get(entry.sessionId) {
-                    session.submit(prompt)
-                } else {
-                    // The driving session is offline (typically after a restart).
-                    // Revive it lazily, then seed the fix via autoSubmit.
-                    _ = await reviveSession(entry.sessionId, registry: registry, store: store)
-                    if let session = registry.get(entry.sessionId) {
-                        session.autoSubmit(prompt)
-                    } else if let fresh = try? registry.create(
-                        provider: .claude, cwd: entry.cwd, cols: 120, rows: 32,
-                        opts: SpawnOptions(skipPermissions: true, model: "opus")
-                    ) {
-                        // The original conversation couldn't be resumed (e.g. nothing
-                        // recoverable). Rather than stall, open a fresh session seeded
-                        // with the PR context, rebind tracking to it, and queue the fix.
-                        // Future polls target the new session.
-                        let seed = trackSeedPrompt(number: number, title: entry.title,
-                                                   branch: entry.branch, url: entry.url)
-                        if !seed.isEmpty { fresh.autoSubmit(seed) }
-                        fresh.autoSubmit(prompt)
-                        entry.sessionId = fresh.id
-                    } else {
-                        // Even a fresh spawn failed — surface it so the tracked-PR UI
-                        // shows the work is stuck rather than dropping it. Dedupe so a
-                        // persistently-failing session doesn't raise the same
-                        // notification on every poll.
-                        let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed or respawned."
-                        if !entry.notifications.contains(where: { $0.message == offlineMsg }) {
-                            let n = TrackNotification(id: UUID().uuidString, prNumber: number,
-                                                      message: offlineMsg, createdAt: nowMs())
-                            entry.notifications.append(n)
-                            newNotifications.append(n)
-                        }
-                    }
-                }
-            }
-
-            tracked[key] = entry
-            for n in newNotifications { broadcastNotification(trackedId: key, prNumber: number, n) }
+            await apply(key: key, activity: activity, viewerLogin: viewerLogin, repoNwo: repoNwo)
         }
         persist()
         broadcastTracked()
+    }
+
+    /// Refresh ONE tracked PR right now: fetch its `gh` activity and run it
+    /// through the same classify → inject → notify path a poll pass uses. This is
+    /// what a webhook ultimately triggers (the event is a trigger, not a payload).
+    /// No-op when the id isn't tracked or the fetch fails (the poll loop retries).
+    public func refreshPr(_ id: String) async {
+        guard let entry = tracked[id] else { return }
+        refreshProbe?(id)
+        async let activityFetch = getPrActivity(entry.cwd, number: entry.number)
+        async let viewerFetch = getViewerLogin(entry.cwd)
+        async let nwoFetch = resolveRepoNwo(current: entry.repoNwo, cwd: entry.cwd)
+        let (activity, viewerLogin, repoNwo) = await (activityFetch, viewerFetch, nwoFetch)
+        guard let activity else { return }
+        await apply(key: id, activity: activity, viewerLogin: viewerLogin, repoNwo: repoNwo)
+        persist()
+        broadcastTracked()
+    }
+
+    // MARK: - webhook ingest
+
+    /// Tracked PRs matching a webhook's repo identity + PR number. The stored
+    /// `repoNwo` is compared case-insensitively (GitHub slugs are); entries that
+    /// predate repo identity (nil `repoNwo`, not yet backfilled) fall back to the
+    /// owner/name embedded in their PR url.
+    public func findByRepoNumber(_ nwo: String, number: Int) -> [TrackedPr] {
+        let want = nwo.lowercased()
+        return tracked.values.filter { entry in
+            guard entry.number == number else { return false }
+            if let stored = entry.repoNwo { return stored.lowercased() == want }
+            guard let slug = repoSlug(fromPrUrl: entry.url) else { return false }
+            return "\(slug.owner)/\(slug.name)".lowercased() == want
+        }
+    }
+
+    /// Webhook entry point: schedule a refresh for every tracked PR matching the
+    /// event's repo + number. No-op when nothing tracked matches. Bursts (one push
+    /// fires several GitHub events) coalesce into a single refresh per PR via
+    /// `webhookDebounce`. Returns how many tracked PRs matched.
+    @discardableResult
+    public func ingestWebhook(repo nwo: String, number: Int) -> Int {
+        let matches = findByRepoNumber(nwo, number: number)
+        for pr in matches { scheduleRefresh(pr.id) }
+        return matches.count
+    }
+
+    private func scheduleRefresh(_ id: String) {
+        // A refresh is already pending for this PR — the new event folds into it.
+        guard pendingRefresh[id] == nil else { return }
+        pendingRefresh[id] = Task { [weak self, delay = webhookDebounce] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.runPendingRefresh(id)
+        }
+    }
+
+    private func runPendingRefresh(_ id: String) async {
+        pendingRefresh[id] = nil
+        await refreshPr(id)
+    }
+
+    // MARK: - per-PR apply (shared by poll + refresh)
+
+    /// Apply one PR's freshly-fetched activity: advance the baseline, inject
+    /// auto-fix prompts into the driving session, raise needs-decision
+    /// notifications, untrack on merge/close. Does NOT persist or broadcast the
+    /// watch list — the caller does, so a poll pass batches one write for N PRs.
+    private func apply(key: String, activity: PrActivity, viewerLogin: String,
+                       repoNwo: String?) async {
+        // The entry may have been untracked while the fetch was off-actor.
+        guard var entry = tracked[key] else { return }
+        if entry.repoNwo == nil, let repoNwo { entry.repoNwo = repoNwo }
+        let number = entry.number
+        let result = classifyPrActivity(prev: entry.snapshot, activity: activity, viewerLogin: viewerLogin)
+        entry.snapshot = result.snapshot
+        entry.lastPolledAt = nowMs()
+
+        // Terminal: the PR merged/closed. Ping observers once (so the client can
+        // toast / notify), then drop it from the watch list. Its session is left alone.
+        var closedReason: String?
+        for case .closed(let r) in result.events { closedReason = r; break }
+        if let reason = closedReason {
+            broadcastNotification(trackedId: key, prNumber: number, TrackNotification(
+                id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
+            untrack(key)
+            return
+        }
+
+        var fixReasons: [String] = []
+        var newNotifications: [TrackNotification] = []
+        for event in result.events {
+            switch event {
+            case .autoFix(let reason):
+                fixReasons.append(reason)
+            case .needsDecision(let reason):
+                newNotifications.append(TrackNotification(
+                    id: UUID().uuidString, prNumber: number, message: reason, createdAt: nowMs()))
+            case .closed:
+                break  // handled above
+            }
+        }
+        entry.notifications.append(contentsOf: newNotifications)
+
+        if !fixReasons.isEmpty {
+            let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
+            if let session = registry.get(entry.sessionId) {
+                session.submit(prompt)
+            } else {
+                // The driving session is offline (typically after a restart).
+                // Revive it lazily, then seed the fix via autoSubmit.
+                _ = await reviveSession(entry.sessionId, registry: registry, store: store)
+                if let session = registry.get(entry.sessionId) {
+                    session.autoSubmit(prompt)
+                } else if let fresh = try? registry.create(
+                    provider: .claude, cwd: entry.cwd, cols: 120, rows: 32,
+                    opts: SpawnOptions(skipPermissions: true, model: "opus")
+                ) {
+                    // The original conversation couldn't be resumed (e.g. nothing
+                    // recoverable). Rather than stall, open a fresh session seeded
+                    // with the PR context, rebind tracking to it, and queue the fix.
+                    // Future polls target the new session.
+                    let seed = trackSeedPrompt(number: number, title: entry.title,
+                                               branch: entry.branch, url: entry.url)
+                    if !seed.isEmpty { fresh.autoSubmit(seed) }
+                    fresh.autoSubmit(prompt)
+                    entry.sessionId = fresh.id
+                } else {
+                    // Even a fresh spawn failed — surface it so the tracked-PR UI
+                    // shows the work is stuck rather than dropping it. Dedupe so a
+                    // persistently-failing session doesn't raise the same
+                    // notification on every poll.
+                    let offlineMsg = "Auto-fix needed, but the driving session is offline and couldn't be resumed or respawned."
+                    if !entry.notifications.contains(where: { $0.message == offlineMsg }) {
+                        let n = TrackNotification(id: UUID().uuidString, prNumber: number,
+                                                  message: offlineMsg, createdAt: nowMs())
+                        entry.notifications.append(n)
+                        newNotifications.append(n)
+                    }
+                }
+            }
+        }
+
+        tracked[key] = entry
+        for n in newNotifications { broadcastNotification(trackedId: key, prNumber: number, n) }
     }
 
     // MARK: - persistence (SQLite `tracked_prs` via TrackedPrStore)
@@ -293,4 +394,12 @@ public actor PrTrackingEngine {
         }
         return payloads
     }
+}
+
+/// Lazy repo-identity backfill: entries tracked before `repoNwo` existed resolve
+/// it alongside their next activity fetch; entries that already have it skip the
+/// extra `gh` round-trip entirely.
+private func resolveRepoNwo(current: String?, cwd: String) async -> String? {
+    if let current { return current }
+    return await getRepoNwo(cwd)
 }
