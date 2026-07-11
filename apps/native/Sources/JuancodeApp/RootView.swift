@@ -1150,6 +1150,9 @@ struct SidebarView: View {
             } else {
                 Button("Archive") { model.setArchived(meta.id, true) }
             }
+            // The log is shared JSONL — grep the session id to follow one row's
+            // spawn/seed/activity/exit trail.
+            Button("Open Activity Log") { model.revealActivityLog() }
             if let tracked = model.trackedPr(forSession: meta.id) {
                 Divider()
                 Button("Untrack PR #\(tracked.number)") { model.untrackPr(tracked.id) }

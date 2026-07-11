@@ -80,10 +80,20 @@ public func reviveSession(
     recoverId: @escaping @Sendable (
         _ provider: ProviderId, _ cwd: String, _ createdAtMs: Int, _ excludeIds: Set<String>
     ) async -> String? = { await recoverCliSessionId($0, cwd: $1, createdAtMs: $2, excludeIds: $3) },
-    needsFreshStart: @escaping @Sendable (SessionMeta) -> Bool = { resumeNeedsFreshStart($0) }
+    needsFreshStart: @escaping @Sendable (SessionMeta) -> Bool = { resumeNeedsFreshStart($0) },
+    log: SessionActivityLogging = NoopSessionActivityLog()
 ) async -> Result<Revival, ReviveFailure> {
+    // Success outcomes are logged by the spawned Session itself (a "spawn" event
+    // with mode resume/restartFresh); only the failure legs need logging here.
+    func logFailure(_ failure: ReviveFailure, project: String) {
+        log.log("reviveFailed", sessionId: id, project: project,
+                fields: ["reason": failure.message])
+    }
     if let live = registry.get(id) { return .success(.resumed(live)) }
-    guard var meta = store.get(id) else { return .failure(.notFound) }
+    guard var meta = store.get(id) else {
+        logFailure(.notFound, project: "")
+        return .failure(.notFound)
+    }
     // Old sessions predate id capture; try to recover it from the CLI's own
     // transcript so they can be resumed like newer ones.
     if meta.cliSessionId == nil {
@@ -93,11 +103,15 @@ public func reviveSession(
             meta.cliSessionId = recovered
         }
     }
-    guard meta.cliSessionId != nil else { return .failure(.unresumable) }
+    guard meta.cliSessionId != nil else {
+        logFailure(.unresumable, project: meta.cwd)
+        return .failure(.unresumable)
+    }
     if needsFreshStart(meta) {
         do {
             return .success(.startedFresh(try registry.restartFresh(meta, cols: cols, rows: rows)))
         } catch {
+            logFailure(.resumeFailed("\(error)"), project: meta.cwd)
             return .failure(.resumeFailed("\(error)"))
         }
     }
@@ -108,6 +122,7 @@ public func reviveSession(
     do {
         return .success(.resumed(try registry.resume(meta, cols: cols, rows: rows, priorScrollback: seed)))
     } catch {
+        logFailure(.resumeFailed("\(error)"), project: meta.cwd)
         return .failure(.resumeFailed("\(error)"))
     }
 }

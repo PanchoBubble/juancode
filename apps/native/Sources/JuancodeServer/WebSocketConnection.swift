@@ -331,7 +331,7 @@ final class WebSocketConnection: @unchecked Sendable {
         case let .reactivate(sessionId, cols, rows):
             if state.registry.get(sessionId) != nil { return } // already live
             switch await reviveSession(sessionId, registry: state.registry, store: state.store,
-                                       cols: cols, rows: rows) {
+                                       cols: cols, rows: rows, log: state.activityLog) {
             case let .success(revival):
                 // `attached` is truthful for both outcomes — the session is live and
                 // the client is on it; a fresh boot's meta carries its new pinned id.
@@ -466,7 +466,8 @@ final class WebSocketConnection: @unchecked Sendable {
                 // message stays persisted in the queue either way; a failed
                 // revival is surfaced instead of leaving it silently pending.
                 if case let .failure(failure) = await reviveSession(
-                    sessionId, registry: state.registry, store: state.store) {
+                    sessionId, registry: state.registry, store: state.store,
+                    log: state.activityLog) {
                     send(.error(sessionId: sessionId, message: failure.message))
                 }
             }
@@ -532,7 +533,8 @@ final class WebSocketConnection: @unchecked Sendable {
     private func reviveForRemoteMessage(_ sessionId: String, data: String) async {
         guard let text = bracketedPasteMessage(data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        switch await reviveSession(sessionId, registry: state.registry, store: state.store) {
+        switch await reviveSession(sessionId, registry: state.registry, store: state.store,
+                                   log: state.activityLog) {
         case let .success(revival):
             revival.session.autoSubmit(text)
         case let .failure(failure):

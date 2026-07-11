@@ -34,6 +34,8 @@ public actor PrTrackingEngine {
 
     private let registry: SessionRegistry
     private let store: GRDBStore
+    /// Durable session-event sink for the lazy-revive path; no-op by default.
+    private let activityLog: SessionActivityLogging
 
     /// PRs under continuous watch, keyed by `TrackedPr.key(cwd:number:)`.
     private var tracked: [String: TrackedPr] = [:]
@@ -68,9 +70,11 @@ public actor PrTrackingEngine {
     /// isn't Sendable and can't cross into the actor init.)
     public init(registry: SessionRegistry, store: GRDBStore, legacyDefaultsSuite: String? = nil,
                 webhookDebounce: Duration = .seconds(2),
-                pollInterval: Duration = Config.prPollInterval) {
+                pollInterval: Duration = Config.prPollInterval,
+                activityLog: SessionActivityLogging = NoopSessionActivityLog()) {
         self.registry = registry
         self.store = store
+        self.activityLog = activityLog
         self.webhookDebounce = webhookDebounce
         self.pollInterval = pollInterval
         let defaults = legacyDefaultsSuite.flatMap(UserDefaults.init(suiteName:)) ?? .standard
@@ -350,7 +354,8 @@ public actor PrTrackingEngine {
             } else {
                 // The driving session is offline (typically after a restart).
                 // Revive it lazily, then seed the fix via autoSubmit.
-                _ = await reviveSession(entry.sessionId, registry: registry, store: store)
+                _ = await reviveSession(entry.sessionId, registry: registry, store: store,
+                                        log: activityLog)
                 if let session = registry.get(entry.sessionId) {
                     session.autoSubmit(prompt)
                 } else if let fresh = try? registry.create(

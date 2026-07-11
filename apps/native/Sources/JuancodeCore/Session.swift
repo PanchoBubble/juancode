@@ -48,6 +48,9 @@ public struct SessionEnvironment: Sendable {
         _ cliSessionId: @escaping @Sendable () -> String?,
         _ onBatch: @escaping @Sendable (_ batch: StructuredEventBatch, _ reset: Bool) -> Void
     ) -> (@Sendable () -> Void)
+    /// Durable lifecycle/activity event sink (`SessionActivityLog` in the app);
+    /// defaults to a no-op so tests stay quiet.
+    public var log: SessionActivityLogging
 
     public init(
         resolver: BinaryResolver = DefaultBinaryResolver(),
@@ -63,7 +66,8 @@ public struct SessionEnvironment: Sendable {
             ProviderId,
             @escaping @Sendable () -> String?,
             @escaping @Sendable (StructuredEventBatch, Bool) -> Void
-        ) -> (@Sendable () -> Void) = { _, _, _ in {} }
+        ) -> (@Sendable () -> Void) = { _, _, _ in {} },
+        log: SessionActivityLogging = NoopSessionActivityLog()
     ) {
         self.resolver = resolver
         self.store = store
@@ -73,6 +77,7 @@ public struct SessionEnvironment: Sendable {
         self.deriveTitle = deriveTitle
         self.deriveUsage = deriveUsage
         self.startActivityTail = startActivityTail
+        self.log = log
     }
 }
 
@@ -233,7 +238,7 @@ public final class Session: @unchecked Sendable {
             usage: nil
         )
         return try Session(meta: meta, args: spec.startArgs(id, opts), cols: cols, rows: rows,
-                           isNew: true, env: env)
+                           isNew: true, spawnMode: "create", env: env)
     }
 
     /// Revive an exited session by resuming its prior CLI conversation in a fresh
@@ -254,7 +259,7 @@ public final class Session: @unchecked Sendable {
         meta.updatedAt = nowMs()
         let opts = SpawnOptions(skipPermissions: meta.skipPermissions)
         return try Session(meta: meta, args: spec.resumeArgs(cliSessionId, opts), cols: cols, rows: rows,
-                           isNew: false, env: env, seedScrollback: priorScrollback)
+                           isNew: false, spawnMode: "resume", env: env, seedScrollback: priorScrollback)
     }
 
     /// Restart an exited session as a brand-new CLI conversation in place, keeping
@@ -283,7 +288,7 @@ public final class Session: @unchecked Sendable {
         let opts = SpawnOptions(skipPermissions: meta.skipPermissions)
         let startId = spec.pinsSessionId ? freshPin : prev.id
         return try Session(meta: meta, args: spec.startArgs(startId, opts), cols: cols, rows: rows,
-                           isNew: false, env: env)
+                           isNew: false, spawnMode: "restartFresh", env: env)
     }
 
     /// Open an editor (`executable` + `args`, e.g. nvim + `["."]`) rooted in
@@ -320,7 +325,8 @@ public final class Session: @unchecked Sendable {
             parentSessionId: parent.id
         )
         return try Session(meta: meta, args: args, cols: cols, rows: rows,
-                           isNew: true, env: env, executableOverride: executable, persist: false)
+                           isNew: true, spawnMode: "editor", env: env,
+                           executableOverride: executable, persist: false)
     }
 
     // MARK: - init
@@ -331,6 +337,7 @@ public final class Session: @unchecked Sendable {
         cols: Int,
         rows: Int,
         isNew: Bool,
+        spawnMode: String,
         env: SessionEnvironment,
         seedScrollback: [UInt8] = [],
         executableOverride: String? = nil,
@@ -361,7 +368,10 @@ public final class Session: @unchecked Sendable {
         // The detector classifies off the shared model's rendered screen — no
         // second VT parse. `handleData` feeds the model before the detector so the
         // screen the settle logic re-reads always includes the arming chunk.
-        self.detector = ActivityDetector(observing: terminalModel) { [weak self] state, notify in
+        self.detector = ActivityDetector(
+            observing: terminalModel,
+            onWatchdogSettle: { [weak self] in self?.logEvent("watchdogSettle") }
+        ) { [weak self] state, notify in
             self?.emitActivity(state, notify)
         }
 
@@ -376,9 +386,13 @@ public final class Session: @unchecked Sendable {
             onData: { [weak self] bytes in self?.handleData(bytes) },
             onExit: { [weak self] code in self?.handleExit(code) }
         ) else {
+            env.log.log("spawnFailed", sessionId: meta.id, project: meta.cwd,
+                        fields: ["mode": spawnMode])
             throw SessionError.spawnFailed
         }
         self.proc = proc
+        logEvent("spawn", ["mode": spawnMode, "provider": meta.provider.rawValue,
+                           "cols": "\(cols)", "rows": "\(rows)"])
 
         if persist {
             if isNew {
@@ -461,7 +475,15 @@ public final class Session: @unchecked Sendable {
         schedulePersist()
     }
 
+    /// One-line append to the injected activity log (a no-op by default). The
+    /// logger hands off to its own queue, so this is safe on any hot path.
+    private func logEvent(_ event: String, _ fields: [String: String] = [:]) {
+        let (id, cwd) = lock.withLock { (_meta.id, _meta.cwd) }
+        env.log.log(event, sessionId: id, project: cwd, fields: fields)
+    }
+
     private func handleExit(_ code: Int32) {
+        logEvent("exit", ["code": "\(code)"])
         lock.withLock {
             _meta.status = .exited
             _meta.exitCode = Int(code)
@@ -478,6 +500,7 @@ public final class Session: @unchecked Sendable {
     }
 
     private func emitActivity(_ state: SessionActivity, _ notify: Bool) {
+        logEvent("activity", ["state": state.rawValue])
         for l in lock.withLock({ Array(activityListeners.values) }) { l(state, notify) }
         maybeFlushQueueOnEdge(state)
         maybePersistOnIdleEdge(state)
@@ -568,9 +591,16 @@ public final class Session: @unchecked Sendable {
     public func autoSubmit(_ text: String, onResult: (@Sendable (AutoSubmitOutcome) -> Void)? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { onResult?(.submitted); return }
+        logEvent("autoSubmit", ["chars": "\(trimmed.count)"])
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { onResult?(.failed(reason: "session was released")); return }
             let outcome = await self.deliverSeed(trimmed)
+            switch outcome {
+            case .submitted:
+                self.logEvent("seedResult", ["outcome": "submitted"])
+            case let .failed(reason):
+                self.logEvent("seedResult", ["outcome": "failed", "reason": reason])
+            }
             onResult?(outcome)
         }
     }
@@ -590,7 +620,8 @@ public final class Session: @unchecked Sendable {
         let signature = InitialPromptDelivery.signature(for: trimmed)
 
         // 1) Wait for the TUI to settle so the input box exists before we paste.
-        await waitForStableScreen(maxMs: Seed.readyMaxMs, pollMs: Seed.readyPollMs)
+        let settled = await waitForStableScreen(maxMs: Seed.readyMaxMs, pollMs: Seed.readyPollMs)
+        logEvent("seedSettle", ["settled": "\(settled)"])
         guard isRunning else { return .failed(reason: "session exited during startup") }
 
         // 2) Paste, then confirm the prompt actually landed in the input box.
@@ -601,9 +632,12 @@ public final class Session: @unchecked Sendable {
         // passes, so a box that only becomes ready seconds later is still caught.
         var landed = false
         var elapsedMs = 0
+        var pasteAttempt = 0
         while elapsedMs < Seed.landDeadlineMs {
             guard isRunning else { return .failed(reason: "session exited before the prompt was typed") }
             if activity == .busy { return .submitted } // already working — nothing to do
+            pasteAttempt += 1
+            logEvent("seedPaste", ["attempt": "\(pasteAttempt)"])
             paste(trimmed)
             landed = await waitUntil(maxMs: Seed.landMs, pollMs: Seed.pollMs) {
                 self.activity == .busy || self.inputBoxContains(signature)
@@ -622,8 +656,9 @@ public final class Session: @unchecked Sendable {
         // Let the paste-end sequence settle before the CR so the CLI is out of
         // paste mode and reads the Enter as submit, not a literal newline.
         try? await Task.sleep(for: .milliseconds(Seed.submitSettleMs))
-        for _ in 0..<Seed.maxAttempts {
+        for attempt in 0..<Seed.maxAttempts {
             guard isRunning else { return .failed(reason: "session exited before the prompt was submitted") }
+            logEvent("seedEnter", ["attempt": "\(attempt + 1)"])
             write("\r")
             let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
                 self.activity == .busy
@@ -841,7 +876,9 @@ public final class Session: @unchecked Sendable {
             guard let item = env.messageQueue.peek(id) else { break }
             // Drop the message only once it verifiably submitted; otherwise leave it
             // queued and stop, so a stalled delivery is retried on the next idle / kick.
-            if await deliverQueued(item.text) {
+            let delivered = await deliverQueued(item.text)
+            logEvent("queuedResult", ["delivered": "\(delivered)", "chars": "\(item.text.count)"])
+            if delivered {
                 env.messageQueue.remove(id, item.id)
             }
             break
@@ -988,6 +1025,7 @@ public final class Session: @unchecked Sendable {
     }
 
     public func kill() {
+        if isRunning { logEvent("kill") }
         stopTitleWatch()
         stopActivityTailIfNeeded()
         if isRunning { proc?.terminate() }
@@ -999,6 +1037,7 @@ public final class Session: @unchecked Sendable {
     /// tell "reaped while idle, wake me on demand" from a crash/exit. The flag is
     /// cleared by `Session.resume`.
     public func markDormant() {
+        logEvent("dormant")
         lock.withLock { _meta.dormant = true }
         persistMeta(titleChanged: false)
     }

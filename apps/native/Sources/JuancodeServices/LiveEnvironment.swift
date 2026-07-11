@@ -10,7 +10,8 @@ public extension SessionEnvironment {
     static func live(
         store: SessionStore,
         messageQueue: MessageQueue = MessageQueue(),
-        scrollbackLimit: Int = Config.scrollbackLimit
+        scrollbackLimit: Int = Config.scrollbackLimit,
+        log: SessionActivityLogging = NoopSessionActivityLog()
     ) -> SessionEnvironment {
         SessionEnvironment(
             resolver: DefaultBinaryResolver(),
@@ -27,7 +28,8 @@ public extension SessionEnvironment {
                 )
                 tail.start()
                 return { tail.stop() }
-            }
+            },
+            log: log
         )
     }
 }

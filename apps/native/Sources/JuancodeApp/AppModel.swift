@@ -1894,6 +1894,8 @@ final class AppModel {
         }
         guard meta.cliSessionId != nil else {
             errorMessage = "No prior CLI conversation could be found to resume this session."
+            appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
+                                     fields: ["reason": "unresumable"])
             return false
         }
         // A pinned-id session that booted but never got a turn has no transcript to
@@ -1911,6 +1913,8 @@ final class AppModel {
             return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior)
         } catch {
             errorMessage = "Failed to resume: \(error)"
+            appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
+                                     fields: ["reason": "\(error)"])
             return false
         }
     }
@@ -1944,6 +1948,7 @@ final class AppModel {
     /// nothing stacks across reloads).
     private func invalidateFailedResume(_ sessionId: String, priorScrollback: [UInt8]) {
         guard var meta = appState.store.get(sessionId) else { return }
+        appState.activityLog.log("resumeInvalidated", sessionId: sessionId, project: meta.cwd)
         meta.cliSessionId = nil
         meta.status = .exited
         appState.store.update(meta, scrollback: priorScrollback)
@@ -2402,6 +2407,9 @@ final class AppModel {
     /// re-raising them. Cleared for a session once it recovers (so a later re-failure
     /// surfaces again).
     @ObservationIgnored private var dismissedHealth: Set<String> = []
+    /// Health states already written to the activity log, so a still-unhealthy
+    /// session isn't re-logged every 30s sweep — only edges land in the file.
+    @ObservationIgnored private var loggedHealthStates: [String: SessionHealthState] = [:]
     /// Session ids we've observed live at least once this run — the set the sweep is
     /// allowed to flag. A session must have come up before we'll report it dead/stale.
     @ObservationIgnored private var everLive: Set<String> = []
@@ -2442,6 +2450,13 @@ final class AppModel {
                 resumable: meta.cliSessionId != nil, dormant: meta.dormant)
         }
         let reports = SessionHealth.sweep(inputs, nowMs: now)
+        // Durable trail: log each report once per state change, not on every sweep.
+        for r in reports where loggedHealthStates[r.id] != r.state {
+            appState.activityLog.log("health", sessionId: r.id,
+                                     project: sessions.first { $0.id == r.id }?.cwd ?? "",
+                                     fields: ["state": r.state.rawValue])
+        }
+        loggedHealthStates = Dictionary(uniqueKeysWithValues: reports.map { ($0.id, $0.state) })
         // Keep dismissals only for sessions that are still unhealthy; a recovered one
         // drops its dismissal so a future failure re-alerts.
         dismissedHealth.formIntersection(Set(reports.map(\.id)))
@@ -3393,6 +3408,7 @@ final class AppModel {
 
     func delete(_ id: String) {
         let meta = appState.store.get(id)
+        appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
         appState.registry.get(id)?.kill()
         appState.store.delete(id)
         activityCancels[id]?(); activityCancels[id] = nil
@@ -3422,6 +3438,17 @@ final class AppModel {
         refresh()
     }
 
+    /// Reveal the rolling session activity log in Finder — the JSONL trail of
+    /// spawn/seed/activity/exit events (grep by session id to follow one session).
+    /// Falls back to the logs folder before the first event has been written.
+    func revealActivityLog() {
+        appState.activityLog.flush()
+        let path = appState.activityLog.logPath
+        let target = FileManager.default.fileExists(atPath: path)
+            ? path : (path as NSString).deletingLastPathComponent
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: target)])
+    }
+
     /// Close (kill + delete) every given session in one pass — the per-project
     /// "close all" action. Same teardown as `delete(_:)` but refreshes once and
     /// removes worktrees in a single batched task instead of one per session.
@@ -3429,7 +3456,9 @@ final class AppModel {
         guard !ids.isEmpty else { return }
         var worktrees: [String] = []
         for id in ids {
-            if let wt = appState.store.get(id)?.worktreePath { worktrees.append(wt) }
+            let meta = appState.store.get(id)
+            if let wt = meta?.worktreePath { worktrees.append(wt) }
+            appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
             appState.registry.get(id)?.kill()
             appState.store.delete(id)
             activityCancels[id]?(); activityCancels[id] = nil

@@ -33,6 +33,17 @@ public enum Config {
         return (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/data")
     }
 
+    /// Where rolling diagnostic logs live (the session activity log). Defaults to
+    /// `~/.juancode/logs`, beside the default data dir; when `JUANCODE_DATA_DIR`
+    /// is overridden the logs follow it (`<dataDir>/logs`) so a relocated install
+    /// keeps everything under one root.
+    public static var logsDir: String {
+        if let override = env["JUANCODE_DATA_DIR"], !override.isEmpty {
+            return (override as NSString).appendingPathComponent("logs")
+        }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/logs")
+    }
+
     /// Max bytes of terminal output retained (and persisted) per session for
     /// replay on (re)attach (`JUANCODE_SCROLLBACK`, default 256 KiB).
     public static var scrollbackLimit: Int {

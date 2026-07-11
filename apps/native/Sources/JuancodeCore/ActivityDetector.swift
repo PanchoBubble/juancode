@@ -91,6 +91,10 @@ public final class ActivityDetector: @unchecked Sendable {
 
     private let queue: DispatchQueue
     private let onChange: ChangeListener
+    /// Fired when the stuck-busy watchdog (not the ordinary settle) is what ends a
+    /// busy turn — the footer went silent past `watchdogMs`. A diagnostics hook
+    /// (the session logs it); nil by default.
+    private let onWatchdogSettle: (@Sendable () -> Void)?
     /// The rendered screen the classifier reads. In production this is the
     /// session's shared `SessionTerminalModel`, fed once in `Session.handleData`
     /// *before* the detector sees the chunk; in the byte-fed mode (tests) the
@@ -132,12 +136,14 @@ public final class ActivityDetector: @unchecked Sendable {
         watchdogMs: Int = 8000,
         toolHoldCapMs: Int = 30 * 60 * 1000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
+        onWatchdogSettle: (@Sendable () -> Void)? = nil,
         onChange: @escaping ChangeListener
     ) {
         self.settleMs = settleMs
         self.watchdogMs = watchdogMs
         self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
+        self.onWatchdogSettle = onWatchdogSettle
         self.onChange = onChange
         self.screen = SessionTerminalModel(cols: cols, rows: rows, scrollbackLines: 0)
         self.ownsScreen = true
@@ -153,12 +159,14 @@ public final class ActivityDetector: @unchecked Sendable {
         watchdogMs: Int = 8000,
         toolHoldCapMs: Int = 30 * 60 * 1000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
+        onWatchdogSettle: (@Sendable () -> Void)? = nil,
         onChange: @escaping ChangeListener
     ) {
         self.settleMs = settleMs
         self.watchdogMs = watchdogMs
         self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
+        self.onWatchdogSettle = onWatchdogSettle
         self.onChange = onChange
         self.screen = model
         self.ownsScreen = false
@@ -331,6 +339,7 @@ public final class ActivityDetector: @unchecked Sendable {
             // A visible prompt beats the open-tool hold: a tool_use is written to the
             // transcript *before* its permission menu is answered, and the user must
             // be pinged. Leaving busy drops the hold (see `transition`).
+            if demoteStaleFooter { onWatchdogSettle?() }
             transition(.waitingInput, notify: true)
             return
         }
@@ -341,6 +350,7 @@ public final class ActivityDetector: @unchecked Sendable {
             armTimers()
             return
         }
+        if demoteStaleFooter { onWatchdogSettle?() }
         // We're leaving busy on a real turn boundary, so notify.
         transition(.idle, notify: true)
     }

@@ -22,18 +22,24 @@ public final class AppState: @unchecked Sendable {
     /// Idle-session reaper (juancode-lgq) — kills verifiably idle CLI process
     /// trees to free RAM, leaving each session dormant and resumable on demand.
     public let sessionReaper: SessionReaper
+    /// Rolling on-disk session activity log (`Config.logsDir`) — the durable
+    /// lifecycle/seed/activity trail for debugging frozen sessions after the fact.
+    public let activityLog: SessionActivityLog
 
     public init(store: GRDBStore) {
         self.store = store
+        let activityLog = SessionActivityLog()
+        self.activityLog = activityLog
         // The queue persists into the same store, so it survives restarts / reconnects.
         let messageQueue = MessageQueue(persistence: store)
         self.messageQueue = messageQueue
         // The registry's session env carries the real seams: login-shell binary
         // resolution, this store, the message queue, Codex id discovery, and
         // title/usage polling.
-        let registry = SessionRegistry(env: .live(store: store, messageQueue: messageQueue))
+        let registry = SessionRegistry(env: .live(store: store, messageQueue: messageQueue,
+                                                  log: activityLog))
         self.registry = registry
-        self.prTracking = PrTrackingEngine(registry: registry, store: store)
+        self.prTracking = PrTrackingEngine(registry: registry, store: store, activityLog: activityLog)
         let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue)
         self.sessionReaper = sessionReaper
         Task { await sessionReaper.start() }
