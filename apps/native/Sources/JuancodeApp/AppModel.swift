@@ -17,8 +17,8 @@ private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
-/// UserDefaults key for the auto-close-idle-sessions threshold, in minutes
-/// (`0` = never / disabled).
+/// UserDefaults key for the idle-session sleep window driving the `SessionReaper`,
+/// in minutes (`0` = never / disabled). Key name predates the reaper.
 private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
@@ -338,6 +338,7 @@ final class AppModel {
         restorePromptTemplates()
         restoreSessionTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
+        applyReaperWindow() // the user's idle window (not the boot default) drives the reaper
         startWorkAtRiskLoop() // periodic dirty/unpushed scan (juancode-rxu)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on,
@@ -790,12 +791,24 @@ final class AppModel {
         }
     }
 
-    /// Auto-close idle sessions: kill (but keep, as a resumable `exited` session)
-    /// any running pty with no output for this many minutes. `0` means never — the
-    /// feature is off. Evaluated on every health tick; default 60 min. Persisted and
-    /// edited from Settings → Sessions (⌘,). See `autoCloseIdleSessions`.
+    /// Idle window (minutes) after which the `SessionReaper` puts a session to
+    /// sleep: it kills the CLI process tree to free RAM once the session has been
+    /// *verifiably* idle for this long, leaving a dormant, resumable tile. `0`
+    /// means never — reaping is off. Persisted and edited from Settings → Sessions
+    /// (⌘,); pushed into the reaper live via `applyReaperWindow`.
     var autoCloseIdleMinutes: Int = UserDefaults.standard.object(forKey: autoCloseIdleMinutesKey) as? Int ?? 60 {
-        didSet { UserDefaults.standard.set(autoCloseIdleMinutes, forKey: autoCloseIdleMinutesKey) }
+        didSet {
+            UserDefaults.standard.set(autoCloseIdleMinutes, forKey: autoCloseIdleMinutesKey)
+            applyReaperWindow()
+        }
+    }
+
+    /// Push the effective idle window into the reaper. `JUANCODE_REAP_IDLE_MINUTES`
+    /// wins when set (the usual env-beats-config precedence); otherwise the user's
+    /// Settings value rules, including `0` = disabled.
+    private func applyReaperWindow() {
+        let minutes = Config.reapIdleMinutesOverride ?? autoCloseIdleMinutes
+        Task { [appState] in await appState.sessionReaper.setIdleWindow(minutes: minutes) }
     }
 
     /// Estimated-cost budget in USD (juancode-qoc). `0` = off. When set, the sidebar
@@ -2408,22 +2421,6 @@ final class AppModel {
                 id: meta.id, status: meta.status, isLive: isLive(meta.id),
                 activity: activity(meta.id), lastOutputMs: meta.updatedAt,
                 resumable: meta.cliSessionId != nil)
-        }
-        // Auto-close long-idle sessions: kill the pty (the exit persists it as a
-        // resumable `exited` session, so it isn't lost — it just stops holding a live
-        // pty). Read each pty's last-output time straight from the live registry —
-        // the published `sessions` snapshot only refreshes on create/exit, so its
-        // `updatedAt` can lag and falsely flag a still-working session. `0` = off.
-        if autoCloseIdleMinutes > 0 {
-            let liveInputs = appState.registry.all().map { s in
-                SessionHealthInput(
-                    id: s.id, status: s.meta.status, isLive: true,
-                    activity: activity(s.id), lastOutputMs: s.meta.updatedAt,
-                    resumable: s.meta.cliSessionId != nil)
-            }
-            for id in SessionHealth.idleToClose(liveInputs, nowMs: now, idleMs: autoCloseIdleMinutes * 60_000) {
-                appState.registry.get(id)?.kill()
-            }
         }
         let reports = SessionHealth.sweep(inputs, nowMs: now)
         // Keep dismissals only for sessions that are still unhealthy; a recovered one

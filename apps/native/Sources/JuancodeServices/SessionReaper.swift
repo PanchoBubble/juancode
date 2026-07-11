@@ -277,15 +277,16 @@ final class TranscriptPathCache: @unchecked Sendable {
 /// Owns the sweep loop and the per-session idle streaks. One process-wide
 /// instance lives on `AppState`, next to `PrTrackingEngine`.
 ///
-/// Distinct from the older `autoCloseIdleMinutes` sweep in the GUI
-/// (`SessionHealth.idleToClose`), which keys on `lastOutputMs` — spinner or
-/// keepalive output defeats it, and it closes the session outright. This reaper
-/// keys on verified idleness and leaves a dormant, resumable tile.
+/// This replaced the older GUI `autoCloseIdleMinutes` sweep, which keyed on
+/// `lastOutputMs` — spinner or keepalive output defeated it, and it closed the
+/// session outright. The reaper keys on verified idleness and leaves a dormant,
+/// resumable tile. The Settings → Sessions idle window still drives it, through
+/// `setIdleWindow`.
 public actor SessionReaper {
     private let registry: SessionRegistry
     private let messageQueue: MessageQueue
     private let probes: SessionReaperProbes
-    private let windowMs: Int
+    private var windowMs: Int
     private let cpuEpsilonMs: Int
     private let sweepInterval: Duration
 
@@ -310,10 +311,19 @@ public actor SessionReaper {
         self.sweepInterval = sweepInterval
     }
 
-    /// Start the periodic sweep. No-op when already running or when reaping is
-    /// disabled (`windowMs <= 0`, i.e. `JUANCODE_REAP_IDLE_MINUTES=0`).
+    /// Change the idle window at runtime (the Settings → Sessions stepper).
+    /// `minutes <= 0` disables reaping — sweeps become no-ops and any tracked
+    /// streaks are dropped, so a later re-enable starts fresh instead of reaping
+    /// off a stale baseline.
+    public func setIdleWindow(minutes: Int) {
+        windowMs = minutes * 60_000
+    }
+
+    /// Start the periodic sweep. No-op when already running. Runs even while the
+    /// window is disabled — each tick is then a cheap no-op — so `setIdleWindow`
+    /// can enable/disable reaping without loop management.
     public func start() {
-        guard loop == nil, windowMs > 0 else { return }
+        guard loop == nil else { return }
         loop = Task { [weak self, sweepInterval] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: sweepInterval)
@@ -332,6 +342,10 @@ public actor SessionReaper {
     /// ones. Returns the reaped session ids (for tests / logging).
     @discardableResult
     public func sweepOnce() async -> [String] {
+        guard windowMs > 0 else {
+            baselines = [:]
+            return []
+        }
         let now = probes.nowMs()
         var reaped: [String] = []
         var next: [String: SessionReapPolicy.Baseline] = [:]

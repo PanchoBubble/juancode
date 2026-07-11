@@ -310,4 +310,103 @@ final class SessionReaperTests: XCTestCase {
         XCTAssertTrue(session.isRunning)
         XCTAssertNotEqual(store.get(session.id)?.dormant, true)
     }
+
+    // MARK: - settings-driven window (setIdleWindow)
+
+    func testDisabledWindowSweepsNothing() async throws {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCodexId: { _, _ in nil }
+        ))
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        // 0 = the Settings toggle off: nothing is ever reaped, however long idle.
+        let clock = Clock(nowMs())
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: quietProbes(clock: clock),
+            windowMs: 0)
+        _ = await reaper.sweepOnce()
+        clock.now += 24 * 60 * 60 * 1000
+        let reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        XCTAssertTrue(session.isRunning)
+        XCTAssertNotEqual(store.get(session.id)?.dormant, true)
+    }
+
+    func testSetIdleWindowDrivesReapingLive() async throws {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCodexId: { _, _ in nil }
+        ))
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        // Born disabled (the persisted setting), enabled at runtime by Settings.
+        let clock = Clock(nowMs())
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: quietProbes(clock: clock),
+            windowMs: 0)
+        clock.now += windowMs
+        var reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+
+        await reaper.setIdleWindow(minutes: windowMs / 60_000)
+        // First enabled sweep only captures the baseline…
+        reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        XCTAssertTrue(session.isRunning)
+        // …and once the window is served, the session is reaped to dormant.
+        clock.now += windowMs
+        reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [session.id])
+        XCTAssertEqual(store.get(session.id)?.dormant, true)
+    }
+
+    func testDisablingMidStreakDropsTheBaseline() async throws {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCodexId: { _, _ in nil }
+        ))
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        let clock = Clock(nowMs())
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: quietProbes(clock: clock),
+            windowMs: windowMs)
+        _ = await reaper.sweepOnce() // baseline captured
+
+        // Toggle off, then back on past the original window: the old streak must
+        // not survive the disabled gap — the session needs a fresh full window.
+        await reaper.setIdleWindow(minutes: 0)
+        _ = await reaper.sweepOnce()
+        await reaper.setIdleWindow(minutes: windowMs / 60_000)
+        clock.now += windowMs * 2
+        var reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        XCTAssertTrue(session.isRunning)
+
+        clock.now += windowMs
+        reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [session.id])
+    }
 }

@@ -72,11 +72,20 @@ public enum Config {
         return p == root || p.hasPrefix(root + "/")
     }
 
+    /// Explicit `JUANCODE_REAP_IDLE_MINUTES` override, nil when unset. When set it
+    /// wins over the Settings → Sessions idle window (the usual `JUANCODE_*`
+    /// precedence: env beats persisted config); a value ≤ 0 disables reaping.
+    public static var reapIdleMinutesOverride: Int? {
+        env["JUANCODE_REAP_IDLE_MINUTES"].flatMap(Int.init)
+    }
+
     /// How long a session must be verifiably idle before the reaper kills its CLI
-    /// process tree to free RAM, leaving a dormant, resumable tile (juancode-lgq).
-    /// `JUANCODE_REAP_IDLE_MINUTES`, default 30; a value ≤ 0 disables reaping.
+    /// process tree to free RAM, leaving a dormant, resumable tile.
+    /// `JUANCODE_REAP_IDLE_MINUTES`, default 30. Only the boot default — the GUI
+    /// re-applies the user's Settings value (or the env override) via
+    /// `SessionReaper.setIdleWindow` right after launch.
     public static var reapIdleMinutes: Int {
-        env["JUANCODE_REAP_IDLE_MINUTES"].flatMap(Int.init) ?? 30
+        reapIdleMinutesOverride ?? 30
     }
 
     /// The editor an "open editor" session launches, rooted in the source

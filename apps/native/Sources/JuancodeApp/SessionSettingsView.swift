@@ -1,8 +1,9 @@
-// Settings → Sessions pane: auto-close idle sessions. Kill (but keep, resumable)
-// any running session with no output for the chosen duration, so unused agents stop
-// holding a live pty. The duration is editable; the toggle off (0 min) disables it
-// entirely. Backed by `AppModel.autoCloseIdleMinutes`; the work runs on the health
-// loop (see `autoCloseIdleSessions`). Surfaced via the standard ⌘, window.
+// Settings → Sessions pane: sleep idle sessions. Once a session has been verifiably
+// idle for the chosen duration, the `SessionReaper` kills its CLI process tree to
+// free RAM, leaving a dormant tile that resumes on demand. The duration is editable;
+// the toggle off (0 min) disables it entirely. Backed by
+// `AppModel.autoCloseIdleMinutes`, which drives the reaper's window live. Surfaced
+// via the standard ⌘, window.
 
 import SwiftUI
 
@@ -32,12 +33,12 @@ struct SessionSettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Automatically close idle sessions", isOn: Binding(
+                Toggle("Automatically sleep idle sessions", isOn: Binding(
                     get: { enabled },
                     set: { model.autoCloseIdleMinutes = $0 ? minutes : 0 }))
 
                 HStack(spacing: 8) {
-                    Text("Close after")
+                    Text("Sleep after")
                     Stepper(value: $minutes, in: 5...1440, step: 5) {
                         Text("\(minutes) min").monospacedDigit()
                     }
@@ -95,10 +96,10 @@ struct SessionSettingsView: View {
             Spacer()
 
             Divider()
-            Text("Stops the agent and frees its pty so an unused session isn't held "
-                + "open. The session stays in the list and can be resumed later. "
-                + "“No output” for the chosen time counts as inactive — a session "
-                + "that's actively working is never closed.")
+            Text("Stops the agent's processes to free memory once a session has "
+                + "been verifiably idle — no work, no pending prompt, no typing — "
+                + "for the chosen time. The session stays in the list as sleeping "
+                + "and wakes on demand; one that's actively working is never touched.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 16)

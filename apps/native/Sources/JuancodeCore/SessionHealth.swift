@@ -102,23 +102,4 @@ public enum SessionHealth {
             return SessionHealthReport(id: s.id, state: state, resumable: s.resumable)
         }
     }
-
-    /// Select live sessions to auto-close: those with no output for at least
-    /// `idleMs`. Returns their ids in input order. `idleMs <= 0` disables the
-    /// feature (returns `[]`), which is how the "Never" setting is expressed.
-    ///
-    /// Inactivity is measured purely by `lastOutputMs` (`meta.updatedAt`), so a
-    /// session that's actually working — it keeps emitting output — never crosses
-    /// the line regardless of `activity`; only ones genuinely sitting silent do.
-    /// Pure so the cutoff rule is unit-testable; the app layer kills the returned
-    /// ptys and the exit persists each as a resumable `exited` session.
-    public static func idleToClose(
-        _ inputs: [SessionHealthInput], nowMs: Int, idleMs: Int
-    ) -> [String] {
-        guard idleMs > 0 else { return [] }
-        return inputs.compactMap { s in
-            guard s.isLive, nowMs - s.lastOutputMs >= idleMs else { return nil }
-            return s.id
-        }
-    }
 }

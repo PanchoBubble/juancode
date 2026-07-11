@@ -77,41 +77,4 @@ import Testing
         let inputs = [input(id: "a"), input(id: "b", activity: .busy, lastOutputMs: 10_000_000)]
         #expect(SessionHealth.sweep(inputs, nowMs: 10_000_001).isEmpty)
     }
-
-    // MARK: - idleToClose (auto-close idle sessions)
-
-    @Test func idleToCloseSelectsOnlyLiveSessionsPastTheThreshold() {
-        let hourMs = 60 * 60 * 1000
-        let inputs = [
-            input(id: "fresh", lastOutputMs: 10_000_000),                 // recent → keep
-            input(id: "idle", lastOutputMs: 10_000_000 - hourMs),         // 1h old → close
-            input(id: "dead", isLive: false, lastOutputMs: 0),            // not live → ignore
-        ]
-        let ids = SessionHealth.idleToClose(inputs, nowMs: 10_000_000, idleMs: hourMs)
-        #expect(ids == ["idle"])
-    }
-
-    @Test func idleToCloseClosesRegardlessOfActivityWhenSilent() {
-        // A long-silent session is closed whether it reads idle or (wedged) busy —
-        // freshness of output, not activity, is the gate.
-        let inputs = [
-            input(id: "busy-silent", activity: .busy, lastOutputMs: 0),
-            input(id: "waiting", activity: .waitingInput, lastOutputMs: 0),
-        ]
-        let ids = SessionHealth.idleToClose(inputs, nowMs: 60 * 60 * 1000, idleMs: 60 * 60 * 1000)
-        #expect(ids == ["busy-silent", "waiting"])
-    }
-
-    @Test func idleToCloseThresholdIsExactlyInclusive() {
-        let s = input(id: "edge", lastOutputMs: 0)
-        #expect(SessionHealth.idleToClose([s], nowMs: 999, idleMs: 1000).isEmpty)
-        #expect(SessionHealth.idleToClose([s], nowMs: 1000, idleMs: 1000) == ["edge"])
-    }
-
-    @Test func idleToCloseDisabledWhenThresholdNotPositive() {
-        // 0 (and below) expresses the "Never" setting — nothing is ever closed.
-        let s = input(id: "ancient", lastOutputMs: 0)
-        #expect(SessionHealth.idleToClose([s], nowMs: 24 * 60 * 60 * 1000, idleMs: 0).isEmpty)
-        #expect(SessionHealth.idleToClose([s], nowMs: 24 * 60 * 60 * 1000, idleMs: -1).isEmpty)
-    }
 }
