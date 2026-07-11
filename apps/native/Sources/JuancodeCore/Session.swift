@@ -799,13 +799,11 @@ public final class Session: @unchecked Sendable {
     }
 
     /// Deliver queued messages one at a time while the session sits idle. Each is
-    /// sent with the same bracketed-paste-then-Enter the seed / submit paths use (a
-    /// `"\(text)\r"` burst is read as a paste with the CR kept literal, so it never
-    /// submits). We pop a message only once we've confirmed it landed the agent in
-    /// `busy`; that also ends this pass — the agent finishing the turn fires the
-    /// next idle edge, which delivers the next message in order. A stalled delivery
-    /// is left queued and retried on the next idle / kick rather than spun on.
-    /// Mirrors `flushQueue` in `apps/server/src/session.ts`.
+    /// sent with the seed path's verified bracketed-paste-then-Enter (`deliverQueued`).
+    /// We pop a message only once we've confirmed it submitted; that also ends this
+    /// pass — the agent finishing the turn fires the next idle edge, which delivers
+    /// the next message in order. A stalled delivery is left queued and retried on
+    /// the next idle / kick rather than spun on.
     private func flushQueue() async {
         let claimed = lock.withLock { () -> Bool in
             if flushingQueue { return false }
@@ -817,18 +815,42 @@ public final class Session: @unchecked Sendable {
 
         while isRunning && activity == .idle {
             guard let item = env.messageQueue.peek(id) else { break }
-            deliverPaste(item.text, submit: true, onResult: nil)
-            if !isRunning { break }
-            let accepted = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
-                self.activity == .busy || !self.isRunning
-            }
-            // Drop the message only once it actually took; otherwise leave it queued
-            // and stop, so a stalled delivery is retried on the next idle / kick.
-            if accepted && activity == .busy {
+            // Drop the message only once it verifiably submitted; otherwise leave it
+            // queued and stop, so a stalled delivery is retried on the next idle / kick.
+            if await deliverQueued(item.text) {
                 env.messageQueue.remove(id, item.id)
             }
             break
         }
+    }
+
+    /// Paste one queued message and verify it submitted — the seed path's
+    /// land-then-verified-Enter, minus the startup settle (the session is already
+    /// live and idle). A blind paste + single CR loses the Enter whenever the CLI
+    /// is still digesting a long paste (the CR lands as a literal newline), so the
+    /// message sits in the box unsent and the queue's retry stacks a duplicate on
+    /// the next idle edge. Returns whether the message went through (agent busy,
+    /// or the prompt left the box).
+    private func deliverQueued(_ text: String) async -> Bool {
+        let signature = InitialPromptDelivery.signature(for: text)
+        paste(text)
+        let landed = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
+            self.activity == .busy || !self.isRunning
+                || self.inputBoxContains(signature) || self.inputBoxShowsCollapsedPaste()
+        }
+        if activity == .busy { return true }
+        guard landed, isRunning else { return false }
+        try? await Task.sleep(for: .milliseconds(Seed.submitSettleMs))
+        for _ in 0..<Seed.maxAttempts {
+            guard isRunning else { return false }
+            write("\r")
+            let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
+                self.activity == .busy
+                    || (!self.inputBoxContains(signature) && !self.inputBoxShowsCollapsedPaste())
+            }
+            if submitted { return true }
+        }
+        return false
     }
 
     /// Resize the pty grid. Returns whether the grid reached the live pty (false

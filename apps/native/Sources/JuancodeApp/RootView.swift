@@ -1819,7 +1819,7 @@ struct SessionRow: View {
     /// to the title's baseline, which sits below the text's optical center — so a bare
     /// dot reads as too low. Shifting each ornament up by half the title's cap height
     /// re-centers it on the title line.
-    private static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
+    private nonisolated static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
 
     var body: some View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the

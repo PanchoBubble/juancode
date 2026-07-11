@@ -13,6 +13,9 @@ export default tseslint.config(
       // (apps/native/.build) vendors third-party JS (e.g. GRDB's bundled
       // sqlite wasm tests) that must not be linted.
       "apps/native/**",
+      // Agent-session worktrees are full repo copies (including their own
+      // SwiftPM .build dirs) — never lint into them.
+      ".claude/worktrees/**",
     ],
   },
   js.configs.recommended,
