@@ -627,9 +627,15 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // through `sizeChanged` — leaving the pty at a stale (smaller) grid, so the
             // agent paints into a sub-rectangle with black margins until you reactivate.
             // Re-assert the real grid (nudged, so it actually re-lays-out) on each such
-            // event. Capture only the weak view + Sendable session — never `self` — so
-            // these `@Sendable` notification closures stay race-free.
-            for name in [NSApplication.didBecomeActiveNotification, NSWindow.didDeminiaturizeNotification] {
+            // event. `didChangeScreen` covers dragging the window to another monitor;
+            // `didChangeScreenParameters` covers resolution changes and displays being
+            // (un)plugged — both can resize/re-layout the window without ever firing
+            // the activation events. Capture only the weak view + Sendable session —
+            // never `self` — so these `@Sendable` notification closures stay race-free.
+            for name in [NSApplication.didBecomeActiveNotification,
+                         NSWindow.didDeminiaturizeNotification,
+                         NSWindow.didChangeScreenNotification,
+                         NSApplication.didChangeScreenParametersNotification] {
                 activeObservers.append(NotificationCenter.default.addObserver(
                     forName: name, object: nil, queue: .main) { [weak tv] _ in
                     MainActor.assumeIsolated { Self.nudgeResize(tv, session) }
@@ -754,8 +760,11 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             guard cols > 0, rows > 0 else { return }
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
             if let last = lastSent, last.cols == cols, last.rows == rows { return }
-            lastSent = (cols, rows)
-            session.resizeLocal(cols: cols, rows: rows)
+            // Only record the grid as sent when it actually reached the pty —
+            // recording a failed resize (pty not up yet / ioctl refused) makes the
+            // dedup swallow every retry at the same grid, leaving the CLI stuck at
+            // its stale size until something else jiggles the layout.
+            lastSent = session.resizeLocal(cols: cols, rows: rows) ? (cols, rows) : nil
         }
 
         func detach() {

@@ -50,9 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // On-demand Metal views can come back from a minimize showing a stale frame
         // (no new pty output ⇒ no `setNeedsDisplay`). Force a repaint of all window
-        // content when the app reactivates or a window is de-miniaturized.
+        // content when the app reactivates, a window is de-miniaturized, or the
+        // window lands on a different screen / the display configuration changes
+        // (monitor swap, resolution change) — those re-layout without activation.
         let center = NotificationCenter.default
-        for name in [NSApplication.didBecomeActiveNotification, NSWindow.didDeminiaturizeNotification] {
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didChangeScreenNotification,
+                     NSApplication.didChangeScreenParametersNotification] {
             restoreObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
                 // Delivered on the main queue, so assuming main-actor isolation is safe.
                 MainActor.assumeIsolated { Self.refreshAllWindows() }

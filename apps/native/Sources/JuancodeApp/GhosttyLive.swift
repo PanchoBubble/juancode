@@ -351,8 +351,13 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // blindly: `repairWakeDrift` reads the grid the pty actually applied
             // and fires a SIGWINCH only on true drift, so a clean pane's TUI never
             // repaints for nothing. (Coordinator is @MainActor ⇒ Sendable; the
-            // observers fire on .main.)
-            for name in [NSApplication.didBecomeActiveNotification, NSWindow.didDeminiaturizeNotification] {
+            // observers fire on .main.) `didChangeScreen` / `didChangeScreenParameters`
+            // cover monitor moves and resolution changes, which re-layout the window
+            // without any activation event.
+            for name in [NSApplication.didBecomeActiveNotification,
+                         NSWindow.didDeminiaturizeNotification,
+                         NSWindow.didChangeScreenNotification,
+                         NSApplication.didChangeScreenParametersNotification] {
                 activeObservers.append(NotificationCenter.default.addObserver(
                     forName: name, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.repairWakeDrift() }
