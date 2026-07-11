@@ -216,38 +216,10 @@ public final class ActivityDetector: @unchecked Sendable {
             combined = pendingBytes + bytes
             pendingBytes = []
         }
-        let cut = Self.utf8CompletePrefixLength(combined)
+        let cut = Utf8Boundary.completePrefixLength(combined)
         if cut < combined.count { pendingBytes = Array(combined[cut...]) }
         guard cut > 0 else { return } // whole chunk is an incomplete tail — nothing to feed yet
         _feed(String(decoding: combined[0..<cut], as: UTF8.self))
-    }
-
-    /// Length of the longest prefix of `buf` that ends on a UTF-8 scalar boundary —
-    /// excludes an incomplete multibyte sequence at the tail so it can be carried into
-    /// the next chunk. A malformed or all-continuation tail is left in the prefix
-    /// (returns the full count) so behavior matches the old whole-chunk decode.
-    static func utf8CompletePrefixLength(_ buf: [UInt8]) -> Int {
-        let n = buf.count
-        guard n > 0 else { return 0 }
-        // Walk back over up to 3 continuation bytes (10xxxxxx) to the last lead byte.
-        var i = n - 1
-        var conts = 0
-        while i >= 0, buf[i] & 0xC0 == 0x80, conts < 3 { i -= 1; conts += 1 }
-        guard i >= 0 else { return n } // all-continuation tail: malformed, don't carry
-        let expected = Self.utf8SequenceLength(buf[i])
-        // Carry only a real multibyte lead whose continuation bytes haven't all arrived.
-        if expected >= 2, n - i < expected { return i }
-        return n
-    }
-
-    /// Total byte length a UTF-8 sequence should have given its lead byte: 1 for ASCII,
-    /// 2/3/4 for multibyte leads, 0 for a continuation byte or invalid lead.
-    private static func utf8SequenceLength(_ b: UInt8) -> Int {
-        if b & 0x80 == 0 { return 1 } // 0xxxxxxx
-        if b & 0xE0 == 0xC0 { return 2 } // 110xxxxx
-        if b & 0xF0 == 0xE0 { return 3 } // 1110xxxx
-        if b & 0xF8 == 0xF0 { return 4 } // 11110xxx
-        return 0 // 10xxxxxx continuation, or invalid
     }
 
     private func _feed(_ data: String) {

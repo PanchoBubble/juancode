@@ -1,4 +1,5 @@
 import Foundation
+import JuancodeCore
 
 /// Per-connection coalescer + bounded buffer for the server→client `output` path
 /// (juancode-5qw.7). The server side twin of the local view's
@@ -30,6 +31,13 @@ final class ServerOutputCoalescer: @unchecked Sendable {
     /// Sessions whose bytes were dropped on overflow and must repaint from
     /// scrollback instead of the incremental stream.
     private var resyncNeeded: Set<String> = []
+    /// Incomplete trailing UTF-8 sequence held back from a session's last flush
+    /// (at most 3 bytes), prepended to its next flush. A flush boundary can land
+    /// mid-glyph; emitting the split halves in separate frames would decode each
+    /// to replacement characters on the client, so every emitted frame must end
+    /// on a scalar boundary. Only `flushSession` (the pre-exit flush, after which
+    /// no more bytes can complete the sequence) emits a still-incomplete tail.
+    private var carry: [String: [UInt8]] = [:]
     private var totalBytes = 0
     private var scheduled = false
     private var stopped = false
@@ -83,7 +91,7 @@ final class ServerOutputCoalescer: @unchecked Sendable {
         pending[sessionId, default: []].append(contentsOf: bytes)
         totalBytes += bytes.count
         if totalBytes > maxBytes {
-            for id in order { resyncNeeded.insert(id) }
+            for id in order { resyncNeeded.insert(id); carry.removeValue(forKey: id) }
             pending.removeAll(keepingCapacity: true)
             order.removeAll(keepingCapacity: true)
             totalBytes = 0
@@ -92,23 +100,28 @@ final class ServerOutputCoalescer: @unchecked Sendable {
     }
 
     /// Flush one session's buffered bytes immediately (used to keep output ordered
-    /// before an `exit` frame). No-op while backed up — the bytes stay buffered and
-    /// will drop-and-resync if the stall persists.
+    /// before an `exit` frame). This is the stream's final flush, so a held-back
+    /// incomplete UTF-8 tail is emitted too (decoding to a replacement character)
+    /// rather than silently dropped — no further bytes can complete it. No-op while
+    /// backed up — the bytes stay buffered and will drop-and-resync if the stall
+    /// persists.
     func flushSession(_ sessionId: String) {
         guard !isBackedUp() else { return }
-        var out: [UInt8]?
+        var out: [UInt8] = []
         var doResync = false
         lock.lock()
         if resyncNeeded.remove(sessionId) != nil {
             doResync = true
-        } else if let b = pending[sessionId], !b.isEmpty {
-            out = b
+            carry.removeValue(forKey: sessionId)
+        } else {
+            out = carry.removeValue(forKey: sessionId) ?? []
+            out += pending[sessionId] ?? []
         }
         if let b = pending.removeValue(forKey: sessionId) { totalBytes -= b.count }
         order.removeAll { $0 == sessionId }
         lock.unlock()
         if doResync { onResync?(sessionId) }
-        else if let out { emitOutput(sessionId, out) }
+        else if !out.isEmpty { emitOutput(sessionId, out) }
     }
 
     /// Forget a session entirely (on unsubscribe/close), dropping its buffer.
@@ -117,6 +130,7 @@ final class ServerOutputCoalescer: @unchecked Sendable {
         if let b = pending.removeValue(forKey: sessionId) { totalBytes -= b.count }
         order.removeAll { $0 == sessionId }
         resyncNeeded.remove(sessionId)
+        carry.removeValue(forKey: sessionId)
         lock.unlock()
     }
 
@@ -125,6 +139,7 @@ final class ServerOutputCoalescer: @unchecked Sendable {
         lock.lock()
         stopped = true
         pending.removeAll(); order.removeAll(); resyncNeeded.removeAll()
+        carry.removeAll()
         totalBytes = 0
         lock.unlock()
     }
@@ -159,7 +174,15 @@ final class ServerOutputCoalescer: @unchecked Sendable {
         let resyncIds = Array(resyncNeeded)
         var toEmit: [(String, [UInt8])] = []
         for id in order where !resyncNeeded.contains(id) {
-            if let b = pending[id], !b.isEmpty { toEmit.append((id, b)) }
+            guard let b = pending[id], !b.isEmpty else { continue }
+            // Hold back an incomplete trailing UTF-8 sequence for the next flush
+            // so the frame decodes cleanly on the client; a malformed tail is not
+            // carried (completePrefixLength keeps it in the prefix), so the carry
+            // can't grow or stall on invalid bytes.
+            let combined = carry.removeValue(forKey: id).map { $0 + b } ?? b
+            let cut = Utf8Boundary.completePrefixLength(combined)
+            if cut < combined.count { carry[id] = Array(combined[cut...]) }
+            if cut > 0 { toEmit.append((id, Array(combined[0..<cut]))) }
         }
         pending.removeAll(keepingCapacity: true)
         order.removeAll(keepingCapacity: true)

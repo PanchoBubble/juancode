@@ -392,21 +392,21 @@ import Testing
         #expect(det.lastPromptMatch == "select-cursor")
     }
 
-    @Test func utf8CompletePrefixLengthCarriesIncompleteTail() {
+    @Test func utf8BoundaryCarriesIncompleteTail() {
         // Complete ASCII: nothing carried.
-        #expect(ActivityDetector.utf8CompletePrefixLength(Array("abc".utf8)) == 3)
+        #expect(Utf8Boundary.completePrefixLength(Array("abc".utf8)) == 3)
         // Complete multibyte: nothing carried.
         let full = Array("a✻".utf8) // 1 + 3 bytes
-        #expect(ActivityDetector.utf8CompletePrefixLength(full) == full.count)
+        #expect(Utf8Boundary.completePrefixLength(full) == full.count)
         // Trailing lead byte of a 3-byte glyph, alone: carry 1.
-        #expect(ActivityDetector.utf8CompletePrefixLength([0x61, 0xE2]) == 1)
+        #expect(Utf8Boundary.completePrefixLength([0x61, 0xE2]) == 1)
         // Trailing lead + one continuation of a 3-byte glyph: carry 2.
-        #expect(ActivityDetector.utf8CompletePrefixLength([0x61, 0xE2, 0x9C]) == 1)
+        #expect(Utf8Boundary.completePrefixLength([0x61, 0xE2, 0x9C]) == 1)
         // A 4-byte emoji missing its last byte: carry 3.
         let emoji = Array("😀".utf8) // [0xF0,0x9F,0x98,0x80]
-        #expect(ActivityDetector.utf8CompletePrefixLength(Array(emoji[0..<3])) == 0)
+        #expect(Utf8Boundary.completePrefixLength(Array(emoji[0..<3])) == 0)
         // Stray continuation byte with no lead: malformed, left in the prefix.
-        #expect(ActivityDetector.utf8CompletePrefixLength([0x80]) == 1)
-        #expect(ActivityDetector.utf8CompletePrefixLength([]) == 0)
+        #expect(Utf8Boundary.completePrefixLength([0x80]) == 1)
+        #expect(Utf8Boundary.completePrefixLength([]) == 0)
     }
 }
