@@ -570,10 +570,19 @@ struct SidebarView: View {
 
     /// Collapse any folder we haven't seen before, so projects are minimized by
     /// default. Already-seen folders keep whatever expand/collapse state the user set.
+    ///
+    /// The mutation is deferred one main-actor turn: both callers fire while the
+    /// sidebar List's backing NSTableView is mid-update (`onAppear` runs during the
+    /// table's initial row pass, `onChange` inside the same view-update transaction),
+    /// and collapsing restructures the list — mutating synchronously there makes the
+    /// table apply row removals reentrantly ("reentrant operation in its NSTableView
+    /// delegate").
     private func collapseNewFolders(_ cwds: [String]) {
-        for cwd in cwds where !seenFolders.contains(cwd) {
-            seenFolders.insert(cwd)
-            collapsedFolders.insert(cwd)
+        let new = cwds.filter { !seenFolders.contains($0) }
+        guard !new.isEmpty else { return }
+        Task { @MainActor in
+            seenFolders.formUnion(new)
+            collapsedFolders.formUnion(new)
         }
     }
 
@@ -795,7 +804,12 @@ struct SidebarView: View {
             // Keep the moved selection on-screen (g/G can jump far).
             .onChange(of: model.selection) { _, sel in
                 guard let sel else { return }
-                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
+                // Deferred: a click-driven change arrives via the table's own
+                // selection-did-change delegate, and scrolling the same table
+                // while that callback is on the stack is a reentrant operation.
+                Task { @MainActor in
+                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
+                }
             }
             }
             if let total = totalUsage, let label = total.badgeLabel {
