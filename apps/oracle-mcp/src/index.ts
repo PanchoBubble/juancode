@@ -47,6 +47,7 @@ import {
 } from "./observer-trigger.ts";
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
+import { registerGithubWebhook } from "./github-webhook.ts";
 import { startActivityListener } from "./native-events.ts";
 import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
@@ -309,6 +310,9 @@ function unobserveMessage(o: ObserveOutcome): string {
 }
 
 const app = express();
+// Registered before the global json parser: the route needs the raw bytes for
+// HMAC verification, and express.json() would consume application/json streams.
+registerGithubWebhook(app);
 app.use(express.json());
 
 app.get("/healthz", (_req: Request, res: Response) => {
