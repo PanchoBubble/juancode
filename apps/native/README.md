@@ -182,8 +182,14 @@ focused session/workdir. Two surfaces in one floating panel:
 the dock UI) append one `OracleDispatch` JSON line to `dispatch.jsonl`; the app
 tails it and turns each line into a real session via `AppModel.create` (reusing
 worktree isolation). Deterministic, observable, and faithful — the agent uses its
-normal file tools, no new network surface. Set `JUANCODE_ORACLE_DIR` to relocate
-the control dir (tests do).
+normal file tools, no new network surface. The mailbox doubles as the sidecar's
+**durable offline queue**: the app persists its consumed byte offset
+(`dispatch.offset` / `ask.offset`), so lines queued while it was down replay
+exactly once on launch, and a `dispatchId` ledger (`dispatch-processed.json`)
+dedupes lines that also arrived live over the WS `create` path. Every dispatch
+outcome — including a rejected path — is appended to `dispatch-results.jsonl` for
+the sidecar to relay. Set `JUANCODE_ORACLE_DIR` to relocate the control dir
+(tests do).
 
 ## Run
 

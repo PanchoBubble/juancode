@@ -55,11 +55,12 @@ final class OracleModel {
     /// corrupted/garbled Oracle render, short of a full `restartAgent()`.
     var chatRefreshToken = 0
 
-    /// Byte offset into `dispatch.jsonl` we've consumed up to. Initialized to the
-    /// file's end at bootstrap so we only act on dispatches made this run.
+    /// Byte offset into `dispatch.jsonl` we've consumed up to. Restored from
+    /// `dispatch.offset` at bootstrap so lines queued while the app was down are
+    /// replayed exactly once; primed to EOF only on the very first run.
     @ObservationIgnored private var dispatchOffset = 0
-    /// Byte offset into `ask.jsonl` we've consumed up to. Primed to the file's end at
-    /// bootstrap so we only act on asks made this run (mirrors `dispatchOffset`).
+    /// Byte offset into `ask.jsonl` we've consumed up to (mirrors `dispatchOffset`,
+    /// persisted to `ask.offset`).
     @ObservationIgnored private var askOffset = 0
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var beadsLoading = false
@@ -166,10 +167,14 @@ final class OracleModel {
             setupError = (error as? OracleError)?.message ?? error.localizedDescription
             return
         }
-        // Only act on dispatches appended after this point — pre-existing lines
-        // belong to a previous run and have already been handled.
-        dispatchOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.dispatchFile)).count) ?? 0
-        askOffset = (try? Data(contentsOf: URL(fileURLWithPath: OraclePaths.askFile)).count) ?? 0
+        // Resume the mailboxes from their persisted offsets so anything queued while
+        // the app was down (the sidecar's offline fallback) is replayed exactly once.
+        // With no persisted offset yet (first run under the offset scheme) prime to
+        // EOF — pre-existing lines predate durable offsets and were already handled.
+        dispatchOffset = restoreOffset(mailbox: OraclePaths.dispatchFile,
+                                       offsetFile: OraclePaths.dispatchOffsetFile)
+        askOffset = restoreOffset(mailbox: OraclePaths.askFile,
+                                  offsetFile: OraclePaths.askOffsetFile)
         ready = true
         startLoop()
         Task {
@@ -383,8 +388,11 @@ final class OracleModel {
     /// turns it into a real session.
     func dispatch(project: String, prompt: String, provider: ProviderId = .claude,
                   worktree: Bool = false, model: String? = nil) {
+        // Minted id so a line replayed after a crash (offset not yet persisted)
+        // can't double-spawn — the tail claims it in the dispatch ledger.
         let req = OracleDispatch(project: project, prompt: prompt,
-                                 provider: provider.rawValue, worktree: worktree, model: model)
+                                 provider: provider.rawValue, worktree: worktree, model: model,
+                                 dispatchId: UUID().uuidString.lowercased())
         try? appendOracleDispatch(req)
     }
 
@@ -423,12 +431,27 @@ final class OracleModel {
         }
     }
 
+    /// Restore a mailbox's persisted consumption offset; on the very first run
+    /// (no offset file yet) prime to the file's end and persist that.
+    private func restoreOffset(mailbox: String, offsetFile: String) -> Int {
+        if let persisted = readOracleMailboxOffset(at: offsetFile) { return persisted }
+        let end = (try? Data(contentsOf: URL(fileURLWithPath: mailbox)).count) ?? 0
+        writeOracleMailboxOffset(end, at: offsetFile)
+        return end
+    }
+
     /// One pass: publish the live state snapshot and process any new dispatch + ask lines.
     private func tick() async {
         writeState()
         let (dispatches, newOffset) = readOracleDispatches(since: dispatchOffset)
-        dispatchOffset = newOffset
+        if newOffset != dispatchOffset {
+            dispatchOffset = newOffset
+            writeOracleMailboxOffset(newOffset, at: OraclePaths.dispatchOffsetFile)
+        }
         for d in dispatches {
+            // A dispatch that already ran via the WS create path (or a replayed line
+            // after a crash) is skipped — the ledger is the double-spawn guard.
+            if let id = d.dispatchId, !OracleDispatchLedger.shared.claim(id) { continue }
             // Guard the target path: a dispatch to a non-existent dir would otherwise
             // silently spawn a session in the wrong place. Reject it and tell Oracle
             // so it can re-dispatch to a real `projects` entry rather than guessing.
@@ -439,13 +462,18 @@ final class OracleModel {
             }
             // Spawn (or seed) the agent in the target project. Selecting it lets the
             // user jump straight to freshly dispatched work.
-            await app.create(provider: d.resolvedProvider, cwd: d.project,
-                             skipPermissions: true, isolateWorktree: d.worktree ?? false,
-                             initialInput: d.prompt, select: true, model: d.model)
+            let s = await app.create(provider: d.resolvedProvider, cwd: d.project,
+                                     skipPermissions: true, isolateWorktree: d.worktree ?? false,
+                                     initialInput: d.prompt, select: true, model: d.model)
+            recordDispatchOutcome(d, sessionId: s?.id,
+                                  error: s == nil ? (app.errorMessage ?? "failed to start the session") : nil)
         }
         // Drain the ask mailbox (remote/MCP path) into the live Oracle session.
         let (asks, newAskOffset) = readOracleAsks(since: askOffset)
-        askOffset = newAskOffset
+        if newAskOffset != askOffset {
+            askOffset = newAskOffset
+            writeOracleMailboxOffset(newAskOffset, at: OraclePaths.askOffsetFile)
+        }
         for a in asks { receiveAsk(a.text) }
     }
 
@@ -469,12 +497,21 @@ final class OracleModel {
     }
 
     /// Tell the Oracle agent a dispatch was rejected (bad `project` path) so it can
-    /// correct itself instead of silently losing the work. Delivered into its live
-    /// chat the same way a remote ask is; no-op if the agent isn't up (the agent
-    /// re-reads `state.json` on its next turn anyway).
+    /// correct itself instead of silently losing the work. The rejection is recorded
+    /// durably (dispatch-results.jsonl) so the sidecar relays it to the remote
+    /// caller/Telegram too — the live-pty message alone is invisible off the Mac.
     private func rejectDispatch(_ d: OracleDispatch) {
+        recordDispatchOutcome(d, sessionId: nil,
+                              error: "\"\(d.project)\" is not an existing directory")
         guard let s = session else { return }
         s.submit("⚠️ Dispatch rejected: \"\(d.project)\" is not an existing directory. "
             + "Use the exact `path` of an entry in state.json's `projects` list — don't guess paths.")
+    }
+
+    /// Append a dispatch's durable outcome for the sidecar to tail and relay.
+    private func recordDispatchOutcome(_ d: OracleDispatch, sessionId: String?, error: String?) {
+        try? appendOracleDispatchResult(OracleDispatchResult(
+            dispatchId: d.dispatchId, project: d.project, ok: error == nil,
+            sessionId: sessionId, error: error, at: nowMs()))
     }
 }

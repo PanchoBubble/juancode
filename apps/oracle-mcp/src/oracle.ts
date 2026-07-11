@@ -1,10 +1,10 @@
 // Oracle control-surface operations, shared by the MCP tools. Everything the
-// Oracle exposes is local to the Mac: its `bd` tracker, the append-only dispatch
-// and ask mailboxes, and the live session list (served by the native app's
-// embedded HTTP API). This module wraps those four surfaces; `index.ts` maps them
-// to MCP tools. Keep the dispatch/ask JSON line shapes in lockstep with the Swift
-// `OracleDispatch` / `OracleAsk` structs in apps/native — the native app tails
-// these files and decodes them.
+// Oracle exposes is local to the Mac: its `bd` tracker, the append-only ask
+// mailbox, and the live session list (served by the native app's embedded HTTP
+// API). This module wraps those surfaces; `index.ts` maps them to MCP tools.
+// Dispatch lives in dispatch.ts (WS-first with the mailbox as offline fallback).
+// Keep the ask JSON line shape in lockstep with the Swift `OracleAsk` struct in
+// apps/native — the native app tails the file and decodes it.
 
 import { spawn } from "node:child_process";
 import { appendFile, readFile, rm } from "node:fs/promises";
@@ -21,7 +21,6 @@ export function oracleDir(): string {
   return o && o.length > 0 ? o : join(homedir(), ".juancode", "oracle");
 }
 
-const dispatchFile = () => join(oracleDir(), "dispatch.jsonl");
 const askFile = () => join(oracleDir(), "ask.jsonl");
 /** Persists the headless chat's claude session id so the phone conversation keeps
  *  context across requests (and sidecar restarts). */
@@ -29,7 +28,7 @@ const chatSessionFile = () => join(oracleDir(), "phone-chat-session.txt");
 
 /** Base URL of the native app's embedded HTTP server (the live session source of
  *  truth). Mirrors the Swift `JUANCODE_HOST`/`JUANCODE_PORT` defaults. */
-function nativeApiBase(): string {
+export function nativeApiBase(): string {
   if (process.env.JUANCODE_API) return process.env.JUANCODE_API.replace(/\/$/, "");
   const port = process.env.JUANCODE_PORT || "4280";
   return `http://127.0.0.1:${port}`;
@@ -158,24 +157,6 @@ export async function createIssue(opts: {
   return { id, raw };
 }
 
-/** Append one dispatch line for the native app to tail and spawn an agent from.
- *  Shape MUST match Swift `OracleDispatch`. */
-export async function appendDispatch(opts: {
-  project: string;
-  prompt: string;
-  provider?: "claude" | "codex";
-  worktree?: boolean;
-}): Promise<void> {
-  const line =
-    JSON.stringify({
-      project: opts.project,
-      prompt: opts.prompt,
-      provider: opts.provider ?? "claude",
-      worktree: opts.worktree ?? false,
-    }) + "\n";
-  await appendFile(dispatchFile(), line, "utf8");
-}
-
 /** Append one ask line for the native app to tail and deliver to the live Oracle
  *  session. Shape MUST match Swift `OracleAsk`. */
 export async function appendAsk(text: string): Promise<void> {
@@ -216,7 +197,7 @@ export async function deleteSession(id: string): Promise<void> {
 }
 
 /** The native server's WebSocket URL, derived from the same base as the HTTP API. */
-function nativeWsUrl(): string {
+export function nativeWsUrl(): string {
   return nativeApiBase().replace(/^http/, "ws") + "/ws";
 }
 

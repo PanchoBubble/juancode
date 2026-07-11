@@ -28,6 +28,17 @@ public enum OraclePaths {
     public static var stateFile: String { join(controlDir, "state.json") }
     public static var dispatchFile: String { join(controlDir, "dispatch.jsonl") }
     public static var askFile: String { join(controlDir, "ask.jsonl") }
+    /// Byte offset into `dispatch.jsonl` consumed so far, persisted so lines queued
+    /// while the app was down are replayed exactly once on the next launch.
+    public static var dispatchOffsetFile: String { join(controlDir, "dispatch.offset") }
+    /// Byte offset into `ask.jsonl` consumed so far (mirrors `dispatchOffsetFile`).
+    public static var askOffsetFile: String { join(controlDir, "ask.offset") }
+    /// Durable per-dispatch outcomes (`OracleDispatchResult` lines) the sidecar tails
+    /// to relay success/failure to the remote caller (console/Telegram).
+    public static var dispatchResultsFile: String { join(controlDir, "dispatch-results.jsonl") }
+    /// Processed dispatch ids (see `OracleDispatchLedger`), so a dispatch delivered
+    /// over the WS that ALSO landed in the mailbox during a race isn't started twice.
+    public static var processedDispatchFile: String { join(controlDir, "dispatch-processed.json") }
 
     private static func join(_ base: String, _ component: String) -> String {
         (base as NSString).appendingPathComponent(component)
@@ -49,14 +60,19 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     /// Model override passed to the provider CLI, e.g. "opus", "sonnet", or a full
     /// model id; absent = provider default.
     public var model: String?
+    /// Caller-minted unique id (sidecar UUID) used to deduplicate a dispatch that
+    /// was delivered over the WS AND appended to the mailbox during a race. Absent
+    /// on lines the Oracle agent writes by hand — those are never WS-delivered.
+    public var dispatchId: String?
 
     public init(project: String, prompt: String, provider: String? = nil,
-                worktree: Bool? = nil, model: String? = nil) {
+                worktree: Bool? = nil, model: String? = nil, dispatchId: String? = nil) {
         self.project = project
         self.prompt = prompt
         self.provider = provider
         self.worktree = worktree
         self.model = model
+        self.dispatchId = dispatchId
     }
 
     /// Resolve `provider` to a `ProviderId`, defaulting to Claude for an absent or
@@ -302,6 +318,122 @@ public func appendOracleAsk(_ ask: OracleAsk) throws {
 public func readOracleAsks(since offset: Int) -> (asks: [OracleAsk], offset: Int) {
     let r = readJSONL(OracleAsk.self, at: OraclePaths.askFile, since: offset)
     return (r.items, r.offset)
+}
+
+// MARK: - Durable dispatch outcomes + mailbox offsets + dedup ledger
+
+/// The durable outcome of one dispatch (WS- or mailbox-delivered), appended to
+/// `dispatch-results.jsonl` so the sidecar can tail it and relay success/failure to
+/// the remote caller (console/Telegram) — a rejection must never live only as a
+/// message typed into the live Oracle pty.
+public struct OracleDispatchResult: Codable, Sendable, Equatable {
+    /// The dispatch's caller-minted id; nil for agent-written mailbox lines.
+    public var dispatchId: String?
+    /// The dispatch's target project path, for a human-readable relay.
+    public var project: String
+    public var ok: Bool
+    /// The spawned session's id (ok == true).
+    public var sessionId: String?
+    /// What went wrong (ok == false).
+    public var error: String?
+    /// ms since epoch.
+    public var at: Int
+
+    public init(dispatchId: String?, project: String, ok: Bool,
+                sessionId: String? = nil, error: String? = nil, at: Int) {
+        self.dispatchId = dispatchId
+        self.project = project
+        self.ok = ok
+        self.sessionId = sessionId
+        self.error = error
+        self.at = at
+    }
+}
+
+/// Result appends can race between the WS handler (server thread) and the mailbox
+/// tail (main actor) — one lock keeps the JSONL lines whole.
+private let dispatchResultLock = NSLock()
+
+/// Append one dispatch outcome to `dispatch-results.jsonl` (thread-safe).
+public func appendOracleDispatchResult(_ result: OracleDispatchResult) throws {
+    dispatchResultLock.lock()
+    defer { dispatchResultLock.unlock() }
+    try appendJSONLine(result, to: OraclePaths.dispatchResultsFile)
+}
+
+/// Decode any complete result lines starting at byte `offset`. See `readJSONL`.
+public func readOracleDispatchResults(since offset: Int) -> (results: [OracleDispatchResult], offset: Int) {
+    let r = readJSONL(OracleDispatchResult.self, at: OraclePaths.dispatchResultsFile, since: offset)
+    return (r.items, r.offset)
+}
+
+/// Read a persisted mailbox byte offset; nil when the file is absent/corrupt (first
+/// run under the offset scheme — callers then prime to EOF, preserving the old
+/// "only act on lines appended this run" behavior exactly once).
+public func readOracleMailboxOffset(at path: String) -> Int? {
+    guard let raw = try? String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8) else { return nil }
+    guard let value = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)), value >= 0 else { return nil }
+    return value
+}
+
+/// Persist a mailbox byte offset (best-effort; a failed write just means a replay
+/// window on next launch, which the dispatch-id ledger de-duplicates).
+public func writeOracleMailboxOffset(_ offset: Int, at path: String) {
+    try? Data("\(offset)\n".utf8).write(to: URL(fileURLWithPath: path))
+}
+
+/// Process-wide registry of dispatch ids already turned into sessions, persisted to
+/// `dispatch-processed.json`. Both delivery routes claim before spawning — the WS
+/// `create` handler and the mailbox tail — so a dispatch that raced onto both paths
+/// (WS ack lost, sidecar appended the same id as a fallback) starts exactly once,
+/// across launches. Bounded: only the most recent `capacity` ids are kept.
+public final class OracleDispatchLedger: @unchecked Sendable {
+    public static let shared = OracleDispatchLedger()
+
+    private let lock = NSLock()
+    private let capacity: Int
+    private let pathProvider: () -> String
+    private var loaded = false
+    private var ids = Set<String>()
+    private var order: [String] = []
+
+    /// `path` defaults to `OraclePaths.processedDispatchFile` (resolved lazily so
+    /// the shared instance honors `JUANCODE_ORACLE_DIR`); injectable for tests.
+    public init(capacity: Int = 512, path: (() -> String)? = nil) {
+        self.capacity = capacity
+        self.pathProvider = path ?? { OraclePaths.processedDispatchFile }
+    }
+
+    /// Atomically claim `id`: true when it was unclaimed (caller proceeds to spawn),
+    /// false when some route already processed it (caller must skip).
+    public func claim(_ id: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        loadIfNeeded()
+        guard !ids.contains(id) else { return false }
+        ids.insert(id)
+        order.append(id)
+        if order.count > capacity {
+            for evicted in order.prefix(order.count - capacity) { ids.remove(evicted) }
+            order.removeFirst(order.count - capacity)
+        }
+        persist()
+        return true
+    }
+
+    private func loadIfNeeded() {
+        guard !loaded else { return }
+        loaded = true
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: pathProvider())),
+              let stored = try? JSONDecoder().decode([String].self, from: data) else { return }
+        order = stored.suffix(capacity)
+        ids = Set(order)
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(order) else { return }
+        try? data.write(to: URL(fileURLWithPath: pathProvider()))
+    }
 }
 
 /// Persist the global state snapshot to `state.json` (pretty, stable key order) so

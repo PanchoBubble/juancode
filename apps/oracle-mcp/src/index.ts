@@ -27,7 +27,6 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import {
   appendAsk,
-  appendDispatch,
   createIssue,
   deleteSession,
   deliverReply,
@@ -38,6 +37,7 @@ import {
   oracleChatStream,
   resetChat,
 } from "./oracle.ts";
+import { dispatch } from "./dispatch.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
   observeSessionForOracle,
@@ -48,7 +48,7 @@ import {
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { startActivityListener } from "./native-events.ts";
-import { startTelegramBridge } from "./telegram.ts";
+import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -136,7 +136,7 @@ function buildServer(): McpServer {
     {
       title: "Dispatch an agent into a project",
       description:
-        "Spawn (or seed) a real agent session in a project on the Mac by appending to the Oracle's dispatch mailbox. The native app must be running; it tails the mailbox and starts the session.",
+        "Spawn (or seed) a real agent session in a project on the Mac. Delivered over the native app's WS with an ack: success returns the real session id, a bad path/provider returns the real error. If the app is down the dispatch is durably queued and starts when the app is next up.",
       inputSchema: {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
@@ -149,12 +149,8 @@ function buildServer(): McpServer {
     },
     async (args) => {
       try {
-        await appendDispatch(args);
-        return ok(
-          `Dispatched ${args.provider ?? "claude"} into ${args.project}${
-            args.worktree ? " (worktree)" : ""
-          }. Watch for it in the session list.`,
-        );
+        const outcome = await dispatch(args);
+        return ok(outcome.message);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -381,8 +377,8 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       res.status(400).send("project and prompt are required");
       return;
     }
-    await appendDispatch({ project, prompt, provider, worktree: worktree === true });
-    res.json({ ok: true });
+    const outcome = await dispatch({ project, prompt, provider, worktree: worktree === true });
+    res.json({ ok: true, ...outcome });
   } catch (e) {
     sendErr(res, e);
   }
@@ -667,4 +663,7 @@ app.listen(port, host, () => {
   // Telegram bridge (juancode-c6y): if TELEGRAM_BOT_TOKEN is set, long-poll Telegram
   // and route messages through the same Oracle backend as the browser chat.
   startTelegramBridge();
+  // Relay durable dispatch outcomes (failures + queued-dispatch starts) to Telegram,
+  // so a dispatch rejected on the Mac is visible to whoever asked for it.
+  startDispatchResultRelay();
 });

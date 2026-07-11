@@ -785,11 +785,13 @@ $("#d-go").onclick = async () => {
   if (!project || !prompt) { alert("Project path and prompt are both required."); return; }
   const btn = $("#d-go"); btn.disabled = true; btn.textContent = "Dispatching…";
   try {
-    await api("/api/dispatch", { method:"POST", body: JSON.stringify({
+    const out = await api("/api/dispatch", { method:"POST", body: JSON.stringify({
       project, prompt, provider: $("#d-prov").value, worktree: $("#d-wt").value === "true" }) });
     $("#d-prompt").value = "";
-    btn.textContent = "Dispatched ✓";
-    setTimeout(() => { btn.textContent = "Dispatch agent"; btn.disabled = false; }, 1400);
+    // The server acks for real now: distinguish "session started" from "app down,
+    // queued for its next launch" so the phone isn't told a lie either way.
+    btn.textContent = out && out.queued ? "Queued (app offline) ✓" : "Dispatched ✓";
+    setTimeout(() => { btn.textContent = "Dispatch agent"; btn.disabled = false; }, 2000);
     await loadSessions();
   } catch(e){ alert("Dispatch failed: "+e.message); btn.textContent = "Dispatch agent"; btn.disabled = false; }
 };

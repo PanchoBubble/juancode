@@ -38,6 +38,7 @@ import {
 } from "./telegram-observe.ts";
 import {
   classifyActivity,
+  dispatchResultText,
   formatSessionLine,
   notifyIcon,
   notifyText,
@@ -48,6 +49,12 @@ import {
   type LiveActivity,
   type SessionSummary,
 } from "./telegram-format.ts";
+import {
+  consumeQueuedDispatch,
+  startDispatchResultsWatcher,
+  type DispatchResultRecord,
+} from "./dispatch-results.ts";
+import { resolveObserverChatIds } from "./observer-trigger.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
 import { onSessionEvent, type SessionActivityEvent } from "./native-events.ts";
 import { makeTranscriber } from "./transcribe.ts";
@@ -963,4 +970,34 @@ export function startTelegramBridge(
     console.error("telegram bridge crashed:", e),
   );
   return controller;
+}
+
+/**
+ * Relay durable dispatch outcomes (dispatch-results.jsonl, written by the native
+ * app) to Telegram (juancode-2kz.1): every failure — a dispatch rejected for a bad
+ * project path or a failed spawn must reach the remote caller, not just the Oracle
+ * pty on the Mac — plus a start-confirmation for dispatches this sidecar queued
+ * offline. Fans out to the same chats an MCP-initiated observe would target.
+ * No-op (null) without a bot token; returns a stop function otherwise.
+ */
+export function startDispatchResultRelay(
+  config: TelegramConfig | null = readTelegramConfig(),
+  subscribe: (
+    onResult: (r: DispatchResultRecord) => void,
+  ) => () => void = startDispatchResultsWatcher,
+  send: (chatId: number, text: string) => Promise<unknown> = (chatId, text) =>
+    sendMessage(config!.token, chatId, text),
+): (() => void) | null {
+  if (!config) return null;
+  return subscribe((record) => {
+    const text = dispatchResultText(record, consumeQueuedDispatch(record.dispatchId));
+    if (!text) return;
+    void (async () => {
+      for (const chatId of await resolveObserverChatIds()) {
+        await send(chatId, text).catch((e) =>
+          console.error("telegram dispatch relay failed:", e instanceof Error ? e.message : e),
+        );
+      }
+    })();
+  });
 }

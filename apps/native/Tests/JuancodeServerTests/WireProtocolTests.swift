@@ -25,6 +25,41 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(rows, 40)
     }
 
+    // ── Dispatch-flavored create (juancode-2kz.1) ────────────────────────────────
+
+    func testDecodesCreateWithDispatchId() throws {
+        let json = """
+        {"type":"create","provider":"claude","cwd":"/abs/repo","cols":120,"rows":40,
+         "initialInput":"do the thing","skipPermissions":true,"isolateWorktree":true,
+         "dispatchId":"c0ffee-1"}
+        """
+        guard case let .create(provider, cwd, cols, rows, initialInput,
+                               skipPermissions, isolateWorktree, dispatchId) = try decode(json) else {
+            return XCTFail("expected .create")
+        }
+        XCTAssertEqual(provider, "claude")
+        XCTAssertEqual(cwd, "/abs/repo")
+        XCTAssertEqual(cols, 120)
+        XCTAssertEqual(rows, 40)
+        XCTAssertEqual(initialInput, "do the thing")
+        XCTAssertEqual(skipPermissions, true)
+        XCTAssertEqual(isolateWorktree, true)
+        XCTAssertEqual(dispatchId, "c0ffee-1")
+    }
+
+    func testDecodesCreateWithoutDispatchIdStaysBackCompatible() throws {
+        // Ordinary interactive creates (desktop/web clients) carry no dispatchId;
+        // it must decode to nil, not fail.
+        let json = #"{"type":"create","provider":"codex","cwd":"/p","cols":80,"rows":24}"#
+        guard case let .create(provider, cwd, _, _, initialInput, _, _, dispatchId) = try decode(json) else {
+            return XCTFail("expected .create")
+        }
+        XCTAssertEqual(provider, "codex")
+        XCTAssertEqual(cwd, "/p")
+        XCTAssertNil(initialInput)
+        XCTAssertNil(dispatchId)
+    }
+
     // ── Version/capability handshake + graceful degrade (juancode-tgc) ───────────
 
     func testUnknownTypeDegradesToUnknown() throws {

@@ -13,8 +13,13 @@ import JuancodeServices
 // MARK: - Client → server
 
 public enum ClientMessage: Sendable {
+    /// `dispatchId` marks a create as an Oracle dispatch (sidecar-minted UUID): the
+    /// server claims it in the dispatch ledger (dedup vs. the mailbox fallback) and
+    /// records a durable `OracleDispatchResult` for the outcome. Nil for ordinary
+    /// interactive creates.
     case create(provider: String, cwd: String, cols: Int, rows: Int,
-                initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?)
+                initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?,
+                dispatchId: String?)
     case attach(sessionId: String, cols: Int, rows: Int)
     case reactivate(sessionId: String, cols: Int, rows: Int)
     /// Adopt an external CLI conversation (one started in a plain terminal) by its
@@ -80,6 +85,8 @@ extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
         case sessionId, data, file, requestId, cliSessionId, startMs, seq
+        // Oracle dispatch over WS (juancode-2kz.1).
+        case dispatchId
         // Tracked-PR registry (juancode-bt2).
         case pr, trackedId, notificationId
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -98,7 +105,8 @@ extension ClientMessage: Decodable {
                 rows: try c.decode(Int.self, forKey: .rows),
                 initialInput: try c.decodeIfPresent(String.self, forKey: .initialInput),
                 skipPermissions: try c.decodeIfPresent(Bool.self, forKey: .skipPermissions),
-                isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree)
+                isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree),
+                dispatchId: try c.decodeIfPresent(String.self, forKey: .dispatchId)
             )
         case "attach":
             self = .attach(sessionId: try c.decode(String.self, forKey: .sessionId),

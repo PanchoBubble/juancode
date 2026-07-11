@@ -10,9 +10,14 @@ import {
   parseTextMessage,
   parseVoiceMessage,
   readTelegramConfig,
+  startDispatchResultRelay,
   type TelegramDeps,
   type TgUpdate,
 } from "./telegram.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { markQueuedDispatch, type DispatchResultRecord } from "./dispatch-results.ts";
 import type { SessionSummary } from "./telegram-format.ts";
 import type { ChatReply } from "./oracle.ts";
 
@@ -647,5 +652,66 @@ describe("handleUpdate — voice messages", () => {
     await handleUpdate(voiceMsg(5, "F", { duration: 601 }), allowed, deps);
     expect(deps.transcribe).not.toHaveBeenCalled();
     expect(deps.send).toHaveBeenCalledWith(100, expect.stringMatching(/too long/i));
+  });
+});
+
+describe("startDispatchResultRelay", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 10));
+
+  it("is a no-op without a bot token", () => {
+    expect(startDispatchResultRelay(null)).toBeNull();
+  });
+
+  it("relays failures to the observer chats and skips foreign successes", async () => {
+    const prevDir = process.env.JUANCODE_ORACLE_DIR;
+    const prevIds = process.env.ALLOWED_USER_IDS;
+    process.env.JUANCODE_ORACLE_DIR = mkdtempSync(join(tmpdir(), "oracle-relay-test-"));
+    process.env.ALLOWED_USER_IDS = "7";
+    try {
+      let emit: ((r: DispatchResultRecord) => void) | null = null;
+      const stopped = vi.fn();
+      const send = vi.fn(async (_chatId: number, _text: string) => null);
+      const stop = startDispatchResultRelay(
+        { token: "t", allowedUserIds: new Set([7]) },
+        (onResult) => {
+          emit = onResult;
+          return stopped;
+        },
+        send,
+      );
+      expect(stop).not.toBeNull();
+      expect(emit).not.toBeNull();
+
+      // A failure is always relayed.
+      emit!({ dispatchId: "d-1", project: "/x/proj", ok: false, sessionId: null,
+              error: "bad path", at: 1 });
+      await flush();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]![0]).toBe(7);
+      expect(send.mock.calls[0]![1]).toContain("bad path");
+
+      // A success this sidecar did NOT queue is not relayed (already acked live).
+      emit!({ dispatchId: "d-2", project: "/x/proj", ok: true, sessionId: "s-1",
+              error: null, at: 2 });
+      await flush();
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // A success for a dispatch queued here IS relayed as a start confirmation.
+      markQueuedDispatch("d-3");
+      emit!({ dispatchId: "d-3", project: "/x/proj", ok: true, sessionId: "s-2",
+              error: null, at: 3 });
+      await flush();
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1]![1]).toContain("s-2");
+
+      stop!();
+      expect(stopped).toHaveBeenCalled();
+    } finally {
+      rmSync(process.env.JUANCODE_ORACLE_DIR!, { recursive: true, force: true });
+      if (prevDir === undefined) delete process.env.JUANCODE_ORACLE_DIR;
+      else process.env.JUANCODE_ORACLE_DIR = prevDir;
+      if (prevIds === undefined) delete process.env.ALLOWED_USER_IDS;
+      else process.env.ALLOWED_USER_IDS = prevIds;
+    }
   });
 });

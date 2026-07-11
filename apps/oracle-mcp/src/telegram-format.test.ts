@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyActivity,
+  dispatchResultText,
   formatSessionLine,
   orderSessions,
   parseSessionList,
@@ -10,6 +11,7 @@ import {
   stateLabel,
   type SessionSummary,
 } from "./telegram-format.ts";
+import type { DispatchResultRecord } from "./dispatch-results.ts";
 
 const s = (over: Partial<SessionSummary>): SessionSummary => ({
   id: "id-1",
@@ -117,5 +119,38 @@ describe("resolveSelector", () => {
     expect(resolveSelector("aa", ordered, undefined)).toBeNull();
     expect(resolveSelector("zz", ordered, undefined)).toBeNull();
     expect(resolveSelector("  ", ordered, undefined)).toBeNull();
+  });
+});
+
+describe("dispatchResultText", () => {
+  const r = (over: Partial<DispatchResultRecord>): DispatchResultRecord => ({
+    dispatchId: "d-1",
+    project: "/x/proj",
+    ok: true,
+    sessionId: null,
+    error: null,
+    at: 0,
+    ...over,
+  });
+
+  it("always relays failures, with the project name and error", () => {
+    const text = dispatchResultText(
+      r({ ok: false, error: '"/x/proj" is not an existing directory' }),
+      false,
+    );
+    expect(text).toContain("proj");
+    expect(text).toContain("is not an existing directory");
+  });
+
+  it("relays a success only for a dispatch this sidecar queued offline", () => {
+    expect(dispatchResultText(r({ sessionId: "s-9" }), false)).toBeNull();
+    const confirmed = dispatchResultText(r({ sessionId: "s-9" }), true);
+    expect(confirmed).toContain("proj");
+    expect(confirmed).toContain("s-9");
+  });
+
+  it("handles an agent-written failure with no dispatch id", () => {
+    const text = dispatchResultText(r({ dispatchId: null, ok: false, error: "boom" }), false);
+    expect(text).toContain("boom");
   });
 });

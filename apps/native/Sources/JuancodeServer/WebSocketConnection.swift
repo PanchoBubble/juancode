@@ -220,9 +220,32 @@ final class WebSocketConnection: @unchecked Sendable {
 
     func handle(_ msg: ClientMessage) async {
         switch msg {
-        case let .create(provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree):
+        case let .create(provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree, dispatchId):
+            // A dispatch-flavored create (sidecar WS-first path) claims its id up
+            // front so the same dispatch arriving via the mailbox fallback is
+            // skipped — and vice versa (juancode-2kz.1). Its outcome is also
+            // recorded durably so the sidecar can relay a real success/error.
+            if let dispatchId, !OracleDispatchLedger.shared.claim(dispatchId) {
+                send(.error(sessionId: nil, message: "Dispatch \(dispatchId) was already processed"))
+                return
+            }
+            let recordResult: (String?, String?) -> Void = { sessionId, error in
+                guard let dispatchId else { return }
+                try? appendOracleDispatchResult(OracleDispatchResult(
+                    dispatchId: dispatchId, project: cwd, ok: error == nil,
+                    sessionId: sessionId, error: error, at: Int(Date().timeIntervalSince1970 * 1000)))
+            }
             guard let pid = ProviderId(rawValue: provider) else {
+                recordResult(nil, "Unknown provider: \(provider)")
                 send(.error(sessionId: nil, message: "Unknown provider: \(provider)")); return
+            }
+            // Guard the target path with a clear error instead of a doomed spawn —
+            // and, for a dispatch, a durable rejection the caller actually sees.
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
+                let message = "\"\(cwd)\" is not an existing directory"
+                recordResult(nil, message)
+                send(.error(sessionId: nil, message: message)); return
             }
             do {
                 // Opt-in isolation: a fresh worktree off cwd so the session can't
@@ -243,10 +266,12 @@ final class WebSocketConnection: @unchecked Sendable {
                 // The creating client controls the grid it just spawned the
                 // session at, so claim ownership up front (juancode-1th.1).
                 _ = session.resizeGrid(owner: clientId, cols: cols, rows: rows)
+                recordResult(session.id, nil)
                 send(.created(session: session.meta))
                 subscribe(session.id)
                 send(.attached(sessionId: session.id, scrollback: "", session: session.meta))
             } catch {
+                recordResult(nil, "Failed to start \(provider): \(errMsg(error))")
                 send(.error(sessionId: nil, message: "Failed to start \(provider): \(errMsg(error))"))
             }
 

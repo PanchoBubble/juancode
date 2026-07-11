@@ -12,12 +12,17 @@ sidecar only **relays intent and reads state**:
 |------|--------------|-----------|
 | `oracle_list_issues` | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle` |
 | `oracle_create_issue` | Create a global tracker item | `bd create` |
-| `oracle_dispatch` | Spawn/seed an agent in a project | append `dispatch.jsonl` (native app tails it) |
+| `oracle_dispatch` | Spawn/seed an agent in a project | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down |
 | `oracle_list_sessions` | List live + persisted sessions | `GET` the native app's `/api/sessions` |
 | `oracle_ask` | Ask the live Oracle agent | append `ask.jsonl` (native app tails it) |
 
-`dispatch` and `ask` require the **native app to be running** (it owns the ptys and
-tails the mailboxes). `list_issues`/`create_issue` work whenever `bd` is installed.
+`dispatch` is WS-first: with the app up you get a real ack (the session id, or the
+real error for a bad path/provider); with the app down the dispatch is durably
+queued in `dispatch.jsonl` and starts exactly once on the app's next launch (the
+app persists its mailbox offset and dedupes by `dispatchId`). Outcomes are also
+written to `dispatch-results.jsonl`, which the sidecar tails to relay failures —
+and queued-dispatch starts — to Telegram. `ask` requires the **native app to be
+running**. `list_issues`/`create_issue` work whenever `bd` is installed.
 
 ## Two ways to reach it from a phone
 

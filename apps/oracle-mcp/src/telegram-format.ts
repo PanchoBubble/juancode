@@ -4,6 +4,8 @@
 // activity events into notification-worthy kinds, and resolve the user's
 // "/observe 2"-style selectors.
 
+import type { DispatchResultRecord } from "./dispatch-results.ts";
+
 /** The slice of the native server's SessionMeta the Telegram surface needs. */
 export interface SessionSummary {
   id: string;
@@ -148,4 +150,23 @@ export function resolveSelector(
   if (exact) return exact.id;
   const prefixed = ordered.filter((s) => s.id.startsWith(sel));
   return prefixed.length === 1 ? prefixed[0]!.id : null;
+}
+
+/**
+ * Telegram copy for a durable dispatch outcome (juancode-2kz.1). Failures are
+ * always relayed — a dispatch rejected on the Mac (bad project path, spawn
+ * failure) must reach the remote caller, not just the live Oracle pty. Successes
+ * ping only when this sidecar queued the dispatch offline (`wasQueuedHere`), as
+ * confirmation that the queued work really started; ordinary WS-acked dispatches
+ * already reported synchronously. Returns null when nothing should be sent.
+ */
+export function dispatchResultText(
+  r: DispatchResultRecord,
+  wasQueuedHere: boolean,
+): string | null {
+  const proj = projectName(r.project);
+  if (!r.ok) return `⚠️ Dispatch into ${proj} failed: ${r.error ?? "unknown error"}`;
+  if (!wasQueuedHere) return null;
+  const sess = r.sessionId ? ` (session ${r.sessionId})` : "";
+  return `▶️ Queued dispatch into ${proj} started${sess}.`;
 }
