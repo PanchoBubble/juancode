@@ -255,39 +255,9 @@ import Testing
         #expect(seen.text == s.id)
     }
 
-    /// The live-session cap (juancode-agy) refuses a spawn once the ceiling of live
-    /// ptys is reached, so a burst of agents can't exhaust RAM.
-    @Test func capRefusesSpawnPastLimit() async throws {
-        let reg = SessionRegistry(env: env(script: makeScript("cat\n")), maxLive: 2)
-        let a = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-        let b = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-        defer { a.kill(); b.kill() }
-
-        #expect(throws: SessionError.self) {
-            try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-        }
-    }
-
-    /// A freed slot (exit drops it from the live map) lets a new spawn through —
-    /// dormant/exited tiles don't count against the cap.
-    @Test func capFreesSlotOnExit() async throws {
-        let reg = SessionRegistry(env: env(script: makeScript("cat\n")), maxLive: 1)
-        let a = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-
-        #expect(throws: SessionError.self) {
-            try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-        }
-
-        a.kill()
-        await poll { reg.all().isEmpty }
-        let b = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
-        defer { b.kill() }
-        #expect(b.isRunning || reg.get(b.id) != nil)
-    }
-
-    /// `maxLive <= 0` disables the cap entirely (the power-user escape hatch).
-    @Test func capDisabledWhenNonPositive() async throws {
-        let reg = SessionRegistry(env: env(script: makeScript("cat\n")), maxLive: 0)
+    /// Spawning is uncapped: any number of concurrent live sessions is allowed.
+    @Test func spawnIsUncapped() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("cat\n")))
         let a = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
         let b = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
         let c = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)

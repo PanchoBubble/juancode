@@ -993,9 +993,6 @@ final class AppModel {
                 focusTerminal()
             }
             return s
-        } catch let SessionError.tooManyLive(cap) {
-            errorMessage = "Session limit reached (\(cap) live). Close or let an idle session go dormant before starting another, or raise JUANCODE_MAX_SESSIONS."
-            return nil
         } catch {
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
             return nil

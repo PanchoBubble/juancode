@@ -105,17 +105,4 @@ public enum Config {
     public static var useModelSeed: Bool {
         env["JUANCODE_RAW_REPLAY"] != "1"
     }
-
-    /// Hard ceiling on concurrently *live* sessions (juancode-agy). Each spawned
-    /// claude/codex tree holds 100-400MB, and nothing else bounds the peak: the
-    /// idle reaper (`reapIdleMinutes`) only reclaims *verifiably idle* trees, so a
-    /// burst of actively-working agents (Oracle dispatch, fan-out, ⌘N) can still
-    /// exhaust RAM and freeze the machine. Past this cap the registry refuses to
-    /// spawn. Dormant/exited tiles don't count — only trees holding a pty. Disabled
-    /// by default (0); set `JUANCODE_MAX_SESSIONS` to a positive value to re-arm the
-    /// cap (e.g. 8, which sits below the ~11-12 that froze the box). A value ≤ 0
-    /// disables the cap.
-    public static var maxLiveSessions: Int {
-        env["JUANCODE_MAX_SESSIONS"].flatMap(Int.init) ?? 0
-    }
 }

@@ -16,14 +16,8 @@ public final class SessionRegistry: @unchecked Sendable {
     private var nextToken = 0
     private let env: SessionEnvironment
 
-    /// Hard ceiling on live ptys held at once (juancode-agy). See
-    /// `Config.maxLiveSessions` for the rationale; ≤ 0 disables the cap.
-    private let maxLive: Int
-
-    public init(env: SessionEnvironment = SessionEnvironment(),
-                maxLive: Int = Config.maxLiveSessions) {
+    public init(env: SessionEnvironment = SessionEnvironment()) {
         self.env = env
-        self.maxLive = maxLive
     }
 
     @discardableResult
@@ -35,7 +29,6 @@ public final class SessionRegistry: @unchecked Sendable {
         opts: SpawnOptions = SpawnOptions(),
         worktreePath: String? = nil
     ) throws -> Session {
-        try enforceCapacity()
         return try track(Session.create(
             provider: provider, cwd: cwd, cols: cols, rows: rows,
             opts: opts, worktreePath: worktreePath, env: env
@@ -76,7 +69,6 @@ public final class SessionRegistry: @unchecked Sendable {
         rows: Int,
         priorScrollback: [UInt8] = []
     ) throws -> Session {
-        try enforceCapacity()
         return try track(Session.resume(prev, cols: cols, rows: rows,
                                         priorScrollback: priorScrollback, env: env))
     }
@@ -86,18 +78,7 @@ public final class SessionRegistry: @unchecked Sendable {
     /// transcript was ever written.
     @discardableResult
     public func restartFresh(_ prev: SessionMeta, cols: Int, rows: Int) throws -> Session {
-        try enforceCapacity()
         return try track(Session.restartFresh(prev, cols: cols, rows: rows, env: env))
-    }
-
-    /// Refuse a new spawn once the live-session cap is full. Counts only ptys still
-    /// in the live map — dormant/exited tiles have already been dropped by their
-    /// exit cleanup and don't count. The check races benignly with a concurrent
-    /// spawn (worst case cap+1); it's a memory backstop, not an exact quota.
-    private func enforceCapacity() throws {
-        guard maxLive > 0 else { return }
-        let live = lock.withLock { sessions.count }
-        if live >= maxLive { throw SessionError.tooManyLive(cap: maxLive) }
     }
 
     /// Flip "accept all" on a live session. There's no way to change a running
