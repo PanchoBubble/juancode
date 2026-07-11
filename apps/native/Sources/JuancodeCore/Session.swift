@@ -350,6 +350,16 @@ public final class Session: @unchecked Sendable {
         // (~64 bytes/line is a conservative average for wrapped agent output).
         self.terminalModel = SessionTerminalModel(
             cols: cols, rows: rows, scrollbackLines: max(2000, env.scrollbackLimit / 64))
+        // A revived session seeds the model with the prior history's replay — the
+        // exact byte stream a reattaching client gets, alt-resync prefix included —
+        // so the rendered screen shows the prior content, matching remote renders.
+        // This must happen HERE: before the pty spawns (no concurrent feed), before
+        // the detector exists (a historical footer/prompt never drives activity
+        // classification — only live output re-reads the screen), and before the
+        // OSC-title listener is registered (a stale OSC title in the history can't
+        // fire adoptOscTitle against the restored/manual title).
+        let priorReplay = scroll.replay
+        if !priorReplay.isEmpty { terminalModel.feed(priorReplay) }
 
         // The detector classifies off the shared model's rendered screen — no
         // second VT parse. `handleData` feeds the model before the detector so the
