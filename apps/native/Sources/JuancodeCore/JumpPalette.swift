@@ -93,34 +93,86 @@ public func sinkDownPrecedes(_ a: SinkSortKey, _ b: SinkSortKey) -> Bool {
 }
 
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
-/// sort: its smart-sort key plus its slot in the user's persisted drag order
-/// (`nil` when the user hasn't placed it yet).
+/// sort: its smart-sort key, its slot in the user's persisted drag order
+/// (`nil` when the user hasn't placed it yet), and its id as the stable
+/// tie-break (bulk-spawned sessions share `createdAt`).
 public struct ManualSortKey: Sendable, Equatable {
     public var key: SessionSortKey
     public var manualIndex: Int?
+    public var id: String
 
-    public init(key: SessionSortKey, manualIndex: Int?) {
+    public init(key: SessionSortKey, manualIndex: Int?, id: String) {
         self.key = key
         self.manualIndex = manualIndex
+        self.id = id
     }
 }
 
+/// The resting order — where a session sits once nothing is bubbling: unplaced
+/// live sessions first (newest-first, so a fresh spawn appears at the top just
+/// like the pre-manual-order sort), then the user's drag order, then unplaced
+/// dead sessions sinking to the bottom. Placed sessions hold their slot dead or
+/// alive — the manual order is the baseline, not liveness. Deliberately reads
+/// no activity/`updatedAt`, so a session flipping busy↔idle never moves.
+public func manualRestingPrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
+    func tier(_ k: ManualSortKey) -> Int {
+        if k.manualIndex != nil { return 1 }
+        return k.key.attention == .exited ? 2 : 0
+    }
+    let ta = tier(a), tb = tier(b)
+    if ta != tb { return ta < tb }
+    if let x = a.manualIndex, let y = b.manualIndex { return x < y }
+    if a.key.createdAt != b.key.createdAt { return a.key.createdAt > b.key.createdAt }
+    return a.id < b.id
+}
+
 /// Strict-weak ordering blending a user's manual drag order with attention
-/// bubbling (juancode-dy7): sessions wanting action float to the top (smart-sorted
-/// among themselves), and the rest sit in `manualIndex` order — placed sessions
-/// before unplaced, unplaced falling back to the smart sort. So a waiting session
-/// bubbles up, then drops back to its manual slot once the user has handled it.
+/// bubbling: sessions wanting action float above everything (waiting before
+/// done-unseen, then their resting order, so two waiting sessions keep their
+/// relative slots), and the rest sit in the resting order. So a waiting session
+/// bubbles up, then drops back to its manual slot once the user has handled it —
+/// the persisted order is never rewritten by the bubble.
 public func manualWithBubblePrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
     let aBubble = attentionBubblesAboveManualOrder(a.key.attention)
     let bBubble = attentionBubblesAboveManualOrder(b.key.attention)
     if aBubble != bBubble { return aBubble }
-    if aBubble { return smartSortPrecedes(a.key, b.key) }
-    switch (a.manualIndex, b.manualIndex) {
-    case let (x?, y?): return x < y
-    case (_?, nil): return true
-    case (nil, _?): return false
-    case (nil, nil): return smartSortPrecedes(a.key, b.key)
+    if aBubble, a.key.attention != b.key.attention { return a.key.attention < b.key.attention }
+    return manualRestingPrecedes(a, b)
+}
+
+/// The manual order to persist after the user drops `moved` at its new spot in
+/// the displayed list (`displayed` is the post-move on-screen order). Bubbled
+/// rows are only temporarily hoisted, so the new order derives from `resting`
+/// (the full group in resting order), not from what happened to be on screen:
+/// every other row keeps its resting slot, and the dragged row lands right after
+/// its nearest non-bubbled predecessor in the displayed list (at the front when
+/// it was dropped above every resting row). Dropping a bubbled row does place
+/// it — an explicit drag is the user choosing its slot.
+public func manualOrderAfterMove(
+    displayed: [String], resting: [String], bubbled: Set<String>, moved id: String
+) -> [String] {
+    guard let pos = displayed.firstIndex(of: id) else { return resting }
+    var order = resting.filter { $0 != id }
+    let predecessor = displayed[..<pos].last { !bubbled.contains($0) && $0 != id }
+    if let p = predecessor, let i = order.firstIndex(of: p) {
+        order.insert(id, at: i + 1)
+    } else {
+        order.insert(id, at: 0)
     }
+    return order
+}
+
+/// Drop ids of deleted sessions (and projects left with no placed sessions) from
+/// a persisted per-project manual order, so the blob doesn't grow forever.
+public func prunedSessionOrder(
+    _ order: [String: [String]], keeping valid: Set<String>
+) -> [String: [String]] {
+    var out: [String: [String]] = [:]
+    for (cwd, ids) in order {
+        let kept = ids.filter(valid.contains)
+        if !kept.isEmpty { out[cwd] = kept }
+    }
+    return out
 }
 
 /// Case-insensitive subsequence match of `query` in `text`, scored; nil when the

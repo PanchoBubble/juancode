@@ -95,6 +95,142 @@ import Testing
         #expect(order == ["l-new", "l-old", "d-new", "d-old"])
     }
 
+    // MARK: manual order + attention bubbling
+
+    private func manualKey(
+        _ id: String, attention: SessionAttention = .idle,
+        slot: Int? = nil, created: Int = 0, updated: Int = 0
+    ) -> ManualSortKey {
+        ManualSortKey(key: key(attention, updated: updated, created: created),
+                      manualIndex: slot, id: id)
+    }
+
+    private func sortedIds(_ keys: [ManualSortKey]) -> [String] {
+        keys.sorted(by: manualWithBubblePrecedes).map(\.id)
+    }
+
+    @Test func manualOrderIsRespectedRegardlessOfAgeOrLiveness() {
+        // Slots win over createdAt, and a placed dead session holds its slot.
+        let out = sortedIds([
+            manualKey("c", attention: .idle, slot: 2, created: 999),
+            manualKey("a", attention: .exited, slot: 0, created: 1),
+            manualKey("b", attention: .working, slot: 1, created: 500),
+        ])
+        #expect(out == ["a", "b", "c"])
+    }
+
+    @Test func attentionBubblesAboveTheManualOrder() {
+        let out = sortedIds([
+            manualKey("a", attention: .idle, slot: 0),
+            manualKey("b", attention: .waitingInput, slot: 2),
+            manualKey("c", attention: .doneUnseen, slot: 1),
+        ])
+        // Waiting beats done-unseen; both beat the manual slots.
+        #expect(out == ["b", "c", "a"])
+    }
+
+    @Test func clearedAttentionReturnsToTheManualSlot() {
+        // Same sessions as above once handled: pure slot order again — the
+        // bubble never rewrote anything.
+        let out = sortedIds([
+            manualKey("a", attention: .idle, slot: 0),
+            manualKey("b", attention: .idle, slot: 2),
+            manualKey("c", attention: .idle, slot: 1),
+        ])
+        #expect(out == ["a", "c", "b"])
+    }
+
+    @Test func bubbledSessionsKeepTheirRelativeRestingOrder() {
+        let out = sortedIds([
+            manualKey("a", attention: .waitingInput, slot: 2),
+            manualKey("b", attention: .waitingInput, slot: 0),
+            manualKey("c", attention: .idle, slot: 1),
+        ])
+        #expect(out == ["b", "a", "c"])
+    }
+
+    @Test func unplacedLiveSessionsRestOnTopNewestFirst() {
+        // Ids the user never dragged go where the old sort put them: fresh live
+        // spawns above the placed rows, newest first, id as the stable tie-break.
+        let out = sortedIds([
+            manualKey("placed", attention: .idle, slot: 0),
+            manualKey("new-old", attention: .idle, created: 100),
+            manualKey("new-new", attention: .working, created: 200),
+            manualKey("tie-b", attention: .idle, created: 200),
+        ])
+        #expect(out == ["new-new", "tie-b", "new-old", "placed"])
+    }
+
+    @Test func unplacedDeadSessionsSinkBelowThePlaced() {
+        let out = sortedIds([
+            manualKey("dead-unplaced", attention: .exited, created: 999),
+            manualKey("placed", attention: .idle, slot: 0),
+        ])
+        #expect(out == ["placed", "dead-unplaced"])
+    }
+
+    @Test func noManualOrderMatchesTheOldSinkSort() {
+        // With no slots at all (and nothing bubbling), the resting order is the
+        // juancode-05u one: live newest-first, dead sinking newest-first.
+        let out = sortedIds([
+            manualKey("d-new", attention: .exited, created: 300),
+            manualKey("l-old", attention: .idle, created: 100),
+            manualKey("d-old", attention: .exited, created: 50),
+            manualKey("l-new", attention: .working, created: 200),
+        ])
+        #expect(out == ["l-new", "l-old", "d-new", "d-old"])
+    }
+
+    // MARK: persisting a drag
+
+    @Test func moveWithNothingBubbledPersistsTheDisplayedOrder() {
+        let out = manualOrderAfterMove(
+            displayed: ["b", "a", "c"], resting: ["a", "b", "c"],
+            bubbled: [], moved: "b")
+        #expect(out == ["b", "a", "c"])
+    }
+
+    @Test func bubbledRowsKeepTheirRestingSlotThroughAnUnrelatedDrag() {
+        // "w" is bubbled to the top of the display but rests at slot 2; dragging
+        // "c" above "a" must not capture "w" at the top.
+        let out = manualOrderAfterMove(
+            displayed: ["w", "c", "a", "b"], resting: ["a", "b", "w", "c"],
+            bubbled: ["w"], moved: "c")
+        #expect(out == ["c", "a", "b", "w"])
+    }
+
+    @Test func droppingAboveEveryRestingRowLandsAtTheFront() {
+        let out = manualOrderAfterMove(
+            displayed: ["c", "a", "b"], resting: ["a", "b", "c"],
+            bubbled: [], moved: "c")
+        #expect(out == ["c", "a", "b"])
+    }
+
+    @Test func draggingABubbledRowPlacesItExplicitly() {
+        // An explicit drop of the bubbled row itself is the user choosing its
+        // slot: it lands after its displayed predecessor.
+        let out = manualOrderAfterMove(
+            displayed: ["a", "w", "b"], resting: ["a", "b", "w"],
+            bubbled: ["w"], moved: "w")
+        #expect(out == ["a", "w", "b"])
+    }
+
+    @Test func unknownMovedIdLeavesTheRestingOrderAlone() {
+        let out = manualOrderAfterMove(
+            displayed: ["a", "b"], resting: ["a", "b"],
+            bubbled: [], moved: "ghost")
+        #expect(out == ["a", "b"])
+    }
+
+    // MARK: pruning
+
+    @Test func pruningDropsDeletedIdsAndEmptiedProjects() {
+        let out = prunedSessionOrder(
+            ["/p1": ["a", "gone", "b"], "/p2": ["dead"], "/p3": ["c"]],
+            keeping: ["a", "b", "c"])
+        #expect(out == ["/p1": ["a", "b"], "/p3": ["c"]])
+    }
+
     // MARK: fuzzy matching
 
     @Test func emptyQueryMatchesEverything() {

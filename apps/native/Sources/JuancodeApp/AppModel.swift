@@ -24,6 +24,10 @@ private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// UserDefaults key for the user's manual within-project session order:
+/// project cwd → ordered session ids (a plist-safe [String: [String]]).
+private let sessionOrderKey = "juancode.sessionOrder"
+
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
@@ -833,6 +837,24 @@ final class AppModel {
     /// drag-and-drop on the folder headers.
     var projectOrder: [String] = (UserDefaults.standard.array(forKey: projectOrderKey) as? [String]) ?? [] {
         didSet { UserDefaults.standard.set(projectOrder, forKey: projectOrderKey) }
+    }
+
+    /// User's manual within-project session order: project cwd → ordered session
+    /// ids. Sessions not listed rest where the default sort puts them; sessions
+    /// needing attention bubble above this order temporarily without rewriting it
+    /// (see `manualWithBubblePrecedes`). Persisted; driven by drag-and-drop on
+    /// the sidebar's session rows.
+    var sessionOrder: [String: [String]] = (UserDefaults.standard.dictionary(forKey: sessionOrderKey) as? [String: [String]]) ?? [:] {
+        didSet { UserDefaults.standard.set(sessionOrder, forKey: sessionOrderKey) }
+    }
+
+    /// Persist a new manual order for one project, pruning ids of deleted
+    /// sessions (and emptied projects) across the whole blob while we're writing.
+    func setSessionOrder(_ ids: [String], forProject cwd: String) {
+        var next = sessionOrder
+        next[cwd] = ids
+        let valid = Set((sessions + externalSessions).map(\.id))
+        sessionOrder = prunedSessionOrder(next, keeping: valid)
     }
 
     /// Custom dev ports the user saved in the Kill Port utility, added on top of the

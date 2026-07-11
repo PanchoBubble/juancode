@@ -444,6 +444,9 @@ struct SidebarView: View {
     @State private var expandedFolders: Set<String> = []
     /// The folder header currently under a drag (by cwd), for the drop highlight.
     @State private var dropTarget: String?
+    /// The scroll-box session row currently under a drag (by id), for the drop
+    /// highlight. The native List rows get theirs from `.onMove` for free.
+    @State private var sessionDropTarget: String?
 
     /// How many session rows a folder shows before offering "Load more".
     private let folderPreviewCount = 5
@@ -533,13 +536,16 @@ struct SidebarView: View {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
         return byCwd.map { cwd, sessions in
-            // Within a project, a stable order that doesn't churn as agents work
-            // (juancode-05u): live sessions hold a fixed newest-first place and
-            // only dead ones (exited/dormant) sink to the bottom. The status glyph
-            // still reflects busy/idle/waiting live — the row just re-glyphs in
-            // place instead of jumping around on every activity tick.
+            // Within a project: sessions needing action (waiting for a reply,
+            // finished-but-unseen) bubble to the top; the rest hold the user's
+            // drag order, with unplaced ones resting where the stable sort puts
+            // them (live newest-first, dead sinking — juancode-05u). Bubbling is
+            // temporary: the persisted order is untouched, so a handled session
+            // falls back to its manual slot.
+            let slots = manualSlots(cwd)
             let ordered = sessions.sorted {
-                sinkDownPrecedes(sinkSortKey($0), sinkSortKey($1))
+                manualWithBubblePrecedes(manualSortKey($0, slots: slots),
+                                         manualSortKey($1, slots: slots))
             }
             return FolderGroup(
                 cwd: cwd,
@@ -561,11 +567,28 @@ struct SidebarView: View {
         }
     }
 
-    /// The stable-sort inputs for one session: only its liveness (dead ones sink)
-    /// and its creation identity — deliberately not its activity/attention, so a
-    /// working session stays put and merely changes glyph instead of jumping.
-    private func sinkSortKey(_ meta: SessionMeta) -> SinkSortKey {
-        SinkSortKey(down: !model.isLive(meta.id), createdAt: meta.createdAt, id: meta.id)
+    /// The user's manual slot per session id for one project (empty when the
+    /// user never dragged in that folder).
+    private func manualSlots(_ cwd: String) -> [String: Int] {
+        let order = model.sessionOrder[cwd] ?? []
+        return Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// One session's attention bucket, mirroring the row glyph exactly.
+    private func attention(_ meta: SessionMeta) -> SessionAttention {
+        sessionAttention(live: model.isLive(meta.id),
+                         activity: model.activity(meta.id),
+                         unseenDone: model.unseenCompletions.contains(meta.id))
+    }
+
+    /// The manual-order sort inputs for one session: its attention (bubbling +
+    /// dead-sink), timestamps, and its slot in the user's persisted drag order.
+    private func manualSortKey(_ meta: SessionMeta, slots: [String: Int]) -> ManualSortKey {
+        ManualSortKey(
+            key: SessionSortKey(attention: attention(meta),
+                                updatedAt: meta.updatedAt, createdAt: meta.createdAt),
+            manualIndex: slots[meta.id],
+            id: meta.id)
     }
 
     /// Collapse any folder we haven't seen before, so projects are minimized by
@@ -602,6 +625,60 @@ struct SidebarView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
             model.projectOrder = order
         }
+    }
+
+    /// Persist a new manual order for `group` after a drag. `displayedAfterMove`
+    /// is the on-screen order with the move already applied; the persisted order
+    /// derives from the resting order instead, so rows that were only bubbled up
+    /// by attention keep their manual slot rather than being captured at the top.
+    private func persistSessionOrder(_ group: FolderGroup, displayedAfterMove: [String], moved id: String) {
+        let slots = manualSlots(group.cwd)
+        let resting = group.sessions
+            .sorted {
+                manualRestingPrecedes(manualSortKey($0, slots: slots),
+                                      manualSortKey($1, slots: slots))
+            }
+            .map(\.id)
+        let bubbled = Set(group.sessions
+            .filter { attentionBubblesAboveManualOrder(attention($0)) }
+            .map(\.id))
+        let order = manualOrderAfterMove(
+            displayed: displayedAfterMove, resting: resting, bubbled: bubbled, moved: id)
+        // Deferred one main-actor turn: .onMove fires from inside the backing
+        // NSTableView's drag handling, and this mutation restructures the list
+        // mid-update — same reentrancy class as collapseNewFolders above.
+        Task { @MainActor in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                model.setSessionOrder(order, forProject: group.cwd)
+            }
+        }
+    }
+
+    /// `.onMove` handler for the List's session rows. `shown` is the ForEach's
+    /// data — the whole group or the preview prefix — and `from`/`to` are in its
+    /// coordinates; rows hidden behind "Load more" keep their tail order.
+    private func moveSessions(in group: FolderGroup, shown: [SessionMeta], from: IndexSet, to: Int) {
+        guard let first = from.first else { return }
+        var shownIds = shown.map(\.id)
+        let movedId = shownIds[first]
+        shownIds.move(fromOffsets: from, toOffset: to)
+        let displayed = shownIds + group.sessions.map(\.id).dropFirst(shown.count)
+        persistSessionOrder(group, displayedAfterMove: displayed, moved: movedId)
+    }
+
+    /// Scroll-box drop handler: place `dragged` just before `target`, the same
+    /// gesture as the project headers. Returns false (drop rejected) for ids not
+    /// in this group — cross-project drags don't reorder anything.
+    @discardableResult
+    private func reorderSessions(in group: FolderGroup, moving dragged: String, onto target: String) -> Bool {
+        guard dragged != target else { return false }
+        var displayed = group.sessions.map(\.id)
+        guard let from = displayed.firstIndex(of: dragged) else { return false }
+        displayed.remove(at: from)
+        guard let to = displayed.firstIndex(of: target) else { return false }
+        displayed.insert(dragged, at: to)
+        persistSessionOrder(group, displayedAfterMove: displayed, moved: dragged)
+        return true
     }
 
     /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
@@ -905,19 +982,26 @@ struct SidebarView: View {
 
     /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
     /// with a "Load more" affordance, and once expanded a fixed-height box that scrolls
-    /// internally so the sidebar doesn't grow. The preview always includes every active
-    /// (live) session — live sessions sort ahead of dead ones, so only dormant/exited
-    /// rows past `folderPreviewCount` hide behind "Load more".
+    /// internally so the sidebar doesn't grow. The preview is sized to fit every active
+    /// (live) session — by default live sessions sort ahead of dead ones, though a
+    /// manual drag order can hold a dead session in a preview slot.
     @ViewBuilder
     private func sessionList(_ group: FolderGroup) -> some View {
         let sessions = group.sessions
         let previewCount = max(folderPreviewCount, group.running)
         if sessions.count <= previewCount {
             ForEach(sessions, id: \.id) { meta in nativeRow(meta) }
+                .onMove { from, to in
+                    moveSessions(in: group, shown: sessions, from: from, to: to)
+                }
         } else if expandedFolders.contains(group.cwd) {
-            scrollBox(sessions, cwd: group.cwd)
+            scrollBox(group)
         } else {
-            ForEach(sessions.prefix(previewCount), id: \.id) { meta in nativeRow(meta) }
+            let shown = Array(sessions.prefix(previewCount))
+            ForEach(shown, id: \.id) { meta in nativeRow(meta) }
+                .onMove { from, to in
+                    moveSessions(in: group, shown: shown, from: from, to: to)
+                }
             Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.insert(group.cwd) } } label: {
                 Label("Load more (\(sessions.count - previewCount))",
                       systemImage: "chevron.down.circle")
@@ -929,9 +1013,13 @@ struct SidebarView: View {
     }
 
     /// All of a folder's sessions inside a height-capped, internally scrolling box.
-    /// These rows can't use the List's selection, so taps set the selection by hand.
+    /// These rows can't use the List's selection or `.onMove`, so taps set the
+    /// selection by hand and reordering is drag-a-row-onto-another, like the
+    /// project headers.
     @ViewBuilder
-    private func scrollBox(_ sessions: [SessionMeta], cwd: String) -> some View {
+    private func scrollBox(_ group: FolderGroup) -> some View {
+        let sessions = group.sessions
+        let cwd = group.cwd
         VStack(spacing: 0) {
             ContainedScroll(maxHeight: CGFloat(folderScrollMaxHeight)) {
                 VStack(spacing: 0) {
@@ -941,6 +1029,29 @@ struct SidebarView: View {
                             Divider().overlay(Color.appHairline(0.12)).padding(.horizontal, 8)
                         }
                         scrollRow(meta)
+                            .overlay(alignment: .top) {
+                                Rectangle()
+                                    .fill(Color.accentColor)
+                                    .frame(height: 2)
+                                    .opacity(sessionDropTarget == meta.id ? 1 : 0)
+                            }
+                            .draggable(meta.id) {
+                                Text(meta.title)
+                                    .font(.system(size: 12))
+                                    .padding(.horizontal, 8).padding(.vertical, 4)
+                                    .background(Color.appSurface.opacity(0.8))
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                sessionDropTarget = nil
+                                guard let dragged = items.first else { return false }
+                                return reorderSessions(in: group, moving: dragged, onto: meta.id)
+                            } isTargeted: { hovering in
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    sessionDropTarget = hovering
+                                        ? meta.id
+                                        : (sessionDropTarget == meta.id ? nil : sessionDropTarget)
+                                }
+                            }
                     }
                 }
             }
