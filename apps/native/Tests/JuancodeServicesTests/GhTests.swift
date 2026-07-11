@@ -230,6 +230,27 @@ final class UnresolvedThreadTests: XCTestCase {
         XCTAssertEqual(merged[1].unresolvedComments, 0)
     }
 
+    func testPrBackfillQueryBuildsScopedQualifiers() {
+        XCTAssertEqual(prBackfillQuery(mine: true, assigned: false, query: "", viewer: "octocat"),
+                       "state:open author:octocat")
+        XCTAssertEqual(prBackfillQuery(mine: false, assigned: true, query: "", viewer: "octocat"),
+                       "state:open assignee:octocat")
+        XCTAssertEqual(prBackfillQuery(mine: true, assigned: true, query: " 403 ", viewer: "octocat"),
+                       "state:open author:octocat assignee:octocat 403")
+        XCTAssertEqual(prBackfillQuery(mine: false, assigned: false, query: "fix flake", viewer: ""),
+                       "state:open fix flake")
+    }
+
+    func testPrBackfillQueryNilWhenNothingScopesBeyondFirehose() {
+        // No filters at all → the base list already covers the view.
+        XCTAssertNil(prBackfillQuery(mine: false, assigned: false, query: "", viewer: "octocat"))
+        // Whitespace-only text is not a query.
+        XCTAssertNil(prBackfillQuery(mine: false, assigned: false, query: "   ", viewer: "octocat"))
+        // Mine/Assigned can't scope while the viewer login is unknown — firing
+        // would just repeat the unscoped firehose page.
+        XCTAssertNil(prBackfillQuery(mine: true, assigned: true, query: "", viewer: ""))
+    }
+
     func testMergePrListsUnionsByNumberNewestFirst() {
         let base = [
             PullRequest(number: 50, title: "new", url: "u", branch: "b",

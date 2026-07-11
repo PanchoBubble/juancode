@@ -228,6 +228,20 @@ public func searchOpenPrs(_ cwd: String, search: String) async -> [PullRequest] 
     }
 }
 
+/// The search qualifiers for the PR-popover backfill, or nil when the active
+/// filters add nothing beyond `state:open` — the firehose `getOpenPrs` page
+/// already covers that view, so re-querying would just repeat it (this is also
+/// why Mine/Assigned are dropped while the viewer login is still unknown). Pure;
+/// exposed for testing.
+public func prBackfillQuery(mine: Bool, assigned: Bool, query: String, viewer: String) -> String? {
+    let text = query.trimmingCharacters(in: .whitespaces)
+    var qualifiers = "state:open"
+    if mine && !viewer.isEmpty { qualifiers += " author:\(viewer)" }
+    if assigned && !viewer.isEmpty { qualifiers += " assignee:\(viewer)" }
+    if !text.isEmpty { qualifiers += " \(text)" }
+    return qualifiers == "state:open" ? nil : qualifiers
+}
+
 /// Union `extra` PRs into `base` by PR number, keeping the existing entry for any
 /// number already present (it carries enrichment like `unresolvedComments` that
 /// the backfill fetch lacks) and appending only genuinely new PRs, then sorting

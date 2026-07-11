@@ -1307,14 +1307,10 @@ final class AppModel {
     /// query, no Mine/Assigned) → no-op, since the base list already covers that
     /// view. Coalesces rapid keystrokes/toggles via a per-cwd cancellable task.
     func backfillPrs(_ cwd: String, mine: Bool, assigned: Bool, query: String) {
-        let text = query.trimmingCharacters(in: .whitespaces)
         prsBackfillTasks[cwd]?.cancel()
-        guard mine || assigned || !text.isEmpty else { return }
-        let viewer = prsByCwd[cwd]?.viewer ?? ""
-        var qualifiers = "state:open"
-        if mine && !viewer.isEmpty { qualifiers += " author:\(viewer)" }
-        if assigned && !viewer.isEmpty { qualifiers += " assignee:\(viewer)" }
-        if !text.isEmpty { qualifiers += " \(text)" }
+        guard let qualifiers = prBackfillQuery(
+            mine: mine, assigned: assigned, query: query,
+            viewer: prsByCwd[cwd]?.viewer ?? "") else { return }
         prsBackfillTasks[cwd] = Task { [qualifiers] in
             try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
