@@ -130,9 +130,10 @@ public final class Session: @unchecked Sendable {
 
     /// Headless VT engine for this session (juancode-a2h.1): a real SwiftTerm
     /// `Terminal` with no view, fed the pty stream once on `workQueue` in
-    /// `handleData`. Runs ALONGSIDE the byte ring and the byte-fed detector during
-    /// the epic's transition — nothing reads it yet; views become projections of it
-    /// in a2h.2. Internally locked, so it's an immutable collaborator like `workQueue`.
+    /// `handleData`. Views seed from it (a2h.2), remote clients stream its damage
+    /// (a2h.3), and the activity detector classifies off its rendered screen — the
+    /// single VT parse per chunk. Internally locked, so it's an immutable
+    /// collaborator like `workQueue`.
     public let terminalModel: SessionTerminalModel
 
     /// Arbitrates which client controls this session's single shared pty grid, so
@@ -177,6 +178,12 @@ public final class Session: @unchecked Sendable {
     /// Set once the user renames the session manually, so the CLI-derived title
     /// poll stops clobbering their chosen name.
     private var titleIsManual = false
+
+    /// Set once the CLI names the session itself via an OSC 0/2 window title
+    /// (surfaced by `terminalModel.onTitleChange`). The CLI's own tab title is the
+    /// fresher signal, so once seen it also stops the transcript poll from writing
+    /// the title — a manual rename still beats both. Guarded by `lock`.
+    private var titleFromOsc = false
 
     /// ms-since-epoch of the last input written to the pty (keystrokes, pastes,
     /// queue deliveries — everything funnels through `write`). Seeded with the
@@ -344,7 +351,10 @@ public final class Session: @unchecked Sendable {
         self.terminalModel = SessionTerminalModel(
             cols: cols, rows: rows, scrollbackLines: max(2000, env.scrollbackLimit / 64))
 
-        self.detector = ActivityDetector(cols: cols, rows: rows) { [weak self] state, notify in
+        // The detector classifies off the shared model's rendered screen — no
+        // second VT parse. `handleData` feeds the model before the detector so the
+        // screen the settle logic re-reads always includes the arming chunk.
+        self.detector = ActivityDetector(observing: terminalModel) { [weak self] state, notify in
             self?.emitActivity(state, notify)
         }
 
@@ -382,6 +392,13 @@ public final class Session: @unchecked Sendable {
 
             // Keep the title + usage in sync with the CLI's own transcript.
             startTitleWatch()
+            // A CLI that sets its own OSC window title names the session directly —
+            // the model parses OSC for free, so adopt it as it changes. Sessions
+            // whose CLI never sets one keep the transcript-derived / placeholder
+            // title. The listener fires on the workQueue (the feeding thread).
+            terminalModel.onTitleChange { [weak self] title in
+                self?.adoptOscTitle(title)
+            }
             // Preferred activity signal: pulse the detector busy on each batch of agent
             // records the CLI appends to its transcript. The id is read via a getter so
             // Codex (which discovers its id after spawn) starts tailing once it lands. The
@@ -425,10 +442,10 @@ public final class Session: @unchecked Sendable {
             scroll.append(bytes)
             return writeThrottle.onOutput(bytes.count)
         }
-        detector.feed(bytes)
-        // Parse into the headless model once, here on the workQueue (juancode-a2h.1).
-        // Additive during the epic's transition — no consumer yet.
+        // Parse into the headless model once, here on the workQueue (juancode-a2h) —
+        // before the detector, which reads its screen state from this model.
         terminalModel.feed(bytes)
+        detector.feed(bytes)
         for l in snapshotOutput() { l(bytes) }
         // Mid-burst crash-safety flush once enough new output has piled up (a
         // continuously streaming session never pauses long enough to trip the
@@ -615,7 +632,7 @@ public final class Session: @unchecked Sendable {
     /// of a content-free seed doesn't loop — though `autoSubmit` rejects those up front.
     private func inputBoxContains(_ signature: String) -> Bool {
         guard !signature.isEmpty else { return true }
-        return InitialPromptDelivery.region(detector.inputRegionSnapshot(rows: Seed.inputRows),
+        return InitialPromptDelivery.region(terminalModel.bottomText(Seed.inputRows),
                                             contains: signature)
     }
 
@@ -623,7 +640,7 @@ public final class Session: @unchecked Sendable {
     /// for a large/multi-line paste in place of the literal text), which the seed
     /// loop treats as the paste having landed. See `InitialPromptDelivery`.
     private func inputBoxShowsCollapsedPaste() -> Bool {
-        InitialPromptDelivery.regionShowsCollapsedPaste(detector.inputRegionSnapshot(rows: Seed.inputRows))
+        InitialPromptDelivery.regionShowsCollapsedPaste(terminalModel.bottomText(Seed.inputRows))
     }
 
     /// Poll until the rendered screen stops changing (two identical, non-empty
@@ -635,11 +652,11 @@ public final class Session: @unchecked Sendable {
     @discardableResult
     private func waitForStableScreen(maxMs: Int, pollMs: Int) async -> Bool {
         var elapsed = 0
-        var prev = detector.screenSnapshot()
+        var prev = terminalModel.visibleText()
         while elapsed < maxMs {
             try? await Task.sleep(for: .milliseconds(pollMs))
             elapsed += pollMs
-            let cur = detector.screenSnapshot()
+            let cur = terminalModel.visibleText()
             if !cur.isEmpty && cur == prev { return true }
             prev = cur
         }
@@ -859,7 +876,6 @@ public final class Session: @unchecked Sendable {
     @discardableResult
     public func resize(cols: Int, rows: Int) -> Bool {
         let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
-        detector.resize(cols: cols, rows: rows)
         terminalModel.resize(cols: cols, rows: rows)
         return applied
     }
@@ -1147,10 +1163,28 @@ public final class Session: @unchecked Sendable {
         if changed { persistMeta(titleChanged: false) }
     }
 
+    /// Adopt an OSC 0/2 window title the CLI set (via `terminalModel.onTitleChange`)
+    /// as the session title, unless the user pinned a manual name. Once one lands,
+    /// the transcript poll stops writing the title (see `titleFromOsc`).
+    private func adoptOscTitle(_ raw: String) {
+        let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let changed = lock.withLock { () -> Bool in
+            guard !titleIsManual else { return false }
+            titleFromOsc = true
+            guard title != _meta.title else { return false }
+            _meta.title = title
+            return true
+        }
+        if changed { persistMeta(titleChanged: true) }
+    }
+
     /// Read the CLI's generated title (or first prompt) and persist if changed.
     private func refreshTitle() async {
-        let (cliSessionId, provider, manual) = lock.withLock { (_meta.cliSessionId, _meta.provider, titleIsManual) }
-        guard !manual else { return } // user renamed it — don't clobber
+        let (cliSessionId, provider, pinned) = lock.withLock {
+            (_meta.cliSessionId, _meta.provider, titleIsManual || titleFromOsc)
+        }
+        guard !pinned else { return } // manual rename or the CLI's own OSC title wins
         guard let cliSessionId else { return } // Codex id not discovered yet
         guard let title = await env.deriveTitle(provider, cliSessionId) else { return }
         let changed = lock.withLock { () -> Bool in

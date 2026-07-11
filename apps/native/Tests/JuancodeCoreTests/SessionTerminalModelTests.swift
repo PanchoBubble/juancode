@@ -110,6 +110,19 @@ import SwiftTerm
         #expect(m.visibleText() == "hello")
     }
 
+    /// `bottomText(n)` is the footer / input / dialog region the activity detector
+    /// and the seed-delivery checks read: the last n rows with per-row trailing
+    /// blanks trimmed, blank rows kept so the region keeps its geometry.
+    @Test func bottomTextReturnsLastRowsKeepingBlanks() {
+        let m = SessionTerminalModel(cols: 20, rows: 5, scrollbackLines: 100)
+        m.feed(esc("top\r\n\r\n\r\n\r\nfooter"))
+        #expect(m.bottomText(2) == "\nfooter")
+        #expect(m.bottomText(5) == "top\n\n\n\nfooter")
+        // Asking for more rows than the grid has clamps to the grid.
+        #expect(m.bottomText(9) == "top\n\n\n\nfooter")
+        #expect(m.bottomText(0) == "")
+    }
+
     @Test func oscTitleIsCaptured() {
         let m = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
         m.feed(esc("\u{1B}]0;my-title\u{07}"))

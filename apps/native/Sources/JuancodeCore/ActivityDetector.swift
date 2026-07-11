@@ -57,12 +57,14 @@ public struct StructuredEventBatch: Sendable {
 ///    a slow tool or delegated subagent goes transcript- *and* screen-quiet for
 ///    minutes, which must not read as idle.
 ///
-/// 2. **Rendered PTY screen** (fallback). The raw byte stream feeds a headless
-///    `TerminalScreen`, so the detector reads the *actual rendered screen*. Both
-///    `claude` and `codex` paint an "esc to interrupt" footer while a turn runs and
-///    an option-menu / yes-no prompt when they pause. This drives **busy** when no
-///    transcript is available yet, and distinguishes **waitingInput** from **idle**
-///    at turn end (a permission prompt isn't written to the transcript until answered).
+/// 2. **Rendered PTY screen** (fallback). The detector reads the *actual rendered
+///    screen* from the session's headless `SessionTerminalModel` — the single VT
+///    parse on the session workQueue (juancode-a2h) — instead of running its own
+///    emulator over the byte stream. Both `claude` and `codex` paint an "esc to
+///    interrupt" footer while a turn runs and an option-menu / yes-no prompt when
+///    they pause. This drives **busy** when no transcript is available yet, and
+///    distinguishes **waitingInput** from **idle** at turn end (a permission prompt
+///    isn't written to the transcript until answered).
 ///
 /// Busy is only ever *entered* via the footer phrase or a structured agent event, so
 /// the startup banner and keystroke echoes never trigger it. A prompt can also appear
@@ -89,7 +91,14 @@ public final class ActivityDetector: @unchecked Sendable {
 
     private let queue: DispatchQueue
     private let onChange: ChangeListener
-    private let screen: TerminalScreen
+    /// The rendered screen the classifier reads. In production this is the
+    /// session's shared `SessionTerminalModel`, fed once in `Session.handleData`
+    /// *before* the detector sees the chunk; in the byte-fed mode (tests) the
+    /// detector owns a private model and feeds it itself.
+    private let screen: SessionTerminalModel
+    /// Whether `screen` is the detector's own (byte-fed mode) — only then do
+    /// `feed`/`resize` drive it; a shared model is owned by the session.
+    private let ownsScreen: Bool
     private var state: SessionActivity = .idle
     private var generation = 0
     /// Whether the *current* busy turn was started by a structured agent event.
@@ -108,10 +117,14 @@ public final class ActivityDetector: @unchecked Sendable {
     /// When the last structured agent pulse arrived; anchors the `toolHoldCapMs` cap.
     private var lastStructuredAt = Date.distantPast
     /// Trailing bytes of a multibyte UTF-8 sequence split across a `feed` boundary,
-    /// carried into the next chunk so the split glyph decodes intact rather than as
+    /// carried into the next chunk so a split multibyte gate token (the "❯" menu
+    /// cursor) still decodes intact for the cheap substring gates rather than as
     /// replacement characters. Touched only on `queue`. (juancode-5qw.6)
     private var pendingBytes: [UInt8] = []
 
+    /// Byte-fed mode: the detector owns a private headless model and renders the
+    /// stream itself. Kept for tests (the corpus feeds raw CLI bytes directly);
+    /// production uses `init(observing:)` so the session's single parse is shared.
     public init(
         cols: Int = 120,
         rows: Int = 40,
@@ -126,7 +139,29 @@ public final class ActivityDetector: @unchecked Sendable {
         self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
         self.onChange = onChange
-        self.screen = TerminalScreen(cols: cols, rows: rows)
+        self.screen = SessionTerminalModel(cols: cols, rows: rows, scrollbackLines: 0)
+        self.ownsScreen = true
+    }
+
+    /// Shared-model mode (production): classify off `model`, the session's headless
+    /// VT engine that already parses every pty chunk once on the workQueue. The
+    /// caller must feed `model` before feeding the detector, so the screen the
+    /// settle logic re-reads always includes the chunk that armed it.
+    public init(
+        observing model: SessionTerminalModel,
+        settleMs: Int = 250,
+        watchdogMs: Int = 8000,
+        toolHoldCapMs: Int = 30 * 60 * 1000,
+        queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
+        onChange: @escaping ChangeListener
+    ) {
+        self.settleMs = settleMs
+        self.watchdogMs = watchdogMs
+        self.toolHoldCapMs = toolHoldCapMs
+        self.queue = queue
+        self.onChange = onChange
+        self.screen = model
+        self.ownsScreen = false
     }
 
     public var activity: SessionActivity {
@@ -138,26 +173,12 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.sync { lastMatchedPrompt }
     }
 
-    /// A point-in-time snapshot of the whole rendered screen, taken on the detector's
-    /// queue so it's consistent with the byte stream fed so far. Used by
-    /// `Session.autoSubmit` to detect when the TUI has settled (stable frames).
-    public func screenSnapshot() -> String {
-        queue.sync { screen.visibleText }
-    }
-
-    /// The bottom `rows` of the rendered screen — the footer / input-box region —
-    /// so `Session.autoSubmit` can confirm a seeded prompt landed in (or left) the
-    /// input box without matching the same text echoed up in the conversation.
-    public func inputRegionSnapshot(rows: Int) -> String {
-        queue.sync { screen.bottomText(rows) }
-    }
-
     /// Feed a chunk of raw pty output as bytes — the hot path from `Session`.
     /// Decodes incrementally on the detector's queue, carrying an incomplete
-    /// trailing UTF-8 sequence across the chunk boundary so a multibyte glyph
-    /// (emoji, box-drawing char) split between two pty reads is never corrupted
-    /// into replacement characters before the screen/footer match sees it. No
-    /// `String` is allocated on the caller's (pty) thread (juancode-5qw.6).
+    /// trailing UTF-8 sequence across the chunk boundary so a multibyte gate token
+    /// (the "❯" menu cursor) split between two pty reads is never corrupted into
+    /// replacement characters before the cheap substring gates see it. No `String`
+    /// is allocated on the caller's (pty) thread (juancode-5qw.6).
     public func feed(_ bytes: [UInt8]) {
         queue.async { self._feedBytes(bytes) }
     }
@@ -184,12 +205,6 @@ public final class ActivityDetector: @unchecked Sendable {
         feedStructured(StructuredEventBatch(kinds: kinds))
     }
 
-    /// Keep the screen model in step with the pty size so cursor/erase math stays
-    /// accurate. Called from `Session.resize`.
-    public func resize(cols: Int, rows: Int) {
-        queue.async { self.screen.resize(cols: cols, rows: rows) }
-    }
-
     /// The session ended — cancel any pending timers and return to idle.
     public func reset() {
         queue.async {
@@ -207,8 +222,13 @@ public final class ActivityDetector: @unchecked Sendable {
     /// chunk and holding back a still-incomplete trailing sequence for the next one,
     /// then feed the complete decoded prefix to `_feed`. Only a plausibly-incomplete
     /// multibyte tail is carried; malformed bytes stay in the prefix so
-    /// `String(decoding:)` replaces them exactly as before.
+    /// `String(decoding:)` replaces them exactly as before. The decoded string only
+    /// drives the cheap gates — the screen itself renders from raw bytes.
     private func _feedBytes(_ bytes: [UInt8]) {
+        // In byte-fed mode the own screen must see every raw byte (SwiftTerm carries
+        // partial escape/UTF-8 sequences itself); a shared model was already fed by
+        // the session before this chunk was enqueued.
+        if ownsScreen { screen.feed(bytes) }
         let combined: [UInt8]
         if pendingBytes.isEmpty {
             combined = bytes
@@ -223,8 +243,6 @@ public final class ActivityDetector: @unchecked Sendable {
     }
 
     private func _feed(_ data: String) {
-        // The screen must see every byte to stay an accurate mirror.
-        screen.feed(data)
         if state == .busy {
             // Already working: any output (re)starts the settle/watchdog clocks.
             armTimers()
@@ -371,7 +389,7 @@ public final class ActivityDetector: @unchecked Sendable {
     /// column gap (many spaces); collapsing restores a compact line so the
     /// distance-bounded `workingRe` (`[^\n]{0,40}`) matches as intended.
     private func normalizedScreen() -> String {
-        Self.wsRe.replacingMatches(in: screen.visibleText, with: " ")
+        Self.wsRe.replacingMatches(in: screen.visibleText(), with: " ")
     }
 
     /// The bottom `promptRegionRows` rows, whitespace-collapsed like `normalizedScreen`.

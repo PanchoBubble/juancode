@@ -181,7 +181,7 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     public var isAlternateBuffer: Bool { lock.withLock { terminal.isCurrentBufferAlternate } }
     public var cursorPosition: (x: Int, y: Int) { lock.withLock { terminal.getCursorLocation() } }
     /// The last OSC 0/2 window title the program set, if any (OSC handling is free
-    /// with the real emulator). Not yet wired into `Session`'s title system.
+    /// with the real emulator). `Session` adopts it via `onTitleChange`.
     public var terminalTitle: String? { lock.withLock { lastTitle } }
 
     /// A full projection of the visible screen. This is what a view renders FROM —
@@ -285,6 +285,25 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             var end = rowsText.count
             while end > 0, rowsText[end - 1].isEmpty { end -= 1 }
             return rowsText[0..<end].joined(separator: "\n")
+        }
+    }
+
+    /// The last `n` visible rows as text (the footer / input / dialog region):
+    /// rows joined by "\n" with per-row trailing blanks trimmed, blank rows kept
+    /// so the region's geometry is preserved. What `ActivityDetector` matches its
+    /// bottom-region prompt patterns against.
+    public func bottomText(_ n: Int) -> String {
+        guard n > 0 else { return "" }
+        return lock.withLock {
+            let cols = terminal.cols
+            let rows = terminal.rows
+            let start = max(0, rows - n)
+            var out: [String] = []
+            out.reserveCapacity(rows - start)
+            for r in start..<rows {
+                out.append(row(terminal.getLine(row: r), cols: cols).text)
+            }
+            return out.joined(separator: "\n")
         }
     }
 
