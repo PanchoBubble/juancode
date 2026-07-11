@@ -625,7 +625,17 @@ final class AppModel {
     /// Whether the projects (sessions-by-folder) sidebar column is visible. RootView
     /// binds NavigationSplitView's columnVisibility to this, so the ⌃S shortcut can
     /// show/hide it programmatically while the native toolbar toggle stays in sync.
-    var projectsSidebarVisible = true
+    /// The didSet is the one choke point both paths share: NavigationSplitView
+    /// animates the collapse, bursting intermediate grids into the terminal resize
+    /// path, so mark it a layout transition — the coordinators hold the intermediate
+    /// grids and settle once. 500ms spans the split-view slide plus both settle
+    /// windows, matching the bottom-terminal toggle.
+    var projectsSidebarVisible = true {
+        didSet {
+            guard oldValue != projectsSidebarVisible else { return }
+            LayoutTransitionGate.shared.begin(for: .milliseconds(500))
+        }
+    }
 
     func toggleProjectsSidebar() {
         projectsSidebarVisible.toggle()
