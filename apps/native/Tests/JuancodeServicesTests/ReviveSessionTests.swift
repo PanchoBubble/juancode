@@ -55,6 +55,10 @@ final class ReviveSessionTests: XCTestCase {
     private let noRecovery: @Sendable (ProviderId, String, Int, Set<String>) async -> String? =
         { _, _, _, _ in nil }
 
+    /// Pin the fresh-start pre-check off so resume-path tests don't depend on the
+    /// real `~/.claude/projects` scan.
+    private let neverNeedsFresh: @Sendable (SessionMeta) -> Bool = { _ in false }
+
     func testUnknownIdFailsWithNotFound() async {
         let store = InMemorySessionStore()
         let result = await reviveSession("nope", registry: makeRegistry(store: store), store: store,
@@ -84,9 +88,10 @@ final class ReviveSessionTests: XCTestCase {
         store.insert(meta)
 
         let result = await reviveSession(meta.id, registry: registry, store: store,
-                                         recoverId: { _, _, _, _ in "recovered-conv-1" })
-        guard case let .success(session) = result else {
-            return XCTFail("expected success, got \(result)")
+                                         recoverId: { _, _, _, _ in "recovered-conv-1" },
+                                         needsFreshStart: neverNeedsFresh)
+        guard case let .success(.resumed(session)) = result else {
+            return XCTFail("expected resumed success, got \(result)")
         }
         defer { session.kill() }
         XCTAssertEqual(session.id, meta.id)
@@ -104,9 +109,9 @@ final class ReviveSessionTests: XCTestCase {
         store.update(meta, scrollback: Array("OLD OUTPUT".utf8))
 
         let result = await reviveSession(meta.id, registry: registry, store: store,
-                                         recoverId: noRecovery)
-        guard case let .success(session) = result else {
-            return XCTFail("expected success, got \(result)")
+                                         recoverId: noRecovery, needsFreshStart: neverNeedsFresh)
+        guard case let .success(.resumed(session)) = result else {
+            return XCTFail("expected resumed success, got \(result)")
         }
         defer { session.kill() }
         let scroll = String(decoding: session.getScrollback(), as: UTF8.self)
@@ -122,9 +127,30 @@ final class ReviveSessionTests: XCTestCase {
 
         let result = await reviveSession(live.id, registry: registry, store: store,
                                          recoverId: noRecovery)
-        guard case let .success(session) = result else {
-            return XCTFail("expected success, got \(result)")
+        guard case let .success(.resumed(session)) = result else {
+            return XCTFail("expected resumed success, got \(result)")
         }
         XCTAssertTrue(session === live)
+    }
+
+    func testPinnedIdWithoutTranscriptBootsFreshInPlace() async {
+        let store = InMemorySessionStore()
+        let registry = makeRegistry(store: store)
+        let meta = exitedMeta(cliSessionId: "conv-never-had-a-turn")
+        store.insert(meta)
+
+        let result = await reviveSession(meta.id, registry: registry, store: store,
+                                         recoverId: noRecovery, needsFreshStart: { _ in true })
+        guard case let .success(.startedFresh(session)) = result else {
+            return XCTFail("expected startedFresh success, got \(result)")
+        }
+        defer { session.kill() }
+        // Same juancode id and pane, but a brand-new pinned conversation id so the
+        // first completed turn writes a resumable transcript.
+        XCTAssertEqual(session.id, meta.id)
+        XCTAssertTrue(session.isRunning)
+        XCTAssertNotNil(session.meta.cliSessionId)
+        XCTAssertNotEqual(session.meta.cliSessionId, "conv-never-had-a-turn")
+        XCTAssertNotNil(registry.get(meta.id))
     }
 }

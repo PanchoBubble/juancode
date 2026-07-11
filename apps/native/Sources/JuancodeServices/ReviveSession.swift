@@ -12,7 +12,8 @@ public enum ReviveFailure: Error, Sendable, Equatable {
     /// No prior CLI conversation id was captured or could be recovered from the
     /// CLI's own transcripts, so there is nothing to resume.
     case unresumable
-    /// `SessionRegistry.resume` threw (e.g. the spawn failed).
+    /// `SessionRegistry.resume` (or the fresh-boot fallback's `restartFresh`)
+    /// threw — e.g. the spawn failed.
     case resumeFailed(String)
 
     /// Human-readable reason, phrased like the existing WS error frames.
@@ -28,16 +29,47 @@ public enum ReviveFailure: Error, Sendable, Equatable {
     }
 }
 
+/// How `reviveSession` brought a session back to life.
+public enum Revival: Sendable {
+    /// The prior CLI conversation resumed (or was already live).
+    case resumed(Session)
+    /// The pinned id had no transcript on disk (the session booted but never
+    /// completed a turn), so a fresh conversation was booted in place instead.
+    case startedFresh(Session)
+
+    /// The live session either way.
+    public var session: Session {
+        switch self {
+        case let .resumed(s), let .startedFresh(s): return s
+        }
+    }
+}
+
+/// Whether reviving `meta` must skip `--resume` and boot fresh instead: pinned-id
+/// providers (Claude) write a transcript only once a turn completes, so a session
+/// that booted but never finished a turn has nothing on disk and `--resume` would
+/// just fast-exit into a dead pane. Discovered-id providers (Codex) only ever
+/// capture an id from a transcript that exists, so they're never doomed this way.
+/// The one shared pre-check behind `AppModel.reactivate` and `reviveSession`.
+public func resumeNeedsFreshStart(_ meta: SessionMeta, roots: RecoverRoots = RecoverRoots()) -> Bool {
+    guard Providers.spec(for: meta.provider).pinsSessionId,
+          let cliId = meta.cliSessionId else { return false }
+    return !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd, roots: roots)
+}
+
 /// Lazily revive an exited session: recover its `cliSessionId` when it predates
 /// id capture, seed the persisted scrollback with a `── session resumed ──`
-/// divider, and resume it through the registry. The one shared implementation of
-/// the revive dance previously duplicated across `PrTrackingEngine.reactivate`,
+/// divider, and resume it through the registry. When the pinned id has no
+/// transcript to resume (see `resumeNeedsFreshStart`), boots a fresh conversation
+/// in place instead of running the doomed `--resume` — the same self-heal the
+/// local `openPersistedPane` path does. The one shared implementation of the
+/// revive dance previously duplicated across `PrTrackingEngine.reactivate`,
 /// `AppModel.reactivate`, and the WS `reactivate` handler (juancode-23m).
 ///
 /// Returns the already-live session unchanged when one exists, so callers can
 /// treat "make this session deliverable" as a single idempotent step.
-/// `recoverId` is a seam for tests; it defaults to the real transcript scan
-/// (`recoverCliSessionId`).
+/// `recoverId` and `needsFreshStart` are seams for tests; they default to the
+/// real transcript scans.
 @discardableResult
 public func reviveSession(
     _ id: String,
@@ -47,9 +79,10 @@ public func reviveSession(
     rows: Int = 32,
     recoverId: @escaping @Sendable (
         _ provider: ProviderId, _ cwd: String, _ createdAtMs: Int, _ excludeIds: Set<String>
-    ) async -> String? = { await recoverCliSessionId($0, cwd: $1, createdAtMs: $2, excludeIds: $3) }
-) async -> Result<Session, ReviveFailure> {
-    if let live = registry.get(id) { return .success(live) }
+    ) async -> String? = { await recoverCliSessionId($0, cwd: $1, createdAtMs: $2, excludeIds: $3) },
+    needsFreshStart: @escaping @Sendable (SessionMeta) -> Bool = { resumeNeedsFreshStart($0) }
+) async -> Result<Revival, ReviveFailure> {
+    if let live = registry.get(id) { return .success(.resumed(live)) }
     guard var meta = store.get(id) else { return .failure(.notFound) }
     // Old sessions predate id capture; try to recover it from the CLI's own
     // transcript so they can be resumed like newer ones.
@@ -61,12 +94,19 @@ public func reviveSession(
         }
     }
     guard meta.cliSessionId != nil else { return .failure(.unresumable) }
+    if needsFreshStart(meta) {
+        do {
+            return .success(.startedFresh(try registry.restartFresh(meta, cols: cols, rows: rows)))
+        } catch {
+            return .failure(.resumeFailed("\(error)"))
+        }
+    }
     // Carry persisted scrollback into the revived session (with a separator
     // before the CLI repaints its TUI underneath).
     let prior = store.getScrollback(id) ?? []
     let seed: [UInt8] = prior.isEmpty ? [] : prior + Array(sessionResumedDivider.utf8)
     do {
-        return .success(try registry.resume(meta, cols: cols, rows: rows, priorScrollback: seed))
+        return .success(.resumed(try registry.resume(meta, cols: cols, rows: rows, priorScrollback: seed)))
     } catch {
         return .failure(.resumeFailed("\(error)"))
     }

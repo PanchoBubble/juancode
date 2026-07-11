@@ -332,7 +332,10 @@ final class WebSocketConnection: @unchecked Sendable {
             if state.registry.get(sessionId) != nil { return } // already live
             switch await reviveSession(sessionId, registry: state.registry, store: state.store,
                                        cols: cols, rows: rows) {
-            case let .success(session):
+            case let .success(revival):
+                // `attached` is truthful for both outcomes — the session is live and
+                // the client is on it; a fresh boot's meta carries its new pinned id.
+                let session = revival.session
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
                                scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
@@ -530,8 +533,8 @@ final class WebSocketConnection: @unchecked Sendable {
         guard let text = bracketedPasteMessage(data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         switch await reviveSession(sessionId, registry: state.registry, store: state.store) {
-        case let .success(session):
-            session.autoSubmit(text)
+        case let .success(revival):
+            revival.session.autoSubmit(text)
         case let .failure(failure):
             send(.error(sessionId: sessionId, message: failure.message))
         }

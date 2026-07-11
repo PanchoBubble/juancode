@@ -149,4 +149,41 @@ final class RecoverSessionTests: XCTestCase {
         let root = claudeRoot("other-cwd", [(id: "abc", cwd: OTHER, startMs: T0)])
         XCTAssertFalse(exists(root, "abc"))
     }
+
+    // MARK: - resumeNeedsFreshStart
+
+    private func meta(provider: ProviderId, cliSessionId: String?) -> SessionMeta {
+        SessionMeta(
+            id: "m-1", provider: provider, cwd: CWD, title: "test", status: .exited,
+            exitCode: 0, createdAt: T0, updatedAt: T0,
+            cliSessionId: cliSessionId, skipPermissions: false,
+            worktreePath: nil, usage: nil
+        )
+    }
+
+    func testNeedsFreshStartWhenPinnedIdHasNoTranscript() {
+        let root = claudeRoot("fresh-needed", [(id: "abc", cwd: CWD, startMs: T0)])
+        let m = meta(provider: .claude, cliSessionId: "never-had-a-turn")
+        XCTAssertTrue(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+    }
+
+    func testNoFreshStartWhenTranscriptExists() {
+        let root = claudeRoot("resumable", [(id: "abc", cwd: CWD, startMs: T0)])
+        let m = meta(provider: .claude, cliSessionId: "abc")
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+    }
+
+    func testNoFreshStartWithoutAPinnedId() {
+        // Nil id is the `.unresumable` path, not the fresh-start one.
+        let root = claudeRoot("no-id", [])
+        let m = meta(provider: .claude, cliSessionId: nil)
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+    }
+
+    func testNoFreshStartForDiscoveredIdProviders() {
+        // Codex ids are discovered from transcripts that exist, so never doomed.
+        let root = claudeRoot("codex", [])
+        let m = meta(provider: .codex, cliSessionId: "rollout-1")
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+    }
 }

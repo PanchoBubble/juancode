@@ -1864,15 +1864,11 @@ final class AppModel {
             errorMessage = "No prior CLI conversation could be found to resume this session."
             return false
         }
-        // Claude writes a transcript only once a turn completes, so a pinned-id
-        // session that booted but never got a turn has nothing to resume — `--resume`
-        // would just fast-exit and churn scrollback. Detect that up front and report
-        // unresumable so callers boot a fresh session in place instead.
-        if Providers.spec(for: meta.provider).pinsSessionId,
-           let cliId = meta.cliSessionId,
-           !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd) {
-            return false
-        }
+        // A pinned-id session that booted but never got a turn has no transcript to
+        // resume — `--resume` would just fast-exit and churn scrollback. Detect that
+        // up front (shared with the WS revive path) and report unresumable so
+        // callers boot a fresh session in place instead.
+        if resumeNeedsFreshStart(meta) { return false }
         do {
             let prior = appState.store.getScrollback(id) ?? []
             let seed: [UInt8] = prior.isEmpty

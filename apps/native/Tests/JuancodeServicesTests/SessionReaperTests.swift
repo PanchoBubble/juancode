@@ -271,8 +271,9 @@ final class SessionReaperTests: XCTestCase {
 
         // Waking it through the shared revive path clears the flag.
         let revived = await reviveSession(session.id, registry: registry, store: store,
-                                          recoverId: { _, _, _, _ in nil })
-        guard case let .success(awake) = revived else {
+                                          recoverId: { _, _, _, _ in nil },
+                                          needsFreshStart: { _ in false })
+        guard case let .success(.resumed(awake)) = revived else {
             return XCTFail("expected revival, got \(revived)")
         }
         defer { awake.kill() }
