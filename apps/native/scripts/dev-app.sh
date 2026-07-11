@@ -33,7 +33,12 @@ APP="$NATIVE/.build/juancode.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Copy (not symlink) so the running executable's real path is inside the .app —
 # the kernel execs the resolved path, and bundle detection walks up from it.
-cp -f "$BIN" "$APP/Contents/MacOS/juancode"
+# Stage to a temp name and mv into place: overwriting the inode in place (cp -f)
+# while an instance is running invalidates the kernel's signature cache for that
+# inode — new execs get SIGKILLed before main and the running app can crash on a
+# later page-in. mv relinks the directory entry to a fresh inode instead.
+cp "$BIN" "$APP/Contents/MacOS/juancode.new"
+mv -f "$APP/Contents/MacOS/juancode.new" "$APP/Contents/MacOS/juancode"
 # App icon (regenerate with: swift scripts/make-icon.swift).
 [ -f "$NATIVE/AppIcon.icns" ] && cp -f "$NATIVE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
