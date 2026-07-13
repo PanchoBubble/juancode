@@ -34,9 +34,10 @@ final class GitHubModel {
     /// The last action failure to surface inline (send-to-agent/track errors).
     var actionError: String?
 
-    /// Kick a PR-list refresh for every folder the view shows.
+    /// Kick a PR-list refresh for every folder the view shows (all, or the one
+    /// scoped folder).
     func refresh(model: AppModel) {
-        for cwd in model.githubFolders { model.loadPrs(cwd) }
+        for cwd in model.githubScopedFolders { model.loadPrs(cwd) }
     }
 
     /// Select a PR and prefetch its detail.
@@ -164,6 +165,9 @@ struct GitHubView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appSurface)
         .onExitCommand { model.showingGitHub = false }
+        // Deep-link resolution: once the scoped folder's PRs load, select the
+        // pending current-branch PR (openGitHubForFolder recorded it).
+        .onChange(of: scopedPrCountSignal) { _, _ in model.resolvePendingBranchSelect() }
     }
 
     // MARK: header
@@ -176,11 +180,20 @@ struct GitHubView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer()
+            if model.githubScope != nil {
+                Button { model.openGitHub(scope: nil) } label: {
+                    Label("All projects", systemImage: "square.grid.2x2")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Show PRs across every project")
+                .clickCursor()
+            }
             Button { model.github.refresh(model: model) } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .help("Refresh open PRs for every folder")
+            .help("Refresh open PRs")
             .clickCursor()
             Button { model.showingGitHub = false } label: {
                 Image(systemName: "xmark")
@@ -194,9 +207,22 @@ struct GitHubView: View {
     }
 
     private var summary: String {
-        let folders = model.githubFolders.count
-        let prs = model.openPrTotal
-        return "\(folders) folder\(folders == 1 ? "" : "s") · \(prs) open PR\(prs == 1 ? "" : "s")"
+        let folders = model.githubScopedFolders
+        let prs = folders.reduce(0) { acc, cwd in
+            guard let r = model.prs(cwd), r.available else { return acc }
+            return acc + r.prs.count
+        }
+        let prPart = "\(prs) open PR\(prs == 1 ? "" : "s")"
+        if let scope = model.githubScope {
+            return "\((scope as NSString).lastPathComponent) · \(prPart)"
+        }
+        return "\(folders.count) folder\(folders.count == 1 ? "" : "s") · \(prPart)"
+    }
+
+    /// Changes when the scoped folder's PRs load, driving deep-link resolution.
+    private var scopedPrCountSignal: Int {
+        guard let scope = model.githubScope else { return -1 }
+        return model.prs(scope)?.prs.count ?? -1
     }
 
     // MARK: PR list (left column)
@@ -204,10 +230,10 @@ struct GitHubView: View {
     private var prList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(model.githubFolders, id: \.self) { cwd in
+                ForEach(model.githubScopedFolders, id: \.self) { cwd in
                     folderSection(cwd)
                 }
-                if model.githubFolders.isEmpty {
+                if model.githubScopedFolders.isEmpty {
                     Text("No project folders yet.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -288,7 +314,7 @@ struct GitHubView: View {
     /// lists — nil once the PR is no longer open (merged/closed on refresh).
     private var selectedPr: (String, PullRequest)? {
         guard let key = model.github.selectedKey else { return nil }
-        for cwd in model.githubFolders {
+        for cwd in model.githubScopedFolders {
             guard let r = model.prs(cwd), r.available else { continue }
             if let pr = r.prs.first(where: { TrackedPr.key(cwd: cwd, number: $0.number) == key }) {
                 return (cwd, pr)

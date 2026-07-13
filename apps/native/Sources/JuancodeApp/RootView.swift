@@ -1191,6 +1191,7 @@ private struct FolderHeader: View {
     let toggle: () -> Void
     @State private var showingAgentPicker = false
     @State private var plusHovering = false
+    @State private var ghHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
     /// the cost stays discoverable without crowding the header (juancode-341).
@@ -1331,6 +1332,24 @@ private struct FolderHeader: View {
                     }
                     .padding(4)
                     .fixesPopoverFirstClick()
+                }
+                // Per-project GitHub view (juancode-4r4): opens the PR view scoped
+                // to this folder, deep-linking to the current branch's PR when
+                // there is one. Only for folders with a git remote.
+                if model.folderGitState(group.cwd)?.remote == true {
+                    Button { model.openGitHubForFolder(group.cwd) } label: {
+                        Image(systemName: "arrow.triangle.pull")
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color.appHairline(ghHovering ? 0.14 : 0)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("GitHub PRs for \(group.name) — opens this branch's PR if it has one")
+                    .clickCursor()
+                    .onHover { ghHovering = $0 }
                 }
             }
             // Line 2: quiet metadata cluster — a single 10pt style, semantic color only

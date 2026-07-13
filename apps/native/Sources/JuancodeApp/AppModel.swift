@@ -1355,6 +1355,22 @@ final class AppModel {
         Array(Set(trackableFolders).union(prsByCwd.keys)).sorted()
     }
 
+    /// GitHub view scope: nil = every folder (the global view), else a single
+    /// cwd whose PRs are shown alone. Set by the per-project GitHub button.
+    var githubScope: String?
+
+    /// A branch whose open PR should be auto-selected once the scoped folder's
+    /// PRs finish loading — the per-project button's deep-link when the PR
+    /// wasn't cached yet at click time. Cleared once resolved or on a plain open.
+    var githubPendingBranchSelect: PendingBranchSelect?
+    struct PendingBranchSelect: Equatable { var cwd: String; var branch: String }
+
+    /// Folders the GitHub view lists: just the scoped one, or all of them.
+    var githubScopedFolders: [String] {
+        if let s = githubScope { return [s] }
+        return githubFolders
+    }
+
     /// Total open PRs across every loaded folder — the sidebar GitHub row badge.
     var openPrTotal: Int {
         prsByCwd.values.filter(\.available).reduce(0) { $0 + $1.prs.count }
@@ -1366,14 +1382,44 @@ final class AppModel {
         tracked.values.contains { !$0.notifications.isEmpty }
     }
 
-    /// Open the GitHub view and kick a PR refresh across every folder.
-    func openGitHub() {
+    /// Open the GitHub view and kick a PR refresh. `scope` nil = every folder
+    /// (the global view); a cwd shows that project alone.
+    func openGitHub(scope: String? = nil) {
+        githubScope = scope
         showingGitHub = true
         github.refresh(model: self)
     }
 
+    /// The global GitHub button/shortcut: always the all-folders view.
     func toggleGitHubView() {
-        if showingGitHub { showingGitHub = false } else { openGitHub() }
+        if showingGitHub && githubScope == nil { showingGitHub = false }
+        else { openGitHub(scope: nil) }
+    }
+
+    /// The per-project GitHub button: open the view scoped to `cwd`, and when
+    /// that folder's current branch has an open PR, deep-link straight into it.
+    /// Selects from cache immediately when possible; otherwise records a pending
+    /// branch so `resolvePendingBranchSelect` picks it up once PRs load.
+    func openGitHubForFolder(_ cwd: String) {
+        let branch = folderGitState(cwd)?.branch
+        githubPendingBranchSelect = nil
+        if let branch, let pr = prs(cwd)?.prs.first(where: { $0.branch == branch }) {
+            github.select(cwd: cwd, pr: pr)
+        } else {
+            github.selectedKey = nil
+            if let branch { githubPendingBranchSelect = PendingBranchSelect(cwd: cwd, branch: branch) }
+        }
+        openGitHub(scope: cwd)
+    }
+
+    /// Resolve a pending branch deep-link once the folder's PRs have loaded.
+    /// Called by the view when the scoped folder's PR list changes.
+    func resolvePendingBranchSelect() {
+        guard let pending = githubPendingBranchSelect,
+              let pr = prs(pending.cwd)?.prs.first(where: { $0.branch == pending.branch })
+        else { return }
+        github.select(cwd: pending.cwd, pr: pr)
+        githubPendingBranchSelect = nil
     }
 
     /// "Open diff" from the GitHub view: land on the best session for the PR with
