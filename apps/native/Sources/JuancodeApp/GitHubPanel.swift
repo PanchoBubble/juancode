@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import JuancodeCore
 import JuancodeServices
+import MarkdownUI
 
 // The first-class GitHub view (juancode-2t6): overlays the detail area of the
 // split view (never a sheet — the session content stays mounted underneath,
@@ -33,11 +34,47 @@ final class GitHubModel {
     private(set) var queuedFlash: Set<String> = []
     /// The last action failure to surface inline (send-to-agent/track errors).
     var actionError: String?
+    /// Viewer-scoped filters shared across every folder in the pane. Mirror the
+    /// folder popover's Mine/Assigned semantics (AND when both are on), and live
+    /// here so they persist while the view is dismissed and re-opened.
+    var mineOnly = false
+    var assignedOnly = false
+
+    /// Whether any viewer-scoped filter is active.
+    var filterActive: Bool { mineOnly || assignedOnly }
+
+    /// Apply the active filters to a folder's PRs using that folder's viewer
+    /// login. Returns the list unchanged when no filter is active or the viewer
+    /// is unknown, so a folder never hides its PRs just because `gh` couldn't
+    /// report who we are.
+    func filtered(_ prs: [PullRequest], viewer: String) -> [PullRequest] {
+        guard filterActive, !viewer.isEmpty else { return prs }
+        return prs.filter { pr in
+            if mineOnly && pr.author != viewer { return false }
+            if assignedOnly && !pr.assignees.contains(viewer) { return false }
+            return true
+        }
+    }
 
     /// Kick a PR-list refresh for every folder the view shows (all, or the one
-    /// scoped folder).
+    /// scoped folder). Re-runs the scoped `gh` query too when a filter is active,
+    /// since `loadPrs` resets the cache to the newest-50 firehose (which may miss
+    /// your older PRs).
     func refresh(model: AppModel) {
-        for cwd in model.githubScopedFolders { model.loadPrs(cwd) }
+        for cwd in model.githubScopedFolders {
+            model.loadPrs(cwd)
+            if filterActive {
+                model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: "")
+            }
+        }
+    }
+
+    /// Re-run the scoped backfill for every folder — called when a filter toggles
+    /// so matches beyond the firehose fold in.
+    func applyFilters(model: AppModel) {
+        for cwd in model.githubScopedFolders {
+            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: "")
+        }
     }
 
     /// Select a PR and prefetch its detail.
@@ -189,6 +226,20 @@ struct GitHubView: View {
                 .help("Show PRs across every project")
                 .clickCursor()
             }
+            if canFilterViewer {
+                Toggle("Mine (\(mineCount))", isOn: mineBinding)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .font(.system(size: 10))
+                    .help("Show only PRs you authored")
+                    .clickCursor()
+                Toggle("Assigned (\(assignedCount))", isOn: assignedBinding)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .font(.system(size: 10))
+                    .help("Show only PRs assigned to you")
+                    .clickCursor()
+            }
             Button { model.github.refresh(model: model) } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -208,11 +259,10 @@ struct GitHubView: View {
 
     private var summary: String {
         let folders = model.githubScopedFolders
-        let prs = folders.reduce(0) { acc, cwd in
-            guard let r = model.prs(cwd), r.available else { return acc }
-            return acc + r.prs.count
-        }
-        let prPart = "\(prs) open PR\(prs == 1 ? "" : "s")"
+        let total = scopedPrTotal
+        let prPart = model.github.filterActive
+            ? "\(shownPrTotal) of \(total) open PR\(total == 1 ? "" : "s")"
+            : "\(total) open PR\(total == 1 ? "" : "s")"
         if let scope = model.githubScope {
             return "\((scope as NSString).lastPathComponent) · \(prPart)"
         }
@@ -223,6 +273,67 @@ struct GitHubView: View {
     private var scopedPrCountSignal: Int {
         guard let scope = model.githubScope else { return -1 }
         return model.prs(scope)?.prs.count ?? -1
+    }
+
+    // MARK: viewer filters
+
+    /// The authenticated `gh` login, taken from the first shown folder that
+    /// reports one (auth is global, so it's the same across folders).
+    private var viewer: String {
+        for cwd in model.githubScopedFolders {
+            if let v = model.prs(cwd)?.viewer, !v.isEmpty { return v }
+        }
+        return ""
+    }
+
+    /// Total open PRs across the folders currently shown (scope-aware).
+    private var scopedPrTotal: Int {
+        model.githubScopedFolders.reduce(0) { acc, cwd in
+            guard let r = model.prs(cwd), r.available else { return acc }
+            return acc + r.prs.count
+        }
+    }
+
+    /// Offer the viewer-scoped filters only once we know who the viewer is and
+    /// there's at least one open PR to filter (within the current scope).
+    private var canFilterViewer: Bool { !viewer.isEmpty && scopedPrTotal > 0 }
+
+    /// PRs authored by the viewer across the shown folders (each scored by its
+    /// own viewer login).
+    private var mineCount: Int {
+        countAcrossFolders { pr, v in pr.author == v }
+    }
+
+    /// PRs assigned to the viewer across the shown folders.
+    private var assignedCount: Int {
+        countAcrossFolders { pr, v in pr.assignees.contains(v) }
+    }
+
+    /// Total PRs shown under the active filters, across the shown folders.
+    private var shownPrTotal: Int {
+        model.githubScopedFolders.reduce(0) { acc, cwd in
+            guard let r = model.prs(cwd), r.available else { return acc }
+            return acc + model.github.filtered(r.prs, viewer: r.viewer ?? "").count
+        }
+    }
+
+    private func countAcrossFolders(_ match: (PullRequest, String) -> Bool) -> Int {
+        model.githubScopedFolders.reduce(0) { acc, cwd in
+            guard let r = model.prs(cwd), r.available, let v = r.viewer, !v.isEmpty else { return acc }
+            return acc + r.prs.filter { match($0, v) }.count
+        }
+    }
+
+    private var mineBinding: Binding<Bool> {
+        Binding(
+            get: { model.github.mineOnly },
+            set: { model.github.mineOnly = $0; model.github.applyFilters(model: model) })
+    }
+
+    private var assignedBinding: Binding<Bool> {
+        Binding(
+            get: { model.github.assignedOnly },
+            set: { model.github.assignedOnly = $0; model.github.applyFilters(model: model) })
     }
 
     // MARK: PR list (left column)
@@ -246,48 +357,55 @@ struct GitHubView: View {
     @ViewBuilder
     private func folderSection(_ cwd: String) -> some View {
         let result = model.prs(cwd)
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "folder")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text((cwd as NSString).lastPathComponent)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .help(cwd)
-                Spacer(minLength: 4)
-                if let r = result, r.available {
-                    Text("\(r.prs.count)")
-                        .font(.system(size: 10).monospacedDigit())
+        let shown = result.map { model.github.filtered($0.prs, viewer: $0.viewer ?? "") } ?? []
+        // Under an active filter, drop folders with no matches so the pane stays
+        // focused on the PRs you asked for.
+        if model.github.filterActive, let r = result, r.available, shown.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
-                } else if result == nil {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color.appPanel)
-            if let r = result {
-                if !r.available {
-                    // e.g. "gh not authenticated" / not a GitHub repo.
-                    Text(r.error ?? "PRs unavailable")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                } else if r.prs.isEmpty {
-                    Text("No open PRs")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                } else {
-                    let ordered = sortPrsTrackedFirst(r.prs) {
-                        model.trackedPr(cwd: cwd, number: $0.number) != nil
+                    Text((cwd as NSString).lastPathComponent)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .help(cwd)
+                    Spacer(minLength: 4)
+                    if let r = result, r.available {
+                        Text("\(shown.count)")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else if result == nil {
+                        ProgressView().controlSize(.mini)
                     }
-                    ForEach(ordered, id: \.number) { pr in
-                        GitHubPrRow(pr: pr, cwd: cwd)
-                        Divider()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.appPanel)
+                if let r = result {
+                    if !r.available {
+                        // e.g. "gh not authenticated" / not a GitHub repo.
+                        Text(r.error ?? "PRs unavailable")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                    } else if r.prs.isEmpty {
+                        Text("No open PRs")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                    } else {
+                        let ordered = sortPrsTrackedFirst(shown) {
+                            model.trackedPr(cwd: cwd, number: $0.number) != nil
+                        }
+                        ForEach(ordered, id: \.number) { pr in
+                            GitHubPrRow(pr: pr, cwd: cwd)
+                            Divider()
+                        }
                     }
                 }
             }
@@ -733,6 +851,7 @@ private struct GitHubConversationSection: View {
     let pr: PullRequest
     let cwd: String
     let conversation: PrConversation
+    @State private var addingComment = false
 
     var body: some View {
         let timeline = prTimeline(conversation)
@@ -778,11 +897,183 @@ private struct GitHubConversationSection: View {
                     }
                 }
             }
+            Divider().opacity(0.4).padding(.top, 2)
+            if addingComment {
+                ReplyComposer(pr: pr, cwd: cwd, replyTargetId: nil, isPresented: $addingComment)
+            } else {
+                Button {
+                    addingComment = true
+                } label: {
+                    Label("Add a comment", systemImage: "plus.bubble")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .clickCursor()
+            }
         }
     }
 }
 
 /// One review verdict in the timeline: author + APPROVED / CHANGES_REQUESTED /
+/// Renders a GitHub comment/review body. Markdown runs go through MarkdownUI
+/// (headings, task lists, code, links) sized to the compact panel typography;
+/// the `<details>`/`<summary>` blocks GitHub bots emit become native collapsible
+/// disclosures instead of rendering their tags literally. Other HTML noise
+/// (comments, `<p>`, `<br>`, `<sub>`) is stripped in `parseCommentSegments`.
+private struct CommentMarkdown: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(parseCommentSegments(text).enumerated()), id: \.offset) { _, seg in
+                CommentSegmentView(segment: seg)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// One parsed piece of a comment body: a run of markdown or a `<details>` block
+/// (whose inner content is parsed recursively, so nested disclosures nest).
+private enum CommentSegment {
+    case markdown(String)
+    case details(summary: String, inner: [CommentSegment])
+}
+
+private struct CommentSegmentView: View {
+    let segment: CommentSegment
+
+    var body: some View {
+        switch segment {
+        case .markdown(let md):
+            Markdown(md)
+                .markdownTheme(.prPanel)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .details(let summary, let inner):
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(inner.enumerated()), id: \.offset) { _, seg in
+                        CommentSegmentView(segment: seg)
+                    }
+                }
+                .padding(.leading, 10)
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } label: {
+                Markdown(summary)
+                    .markdownTheme(.prPanel)
+            }
+        }
+    }
+}
+
+/// Strip the HTML that MarkdownUI would otherwise print verbatim, then split the
+/// body into markdown runs and `<details>` blocks (balanced, nesting-aware).
+private func parseCommentSegments(_ raw: String) -> [CommentSegment] {
+    splitDetails(cleanCommentHTML(raw))
+}
+
+/// Remove HTML comments and unwrap the prose-wrapper tags GitHub bots emit;
+/// leaves `<details>`/`<summary>` for `splitDetails` to turn into disclosures.
+private func cleanCommentHTML(_ s: String) -> String {
+    var out = s
+    let subs: [(String, String)] = [
+        ("<!--[\\s\\S]*?-->", ""),      // HTML comments
+        ("<br\\s*/?>", "\n"),           // line breaks
+        ("</?p\\s*>", "\n\n"),          // paragraph wrappers
+        ("</?su[bp]\\s*>", ""),         // <sub>/<sup> wrappers
+    ]
+    for (pattern, replacement) in subs {
+        out = out.replacingOccurrences(
+            of: pattern, with: replacement,
+            options: [.regularExpression, .caseInsensitive])
+    }
+    return out
+}
+
+private func splitDetails(_ text: String) -> [CommentSegment] {
+    var segments: [CommentSegment] = []
+    var idx = text.startIndex
+    while idx < text.endIndex {
+        guard let open = text.range(of: "<details", options: .caseInsensitive,
+                                    range: idx..<text.endIndex) else {
+            appendMarkdown(text[idx...], to: &segments)
+            break
+        }
+        appendMarkdown(text[idx..<open.lowerBound], to: &segments)
+        guard let openTagEnd = text.range(of: ">", range: open.upperBound..<text.endIndex) else {
+            appendMarkdown(text[open.lowerBound...], to: &segments)
+            break
+        }
+        let contentStart = openTagEnd.upperBound
+        guard let close = matchingDetailsClose(text, from: contentStart) else {
+            // Unbalanced <details>: treat everything after it as the inner body.
+            segments.append(makeDetails(String(text[contentStart...])))
+            break
+        }
+        segments.append(makeDetails(String(text[contentStart..<close.lowerBound])))
+        idx = close.upperBound
+    }
+    return segments
+}
+
+/// Find the `</details>` that closes the block opened just before `start`,
+/// accounting for nested `<details>`. Returns the full `</details ... >` range.
+private func matchingDetailsClose(_ text: String, from start: String.Index) -> Range<String.Index>? {
+    var depth = 1
+    var cursor = start
+    while cursor < text.endIndex {
+        let openR = text.range(of: "<details", options: .caseInsensitive,
+                               range: cursor..<text.endIndex)
+        guard let closeR = text.range(of: "</details", options: .caseInsensitive,
+                                      range: cursor..<text.endIndex) else { return nil }
+        if let open = openR, open.lowerBound < closeR.lowerBound {
+            depth += 1
+            cursor = open.upperBound
+        } else {
+            depth -= 1
+            if depth == 0 {
+                let gt = text.range(of: ">", range: closeR.upperBound..<text.endIndex)
+                return closeR.lowerBound..<(gt?.upperBound ?? text.endIndex)
+            }
+            cursor = closeR.upperBound
+        }
+    }
+    return nil
+}
+
+/// Build a `.details` segment: pull the leading `<summary>` (if any) as the
+/// label, recursively parse the remaining inner body.
+private func makeDetails(_ inner: String) -> CommentSegment {
+    var summary = "Details"
+    var rest = inner
+    if let sOpen = inner.range(of: "<summary", options: .caseInsensitive),
+       let sTagEnd = inner.range(of: ">", range: sOpen.upperBound..<inner.endIndex),
+       let sClose = inner.range(of: "</summary>", options: .caseInsensitive,
+                                range: sTagEnd.upperBound..<inner.endIndex) {
+        let label = inner[sTagEnd.upperBound..<sClose.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !label.isEmpty { summary = label }
+        rest.removeSubrange(sOpen.lowerBound..<sClose.upperBound)
+    }
+    return .details(summary: summary, inner: splitDetails(rest))
+}
+
+private func appendMarkdown(_ slice: Substring, to segments: inout [CommentSegment]) {
+    let trimmed = slice.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty { segments.append(.markdown(trimmed)) }
+}
+
+extension Theme {
+    /// GitHub look at the panel's compact size: override only the base text
+    /// size, letting the `.gitHub` theme's relative heading/code/quote sizes
+    /// scale down with it.
+    @MainActor
+    static let prPanel: Theme = Theme.gitHub
+        .text { FontSize(12) }
+}
+
 /// COMMENTED chip + relative time, and the review body when non-empty.
 private struct ReviewVerdictRow: View {
     let review: PrReviewItem
@@ -804,10 +1095,7 @@ private struct ReviewVerdictRow: View {
                 Spacer(minLength: 0)
             }
             if !review.body.isEmpty {
-                Text(review.body)
-                    .font(.system(size: 12))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                CommentMarkdown(text: review.body)
             }
         }
     }
@@ -849,10 +1137,7 @@ private struct IssueCommentRow: View {
                         number: pr.number, path: nil, line: nil,
                         author: comment.author, body: comment.body, url: comment.url))
             }
-            Text(comment.body)
-                .font(.system(size: 12))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            CommentMarkdown(text: comment.body)
             if replying {
                 ReplyComposer(pr: pr, cwd: cwd, replyTargetId: nil, isPresented: $replying)
             }
@@ -913,10 +1198,7 @@ private struct ReviewThreadView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
                         }
-                        Text(c.body)
-                            .font(.system(size: 12))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        CommentMarkdown(text: c.body)
                     }
                 }
                 if replying {

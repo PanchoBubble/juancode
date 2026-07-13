@@ -628,32 +628,38 @@ public final class Session: @unchecked Sendable {
         logEvent("seedSettle", ["settled": "\(settled)"])
         guard isRunning else { return .failed(reason: "session exited during startup") }
 
-        // 2) Paste, then confirm the prompt actually landed in the input box.
+        // A fresh session that's already working (self-started) needs no seeding.
+        // Checked once, up front only: our own paste churn below can flip the
+        // detector to busy, and treating that as "submitted" used to short-circuit
+        // out before the Enter — leaving the prompt sitting unsent in the box.
+        if activity == .busy { return .submitted }
+
+        // 2) Paste, then confirm the prompt actually landed on screen.
         // `waitForStableScreen` can report "settled" on an early partial paint — the
         // banner is up but the input box isn't interactive yet — especially when
         // several sessions spawn at once and contend for CPU. So don't give up after
         // a fixed few tries: keep re-pasting until it lands or a generous deadline
         // passes, so a box that only becomes ready seconds later is still caught.
+        // Only re-paste while nothing has landed: a tall multi-line seed renders as
+        // literal text taller than the input box, and stacking duplicate copies
+        // pushes its first line (the signature) off-screen — which is what defeated
+        // detection and left several unsent copies in the box.
         var landed = false
         var elapsedMs = 0
         var pasteAttempt = 0
         while elapsedMs < Seed.landDeadlineMs {
             guard isRunning else { return .failed(reason: "session exited before the prompt was typed") }
-            if activity == .busy { return .submitted } // already working — nothing to do
+            if seedLanded(signature) { landed = true; break }
             pasteAttempt += 1
             logEvent("seedPaste", ["attempt": "\(pasteAttempt)"])
             paste(trimmed)
-            landed = await waitUntil(maxMs: Seed.landMs, pollMs: Seed.pollMs) {
-                self.activity == .busy || self.inputBoxContains(signature)
-                    || self.inputBoxShowsCollapsedPaste()
-            }
-            if activity == .busy { return .submitted }
+            landed = await waitUntil(maxMs: Seed.landMs, pollMs: Seed.pollMs) { self.seedLanded(signature) }
             if landed { break }
             elapsedMs += Seed.landMs
         }
         guard landed else {
             return .failed(
-                reason: "the prompt never appeared in the input box after \(Seed.landDeadlineMs / 1000)s")
+                reason: "the prompt never appeared on screen after \(Seed.landDeadlineMs / 1000)s")
         }
 
         // 3) Submit, then confirm it went through (agent busy, or the box cleared).
@@ -687,6 +693,20 @@ public final class Session: @unchecked Sendable {
     /// loop treats as the paste having landed. See `InitialPromptDelivery`.
     private func inputBoxShowsCollapsedPaste() -> Bool {
         InitialPromptDelivery.regionShowsCollapsedPaste(terminalModel.bottomText(Seed.inputRows))
+    }
+
+    /// True once the seed is detectably on screen — its `signature` or a collapsed-
+    /// paste chip, searched across the *whole* visible screen rather than only the
+    /// input-box footer. A tall multi-line seed renders as literal text taller than
+    /// the footer, so its first line (the signature) scrolls above the bottom rows;
+    /// scoping the land check to the footer missed it and the Enter was never sent.
+    /// Safe to search the whole screen here because a freshly settled session shows
+    /// only the banner + empty box. Submission is still confirmed against the footer
+    /// (see `deliverSeed`), where "the prompt left the box" is the right signal.
+    private func seedLanded(_ signature: String) -> Bool {
+        let screen = terminalModel.visibleText()
+        return InitialPromptDelivery.region(screen, contains: signature)
+            || InitialPromptDelivery.regionShowsCollapsedPaste(screen)
     }
 
     /// Poll until the rendered screen stops changing (two identical, non-empty

@@ -45,6 +45,7 @@ public final class SessionRegistry: @unchecked Sendable {
     public func createEditor(
         parent: SessionMeta,
         file: String? = nil,
+        line: Int? = nil,
         cols: Int,
         rows: Int
     ) throws -> Session {
@@ -56,10 +57,25 @@ public final class SessionRegistry: @unchecked Sendable {
             let full = URL(fileURLWithPath: file, relativeTo: root).standardizedFileURL
             if full.path == root.path || full.path.hasPrefix(root.path + "/") { target = full.path }
         }
+        var args = baseArgs
+        // Jump to a line when we opened a concrete file in a vim-family editor:
+        // `nvim +256 path` positions the cursor there (the `+N` flag must precede the
+        // path). Other editors get the file without the jump (their line syntax differs).
+        if let line, line > 0, target != ".", editorSupportsLineFlag(executable) {
+            args.append("+\(line)")
+        }
+        args.append(target)
         return try track(Session.editor(
-            parent: parent, executable: executable, args: baseArgs + [target],
+            parent: parent, executable: executable, args: args,
             cols: cols, rows: rows, env: env
         ))
+    }
+
+    /// Whether `executable` is a vim-family editor that understands the `+<line>`
+    /// open-at-line flag.
+    private func editorSupportsLineFlag(_ executable: String) -> Bool {
+        let name = (executable as NSString).lastPathComponent.lowercased()
+        return ["nvim", "vim", "vi", "view", "nvi", "gvim", "mvim"].contains(name)
     }
 
     /// Revive an exited session by resuming its prior CLI conversation.

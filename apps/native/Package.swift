@@ -30,6 +30,10 @@ let package = Package(
         // for SwiftTerm (cleaner resize, fewer render glitches). Host-driven via
         // InMemoryTerminalSession so we keep owning the pty/byte stream.
         .package(url: "https://github.com/Lakr233/libghostty-spm.git", from: "1.2.0"),
+        // GitHub-flavored markdown rendering for PR-panel comment bodies
+        // (juancode-lqw). Handles headings, task lists, code fences, links; HTML
+        // blocks (<details> etc.) render as their inner text.
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", from: "2.4.0"),
     ],
     targets: [
         // The native core that replaces node-pty + the server's session layer
@@ -91,6 +95,7 @@ let package = Package(
                 // live surface; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm for
                 // A/B comparison. See GhosttyLive.swift.
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ]
         ),
         .testTarget(

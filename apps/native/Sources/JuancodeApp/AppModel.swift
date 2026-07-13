@@ -521,6 +521,11 @@ final class AppModel {
 
     func liveSession(_ id: String) -> Session? { appState.registry.get(id) }
 
+    /// Whether `id` is an in-app editor pane (nvim etc.), across live + cached metas.
+    func isEditorSession(_ id: String) -> Bool {
+        (liveSession(id)?.meta.kind ?? metaCache[id]?.kind) == .editor
+    }
+
     /// Move the sidebar selection by `delta` rows within `navOrder` (clamped). With
     /// nothing selected, jumps to the first (down) or last (up) row.
     func moveSelection(by delta: Int) {
@@ -714,7 +719,20 @@ final class AppModel {
                 }
             }
         }
-        s.onExit { [weak self] _ in Task { @MainActor in self?.refresh() } }
+        s.onExit { [weak self] _ in Task { @MainActor in
+            guard let self else { return }
+            // An editor pane (nvim) that quits (:q) is gone from the list; if it was
+            // selected, land back on the session it was opened from instead of an
+            // empty (black) detail pane, and refocus that terminal.
+            if s.meta.kind == .editor, self.selection == s.id,
+               let parent = s.meta.parentSessionId {
+                self.selection = parent
+                self.refresh()
+                self.focusTerminal()
+                return
+            }
+            self.refresh()
+        } }
         // A CLI-derived title / usage landing from the title poll (or a rename /
         // archive) mutates the live meta without a turn edge. Patch that one row in
         // place rather than rebuilding the whole list from `store.list()` every 4s
@@ -1097,7 +1115,7 @@ final class AppModel {
     /// main actor (forkpty + login-shell binary resolution) like `create`, then
     /// selects the new pane. No-op if the source session is unknown or is itself an
     /// editor.
-    func openEditorSession(_ sessionId: String, file: String? = nil) {
+    func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
         guard let parent = appState.registry.get(sessionId)?.meta
                 ?? sessions.first(where: { $0.id == sessionId }),
               parent.kind != .editor else { return }
@@ -1106,7 +1124,7 @@ final class AppModel {
         Task {
             do {
                 let s = try await Task.detached(priority: .userInitiated) {
-                    try state.registry.createEditor(parent: parent, file: file, cols: grid.cols, rows: grid.rows)
+                    try state.registry.createEditor(parent: parent, file: file, line: line, cols: grid.cols, rows: grid.rows)
                 }.value
                 refresh()
                 selection = s.id
@@ -3460,6 +3478,9 @@ final class AppModel {
     }
 
     func delete(_ id: String) {
+        // Editor panes aren't persisted, so their parent link lives only on the live
+        // meta — read it before the kill so closing one lands back on its parent.
+        let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
         let meta = appState.store.get(id)
         appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
         appState.registry.get(id)?.kill()
@@ -3470,7 +3491,7 @@ final class AppModel {
         stopWatchingChanges(id)
         agentWorktreeBySession.removeValue(forKey: id)
         remoteGridOwners.removeValue(forKey: id)
-        if selection == id { selection = nil }
+        if selection == id { selection = editorParent }
         clearUnread(id)
         refresh()
         if let wt = meta?.worktreePath {
@@ -3509,6 +3530,7 @@ final class AppModel {
         guard !ids.isEmpty else { return }
         var worktrees: [String] = []
         for id in ids {
+            let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
             let meta = appState.store.get(id)
             if let wt = meta?.worktreePath { worktrees.append(wt) }
             appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
@@ -3519,7 +3541,7 @@ final class AppModel {
             stopWatchingChanges(id)
             agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
-            if selection == id { selection = nil }
+            if selection == id { selection = editorParent }
             clearUnread(id)
         }
         refresh()

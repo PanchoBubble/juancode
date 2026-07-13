@@ -2564,7 +2564,8 @@ struct SessionContainer: View {
             SwiftTermLive(session: session,
                           focusToken: model.terminalFocusToken,
                           resyncToken: model.terminalResyncToken,
-                          autoFocusOnAppear: !model.suppressTerminalAutoFocus)
+                          autoFocusOnAppear: !model.suppressTerminalAutoFocus,
+                          onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))

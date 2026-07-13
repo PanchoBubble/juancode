@@ -2,6 +2,11 @@ import SwiftUI
 import AppKit
 import SwiftTerm
 import JuancodeCore
+import os
+
+// TEMP resize-repaint diagnostics (juancode). Filter in Console.app / `log stream`
+// with: subsystem == "dev.juancode.app" && category == "resize-debug"
+private let resizeDebugLog = Logger(subsystem: "dev.juancode.app", category: "resize-debug")
 
 /// SwiftUI identity for a live terminal view: its `Session` object plus a manual
 /// `refresh` counter. A change to *either* recreates the view — the session swap
@@ -63,6 +68,56 @@ private extension NSColor {
 /// with `defaults write dev.juancode.app terminal.copyOnSelect -bool false`.
 final class CopyOnSelectTerminalView: TerminalView {
     private var copyWork: DispatchWorkItem?
+    /// Called with a `path` (and optional 1-based `line`) when a ⌘-click / ⌘⇧-click
+    /// lands on a `path:line` token — routed to the in-app editor pane. Set by the
+    /// representable; the path is resolved against the session cwd downstream.
+    var onOpenPath: ((String, Int?) -> Void)?
+
+    /// A ⌘-click / ⌘⇧-click at a window-space point: if a `path:line` sits under it,
+    /// fire `onOpenPath` and report handled (the caller then swallows the event). We
+    /// can't override `mouseDown` (SwiftTerm marks it `public`, not `open`), so this is
+    /// driven by a local event monitor — matching the wheel / shift-enter pattern.
+    func handleModifiedClick(at windowPoint: NSPoint) -> Bool {
+        guard let onOpenPath else { return false } // no handler (e.g. Oracle dock): don't swallow
+        guard let cell = screenCell(at: windowPoint), let hit = pathToken(at: cell) else { return false }
+        onOpenPath(hit.path, hit.line)
+        return true
+    }
+
+    /// Screen cell (col/row relative to the visible viewport) under a window-space
+    /// point. Replicates SwiftTerm's own (internal) cell math from the public font.
+    private func screenCell(at windowPoint: NSPoint) -> (col: Int, row: Int)? {
+        guard let terminal else { return nil }
+        let p = convert(windowPoint, from: nil)
+        let (w, h) = cellSize()
+        guard w > 0, h > 0 else { return nil }
+        let row = Int((bounds.height - p.y) / h)
+        guard row >= 0, row < terminal.rows else { return nil }
+        let col = min(max(0, Int(p.x / w)), max(0, terminal.cols - 1))
+        return (col, row)
+    }
+
+    /// Cell pixel size, mirroring SwiftTerm's `computeFontDimensions` (font ascent +
+    /// descent + leading for height, the "W" advance for width, both snapped to the
+    /// backing grid) so the mapping matches what the view actually rendered.
+    private func cellSize() -> (CGFloat, CGFloat) {
+        let ct = font as CTFont
+        let height = ceil(CTFontGetAscent(ct) + CTFontGetDescent(ct) + CTFontGetLeading(ct))
+        let width = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        let scale = window?.backingScaleFactor ?? 2
+        return (ceil(width * scale) / scale, ceil(height * scale) / scale)
+    }
+
+    /// If a `path[:line[:col]]` token sits at `cell`, return it. Reads the buffer line
+    /// via public API and prefers the match spanning the clicked column.
+    private func pathToken(at cell: (col: Int, row: Int)) -> (path: String, line: Int?)? {
+        guard let terminal else { return nil }
+        let bufferRow = cell.row + terminal.buffer.yDisp
+        guard bufferRow >= 0 else { return nil }
+        let text = terminal.getText(start: Position(col: 0, row: bufferRow),
+                                    end: Position(col: max(0, terminal.cols - 1), row: bufferRow))
+        return TerminalPathLink.parse(in: text, preferColumn: cell.col)
+    }
 
     override func selectionChanged(source: Terminal) {
         super.selectionChanged(source: source)
@@ -157,6 +212,32 @@ func installShiftEnterNewline(view: NSView, session: Session) -> Any? {
     }
 }
 
+/// ⌘-click / ⌘⇧-click a `path:line` in the terminal to open it in the editor pane.
+///
+/// SwiftTerm marks `mouseDown` `public` (not `open`), so we can't override it; instead a
+/// window-level `.leftMouseDown` monitor sits ahead of the surface. It only acts when the
+/// click is over *this* terminal in the key window, ⌘ (optionally +⇧) is the only
+/// modifier, and a path token sits under the pointer — then it opens and swallows the
+/// event. Everything else (plain clicks, drag-select, ⌘-click on a URL) passes straight
+/// through to SwiftTerm's own handling untouched.
+func installPathClickOpen(on tv: CopyOnSelectTerminalView) -> Any? {
+    let handle: @MainActor (CGPoint, Int, NSEvent.ModifierFlags) -> Bool = { [weak tv] location, windowNumber, mods in
+        guard let tv, let window = tv.window, window.isKeyWindow, window.windowNumber == windowNumber else { return false }
+        let m = mods.intersection([.command, .shift, .control, .option])
+        guard m == .command || m == [.command, .shift] else { return false }
+        guard let hit = window.contentView?.hitTest(location), hit === tv || hit.isDescendant(of: tv)
+        else { return false }
+        return tv.handleModifiedClick(at: location)
+    }
+    return NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+        let location = event.locationInWindow
+        let windowNumber = event.windowNumber
+        let mods = event.modifierFlags
+        let consumed = MainActor.assumeIsolated { handle(location, windowNumber, mods) }
+        return consumed ? nil : event
+    }
+}
+
 /// Vim-style sidebar navigation + ⌃H/⌃L pane focus (juancode-vgm).
 ///
 /// The live terminal makes itself first responder and SwiftTerm swallows every
@@ -235,6 +316,9 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             // a later row click auto-focuses its terminal again. Guarded to avoid churn.
             if model.suppressTerminalAutoFocus { model.suppressTerminalAutoFocus = false }
             guard ctrl, keyCode == 4 else { return false } // ⌃H
+            // Inside an editor pane (nvim), ⌃H/J/K/L are vim window moves — let ⌃H reach
+            // the pty instead of stealing it for sidebar focus (⌃J/K/L already pass through).
+            if let sel = model.selection, model.isEditorSession(sel) { return false }
             window.makeFirstResponder(nil)
             model.focusSidebar()
             return true
@@ -477,13 +561,17 @@ struct SwiftTermLive: View {
     /// while the sidebar is being keyboard-navigated, so opening rows with j/k doesn't
     /// yank focus into the pty on every move (juancode-vgm).
     var autoFocusOnAppear: Bool = true
+    /// ⌘-click / ⌘⇧-click on a `path:line` in the terminal calls this with the path
+    /// and optional line, so the host can open it (see `AppModel.openEditorSession`).
+    var onOpenPath: ((String, Int?) -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
             SwiftTermRepresentable(session: session, targetSize: proxy.size,
                                    remembersSize: remembersSize, focusToken: focusToken,
                                    resyncToken: resyncToken,
-                                   autoFocusOnAppear: autoFocusOnAppear)
+                                   autoFocusOnAppear: autoFocusOnAppear,
+                                   onOpenPath: onOpenPath)
         }
     }
 }
@@ -503,6 +591,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     /// the grid and forces a SIGWINCH. See `SwiftTermLive.resyncToken`.
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    var onOpenPath: ((String, Int?) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
@@ -520,6 +609,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         // consume them cleanly they land as junk in the input line. Wheel scrolling
         // stays alive via `installWheelForwarding`, which sends button events directly.
         tv.allowMouseReporting = false
+        tv.onOpenPath = onOpenPath
+        context.coordinator.onOpenPath = onOpenPath
         SwiftTermTheme.apply(to: tv)
         context.coordinator.attach(to: tv)
         let host = TerminalHostView(terminal: tv)
@@ -559,6 +650,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
 
     final class Coordinator: NSObject, TerminalViewDelegate {
         private let session: Session
+        /// Routes a file-path link (OSC-8 / detected) to the in-app editor. Web URLs
+        /// still open in the browser (see `requestOpenLink`).
+        var onOpenPath: ((String, Int?) -> Void)?
         private weak var view: TerminalView?
         private var cancel: (() -> Void)?
         /// Batches pty output into one `feed()` per runloop turn (juancode-kdn).
@@ -566,6 +660,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private var wheelMonitor: Any?
         /// Window-level keyDown monitor mapping Shift+Enter → `\`+CR (soft newline).
         private var shiftEnterMonitor: Any?
+        /// Window-level leftMouseDown monitor for ⌘-click-to-open a `path:line`.
+        private var pathClickMonitor: Any?
         private var resizeWork: DispatchWorkItem?
         /// One-shot repaint fired after the attach-time scrollback replay lands
         /// (see `attach`). Held so `detach` can cancel it before the pane tears down.
@@ -600,6 +696,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
             shiftEnterMonitor = installShiftEnterNewline(view: tv, session: session)
+            if let cv = tv as? CopyOnSelectTerminalView { pathClickMonitor = installPathClickOpen(on: cv) }
             // Follow the global terminal font-zoom level (juancode-fry). SwiftTerm's
             // surface is live immediately (no lazy attach), so apply the current level now.
             baseFontPoints = Double(tv.font.pointSize)
@@ -683,6 +780,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: Session) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             let cols = t.cols, rows = t.rows
+            resizeDebugLog.log("nudgeResize FLAP cols=\(cols) rows=\(rows) alt=\(t.isCurrentBufferAlternate)")
             session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) {
                 session.resizeLocal(cols: cols, rows: rows)
@@ -724,6 +822,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// The debounce already suppresses intermediate grids; the transition flag
         /// upgrades the eventual flush to a forced re-layout.
         private func scheduleResize(cols: Int, rows: Int) {
+            let alt = view?.terminal?.isCurrentBufferAlternate ?? false
+            resizeDebugLog.log("scheduleResize in cols=\(cols) rows=\(rows) gateActive=\(LayoutTransitionGate.shared.active) alt=\(alt) lastSent=\(self.lastSent.map { "\($0.cols)x\($0.rows)" } ?? "nil", privacy: .public)")
             lastGrid = (cols, rows)
             if LayoutTransitionGate.shared.active { settleAfterTransition = true }
             resizeWork?.cancel()
@@ -738,7 +838,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// re-lays-out at the settled size.
         private func flushResize() {
             guard let g = lastGrid else { return }
+            let alt = view?.terminal?.isCurrentBufferAlternate ?? false
             if settleAfterTransition {
+                let netZero = lastSent.map { $0.cols == g.cols && $0.rows == g.rows } ?? false
+                resizeDebugLog.log("flushResize SETTLE grid=\(g.cols)x\(g.rows) netZero=\(netZero) alt=\(alt) -> branch=\(netZero ? "FLAP" : "plain-sendResize", privacy: .public)")
                 settleAfterTransition = false
                 if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
                 // Only force the rows-1/rows flap when the settled grid equals
@@ -759,6 +862,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                     sendResize(cols: g.cols, rows: g.rows)
                 }
             } else {
+                resizeDebugLog.log("flushResize PLAIN (no transition) grid=\(g.cols)x\(g.rows) alt=\(alt)")
                 sendResize(cols: g.cols, rows: g.rows)
             }
         }
@@ -771,7 +875,11 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private func sendResize(cols: Int, rows: Int) {
             guard cols > 0, rows > 0 else { return }
             if remembersSize { TerminalGrid.remember(cols: cols, rows: rows) }
-            if let last = lastSent, last.cols == cols, last.rows == rows { return }
+            if let last = lastSent, last.cols == cols, last.rows == rows {
+                resizeDebugLog.log("sendResize DEDUP (no SIGWINCH) cols=\(cols) rows=\(rows)")
+                return
+            }
+            resizeDebugLog.log("sendResize SEND SIGWINCH cols=\(cols) rows=\(rows)")
             // Only record the grid as sent when it actually reached the pty —
             // recording a failed resize (pty not up yet / ioctl refused) makes the
             // dedup swallow every retry at the same grid, leaving the CLI stuck at
@@ -785,6 +893,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             session.releaseGrid(owner: GridArbiter.localOwner)
             if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
             if let m = shiftEnterMonitor { NSEvent.removeMonitor(m); shiftEnterMonitor = nil }
+            if let m = pathClickMonitor { NSEvent.removeMonitor(m); pathClickMonitor = nil }
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             replayRepaintWork?.cancel(); replayRepaintWork = nil
@@ -812,7 +921,19 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func scrolled(source: TerminalView, position: Double) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            // SwiftTerm hands us OSC-8 / detected links on ⌘-click. Only real web/mail
+            // URLs go to NSWorkspace — a bare `foo.ts:256` isn't openable and macOS
+            // throws "The application can't be opened", so route path-like links to the
+            // in-app editor instead.
+            if let url = URL(string: link), let scheme = url.scheme?.lowercased(),
+               ["http", "https", "mailto"].contains(scheme) {
+                NSWorkspace.shared.open(url)
+                return
+            }
+            var path = link
+            if path.hasPrefix("file://"), let u = URL(string: link) { path = u.path }
+            let parsed = TerminalPathLink.parse(in: path, preferColumn: 0)
+            onOpenPath?(parsed?.path ?? path, parsed?.line)
         }
         func bell(source: TerminalView) { NSSound.beep() }
         func clipboardCopy(source: TerminalView, content: Data) {

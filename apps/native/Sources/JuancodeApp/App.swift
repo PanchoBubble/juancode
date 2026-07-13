@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Darwin
 import JuancodeCore
 import JuancodePersistence
 import JuancodeServer
@@ -18,6 +19,43 @@ enum AppEnv {
     /// The app model, for delegate paths that need UI state — the quit-time
     /// work-at-risk summary reads its last scan (juancode-rxu).
     static var model: AppModel?
+}
+
+/// Cap this process's open-file-descriptor limit to a sane value at launch.
+///
+/// The app holds many fds at once — one pty master per live session, per-session
+/// log/transcript handles, the embedded server's listen + client sockets, and the
+/// DB — so a low inherited limit makes `forkpty` fail with EMFILE ("Too many open
+/// files") and new sessions stop opening. A Finder/`open`/launchd launch inherits
+/// the system soft limit of 256; lifting that is the primary fix.
+///
+/// We deliberately *cap* rather than only raise it. `PtyProcess`'s post-fork
+/// close loop calls `close()` over every fd up to `getdtablesize()` (the soft
+/// limit, itself clamped to `kern.maxfilesperproc`), so a huge inherited limit
+/// (1048576 → effective 92160) turns every spawn into ~16-50ms of syscalls and
+/// shows up as laggy session opening. A modest ceiling keeps ~100x headroom over
+/// realistic usage while holding that loop near ~2ms, and the loop stays correct
+/// because the kernel can't hand out an fd >= the soft limit. Override with
+/// `JUANCODE_MAX_FDS`.
+private func configureFileDescriptorLimit() {
+    let target: rlim_t = {
+        if let raw = ProcessInfo.processInfo.environment["JUANCODE_MAX_FDS"],
+           let n = UInt64(raw.trimmingCharacters(in: .whitespaces)), n > 0 {
+            return rlim_t(n)
+        }
+        return 16384
+    }()
+    // RLIM_INFINITY (the "no hard limit" sentinel) isn't imported as a Swift
+    // symbol; reproduce its value: (1 << 63) - 1.
+    let rlimInfinity: rlim_t = (rlim_t(1) << 63) - 1
+    var lim = rlimit()
+    guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
+    let want = lim.rlim_max == rlimInfinity ? target : min(target, lim.rlim_max)
+    guard want != lim.rlim_cur else { return }
+    lim.rlim_cur = want
+    if setrlimit(RLIMIT_NOFILE, &lim) != 0 {
+        NSLog("juancode: could not set RLIMIT_NOFILE to \(want): \(String(cString: strerror(errno)))")
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -132,6 +170,10 @@ struct JuancodeApp: App {
     @State private var shortcuts = Shortcuts()
 
     init() {
+        // Lift/cap the fd limit before anything opens a descriptor (DB, server,
+        // ptys), so a low inherited limit can't make forkpty fail with EMFILE.
+        configureFileDescriptorLimit()
+
         // Open the on-disk store. If that fails (corrupt file, locked, unwritable
         // data dir) don't crash — fall back to an ephemeral in-memory store so the
         // app still runs this launch, and carry the reason so RootView can surface
