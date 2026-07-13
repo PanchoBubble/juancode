@@ -191,6 +191,10 @@ struct GitHubView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if canFilterViewer {
+                filterBar
+                Divider()
+            }
             HStack(spacing: 0) {
                 prList
                     .frame(width: 300)
@@ -226,20 +230,6 @@ struct GitHubView: View {
                 .help("Show PRs across every project")
                 .clickCursor()
             }
-            if canFilterViewer {
-                Toggle("Mine (\(mineCount))", isOn: mineBinding)
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                    .font(.system(size: 10))
-                    .help("Show only PRs you authored")
-                    .clickCursor()
-                Toggle("Assigned (\(assignedCount))", isOn: assignedBinding)
-                    .toggleStyle(.button)
-                    .controlSize(.small)
-                    .font(.system(size: 10))
-                    .help("Show only PRs assigned to you")
-                    .clickCursor()
-            }
             Button { model.github.refresh(model: model) } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -255,6 +245,29 @@ struct GitHubView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+    }
+
+    // MARK: filter bar
+
+    /// Viewer-scoped filters, in their own full-width row under the header.
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            Toggle("Mine (\(mineCount))", isOn: mineBinding)
+                .toggleStyle(.button)
+                .controlSize(.small)
+                .font(.system(size: 10))
+                .help("Show only PRs you authored")
+                .clickCursor()
+            Toggle("Assigned (\(assignedCount))", isOn: assignedBinding)
+                .toggleStyle(.button)
+                .controlSize(.small)
+                .font(.system(size: 10))
+                .help("Show only PRs assigned to you")
+                .clickCursor()
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
     }
 
     private var summary: String {
@@ -978,11 +991,23 @@ private func parseCommentSegments(_ raw: String) -> [CommentSegment] {
 /// leaves `<details>`/`<summary>` for `splitDetails` to turn into disclosures.
 private func cleanCommentHTML(_ s: String) -> String {
     var out = s
+    // <a href="url">text</a>  ->  [text](url), so MarkdownUI renders a real link
+    // instead of printing the tag verbatim.
+    out = out.replacingOccurrences(
+        of: "<a\\s+[^>]*?href=[\"']([^\"']+)[\"'][^>]*>([\\s\\S]*?)</a>",
+        with: "[$2]($1)",
+        options: [.regularExpression, .caseInsensitive])
+    // <img ... src="url" ... alt="text">  ->  ![text](url)
+    out = out.replacingOccurrences(
+        of: "<img\\s+[^>]*?src=[\"']([^\"']+)[\"'][^>]*?alt=[\"']([^\"']*)[\"'][^>]*/?>",
+        with: "![$2]($1)",
+        options: [.regularExpression, .caseInsensitive])
     let subs: [(String, String)] = [
         ("<!--[\\s\\S]*?-->", ""),      // HTML comments
         ("<br\\s*/?>", "\n"),           // line breaks
         ("</?p\\s*>", "\n\n"),          // paragraph wrappers
         ("</?su[bp]\\s*>", ""),         // <sub>/<sup> wrappers
+        ("</?(?:span|div|kbd|font)[^>]*>", ""), // stray inline wrappers bots emit
     ]
     for (pattern, replacement) in subs {
         out = out.replacingOccurrences(
