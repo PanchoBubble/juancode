@@ -3575,7 +3575,8 @@ final class AppModel {
                         guard let probed = await probeWorkAtRisk(root.path) else { return nil }
                         return WorkAtRiskScan.classify(root, state: probed.state,
                                                        dirtyFiles: probed.dirtyFiles,
-                                                       aheadOfBase: probed.aheadOfBase)
+                                                       aheadOfBase: probed.aheadOfBase,
+                                                       headOnRemote: probed.headOnRemote)
                     }
                 }
                 for _ in 0..<4 { enqueue() }

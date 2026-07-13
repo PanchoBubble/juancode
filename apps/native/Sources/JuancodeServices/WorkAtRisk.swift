@@ -119,13 +119,20 @@ public enum WorkAtRiskScan {
     /// `state.ahead` counts ALL commits when there's no upstream (Git.swift), so
     /// it must not be trusted in that case; nil `aheadOfBase` (no base found,
     /// e.g. a repo with no remote at all) counts as 0 rather than flagging the
-    /// whole history as unpushed.
+    /// whole history as unpushed. `headOnRemote` (only meaningful with no
+    /// upstream) says HEAD is already contained in some remote branch — pushed
+    /// without upstream tracking, or sharing history with an already-pushed
+    /// branch — so nothing is actually unpushed regardless of `aheadOfBase`.
     public static func classify(
-        _ root: RootRef, state: GitState, dirtyFiles: Int, aheadOfBase: Int?
+        _ root: RootRef, state: GitState, dirtyFiles: Int, aheadOfBase: Int?,
+        headOnRemote: Bool = false
     ) -> WorkAtRisk? {
         guard state.git else { return nil }
         let noUpstream = state.upstream == nil && !state.detached
-        let ahead = state.upstream != nil ? state.ahead : (aheadOfBase ?? 0)
+        let ahead: Int
+        if state.upstream != nil { ahead = state.ahead }
+        else if headOnRemote { ahead = 0 }
+        else { ahead = aheadOfBase ?? 0 }
         guard dirtyFiles > 0 || ahead > 0 else { return nil }
         return WorkAtRisk(
             path: root.path, repoRoot: root.repoRoot, branch: state.branch,
@@ -169,9 +176,18 @@ public enum WorkAtRiskScan {
     }
 }
 
+/// True when HEAD is contained in at least one remote-tracking branch — i.e.
+/// it's already been pushed somewhere, even if this local branch has no upstream
+/// configured (pushed without `-u`, or sharing history with a pushed branch).
+/// Never throws; false on any error or with no remotes.
+func headContainedInAnyRemote(_ path: String) async -> Bool {
+    guard let out = try? await git(path, ["branch", "-r", "--contains", "HEAD"]) else { return false }
+    return out.split(separator: "\n").contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+}
+
 /// Raw git facts about one root, for `WorkAtRiskScan.classify`. nil for a
 /// missing dir or non-git cwd. Never throws.
-public func probeWorkAtRisk(_ path: String) async -> (state: GitState, dirtyFiles: Int, aheadOfBase: Int?)? {
+public func probeWorkAtRisk(_ path: String) async -> (state: GitState, dirtyFiles: Int, aheadOfBase: Int?, headOnRemote: Bool)? {
     guard FileManager.default.fileExists(atPath: path) else { return nil }
     let state = await getGitState(path)
     guard state.git else { return nil }
@@ -184,12 +200,17 @@ public func probeWorkAtRisk(_ path: String) async -> (state: GitState, dirtyFile
 
     // With an upstream, `state.ahead` is the true unpushed count. Without one,
     // count commits beyond the inferred base branch instead — `state.ahead`
-    // would be the branch's entire history.
+    // would be the branch's entire history. But first check whether HEAD is
+    // already on a remote: a branch pushed without upstream tracking has no
+    // `@{u}` yet its commits ARE on the remote, so it isn't unpushed at all.
     var aheadOfBase: Int? = nil
-    if state.upstream == nil, !state.detached, let base = await defaultBaseBranch(path) {
-        if let out = try? await git(path, ["rev-list", "--count", "\(base)..HEAD"]) {
+    var headOnRemote = false
+    if state.upstream == nil, !state.detached {
+        headOnRemote = await headContainedInAnyRemote(path)
+        if !headOnRemote, let base = await defaultBaseBranch(path),
+           let out = try? await git(path, ["rev-list", "--count", "\(base)..HEAD"]) {
             aheadOfBase = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
-    return (state, dirtyFiles, aheadOfBase)
+    return (state, dirtyFiles, aheadOfBase, headOnRemote)
 }

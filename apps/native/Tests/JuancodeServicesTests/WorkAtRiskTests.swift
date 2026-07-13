@@ -108,6 +108,23 @@ final class WorkAtRiskTests: XCTestCase {
             dirtyFiles: 0, aheadOfBase: nil))
     }
 
+    func testClassifyNoUpstreamHeadOnRemoteIsNotUnpushed() {
+        // The Land Utopia case (juancode-bo0): no upstream, commits beyond base,
+        // but HEAD already on a remote branch → not unpushed, so clean tree = nil.
+        XCTAssertNil(WorkAtRiskScan.classify(
+            root(), state: state(upstream: nil, ahead: 500, dirty: false),
+            dirtyFiles: 0, aheadOfBase: 3, headOnRemote: true))
+    }
+
+    func testClassifyHeadOnRemoteStillFlagsDirtyTree() {
+        // headOnRemote zeroes only the unpushed count; uncommitted files still risk.
+        let r = WorkAtRiskScan.classify(
+            root(), state: state(upstream: nil, dirty: true),
+            dirtyFiles: 2, aheadOfBase: 3, headOnRemote: true)
+        XCTAssertEqual(r?.dirtyFiles, 2)
+        XCTAssertEqual(r?.ahead, 0)
+    }
+
     func testClassifyCarriesOrphanedFlag() {
         let orphan = WorkAtRiskScan.RootRef(path: "/wt", repoRoot: "/repo", sessionIds: [])
         let r = WorkAtRiskScan.classify(
@@ -202,6 +219,37 @@ final class WorkAtRiskTests: XCTestCase {
                           atomically: true, encoding: .utf8)
         let dirty = await probeWorkAtRisk(dir)
         XCTAssertEqual(dirty?.dirtyFiles, 2)
+    }
+
+    func testProbeNoUpstreamButHeadOnRemoteIsNotUnpushed() async throws {
+        // A branch pushed to a remote WITHOUT upstream tracking: HEAD is on a
+        // remote branch, so nothing is unpushed even though there is no @{u}.
+        let remote = mkdtemp("juancode-remote-")
+        let dir = mkdtemp("juancode-war2-")
+        defer {
+            try? FileManager.default.removeItem(atPath: remote)
+            try? FileManager.default.removeItem(atPath: dir)
+        }
+        try runGit(["init", "-q", "--bare"], cwd: remote)
+        try runGit(["init", "-q"], cwd: dir)
+        try runGit(["config", "user.email", "t@e.com"], cwd: dir)
+        try runGit(["config", "user.name", "T"], cwd: dir)
+        try runGit(["remote", "add", "origin", remote], cwd: dir)
+        try "one\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
+                          atomically: true, encoding: .utf8)
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-qm", "init"], cwd: dir)
+        // Push HEAD under a remote branch name but do NOT set upstream (no -u).
+        try runGit(["push", "-q", "origin", "HEAD:some-remote-branch"], cwd: dir)
+
+        let probed = await probeWorkAtRisk(dir)
+        XCTAssertEqual(probed?.headOnRemote, true)
+        XCTAssertNil(probed?.state.upstream) // sanity: no upstream configured
+        // Clean tree + head-on-remote → not at risk.
+        let risk = WorkAtRiskScan.classify(
+            root(), state: probed!.state, dirtyFiles: probed!.dirtyFiles,
+            aheadOfBase: probed!.aheadOfBase, headOnRemote: probed!.headOnRemote)
+        XCTAssertNil(risk)
     }
 
     func testProbeReturnsNilForNonGitDir() async throws {
