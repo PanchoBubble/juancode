@@ -320,13 +320,17 @@ final class TerminalHostView: NSView {
 
     /// Pin the terminal to our exact bounds. SwiftTerm's own `setFrameSize`
     /// recomputes the grid (cols/rows) and fires `sizeChanged` from here, so this is
-    /// the one place size flows from. Always nudge a repaint so the CoreGraphics
-    /// renderer fills any newly-exposed area after a grow (no black bands).
+    /// the one place size flows from. On a real frame change, nudge a repaint so the
+    /// CoreGraphics renderer fills any newly-exposed area after a grow (no black
+    /// bands). When the frame is unchanged, do NOT touch `needsDisplay`: a full-view
+    /// invalidation makes SwiftTerm rebuild attributed strings for every visible row
+    /// (its most expensive draw), and this runs on every AppKit layout pass — that
+    /// was a main-thread hog under agent streaming (juancode-idq).
     private func pinTerminal() {
         if terminal.frame != bounds {
             terminal.frame = bounds
+            terminal.needsDisplay = true
         }
-        terminal.needsDisplay = true
         // Report the grid SwiftTerm now has for these bounds. Setting the frame above
         // runs SwiftTerm's `setFrameSize` → `processSizeChange` synchronously, so the
         // model's cols/rows are current here. This fires on every layout (not just
@@ -373,12 +377,20 @@ final class TerminalHostView: NSView {
     /// `sizeChanged`; we also report the grid directly so the pty SIGWINCH is sent
     /// even if the grid value didn't change but the pty was stale. This is what makes
     /// a freshly-opened session size correctly instead of staying at 80x24.
+    ///
+    /// Everything is gated on a REAL frame change: `updateNSView` calls this on
+    /// every SwiftUI update that touches the representable (activity flips, sidebar
+    /// churn, …), and an unconditional `needsDisplay = true` forced SwiftTerm's
+    /// full-grid redraw — every visible row's attributed string rebuilt — per model
+    /// update, saturating the main thread while agents stream (juancode-idq). A
+    /// same-size call has nothing to repaint or re-report: stale-pty resync is owned
+    /// by `pinTerminal` (real layout passes), `Session.reapplyGridWhenReady`, and the
+    /// reactivation nudges.
     func applySize(_ size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
         let f = NSRect(origin: .zero, size: size)
-        if terminal.frame != f {
-            terminal.frame = f
-        }
+        guard terminal.frame != f else { return }
+        terminal.frame = f
         terminal.needsDisplay = true
         if let t = terminal.terminal, t.cols > 0, t.rows > 0 { onGrid?(t.cols, t.rows) }
     }

@@ -23,9 +23,26 @@ public enum MetaPatchOutcome: Sendable, Equatable {
 /// Decide how a `SessionMeta` change should be applied to `sessions` without a
 /// full `store.list()` rebuild. Matches by id; `patch` only when the meta actually
 /// differs from the one held (so an unchanged poll is a no-op).
+///
+/// A usage/`updatedAt`-only delta must also be VISIBLE to count as a change: the
+/// 4s usage poll lands a fresh token count (plus a bumped `updatedAt`) on nearly
+/// every tick while an agent streams, but the UI renders usage compactly
+/// ("12.4k tok" badges) — mutating the sessions array for a sub-label delta
+/// re-renders every reader (sidebar, rails, toolbar) for a pixel-identical frame
+/// (juancode-idq). The precise values stay authoritative on the live `Session`
+/// and in the store; the published array is a display cache whose `updatedAt`
+/// already lags (scrollback flushes never emit meta).
 public func metaPatchOutcome(for meta: SessionMeta, in sessions: [SessionMeta]) -> MetaPatchOutcome {
     guard let idx = sessions.firstIndex(where: { $0.id == meta.id }) else {
         return .fullRefresh
     }
-    return sessions[idx] == meta ? .noChange : .patch(index: idx)
+    let held = sessions[idx]
+    guard held != meta else { return .noChange }
+    var invisible = meta
+    invisible.usage = held.usage
+    invisible.updatedAt = held.updatedAt
+    if invisible == held, meta.usage?.badgeLabel == held.usage?.badgeLabel {
+        return .noChange
+    }
+    return .patch(index: idx)
 }

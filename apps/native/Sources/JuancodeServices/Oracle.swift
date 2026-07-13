@@ -18,10 +18,16 @@ import JuancodeCore
 
 public enum OraclePaths {
     /// `~/.juancode/oracle`, overridable via `JUANCODE_ORACLE_DIR` (used by tests).
+    /// Read via `getenv` (not `ProcessInfo.environment`, which bridges the whole
+    /// environ into a fresh dictionary per call): this getter sits inside per-render
+    /// session-list filters, where it showed up hot in CPU samples (juancode-idq).
+    /// `getenv` still reflects a test's `setenv` between cases.
     public static var controlDir: String {
-        if let o = ProcessInfo.processInfo.environment["JUANCODE_ORACLE_DIR"], !o.isEmpty { return o }
-        return (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/oracle")
+        if let raw = getenv("JUANCODE_ORACLE_DIR"), raw.pointee != 0 { return String(cString: raw) }
+        return defaultControlDir
     }
+    private static let defaultControlDir =
+        (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/oracle")
     public static var beadsDir: String { join(controlDir, ".beads") }
     public static var gitDir: String { join(controlDir, ".git") }
     public static var agentsFile: String { join(controlDir, "AGENTS.md") }
