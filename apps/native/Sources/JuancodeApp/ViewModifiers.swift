@@ -13,6 +13,12 @@ extension View {
         modifier(ClickCursorModifier())
     }
 
+    /// Apply to a `.popover`'s root content so its first click isn't swallowed by
+    /// window activation (juancode-7kc). See `PopoverFirstClickFix`.
+    func fixesPopoverFirstClick() -> some View {
+        background(PopoverFirstClickFix())
+    }
+
     /// Pointing-hand cursor only (no highlight) — for larger custom hit areas where
     /// a background chip would look wrong (e.g. the terminal-drop zone).
     @ViewBuilder
@@ -66,6 +72,26 @@ private struct ClickCursorModifier: ViewModifier {
             .onHover { hovering = $0 }
             .pointerCursor()
             .animation(.easeOut(duration: 0.10), value: hovering)
+    }
+}
+
+// MARK: - Popover first-click fix (juancode-7kc)
+
+/// A SwiftUI `.popover` renders in its own child `NSWindow` that isn't key when it
+/// first appears, so on macOS the first click inside it is swallowed to make that
+/// window key — the button's action only fires on the *second* click. Dropping
+/// this zero-size, invisible view into the popover content (via
+/// `.fixesPopoverFirstClick()`) makes the popover window key the instant it's
+/// attached, so the very first click on a control registers.
+struct PopoverFirstClickFix: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { KeyOnAttachView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class KeyOnAttachView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.makeKey()
+        }
     }
 }
 

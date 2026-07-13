@@ -1330,6 +1330,7 @@ private struct FolderHeader: View {
                         }
                     }
                     .padding(4)
+                    .fixesPopoverFirstClick()
                 }
             }
             // Line 2: quiet metadata cluster — a single 10pt style, semantic color only
