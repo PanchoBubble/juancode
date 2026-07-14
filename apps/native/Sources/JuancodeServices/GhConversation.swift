@@ -27,13 +27,23 @@ public struct PrConversationComment: Sendable, Equatable, Identifiable {
     public let id: String
     public let databaseId: Int?
     public let author: String
+    /// The author's GitHub avatar URL, for the thumbnail next to their handle;
+    /// nil when the API didn't report one (ghost/deleted account).
+    public let authorAvatarUrl: String?
     public let body: String
     public let createdAt: Date?
     public let url: String
+    /// For an inline review comment: the file it hangs off, and the line within
+    /// it. Both nil for an issue-level comment (which has no location).
+    public let path: String?
+    public let line: Int?
     public init(id: String, databaseId: Int?, author: String, body: String,
-                createdAt: Date?, url: String) {
+                createdAt: Date?, url: String, authorAvatarUrl: String? = nil,
+                path: String? = nil, line: Int? = nil) {
         self.id = id; self.databaseId = databaseId; self.author = author
+        self.authorAvatarUrl = authorAvatarUrl
         self.body = body; self.createdAt = createdAt; self.url = url
+        self.path = path; self.line = line
     }
 }
 
@@ -64,14 +74,43 @@ public struct PrReviewThread: Sendable, Equatable, Identifiable {
 public struct PrReviewItem: Sendable, Equatable, Identifiable {
     public let id: String
     public let author: String
+    /// The reviewer's GitHub avatar URL, for the thumbnail next to their handle.
+    public let authorAvatarUrl: String?
     public let state: String
     public let body: String
     public let createdAt: Date?
     public let url: String
+    /// The inline file comments submitted as part of this review, in thread
+    /// order — rendered nested under the review event, the way GitHub's
+    /// Conversation tab groups a review with its comments. Empty for a bare
+    /// verdict (approve/comment with no inline notes).
+    public let comments: [PrConversationComment]
     public init(id: String, author: String, state: String, body: String,
-                createdAt: Date?, url: String) {
-        self.id = id; self.author = author; self.state = state
+                createdAt: Date?, url: String, authorAvatarUrl: String? = nil,
+                comments: [PrConversationComment] = []) {
+        self.id = id; self.author = author; self.authorAvatarUrl = authorAvatarUrl
+        self.state = state
         self.body = body; self.createdAt = createdAt; self.url = url
+        self.comments = comments
+    }
+}
+
+/// One commit on the PR, for the interleaved conversation timeline: the short
+/// SHA, the first line of the message, the author handle/name, and when it
+/// landed.
+public struct PrCommit: Sendable, Equatable, Identifiable {
+    /// The abbreviated (7-char) SHA — also the identity for the timeline.
+    public let abbreviatedOid: String
+    public let oid: String
+    public let messageHeadline: String
+    public let author: String
+    public let committedDate: Date?
+    public var id: String { oid }
+    public init(oid: String, abbreviatedOid: String, messageHeadline: String,
+                author: String, committedDate: Date?) {
+        self.oid = oid; self.abbreviatedOid = abbreviatedOid
+        self.messageHeadline = messageHeadline; self.author = author
+        self.committedDate = committedDate
     }
 }
 
@@ -79,13 +118,36 @@ public struct PrReviewItem: Sendable, Equatable, Identifiable {
 /// threads, plus the PR state (OPEN / CLOSED / MERGED) for the header.
 public struct PrConversation: Sendable, Equatable {
     public let state: String
+    /// The PR's own description (the opening body), as raw markdown; empty when
+    /// the PR has no description.
+    public let body: String
     public let issueComments: [PrConversationComment]
     public let reviews: [PrReviewItem]
     public let threads: [PrReviewThread]
+    public let commits: [PrCommit]
     public init(state: String, issueComments: [PrConversationComment],
-                reviews: [PrReviewItem], threads: [PrReviewThread]) {
-        self.state = state; self.issueComments = issueComments
-        self.reviews = reviews; self.threads = threads
+                reviews: [PrReviewItem], threads: [PrReviewThread], body: String = "",
+                commits: [PrCommit] = []) {
+        self.state = state; self.body = body; self.issueComments = issueComments
+        self.reviews = reviews; self.threads = threads; self.commits = commits
+    }
+
+    /// Resolution state for a review comment, keyed by its GraphQL node id, lifted
+    /// from the review threads (comments don't carry it themselves). Lets the
+    /// review-grouped rendering show a "resolved"/"outdated" badge and find the
+    /// reply target without re-fetching threads.
+    public struct CommentThreadInfo: Sendable, Equatable {
+        public let isResolved: Bool
+        public let isOutdated: Bool
+        public let replyTargetId: Int?
+    }
+
+    public func threadInfo(forCommentId id: String) -> CommentThreadInfo? {
+        for t in threads where t.comments.contains(where: { $0.id == id }) {
+            return CommentThreadInfo(isResolved: t.isResolved, isOutdated: t.isOutdated,
+                                     replyTargetId: t.replyTargetId)
+        }
+        return nil
     }
 }
 
@@ -97,9 +159,11 @@ private struct ConversationResponse: Decodable {
     struct Repository: Decodable { let pullRequest: PullRequestNode? }
     struct PullRequestNode: Decodable {
         let state: String?
+        let body: String?
         let comments: CommentConnection?
         let reviews: ReviewConnection?
         let reviewThreads: ThreadConnection?
+        let commits: CommitConnection?
     }
     struct CommentConnection: Decodable { let nodes: [CommentNode]? }
     struct CommentNode: Decodable {
@@ -109,6 +173,8 @@ private struct ConversationResponse: Decodable {
         let body: String?
         let createdAt: String?
         let url: String?
+        let path: String?
+        let line: Int?
     }
     struct ReviewConnection: Decodable { let nodes: [ReviewNode]? }
     struct ReviewNode: Decodable {
@@ -118,6 +184,7 @@ private struct ConversationResponse: Decodable {
         let body: String?
         let createdAt: String?
         let url: String?
+        let comments: CommentConnection?
     }
     struct ThreadConnection: Decodable { let nodes: [ThreadNode]? }
     struct ThreadNode: Decodable {
@@ -127,6 +194,20 @@ private struct ConversationResponse: Decodable {
         let path: String?
         let line: Int?
         let comments: CommentConnection?
+    }
+    struct CommitConnection: Decodable { let nodes: [CommitEdge]? }
+    struct CommitEdge: Decodable { let commit: CommitNode? }
+    struct CommitNode: Decodable {
+        let oid: String?
+        let abbreviatedOid: String?
+        let messageHeadline: String?
+        let committedDate: String?
+        let authors: AuthorConnection?
+    }
+    struct AuthorConnection: Decodable { let nodes: [CommitAuthor]? }
+    struct CommitAuthor: Decodable {
+        let name: String?
+        let user: RawPrAuthor?
     }
     let data: DataField?
 }
@@ -159,7 +240,8 @@ func parsePrConversation(_ json: String) -> PrConversation? {
             guard let id = c.id else { return nil }
             return PrConversationComment(
                 id: id, databaseId: c.databaseId, author: c.author?.login ?? "",
-                body: c.body ?? "", createdAt: parseIsoDate(c.createdAt), url: c.url ?? "")
+                body: c.body ?? "", createdAt: parseIsoDate(c.createdAt), url: c.url ?? "",
+                authorAvatarUrl: c.author?.avatarUrl, path: c.path, line: c.line)
         }
     }
 
@@ -167,7 +249,8 @@ func parsePrConversation(_ json: String) -> PrConversation? {
         guard let id = r.id else { return nil }
         return PrReviewItem(
             id: id, author: r.author?.login ?? "", state: (r.state ?? "").uppercased(),
-            body: r.body ?? "", createdAt: parseIsoDate(r.createdAt), url: r.url ?? "")
+            body: r.body ?? "", createdAt: parseIsoDate(r.createdAt), url: r.url ?? "",
+            authorAvatarUrl: r.author?.avatarUrl, comments: mapComments(r.comments))
     }
 
     let threads: [PrReviewThread] = (pr.reviewThreads?.nodes ?? []).compactMap { t in
@@ -177,11 +260,32 @@ func parsePrConversation(_ json: String) -> PrConversation? {
             path: t.path ?? "", line: t.line, comments: mapComments(t.comments))
     }
 
+    // Drop empty-review noise: GitHub records a bare COMMENTED review for every
+    // inline-comment reply, which — with no body and no own inline comments —
+    // would render as a contentless "commented" card. Only that exact shape is
+    // dropped; verdicts and anything with a body or comments are kept.
+    let meaningfulReviews = reviews.filter {
+        !($0.state == "COMMENTED" && $0.body.isEmpty && $0.comments.isEmpty)
+    }
+
+    let commits: [PrCommit] = (pr.commits?.nodes ?? []).compactMap { edge in
+        guard let c = edge.commit, let oid = c.oid else { return nil }
+        let author = c.authors?.nodes?.first
+        return PrCommit(
+            oid: oid,
+            abbreviatedOid: c.abbreviatedOid ?? String(oid.prefix(7)),
+            messageHeadline: c.messageHeadline ?? "",
+            author: author?.user?.login ?? author?.name ?? "",
+            committedDate: parseIsoDate(c.committedDate))
+    }
+
     return PrConversation(
         state: (pr.state ?? "").uppercased(),
         issueComments: mapComments(pr.comments),
-        reviews: reviews,
-        threads: threads)
+        reviews: meaningfulReviews,
+        threads: threads,
+        body: pr.body ?? "",
+        commits: commits)
 }
 
 // MARK: - fetch
@@ -197,13 +301,22 @@ public func getPrConversation(_ cwd: String, number: Int, prUrl: String) async -
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           state
-          comments(last: 50) { nodes { id databaseId author { login } body createdAt url } }
-          reviews(last: 30) { nodes { id author { login } state body createdAt url } }
+          body
+          comments(last: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url } }
+          reviews(last: 30) {
+            nodes {
+              id author { login avatarUrl } state body createdAt url
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line } }
+            }
+          }
           reviewThreads(first: 100) {
             nodes {
               id isResolved isOutdated path line
-              comments(first: 50) { nodes { id databaseId author { login } body createdAt url } }
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line } }
             }
+          }
+          commits(last: 100) {
+            nodes { commit { oid abbreviatedOid messageHeadline committedDate authors(first: 1) { nodes { name user { login avatarUrl } } } } }
           }
         }
       }

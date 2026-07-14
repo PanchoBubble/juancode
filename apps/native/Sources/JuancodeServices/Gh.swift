@@ -52,6 +52,9 @@ struct RawPr: Decodable {
 
 struct RawPrAuthor: Decodable {
     var login: String?
+    // Only populated by the GraphQL conversation query (`author { login avatarUrl }`);
+    // `gh pr list --json author` doesn't carry it, so it stays nil on that path.
+    var avatarUrl: String?
 }
 
 /// Collapse a PR's individual checks into a single failing/pending/passing/none.
@@ -242,15 +245,20 @@ public func prBackfillQuery(mine: Bool, assigned: Bool, query: String, viewer: S
     return qualifiers == "state:open" ? nil : qualifiers
 }
 
-/// Union `extra` PRs into `base` by PR number, keeping the existing entry for any
-/// number already present (it carries enrichment like `unresolvedComments` that
-/// the backfill fetch lacks) and appending only genuinely new PRs, then sorting
-/// newest-first. Pure; exposed for testing.
+/// Union `extra` PRs into `base` by PR number: keep `base` exactly as-is — same
+/// entries (they carry enrichment like `unresolvedComments` the backfill lacks),
+/// same order, same identity — and append only the genuinely-new PRs from `extra`
+/// (those newest-first among themselves). Preserving `base` order is deliberate:
+/// the backfill lands ~seconds after the instant client-side filter, so a full
+/// re-sort here would visibly reshuffle every already-shown row (the flash when
+/// toggling Mine/Assigned). Appending keeps shown rows put and only folds the
+/// older, beyond-the-firehose matches in at the end. Pure; exposed for testing.
 public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [PullRequest] {
-    var byNumber = [Int: PullRequest]()
-    for pr in base { byNumber[pr.number] = pr }
-    for pr in extra where byNumber[pr.number] == nil { byNumber[pr.number] = pr }
-    return byNumber.values.sorted { $0.number > $1.number }
+    let present = Set(base.map(\.number))
+    let newcomers = extra
+        .filter { !present.contains($0.number) }
+        .sorted { $0.number > $1.number }
+    return base + newcomers
 }
 
 /// Order a folder's open PRs for the GitHub view: tracked PRs first (they're the

@@ -145,14 +145,17 @@ public actor PrTrackingEngine {
     /// context + auto-fix-vs-escalate contract, register it, and ensure the poll
     /// loop is running. Returns the new entry (so the GUI can select its spawned
     /// session); nil when already tracked (no-op) or the spawn failed.
+    /// `cols`/`rows` seed the spawned pty's grid. The UI passes the current
+    /// on-screen terminal size so the agent's alt-screen boots matching the pane
+    /// it renders in (the "fresh session opens short" fix); the default is the
+    /// roomy background size used when no view is driving the spawn.
     @discardableResult
-    public func track(_ pr: PullRequest, cwd: String) -> TrackedPr? {
+    public func track(_ pr: PullRequest, cwd: String, cols: Int = 120, rows: Int = 32) -> TrackedPr? {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard tracked[key] == nil else { return nil }
         let seed = trackSeedPrompt(number: pr.number, title: pr.title, branch: pr.branch, url: pr.url)
-        let grid = (cols: 120, rows: 32)
         guard let session = try? registry.create(
-            provider: .claude, cwd: cwd, cols: grid.cols, rows: grid.rows,
+            provider: .claude, cwd: cwd, cols: cols, rows: rows,
             opts: SpawnOptions(skipPermissions: true, model: "opus")
         ) else { return nil }
         if !seed.isEmpty { session.autoSubmit(seed) }

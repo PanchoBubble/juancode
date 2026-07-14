@@ -224,6 +224,12 @@ final class AppModel {
     private var prsLoading: Set<String> = []
     /// Per-cwd debounce tasks for the PR popover's background scoped re-query.
     private var prsBackfillTasks: [String: Task<Void, Never>] = [:]
+    /// The resolved `gh` search qualifiers for each cwd's currently-active scoped
+    /// backfill (Mine/Assigned/text), or absent when no filter is active. Kept so a
+    /// `loadPrs` refresh can re-apply it in the same pass — otherwise the firehose
+    /// reload lands last and clobbers the backfilled matches, snapping the count
+    /// back to the newest-50 subset (e.g. "Mine (6)" instead of "Mine (13)").
+    private var prsBackfillIntent: [String: String] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
     private var gridCancels: [String: () -> Void] = [:]
@@ -1321,8 +1327,18 @@ final class AppModel {
     func loadPrs(_ cwd: String) {
         guard !prsLoading.contains(cwd) else { return }
         prsLoading.insert(cwd)
+        let scoped = prsBackfillIntent[cwd]
         Task {
-            let result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
+            var result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
+            // Fold any active scoped filter (Mine/Assigned/text) into the same pass
+            // so the reload publishes the full set at once — matches beyond the
+            // newest-50 firehose stay in, and the count doesn't flash back down.
+            if result.available, let scoped {
+                let found = await Task.detached(priority: .utility) {
+                    await searchOpenPrs(cwd, search: scoped)
+                }.value
+                if !found.isEmpty { result.prs = mergePrLists(result.prs, found) }
+            }
             prsByCwd[cwd] = result
             prsLoading.remove(cwd)
         }
@@ -1339,7 +1355,14 @@ final class AppModel {
         prsBackfillTasks[cwd]?.cancel()
         guard let qualifiers = prBackfillQuery(
             mine: mine, assigned: assigned, query: query,
-            viewer: prsByCwd[cwd]?.viewer ?? "") else { return }
+            viewer: prsByCwd[cwd]?.viewer ?? "") else {
+            // Filter cleared (or nothing to scope): drop the intent so a later
+            // refresh doesn't re-apply a stale Mine/Assigned search.
+            prsBackfillIntent[cwd] = nil
+            return
+        }
+        // Remember the active scope so a firehose reload re-applies it in one pass.
+        prsBackfillIntent[cwd] = qualifiers
         prsBackfillTasks[cwd] = Task { [qualifiers] in
             try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
@@ -1348,7 +1371,13 @@ final class AppModel {
             }.value
             if Task.isCancelled || found.isEmpty { return }
             guard var existing = prsByCwd[cwd], existing.available else { return }
-            existing.prs = mergePrLists(existing.prs, found)
+            let merged = mergePrLists(existing.prs, found)
+            // The client-side filter already re-rendered the list from cache; only
+            // republish when the backfill actually surfaced PRs beyond the firehose.
+            // Reassigning an equivalent list just re-renders the pane — the flash
+            // you'd otherwise see when toggling Mine/Assigned.
+            guard merged != existing.prs else { return }
+            existing.prs = merged
             prsByCwd[cwd] = existing
         }
     }
@@ -1655,8 +1684,10 @@ final class AppModel {
     /// runs the poll loop; the GUI just selects the spawned session so "Track" is
     /// still an explicit "take me there". The mirror updates via the subscription.
     func trackPr(_ pr: PullRequest, cwd: String) {
+        let grid = TerminalGrid.spawn
         Task {
-            guard let entry = await appState.prTracking.track(pr, cwd: cwd) else { return }
+            guard let entry = await appState.prTracking.track(
+                pr, cwd: cwd, cols: grid.cols, rows: grid.rows) else { return }
             selection = entry.sessionId
             focusTerminal()
         }
@@ -1684,7 +1715,8 @@ final class AppModel {
     /// and just handed one comment off. Returns false when tracking failed
     /// (spawn failure) and nothing was queued.
     func trackPrAndQueue(_ pr: PullRequest, cwd: String, prompt: String) async -> Bool {
-        if let entry = await appState.prTracking.track(pr, cwd: cwd) {
+        let grid = TerminalGrid.spawn
+        if let entry = await appState.prTracking.track(pr, cwd: cwd, cols: grid.cols, rows: grid.rows) {
             queuePrompt(sessionId: entry.sessionId, text: prompt)
             return true
         }
