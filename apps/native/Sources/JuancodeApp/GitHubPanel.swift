@@ -23,12 +23,19 @@ final class GitHubModel {
     private(set) var conversations: [String: PrConversation] = [:]
     /// Fetched CI check runs per PR.
     private(set) var checks: [String: [PrCheckRun]] = [:]
+    /// Fetched PR diffs per PR, for the detail's Diff tab (fetched lazily the first
+    /// time that tab is shown; cached for the app's lifetime).
+    private(set) var diffs: [String: DiffResult] = [:]
+    /// PR keys with a diff fetch in flight, so the tab doesn't stampede `gh pr diff`.
+    private(set) var diffLoading: Set<String> = []
     /// PR keys with a detail fetch in flight, so selection doesn't stampede.
     private(set) var loading: Set<String> = []
     /// Failing-step CI logs per PR (fetched once, on demand — "Show logs").
     private(set) var ciLogs: [String: String] = [:]
     /// PR keys with a CI-log fetch in flight (spinner on the checks row).
     private(set) var ciLogsLoading: Set<String> = []
+    /// PR keys with a `gh run rerun` in flight (disables the rerun buttons).
+    private(set) var rerunning: Set<String> = []
     /// Timeline-item ids briefly flashing a "Queued" confirmation after a
     /// successful "Send to agent".
     private(set) var queuedFlash: Set<String> = []
@@ -58,7 +65,7 @@ final class GitHubModel {
 
     /// Kick a PR-list refresh for every folder the view shows (all, or the one
     /// scoped folder). Re-runs the scoped `gh` query too when a filter is active,
-    /// since `loadPrs` resets the cache to the newest-50 firehose (which may miss
+    /// since `loadPrs` resets the cache to the newest-100 firehose (which may miss
     /// your older PRs).
     func refresh(model: AppModel) {
         for cwd in model.githubScopedFolders {
@@ -106,6 +113,23 @@ final class GitHubModel {
         }
     }
 
+    /// Fetch the PR's diff (`gh pr diff --patch`, split into per-file `DiffFile`s)
+    /// for the detail's Diff tab. Off-main; cached per PR and coalesced so re-opening
+    /// the tab is instant. A failed fetch leaves the cache empty so the tab retries.
+    func loadDiff(cwd: String, pr: PullRequest) {
+        let key = TrackedPr.key(cwd: cwd, number: pr.number)
+        guard diffs[key] == nil, !diffLoading.contains(key) else { return }
+        diffLoading.insert(key)
+        let number = pr.number
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                try? await getPrDiff(cwd, number: number)
+            }.value
+            if let result { diffs[key] = result }
+            diffLoading.remove(key)
+        }
+    }
+
     /// Fetch the failing-step CI logs for a PR (once — cached until the app
     /// restarts; the checks row offers a reload). Off-main: shells into
     /// `gh run view --log-failed` per failing run.
@@ -120,6 +144,30 @@ final class GitHubModel {
             }.value
             ciLogs[key] = logs.isEmpty ? "No failing-step logs available." : logs
             ciLogsLoading.remove(key)
+        }
+    }
+
+    /// Re-run a PR's CI checks via `gh run rerun` (`failedOnly` → "Re-run failed
+    /// jobs", else "Re-run all jobs"). Off-main; on success refetches the check
+    /// runs so the row reflects the re-queued state, else surfaces the error.
+    func rerunChecks(cwd: String, pr: PullRequest, failedOnly: Bool) {
+        let key = TrackedPr.key(cwd: cwd, number: pr.number)
+        guard !rerunning.contains(key) else { return }
+        rerunning.insert(key)
+        actionError = nil
+        let number = pr.number
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try await JuancodeServices.rerunChecks(cwd, number: number, failedOnly: failedOnly)
+                }.value
+                loadDetail(cwd: cwd, pr: pr)
+            } catch let e as GhError {
+                actionError = e.message
+            } catch {
+                actionError = error.localizedDescription
+            }
+            rerunning.remove(key)
         }
     }
 
@@ -171,6 +219,33 @@ final class GitHubModel {
         }
     }
 
+    /// Compose the diff-review basket staged for this PR (line notes added in the
+    /// Diff tab, keyed by the PR key so they survive tab/PR switches) into one
+    /// feedback prompt and route it to the agent — queued on the tracking session
+    /// when tracked, else tracked-and-queued. Clears the basket on a successful
+    /// hand-off and flashes a confirmation on the bar.
+    func sendDiffReview(appModel: AppModel, cwd: String, pr: PullRequest) {
+        let key = TrackedPr.key(cwd: cwd, number: pr.number)
+        let staged = appModel.comments(key)
+        let feedback = composeReviewFeedback(staged)
+        guard !feedback.isEmpty else { return }
+        let prompt = diffReviewPrompt(number: pr.number, url: pr.url, feedback: feedback)
+        if let t = appModel.trackedPr(cwd: cwd, number: pr.number) {
+            appModel.queuePrompt(sessionId: t.sessionId, text: prompt)
+            appModel.discardComments(key)
+            flashQueued(key)
+        } else {
+            Task {
+                if await appModel.trackPrAndQueue(pr, cwd: cwd, prompt: prompt) {
+                    appModel.discardComments(key)
+                    flashQueued(key)
+                } else {
+                    actionError = "Couldn't track PR #\(pr.number) — the agent session failed to spawn."
+                }
+            }
+        }
+    }
+
     /// Show "Queued" next to the item for a moment, then clear it.
     private func flashQueued(_ itemId: String) {
         queuedFlash.insert(itemId)
@@ -207,7 +282,7 @@ struct GitHubView: View {
         .background(Color.appSurface)
         .onExitCommand { model.showingGitHub = false }
         // Opening with a filter still active (persisted across dismiss/reopen): fold
-        // in the matches beyond the newest-50 firehose so the count is right from the
+        // in the matches beyond the newest-100 firehose so the count is right from the
         // start, without waiting for a manual refresh or a filter re-toggle.
         .task { if model.github.filterActive { model.github.applyFilters(model: model) } }
         // Deep-link resolution: once the scoped folder's PRs load, select the
@@ -416,9 +491,7 @@ struct GitHubView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     } else {
-                        let ordered = sortPrsTrackedFirst(shown) {
-                            model.trackedPr(cwd: cwd, number: $0.number) != nil
-                        }
+                        let ordered = sortPrsBySubmitDate(shown)
                         ForEach(ordered, id: \.number) { pr in
                             GitHubPrRow(pr: pr, cwd: cwd)
                             Divider()
@@ -572,6 +645,321 @@ private struct GitHubPrActions: View {
 
 // MARK: - PR detail pane (juancode-1au)
 
+/// The two tabs the PR detail can show: the conversation timeline, or the PR's
+/// diff rendered read-only.
+private enum PrDetailTab: String, CaseIterable {
+    case conversation, diff
+    var label: String {
+        switch self {
+        case .conversation: return "Conversation"
+        case .diff: return "Diff"
+        }
+    }
+}
+
+/// The PR diff, rendered with the same syntax-highlighted, comment-able `FileCard`
+/// as the working-tree Changes panel — click a line (or drag-select a range) to
+/// stage an inline note. Notes live in a per-PR review basket (keyed by the PR key,
+/// so they survive tab and PR switches) and are handed to the agent in one batch via
+/// the bar at the bottom. Fetched lazily via `GitHubModel.loadDiff` and cached.
+///
+/// Layout mirrors the Changes panel: a resizable file tree on the left, the diff
+/// cards on the right. A path filter hides non-matching files everywhere; a content
+/// filter washes matching diff lines and steps the selection between matching files.
+private struct PrDiffTab: View {
+    @Environment(AppModel.self) private var model
+    let pr: PullRequest
+    let cwd: String
+    /// Which files are expanded — everything starts collapsed, like the Changes panel.
+    @State private var expandedPaths: Set<String> = []
+    /// Free-text filter over changed-file paths (hides non-matching files in the tree
+    /// and the diff list).
+    @State private var pathQuery = ""
+    /// Free-text search over diff line content (highlights matching lines, drives jump).
+    @State private var contentQuery = ""
+    /// Directory node ids currently expanded in the tree.
+    @State private var treeExpanded: Set<String> = []
+    /// The file selected in the tree — the diff list scrolls to it.
+    @State private var selectedPath: String?
+    /// Index into `matchingPaths` for the content-search jump buttons.
+    @State private var matchCursor = 0
+    /// Persisted width of the tree pane and whether it's shown (shared defaults with
+    /// the Changes panel so the split feels consistent across the two diff surfaces).
+    @AppStorage("changes.treeWidth") private var treeWidth: Double = 260
+    @AppStorage("changes.treeShown") private var treeShown: Bool = true
+
+    private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
+    private var result: DiffResult? { model.github.diffs[key] }
+    private var loading: Bool { model.github.diffLoading.contains(key) }
+
+    /// The normalized content query (empty when no search is active).
+    private var contentQ: String { contentQuery.trimmingCharacters(in: .whitespaces).lowercased() }
+
+    /// Files surviving the path filter, in diff order.
+    private var visibleFiles: [DiffFile] {
+        let q = pathQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let files = result?.files ?? []
+        return q.isEmpty ? files : files.filter { $0.path.lowercased().contains(q) }
+    }
+
+    private var tree: [FileTreeNode] { buildFileTree(visibleFiles) }
+    private var allDirIDs: Set<String> { directoryNodeIDs(tree) }
+
+    /// Paths (in diff order) whose diff body contains the content query — the jump
+    /// targets and the set auto-expanded so their highlighted lines are visible.
+    private var matchingPaths: [String] {
+        guard !contentQ.isEmpty else { return [] }
+        return visibleFiles.filter { $0.diff.lowercased().contains(contentQ) }.map(\.path)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            content
+            reviewBar
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
+        .onAppear { model.github.loadDiff(cwd: cwd, pr: pr) }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let result {
+            if result.files.isEmpty {
+                leading("No file changes.")
+            } else {
+                VStack(spacing: 6) {
+                    if result.truncatedFiles == true {
+                        Text("Showing the first \(result.files.count) files — open the PR in your browser for the rest.")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    filtersRow
+                    splitView
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        } else if loading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Loading diff…").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            leading("Couldn't load the diff.")
+        }
+    }
+
+    // MARK: filters
+
+    /// The two filters plus the content-search match counter and jump chevrons.
+    private var filtersRow: some View {
+        HStack(spacing: 8) {
+            Button { treeShown.toggle() } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(treeShown ? Color.accentColor : .secondary)
+            .help(treeShown ? "Hide the file tree" : "Show the file tree")
+            .clickCursor()
+
+            TextField("Filter files…", text: $pathQuery)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .frame(maxWidth: 200)
+
+            HStack(spacing: 4) {
+                Image(systemName: "text.magnifyingglass")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                TextField("Search in diff…", text: $contentQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .onSubmit { jumpMatch(1) }
+                if !contentQ.isEmpty {
+                    Text(matchingPaths.isEmpty
+                         ? "no matches"
+                         : "\(min(matchCursor + 1, matchingPaths.count))/\(matchingPaths.count) file\(matchingPaths.count == 1 ? "" : "s")")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize()
+                    Button { jumpMatch(-1) } label: { Image(systemName: "chevron.up") }
+                        .buttonStyle(.borderless).clickCursor()
+                        .disabled(matchingPaths.isEmpty)
+                        .help("Previous file with a match")
+                    Button { jumpMatch(1) } label: { Image(systemName: "chevron.down") }
+                        .buttonStyle(.borderless).clickCursor()
+                        .disabled(matchingPaths.isEmpty)
+                        .help("Next file with a match")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .onChange(of: contentQ) { _, _ in
+            // A new search jumps to (and expands) the first hit.
+            matchCursor = 0
+            if let first = matchingPaths.first { selectedPath = first }
+        }
+    }
+
+    /// Step the selection to the next/prev file that contains a content match, wrapping
+    /// at the ends. Selecting the path scrolls to and expands that card.
+    private func jumpMatch(_ delta: Int) {
+        let paths = matchingPaths
+        guard !paths.isEmpty else { return }
+        let start = selectedPath.flatMap { paths.firstIndex(of: $0) } ?? -1
+        let next = ((start + delta) % paths.count + paths.count) % paths.count
+        matchCursor = next
+        selectedPath = paths[next]
+    }
+
+    // MARK: tree | diff split
+
+    private var splitView: some View {
+        HStack(spacing: 0) {
+            if treeShown {
+                treePane.frame(width: CGFloat(treeWidth))
+                DragResizeHandle(axis: .vertical, value: $treeWidth, min: 160, max: 520, invert: false)
+            }
+            diffPane.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var treePane: some View {
+        if visibleFiles.isEmpty {
+            Text("No files match “\(pathQuery)”.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(8)
+        } else {
+            VStack(spacing: 0) {
+                treePaneHeader
+                Divider()
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(tree) { node in
+                            FileTreeRows(
+                                node: node,
+                                depth: 0,
+                                viewedPaths: [],
+                                selectedPath: $selectedPath,
+                                expanded: $treeExpanded)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .background(Color(NSColor.textBackgroundColor).opacity(0.3))
+        }
+    }
+
+    private var treePaneHeader: some View {
+        let dirs = allDirIDs
+        return HStack(spacing: 4) {
+            Spacer()
+            Button { treeExpanded = [] } label: { Image(systemName: "rectangle.compress.vertical") }
+                .buttonStyle(.borderless)
+                .help("Collapse all folders")
+                .disabled(dirs.isEmpty || treeExpanded.isEmpty)
+                .clickCursor()
+            Button { treeExpanded = dirs } label: { Image(systemName: "rectangle.expand.vertical") }
+                .buttonStyle(.borderless)
+                .help("Expand all folders")
+                .disabled(dirs.isEmpty || treeExpanded == dirs)
+                .clickCursor()
+        }
+        .font(.system(size: 10))
+        .padding(.horizontal, 8).padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private var diffPane: some View {
+        if visibleFiles.isEmpty {
+            leading("No files match “\(pathQuery)”.")
+        } else {
+            let matches = Set(matchingPaths)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(visibleFiles, id: \.path) { file in
+                            FileCard(
+                                sessionId: key,
+                                file: file,
+                                // Basket keyed by the PR key; scope each card to its own
+                                // file (the PR diff has no commit source, so sha is nil).
+                                comments: model.comments(key).filter {
+                                    $0.file == file.path && $0.commitSha == nil
+                                },
+                                // A file with a live content match auto-expands so its
+                                // highlighted lines show without a manual click.
+                                collapsed: !expandedPaths.contains(file.path)
+                                    && !matches.contains(file.path),
+                                selected: file.path == selectedPath,
+                                onToggleCollapse: { toggle(file.path) },
+                                viewable: false,
+                                editable: false,
+                                contentMatch: contentQ)
+                                .id(file.path)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .onChange(of: selectedPath) { _, path in
+                    guard let path else { return }
+                    expandedPaths.insert(path)
+                    withAnimation { proxy.scrollTo(path, anchor: .top) }
+                }
+            }
+        }
+    }
+
+    /// The staged-notes bar: a count, Discard, and Send to agent (queues the whole
+    /// batch on the tracking session, or tracks-and-queues an untracked PR). Shown
+    /// only while notes are staged; flashes a confirmation briefly after a hand-off.
+    @ViewBuilder
+    private var reviewBar: some View {
+        let staged = model.comments(key)
+        if model.github.queuedFlash.contains(key) {
+            HStack(spacing: 6) {
+                Label("Sent to agent", systemImage: "checkmark")
+                    .font(.system(size: 11)).foregroundStyle(.green)
+                Spacer()
+            }
+            .padding(.top, 4)
+        } else if !staged.isEmpty {
+            HStack(spacing: 8) {
+                Text("\(staged.count) comment\(staged.count == 1 ? "" : "s")")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Discard") { model.discardComments(key) }
+                    .controlSize(.small)
+                    .clickCursor()
+                Button("Send to agent") {
+                    model.github.sendDiffReview(appModel: model, cwd: cwd, pr: pr)
+                }
+                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
+                .help(model.trackedPr(cwd: cwd, number: pr.number) != nil
+                      ? "Queue these notes on the PR's tracking session (delivered on its next idle)"
+                      : "Track this PR and queue these notes on its new agent session")
+                .clickCursor()
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func toggle(_ path: String) {
+        if expandedPaths.contains(path) { expandedPaths.remove(path) } else { expandedPaths.insert(path) }
+    }
+
+    private func leading(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// A relative date string for a comment/review timestamp ("2 hr ago"), empty
 /// when the timestamp didn't parse.
 private func relativeDate(_ d: Date?) -> String {
@@ -588,29 +976,70 @@ private struct GitHubPrDetail: View {
     let pr: PullRequest
     let cwd: String
     @State private var descriptionExpanded = true
+    /// Which detail tab is showing — the conversation timeline or the PR diff.
+    @State private var tab: PrDetailTab = .conversation
 
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
     private var conversation: PrConversation? { model.github.conversations[key] }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                header
-                notificationRows
-                checksSection
-                Divider()
-                conversationSection
-                if let err = model.github.actionError {
-                    Text(err)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
+        VStack(spacing: 0) {
+            pinnedHead
+            Divider()
+            switch tab {
+            case .conversation:
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        notificationRows
+                        descriptionDisclosure
+                        checksSection
+                        Divider()
+                        conversationSection
+                        if let err = model.github.actionError {
+                            Text(err)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            case .diff:
+                // The diff tab owns its own tree/diff scroll views, so it must fill the
+                // pane rather than sit inside the conversation's outer ScrollView.
+                VStack(alignment: .leading, spacing: 0) {
+                    if hasNotifications {
+                        notificationRows.padding(.horizontal, 16).padding(.top, 12)
+                    }
+                    PrDiffTab(pr: pr, cwd: cwd)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+    }
+
+    private var hasNotifications: Bool { !(tracked?.notifications.isEmpty ?? true) }
+
+    /// The fixed top block: PR identity (title/branch/actions) plus the sticky
+    /// Conversation/Diff switcher, on an opaque background so scrolled content
+    /// never bleeds under it.
+    private var pinnedHead: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            Picker("", selection: $tab) {
+                ForEach(PrDetailTab.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.appSurface)
     }
 
     // MARK: header
@@ -657,7 +1086,6 @@ private struct GitHubPrDetail: View {
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
             }
-            descriptionDisclosure
         }
     }
 
@@ -787,11 +1215,36 @@ private struct GitHubChecksSection: View {
 
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
 
+    private var hasFailing: Bool { runs.contains(where: \.failed) }
+    private var isRerunning: Bool { model.github.rerunning.contains(key) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Checks")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("Checks")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if isRerunning { ProgressView().controlSize(.mini) }
+                if hasFailing {
+                    Button("Re-run failed") {
+                        model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: true)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+                    .disabled(isRerunning)
+                    .help("gh run rerun --failed: re-run only the failed jobs")
+                    .clickCursor()
+                }
+                Button("Re-run all") {
+                    model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: false)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10))
+                .disabled(isRerunning)
+                .help("gh run rerun: re-run every job on this PR")
+                .clickCursor()
+            }
             ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
                 checkRow(run)
             }
@@ -938,6 +1391,34 @@ private struct ConversationCard<Content: View>: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(Color.secondary.opacity(0.15)))
+    }
+}
+
+/// A compact row of emoji-reaction chips (emoji + count) under a comment/review,
+/// mirroring GitHub's reaction bar. Renders nothing when there are no reactions.
+private struct ReactionsRow: View {
+    let reactions: [PrReaction]
+
+    var body: some View {
+        let shown = reactions.filter { !$0.emoji.isEmpty }
+        if !shown.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(shown) { r in
+                    HStack(spacing: 3) {
+                        Text(r.emoji).font(.system(size: 11))
+                        Text("\(r.count)")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.12))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.15)))
+                }
+            }
+            .padding(.top, 1)
+        }
     }
 }
 
@@ -1114,6 +1595,7 @@ private struct ReviewEventRow: View {
             if !review.body.isEmpty {
                 CommentMarkdown(text: review.body)
             }
+            ReactionsRow(reactions: review.reactions)
             if !review.comments.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(review.comments) { c in
@@ -1198,6 +1680,7 @@ private struct InlineReviewCommentRow: View {
                     .foregroundStyle(.tertiary)
             }
             CommentMarkdown(text: comment.body)
+            ReactionsRow(reactions: comment.reactions)
             if replying {
                 ReplyComposer(pr: pr, cwd: cwd,
                               replyTargetId: info?.replyTargetId, isPresented: $replying)
@@ -1236,6 +1719,7 @@ private struct IssueCommentRow: View {
                         author: comment.author, body: comment.body, url: comment.url))
             }
             CommentMarkdown(text: comment.body)
+            ReactionsRow(reactions: comment.reactions)
             if replying {
                 ReplyComposer(pr: pr, cwd: cwd, replyTargetId: nil, isPresented: $replying)
             }

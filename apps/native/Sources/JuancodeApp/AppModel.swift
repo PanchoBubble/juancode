@@ -28,6 +28,10 @@ private let projectOrderKey = "juancode.projectOrder"
 /// project cwd → ordered session ids (a plist-safe [String: [String]]).
 private let sessionOrderKey = "juancode.sessionOrder"
 
+/// UserDefaults key for the per-project "new sessions land on a fresh worktree"
+/// toggle: project cwd → Bool (a plist-safe [String: Bool]).
+private let worktreeByProjectKey = "juancode.worktreeByProject"
+
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
@@ -100,6 +104,10 @@ final class AppModel {
     /// only until the user drags a panel edge, after which the persisted manual
     /// width wins (see `PanelAutoSize`).
     var windowWidth: CGFloat = 0
+    /// The app's main `NSWindow`, resolved by `WindowBackground`. Used to grow the
+    /// window on its bottom edge when the terminal panel opens, so the agent's
+    /// terminal keeps its exact height instead of being squeezed (and reflowed).
+    weak var hostWindow: NSWindow?
 
     // MARK: Keyboard navigation (juancode-vgm)
     //
@@ -212,6 +220,13 @@ final class AppModel {
     var showingSessionTemplates = false
     /// Controls the Kill Port utility sheet — find and free a stuck local dev port.
     var showingKillPort = false
+    /// Auth & MCP status sheet — lifted off the sidebar toolbar into the top-bar
+    /// Tools popover (juancode-tciz), so it lives on the model rather than local
+    /// sidebar @State.
+    var showingStatus = false
+    /// 'Ask AI to change my settings' sheet (juancode-bdlq) — a small prompt that
+    /// runs a headless `claude -p` turn and previews a settings patch to confirm.
+    var showingSettingsAI = false
     var errorMessage: String?
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
@@ -228,7 +243,7 @@ final class AppModel {
     /// backfill (Mine/Assigned/text), or absent when no filter is active. Kept so a
     /// `loadPrs` refresh can re-apply it in the same pass — otherwise the firehose
     /// reload lands last and clobbers the backfilled matches, snapping the count
-    /// back to the newest-50 subset (e.g. "Mine (6)" instead of "Mine (13)").
+    /// back to the newest-100 subset (e.g. "Mine (6)" instead of "Mine (13)").
     private var prsBackfillIntent: [String: String] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
@@ -882,6 +897,27 @@ final class AppModel {
         didSet { UserDefaults.standard.set(sessionOrder, forKey: sessionOrderKey) }
     }
 
+    /// Per-project default for the folder "+" button: when a project's cwd is
+    /// mapped to `true`, a new session started from its header lands on a fresh
+    /// git worktree instead of the project checkout. Keyed by project cwd, same
+    /// pattern as `sessionOrder`. Persisted.
+    var worktreeByProject: [String: Bool] = (UserDefaults.standard.dictionary(forKey: worktreeByProjectKey) as? [String: Bool]) ?? [:] {
+        didSet { UserDefaults.standard.set(worktreeByProject, forKey: worktreeByProjectKey) }
+    }
+
+    /// Whether the folder "+" should isolate new sessions onto a worktree for `cwd`.
+    func worktreeDefault(forProject cwd: String) -> Bool {
+        worktreeByProject[cwd] ?? false
+    }
+
+    /// Flip the per-project worktree default, dropping the entry when back to the
+    /// `false` default so the blob doesn't accumulate stale project keys.
+    func setWorktreeDefault(_ on: Bool, forProject cwd: String) {
+        var next = worktreeByProject
+        if on { next[cwd] = true } else { next[cwd] = nil }
+        worktreeByProject = next
+    }
+
     /// Persist a new manual order for one project, pruning ids of deleted
     /// sessions (and emptied projects) across the whole blob while we're writing.
     func setSessionOrder(_ ids: [String], forProject cwd: String) {
@@ -1094,11 +1130,13 @@ final class AppModel {
 
     /// Start a new session directly in a given folder + provider, bypassing the
     /// NewSessionView sheet. Mirrors the web sidebar's per-folder "+" agent menu
-    /// (accept-all off, no worktree). Both callers — the folder "+" popover and ⌘N
+    /// (accept-all off). Both callers — the folder "+" popover and ⌘N
     /// (`quickNewSession`) — are explicit "give me a new session" gestures, so we
     /// select it and move the grid + terminal focus to it once it's up.
-    func createInFolder(provider: ProviderId, cwd: String) {
-        Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: false, select: true) }
+    /// Honors the project's worktree default unless a caller overrides it.
+    func createInFolder(provider: ProviderId, cwd: String, isolateWorktree: Bool? = nil) {
+        let worktree = isolateWorktree ?? worktreeDefault(forProject: cwd)
+        Task { await create(provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: worktree, select: true) }
     }
 
     /// ⌘N: open a new session mirroring the current selection's agent + working
@@ -1332,7 +1370,7 @@ final class AppModel {
             var result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
             // Fold any active scoped filter (Mine/Assigned/text) into the same pass
             // so the reload publishes the full set at once — matches beyond the
-            // newest-50 firehose stay in, and the count doesn't flash back down.
+            // newest-100 firehose stay in, and the count doesn't flash back down.
             if result.available, let scoped {
                 let found = await Task.detached(priority: .utility) {
                     await searchOpenPrs(cwd, search: scoped)
@@ -3093,29 +3131,37 @@ final class AppModel {
         didSet { UserDefaults.standard.set(bottomTerminalShown, forKey: "session.bottomPanel.shown") }
     }
 
-    /// Toggle the bottom terminal panel. When opening it, seed the first shell in the
-    /// selected session's folder if that folder has none yet (mirrors the header
-    /// button). No-op seeding if nothing is selected.
+    /// Bumped whenever the panel is shown, to pull keyboard focus into its active
+    /// shell pane. First open focuses on spawn; a keep-alive re-show has no new view
+    /// to auto-focus, so the pane watches this token and grabs focus instead (juancode).
+    var shellFocusToken: Int = 0
+
+    /// Toggle the bottom terminal panel. The window is NOT resized: the session
+    /// terminal translates UP by the panel's height and the panel slides in over the
+    /// freed space, both as pure SwiftUI transforms. An offset moves the layer without
+    /// a frame change, so neither the agent's grid nor the shell reflows — the repaint
+    /// churn the old window-grow / squeeze paths caused is gone (juancode). Closing
+    /// slides everything back into place. Seeding the folder's first shell is handled
+    /// by the panel itself (`ensureTerminal`), covering relaunch + folder switches.
     func toggleBottomTerminal() {
-        // Panel transition: the terminal coordinators must hold the intermediate
-        // grids this relayout produces and settle once (juancode-1th.2). 500ms
-        // spans the 200ms slide plus both settle windows, so the animated reflow
-        // runs the same lockstep+settle path as a divider drag.
-        LayoutTransitionGate.shared.begin(for: .milliseconds(500))
-        // Animated: the panel is kept mounted and slides to/from zero height (see
-        // SessionContainer) — the surface NSViews are never recreated. easeInOut,
-        // not a spring: overshoot would fire extra grid flaps into the ptys.
-        withAnimation(.easeInOut(duration: 0.2)) { bottomTerminalShown.toggle() }
-        if !bottomTerminalShown {
+        let willShow = !bottomTerminalShown
+        withAnimation(.easeInOut(duration: 0.22)) { bottomTerminalShown = willShow }
+        if willShow {
+            shellFocusToken &+= 1
+        } else {
             // The collapsed shell must not keep first-responder status (it would
-            // type into an invisible terminal) — hand focus to the main terminal.
+            // type into an off-screen terminal) — hand focus to the main terminal.
             focusTerminal()
         }
-        guard bottomTerminalShown,
-              let id = selection,
-              let cwd = sessions.first(where: { $0.id == id })?.cwd,
-              terminalPanel(cwd).isEmpty
-        else { return }
+    }
+
+    /// Ensure `cwd` has at least one shell terminal, opening one if the panel is
+    /// empty. Called by the panel whenever it becomes visible for a folder: the
+    /// panel is shown globally but terminals are per-folder, so a relaunch (shown
+    /// persisted true) or a switch to another folder would otherwise land on an
+    /// empty "No terminal" panel (juancode).
+    func ensureTerminal(cwd: String) {
+        guard terminalPanel(cwd).isEmpty else { return }
         openTerminalTab(cwd: cwd)
     }
 

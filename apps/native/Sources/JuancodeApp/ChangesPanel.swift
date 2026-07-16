@@ -856,7 +856,7 @@ private struct CommitPickerPopover: View {
 
 // MARK: - File card (header + hunks + inline comments)
 
-private struct FileCard: View {
+struct FileCard: View {
     @Environment(AppModel.self) private var model
     let sessionId: String
     let file: DiffFile
@@ -871,13 +871,22 @@ private struct FileCard: View {
     var selected: Bool = false
     let onToggleCollapse: () -> Void
     var onToggleViewed: () -> Void = {}
-    let onEdit: () -> Void
+    var onEdit: () -> Void = {}
+    /// Whether the "mark viewed" checkbox and "open in editor" affordances are shown.
+    /// Off for read-only sources with no working-tree file behind them (the PR diff
+    /// viewer, which drives this card off a PR key rather than a live session).
+    var viewable: Bool = true
+    var editable: Bool = true
     /// When false (the side-by-side diff pane), the collapse chevron is hidden — the
     /// single selected file is always shown fully expanded.
     var collapsible: Bool = true
     /// Whether the destructive per-file / per-hunk revert is offered (working-tree
     /// source only — reverting a PR/commit/base diff is meaningless). juancode-qce.3.
     var revertable: Bool = false
+    /// A lowercased content-search query. When non-empty, diff rows whose raw text
+    /// contains it get a highlight wash. Empty (the default) is a no-op, so the
+    /// working-tree Changes panel is unaffected — only the PR Diff tab passes it.
+    var contentMatch: String = ""
 
     /// A pending discard awaiting confirmation — the whole file or one hunk index.
     /// Non-nil drives the confirmation dialog; revert never runs without it.
@@ -1049,21 +1058,25 @@ private struct FileCard: View {
             Spacer(minLength: 6)
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(.green)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(.red)
-            Button(action: onToggleViewed) {
-                Image(systemName: viewed ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 11))
-                    .foregroundStyle(viewed ? Color.green : .secondary)
+            if viewable {
+                Button(action: onToggleViewed) {
+                    Image(systemName: viewed ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 11))
+                        .foregroundStyle(viewed ? Color.green : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(viewed ? "Marked viewed — click to unmark (v)" : "Mark viewed (v)")
+                .clickCursor()
             }
-            .buttonStyle(.borderless)
-            .help(viewed ? "Marked viewed — click to unmark (v)" : "Mark viewed (v)")
-            .clickCursor()
-            Button(action: onEdit) {
-                Image(systemName: "square.and.pencil").font(.system(size: 10))
+            if editable {
+                Button(action: onEdit) {
+                    Image(systemName: "square.and.pencil").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                .disabled(file.status == .deleted)
+                .help(file.status == .deleted ? "File was deleted" : "Open in your editor ($EDITOR)")
+                .clickCursor()
             }
-            .buttonStyle(.borderless).foregroundStyle(.secondary)
-            .disabled(file.status == .deleted)
-            .help(file.status == .deleted ? "File was deleted" : "Open in your editor ($EDITOR)")
-            .clickCursor()
             if revertable {
                 Button { revertTarget = .file } label: {
                     Image(systemName: "arrow.uturn.backward").font(.system(size: 10))
@@ -1109,6 +1122,7 @@ private struct FileCard: View {
                     }
                 }
                 let line = rd.flatLines[idx]
+                let matched = !contentMatch.isEmpty && line.text.lowercased().contains(contentMatch)
                 DiffLineRow(
                     generation: rd.generation,
                     index: idx,
@@ -1119,6 +1133,7 @@ private struct FileCard: View {
                     anchorLine: line.anchor?.line,
                     text: rd.rendered[idx],
                     selected: isRowSelected(idx, side: line.anchor?.side, line: line.anchor?.line),
+                    highlighted: matched,
                     onComment: { side, ln in
                         beginCompose(ComposeAnchor(side: side, line: ln, endLine: ln))
                     })
@@ -1427,10 +1442,13 @@ private struct DiffLineRow: View, Equatable {
     let text: AttributedString
     /// True while a drag-select spans this row — draws the selection overlay.
     let selected: Bool
+    /// True when a content-search query matches this row's text — draws a search wash.
+    var highlighted: Bool = false
     let onComment: (CommentSide, Int) -> Void
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.generation == b.generation && a.index == b.index && a.selected == b.selected
+        a.generation == b.generation && a.index == b.index
+            && a.selected == b.selected && a.highlighted == b.highlighted
     }
 
     var body: some View {
@@ -1444,6 +1462,9 @@ private struct DiffLineRow: View, Equatable {
                 .textSelection(.enabled)
         }
         .background(bgColor)
+        // Content-search wash — a warm amber tint under the drag-select overlay, so a
+        // search hit reads distinctly from a selected range without recoloring the code.
+        .overlay(highlighted ? Color.yellow.opacity(0.28) : Color.clear)
         // Selection overlay sits above the add/remove bg and below the syntax text,
         // so it reads as a distinct range highlight without recoloring the code.
         .overlay(selected ? Color.accentColor.opacity(0.22) : Color.clear)
@@ -1743,7 +1764,7 @@ private struct GitActionsView: View {
 
 /// Renders one tree node and (for a folder) its children recursively. A folder row
 /// toggles its expansion; a file row selects itself so its diff shows on the right.
-private struct FileTreeRows: View {
+struct FileTreeRows: View {
     let node: FileTreeNode
     let depth: Int
     let viewedPaths: Set<String>

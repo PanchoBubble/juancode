@@ -292,3 +292,19 @@ public func commentTaskPrompt(number: Int, path: String?, line: Int?,
     thread via `gh` explaining what you did.
     """
 }
+
+/// The prompt queued into a session when the user hands the staged diff-review
+/// basket to the agent from the GitHub view's Diff tab. `feedback` is the composed
+/// `composeReviewFeedback` block (numbered `file:line — note` entries with the
+/// quoted diff lines); this wraps it with the PR pointer so the agent knows which
+/// PR the notes are against.
+public func diffReviewPrompt(number: Int, url: String, feedback: String) -> String {
+    return """
+    [juancode GitHub view] Diff review on PR #\(number) (\(url)):
+
+    \(feedback)
+
+    If a point is an obvious fix, make the change, commit, and push to the PR branch. \
+    If any needs a real decision, STOP and tell me what you need.
+    """
+}

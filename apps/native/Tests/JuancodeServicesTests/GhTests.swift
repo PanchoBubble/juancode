@@ -285,4 +285,14 @@ final class UnresolvedThreadTests: XCTestCase {
         // No tracked PRs → the list is unchanged.
         XCTAssertEqual(sortPrsTrackedFirst(prs) { _ in false }.map(\.number), [50, 40, 30, 20])
     }
+
+    func testSortPrsBySubmitDateIsNumberDescending() {
+        func pr(_ n: Int) -> PullRequest {
+            PullRequest(number: n, title: "t\(n)", url: "u", branch: "b",
+                        draft: false, checks: .passing, author: "me")
+        }
+        // PR numbers are assigned at creation, so number-desc == submit-date-desc.
+        let ordered = sortPrsBySubmitDate([pr(20), pr(50), pr(30), pr(40)])
+        XCTAssertEqual(ordered.map(\.number), [50, 40, 30, 20])
+    }
 }

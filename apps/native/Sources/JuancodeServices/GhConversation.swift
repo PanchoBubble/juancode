@@ -20,6 +20,33 @@ private func ghBin() -> String {
 
 // MARK: - wire types
 
+/// One emoji reaction bucket on a comment/review — GitHub's `reactionGroups`
+/// entry: the content enum (`THUMBS_UP`, `HEART`, …) and how many people reacted
+/// with it. Only non-empty buckets are kept.
+public struct PrReaction: Sendable, Equatable, Identifiable {
+    public let content: String
+    public let count: Int
+    public var id: String { content }
+    public init(content: String, count: Int) {
+        self.content = content; self.count = count
+    }
+
+    /// The emoji for GitHub's reaction content enum; empty for an unknown value.
+    public var emoji: String {
+        switch content {
+        case "THUMBS_UP": return "👍"
+        case "THUMBS_DOWN": return "👎"
+        case "LAUGH": return "😄"
+        case "HOORAY": return "🎉"
+        case "CONFUSED": return "😕"
+        case "HEART": return "❤️"
+        case "ROCKET": return "🚀"
+        case "EYES": return "👀"
+        default: return ""
+        }
+    }
+}
+
 /// One comment in a PR conversation — either an issue-level comment or one entry
 /// of an inline review thread. `id` is the GraphQL node id (stable, dedupable);
 /// `databaseId` is the REST id needed to *reply* to a review comment.
@@ -37,13 +64,15 @@ public struct PrConversationComment: Sendable, Equatable, Identifiable {
     /// it. Both nil for an issue-level comment (which has no location).
     public let path: String?
     public let line: Int?
+    /// Emoji reactions on this comment, non-empty buckets only.
+    public let reactions: [PrReaction]
     public init(id: String, databaseId: Int?, author: String, body: String,
                 createdAt: Date?, url: String, authorAvatarUrl: String? = nil,
-                path: String? = nil, line: Int? = nil) {
+                path: String? = nil, line: Int? = nil, reactions: [PrReaction] = []) {
         self.id = id; self.databaseId = databaseId; self.author = author
         self.authorAvatarUrl = authorAvatarUrl
         self.body = body; self.createdAt = createdAt; self.url = url
-        self.path = path; self.line = line
+        self.path = path; self.line = line; self.reactions = reactions
     }
 }
 
@@ -85,13 +114,15 @@ public struct PrReviewItem: Sendable, Equatable, Identifiable {
     /// Conversation tab groups a review with its comments. Empty for a bare
     /// verdict (approve/comment with no inline notes).
     public let comments: [PrConversationComment]
+    /// Emoji reactions on the review summary, non-empty buckets only.
+    public let reactions: [PrReaction]
     public init(id: String, author: String, state: String, body: String,
                 createdAt: Date?, url: String, authorAvatarUrl: String? = nil,
-                comments: [PrConversationComment] = []) {
+                comments: [PrConversationComment] = [], reactions: [PrReaction] = []) {
         self.id = id; self.author = author; self.authorAvatarUrl = authorAvatarUrl
         self.state = state
         self.body = body; self.createdAt = createdAt; self.url = url
-        self.comments = comments
+        self.comments = comments; self.reactions = reactions
     }
 }
 
@@ -175,7 +206,13 @@ private struct ConversationResponse: Decodable {
         let url: String?
         let path: String?
         let line: Int?
+        let reactionGroups: [ReactionGroupNode]?
     }
+    struct ReactionGroupNode: Decodable {
+        let content: String?
+        let reactors: ReactorConnection?
+    }
+    struct ReactorConnection: Decodable { let totalCount: Int? }
     struct ReviewConnection: Decodable { let nodes: [ReviewNode]? }
     struct ReviewNode: Decodable {
         let id: String?
@@ -185,6 +222,7 @@ private struct ConversationResponse: Decodable {
         let createdAt: String?
         let url: String?
         let comments: CommentConnection?
+        let reactionGroups: [ReactionGroupNode]?
     }
     struct ThreadConnection: Decodable { let nodes: [ThreadNode]? }
     struct ThreadNode: Decodable {
@@ -235,13 +273,21 @@ func parsePrConversation(_ json: String) -> PrConversation? {
           let decoded = try? JSONDecoder().decode(ConversationResponse.self, from: data),
           let pr = decoded.data?.repository?.pullRequest else { return nil }
 
+    func mapReactions(_ groups: [ConversationResponse.ReactionGroupNode]?) -> [PrReaction] {
+        (groups ?? []).compactMap { g in
+            guard let content = g.content, let count = g.reactors?.totalCount, count > 0 else { return nil }
+            return PrReaction(content: content, count: count)
+        }
+    }
+
     func mapComments(_ conn: ConversationResponse.CommentConnection?) -> [PrConversationComment] {
         (conn?.nodes ?? []).compactMap { c in
             guard let id = c.id else { return nil }
             return PrConversationComment(
                 id: id, databaseId: c.databaseId, author: c.author?.login ?? "",
                 body: c.body ?? "", createdAt: parseIsoDate(c.createdAt), url: c.url ?? "",
-                authorAvatarUrl: c.author?.avatarUrl, path: c.path, line: c.line)
+                authorAvatarUrl: c.author?.avatarUrl, path: c.path, line: c.line,
+                reactions: mapReactions(c.reactionGroups))
         }
     }
 
@@ -250,7 +296,8 @@ func parsePrConversation(_ json: String) -> PrConversation? {
         return PrReviewItem(
             id: id, author: r.author?.login ?? "", state: (r.state ?? "").uppercased(),
             body: r.body ?? "", createdAt: parseIsoDate(r.createdAt), url: r.url ?? "",
-            authorAvatarUrl: r.author?.avatarUrl, comments: mapComments(r.comments))
+            authorAvatarUrl: r.author?.avatarUrl, comments: mapComments(r.comments),
+            reactions: mapReactions(r.reactionGroups))
     }
 
     let threads: [PrReviewThread] = (pr.reviewThreads?.nodes ?? []).compactMap { t in
@@ -265,7 +312,7 @@ func parsePrConversation(_ json: String) -> PrConversation? {
     // would render as a contentless "commented" card. Only that exact shape is
     // dropped; verdicts and anything with a body or comments are kept.
     let meaningfulReviews = reviews.filter {
-        !($0.state == "COMMENTED" && $0.body.isEmpty && $0.comments.isEmpty)
+        !($0.state == "COMMENTED" && $0.body.isEmpty && $0.comments.isEmpty && $0.reactions.isEmpty)
     }
 
     let commits: [PrCommit] = (pr.commits?.nodes ?? []).compactMap { edge in
@@ -302,17 +349,17 @@ public func getPrConversation(_ cwd: String, number: Int, prUrl: String) async -
         pullRequest(number: $number) {
           state
           body
-          comments(last: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url } }
+          comments(last: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url reactionGroups { content reactors { totalCount } } } }
           reviews(last: 30) {
             nodes {
-              id author { login avatarUrl } state body createdAt url
-              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line } }
+              id author { login avatarUrl } state body createdAt url reactionGroups { content reactors { totalCount } }
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line reactionGroups { content reactors { totalCount } } } }
             }
           }
           reviewThreads(first: 100) {
             nodes {
               id isResolved isOutdated path line
-              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line } }
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line reactionGroups { content reactors { totalCount } } } }
             }
           }
           commits(last: 100) {

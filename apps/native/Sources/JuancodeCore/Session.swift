@@ -634,6 +634,16 @@ public final class Session: @unchecked Sendable {
         // out before the Enter — leaving the prompt sitting unsent in the box.
         if activity == .busy { return .submitted }
 
+        // Re-assert the pane's real grid now, while the screen is idle and the input
+        // box is up. A seeded session (tracked PRs auto-submit at spawn) starts
+        // streaming right after this and never goes idle again, so the server-side
+        // `reapplyGridWhenReady` gives up on the busy screen — leaving the pty stuck at
+        // its narrow boot grid if Claude missed the local pane's early SIGWINCH (the
+        // "tracked PR terminal opens narrow" bug). This settle point is the one safe
+        // moment for a genuine size re-assert before the seed response floods in; by now
+        // the local pane has set `desiredCols/Rows` to the true on-screen width.
+        nudgeReapply()
+
         // 2) Paste, then confirm the prompt actually landed on screen.
         // `waitForStableScreen` can report "settled" on an early partial paint — the
         // banner is up but the input box isn't interactive yet — especially when

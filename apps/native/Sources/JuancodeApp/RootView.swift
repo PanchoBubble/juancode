@@ -33,95 +33,30 @@ struct RootView: View {
         // Publish the window content width; drives all auto panel defaults.
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { model.windowWidth = $0 }
         .preferredColorScheme(model.themePreference.colorScheme)
-        .background(WindowBackground(color: .appWindow))
+        .background(WindowBackground(color: .appWindow) { model.hostWindow = $0 })
         // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
         .background(PaneNavInstaller(model: model, oracle: oracle, shortcuts: shortcuts).frame(width: 0, height: 0))
         // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                // Slimmed top bar (juancode-v4ep): notifications, the Oracle AI, an
+                // AI-settings prompt, and a Tools popover. Everything else moved —
+                // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP status
+                // into Tools; the pencil onto session-row hover; Tracked Issues into
+                // the sidebar; Appearance into the ⌘, Settings window.
                 NotificationsBell()
-                // Keep Awake indicator + quick toggle, sitting next to the bell (also on
-                // View menu, ⌃⇧A). Filled + tinted while the idle-sleep assertion is held;
-                // dimmed cup when off — so it's clear at a glance whether sessions are
-                // protected from idle sleep. On by default (see AppModel.keepAwake).
-                Button { model.keepAwake.toggle() } label: {
-                    Label("Keep Awake", systemImage: model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
-                }
-                .foregroundStyle(model.keepAwake ? Color.accentColor : Color.secondary)
-                .help(model.keepAwake
-                      ? "Keep Awake is on — the Mac won't idle-sleep. Click to turn off (⌃⇧A)"
-                      : "Keep Awake is off — click to stop the Mac idle-sleeping while sessions run (⌃⇧A)")
-                .clickCursor()
-                Button { model.openEditorForSelection() } label: {
-                    Label("Open Editor", systemImage: "pencil")
-                }
-                .help("Open the selected session's worktree in your editor ($EDITOR, ⌘E)")
-                .disabled(model.selection == nil)
-                .clickCursor()
-                Button { model.openGitHub() } label: {
-                    Label("GitHub", systemImage: "arrow.triangle.pull")
-                }
-                .help("GitHub — open PRs per project, tracked-PR loops (⌘⇧G)")
-                .clickCursor()
-                Button { model.showingTrackedIssues = true } label: {
-                    Label("Tracked Issues", systemImage: "ticket")
-                }
-                .help("Linear issues under watch — do-or-escalate loops")
-                .clickCursor()
-                Button { model.showingWorktrees = true; model.loadWorktrees() } label: {
-                    Label("Worktrees", systemImage: model.workAtRiskList.isEmpty
-                          ? "externaldrive.badge.minus" : "externaldrive.badge.exclamationmark")
-                }
-                .help(model.workAtRiskList.isEmpty
-                      ? "Manage / clean git worktrees"
-                      : "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work")
-                .foregroundStyle(model.workAtRiskList.isEmpty ? Color.primary : Color.orange)
-                .clickCursor()
-                Button { model.showingSessionHealth = true } label: {
-                    Label("Session Health", systemImage: model.unhealthySessions.isEmpty
-                          ? "heart.text.square" : "heart.slash")
-                }
-                .help(model.unhealthySessions.isEmpty
-                      ? "Session health — dead / stalled sessions"
-                      : "\(model.unhealthySessions.count) session(s) need attention")
-                .foregroundStyle(model.unhealthySessions.isEmpty ? Color.primary : Color.orange)
-                .clickCursor()
-                Button { model.showingRecurringTasks = true } label: {
-                    Label("Recurring Tasks", systemImage: "repeat")
-                }
-                .help(model.recurringTasks.isEmpty
-                      ? "Recurring tasks — scheduled re-runs of a prompt"
-                      : "\(model.recurringTasks.count) recurring task(s) scheduled")
-                .clickCursor()
-                Button { oracle.open(tab: .issues) } label: {
-                    Label("Issues", systemImage: "tray.full")
-                }
-                .help("Global issues (Oracle tracker)")
-                .clickCursor()
                 Button { oracle.open(tab: .chat) } label: {
                     Label("Oracle", systemImage: "sparkles")
                 }
                 .help("Oracle — global orchestration (⌃Space)")
                 .clickCursor()
-                // Appearance toggle (juancode light/dark): click cycles
-                // System → Light → Dark; the dropdown picks one directly.
-                Menu {
-                    Picker("Appearance", selection: $model.themePreference) {
-                        ForEach(ThemePreference.allCases) { pref in
-                            Label(pref.label, systemImage: pref.symbol).tag(pref)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } label: {
-                    Label("Appearance", systemImage: model.themePreference.symbol)
-                } primaryAction: {
-                    model.themePreference = model.themePreference.next
+                Button { model.showingSettingsAI = true } label: {
+                    Label("Settings", systemImage: "gearshape")
                 }
-                .menuIndicator(.hidden)
-                .help("Appearance: \(model.themePreference.label) — click to cycle, or pick")
+                .help("Ask AI to change your settings")
                 .clickCursor()
+                ToolsMenu()
             }
         }
         // The file editor opens as a large, resizable floating window over the whole
@@ -163,6 +98,12 @@ struct RootView: View {
         .sheet(isPresented: $model.showingKillPort) {
             KillPortSheet()
         }
+        .sheet(isPresented: $model.showingStatus) {
+            StatusPanel()
+        }
+        .sheet(isPresented: $model.showingSettingsAI) {
+            SettingsAIView()
+        }
         // On-disk DB failed to open at launch → running in-memory; surface recovery.
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()
@@ -184,6 +125,9 @@ struct RootView: View {
 /// the default system-gray window background. Used as a hidden `.background(...)`.
 private struct WindowBackground: NSViewRepresentable {
     let color: NSColor
+    /// Called with the resolved host window, so the model can grow it for the
+    /// bottom terminal panel.
+    var onResolve: ((NSWindow) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
@@ -199,6 +143,7 @@ private struct WindowBackground: NSViewRepresentable {
         guard let window else { return }
         window.backgroundColor = color
         window.titlebarAppearsTransparent = true
+        onResolve?(window)
     }
 }
 
@@ -425,6 +370,87 @@ private struct NotificationsBell: View {
     }
 }
 
+/// Top-bar "Tools" popover (juancode-v4ep): the utilities that used to be their own
+/// toolbar buttons — Keep Awake, Recurring Tasks, Worktrees, Kill Port, and Auth &
+/// MCP status. The wrench icon turns orange when a worktree holds at-risk work, so
+/// the old worktree warning stays visible at a glance without opening the popover.
+private struct ToolsMenu: View {
+    @Environment(AppModel.self) private var model
+    @State private var showing = false
+
+    private var atRisk: Bool { !model.workAtRiskList.isEmpty }
+
+    var body: some View {
+        Button { showing = true } label: {
+            Label("Tools", systemImage: "wrench.and.screwdriver")
+        }
+        .foregroundStyle(atRisk ? Color.orange : Color.primary)
+        .help(atRisk
+              ? "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work"
+              : "Tools — keep awake, recurring tasks, worktrees, kill port, MCP status")
+        .clickCursor()
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Keep Awake is a toggle, so it shows its live state rather than
+                // dismissing — the rest open a sheet and close the popover.
+                Button { model.keepAwake.toggle() } label: {
+                    row(model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
+                        "Keep Awake",
+                        tint: model.keepAwake ? Color.accentColor : nil,
+                        trailing: model.keepAwake ? "On" : "Off")
+                }
+                .buttonStyle(.plain).clickCursor()
+                .help("Block the Mac from idle-sleeping while sessions run (⌃⇧A)")
+                Divider().padding(.vertical, 2)
+                toolButton("repeat", "Recurring Tasks",
+                           trailing: model.recurringTasks.isEmpty ? nil : "\(model.recurringTasks.count)") {
+                    model.showingRecurringTasks = true
+                }
+                toolButton(atRisk ? "externaldrive.badge.exclamationmark" : "externaldrive.badge.minus",
+                           "Worktrees", tint: atRisk ? Color.orange : nil,
+                           trailing: atRisk ? "\(model.workAtRiskList.count)" : nil) {
+                    model.showingWorktrees = true
+                    model.loadWorktrees()
+                }
+                toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
+                toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
+            }
+            .padding(6)
+            .frame(width: 240)
+        }
+    }
+
+    /// A popover row that opens a sheet then dismisses the popover.
+    @ViewBuilder
+    private func toolButton(_ systemImage: String, _ title: String, tint: Color? = nil,
+                            trailing: String? = nil, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            showing = false
+        } label: {
+            row(systemImage, title, tint: tint, trailing: trailing)
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+    }
+
+    private func row(_ systemImage: String, _ title: String, tint: Color? = nil,
+                     trailing: String? = nil) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage).font(.system(size: 12))
+                .foregroundStyle(tint ?? .secondary)
+                .frame(width: 18)
+            Text(title).font(.system(size: 12))
+            Spacer(minLength: 8)
+            if let trailing {
+                Text(trailing).font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .padding(.horizontal, 8).padding(.vertical, 6)
+    }
+}
+
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
@@ -456,10 +482,6 @@ struct SidebarView: View {
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
-    /// Whether the full-text transcript search sheet is open (juancode-wx9).
-    @State private var showingSearch = false
-    /// Whether the auth & MCP status sheet is open (juancode-daw).
-    @State private var showingStatus = false
     /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
     @FocusState private var listFocused: Bool
     /// Whether the "Filter sessions…" field holds focus, so ⌃F can jump to it.
@@ -703,53 +725,6 @@ struct SidebarView: View {
         let groups = makeGroups()
         let visibleIDs = visibleOrderedIDs(from: groups)
         return VStack(spacing: 0) {
-            // Persistent "add a project" entry point pinned to the top of the left
-            // panel, above the filter and the collapsible session list — so starting
-            // a session in a new folder (which is how a folder becomes a project) is
-            // always one obvious click away, not buried at the bottom.
-            Button { model.showingNewSession = true } label: {
-                Label("New project…", systemImage: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .clickCursor()
-            .padding(.horizontal, 8)
-            .padding(.top, 6)
-            .help("Start a session in any folder — it appears here as a project")
-            // Fixed GitHub row (juancode-2t6) — a plain Button, NOT a List row, so
-            // the List's selection semantics stay session-only.
-            Button { model.toggleGitHubView() } label: {
-                HStack(spacing: 6) {
-                    Label("GitHub", systemImage: "arrow.triangle.pull")
-                        .font(.system(size: 12, weight: .medium))
-                    if model.openPrTotal > 0 {
-                        Text("\(model.openPrTotal)")
-                            .font(.system(size: 10, weight: .medium).monospacedDigit())
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.2))
-                            .clipShape(Capsule())
-                            .help("\(model.openPrTotal) open PR\(model.openPrTotal == 1 ? "" : "s") across projects")
-                    }
-                    if model.trackedPrNeedsAttention {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 6, height: 6)
-                            .help("A tracked PR needs your decision")
-                    }
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .clickCursor()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 6)
-                .fill(model.showingGitHub ? Color.accentColor.opacity(0.18) : Color.clear)
-                .padding(.horizontal, 4))
-            .help("All open PRs per project (⌘⇧G)")
             let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty
             HStack(spacing: 6) {
                 Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill"
@@ -804,7 +779,20 @@ struct SidebarView: View {
                 .padding(.bottom, 4)
             }
             ScrollViewReader { proxy in
-            List(selection: $model.selection) {
+            // Custom selection binding rather than a plain `$model.selection`: while
+            // the GitHub overlay is up we report no selection, so clicking ANY session
+            // row — including the one already selected — is a change the List reports,
+            // letting us dismiss the overlay and land on that session. A per-row tap
+            // gesture can't do this: attaching one to a native List row swallows the
+            // click and breaks selection entirely on macOS. We never write nil back, so
+            // the real selection (and its keep-alive pane) survives.
+            List(selection: Binding(
+                get: { model.showingGitHub ? nil : model.selection },
+                set: { newValue in
+                    if model.showingGitHub { model.showingGitHub = false }
+                    if let newValue { model.selection = newValue }
+                }
+            )) {
                 ForEach(groups) { group in
                     Section {
                         if !collapsedFolders.contains(group.cwd) {
@@ -862,6 +850,7 @@ struct SidebarView: View {
                     .buttonStyle(.borderless)
                     .clickCursor()
                 }
+                trackedIssuesSection
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -938,32 +927,15 @@ struct SidebarView: View {
                 .help(anyExpanded ? "Collapse all projects" : "Expand all projects")
                 .clickCursor()
             }
-            ToolbarItem {
-                Button { showingSearch = true } label: { Image(systemName: "magnifyingglass") }
-                    .help("Search transcripts")
-                    .clickCursor()
-            }
-            ToolbarItem {
-                Button { showingStatus = true } label: { Image(systemName: "shield.lefthalf.filled") }
-                    .help("Auth & MCP status")
-                    .clickCursor()
-            }
-            ToolbarItem {
-                Button { model.showingKillPort = true } label: { Image(systemName: "powerplug") }
-                    .help("Kill Port — free up a stuck local dev port")
-                    .clickCursor()
-            }
+            // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP
+            // status (shield) moved off the sidebar: the filter field above covers
+            // in-list finding, and Kill Port + MCP status now live in the top-bar
+            // Tools popover (juancode-tciz / juancode-v4ep).
             ToolbarItem {
                 Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
                     .help("New session")
                     .clickCursor()
             }
-        }
-        .sheet(isPresented: $showingSearch) {
-            SearchPanel()
-        }
-        .sheet(isPresented: $showingStatus) {
-            StatusPanel()
         }
         .navigationTitle("juancode")
         .alert("Rename session", isPresented: Binding(
@@ -1104,7 +1076,12 @@ struct SidebarView: View {
             .padding(.vertical, 1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .onTapGesture { if !external { model.selection = meta.id } }
+            .onTapGesture {
+                if !external {
+                    model.selection = meta.id
+                    if model.showingGitHub { model.showingGitHub = false }
+                }
+            }
             .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
             .contextMenu { rowContextMenu(meta) }
         // Selection accent + pointing-hand + hover fill for the clickable rows;
@@ -1116,6 +1093,54 @@ struct SidebarView: View {
             row
                 .modifier(SelectableRowBackground(selected: model.selection == meta.id))
                 .pointerCursor()
+        }
+    }
+
+    /// Tracked Linear issues, surfaced in the sidebar (juancode-yluq) — moved off the
+    /// top-bar toolbar. Each row jumps to the issue's tracking session; the "+" in the
+    /// header opens the full tracking sheet (add / manage). Hidden when nothing tracked.
+    @ViewBuilder
+    private var trackedIssuesSection: some View {
+        let issues = model.trackedIssuesList
+        if !issues.isEmpty {
+            Section {
+                ForEach(issues) { issue in
+                    Button {
+                        model.selection = issue.sessionId
+                        if model.showingGitHub { model.showingGitHub = false }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "ticket")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                            Text(issue.identifier)
+                                .font(.system(size: 10).monospaced()).foregroundStyle(.secondary)
+                            Text(issue.title).font(.system(size: 11)).lineLimit(1)
+                            Spacer(minLength: 4)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .clickCursor()
+                    .help(issue.title)
+                    .contextMenu {
+                        Button("Open in Linear") {
+                            if let u = URL(string: issue.url) { NSWorkspace.shared.open(u) }
+                        }
+                        Button("Untrack \(issue.identifier)") { model.untrackIssue(issue.id) }
+                    }
+                }
+            } header: {
+                HStack(spacing: 4) {
+                    Text("Tracked issues").font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Button { model.showingTrackedIssues = true } label: {
+                        Image(systemName: "plus").font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .clickCursor()
+                    .help("Track a Linear issue / manage tracked issues")
+                }
+            }
         }
     }
 
@@ -1132,6 +1157,8 @@ struct SidebarView: View {
                           changeBadge: external ? nil : model.changeBadge(meta.id),
                           onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
+                          onOpenInEditor: (external || meta.kind == .editor)
+                              ? nil : { model.openEditorSession(meta.id) },
                           selected: model.selection == meta.id,
                           activating: model.isActivating(meta.id))
     }
@@ -1315,6 +1342,24 @@ private struct FolderHeader: View {
                 .onHover { plusHovering = $0 }
                 .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 2) {
+                        // Per-project worktree default: when on, picking an agent below
+                        // starts the session on a fresh git worktree. Persisted per
+                        // project, so it sticks for future "+" clicks. Git folders only.
+                        if model.folderGitState(group.cwd)?.git == true {
+                            Toggle(isOn: Binding(
+                                get: { model.worktreeDefault(forProject: group.cwd) },
+                                set: { model.setWorktreeDefault($0, forProject: group.cwd) }
+                            )) {
+                                Text("New worktree")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                            .help("Start new sessions here on a fresh git worktree")
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            Divider().padding(.vertical, 2)
+                        }
                         ForEach(ProviderId.allCases, id: \.self) { p in
                             Button {
                                 model.createInFolder(provider: p, cwd: group.cwd)
@@ -1330,6 +1375,7 @@ private struct FolderHeader: View {
                             .clickCursor()
                         }
                     }
+                    .frame(minWidth: 180)
                     .padding(4)
                     .fixesPopoverFirstClick()
                 }
@@ -1954,6 +2000,10 @@ struct SessionRow: View {
     var onOpenChanges: (() -> Void)? = nil
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
+    /// Open this session's worktree in $EDITOR — revealed on hover as a pencil on
+    /// the trailing edge (moved off the top-bar toolbar, juancode-byc5). Nil for
+    /// external/editor rows, which have no editor to open.
+    var onOpenInEditor: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2034,6 +2084,18 @@ struct SessionRow: View {
             }
             .buttonStyle(.borderless)
             .help("From your terminal — resume in juancode")
+            .clickCursor()
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+        }
+        // Hover-revealed "open in editor" pencil for own sessions (juancode-byc5) —
+        // same reveal pattern as the external resume button above. ⌘E does the same
+        // for the selected session.
+        if !external, let onOpenInEditor, hovering {
+            Button(action: onOpenInEditor) {
+                Image(systemName: "pencil").font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .help("Open this session's worktree in your editor ($EDITOR, ⌘E)")
             .clickCursor()
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
@@ -2321,7 +2383,8 @@ struct SessionContainer: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text(meta.title).font(.headline).lineLimit(1)
+                // Title lives in the window titlebar (.navigationTitle); no need to
+                // repeat it here — this row is just the session's action buttons.
                 Spacer()
                 if let label = meta.usage?.badgeLabel {
                     Text(label)
@@ -2335,13 +2398,6 @@ struct SessionContainer: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Refresh terminal — rebuild and replay scrollback to fix a corrupted / garbled render")
-                .clickCursor()
-                Button {
-                    model.resyncTerminalGeometry()
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                }
-                .help("Recalculate terminal geometry — re-fit the grid if a resize left it mis-sized (⌃⇧R)")
                 .clickCursor()
                 Button {
                     model.toggleBottomTerminal()
@@ -2363,7 +2419,7 @@ struct SessionContainer: View {
             }
             .padding(8)
             Divider()
-            VStack(spacing: 0) {
+            ZStack(alignment: .top) {
                 terminal
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // Focus rim flash on teleport landings (juancode-vz1): belongs to
@@ -2382,30 +2438,37 @@ struct SessionContainer: View {
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
                     }
-                if model.bottomTerminalShown {
-                    // previewOnly: this divider borders the live terminal panes
-                    // (main + bottom). Committing the size live reflows the CLI's
-                    // TUI on every drag frame, interleaving partial redraws into the
-                    // scrollback buffer permanently. Preview the edge during the drag
-                    // and resize once on release for a single clean repaint.
-                    DragResizeHandle(axis: .horizontal, value: $bottomHeight, min: 120, max: 720,
-                                     previewOnly: true)
-                }
-                // Keep-alive: once this folder has shells, the panel stays MOUNTED
-                // across toggles and slides to/from zero height (clipped) instead of
-                // being inserted/removed. Tearing it down recreated the terminal
-                // surface NSViews on every show — the toggle jank (juancode-it1).
-                // The `hidden` flag freezes pty sizing + pauses surface rendering
-                // while collapsed, so the animation's shrinking grids never reach
-                // the shells. Never mounts for folders that never opened a terminal.
+                    // Translate the whole session UP by the panel height rather than
+                    // resizing the window or squeezing the grid. An `.offset` moves the
+                    // layer with a pure transform — no frame change, so no SIGWINCH and
+                    // no pty reflow; the newest rows (the prompt) end up right above the
+                    // panel and the oldest scroll off the top, exactly like scrolling.
+                    // Closing slides it back into place (juancode).
+                    .offset(y: model.bottomTerminalShown ? -CGFloat(bottomHeight) : 0)
+
+                // Keep-alive bottom panel, pinned to the bottom edge and slid in from
+                // below via a transform. Once this folder has shells the panel stays
+                // MOUNTED across toggles at a CONSTANT height — the toggle only moves it,
+                // so the shell never reflows either (the height-animating collapse this
+                // replaced was the toggle jank, juancode-it1). The `hidden` flag still
+                // pauses the shell's rendering while it's off-screen. Never mounts for
+                // folders that never opened a terminal.
                 if model.bottomTerminalShown || !model.terminalPanel(meta.cwd).isEmpty {
-                    BottomTerminalPanel(cwd: meta.cwd, hidden: !model.bottomTerminalShown)
-                        .frame(height: model.bottomTerminalShown ? CGFloat(bottomHeight) : 0,
-                               alignment: .top)
-                        .clipped()
-                        .allowsHitTesting(model.bottomTerminalShown)
+                    VStack(spacing: 0) {
+                        // Drag the top edge to resize the panel; previewOnly commits once
+                        // on release so the shell reflows in a single clean jump. Just
+                        // rewrites `bottomHeight` now — no window resize.
+                        DragResizeHandle(axis: .horizontal, value: $bottomHeight,
+                                         min: 120, max: 720, previewOnly: true)
+                        BottomTerminalPanel(cwd: meta.cwd, hidden: !model.bottomTerminalShown)
+                    }
+                    .frame(height: CGFloat(bottomHeight))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .offset(y: model.bottomTerminalShown ? 0 : CGFloat(bottomHeight))
+                    .allowsHitTesting(model.bottomTerminalShown)
                 }
             }
+            .clipped()
             // Breathing room so the terminal isn't glued to the window edges. Constant
             // on both sides: nothing about the side panel's visibility may change the
             // terminal's layout (see the overlay note below).

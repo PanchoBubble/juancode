@@ -17,12 +17,16 @@ final class GhConversationTests: XCTestCase {
         {"id":"IC_1","databaseId":111,
          "author":{"login":"alice","avatarUrl":"https://avatars.example/alice.png"},
          "body":"Looks good overall","createdAt":"2026-07-01T12:00:00Z",
-         "url":"https://github.com/o/r/pull/5#issuecomment-111"}
+         "url":"https://github.com/o/r/pull/5#issuecomment-111",
+         "reactionGroups":[{"content":"THUMBS_UP","reactors":{"totalCount":3}},
+                           {"content":"HEART","reactors":{"totalCount":1}},
+                           {"content":"CONFUSED","reactors":{"totalCount":0}}]}
       ]},
       "reviews":{"nodes":[
         {"id":"PRR_1","author":{"login":"bob"},"state":"changes_requested",
          "body":"Needs tests","createdAt":"2026-07-01T13:30:00.500Z",
-         "url":"https://github.com/o/r/pull/5#pullrequestreview-1"}
+         "url":"https://github.com/o/r/pull/5#pullrequestreview-1",
+         "reactionGroups":[{"content":"ROCKET","reactors":{"totalCount":2}}]}
       ]},
       "reviewThreads":{"nodes":[
         {"id":"RT_1","isResolved":false,"isOutdated":false,
@@ -82,6 +86,10 @@ final class GhConversationTests: XCTestCase {
         XCTAssertEqual(ic.url, "https://github.com/o/r/pull/5#issuecomment-111")
         // Plain ISO-8601 date parses.
         XCTAssertEqual(ic.createdAt?.timeIntervalSince1970, 1_782_907_200)
+        // Reactions parse; the zero-count bucket (CONFUSED) is dropped.
+        XCTAssertEqual(ic.reactions.map(\.content), ["THUMBS_UP", "HEART"])
+        XCTAssertEqual(ic.reactions.map(\.count), [3, 1])
+        XCTAssertEqual(ic.reactions.first?.emoji, "👍")
 
         XCTAssertEqual(conv.reviews.count, 1)
         let review = conv.reviews[0]
@@ -91,6 +99,8 @@ final class GhConversationTests: XCTestCase {
         XCTAssertEqual(review.body, "Needs tests")
         // Fractional-seconds ISO-8601 date parses too.
         XCTAssertEqual(review.createdAt?.timeIntervalSince1970, 1_782_912_600.5)
+        XCTAssertEqual(review.reactions.map(\.content), ["ROCKET"])
+        XCTAssertEqual(review.reactions.first?.emoji, "🚀")
 
         XCTAssertEqual(conv.threads.count, 2)
         let thread = conv.threads[0]

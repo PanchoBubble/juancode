@@ -15,7 +15,7 @@ import JuancodeCore
 
 private let MAX_BUFFER = 16 * 1024 * 1024
 
-private let MAX_PRS = 50
+private let MAX_PRS = 100
 
 /// The `gh pr list --json` fields we request. `assignees` powers the native
 /// "Assigned to me" filter (each element is `{ login }`).
@@ -266,6 +266,14 @@ public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [Pull
 /// order. Pure; exposed for testing.
 public func sortPrsTrackedFirst(_ prs: [PullRequest], isTracked: (PullRequest) -> Bool) -> [PullRequest] {
     prs.filter(isTracked) + prs.filter { !isTracked($0) }
+}
+
+/// Order a folder's open PRs strictly by submit date, newest first. GitHub
+/// assigns PR numbers sequentially at creation, so descending number *is*
+/// descending submit date — no extra `createdAt` field to fetch. Pure; exposed
+/// for testing.
+public func sortPrsBySubmitDate(_ prs: [PullRequest]) -> [PullRequest] {
+    prs.sorted { $0.number > $1.number }
 }
 
 // MARK: - Unresolved review threads (the "active comments" count in the PR list)
@@ -565,6 +573,30 @@ public func getPrCheckRuns(_ cwd: String, number: Int) async -> [PrCheckRun] {
         return parseCheckRuns(r.stdout)
     } catch {
         return []
+    }
+}
+
+/// Re-run a PR's CI checks (`gh run rerun`). Resolves the GitHub Actions run ids
+/// behind the PR's checks and re-runs each unique run. `failedOnly` passes
+/// `--failed` (re-run only the failed jobs of runs carrying a failing check,
+/// mirroring GitHub's "Re-run failed jobs"); otherwise re-runs every job of
+/// every run ("Re-run all jobs"). User-initiated (a button) — never unattended.
+/// Throws `GhError` when gh fails or the PR has no rerunnable Actions runs.
+public func rerunChecks(_ cwd: String, number: Int, failedOnly: Bool) async throws {
+    let checks = await getPrCheckRuns(cwd, number: number)
+    let source = failedOnly ? checks.filter(\.failed) : checks
+    var seen = Set<String>()
+    var runIds: [String] = []
+    for c in source {
+        if let id = runIdFromCheckLink(c.link), seen.insert(id).inserted { runIds.append(id) }
+    }
+    guard !runIds.isEmpty else {
+        throw GhError(failedOnly
+            ? "No failed GitHub Actions runs to re-run"
+            : "No GitHub Actions runs to re-run")
+    }
+    for id in runIds {
+        try await ghWrite(cwd, failedOnly ? ["run", "rerun", id, "--failed"] : ["run", "rerun", id])
     }
 }
 

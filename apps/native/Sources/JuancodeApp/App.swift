@@ -153,8 +153,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// True once a graceful shutdown has been kicked off, so a second terminate
+    /// (e.g. macOS re-asking, or a SIGTERM landing mid-drain) doesn't start another.
+    private var terminating = false
+
+    /// Drain live sessions before the process dies (juancode-6cqj). We must WAIT for
+    /// each CLI to flush its transcript and for our own persist to run, but that wait
+    /// can't run on the main thread (the session exit listeners hop through it). So
+    /// return `.terminateLater`, drain on a background queue, and reply on the main
+    /// actor when done or after a hard deadline. `applicationWillTerminate` still runs
+    /// after we reply and force-kills any straggler, so a wedged CLI can't hang quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let state = AppEnv.state, !terminating else { return .terminateNow }
+        terminating = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            state.shutdownGracefully(timeout: 3.0)
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        AppEnv.state?.shutdown() // kill live sessions + ephemeral ptys on quit
+        AppEnv.state?.shutdown() // force-kill any straggler pty on quit
     }
 }
 
@@ -367,7 +387,8 @@ struct JuancodeApp: App {
             }
         }
 
-        // Standard ⌘, Settings window — editable shortcuts + session behaviour.
+        // Standard ⌘, Settings window — editable shortcuts + session behaviour +
+        // appearance (moved here off the top-bar toolbar, juancode-v4ep).
         Settings {
             TabView {
                 ShortcutSettingsView()
@@ -376,6 +397,9 @@ struct JuancodeApp: App {
                 SessionSettingsView()
                     .environment(model)
                     .tabItem { Label("Sessions", systemImage: "rectangle.stack") }
+                AppearanceSettingsView()
+                    .environment(model)
+                    .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }
             }
         }
     }
