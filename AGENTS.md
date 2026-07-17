@@ -49,6 +49,13 @@ Run from the repo root:
 (`pnpm check` runs all three.) A Husky pre-commit hook runs eslint + prettier + related
 vitest on staged files.
 
+## Shipping: merge to main, no PRs
+
+For now this repo ships straight to `main` — do NOT open GitHub PRs unless explicitly
+asked. Work on a branch if convenient, then land it yourself (fast-forward preferred,
+e.g. `git push origin <branch>:main`) and confirm `main` is up to date. This also
+applies to dispatched/background agent sessions.
+
 ## Run it locally
 
 - Native app: `cd apps/native && swift run juancode-app` (embedded server on `:4280`).
