@@ -86,4 +86,49 @@ public final class AppState: @unchecked Sendable {
         registry.killAll()
         ephemeral.killAll()
     }
+
+    /// Graceful shutdown: request termination of every live session and *wait*
+    /// (bounded by `timeout`) for each pty to actually exit before returning
+    /// (juancode-6cqj). A bare `shutdown()` only fires SIGTERM and returns, so on
+    /// app quit the process is torn down before the CLI flushes its transcript and
+    /// before our own `handleExit -> persistNow()` runs — losing the last, unflushed
+    /// turns (they're absent from the transcript `--resume` repaints from on reopen).
+    /// Each `Session.handleExit` persists *before* firing its exit listener, so
+    /// awaiting the exits guarantees both the CLI's transcript flush and our persist
+    /// have landed. Blocks the calling thread; call it off the main actor.
+    public func shutdownGracefully(timeout: TimeInterval = 3.0) {
+        let live = registry.all().filter { $0.isRunning }
+        guard !live.isEmpty else {
+            shutdown()
+            return
+        }
+        let group = DispatchGroup()
+        var cancels: [() -> Void] = []
+        for session in live {
+            group.enter()
+            let left = OnceFlag()
+            let cancel = session.onExit { _ in if left.fire() { group.leave() } }
+            cancels.append(cancel)
+        }
+        // Request termination now (SIGTERM / master-EOF). The real exit + persist
+        // happens on each session's work queue and fires the listener above.
+        for session in live { session.kill() }
+        _ = group.wait(timeout: .now() + timeout)
+        for cancel in cancels { cancel() }
+        // Force-kill anything that didn't exit within the budget, plus ephemeral ptys.
+        shutdown()
+    }
+}
+
+/// One-shot latch so a (possibly re-entrant) exit listener leaves its DispatchGroup
+/// exactly once.
+private final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func fire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
+    }
 }

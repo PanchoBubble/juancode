@@ -28,6 +28,21 @@ struct BottomTerminalPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appSurface)
+        // Seed the folder's first shell whenever the panel is actually visible. The
+        // panel is shown globally but terminals are per-folder, so a relaunch (shown
+        // persisted true) or a switch to another folder would otherwise show an empty
+        // "No terminal" panel — the toggle alone only covers the folder selected at
+        // toggle time (juancode).
+        .onAppear { seedIfVisible() }
+        .onChange(of: cwd) { _, _ in seedIfVisible() }
+        .onChange(of: hidden) { _, _ in seedIfVisible() }
+    }
+
+    /// Open a shell for this folder if the panel is on-screen (not the collapsed
+    /// keep-alive state) and has no terminals yet.
+    private func seedIfVisible() {
+        guard !hidden else { return }
+        model.ensureTerminal(cwd: cwd)
     }
 
     private var tabStrip: some View {
@@ -95,12 +110,12 @@ struct BottomTerminalPanel: View {
         if let tab = panel.activeTab {
             if tab.isSplit {
                 HStack(spacing: 0) {
-                    paneView(tab.panes[0])
+                    paneView(tab.panes[0], focusToken: model.shellFocusToken)
                     Divider()
                     paneView(tab.panes[1])
                 }
             } else {
-                paneView(tab.panes[0])
+                paneView(tab.panes[0], focusToken: model.shellFocusToken)
             }
         } else {
             ContentUnavailableView {
@@ -113,14 +128,16 @@ struct BottomTerminalPanel: View {
 
     /// One shell pane. Keyed by pane id so each pty binds to a stable view; if the
     /// pty has exited (or failed to spawn) we show a placeholder rather than crash.
+    /// `focusToken` is threaded only into the primary pane so re-showing the panel
+    /// pulls focus back into the shell (juancode).
     @ViewBuilder
-    private func paneView(_ pane: TerminalPaneID) -> some View {
+    private func paneView(_ pane: TerminalPaneID, focusToken: Int = 0) -> some View {
         if let pty = model.shellPty(pane) {
             Group {
                 if TerminalBackendChoice.useGhostty {
                     GhosttyEphemeral(pty: pty, hidden: hidden, onExit: {})
                 } else {
-                    SwiftTermEphemeral(pty: pty, hidden: hidden, onExit: {})
+                    SwiftTermEphemeral(pty: pty, hidden: hidden, focusToken: focusToken, onExit: {})
                 }
             }
             .background(Color.black)

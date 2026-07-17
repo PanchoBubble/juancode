@@ -168,6 +168,14 @@ public enum ProcessRunner {
             return
         }
 
+        // Drop our copies of the pipe write-ends now the child owns its own (dup'd
+        // at spawn). Otherwise the parent stays a writer, the read ends never EOF,
+        // and both fds leak — over a long run that exhausts the fd table until the
+        // next forkpty fails "Too many open files" (juancode-nft0). inPipe's writer
+        // is closed below, after stdin is fed.
+        try? outPipe.fileHandleForWriting.close()
+        try? errPipe.fileHandleForWriting.close()
+
         if let stdin, let inPipe {
             inPipe.fileHandleForWriting.write(Data(stdin.utf8))
             try? inPipe.fileHandleForWriting.close()
@@ -208,10 +216,10 @@ public enum ProcessRunner {
     }
 
     /// Owns the two read handles and guarantees each stream is torn down (reader
-    /// cancelled, `DispatchGroup` signalled) exactly once — whether that's driven
-    /// by a real EOF, the post-termination grace, or the timeout. Prevents an
-    /// unbalanced `group.leave()` while letting us force-close a stream whose
-    /// write end a leaked child still holds open.
+    /// cancelled, fd closed, `DispatchGroup` signalled) exactly once — whether
+    /// that's driven by a real EOF, the post-termination grace, or the timeout.
+    /// Prevents an unbalanced `group.leave()` while letting us force-close a stream
+    /// whose write end a leaked child still holds open.
     private final class Handles: @unchecked Sendable {
         private let lock = NSLock()
         let out: FileHandle
@@ -229,11 +237,16 @@ public enum ProcessRunner {
                 if outDone { return false }
                 outDone = true
                 out.readabilityHandler = nil
+                // Nil-ing the handler cancels the dispatch source but does NOT free
+                // the fd — FileHandle only releases it on close/dealloc. Close it
+                // here or the read-end leaks on every run (juancode-nft0).
+                try? out.close()
                 return true
             } else {
                 if errDone { return false }
                 errDone = true
                 err.readabilityHandler = nil
+                try? err.close()
                 return true
             }
         }

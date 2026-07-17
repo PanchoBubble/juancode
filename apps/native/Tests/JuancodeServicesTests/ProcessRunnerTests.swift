@@ -82,4 +82,27 @@ final class ProcessRunnerTests: XCTestCase {
         let r = try await ProcessRunner.run("/bin/sh", ["-c", "printf %s \"$JUANCODE_TEST_VAR\""])
         XCTAssertEqual(r.stdout, "inherited-value")
     }
+
+    /// Every run must release its pipe fds. Before the fix, `Handles.finish` nil-ed
+    /// the readabilityHandler but never closed the read handle, and the pipe
+    /// write-ends were never closed, so each call leaked ~2-4 fds — the poll-loop
+    /// exhaustion that made forkpty fail "Too many open files" (juancode-nft0).
+    /// Assert the process fd count doesn't grow across many runs (with/without stdin).
+    func testDoesNotLeakFileDescriptors() async throws {
+        // Warm up so one-time allocations don't count as growth.
+        for _ in 0..<5 { _ = try await ProcessRunner.run("/bin/echo", ["warmup"]) }
+        let before = Self.openFdCount()
+        for i in 0..<60 {
+            _ = try await ProcessRunner.run("/bin/echo", ["\(i)"])
+            _ = try await ProcessRunner.run("/bin/cat", [], stdin: "s\(i)")
+        }
+        let after = Self.openFdCount()
+        // A leak would add hundreds; allow a small slack for lazy runtime fds.
+        XCTAssertLessThan(after - before, 16, "fd count grew from \(before) to \(after)")
+    }
+
+    /// Count this process's open fds by listing `/dev/fd`.
+    private static func openFdCount() -> Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+    }
 }

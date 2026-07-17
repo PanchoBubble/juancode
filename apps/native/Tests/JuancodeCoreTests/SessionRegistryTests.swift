@@ -115,6 +115,29 @@ import Testing
         #expect(!exited.text.isEmpty)
     }
 
+    /// The graceful-shutdown drain (juancode-6cqj) waits on `onExit` and trusts that
+    /// the final scrollback is already persisted by the time the listener fires —
+    /// `handleExit` calls `persistNow()` *before* notifying. This guards that
+    /// ordering: at listener time the store already holds the marker the child
+    /// printed just before exiting.
+    @Test func exitListenerFiresAfterFinalScrollbackPersisted() async throws {
+        let store = InMemorySessionStore()
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'BYEMARKER\\n'\n"), store: store))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        let id = s.id
+
+        let persistedAtExit = ByteSink() // flag carrier
+        s.onExit { _ in
+            let sb = store.getScrollback(id) ?? []
+            if String(decoding: sb, as: UTF8.self).contains("BYEMARKER") {
+                persistedAtExit.add(Array("OK".utf8))
+            }
+        }
+
+        await poll { !persistedAtExit.text.isEmpty }
+        #expect(persistedAtExit.text == "OK")
+    }
+
     @Test func exitCodeIsCaptured() async throws {
         let store = InMemorySessionStore()
         let reg = SessionRegistry(env: env(script: makeScript("printf 'bye\\n'\nexit 3\n"), store: store))

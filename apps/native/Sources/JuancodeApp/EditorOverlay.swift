@@ -132,6 +132,10 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     /// toggle, juancode-it1): freezes pty sizing so the collapse animation's
     /// shrinking grids never reach the shell.
     var hidden: Bool = false
+    /// Bumped by the host to pull keyboard focus into this pane after it's already
+    /// on-screen (a keep-alive re-show has no fresh view for `makeNSView` to focus).
+    /// Default 0 → callers that don't drive focus (e.g. the editor) never re-focus.
+    var focusToken: Int = 0
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -144,6 +148,9 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         let t = tv.getTerminal()
         pty.resize(cols: t.cols, rows: t.rows)
         DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
+        // The initial spawn already grabs focus above — record the token so the first
+        // `updateNSView` doesn't fire a redundant re-focus.
+        context.coordinator.lastFocusToken = focusToken
         let host = TerminalHostView(terminal: tv)
         host.onDrop = { [pty] text in pty.write(Array(text.utf8)) }
         return host
@@ -153,6 +160,16 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     // intermediate animation frame resizes the NSView — so the freeze lands first.
     func updateNSView(_ nsView: TerminalHostView, context: Context) {
         context.coordinator.setHidden(hidden)
+        // A bumped token means "focus me now" — but only once it's actually visible.
+        if focusToken != context.coordinator.lastFocusToken {
+            context.coordinator.lastFocusToken = focusToken
+            if !hidden {
+                DispatchQueue.main.async { [weak nsView] in
+                    guard let nsView, let window = nsView.window else { return }
+                    window.makeFirstResponder(nsView.terminal)
+                }
+            }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalHostView, context: Context) -> CGSize? {
@@ -181,6 +198,8 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         private var sizingFrozen = false
         /// Latest grid the view reported while frozen; flushed once on unhide.
         private var frozenGrid: (cols: Int, rows: Int)?
+        /// Last `focusToken` acted on, so a re-show focuses exactly once per bump.
+        var lastFocusToken = 0
         /// Default font size captured on attach — anchors zoom level 0 (juancode-fry).
         private var baseFontPoints: Double = 0
         private var zoomObserver: Any?

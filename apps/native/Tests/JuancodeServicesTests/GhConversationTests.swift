@@ -12,15 +12,21 @@ final class GhConversationTests: XCTestCase {
     private let fullFixture = """
     {"data":{"repository":{"pullRequest":{
       "state":"OPEN",
+      "body":"This PR fixes the thing.",
       "comments":{"nodes":[
-        {"id":"IC_1","databaseId":111,"author":{"login":"alice"},
+        {"id":"IC_1","databaseId":111,
+         "author":{"login":"alice","avatarUrl":"https://avatars.example/alice.png"},
          "body":"Looks good overall","createdAt":"2026-07-01T12:00:00Z",
-         "url":"https://github.com/o/r/pull/5#issuecomment-111"}
+         "url":"https://github.com/o/r/pull/5#issuecomment-111",
+         "reactionGroups":[{"content":"THUMBS_UP","reactors":{"totalCount":3}},
+                           {"content":"HEART","reactors":{"totalCount":1}},
+                           {"content":"CONFUSED","reactors":{"totalCount":0}}]}
       ]},
       "reviews":{"nodes":[
         {"id":"PRR_1","author":{"login":"bob"},"state":"changes_requested",
          "body":"Needs tests","createdAt":"2026-07-01T13:30:00.500Z",
-         "url":"https://github.com/o/r/pull/5#pullrequestreview-1"}
+         "url":"https://github.com/o/r/pull/5#pullrequestreview-1",
+         "reactionGroups":[{"content":"ROCKET","reactors":{"totalCount":2}}]}
       ]},
       "reviewThreads":{"nodes":[
         {"id":"RT_1","isResolved":false,"isOutdated":false,
@@ -68,16 +74,22 @@ final class GhConversationTests: XCTestCase {
     func testParsesFullConversation() throws {
         let conv = try XCTUnwrap(parsePrConversation(fullFixture))
         XCTAssertEqual(conv.state, "OPEN")
+        XCTAssertEqual(conv.body, "This PR fixes the thing.")
 
         XCTAssertEqual(conv.issueComments.count, 1)
         let ic = conv.issueComments[0]
         XCTAssertEqual(ic.id, "IC_1")
         XCTAssertEqual(ic.databaseId, 111)
         XCTAssertEqual(ic.author, "alice")
+        XCTAssertEqual(ic.authorAvatarUrl, "https://avatars.example/alice.png")
         XCTAssertEqual(ic.body, "Looks good overall")
         XCTAssertEqual(ic.url, "https://github.com/o/r/pull/5#issuecomment-111")
         // Plain ISO-8601 date parses.
         XCTAssertEqual(ic.createdAt?.timeIntervalSince1970, 1_782_907_200)
+        // Reactions parse; the zero-count bucket (CONFUSED) is dropped.
+        XCTAssertEqual(ic.reactions.map(\.content), ["THUMBS_UP", "HEART"])
+        XCTAssertEqual(ic.reactions.map(\.count), [3, 1])
+        XCTAssertEqual(ic.reactions.first?.emoji, "👍")
 
         XCTAssertEqual(conv.reviews.count, 1)
         let review = conv.reviews[0]
@@ -87,6 +99,8 @@ final class GhConversationTests: XCTestCase {
         XCTAssertEqual(review.body, "Needs tests")
         // Fractional-seconds ISO-8601 date parses too.
         XCTAssertEqual(review.createdAt?.timeIntervalSince1970, 1_782_912_600.5)
+        XCTAssertEqual(review.reactions.map(\.content), ["ROCKET"])
+        XCTAssertEqual(review.reactions.first?.emoji, "🚀")
 
         XCTAssertEqual(conv.threads.count, 2)
         let thread = conv.threads[0]
@@ -100,10 +114,13 @@ final class GhConversationTests: XCTestCase {
     func testParsesMinimalConversationWithNullsAndGarbageDate() throws {
         let conv = try XCTUnwrap(parsePrConversation(minimalFixture))
         XCTAssertEqual(conv.state, "MERGED")
+        // No `body` key in the fixture → empty description, not a parse failure.
+        XCTAssertEqual(conv.body, "")
 
         let ic = conv.issueComments[0]
         XCTAssertNil(ic.databaseId)
         XCTAssertEqual(ic.author, "")
+        XCTAssertNil(ic.authorAvatarUrl)
         XCTAssertEqual(ic.body, "")
         XCTAssertEqual(ic.url, "")
         // Garbage createdAt → nil, not a parse failure.
@@ -181,5 +198,154 @@ final class GhConversationTests: XCTestCase {
             author: "alice", body: "typo", url: "u")
         XCTAssertTrue(prompt.contains("`README.md`"))
         XCTAssertFalse(prompt.contains("README.md:"))
+    }
+
+    // MARK: - grouped reviews + commits
+
+    /// A review carrying two inline comments, a bare approval, an empty
+    /// COMMENTED review (must be dropped), matching threads (for resolution
+    /// lookup), and two commits.
+    private let groupedFixture = """
+    {"data":{"repository":{"pullRequest":{
+      "state":"OPEN",
+      "comments":{"nodes":[]},
+      "reviews":{"nodes":[
+        {"id":"PRR_1","author":{"login":"bob"},"state":"changes_requested",
+         "body":"Two things","createdAt":"2026-07-01T10:00:00Z","url":"u1",
+         "comments":{"nodes":[
+           {"id":"RC_1","databaseId":222,"author":{"login":"bob"},"body":"nil crash",
+            "createdAt":"2026-07-01T10:00:01Z","url":"d222","path":"a.swift","line":42},
+           {"id":"RC_2","databaseId":333,"author":{"login":"bob"},"body":"rename",
+            "createdAt":"2026-07-01T10:00:02Z","url":"d333","path":"b.swift","line":7}
+         ]}},
+        {"id":"PRR_2","author":{"login":"carol"},"state":"approved","body":"",
+         "createdAt":"2026-07-01T11:00:00Z","url":"u2","comments":{"nodes":[]}},
+        {"id":"PRR_3","author":{"login":"dave"},"state":"commented","body":"",
+         "createdAt":"2026-07-01T12:00:00Z","url":"u3","comments":{"nodes":[]}}
+      ]},
+      "reviewThreads":{"nodes":[
+        {"id":"RT_1","isResolved":true,"isOutdated":false,"path":"a.swift","line":42,
+         "comments":{"nodes":[
+           {"id":"RC_1","databaseId":222,"author":{"login":"bob"},"body":"nil crash",
+            "createdAt":"2026-07-01T10:00:01Z","url":"d222","path":"a.swift","line":42}
+         ]}}
+      ]},
+      "commits":{"nodes":[
+        {"commit":{"oid":"abc1234567","abbreviatedOid":"abc1234",
+          "messageHeadline":"fix: guard nil","committedDate":"2026-07-01T10:30:00Z",
+          "authors":{"nodes":[{"name":"Bob B","user":{"login":"bob"}}]}}},
+        {"commit":{"oid":"def7654321","abbreviatedOid":null,
+          "messageHeadline":"chore: rename","committedDate":"2026-07-01T10:40:00Z",
+          "authors":{"nodes":[{"name":"Local Only","user":null}]}}}
+      ]}
+    }}}}
+    """
+
+    func testGroupsReviewInlineCommentsAndDropsEmptyReview() throws {
+        let conv = try XCTUnwrap(parsePrConversation(groupedFixture))
+        // The empty COMMENTED review (no body, no comments) is dropped; the
+        // verdict + the approval survive.
+        XCTAssertEqual(conv.reviews.map(\.id), ["PRR_1", "PRR_2"])
+        let review = conv.reviews[0]
+        XCTAssertEqual(review.comments.map(\.id), ["RC_1", "RC_2"])
+        XCTAssertEqual(review.comments[0].path, "a.swift")
+        XCTAssertEqual(review.comments[0].line, 42)
+        XCTAssertEqual(review.comments[1].path, "b.swift")
+        // Approval kept even with no body/comments.
+        XCTAssertEqual(conv.reviews[1].state, "APPROVED")
+        XCTAssertTrue(conv.reviews[1].comments.isEmpty)
+    }
+
+    func testThreadInfoLookupCrossReferencesResolution() throws {
+        let conv = try XCTUnwrap(parsePrConversation(groupedFixture))
+        // RC_1 belongs to a resolved thread; the reply target is its db id.
+        let info = try XCTUnwrap(conv.threadInfo(forCommentId: "RC_1"))
+        XCTAssertTrue(info.isResolved)
+        XCTAssertFalse(info.isOutdated)
+        XCTAssertEqual(info.replyTargetId, 222)
+        // RC_2 has no matching thread in the fixture → no info.
+        XCTAssertNil(conv.threadInfo(forCommentId: "RC_2"))
+    }
+
+    func testParsesCommits() throws {
+        let conv = try XCTUnwrap(parsePrConversation(groupedFixture))
+        XCTAssertEqual(conv.commits.count, 2)
+        XCTAssertEqual(conv.commits[0].abbreviatedOid, "abc1234")
+        XCTAssertEqual(conv.commits[0].messageHeadline, "fix: guard nil")
+        // Prefers the GitHub login when present…
+        XCTAssertEqual(conv.commits[0].author, "bob")
+        // …falls back to abbreviating oid, and to the raw name for a local author.
+        XCTAssertEqual(conv.commits[1].abbreviatedOid, "def7654")
+        XCTAssertEqual(conv.commits[1].author, "Local Only")
+    }
+
+    func testTimelineInterleavesCommitsChronologically() throws {
+        let conv = try XCTUnwrap(parsePrConversation(groupedFixture))
+        let ids = prTimeline(conv).map(\.id)
+        // 10:00 review, 10:30 commit, 10:40 commit, 11:00 approval.
+        XCTAssertEqual(ids, ["review:PRR_1", "commit:abc1234567",
+                             "commit:def7654321", "review:PRR_2"])
+    }
+
+    // MARK: - comment HTML → markdown
+
+    func testCleanCommentHTMLConvertsInlineEmphasis() {
+        let out = cleanCommentHTML("<strong>bold</strong> and <em>em</em> and <code>x()</code>")
+        XCTAssertEqual(out, "**bold** and *em* and `x()`")
+        // <b>/<i> aliases too.
+        XCTAssertEqual(cleanCommentHTML("<b>B</b> <i>I</i>"), "**B** *I*")
+    }
+
+    func testCleanCommentHTMLConvertsLinksImagesHeadingsLists() {
+        XCTAssertEqual(
+            cleanCommentHTML(#"<a href="https://x.dev">docs</a>"#),
+            "[docs](https://x.dev)")
+        XCTAssertEqual(
+            cleanCommentHTML(#"<img src="https://x.dev/a.png" alt="pic">"#),
+            "![pic](https://x.dev/a.png)")
+        XCTAssertTrue(cleanCommentHTML("<h2>Reason</h2>").contains("## Reason"))
+        let list = cleanCommentHTML("<ul><li>one</li><li>two</li></ul>")
+        XCTAssertTrue(list.contains("- one"))
+        XCTAssertTrue(list.contains("- two"))
+        XCTAssertFalse(list.contains("<li>"))
+    }
+
+    func testCleanCommentHTMLLeavesDetailsForSplitting() {
+        // <details>/<summary> must survive cleaning (splitDetails consumes them),
+        // while inline tags inside are already converted.
+        let out = cleanCommentHTML("<details><summary><strong>Waiting for</strong></summary>x</details>")
+        XCTAssertTrue(out.contains("<details"))
+        XCTAssertTrue(out.contains("<summary"))
+        XCTAssertTrue(out.contains("**Waiting for**"))
+        XCTAssertFalse(out.contains("<strong>"))
+    }
+
+    // MARK: - comment segments
+
+    func testParseCommentSegmentsSummaryLabelIsCleanedMarkdown() {
+        // The screenshot bug: a bot's <details> summary carried raw <strong>,
+        // which was shown literally. The summary label must arrive as markdown.
+        let segs = parseCommentSegments(
+            "intro\n<details><summary><strong>Waiting for</strong></summary>\ninner body\n</details>")
+        XCTAssertEqual(segs.count, 2)
+        guard case .markdown(let lead) = segs[0] else {
+            return XCTFail("expected leading markdown, got \(segs[0])")
+        }
+        XCTAssertEqual(lead, "intro")
+        guard case .details(let summary, let inner) = segs[1] else {
+            return XCTFail("expected details, got \(segs[1])")
+        }
+        XCTAssertEqual(summary, "**Waiting for**")
+        XCTAssertEqual(inner, [.markdown("inner body")])
+    }
+
+    func testParseCommentSegmentsNestsDetails() {
+        let segs = parseCommentSegments(
+            "<details><summary>outer</summary><details><summary>inner</summary>deep</details></details>")
+        guard case .details(let outerSummary, let outerInner) = segs.first else {
+            return XCTFail("expected outer details, got \(String(describing: segs.first))")
+        }
+        XCTAssertEqual(outerSummary, "outer")
+        XCTAssertEqual(outerInner, [.details(summary: "inner", inner: [.markdown("deep")])])
     }
 }

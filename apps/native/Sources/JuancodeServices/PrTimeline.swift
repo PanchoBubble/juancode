@@ -13,13 +13,15 @@ import Foundation
 public enum PrTimelineItem: Sendable, Equatable, Identifiable {
     case comment(PrConversationComment)
     case review(PrReviewItem)
+    case commit(PrCommit)
 
-    /// Namespaced so a comment and a review can never collide even if GitHub
-    /// ever handed back overlapping node ids.
+    /// Namespaced so a comment, a review, and a commit can never collide even if
+    /// GitHub ever handed back overlapping node ids.
     public var id: String {
         switch self {
         case .comment(let c): return "comment:\(c.id)"
         case .review(let r): return "review:\(r.id)"
+        case .commit(let c): return "commit:\(c.oid)"
         }
     }
 
@@ -27,16 +29,20 @@ public enum PrTimelineItem: Sendable, Equatable, Identifiable {
         switch self {
         case .comment(let c): return c.createdAt
         case .review(let r): return r.createdAt
+        case .commit(let c): return c.committedDate
         }
     }
 }
 
-/// Merge issue comments + review verdicts into one timeline, chronological by
-/// `createdAt`. Undated items (garbage timestamps parse to nil) sort last; ties
-/// and undated runs keep their input order (comments before reviews) so the
-/// result is deterministic.
-public func prTimeline(comments: [PrConversationComment], reviews: [PrReviewItem]) -> [PrTimelineItem] {
-    let items = comments.map(PrTimelineItem.comment) + reviews.map(PrTimelineItem.review)
+/// Merge issue comments + review verdicts + commits into one timeline,
+/// chronological by `createdAt`. Undated items (garbage timestamps parse to nil)
+/// sort last; ties and undated runs keep their input order (comments, then
+/// reviews, then commits) so the result is deterministic.
+public func prTimeline(comments: [PrConversationComment], reviews: [PrReviewItem],
+                       commits: [PrCommit] = []) -> [PrTimelineItem] {
+    let items = comments.map(PrTimelineItem.comment)
+        + reviews.map(PrTimelineItem.review)
+        + commits.map(PrTimelineItem.commit)
     return items.enumerated().sorted { a, b in
         switch (a.element.createdAt, b.element.createdAt) {
         case let (x?, y?): return x != y ? x < y : a.offset < b.offset
@@ -49,7 +55,8 @@ public func prTimeline(comments: [PrConversationComment], reviews: [PrReviewItem
 
 /// Convenience overload over a fetched conversation.
 public func prTimeline(_ conversation: PrConversation) -> [PrTimelineItem] {
-    prTimeline(comments: conversation.issueComments, reviews: conversation.reviews)
+    prTimeline(comments: conversation.issueComments, reviews: conversation.reviews,
+               commits: conversation.commits)
 }
 
 // MARK: - check outcome

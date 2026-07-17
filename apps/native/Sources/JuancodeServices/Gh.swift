@@ -15,7 +15,7 @@ import JuancodeCore
 
 private let MAX_BUFFER = 16 * 1024 * 1024
 
-private let MAX_PRS = 50
+private let MAX_PRS = 100
 
 /// The `gh pr list --json` fields we request. `assignees` powers the native
 /// "Assigned to me" filter (each element is `{ login }`).
@@ -52,6 +52,9 @@ struct RawPr: Decodable {
 
 struct RawPrAuthor: Decodable {
     var login: String?
+    // Only populated by the GraphQL conversation query (`author { login avatarUrl }`);
+    // `gh pr list --json author` doesn't carry it, so it stays nil on that path.
+    var avatarUrl: String?
 }
 
 /// Collapse a PR's individual checks into a single failing/pending/passing/none.
@@ -242,15 +245,20 @@ public func prBackfillQuery(mine: Bool, assigned: Bool, query: String, viewer: S
     return qualifiers == "state:open" ? nil : qualifiers
 }
 
-/// Union `extra` PRs into `base` by PR number, keeping the existing entry for any
-/// number already present (it carries enrichment like `unresolvedComments` that
-/// the backfill fetch lacks) and appending only genuinely new PRs, then sorting
-/// newest-first. Pure; exposed for testing.
+/// Union `extra` PRs into `base` by PR number: keep `base` exactly as-is — same
+/// entries (they carry enrichment like `unresolvedComments` the backfill lacks),
+/// same order, same identity — and append only the genuinely-new PRs from `extra`
+/// (those newest-first among themselves). Preserving `base` order is deliberate:
+/// the backfill lands ~seconds after the instant client-side filter, so a full
+/// re-sort here would visibly reshuffle every already-shown row (the flash when
+/// toggling Mine/Assigned). Appending keeps shown rows put and only folds the
+/// older, beyond-the-firehose matches in at the end. Pure; exposed for testing.
 public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [PullRequest] {
-    var byNumber = [Int: PullRequest]()
-    for pr in base { byNumber[pr.number] = pr }
-    for pr in extra where byNumber[pr.number] == nil { byNumber[pr.number] = pr }
-    return byNumber.values.sorted { $0.number > $1.number }
+    let present = Set(base.map(\.number))
+    let newcomers = extra
+        .filter { !present.contains($0.number) }
+        .sorted { $0.number > $1.number }
+    return base + newcomers
 }
 
 /// Order a folder's open PRs for the GitHub view: tracked PRs first (they're the
@@ -258,6 +266,14 @@ public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [Pull
 /// order. Pure; exposed for testing.
 public func sortPrsTrackedFirst(_ prs: [PullRequest], isTracked: (PullRequest) -> Bool) -> [PullRequest] {
     prs.filter(isTracked) + prs.filter { !isTracked($0) }
+}
+
+/// Order a folder's open PRs strictly by submit date, newest first. GitHub
+/// assigns PR numbers sequentially at creation, so descending number *is*
+/// descending submit date — no extra `createdAt` field to fetch. Pure; exposed
+/// for testing.
+public func sortPrsBySubmitDate(_ prs: [PullRequest]) -> [PullRequest] {
+    prs.sorted { $0.number > $1.number }
 }
 
 // MARK: - Unresolved review threads (the "active comments" count in the PR list)
@@ -557,6 +573,30 @@ public func getPrCheckRuns(_ cwd: String, number: Int) async -> [PrCheckRun] {
         return parseCheckRuns(r.stdout)
     } catch {
         return []
+    }
+}
+
+/// Re-run a PR's CI checks (`gh run rerun`). Resolves the GitHub Actions run ids
+/// behind the PR's checks and re-runs each unique run. `failedOnly` passes
+/// `--failed` (re-run only the failed jobs of runs carrying a failing check,
+/// mirroring GitHub's "Re-run failed jobs"); otherwise re-runs every job of
+/// every run ("Re-run all jobs"). User-initiated (a button) — never unattended.
+/// Throws `GhError` when gh fails or the PR has no rerunnable Actions runs.
+public func rerunChecks(_ cwd: String, number: Int, failedOnly: Bool) async throws {
+    let checks = await getPrCheckRuns(cwd, number: number)
+    let source = failedOnly ? checks.filter(\.failed) : checks
+    var seen = Set<String>()
+    var runIds: [String] = []
+    for c in source {
+        if let id = runIdFromCheckLink(c.link), seen.insert(id).inserted { runIds.append(id) }
+    }
+    guard !runIds.isEmpty else {
+        throw GhError(failedOnly
+            ? "No failed GitHub Actions runs to re-run"
+            : "No GitHub Actions runs to re-run")
+    }
+    for id in runIds {
+        try await ghWrite(cwd, failedOnly ? ["run", "rerun", id, "--failed"] : ["run", "rerun", id])
     }
 }
 

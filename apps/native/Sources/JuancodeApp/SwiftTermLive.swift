@@ -150,11 +150,7 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
     // Sendable). Returns true when it consumed the wheel. Args are plain scalars so
     // nothing non-Sendable crosses into the nonisolated monitor closure below.
     let handle: @MainActor (Double, CGPoint, Int) -> Bool = { [weak tv] deltaY, location, windowNumber in
-        // Gate on the program's requested mouseMode only — NOT on the view's
-        // `allowMouseReporting`, which we deliberately disable (see `attach`) to stop
-        // hover/motion from being typed into the pty. Our wheel events go through
-        // `terminal.sendEvent` directly, which is independent of that view flag.
-        guard let tv, let terminal = tv.terminal, terminal.mouseMode != .off,
+        guard let tv, let terminal = tv.terminal,
               // Only consume for the terminal that is genuinely under the pointer.
               // A plain `tv.bounds.contains(...)` is wrong: overlays like the Oracle
               // dock and Changes panel sit *on top of* the terminal's rectangle (and a
@@ -165,6 +161,16 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
               let window = tv.window, window.isKeyWindow, window.windowNumber == windowNumber,
               let hit = window.contentView?.hitTest(location),
               hit === tv || hit.isDescendant(of: tv) else { return false }
+        // Forward the wheel to the program when it either asked for mouse reporting OR is
+        // on the alternate screen. Gate on the program's requested mouseMode — NOT on the
+        // view's `allowMouseReporting`, which we deliberately disable (see `attach`) to stop
+        // hover/motion from being typed into the pty; our events go through `terminal.sendEvent`
+        // directly, which is independent of that flag. The alt-screen clause matters because an
+        // idle claude/codex turn drops mouse reporting while staying on the alternate screen,
+        // which has no local scrollback — without it the wheel falls through to SwiftTerm's
+        // native scrollback (empty on the alt screen) and does nothing. These panes run the
+        // agent CLI directly on the pty, so forwarding to the alt-screen program is safe.
+        guard terminal.mouseMode != .off || terminal.isCurrentBufferAlternate else { return false }
         let ticks = max(1, min(6, Int(abs(deltaY))))
         // xterm encodes wheel-up as button 64 and wheel-down as 65. Position is
         // irrelevant for these apps' full-screen scroll regions, so report (0,0).

@@ -21,13 +21,14 @@ extension View {
 
     /// Pointing-hand cursor only (no highlight) — for larger custom hit areas where
     /// a background chip would look wrong (e.g. the terminal-drop zone).
-    @ViewBuilder
+    ///
+    /// Uses the `onHover` + `NSCursor` push/pop method rather than `pointerStyle(.link)`:
+    /// `pointerStyle` does not reliably propagate to buttons hosted inside a
+    /// `NavigationSplitView` toolbar (AppKit `NSToolbar`), so the pointer went missing on
+    /// the sidebar toolbar icons even though their hover highlight (also `onHover`-driven)
+    /// showed. The push/pop approach works in every context, toolbar included.
     func pointerCursor() -> some View {
-        if #available(macOS 15.0, *) {
-            pointerStyle(.link)
-        } else {
-            onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
-        }
+        onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
 }
 
