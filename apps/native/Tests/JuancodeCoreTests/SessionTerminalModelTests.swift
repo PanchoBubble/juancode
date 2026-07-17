@@ -320,6 +320,34 @@ import SwiftTerm
             #expect(modelRow == refRow, "row \(r) mismatch: model=\(modelRow.debugDescription) ref=\(refRow.debugDescription)")
         }
     }
+
+    /// Regression for juancode-9goj. SwiftTerm's OSC 8 hyperlink atom table
+    /// (`TinyAtom.map`) is process-global and not thread-safe; every `Terminal` in
+    /// the process shares it. juancode parses each pty stream in more than one place
+    /// on different threads (the headless model on the session workQueue, the GUI
+    /// views on the main actor), so a hyperlink-bearing stream fed concurrently must
+    /// not corrupt that table. Without the shared `SwiftTermParse` lock this aborts
+    /// the test process inside `TinyAtom.lookup` ("unrecognized selector sent to
+    /// <garbage>"); with it, the feeds serialize and it completes.
+    @Test func concurrentHyperlinkFeedsDoNotCorruptGlobalAtomTable() {
+        // OSC 8 hyperlink: ESC ] 8 ; ; URI BEL  text  ESC ] 8 ; ; BEL. Each opening
+        // sequence allocates a fresh atom in the shared global map.
+        let link = "\u{1B}]8;;https://example.com/\u{07}click\u{1B}]8;;\u{07}\r\n"
+        let payload = esc(String(repeating: link, count: 40))
+        let models = (0..<4).map { _ in
+            SessionTerminalModel(cols: 80, rows: 24, scrollbackLines: 200)
+        }
+        // Real parallelism across threads: different models feed at the same time,
+        // racing the one global atom table. (Two iterations landing on the same model
+        // are serialized by that model's own lock; the cross-model race is the target.)
+        DispatchQueue.concurrentPerform(iterations: 16) { i in
+            let m = models[i % models.count]
+            for _ in 0..<40 { m.feed(payload) }
+        }
+        // Surviving the concurrent feeds without aborting is the real assertion;
+        // confirm the models are still consistent afterward.
+        for m in models { #expect(m.cols == 80 && m.rows == 24) }
+    }
 }
 
 /// An independent reference `Terminal` in tests, driven by a bare delegate, so the

@@ -813,7 +813,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // the pty callback arrives on a background queue. Coalesce live bursts
             // into one feed per runloop turn (juancode-kdn).
             let coalescer = TerminalFeedCoalescer { [weak tv] bytes in
-                tv?.feed(byteArray: bytes[...])
+                // Serialize with the headless model's parse (session workQueue): both
+                // share SwiftTerm's global OSC 8 atom table (juancode-9goj).
+                SwiftTermParse.locked { tv?.feed(byteArray: bytes[...]) }
             }
             feedCoalescer = coalescer
             if Config.useModelSeed {
@@ -1027,7 +1029,7 @@ struct SwiftTermReplay: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalHostView {
         let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         SwiftTermTheme.apply(to: tv)
-        if !scrollback.isEmpty { tv.feed(byteArray: scrollback[...]) }
+        if !scrollback.isEmpty { SwiftTermParse.locked { tv.feed(byteArray: scrollback[...]) } }
         // No `onDrop`: an exited session is read-only. The host still gives it
         // correct resize behaviour.
         return TerminalHostView(terminal: tv)

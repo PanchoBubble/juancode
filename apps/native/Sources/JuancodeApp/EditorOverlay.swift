@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SwiftTerm
+import JuancodeCore
 import JuancodeServices
 
 /// One open editor overlay: the session it belongs to, the file being edited, and
@@ -229,7 +230,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
             cancelOutput = pty.onOutput { [weak tv] bytes in
-                DispatchQueue.main.async { tv?.feed(byteArray: bytes[...]) }
+                DispatchQueue.main.async { SwiftTermParse.locked { tv?.feed(byteArray: bytes[...]) } }
             }
             // Capture the exit handler directly (not `self`) so the `@Sendable`
             // closure doesn't pull in the non-Sendable Coordinator.

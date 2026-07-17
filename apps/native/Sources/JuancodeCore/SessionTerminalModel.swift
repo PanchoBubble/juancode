@@ -156,7 +156,10 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     public func feed(_ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
         let damage: TerminalDamage? = lock.withLock {
-            terminal.feed(byteArray: bytes)
+            // Serialize against every other SwiftTerm parse in the process — the GUI
+            // views feed the same stream on the main actor, and all instances share
+            // the global OSC 8 atom table (juancode-9goj).
+            SwiftTermParse.locked { terminal.feed(byteArray: bytes) }
             guard let range = terminal.getScrollInvariantUpdateRange() else { return nil }
             terminal.clearUpdateRange()
             return TerminalDamage(startY: range.startY, endY: range.endY)
@@ -170,7 +173,7 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     public func resize(cols: Int, rows: Int) {
         lock.withLock {
             guard cols > 0, rows > 0 else { return }
-            terminal.resize(cols: cols, rows: rows)
+            SwiftTermParse.locked { terminal.resize(cols: cols, rows: rows) }
         }
     }
 
