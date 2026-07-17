@@ -376,6 +376,8 @@ struct JuancodeApp: App {
                 SessionSettingsView()
                     .environment(model)
                     .tabItem { Label("Sessions", systemImage: "rectangle.stack") }
+                TerminalSettingsView()
+                    .tabItem { Label("Terminal", systemImage: "terminal") }
             }
         }
     }

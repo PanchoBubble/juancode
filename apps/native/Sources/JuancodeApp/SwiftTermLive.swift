@@ -352,9 +352,10 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
 /// wrappers otherwise leave to chance:
 ///
 /// 1. **Resize.** SwiftUI sizes the view it gets from `makeNSView`, but a bare
-///    `TerminalView` doesn't reliably pick that up. We pin the terminal to our
-///    bounds on every `layout()`, so the grid (and the pty via SIGWINCH) always
-///    tracks the real size — and nudge a redraw so the new frame paints.
+///    `TerminalView` doesn't reliably pick that up. Size changes are throttled and
+///    settled here, then applied ATOMICALLY: SwiftTerm's grid reflow and the pty's
+///    winsize (SIGWINCH) move in one step, so the view never renders at a grid the
+///    CLI doesn't have yet (juancode-msnf).
 /// 2. **Drag-and-drop.** SwiftTerm registers no dragged types, so dropping a file
 ///    did nothing. We accept file URLs and hand their (shell-quoted) paths to
 ///    `onDrop`, which writes them into the session/pty as if typed.
@@ -371,6 +372,8 @@ final class TerminalHostView: NSView {
     /// the live terminal (the read-only replay view leaves it off).
     var focusOnAppear = false
     private var didAutoFocus = false
+    /// Re-applies the renderer choice (CG/Metal) when the Settings toggle flips.
+    private var rendererObserver: Any?
 
     init(terminal: TerminalView) {
         self.terminal = terminal
@@ -394,6 +397,22 @@ final class TerminalHostView: NSView {
     // time the window may not yet be key, so `makeFirstResponder` could be ignored.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // Renderer choice applies here — SwiftTerm's `setUseMetal` wants the view
+        // in a window. The observer for later Settings flips lives only while
+        // we're IN a window (registered on join, removed on leave) so a torn-down
+        // pane can't leak observers — a `deinit` can't touch the non-Sendable token.
+        if window != nil {
+            applyRenderer()
+            if rendererObserver == nil {
+                rendererObserver = NotificationCenter.default.addObserver(
+                    forName: TerminalRenderer.didChange, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.applyRenderer() }
+                }
+            }
+        } else if let o = rendererObserver {
+            NotificationCenter.default.removeObserver(o)
+            rendererObserver = nil
+        }
         guard focusOnAppear, !didAutoFocus, window != nil else { return }
         didAutoFocus = true
         DispatchQueue.main.async { [weak self] in
@@ -402,24 +421,102 @@ final class TerminalHostView: NSView {
         }
     }
 
-    /// Pin the terminal to our exact bounds. SwiftTerm's own `setFrameSize`
-    /// recomputes the grid (cols/rows) and fires `sizeChanged` from here, so this is
-    /// the one place size flows from. On a real frame change, nudge a repaint so the
-    /// CoreGraphics renderer fills any newly-exposed area after a grow (no black
-    /// bands). When the frame is unchanged, do NOT touch `needsDisplay`: a full-view
-    /// invalidation makes SwiftTerm rebuild attributed strings for every visible row
-    /// (its most expensive draw), and this runs on every AppKit layout pass — that
-    /// was a main-thread hog under agent streaming (juancode-idq).
-    private func pinTerminal() {
-        if terminal.frame != bounds {
-            terminal.frame = bounds
-            terminal.needsDisplay = true
+    /// Switch the terminal to the current renderer choice. Metal init can fail
+    /// (no device / pipeline error) — fall back to CoreGraphics silently rather
+    /// than surfacing an error for a purely cosmetic preference.
+    private func applyRenderer() {
+        guard window != nil else { return }
+        do { try terminal.setUseMetal(TerminalRenderer.shared.metalEnabled) }
+        catch { try? terminal.setUseMetal(false) }
+    }
+
+    /// Latest size requested while an apply is deferred (throttle window, live
+    /// window drag, or a `LayoutTransitionGate` panel animation). Flushed by
+    /// `flushPendingSize` — trailing timer, `viewDidEndLiveResize`, or gate end.
+    private var pendingSize: NSSize?
+    private var settleWork: DispatchWorkItem?
+    private var lastApplyUptimeNs: UInt64 = 0
+    /// Minimum spacing between grid applies. Reflow + repaint + SIGWINCH per apply
+    /// is real work for both SwiftTerm and the CLI's TUI, so a drag is sampled
+    /// rather than tracked per-frame (Ghostty coalesces resizes the same way, at
+    /// 25ms on its IO thread). Window live-resize gets a wider interval: the CLI
+    /// full-repaints per SIGWINCH and mid-drag frames are throwaway.
+    private static let applyIntervalNs: UInt64 = 80_000_000
+    private static let liveResizeIntervalNs: UInt64 = 150_000_000
+
+    /// Route a size toward the terminal. The grid apply (SwiftTerm reflow) and the
+    /// pty winsize (SIGWINCH) always happen TOGETHER in `flushPendingSize` — never
+    /// let the view render at a grid the pty doesn't have yet: the old scheme
+    /// (reflow now, debounced SIGWINCH 90-150ms later) left the CLI painting at the
+    /// stale width into an already-reflowed grid, which is exactly what garbled
+    /// characters on resize (juancode-msnf).
+    ///
+    /// When the size is unchanged there is nothing to apply, but `reportStale`
+    /// callers (layout passes) still report the current grid so a stale pty gets
+    /// re-synced even when SwiftTerm's own delegate stayed quiet; `sendResize`
+    /// dedups it to nothing in steady state. No `needsDisplay` on that path: a
+    /// full-view invalidation rebuilds every visible row's attributed string — a
+    /// main-thread hog under agent streaming (juancode-idq).
+    private func requestSize(_ size: NSSize, reportStale: Bool) {
+        guard size.width > 1, size.height > 1 else { return }
+        if terminal.frame.size == size {
+            // Includes a burst that settled back where it started (net-zero panel
+            // toggle): drop the pending intermediate, nothing ever reflowed.
+            pendingSize = nil
+            settleWork?.cancel(); settleWork = nil
+            if reportStale, let t = terminal.terminal, t.cols > 0, t.rows > 0 {
+                onGrid?(t.cols, t.rows)
+            }
+            return
         }
-        // Report the grid SwiftTerm now has for these bounds. Setting the frame above
-        // runs SwiftTerm's `setFrameSize` → `processSizeChange` synchronously, so the
-        // model's cols/rows are current here. This fires on every layout (not just
-        // when the grid *changes*), so a stale pty gets re-synced even if SwiftTerm's
-        // own delegate stayed quiet.
+        pendingSize = size
+        if LayoutTransitionGate.shared.active {
+            // Discrete panel/fullscreen animation: every intermediate geometry is
+            // throwaway. Freeze the grid for the whole transition and apply the
+            // settled size once — reflowing mid-animation is how a net-zero toggle
+            // used to leave garbled frames behind (juancode-1th.2).
+            armSettle(afterMs: 120)
+        } else {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let interval = inLiveResize ? Self.liveResizeIntervalNs : Self.applyIntervalNs
+            if now &- lastApplyUptimeNs >= interval {
+                flushPendingSize()
+            } else {
+                armSettle(afterMs: Int(interval / 1_000_000))
+            }
+        }
+    }
+
+    private func armSettle(afterMs: Int) {
+        settleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Still mid-transition: keep holding. (Live drags don't need the
+            // re-check — `viewDidEndLiveResize` flushes them eagerly.)
+            if LayoutTransitionGate.shared.active {
+                self.armSettle(afterMs: 120)
+            } else {
+                self.flushPendingSize()
+            }
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(afterMs), execute: work)
+    }
+
+    /// Apply the latest pending size atomically: reflow SwiftTerm's grid (setting
+    /// the frame runs `processSizeChange` synchronously) and push the resulting
+    /// grid to the pty in the same step via `onGrid` → `sendResize` → ioctl. The
+    /// view and the CLI never disagree about the grid for more than the ioctl call.
+    private func flushPendingSize() {
+        settleWork?.cancel(); settleWork = nil
+        guard let size = pendingSize else { return }
+        pendingSize = nil
+        lastApplyUptimeNs = DispatchTime.now().uptimeNanoseconds
+        let f = NSRect(origin: .zero, size: size)
+        guard terminal.frame != f else { return }
+        resizeDebugLog.log("applyGrid size=\(Int(size.width))x\(Int(size.height))")
+        terminal.frame = f
+        terminal.needsDisplay = true
         if let t = terminal.terminal, t.cols > 0, t.rows > 0 {
             onGrid?(t.cols, t.rows)
         }
@@ -427,23 +524,26 @@ final class TerminalHostView: NSView {
 
     // `setFrameSize` is the reliable hook — SwiftUI resizing the host (window split,
     // panel drag, or the Oracle dock grip) always routes through it; `layout()`
-    // isn't guaranteed to fire for a frame-based NSView, so we cover both.
+    // isn't guaranteed to fire for a frame-based NSView, so we cover both. The
+    // terminal's origin stays at zero while an apply is deferred, so mid-drag the
+    // frozen content stays bottom-anchored — where the CLI's input line lives.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        pinTerminal()
+        requestSize(bounds.size, reportStale: true)
     }
 
     override func layout() {
         super.layout()
-        pinTerminal()
+        requestSize(bounds.size, reportStale: true)
     }
 
-    // After a live drag (window edge / split divider) settles, guarantee the grid +
-    // pty land on the *final* size — intermediate frames are coalesced, so the last
-    // one could otherwise be the value the CLI is left rendering at.
+    // A live drag (window edge) settled: land the final size immediately —
+    // intermediate frames were sampled, so the last one could otherwise wait out
+    // a trailing timer while the CLI renders at a stale width.
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
-        pinTerminal()
+        requestSize(bounds.size, reportStale: true)
+        flushPendingSize()
     }
 
     /// Make the terminal first responder on demand (⌃Space focus request). Deferred
@@ -456,27 +556,17 @@ final class TerminalHostView: NSView {
     }
 
     /// Apply the authoritative SwiftUI size (from the wrapping GeometryReader, via
-    /// `updateNSView`). Setting the terminal's frame runs SwiftTerm's `setFrameSize`
-    /// → `processSizeChange` synchronously, recomputing the grid and firing
-    /// `sizeChanged`; we also report the grid directly so the pty SIGWINCH is sent
-    /// even if the grid value didn't change but the pty was stale. This is what makes
-    /// a freshly-opened session size correctly instead of staying at 80x24.
+    /// `updateNSView`). Routed through the same throttled `requestSize` path as the
+    /// AppKit layout hooks — grid and pty move together. This is what makes a
+    /// freshly-opened session size correctly instead of staying at 80x24.
     ///
-    /// Everything is gated on a REAL frame change: `updateNSView` calls this on
-    /// every SwiftUI update that touches the representable (activity flips, sidebar
-    /// churn, …), and an unconditional `needsDisplay = true` forced SwiftTerm's
-    /// full-grid redraw — every visible row's attributed string rebuilt — per model
-    /// update, saturating the main thread while agents stream (juancode-idq). A
-    /// same-size call has nothing to repaint or re-report: stale-pty resync is owned
-    /// by `pinTerminal` (real layout passes), `Session.reapplyGridWhenReady`, and the
-    /// reactivation nudges.
+    /// `reportStale` is false: `updateNSView` fires on every SwiftUI update that
+    /// touches the representable (activity flips, sidebar churn, …), so a same-size
+    /// call must stay a strict no-op (juancode-idq); stale-pty resync is owned by
+    /// the real layout passes, `Session.reapplyGridWhenReady`, and the reactivation
+    /// drift check.
     func applySize(_ size: CGSize) {
-        guard size.width > 1, size.height > 1 else { return }
-        let f = NSRect(origin: .zero, size: size)
-        guard terminal.frame != f else { return }
-        terminal.frame = f
-        terminal.needsDisplay = true
-        if let t = terminal.terminal, t.cols > 0, t.rows > 0 { onGrid?(t.cols, t.rows) }
+        requestSize(size, reportStale: false)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -601,7 +691,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         // resync nudge on every newly-opened terminal). See GhosttyRepresentable.
         context.coordinator.lastFocusToken = focusToken
         context.coordinator.lastResyncToken = resyncToken
-        let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        // Create the view at the real laid-out size when SwiftUI already knows it,
+        // so the attach-time model seed renders at the true grid instead of a
+        // placeholder one (which then needed a forced re-layout to fix).
+        let initialSize = targetSize.width > 1 && targetSize.height > 1
+            ? targetSize : CGSize(width: 800, height: 600)
+        let tv = CopyOnSelectTerminalView(frame: CGRect(origin: .zero, size: initialSize))
         tv.terminalDelegate = context.coordinator
         // Stop SwiftTerm from auto-forwarding mouse motion/clicks to the pty. When a
         // TUI enables motion tracking (DECSET 1002/1003) the view encodes every
@@ -662,16 +757,15 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private var shiftEnterMonitor: Any?
         /// Window-level leftMouseDown monitor for ⌘-click-to-open a `path:line`.
         private var pathClickMonitor: Any?
-        private var resizeWork: DispatchWorkItem?
         /// One-shot repaint fired after the attach-time scrollback replay lands
         /// (see `attach`). Held so `detach` can cancel it before the pane tears down.
         private var replayRepaintWork: DispatchWorkItem?
         /// Last (cols,rows) we pushed to the pty, so we never send a redundant
         /// SIGWINCH (which makes the agent's TUI repaint for no reason).
         private var lastSent: (cols: Int, rows: Int)?
-        /// Latest grid size SwiftTerm computed (from `sizeChanged`). Cached as plain
-        /// ints so a reactivation nudge can re-send it without touching the main-actor view.
-        private var lastGrid: (cols: Int, rows: Int)?
+        /// The grid the attach-time model seed was rendered at, so the post-settle
+        /// check can tell whether the seed is still exact (see `attach`).
+        private var seedGrid: (cols: Int, rows: Int)?
         /// Observers that re-assert the grid when the app/window comes back to the front
         /// (activation / de-miniaturize) — a fullscreen / display / Space change can
         /// re-lay-out the window without routing a frame change through `sizeChanged`.
@@ -717,6 +811,11 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             }
             feedCoalescer = coalescer
             if Config.useModelSeed {
+                // The seed is synthesized at the MODEL's grid (== the pty's). Record
+                // it so the settle check below can tell whether the seed is still
+                // exact once the pane's real bounds land. The pty's actual grid is
+                // the ground truth; the view's grid is a fallback approximation.
+                seedGrid = session.appliedGrid() ?? tv.terminal.map { ($0.cols, $0.rows) }
                 // Atomically seed from the model and subscribe (juancode-a2h.2): the
                 // clean seed and the live stream partition with no gap, so a brand-new
                 // session's boot burst can't be dropped between seed and subscribe.
@@ -735,19 +834,22 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // app-switch, can re-lay-out the window without routing a frame change
             // through `sizeChanged` — leaving the pty at a stale (smaller) grid, so the
             // agent paints into a sub-rectangle with black margins until you reactivate.
-            // Re-assert the real grid (nudged, so it actually re-lays-out) on each such
-            // event. `didChangeScreen` covers dragging the window to another monitor;
-            // `didChangeScreenParameters` covers resolution changes and displays being
-            // (un)plugged — both can resize/re-layout the window without ever firing
-            // the activation events. Capture only the weak view + Sendable session —
-            // never `self` — so these `@Sendable` notification closures stay race-free.
+            // Verify-then-repair on each such event: compare the pty's actual grid
+            // (`TIOCGWINSZ` readback) to the view's and resize only on true drift — the
+            // old unconditional rows-1/rows flap made every visible agent full-repaint
+            // twice on every app activation, and a flap landing mid-stream is itself a
+            // garble source (juancode-msnf). `didChangeScreen` covers dragging the
+            // window to another monitor; `didChangeScreenParameters` covers resolution
+            // changes and displays being (un)plugged. Capture only the weak view +
+            // Sendable session — never `self` — so these `@Sendable` notification
+            // closures stay race-free.
             for name in [NSApplication.didBecomeActiveNotification,
                          NSWindow.didDeminiaturizeNotification,
                          NSWindow.didChangeScreenNotification,
                          NSApplication.didChangeScreenParametersNotification] {
                 activeObservers.append(NotificationCenter.default.addObserver(
                     forName: name, object: nil, queue: .main) { [weak tv] _ in
-                    MainActor.assumeIsolated { Self.nudgeResize(tv, session) }
+                    MainActor.assumeIsolated { Self.resyncIfDrifted(tv, session) }
                 })
             }
             // The boot-time resync (slow CLI missing early SIGWINCHs) is now owned by
@@ -755,28 +857,53 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // once the TUI settles (juancode-1th.3). This view only handles later
             // window relayouts (the reactivation nudge above) and manual `forceResync`.
 
-            // The model seed above paints the correct current screen, but it lands at
-            // the view's PLACEHOLDER grid (makeNSView size) — the real pane bounds only
-            // settle a beat later. The pty itself is untouched by a client rebuild, so a
-            // live full-screen agent won't repaint on its own to fill the settled grid.
-            // Once the bounds have settled, force a genuine SIGWINCH so the agent fully
-            // repaints at the true current grid, replacing the placeholder-sized seed.
-            // Gated on alt-buffer so a plain shell (line-based, reflows correctly) isn't
-            // nudged for nothing.
+            // The model seed above paints the correct current screen at the MODEL's
+            // grid; the pane's real bounds may settle a beat later at a different one.
+            // Once settled, decide whether the seed is still exact:
+            //   - settled grid == seed grid: the seed already matches, do nothing
+            //     (the common case now that `makeNSView` sizes the view for real
+            //     bounds before seeding — the old unconditional nudge here forced a
+            //     wasteful double repaint on every attach).
+            //   - grids differ and the pty moved with the view: the resize that moved
+            //     it was a genuine SIGWINCH — the CLI's full repaint replaces the seed.
+            //   - grids differ but the pty already had the settled grid (resize
+            //     deduped, no SIGWINCH): the mis-sized seed would stay on screen —
+            //     the one case that still needs a forced re-layout.
+            // Gated on alt-buffer so a plain shell (line-based, reflows correctly)
+            // isn't nudged for nothing.
             let repaint = DispatchWorkItem { [weak self] in
                 guard let self, let tv = self.view, let t = tv.terminal,
                       self.session.isRunning, t.isCurrentBufferAlternate else { return }
-                self.forceResync()
+                guard let seed = self.seedGrid, seed != (t.cols, t.rows) else { return }
+                if let applied = self.session.appliedGrid(),
+                   applied.cols == t.cols, applied.rows == t.rows {
+                    self.forceResync()
+                }
             }
             replayRepaintWork = repaint
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: repaint)
         }
 
+        /// Verify-then-repair: resize the pty to the view's grid only when the pty's
+        /// actual grid (`TIOCGWINSZ` readback) genuinely drifted from it. The repair
+        /// is a plain resize — a real size change from the CLI's point of view, so it
+        /// re-lays-out — never a flap. Static with Sendable-only captures so it's
+        /// safe to call from `@Sendable` notification closures.
+        @MainActor private static func resyncIfDrifted(_ tv: TerminalView?, _ session: Session) {
+            guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
+            guard let applied = session.appliedGrid(),
+                  applied.cols != t.cols || applied.rows != t.rows else { return }
+            resizeDebugLog.log("resyncIfDrifted pty=\(applied.cols)x\(applied.rows) view=\(t.cols)x\(t.rows)")
+            session.resizeLocal(cols: t.cols, rows: t.rows)
+        }
+
         /// Nudge the pty to the view's live grid: send `rows-1` then the real `rows` a
         /// beat later, so the agent observes a genuine size change and fully re-lays-out.
-        /// A plain same-size SIGWINCH can be a no-op — which is exactly why a drifted
-        /// session only fills the available space after a reactivate. Static with
-        /// Sendable-only captures so it's safe to call from `@Sendable` closures.
+        /// A plain same-size SIGWINCH can be a no-op (Node CLIs only emit `resize` when
+        /// the dimensions actually changed) — this is the escape hatch for "pty size is
+        /// right but the rendered screen is stale", used by the manual resync (⌃⇧R) and
+        /// the attach settle. Static with Sendable-only captures so it's safe to call
+        /// from `@Sendable` closures.
         @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: Session) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             let cols = t.cols, rows = t.rows
@@ -796,75 +923,15 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             Self.nudgeResize(view, session)
         }
 
-        /// The CLI is spawned at a default 80x24. Once SwiftTerm has measured its
-        /// cell size and the view has its real bounds, the grid SwiftTerm renders can
-        /// be much larger than what the CLI thinks it has — leaving a black band
-        /// below the agent's output (the bug: terminal "doesn't resize"). A single
-        /// early SIGWINCH can also land before the TUI installs its handler. So we
-        /// resync the pty to the live grid a few times across the boot window;
-        /// `sendResize` dedups so steady state sends nothing.
-        /// The host computed a grid for its real bounds. Cache it and push a
-        /// debounced SIGWINCH so the pty tracks the actual on-screen size.
+        /// The host applied a grid for its real bounds (or a layout pass re-reported
+        /// the current one). Push it to the pty NOW: the host already throttles and
+        /// settles size changes (`TerminalHostView.requestSize`), so by the time a
+        /// grid lands here the view has just reflowed to it — any delay before the
+        /// ioctl is a window where the CLI paints at a stale width into the new grid
+        /// (the resize-garbling bug, juancode-msnf). `sendResize` dedups repeats.
         func gridChanged(cols: Int, rows: Int) {
             guard cols > 0, rows > 0 else { return }
-            scheduleResize(cols: cols, rows: rows)
-        }
-
-        /// True when a grid change in the pending debounce window arrived during a
-        /// panel open/close transition (`LayoutTransitionGate`) — the flush must
-        /// then force a full re-layout (nudge) rather than a plain resize: a
-        /// net-zero toggle settles at the grid the pty already has, where a plain
-        /// send dedups to nothing, no SIGWINCH fires, and the frames rendered
-        /// mid-transition stay garbled until a manual resync (juancode-1th.2).
-        private var settleAfterTransition = false
-
-        /// Trailing-debounced resize: cache the latest grid and (re)arm the flush.
-        /// The debounce already suppresses intermediate grids; the transition flag
-        /// upgrades the eventual flush to a forced re-layout.
-        private func scheduleResize(cols: Int, rows: Int) {
-            let alt = view?.terminal?.isCurrentBufferAlternate ?? false
-            resizeDebugLog.log("scheduleResize in cols=\(cols) rows=\(rows) gateActive=\(LayoutTransitionGate.shared.active) alt=\(alt) lastSent=\(self.lastSent.map { "\($0.cols)x\($0.rows)" } ?? "nil", privacy: .public)")
-            lastGrid = (cols, rows)
-            if LayoutTransitionGate.shared.active { settleAfterTransition = true }
-            resizeWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.flushResize() }
-            resizeWork = work
-            let delay: DispatchTimeInterval = settleAfterTransition ? .milliseconds(150) : .milliseconds(90)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-        }
-
-        /// Push the latest grid to the pty. After a layout transition, do it as a
-        /// genuine SIGWINCH (see `settleAfterTransition`) so the TUI fully
-        /// re-lays-out at the settled size.
-        private func flushResize() {
-            guard let g = lastGrid else { return }
-            let alt = view?.terminal?.isCurrentBufferAlternate ?? false
-            if settleAfterTransition {
-                let netZero = lastSent.map { $0.cols == g.cols && $0.rows == g.rows } ?? false
-                resizeDebugLog.log("flushResize SETTLE grid=\(g.cols)x\(g.rows) netZero=\(netZero) alt=\(alt) -> branch=\(netZero ? "FLAP" : "plain-sendResize", privacy: .public)")
-                settleAfterTransition = false
-                if remembersSize { TerminalGrid.remember(cols: g.cols, rows: g.rows) }
-                // Only force the rows-1/rows flap when the settled grid equals
-                // what the pty already has (net-zero toggle — a plain send would
-                // dedup to no SIGWINCH). When the grid changed, one plain resize
-                // is already a genuine SIGWINCH; the extra flap just writes more
-                // mis-wrapped output on a streaming session (juancode-qxb).
-                if let last = lastSent, last.cols == g.cols, last.rows == g.rows {
-                    lastSent = nil
-                    session.resizeLocal(cols: g.cols, rows: g.rows > 2 ? g.rows - 1 : g.rows + 1)
-                    let work = DispatchWorkItem { [weak self] in
-                        guard let self, let g = self.lastGrid else { return }
-                        self.lastSent = g
-                        self.session.resizeLocal(cols: g.cols, rows: g.rows)
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: work)
-                } else {
-                    sendResize(cols: g.cols, rows: g.rows)
-                }
-            } else {
-                resizeDebugLog.log("flushResize PLAIN (no transition) grid=\(g.cols)x\(g.rows) alt=\(alt)")
-                sendResize(cols: g.cols, rows: g.rows)
-            }
+            sendResize(cols: cols, rows: rows)
         }
 
         /// Push a size to the pty, skipping no-op repeats. Also remember it as the
@@ -897,7 +964,6 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             replayRepaintWork?.cancel(); replayRepaintWork = nil
-            resizeWork?.cancel(); resizeWork = nil
             cancel?()
             cancel = nil
         }
@@ -909,12 +975,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // Coalesce a burst of resizes (panel-toggle relayout, window-edge drag)
-            // into a single SIGWINCH. SwiftTerm has already resized its own grid for
-            // rendering; we just avoid hammering the agent's TUI with intermediate
-            // widths mid-stream, which interleaves partial redraws into garbage.
+            // SwiftTerm reflowed its grid (fired from the host's throttled frame
+            // apply, or a font-zoom re-layout). Push the pty in lockstep; burst
+            // suppression lives in `TerminalHostView.requestSize`, dedup in
+            // `sendResize`.
             guard newCols > 0, newRows > 0 else { return }
-            scheduleResize(cols: newCols, rows: newRows)
+            sendResize(cols: newCols, rows: newRows)
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}
