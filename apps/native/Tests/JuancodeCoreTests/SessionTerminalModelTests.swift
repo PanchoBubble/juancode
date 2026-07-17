@@ -172,6 +172,122 @@ import SwiftTerm
         #expect(!cells[1].style.contains(.bold))
     }
 
+    /// juancode-gwqg: on the primary buffer the seed flows the scrollback history
+    /// in above the repainted screen, so a freshly-seeded terminal scrolls back
+    /// through the same history the model retains — re-attaching a pane no longer
+    /// loses everything above the visible screen.
+    @Test func seedBytesReproducePrimaryScrollback() {
+        let m = SessionTerminalModel(cols: 10, rows: 3, scrollbackLines: 100)
+        // Six lines into a 3-row grid: L1..L3 scroll into history, L4..L6 visible.
+        m.feed(esc("L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6"))
+        #expect(m.visibleText() == "L4\nL5\nL6")
+        #expect(m.scrollbackRows == 3)
+
+        let seeded = SessionTerminalModel(cols: 10, rows: 3, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(seeded.visibleText() == m.visibleText())
+        #expect(seeded.cursorPosition == m.cursorPosition)
+        #expect(seeded.scrollbackRows == 3)
+        #expect(seeded.styledScrollbackTail(3).map(\.text) == ["L1", "L2", "L3"])
+    }
+
+    /// The scrollback portion of the seed is capped (the receiving view retains a
+    /// bounded history), keeping the NEWEST rows.
+    @Test func seedBytesCapScrollbackToNewestRows() {
+        let m = SessionTerminalModel(cols: 10, rows: 3, scrollbackLines: 100)
+        m.feed(esc("L1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6"))
+
+        let seeded = SessionTerminalModel(cols: 10, rows: 3, scrollbackLines: 100)
+        seeded.feed(m.seedBytes(maxScrollbackRows: 2))
+
+        #expect(seeded.visibleText() == m.visibleText())
+        #expect(seeded.scrollbackRows == 2)
+        #expect(seeded.styledScrollbackTail(2).map(\.text) == ["L2", "L3"])
+    }
+
+    /// Flowed scrollback rows keep their per-cell SGR, and a full-width history row
+    /// doesn't gain a spurious blank line (the CR clears the pending wrap).
+    @Test func seedBytesScrollbackKeepsStyleAndFullWidthRows() {
+        let m = SessionTerminalModel(cols: 5, rows: 2, scrollbackLines: 100)
+        // A styled full-width row and a styled short row scroll into history.
+        m.feed(esc("\u{1B}[1;31mAAAAA\u{1B}[0m\r\n\u{1B}[34mblue\u{1B}[0m\r\nx\r\ny"))
+        #expect(m.scrollbackRows == 2)
+
+        let seeded = SessionTerminalModel(cols: 5, rows: 2, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(seeded.scrollbackRows == 2)
+        let tail = seeded.styledScrollbackTail(2)
+        #expect(tail.map(\.text) == ["AAAAA", "blue"])
+        #expect(tail[0].cells[0].fg == .ansi(1))
+        #expect(tail[0].cells[0].style.contains(.bold))
+        #expect(tail[1].cells[0].fg == .ansi(4))
+        #expect(seeded.visibleText() == "x\ny")
+    }
+
+    /// A model with no scrollback seeds exactly as before — no flow, no padding.
+    @Test func seedBytesWithoutScrollbackLeaveNoHistory() {
+        let m = SessionTerminalModel(cols: 10, rows: 4, scrollbackLines: 100)
+        m.feed(esc("hello\r\nworld"))
+
+        let seeded = SessionTerminalModel(cols: 10, rows: 4, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(seeded.scrollbackRows == 0)
+        #expect(seeded.visibleText() == "hello\nworld")
+        #expect(seeded.cursorPosition == m.cursorPosition)
+    }
+
+    /// juancode-gwqg: the seed re-asserts the input-relevant modes the program
+    /// enabled — mouse reporting, DECCKM application cursor keys, bracketed paste —
+    /// so a freshly-seeded view encodes wheel/arrows/paste exactly like a view that
+    /// parsed the whole live stream. Without this a re-attached pane had dead
+    /// wheel-scroll and normal-mode arrows inside TUIs.
+    @Test func seedBytesReproduceInputModes() {
+        let m = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        m.feed(esc("\u{1B}[?1002h\u{1B}[?1006h\u{1B}[?1h\u{1B}[?2004h"))
+        #expect(m.mouseReportingOn)
+        #expect(m.applicationCursorKeys)
+        #expect(m.bracketedPaste)
+
+        let seeded = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(seeded.mouseReportingOn)
+        #expect(seeded.applicationCursorKeys)
+        #expect(seeded.bracketedPaste)
+    }
+
+    /// A program that enabled no modes seeds a view with none enabled (the seed
+    /// only ever sets modes; a fresh surface starts with everything off).
+    @Test func seedBytesLeaveDefaultModesOff() {
+        let m = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        m.feed(esc("plain output"))
+
+        let seeded = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(!seeded.mouseReportingOn)
+        #expect(!seeded.applicationCursorKeys)
+        #expect(!seeded.bracketedPaste)
+    }
+
+    /// Modes survive alongside an alt-screen repaint too (the TUI case that needs
+    /// them most).
+    @Test func seedBytesReproduceModesOnAlternateScreen() {
+        let m = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        m.feed(esc("\u{1B}[?1049h\u{1B}[2J\u{1B}[Htui\u{1B}[?1003h\u{1B}[?1006h\u{1B}[?2004h"))
+
+        let seeded = SessionTerminalModel(cols: 20, rows: 4, scrollbackLines: 100)
+        seeded.feed(m.seedBytes())
+
+        #expect(seeded.isAlternateBuffer)
+        #expect(seeded.visibleText() == "tui")
+        #expect(seeded.mouseReportingOn)
+        #expect(seeded.bracketedPaste)
+    }
+
     /// Acceptance: the model's snapshot matches, line for line, what an independent
     /// SwiftTerm `Terminal` renders for the same byte stream — a compact golden
     /// exercising cursor moves, colors, a scroll, and alt-screen enter/exit.
