@@ -243,17 +243,36 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         }
     }
 
-    /// A clean, well-formed VT byte stream that repaints the CURRENT visible screen
-    /// (juancode-a2h.2). Fed to a freshly-attached local view in place of raw byte
-    /// replay: because it is synthesized from PARSED state it carries no partial
-    /// escape sequences and no stale alt-screen frames, so a view seeded with it
-    /// lands the correct screen with no replay-garble and no synthetic alt-screen
-    /// resync prefix. Uses absolute cursor positioning per row so nothing scrolls.
+    /// How many scrollback history rows to reproduce in `seedBytes()` by default.
+    /// Matches SwiftTerm's stock view scrollback (500 lines) — seeding more than
+    /// the receiving view retains is pure parse waste.
+    public static let defaultSeedScrollbackRows = 500
+
+    /// A clean, well-formed VT byte stream that repaints the model's CURRENT state
+    /// (juancode-a2h.2 / juancode-gwqg). Fed to a freshly-attached local view in
+    /// place of raw byte replay: because it is synthesized from PARSED state it
+    /// carries no partial escape sequences and no stale alt-screen frames, so a
+    /// view seeded with it lands the correct screen with no replay-garble and no
+    /// synthetic alt-screen resync prefix.
     ///
-    /// Scrollback history above the visible screen is not reproduced here — a live
-    /// program repaints on its next output, and the alt-screen TUIs keep no
-    /// scrollback anyway (see the scrollback-seed follow-up ticket).
-    public func seedBytes() -> [UInt8] {
+    /// Exactness (juancode-gwqg — "make attach seeding exact"):
+    /// - On the primary buffer, the last `maxScrollbackRows` of scrollback history
+    ///   are flowed in above the repainted screen, so the seeded view scrolls back
+    ///   through the same history the model retains. Wrapped logical lines arrive
+    ///   as hard grid rows (same fidelity the visible-screen repaint already had).
+    /// - While the ALTERNATE buffer is active only the alt screen is reproduced:
+    ///   SwiftTerm keeps `normalBuffer` private, so the primary screen underneath
+    ///   is unreachable through public API (follow-up ticket covers capturing it
+    ///   at the buffer flip). Alt-screen TUIs keep no scrollback regardless.
+    /// - Input-relevant modes the program enabled are re-asserted — mouse
+    ///   reporting (plus SGR encoding, the protocol every TUI we host requests;
+    ///   SwiftTerm keeps the exact protocol private), DECCKM application cursor
+    ///   keys, and bracketed paste — so a seeded view encodes wheel/arrows/paste
+    ///   exactly like a view that parsed the whole live stream. Without this a
+    ///   re-attached pane had dead wheel-scroll and normal-mode arrows inside TUIs.
+    ///   Modes are only *set* (never reset): the contract is a freshly-created,
+    ///   default-state surface.
+    public func seedBytes(maxScrollbackRows: Int = SessionTerminalModel.defaultSeedScrollbackRows) -> [UInt8] {
         lock.withLock {
             let cols = terminal.cols
             let rows = terminal.rows
@@ -263,12 +282,65 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             enc.reset()
             enc.setAlternateBuffer(alt)
             enc.clearScreen()
+            if !alt {
+                // Flow the scrollback tail, then push it fully above the viewport
+                // so the absolute-positioned screen repaint below never overlaps it.
+                let available = terminal.getTopVisibleRow()
+                let count = min(available, max(0, maxScrollbackRows))
+                if count > 0 {
+                    for r in (available - count)..<available {
+                        enc.flowRow(retainedRow(r, cols: cols))
+                    }
+                    enc.padViewportBelowFlowedRows(rows: rows)
+                }
+            }
             for r in 0..<rows {
                 enc.paintRow(r, row(terminal.getLine(row: r), cols: cols))
             }
             enc.moveCursor(x: cursor.x, y: cursor.y)
+            if let code = Self.mouseModeCode(terminal.mouseMode) {
+                enc.setPrivateMode(code, true)
+                enc.setPrivateMode(1006, true) // SGR extended coordinates
+            }
+            if terminal.applicationCursor { enc.setPrivateMode(1, true) }
+            if terminal.bracketedPasteMode { enc.setPrivateMode(2004, true) }
             enc.setCursorVisible(cursorVisible)
             return enc.bytes
+        }
+    }
+
+    /// The number of scrollback history rows the model currently retains above the
+    /// visible screen (0 while the alternate buffer is active — it keeps none).
+    public var scrollbackRows: Int {
+        lock.withLock { terminal.getTopVisibleRow() }
+    }
+
+    /// The last `count` scrollback history rows (oldest first), styled — exactly
+    /// what `seedBytes()` flows in above the repainted screen.
+    public func styledScrollbackTail(_ count: Int) -> [TerminalRow] {
+        guard count > 0 else { return [] }
+        return lock.withLock {
+            let cols = terminal.cols
+            let available = terminal.getTopVisibleRow()
+            let n = min(available, count)
+            return (0..<n).map { retainedRow(available - n + $0, cols: cols) }
+        }
+    }
+
+    // MARK: - input-mode projections (what the seed reproduces)
+
+    public var mouseReportingOn: Bool { lock.withLock { terminal.mouseMode != .off } }
+    public var applicationCursorKeys: Bool { lock.withLock { terminal.applicationCursor } }
+    public var bracketedPaste: Bool { lock.withLock { terminal.bracketedPasteMode } }
+
+    /// DEC private-mode number for a SwiftTerm mouse mode, nil when reporting is off.
+    private static func mouseModeCode(_ mode: Terminal.MouseMode) -> Int? {
+        switch mode {
+        case .off: return nil
+        case .x10: return 9
+        case .vt200: return 1000
+        case .buttonEventTracking: return 1002
+        case .anyEvent: return 1003
         }
     }
 
@@ -362,6 +434,38 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             i += 1
         }
         // Trim trailing blanks from the text form (cells keep full width for layout).
+        while let last = text.last, last == " " { text.removeLast() }
+        return TerminalRow(cells: cells, text: text)
+    }
+
+    /// Build a `TerminalRow` from a retained-buffer row (0-based from the start of
+    /// retained scrollback; rows `0..<getTopVisibleRow()` are history). Reads cell
+    /// by cell through `Buffer.getChar(atBufferRelative:)` — the one public accessor
+    /// that reaches scrollback rows without the internal scroll-invariant offset.
+    /// Same wide-glyph / NUL handling as `row(_:cols:)`.
+    private func retainedRow(_ bufferRow: Int, cols: Int) -> TerminalRow {
+        var cells: [TerminalCell] = []
+        cells.reserveCapacity(cols)
+        var text = ""
+        var i = 0
+        while i < cols {
+            let cd = terminal.buffer.getChar(atBufferRelative: Position(col: i, row: bufferRow))
+            let width = Int(cd.width)
+            if width == 0 {
+                i += 1
+                continue
+            }
+            let raw = terminal.getCharacter(for: cd)
+            let ch: Character = raw == "\u{0}" ? " " : raw
+            cells.append(TerminalCell(
+                char: ch,
+                width: width,
+                fg: Self.color(cd.attribute.fg),
+                bg: Self.color(cd.attribute.bg),
+                style: Self.style(cd.attribute.style)))
+            text.append(ch)
+            i += 1
+        }
         while let last = text.last, last == " " { text.removeLast() }
         return TerminalRow(cells: cells, text: text)
     }

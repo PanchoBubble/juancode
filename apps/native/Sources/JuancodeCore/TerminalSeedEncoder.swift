@@ -1,12 +1,15 @@
 import Foundation
 
-/// Builds a clean VT byte stream that repaints a terminal's visible screen from
-/// parsed `TerminalRow`s (juancode-a2h.2). Used by `SessionTerminalModel.seedBytes()`
-/// to seed a freshly-attached view without replaying raw pty bytes — the output is
-/// well-formed by construction (no partial escapes, no stale alt-screen frames), so
-/// the seeded view lands the correct screen with no replay-garble.
+/// Builds a clean VT byte stream that repaints a terminal's state from parsed
+/// `TerminalRow`s (juancode-a2h.2 / juancode-gwqg). Used by
+/// `SessionTerminalModel.seedBytes()` to seed a freshly-attached view without
+/// replaying raw pty bytes — the output is well-formed by construction (no partial
+/// escapes, no stale alt-screen frames), so the seeded view lands the correct
+/// screen with no replay-garble.
 ///
-/// Each row is painted at an absolute position (CUP) so nothing scrolls, and SGR is
+/// Visible rows are painted at absolute positions (CUP) so nothing scrolls;
+/// scrollback history rows are *flowed* (`flowRow`, painted then newline) so the
+/// receiving terminal accumulates them into its own scrollback naturally. SGR is
 /// re-emitted only when a cell's attributes differ from the previous cell (reset to
 /// default at the start of every row).
 struct TerminalSeedEncoder {
@@ -34,8 +37,44 @@ struct TerminalSeedEncoder {
     /// are dropped (the screen was already cleared), so a mostly-empty row stays cheap.
     mutating func paintRow(_ r: Int, _ row: TerminalRow) {
         csi("\(r + 1);1H")
-        // Drop trailing cells that are a plain space with default attributes: the
-        // clear already blanked them, and emitting them would just pad the line.
+        paintCells(row)
+    }
+
+    /// Flow one scrollback history row at the cursor, then move to the next line.
+    /// No absolute positioning: successive flowed rows scroll the receiving terminal
+    /// exactly like live output did, pushing each row into its scrollback. The CR
+    /// also clears a pending wrap left by a full-width row, so a row of exactly
+    /// `cols` cells doesn't gain a spurious blank line.
+    mutating func flowRow(_ row: TerminalRow) {
+        paintCells(row)
+        bytes.append(0x0D) // CR
+        bytes.append(0x0A) // LF
+    }
+
+    /// After flowing history rows, push them fully above the viewport: `rows - 1`
+    /// line feeds walk the cursor to the bottom, so the viewport that `paintRow`
+    /// then paints into is entirely fresh blank lines and every flowed row lands in
+    /// scrollback — never half-visible behind the repainted screen.
+    mutating func padViewportBelowFlowedRows(rows: Int) {
+        for _ in 0..<max(0, rows - 1) { bytes.append(0x0A) }
+    }
+
+    /// Set (`h`) or reset (`l`) a DEC private mode — how the seed reproduces the
+    /// program's input-relevant modes (mouse reporting, DECCKM, bracketed paste) so
+    /// a freshly-seeded view encodes input exactly like a view that parsed the
+    /// whole live stream.
+    mutating func setPrivateMode(_ code: Int, _ on: Bool) {
+        csi("?\(code)\(on ? "h" : "l")")
+    }
+
+    /// Position the cursor at (x, y), 0-based, converting to 1-based CUP.
+    mutating func moveCursor(x: Int, y: Int) { csi("\(y + 1);\(x + 1)H") }
+
+    mutating func setCursorVisible(_ visible: Bool) { csi(visible ? "?25h" : "?25l") }
+
+    /// Emit a row's styled cells at the cursor. Trailing plain-blank cells are
+    /// dropped (the target line is already blank), so a mostly-empty row stays cheap.
+    private mutating func paintCells(_ row: TerminalRow) {
         var end = row.cells.count
         while end > 0, row.cells[end - 1].isBlankDefault { end -= 1 }
         guard end > 0 else { return }
@@ -51,11 +90,6 @@ struct TerminalSeedEncoder {
         }
         csi("0m")
     }
-
-    /// Position the cursor at (x, y), 0-based, converting to 1-based CUP.
-    mutating func moveCursor(x: Int, y: Int) { csi("\(y + 1);\(x + 1)H") }
-
-    mutating func setCursorVisible(_ visible: Bool) { csi(visible ? "?25h" : "?25l") }
 }
 
 /// The SGR-relevant attributes of a cell, so a run of identical-looking cells emits
