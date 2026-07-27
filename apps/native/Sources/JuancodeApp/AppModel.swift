@@ -328,6 +328,14 @@ final class AppModel {
     /// same run (after it exits again, say) doesn't re-announce a restore.
     private var revivedRestoresThisRun: Set<String> = []
 
+    /// Crash orphans (running when the previous process died) not yet revived this
+    /// run — the sidebar keeps these in their live resting spots instead of sinking
+    /// them with old dead sessions. Emptied per-id as sessions come back live.
+    private(set) var pendingCrashOrphans: Set<String>
+
+    /// Whether `id` is a still-unrevived crash orphan (drives the sidebar sort).
+    func isCrashOrphan(_ id: String) -> Bool { pendingCrashOrphans.contains(id) }
+
     /// Live-output subscription cancels for restored panes awaiting their first live
     /// byte — the auto-dismiss hook for the `.resuming` banner.
     private var restoreOutputCancels: [String: () -> Void] = [:]
@@ -340,9 +348,13 @@ final class AppModel {
         // sessions not already live in the (post-restart, usually empty) registry.
         let liveAtLaunch = Set(appState.registry.all().map(\.id))
         self.launchRestoredIds = Set(appState.store.list().map(\.id)).subtracting(liveAtLaunch)
+        self.pendingCrashOrphans = appState.crashOrphanIds
         appState.registry.onCreate { [weak self] s in
             Task { @MainActor in
                 guard let self else { return }
+                // Once a crash orphan is live again it's an ordinary session; let
+                // it sort (and later sink) normally.
+                self.pendingCrashOrphans.remove(s.id)
                 self.watch(s)
                 self.pruneSessionsPerProject()
                 self.refresh()

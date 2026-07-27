@@ -407,10 +407,16 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         return toDelete
     }
 
-    public func markOrphansExited() {
-        try? dbQueue.write { db in
-            try db.execute(sql: "UPDATE sessions SET status = 'exited' WHERE status = 'running'")
-        }
+    @discardableResult
+    public func markOrphansDormant() -> [String] {
+        (try? dbQueue.write { db -> [String] in
+            let ids = try String.fetchAll(
+                db, sql: "SELECT id FROM sessions WHERE status = 'running'")
+            guard !ids.isEmpty else { return [] }
+            try db.execute(
+                sql: "UPDATE sessions SET status = 'exited', dormant = 1 WHERE status = 'running'")
+            return ids
+        }) ?? []
     }
 
     // MARK: - PersistentStore: comments

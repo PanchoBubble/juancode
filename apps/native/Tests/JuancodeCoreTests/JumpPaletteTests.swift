@@ -316,4 +316,27 @@ import Testing
         ], query: "fix")
         #expect(out.map(\.id) == ["b", "a"])
     }
+
+    @Test func crashOrphanRestsLikeLiveInsteadOfSinking() {
+        #expect(restingAttention(.exited, crashOrphan: true) == .idle)
+        #expect(restingAttention(.exited, crashOrphan: false) == .exited)
+        #expect(restingAttention(.working, crashOrphan: true) == .working)
+
+        // An unrevived crash orphan (dead, unplaced) precedes both a manually
+        // placed row and a plain dead row — after a crash/reboot yesterday's
+        // active sessions must not hide behind "Load more".
+        let orphan = ManualSortKey(
+            key: SessionSortKey(attention: restingAttention(.exited, crashOrphan: true),
+                                updatedAt: 10, createdAt: 10),
+            manualIndex: nil, id: "orphan")
+        let placed = ManualSortKey(
+            key: SessionSortKey(attention: .exited, updatedAt: 99, createdAt: 99),
+            manualIndex: 0, id: "placed")
+        let dead = ManualSortKey(
+            key: SessionSortKey(attention: .exited, updatedAt: 50, createdAt: 50),
+            manualIndex: nil, id: "dead")
+        #expect(manualRestingPrecedes(orphan, placed))
+        #expect(manualRestingPrecedes(orphan, dead))
+        #expect(manualRestingPrecedes(placed, dead))
+    }
 }

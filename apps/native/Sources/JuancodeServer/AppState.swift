@@ -25,6 +25,10 @@ public final class AppState: @unchecked Sendable {
     /// Rolling on-disk session activity log (`Config.logsDir`) — the durable
     /// lifecycle/seed/activity trail for debugging frozen sessions after the fact.
     public let activityLog: SessionActivityLog
+    /// Sessions that were still "running" in the db at launch — their ptys died
+    /// with the previous process (crash/hard kill). Marked dormant at boot; the
+    /// GUI keeps them surfaced (not sunk with old dead sessions) until revived.
+    public let crashOrphanIds: Set<String>
 
     public init(store: GRDBStore) {
         self.store = store
@@ -44,8 +48,11 @@ public final class AppState: @unchecked Sendable {
         self.sessionReaper = sessionReaper
         Task { await sessionReaper.start() }
         // Any session still "running" in the db is stale — its pty died with the
-        // previous process. Mark them exited so the UI shows truth.
-        store.markOrphansExited()
+        // previous process (crash or hard kill). Mark them exited-but-dormant so
+        // they read as "sleeping, resumable" tiles rather than dead ones, and keep
+        // their ids so the sidebar can hold them in their live resting spots
+        // instead of sinking them under older sessions.
+        crashOrphanIds = Set(store.markOrphansDormant())
         // Enforce the per-project retention cap on the persisted history (juancode-477).
         // Nothing is live this early, so no ids need protecting.
         store.enforceSessionCap()

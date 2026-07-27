@@ -126,12 +126,19 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertFalse(store.delete(m.id)) // already gone
     }
 
-    func testMarkOrphansExited() {
+    func testMarkOrphansDormant() {
         store.insert(meta("running", status: .running))
         store.insert(meta("done", status: .exited))
-        store.markOrphansExited()
+        let orphans = store.markOrphansDormant()
+        XCTAssertEqual(orphans, ["running"])
+        // The orphan reads as sleeping-but-resumable, not just dead.
         XCTAssertEqual(store.get("running")?.status, .exited)
+        XCTAssertEqual(store.get("running")?.dormant, true)
+        // Already-exited sessions are untouched.
         XCTAssertEqual(store.get("done")?.status, .exited)
+        XCTAssertEqual(store.get("done")?.dormant, false)
+        // Idempotent: a second boot finds no orphans.
+        XCTAssertEqual(store.markOrphansDormant(), [])
     }
 
     // MARK: - rename + archive (juancode-211)

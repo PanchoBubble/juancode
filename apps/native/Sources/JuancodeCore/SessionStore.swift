@@ -44,9 +44,12 @@ public protocol PersistentStore: SessionStore {
     func usedCliSessionIds() -> Set<String>
     func search(_ query: String, limit: Int) -> [SearchHit]
     @discardableResult func delete(_ id: String) -> Bool
-    /// On startup, mark any session still "running" as exited (its pty died with
-    /// the previous process).
-    func markOrphansExited()
+    /// On startup, mark any session still "running" as exited AND dormant (its pty
+    /// died with the previous process, but the CLI conversation is intact and
+    /// resumable — the same state the idle reaper leaves, so the UI shows a
+    /// "sleeping" tile instead of a dead one). Returns the affected ids so the
+    /// launch can keep these crash orphans visible in the sidebar.
+    @discardableResult func markOrphansDormant() -> [String]
 
     // inline diff comments
     func addComment(_ c: DiffComment)
@@ -174,12 +177,17 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         }
     }
 
-    public func markOrphansExited() {
+    @discardableResult
+    public func markOrphansDormant() -> [String] {
         lock.withLock {
+            var ids: [String] = []
             for (id, var m) in metas where m.status == .running {
                 m.status = .exited
+                m.dormant = true
                 metas[id] = m
+                ids.append(id)
             }
+            return ids
         }
     }
 

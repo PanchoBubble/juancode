@@ -92,6 +92,15 @@ public func sinkDownPrecedes(_ a: SinkSortKey, _ b: SinkSortKey) -> Bool {
     return a.id < b.id
 }
 
+/// Resting attention for the sidebar sort: a crash orphan (still "running" when
+/// the previous process died, not yet revived this run) rests like an idle live
+/// session instead of sinking with old dead ones — otherwise a crash/relaunch
+/// buries yesterday's active work under manually-placed rows and behind the
+/// folder's "Load more". Glyphs are untouched; this only affects ordering.
+public func restingAttention(_ attention: SessionAttention, crashOrphan: Bool) -> SessionAttention {
+    (crashOrphan && attention == .exited) ? .idle : attention
+}
+
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
 /// sort: its smart-sort key, its slot in the user's persisted drag order
 /// (`nil` when the user hasn't placed it yet), and its id as the stable

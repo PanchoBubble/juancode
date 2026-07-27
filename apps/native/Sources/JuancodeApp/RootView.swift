@@ -605,9 +605,12 @@ struct SidebarView: View {
 
     /// The manual-order sort inputs for one session: its attention (bubbling +
     /// dead-sink), timestamps, and its slot in the user's persisted drag order.
+    /// Unrevived crash orphans rest like idle live sessions (`restingAttention`)
+    /// so a crash/relaunch doesn't bury them behind "Load more".
     private func manualSortKey(_ meta: SessionMeta, slots: [String: Int]) -> ManualSortKey {
         ManualSortKey(
-            key: SessionSortKey(attention: attention(meta),
+            key: SessionSortKey(attention: restingAttention(attention(meta),
+                                                            crashOrphan: model.isCrashOrphan(meta.id)),
                                 updatedAt: meta.updatedAt, createdAt: meta.createdAt),
             manualIndex: slots[meta.id],
             id: meta.id)
