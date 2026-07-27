@@ -2171,15 +2171,17 @@ struct SessionRow: View {
     private var isWorktree: Bool { meta.worktreePath != nil }
 
     private var subtitle: String {
-        // Non-worktree rows: the folder/project name is redundant (the row sits under
-        // its project header), so show only usage.
-        guard isWorktree else { return meta.usage?.badgeLabel ?? "" }
-        // Worktree rows show the branch (e.g. `juancode/48e86fc1`) rather than the
-        // worktree dir's bare hash, so the row reads meaningfully. Falls back to the
-        // dir name until the branch loads (or on a detached HEAD).
-        let base = worktreeBranch ?? (meta.cwd as NSString).lastPathComponent
-        if let label = meta.usage?.badgeLabel { return "\(base) · \(label)" }
-        return base
+        var parts: [String] = []
+        // Worktree rows lead with the branch (e.g. `juancode/48e86fc1`) rather than
+        // the worktree dir's bare hash, so the row reads meaningfully. Falls back to
+        // the dir name until the branch loads (or on a detached HEAD). Non-worktree
+        // rows skip it — the folder/project name is redundant under the project header.
+        if isWorktree {
+            parts.append(worktreeBranch ?? (meta.cwd as NSString).lastPathComponent)
+        }
+        parts.append(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
+        if let label = meta.usage?.badgeLabel { parts.append(label) }
+        return parts.joined(separator: " · ")
     }
 
     /// Detailed usage breakdown for the subtitle tooltip (was the trailing badge's
@@ -2386,6 +2388,10 @@ struct SessionContainer: View {
                 // Title lives in the window titlebar (.navigationTitle); no need to
                 // repeat it here — this row is just the session's action buttons.
                 Spacer()
+                Text(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .help("Session started")
                 if let label = meta.usage?.badgeLabel {
                     Text(label)
                         .font(.caption.monospacedDigit())
