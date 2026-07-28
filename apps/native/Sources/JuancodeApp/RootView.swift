@@ -43,7 +43,7 @@ struct RootView: View {
                 // Slimmed top bar (juancode-v4ep): notifications, the Oracle AI, an
                 // AI-settings prompt, and a Tools popover. Everything else moved —
                 // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP status
-                // into Tools; the pencil onto session-row hover; Tracked Issues into
+                // into Tools; Open in Editor into the session-row hover menu; Tracked Issues into
                 // the sidebar; Appearance into the ⌘, Settings window.
                 NotificationsBell()
                 Button { oracle.open(tab: .chat) } label: {
@@ -482,6 +482,11 @@ struct SidebarView: View {
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
+    /// The session awaiting close confirmation (drives the close alert). Set from
+    /// the row's hover ✕ and the context menu's Delete — an .alert, not a
+    /// .confirmationDialog, because dialogs never present from a context-menu
+    /// action on macOS (juancode-05u) while alerts do (see Rename above).
+    @State private var confirmingClose: SessionMeta?
     /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
     @FocusState private var listFocused: Bool
     /// Whether the "Filter sessions…" field holds focus, so ⌃F can jump to it.
@@ -952,6 +957,18 @@ struct SidebarView: View {
                 renaming = nil
             }
         }
+        .alert("Close \"\(confirmingClose?.title ?? "session")\"?", isPresented: Binding(
+            get: { confirmingClose != nil },
+            set: { if !$0 { confirmingClose = nil } }
+        ), presenting: confirmingClose) { meta in
+            Button("Cancel", role: .cancel) { confirmingClose = nil }
+            Button("Close Session", role: .destructive) {
+                model.delete(meta.id)
+                confirmingClose = nil
+            }
+        } message: { meta in
+            Text(closeWarning(meta))
+        }
         .perfTrackBody()
     }
 
@@ -1054,7 +1071,7 @@ struct SidebarView: View {
             // A minimal hairline between session rows for visual separation.
             .listRowSeparator(.visible)
             .listRowSeparatorTint(Color.appHairline(0.12))
-            .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
+            .onAppear { if meta.worktreePath != nil { model.loadSessionPrContext(meta) } }
             .contextMenu { rowContextMenu(meta) }
         // Pointing-hand + hover fill for the clickable (selectable) rows; external
         // rows aren't selectable, so they keep the default cursor and no hover fill.
@@ -1085,7 +1102,7 @@ struct SidebarView: View {
                     if model.showingGitHub { model.showingGitHub = false }
                 }
             }
-            .onAppear { if meta.worktreePath != nil { model.loadFolderGitState(meta.cwd) } }
+            .onAppear { if meta.worktreePath != nil { model.loadSessionPrContext(meta) } }
             .contextMenu { rowContextMenu(meta) }
         // Selection accent + pointing-hand + hover fill for the clickable rows;
         // external rows can't be selected by tap, so they keep the default cursor
@@ -1160,11 +1177,20 @@ struct SidebarView: View {
                           changeBadge: external ? nil : model.changeBadge(meta.id),
                           onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
-                          onOpenInEditor: (external || meta.kind == .editor)
-                              ? nil : { model.openEditorSession(meta.id) },
                           onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
+                          menuContent: external ? nil : { AnyView(rowContextMenu(meta)) },
+                          onCloseRequested: external ? nil : { confirmingClose = meta },
                           selected: model.selection == meta.id,
                           activating: model.isActivating(meta.id))
+    }
+
+    /// What closing this session actually discards, spelled out in the confirm alert.
+    private func closeWarning(_ meta: SessionMeta) -> String {
+        var parts: [String] = []
+        if model.isLive(meta.id) { parts.append("terminate its running agent") }
+        parts.append("delete the session and its scrollback")
+        if meta.worktreePath != nil { parts.append("remove its worktree") }
+        return "This will " + parts.joined(separator: ", ") + "."
     }
 
     @ViewBuilder
@@ -1184,6 +1210,15 @@ struct SidebarView: View {
             // The log is shared JSONL — grep the session id to follow one row's
             // spawn/seed/activity/exit trail.
             Button("Open Activity Log") { model.revealActivityLog() }
+            // The session's branch has an open PR (loaded via loadSessionPrContext
+            // on row appear for worktree rows) — jump to it in-app or on github.com.
+            if let pr = model.openPr(forSession: meta) {
+                Divider()
+                Button("Open PR #\(pr.number) in juancode") { model.openGitHubForSession(meta) }
+                Button("Open PR #\(pr.number) on GitHub") {
+                    if let u = URL(string: pr.url) { NSWorkspace.shared.open(u) }
+                }
+            }
             if let tracked = model.trackedPr(forSession: meta.id) {
                 Divider()
                 Button("Untrack PR #\(tracked.number)") { model.untrackPr(tracked.id) }
@@ -1202,7 +1237,9 @@ struct SidebarView: View {
             if model.isLive(meta.id) {
                 Button("Kill Agent", role: .destructive) { model.killSession(meta.id) }
             }
-            Button("Delete", role: .destructive) { model.delete(meta.id) }
+            // Routed through the confirm alert (same one as the row's hover ✕) —
+            // closing discards scrollback and any worktree, so no one-click delete.
+            Button("Delete", role: .destructive) { confirmingClose = meta }
         }
     }
 
@@ -2004,13 +2041,16 @@ struct SessionRow: View {
     var onOpenChanges: (() -> Void)? = nil
     /// Resume action for an external row; the row is otherwise non-interactive.
     var onResume: (() -> Void)? = nil
-    /// Open this session's worktree in $EDITOR — revealed on hover as a pencil on
-    /// the trailing edge (moved off the top-bar toolbar, juancode-byc5). Nil for
-    /// external/editor rows, which have no editor to open.
-    var onOpenInEditor: (() -> Void)? = nil
     /// Open the tracked PR in-app (the GitHub view scoped to it) — the capsule's
     /// click target. Nil leaves the capsule inert.
     var onOpenTrackedPr: ((TrackedPr) -> Void)? = nil
+    /// The row's action menu (same content as its context menu) — revealed on hover
+    /// as an ellipsis on the trailing edge, replacing the old pencil (Open in Editor
+    /// lives inside it, still on ⌘E too). Nil for external rows.
+    var menuContent: (() -> AnyView)? = nil
+    /// Ask to close (kill + delete) this session — the hover ✕. The caller owns the
+    /// confirmation alert; nil for external rows.
+    var onCloseRequested: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2094,17 +2134,32 @@ struct SessionRow: View {
             .clickCursor()
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
-        // Hover-revealed "open in editor" pencil for own sessions (juancode-byc5) —
-        // same reveal pattern as the external resume button above. ⌘E does the same
-        // for the selected session.
-        if !external, let onOpenInEditor, hovering {
-            Button(action: onOpenInEditor) {
-                Image(systemName: "pencil").font(.system(size: 12))
+        // Hover-revealed row actions for own sessions — an ellipsis menu (the
+        // context menu's items, made discoverable without a right-click) and a ✕
+        // that closes the session after confirmation. Same reveal pattern as the
+        // external resume button above.
+        if !external, hovering {
+            if let menuContent {
+                Menu { menuContent() } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 12))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Session actions")
+                .clickCursor()
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             }
-            .buttonStyle(.borderless)
-            .help("Open this session's worktree in your editor ($EDITOR, ⌘E)")
-            .clickCursor()
-            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+            if let onCloseRequested {
+                Button(action: onCloseRequested) {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .help("Close session (asks to confirm)")
+                .clickCursor()
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+            }
         }
     }
 

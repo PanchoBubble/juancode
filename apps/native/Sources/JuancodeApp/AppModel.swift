@@ -3626,10 +3626,21 @@ final class AppModel {
         }
     }
 
+    /// The row to land on once `id` closes while selected: the nearest surviving
+    /// sidebar neighbor (next in nav order, else previous), so closing the focused
+    /// session doesn't strand the detail pane on nothing when other sessions exist.
+    private func neighborInNavOrder(of id: String, excluding: Set<String>) -> String? {
+        guard let idx = navOrder.firstIndex(of: id) else { return nil }
+        if let after = navOrder[(idx + 1)...].first(where: { !excluding.contains($0) }) { return after }
+        return navOrder[..<idx].reversed().first { !excluding.contains($0) }
+    }
+
     func delete(_ id: String) {
         // Editor panes aren't persisted, so their parent link lives only on the live
         // meta — read it before the kill so closing one lands back on its parent.
         let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
+        // Resolved before teardown: navOrder still contains the dying row.
+        let neighbor = neighborInNavOrder(of: id, excluding: [id])
         let meta = appState.store.get(id)
         appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
         appState.registry.get(id)?.kill()
@@ -3640,7 +3651,7 @@ final class AppModel {
         stopWatchingChanges(id)
         agentWorktreeBySession.removeValue(forKey: id)
         remoteGridOwners.removeValue(forKey: id)
-        if selection == id { selection = editorParent }
+        if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
         refresh()
         if let wt = meta?.worktreePath {
@@ -3677,6 +3688,12 @@ final class AppModel {
     /// removes worktrees in a single batched task instead of one per session.
     func closeSessions(_ ids: [String]) {
         guard !ids.isEmpty else { return }
+        // Resolved before teardown (navOrder still holds the dying rows): where the
+        // selection lands if it's among the closed — nearest surviving neighbor.
+        let idSet = Set(ids)
+        let fallback = selection.flatMap { sel in
+            idSet.contains(sel) ? neighborInNavOrder(of: sel, excluding: idSet) : nil
+        }
         var worktrees: [String] = []
         for id in ids {
             let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
@@ -3690,7 +3707,9 @@ final class AppModel {
             stopWatchingChanges(id)
             agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
-            if selection == id { selection = editorParent }
+            if selection == id {
+                selection = editorParent.flatMap { idSet.contains($0) ? nil : $0 } ?? fallback
+            }
             clearUnread(id)
         }
         refresh()
