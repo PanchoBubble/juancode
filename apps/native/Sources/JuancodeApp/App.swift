@@ -60,6 +60,9 @@ private func configureFileDescriptorLimit() {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
+    /// Set once a terminal signal has kicked off termination, so a second
+    /// Ctrl-C/SIGTERM hard-exits instead of waiting on a possibly-wedged drain.
+    private var signalQuitRequested = false
     /// Held for the app's lifetime to opt out of App Nap. Without it, minimizing
     /// the window lets macOS nap the process: the pty-read queue is throttled (so
     /// the agent blocks on a full pipe) and the on-demand Metal terminal view stops
@@ -130,10 +133,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // run loop doesn't honour the default SIGINT disposition, so we monitor
         // the signals via dispatch sources (which fire regardless of disposition)
         // and route them through the normal terminate path (→ applicationWillTerminate).
+        //
+        // The source fires on a BACKGROUND queue, not .main: SIG_IGN disables the
+        // OS default (terminate), so this handler is the only exit path — if it were
+        // pinned to .main a wedged main thread would make the process unkillable by
+        // anything but SIGKILL. A second signal (or the graceful drain hanging) forces
+        // a hard exit so Ctrl-C always wins.
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)
-            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            src.setEventHandler { NSApp.terminate(nil) }
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
+            src.setEventHandler { [weak self] in
+                if self?.signalQuitRequested == true { _exit(0) }
+                self?.signalQuitRequested = true
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { _exit(0) }
+            }
             src.resume()
             signalSources.append(src)
         }

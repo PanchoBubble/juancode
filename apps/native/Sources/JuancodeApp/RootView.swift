@@ -1162,6 +1162,7 @@ struct SidebarView: View {
                           onResume: external ? { model.importExternalSession(meta.id) } : nil,
                           onOpenInEditor: (external || meta.kind == .editor)
                               ? nil : { model.openEditorSession(meta.id) },
+                          onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
                           selected: model.selection == meta.id,
                           activating: model.isActivating(meta.id))
     }
@@ -2007,6 +2008,9 @@ struct SessionRow: View {
     /// the trailing edge (moved off the top-bar toolbar, juancode-byc5). Nil for
     /// external/editor rows, which have no editor to open.
     var onOpenInEditor: (() -> Void)? = nil
+    /// Open the tracked PR in-app (the GitHub view scoped to it) — the capsule's
+    /// click target. Nil leaves the capsule inert.
+    var onOpenTrackedPr: ((TrackedPr) -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2124,14 +2128,14 @@ struct SessionRow: View {
     }
 
     private func prCapsule(_ t: TrackedPr) -> some View {
-        var help = "Tracking PR #\(t.number) — \(t.state.rawValue)\nClick to open in browser"
+        var help = "Tracking PR #\(t.number) — \(t.state.rawValue)\nClick to open the PR in juancode"
         // When an issue is also tracked but folded away, keep its id discoverable.
         if let ti = trackedIssue, !showIssue {
             help += "\nAlso tracking \(ti.identifier) — \(ti.state.rawValue)"
         }
-        // A button so the click opens the PR without also selecting the row.
+        // A button so the click opens the PR in-app (not the row selection).
         return Button {
-            if let url = URL(string: t.url) { NSWorkspace.shared.open(url) }
+            onOpenTrackedPr?(t)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
@@ -2401,6 +2405,17 @@ struct SessionContainer: View {
                         .foregroundStyle(.secondary)
                         .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
                 }
+                // When this session's branch has an open PR, offer a one-click jump
+                // into the in-app PR view (scoped + deep-linked to that PR).
+                if let pr = model.openPr(forSession: meta) {
+                    Button {
+                        model.openGitHubForSession(meta)
+                    } label: {
+                        Label("PR #\(pr.number)", systemImage: "arrow.triangle.pull")
+                    }
+                    .help("Open PR #\(pr.number) \"\(pr.title)\" for this branch in juancode")
+                    .clickCursor()
+                }
                 Button {
                     model.refreshTerminal()
                 } label: {
@@ -2522,6 +2537,8 @@ struct SessionContainer: View {
         .task(id: meta.id) {
             await model.openPersistedPane(meta.id)
             model.noteLivePaneVisible(meta.id)
+            // So the header can tell whether this branch has an open PR.
+            model.loadSessionPrContext(meta)
         }
         // The live Session OBJECT behind the selected id can change while we're
         // showing it — a reactivation or a permissions flip mints a new one. The

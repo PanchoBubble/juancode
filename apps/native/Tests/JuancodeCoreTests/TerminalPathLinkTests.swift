@@ -56,4 +56,42 @@ final class TerminalPathLinkTests: XCTestCase {
         XCTAssertEqual(r?.path, "/Users/x/proj/file.swift")
         XCTAssertEqual(r?.line, 9)
     }
+
+    // MARK: URL detection (⌘-click opens the browser, not the editor)
+
+    func testWebUrlDetected() {
+        XCTAssertEqual(
+            TerminalPathLink.url(in: "https://github.com/PanchoBubble/juancode/pull/42", preferColumn: 5),
+            "https://github.com/PanchoBubble/juancode/pull/42")
+    }
+
+    func testLocalhostUrlDetected() {
+        // The bug this fixes: `localhost` has no dot, so the path parser mis-read the
+        // `/foo` tail as a file and opened it in the editor.
+        XCTAssertEqual(
+            TerminalPathLink.url(in: "open http://localhost:4280/foo now", preferColumn: 15),
+            "http://localhost:4280/foo")
+    }
+
+    func testUrlTrailingPunctuationTrimmed() {
+        XCTAssertEqual(
+            TerminalPathLink.url(in: "PR ready: https://example.com/x/y.", preferColumn: 20),
+            "https://example.com/x/y")
+    }
+
+    func testUrlQueryAndFragmentKept() {
+        XCTAssertEqual(
+            TerminalPathLink.url(in: "https://example.com/a/b?tab=files#L20", preferColumn: 5),
+            "https://example.com/a/b?tab=files#L20")
+    }
+
+    func testMailtoDetected() {
+        XCTAssertEqual(
+            TerminalPathLink.url(in: "reach mailto:dev@example.com today", preferColumn: 12),
+            "mailto:dev@example.com")
+    }
+
+    func testNoUrlReturnsNil() {
+        XCTAssertNil(TerminalPathLink.url(in: "just src/main.rs:9 here", preferColumn: 0))
+    }
 }

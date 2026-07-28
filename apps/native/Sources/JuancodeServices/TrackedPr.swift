@@ -238,6 +238,12 @@ public func trackSeedPrompt(number: Int, title: String, branch: String, url: Str
     risky refactor, or a non-obvious failure), STOP and explain what you need from \
     me instead of guessing.
 
+    CI flakes: the Dagger checks are known to fail intermittently. If a Dagger check \
+    fails and nothing in its logs points to a real problem in this PR's changes, just \
+    re-run it (`gh run rerun <run-id> --failed`) rather than treating it as something \
+    to fix. Only dig in or escalate if it fails again on the re-run, or the logs show \
+    a real error tied to your changes.
+
     Codex review fallback: this PR is normally code-reviewed by Codex, and only added \
     to the Mergify merge queue after that review. If you see a comment saying Codex has \
     reached its usage limits for code reviews (i.e. it couldn't review this PR), do the \

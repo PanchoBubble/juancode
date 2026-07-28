@@ -1509,6 +1509,61 @@ final class AppModel {
         openGitHub(scope: cwd)
     }
 
+    /// Open the GitHub view scoped to a tracked PR's folder and select it — the
+    /// in-app alternative to opening the PR on github.com from its session-row
+    /// capsule. Selects from cache immediately when that folder's PRs are loaded;
+    /// otherwise defers via the pending branch select, resolved once PRs load.
+    func openGitHubForTrackedPr(_ t: TrackedPr) {
+        githubPendingBranchSelect = nil
+        if let pr = prs(t.cwd)?.prs.first(where: { $0.number == t.number }) {
+            github.select(cwd: t.cwd, pr: pr)
+        } else {
+            github.selectedKey = TrackedPr.key(cwd: t.cwd, number: t.number)
+            githubPendingBranchSelect = PendingBranchSelect(cwd: t.cwd, branch: t.branch)
+        }
+        openGitHub(scope: t.cwd)
+    }
+
+    /// The repo root backing a session: its worktree's main checkout when isolated,
+    /// else the project root of its cwd. PRs are keyed here (the GitHub view scopes
+    /// by project, not per worktree), matching `trackableFolders`.
+    func repoRoot(forSession meta: SessionMeta) -> String {
+        worktreeRepoRoots[meta.cwd] ?? projectCwd(for: meta.cwd)
+    }
+
+    /// The open PR whose head branch matches this session's branch, if one is loaded.
+    /// `meta.cwd` is where the pty runs (the worktree dir for isolated sessions), so
+    /// its folder git state carries the session's branch; the PR list lives under the
+    /// repo root. Drives the session header's "Open PR" button visibility.
+    func openPr(forSession meta: SessionMeta) -> PullRequest? {
+        guard let branch = folderGitState(meta.cwd)?.branch else { return nil }
+        return prs(repoRoot(forSession: meta))?.prs.first { $0.branch == branch }
+    }
+
+    /// Load the git state + PR list a session header needs to decide whether its
+    /// branch has an open PR. Coalesced downstream; safe to call on every appear.
+    func loadSessionPrContext(_ meta: SessionMeta) {
+        loadFolderGitState(meta.cwd)
+        loadPrs(repoRoot(forSession: meta))
+    }
+
+    /// Open the in-app GitHub view for this session's branch PR (the session-header
+    /// button). Scopes to the session's repo root and deep-links the branch's open
+    /// PR, deferring the select via `githubPendingBranchSelect` when the list hasn't
+    /// loaded yet. Uses `meta.cwd`'s branch (the worktree's) with the repo root's PRs.
+    func openGitHubForSession(_ meta: SessionMeta) {
+        let root = repoRoot(forSession: meta)
+        let branch = folderGitState(meta.cwd)?.branch
+        githubPendingBranchSelect = nil
+        if let branch, let pr = prs(root)?.prs.first(where: { $0.branch == branch }) {
+            github.select(cwd: root, pr: pr)
+        } else {
+            github.selectedKey = nil
+            if let branch { githubPendingBranchSelect = PendingBranchSelect(cwd: root, branch: branch) }
+        }
+        openGitHub(scope: root)
+    }
+
     /// Resolve a pending branch deep-link once the folder's PRs have loaded.
     /// Called by the view when the scoped folder's PR list changes.
     func resolvePendingBranchSelect() {
@@ -1883,9 +1938,13 @@ final class AppModel {
             }
             let seed = trackIssueSeedPrompt(identifier: activity.identifier,
                                             title: activity.title, url: activity.url)
+            // Isolate the tracked work on its own worktree (branch juancode/<id>) so it
+            // never fights the shared checkout other sessions live-edit. A short suffix
+            // avoids colliding with a lingering branch/dir from a prior track/untrack.
+            let worktreeName = "\(activity.identifier.lowercased())-\(String(UUID().uuidString.prefix(4)).lowercased())"
             guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
-                                             isolateWorktree: false, initialInput: seed,
-                                             model: "opus") else { return }
+                                             isolateWorktree: true, initialInput: seed,
+                                             model: "opus", worktreeName: worktreeName) else { return }
             // Baseline from the activity we already fetched, so the first poll doesn't
             // fire events for comments/state that predate tracking.
             let baseline = classifyIssueActivity(prev: IssueTrackSnapshot(), activity: activity).snapshot

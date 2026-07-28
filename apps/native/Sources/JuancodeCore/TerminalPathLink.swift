@@ -8,6 +8,27 @@ import Foundation
 /// or carries an explicit `:line` — which keeps prose ("e.g.", "vs.") and version-ish
 /// runs from resolving to stray files. URLs are skipped (those open in a browser).
 public enum TerminalPathLink {
+    /// Find a web/mail URL on the line, preferring the one whose character span covers
+    /// `preferColumn` (the clicked column). Returned so a ⌘-click on a link opens the
+    /// browser instead of the editor — the bare-path parser below would otherwise match
+    /// a URL's `host/path` tail (after the scheme's `://`) as a file path.
+    public static func url(in line: String, preferColumn: Int) -> String? {
+        // Scheme + non-whitespace run, minus trailing sentence punctuation the run
+        // may have swept up. Mirrors what a terminal highlights as a clickable link.
+        let pattern = #"(?:https?://|mailto:)[^\s]+"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = line as NSString
+        var candidates: [(range: NSRange, url: String)] = []
+        for m in re.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
+            var url = ns.substring(with: m.range)
+            while let last = url.last, ".,:;)]}>\"'".contains(last) { url.removeLast() }
+            guard !url.isEmpty else { continue }
+            candidates.append((m.range, url))
+        }
+        guard !candidates.isEmpty else { return nil }
+        return (candidates.first { NSLocationInRange(preferColumn, $0.range) } ?? candidates[0]).url
+    }
+
     /// Parse the first qualifying path token, preferring the one whose character span
     /// covers `preferColumn` when the line holds several (the clicked column).
     public static func parse(in line: String, preferColumn: Int) -> (path: String, line: Int?)? {

@@ -348,6 +348,27 @@ import SwiftTerm
         // confirm the models are still consistent afterward.
         for m in models { #expect(m.cols == 80 && m.rows == 24) }
     }
+
+    /// `SwiftTermParse.locked` must be re-entrant on one thread. SwiftTerm calls its
+    /// delegate synchronously during a feed, and a GUI feed (already holding the
+    /// lock) that processes a column switch re-enters via `sizeChanged` →
+    /// `SessionTerminalModel.resize` → `SwiftTermParse.locked`. A non-recursive lock
+    /// self-deadlocks there and freezes the main thread — the app then can't be
+    /// closed and needs SIGKILL (juancode-9goj). Guard the recursive property with a
+    /// timeout so a regression surfaces as a failure, not an indefinite hang.
+    @Test func parseLockIsReentrantOnSameThread() {
+        let done = DispatchSemaphore(value: 0)
+        let box = IntBox()
+        DispatchQueue.global().async {
+            box.value = SwiftTermParse.locked {
+                SwiftTermParse.locked { 42 } // re-enter on the SAME thread
+            }
+            done.signal()
+        }
+        #expect(done.wait(timeout: .now() + 3) == .success,
+                "SwiftTermParse.locked deadlocked on same-thread re-entry (not recursive)")
+        #expect(box.value == 42)
+    }
 }
 
 /// An independent reference `Terminal` in tests, driven by a bare delegate, so the
@@ -365,6 +386,11 @@ private final class ReferenceTerminal {
 
 private final class NoopTerminalDelegate: TerminalDelegate {
     func send(source: Terminal, data: ArraySlice<UInt8>) {}
+}
+
+/// A cross-thread `Int` sink whose write is ordered by the caller's semaphore.
+private final class IntBox: @unchecked Sendable {
+    var value = 0
 }
 
 /// Collects damage deltas off the model's callback (fired on the feeding thread).

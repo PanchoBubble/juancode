@@ -17,8 +17,18 @@ import Foundation
 /// any per-instance model lock (`SessionTerminalModel.feed` takes its model lock
 /// then this; GUI feeds take only this), so the lock order is fixed and no cycle
 /// can form.
+///
+/// RECURSIVE on purpose: SwiftTerm calls its delegate synchronously *during* a
+/// feed, and some of those callbacks re-enter a locked section on the SAME thread —
+/// a GUI `feed` (holding this) processing a column-switch (DECCOLM) fires
+/// `sizeChanged`, which resizes the session and so calls
+/// `SessionTerminalModel.resize` → `SwiftTermParse.locked` again. A non-recursive
+/// lock self-deadlocks there and freezes the main thread (the app then can't be
+/// closed and needs SIGKILL). A recursive lock lets the same thread re-enter while
+/// still blocking every OTHER thread, so cross-thread mutual exclusion — the whole
+/// point of the race fix — is preserved.
 public enum SwiftTermParse {
-    private static let lock = NSLock()
+    private static let lock = NSRecursiveLock()
 
     @inline(__always)
     public static func locked<T>(_ body: () -> T) -> T {

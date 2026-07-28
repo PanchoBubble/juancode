@@ -78,8 +78,16 @@ final class CopyOnSelectTerminalView: TerminalView {
     /// can't override `mouseDown` (SwiftTerm marks it `public`, not `open`), so this is
     /// driven by a local event monitor — matching the wheel / shift-enter pattern.
     func handleModifiedClick(at windowPoint: NSPoint) -> Bool {
+        guard let cell = screenCell(at: windowPoint), let line = lineText(at: cell) else { return false }
+        // A web/mail URL always opens in the browser — check it before the path parser,
+        // which would otherwise match a URL's `host/path` tail as a file path.
+        if let link = TerminalPathLink.url(in: line, preferColumn: cell.col),
+           let url = URL(string: link) {
+            NSWorkspace.shared.open(url)
+            return true
+        }
         guard let onOpenPath else { return false } // no handler (e.g. Oracle dock): don't swallow
-        guard let cell = screenCell(at: windowPoint), let hit = pathToken(at: cell) else { return false }
+        guard let hit = TerminalPathLink.parse(in: line, preferColumn: cell.col) else { return false }
         onOpenPath(hit.path, hit.line)
         return true
     }
@@ -108,15 +116,14 @@ final class CopyOnSelectTerminalView: TerminalView {
         return (ceil(width * scale) / scale, ceil(height * scale) / scale)
     }
 
-    /// If a `path[:line[:col]]` token sits at `cell`, return it. Reads the buffer line
-    /// via public API and prefers the match spanning the clicked column.
-    private func pathToken(at cell: (col: Int, row: Int)) -> (path: String, line: Int?)? {
+    /// The full rendered text of the buffer line under `cell`, read via public API.
+    /// Callers scan it for a URL or a `path:line` token spanning the clicked column.
+    private func lineText(at cell: (col: Int, row: Int)) -> String? {
         guard let terminal else { return nil }
         let bufferRow = cell.row + terminal.buffer.yDisp
         guard bufferRow >= 0 else { return nil }
-        let text = terminal.getText(start: Position(col: 0, row: bufferRow),
-                                    end: Position(col: max(0, terminal.cols - 1), row: bufferRow))
-        return TerminalPathLink.parse(in: text, preferColumn: cell.col)
+        return terminal.getText(start: Position(col: 0, row: bufferRow),
+                                end: Position(col: max(0, terminal.cols - 1), row: bufferRow))
     }
 
     override func selectionChanged(source: Terminal) {
