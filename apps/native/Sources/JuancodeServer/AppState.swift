@@ -26,9 +26,18 @@ public final class AppState: @unchecked Sendable {
     /// lifecycle/seed/activity trail for debugging frozen sessions after the fact.
     public let activityLog: SessionActivityLog
     /// Sessions that were still "running" in the db at launch — their ptys died
-    /// with the previous process (crash/hard kill). Marked dormant at boot; the
-    /// GUI keeps them surfaced (not sunk with old dead sessions) until revived.
+    /// with the previous process (crash/hard kill) — plus sessions the previous
+    /// process put to sleep on quit (`shutdownGracefully`). Marked dormant at
+    /// boot; the GUI keeps them surfaced (not sunk with old dead sessions) until
+    /// revived.
     public let crashOrphanIds: Set<String>
+
+    /// UserDefaults key holding the ids of sessions that were live at the last
+    /// graceful quit. Written by `shutdownGracefully`, consumed (and cleared) at
+    /// the next boot so those sessions get the same "sleeping, kept visible"
+    /// treatment as crash orphans — closing the app used to silently bury every
+    /// open session as plain dead rows.
+    private static let sleptOnQuitKey = "juancode.sleptOnQuit"
 
     public init(store: GRDBStore) {
         self.store = store
@@ -51,8 +60,14 @@ public final class AppState: @unchecked Sendable {
         // previous process (crash or hard kill). Mark them exited-but-dormant so
         // they read as "sleeping, resumable" tiles rather than dead ones, and keep
         // their ids so the sidebar can hold them in their live resting spots
-        // instead of sinking them under older sessions.
-        crashOrphanIds = Set(store.markOrphansDormant())
+        // instead of sinking them under older sessions. Sessions the previous
+        // process slept on graceful quit get the identical treatment — restored
+        // from the marker their shutdown wrote (validated against rows that still
+        // exist, so a session deleted since quit can't resurface).
+        let quitSlept = Set(UserDefaults.standard.stringArray(forKey: Self.sleptOnQuitKey) ?? [])
+        UserDefaults.standard.removeObject(forKey: Self.sleptOnQuitKey)
+        let known = Set(store.list().filter(\.dormant).map(\.id))
+        crashOrphanIds = Set(store.markOrphansDormant()).union(quitSlept.intersection(known))
         // Enforce the per-project retention cap on the persisted history (juancode-477).
         // Nothing is live this early, so no ids need protecting.
         store.enforceSessionCap()
@@ -109,6 +124,12 @@ public final class AppState: @unchecked Sendable {
             shutdown()
             return
         }
+        // Put every open session to sleep, not to death: flag dormant BEFORE the
+        // kill so the row `handleExit` finalises reads "sleeping, resumable", and
+        // record the ids so the next boot keeps them surfaced exactly like crash
+        // orphans. Quitting the app used to bury all open sessions as dead rows.
+        for session in live { session.markDormant() }
+        UserDefaults.standard.set(live.map(\.id), forKey: Self.sleptOnQuitKey)
         let group = DispatchGroup()
         var cancels: [() -> Void] = []
         for session in live {

@@ -14,6 +14,8 @@ struct RootView: View {
     /// Whether the always-visible Oracle session rail on the right edge is shown.
     /// Shared with the dock header's toggle via the same @AppStorage key.
     @AppStorage("oracle.sessionRail.shown") private var oracleRailShown = true
+    /// The rail's width — drag its left edge to adjust; persisted.
+    @AppStorage("oracle.sessionRail.width") private var oracleRailWidth: Double = 220
 
     var body: some View {
         @Bindable var model = model
@@ -66,6 +68,9 @@ struct RootView: View {
                 ToolsMenu()
             }
         }
+        // No toolbar material — the top strip stays the window's black (dark mode)
+        // instead of the system gray band over the split view and the Oracle rail.
+        .toolbarBackground(.hidden, for: .windowToolbar)
         // The file editor opens as a large, resizable floating window over the whole
         // window (not the narrow Changes side panel a sheet was confined near).
         .overlay { EditorHost() }
@@ -125,10 +130,15 @@ struct RootView: View {
             Text(model.errorMessage ?? "")
         }
         if oracleRailShown {
-            Divider()
-            OracleGlobalRail().frame(width: 220)
+            // Preview-only drag (like the Oracle drawer's edge): the split view to the
+            // left hosts live terminals, and reflowing them at every intermediate width
+            // garbles the CLIs' TUIs — commit once on release for a single clean reflow.
+            DragResizeHandle(axis: .vertical, value: $oracleRailWidth,
+                             min: 170, max: 480, invert: true, previewOnly: true)
+            OracleGlobalRail().frame(width: oracleRailWidth)
         }
         }
+        .background(Color.appSurface.ignoresSafeArea())
     }
 }
 

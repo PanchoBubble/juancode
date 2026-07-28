@@ -667,6 +667,11 @@ struct SwiftTermLive: View {
     /// ⌘-click / ⌘⇧-click on a `path:line` in the terminal calls this with the path
     /// and optional line, so the host can open it (see `AppModel.openEditorSession`).
     var onOpenPath: ((String, Int?) -> Void)? = nil
+    /// Reports every grid the view applies to the pty. The Oracle dock persists the
+    /// last one (`rememberDockGrid`) so the next agent spawn boots at the drawer's
+    /// real size — mirrors GhosttyLive's `onGrid`, which this backend lacked, leaving
+    /// the remembered dock grid permanently stale on SwiftTerm.
+    var onGrid: ((Int, Int) -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -674,7 +679,8 @@ struct SwiftTermLive: View {
                                    remembersSize: remembersSize, focusToken: focusToken,
                                    resyncToken: resyncToken,
                                    autoFocusOnAppear: autoFocusOnAppear,
-                                   onOpenPath: onOpenPath)
+                                   onOpenPath: onOpenPath,
+                                   onGrid: onGrid)
         }
     }
 }
@@ -695,6 +701,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
     var onOpenPath: ((String, Int?) -> Void)? = nil
+    var onGrid: ((Int, Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
@@ -724,7 +731,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         let host = TerminalHostView(terminal: tv)
         host.focusOnAppear = autoFocusOnAppear
         host.onDrop = { [session] text in session.write(text) }
-        host.onGrid = { cols, rows in context.coordinator.gridChanged(cols: cols, rows: rows) }
+        host.onGrid = { [onGrid] cols, rows in
+            context.coordinator.gridChanged(cols: cols, rows: rows)
+            onGrid?(cols, rows)
+        }
         return host
     }
 

@@ -398,7 +398,8 @@ private struct OracleChatView: View {
                                 onGrid: { cols, rows in oracle.rememberDockGrid(cols: cols, rows: rows) })
                         .id(TerminalIdentity(session: session, refresh: oracle.chatRefreshToken))
                 } else {
-                    SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken)
+                    SwiftTermLive(session: session, remembersSize: false, focusToken: oracle.chatFocusToken,
+                                  onGrid: { cols, rows in oracle.rememberDockGrid(cols: cols, rows: rows) })
                         .id(TerminalIdentity(session: session, refresh: oracle.chatRefreshToken))
                 }
             }
@@ -431,9 +432,26 @@ struct OracleGlobalRail: View {
     /// The Oracle being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
+    /// Free-text filter over Oracle titles (and their "Oracle N" numbers).
+    @State private var query = ""
 
     /// The running Oracles, most-recent first (see `OracleModel.oracleSessions`).
     private var sessions: [SessionMeta] { oracle.oracleSessions }
+
+    /// Every Oracle paired with its stable spawn-order number (oldest = 1), then
+    /// filtered by `query`. Numbering happens BEFORE filtering so "Oracle 12" keeps
+    /// its number no matter what the filter hides.
+    private var filtered: [(meta: SessionMeta, number: Int)] {
+        let all = sessions
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return all.enumerated().compactMap { idx, meta in
+            let number = all.count - idx
+            guard q.isEmpty
+                || meta.title.lowercased().contains(q)
+                || "oracle \(number)".contains(q) else { return nil }
+            return (meta, number)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -448,6 +466,35 @@ struct OracleGlobalRail: View {
                     .clickCursor()
             }
             .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
+            if !sessions.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(query.isEmpty ? Color.secondary : Color.accentColor)
+                    TextField("Filter Oracles…", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .onKeyPress(.escape) {
+                            guard !query.isEmpty else { return .ignored }
+                            query = ""
+                            return .handled
+                        }
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear filter (Esc)")
+                        .clickCursor()
+                    }
+                }
+                .padding(.horizontal, 6).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(query.isEmpty ? Color.secondary.opacity(0.25) : Color.accentColor,
+                                  lineWidth: 1))
+                .padding(.horizontal, 8).padding(.bottom, 6)
+            }
             Divider()
             if sessions.isEmpty {
                 VStack(spacing: 8) {
@@ -460,11 +507,19 @@ struct OracleGlobalRail: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filtered.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No matching Oracles")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(Array(sessions.enumerated()), id: \.element.id) { idx, meta in
-                            row(meta, number: sessions.count - idx)
+                        ForEach(filtered, id: \.meta.id) { item in
+                            row(item.meta, number: item.number)
                         }
                     }
                     .padding(.vertical, 4)
@@ -472,7 +527,10 @@ struct OracleGlobalRail: View {
             }
         }
         .frame(maxHeight: .infinity)
-        .background(Color.appPanelElevated)
+        // Match the window/terminal black (dark) instead of the old elevated gray, so
+        // the rail and the top strip above it read as one surface (user: "the top
+        // section should match the black bg on dark mode").
+        .background(Color.appSurface)
         .alert("Rename Oracle", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
