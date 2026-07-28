@@ -242,6 +242,41 @@ public enum JuancodeServer {
             jsonResponse(await state.prTracking.list().map(TrackedPrWire.init))
         }
 
+        // Track a PR by project path + number (the Oracle's entry point — its
+        // AGENTS.md documents this endpoint). The PR's metadata comes from the
+        // same `gh` open-PR list the GUI's picker uses, so callers never build a
+        // full PullRequest payload. Idempotent: re-tracking returns the existing
+        // entry. Tracking spawns the shepherd agent session, like the GUI path.
+        router.post("/api/tracked-prs") { req, ctx in
+            let body = try await req.decode(as: TrackPrBody.self, context: ctx)
+            let cwd = body.cwd.trimmingCharacters(in: .whitespaces)
+            guard !cwd.isEmpty, body.number > 0 else {
+                throw APIError(.badRequest, "cwd (absolute project path) and positive number required")
+            }
+            if let existing = await state.prTracking.list()
+                .first(where: { $0.cwd == cwd && $0.number == body.number }) {
+                return jsonResponse(TrackedPrWire(existing))
+            }
+            let list = await getOpenPrs(cwd)
+            guard list.available else {
+                throw APIError(.badRequest, list.error ?? "gh unavailable in \(cwd)")
+            }
+            guard let pr = list.prs.first(where: { $0.number == body.number }) else {
+                throw APIError(.notFound, "PR #\(body.number) is not an open PR of \(cwd)")
+            }
+            guard let entry = await state.prTracking.track(pr, cwd: cwd) else {
+                throw APIError(.internalServerError, "failed to spawn the tracking agent session")
+            }
+            return jsonResponse(TrackedPrWire(entry))
+        }
+
+        // Stop tracking (drops the watch; leaves the agent session alone).
+        router.delete("/api/tracked-prs/:id") { _, ctx in
+            let id = try param(ctx, "id")
+            await state.prTracking.untrack(id)
+            return jsonResponse(["ok": true])
+        }
+
         // Webhook-driven refresh trigger: the sidecar receives GitHub webhooks
         // (verifying the HMAC signature there) and forwards just the repo + PR
         // number here over localhost. The event is a trigger, not a payload — the
@@ -438,6 +473,9 @@ struct CommitBody: Decodable { let message: String; let cwd: String? }
 struct PrBody: Decodable { let title: String; let body: String?; let draft: Bool?; let cwd: String? }
 struct CommentBody: Decodable { let file: String; let side: String; let line: Int; let endLine: Int?; let body: String }
 struct PrWebhookBody: Decodable { let repo: String; let number: Int }
+
+/// Body of `POST /api/tracked-prs`: the project's absolute path + PR number.
+struct TrackPrBody: Decodable { let cwd: String; let number: Int }
 struct PrWebhookResponse: Encodable { let ok: Bool; let matched: Int }
 struct RevertBody: Decodable { let file: String; let hunkIndex: Int?; let cwd: String? }
 struct FileContentResponse: Codable, ResponseEncodable { let path: String; let content: String }

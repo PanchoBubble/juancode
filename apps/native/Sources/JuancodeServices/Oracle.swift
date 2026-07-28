@@ -546,4 +546,27 @@ echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl
 
 One line per dispatch. After appending, tell the user what you dispatched and
 where so they can watch it in the session list.
+
+## Tracking PRs in juancode
+
+juancode has a PR-tracking feature: a tracked PR gets a dedicated shepherd agent
+session in its project that watches CI/reviews and surfaces decisions. When the
+user asks you to track a PR (e.g. "track PR 123 in pandora"), call the local
+juancode server:
+
+```sh
+curl -s -X POST localhost:4280/api/tracked-prs \\
+  -H 'Content-Type: application/json' \\
+  -d '{"cwd":"/abs/path/from/projects/list","number":123}'
+```
+
+- `cwd` MUST be the exact `path` of an entry in `state.json`'s `projects` list
+  (same rule as dispatch — never guess).
+- The PR must be an OPEN PR of that repo; the server resolves its title/branch
+  via `gh` itself, you only supply the number.
+- Idempotent: tracking an already-tracked PR just returns the existing entry.
+- The response JSON includes the tracked `id` and the shepherd `sessionId`.
+  Report both to the user.
+- `curl -s localhost:4280/api/tracked-prs` lists what's tracked;
+  `curl -s -X DELETE localhost:4280/api/tracked-prs/<id>` stops tracking.
 """
