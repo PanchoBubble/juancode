@@ -2494,11 +2494,11 @@ struct SessionContainer: View {
                     .clickCursor()
                 }
                 Button {
-                    model.refreshTerminal()
+                    model.deepRefreshSelectedTerminal()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .help("Refresh terminal — rebuild and replay scrollback to fix a corrupted / garbled render")
+                .help("Repaint clean — restart the CLI and resume this conversation so the pane redraws from the transcript (fixes garbled renders; drops an in-flight reply)")
                 .clickCursor()
                 Button {
                     model.toggleBottomTerminal()

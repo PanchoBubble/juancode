@@ -649,6 +649,49 @@ final class AppModel {
         }
     }
 
+    /// Deep refresh (the toolbar Refresh button): restart the CLI process behind
+    /// the selected pane and `--resume` its conversation, WITHOUT re-seeding the
+    /// recorded scrollback. The CLI reprints the transcript itself from its own
+    /// session file, so the whole pane repaints clean at the current grid.
+    ///
+    /// This is the refresh that actually heals resize garble: the damage lives in
+    /// the recorded byte stream (frames emitted mid-resize), so `refreshTerminal`'s
+    /// rebuild+replay faithfully reproduces it ("refresh does nothing"). Only a
+    /// transcript reprint discards those bytes. Cost: any in-flight reply is
+    /// dropped — this is an explicit repair action, not a routine one.
+    func deepRefreshSelectedTerminal() {
+        guard let id = selection else { return }
+        Task { @MainActor [weak self] in _ = await self?.deepRefresh(id) }
+    }
+
+    /// Kill `id`'s live pty (if any), wait for the exit to finalize, then resume
+    /// its conversation at the same grid with a clean pane (no scrollback seed).
+    /// Falls back to the rebuild+replay refresh — and returns false — when the
+    /// session has no resumable conversation (a resume there would boot a FRESH
+    /// conversation and genuinely lose the pane's content).
+    @discardableResult
+    func deepRefresh(_ id: String, grid: (cols: Int, rows: Int)? = nil) async -> Bool {
+        guard let meta = appState.store.get(id) ?? metaCache[id],
+              meta.cliSessionId != nil, !resumeNeedsFreshStart(meta) else {
+            if selection == id { refreshTerminal() }
+            return false
+        }
+        var g = grid
+        if let live = liveSession(id) {
+            g = g ?? live.appliedGrid()
+            live.kill()
+            // Wait for handleExit to land (persist + registry unregister) —
+            // `reactivate` no-ops while the session still reads as live. Bounded:
+            // kill() escalates SIGTERM→SIGKILL itself, so a wedged CLI still exits.
+            var waitedMs = 0
+            while isLive(id), waitedMs < 6000 {
+                try? await Task.sleep(for: .milliseconds(100))
+                waitedMs += 100
+            }
+        }
+        return await reactivate(id, grid: g, seedPrior: false)
+    }
+
     /// The detail view is showing session `id` live: make sure the keep-alive pane
     /// pool has its entry at the MRU front (juancode-073). Called synchronously
     /// from the `selection` setter for ordinary switches, and again from the
@@ -2088,8 +2131,15 @@ final class AppModel {
     /// the spawn size — the Oracle dock passes its own narrow grid so the resumed CLI
     /// boots at the dock's width instead of the wide main-window `TerminalGrid.spawn`,
     /// which otherwise wraps the TUI into garbage inside the drawer.
+    /// `seedPrior: false` resumes WITHOUT replaying the recorded scrollback into
+    /// the fresh pty — the deep-refresh path (`deepRefresh`), where that history
+    /// is exactly the damage being repaired; the CLI's own `--resume` transcript
+    /// reprint becomes the pane's whole content. The pre-resume scrollback is
+    /// still captured for `invalidateFailedResume`'s rollback, so a failed resume
+    /// never costs the stored history.
     @discardableResult
-    func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil) async -> Bool {
+    func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil,
+                    seedPrior: Bool = true) async -> Bool {
         if isLive(id) { return true }
         // The db row can be gone if the retention cap pruned it after this pane was
         // opened; fall back to the run-lifetime meta cache and re-insert so opening
@@ -2117,7 +2167,7 @@ final class AppModel {
         if resumeNeedsFreshStart(meta) { return false }
         do {
             let prior = appState.store.getScrollback(id) ?? []
-            let seed: [UInt8] = prior.isEmpty
+            let seed: [UInt8] = (prior.isEmpty || !seedPrior)
                 ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
             let g = grid ?? TerminalGrid.spawn
             let session = try appState.registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)

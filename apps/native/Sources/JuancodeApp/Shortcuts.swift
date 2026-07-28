@@ -280,7 +280,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .refreshTerminal:
         // Refresh whichever terminal you're looking at: the Oracle chat when the
         // dock is open, else the selected session's pane.
-        if oracle.expanded { oracle.refreshChat() } else { model.refreshTerminal() }
+        if oracle.expanded { oracle.refreshChat() } else { model.deepRefreshSelectedTerminal() }
     case .toggleChanges: model.toggleChangesPanel()
     case .openChangesForCurrentSession:
         if let id = model.selection { model.openChanges(for: id) }

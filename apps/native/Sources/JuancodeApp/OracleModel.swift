@@ -226,11 +226,19 @@ final class OracleModel {
         spawnAgent()
     }
 
-    /// Hard-refresh the chat terminal without touching the live CLI: rebuild the view
-    /// so it replays the full scrollback and repaints cleanly. Try this before
-    /// `restartAgent()` when only the render is corrupted, not the conversation.
+    /// Hard-refresh the chat terminal: deep-refresh the Oracle's session (restart
+    /// the CLI + `--resume` its conversation at the dock grid, no damaged-scrollback
+    /// seed) so the pane repaints clean from the transcript. A rebuild+replay can't
+    /// heal resize garble — the damage is in the recorded bytes — so that's only the
+    /// fallback for an Oracle with no resumable conversation yet.
     func refreshChat() {
-        chatRefreshToken &+= 1
+        guard let id = oracleSessionId else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if !(await self.app.deepRefresh(id, grid: self.dockGrid)) {
+                self.chatRefreshToken &+= 1
+            }
+        }
     }
 
     /// Spin up an additional Oracle agent and make it the active chat. Several Oracles
