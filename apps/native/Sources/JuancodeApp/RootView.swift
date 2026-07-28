@@ -11,6 +11,9 @@ struct RootView: View {
     /// Shown once at launch when the on-disk database failed to open and the app
     /// fell back to an in-memory store (juancode-4zk).
     @State private var showDbRecovery = false
+    /// Whether the always-visible Oracle session rail on the right edge is shown.
+    /// Shared with the dock header's toggle via the same @AppStorage key.
+    @AppStorage("oracle.sessionRail.shown") private var oracleRailShown = true
 
     var body: some View {
         @Bindable var model = model
@@ -21,7 +24,11 @@ struct RootView: View {
                                                fraction: 0.20, min: 280, max: 380)
         // Column visibility is bridged through AppModel so ⌃S can toggle the projects
         // sidebar; the native toolbar toggle writes back through the same binding.
-        return NavigationSplitView(columnVisibility: Binding(
+        // The split view sits in an HStack with the always-visible Oracle session
+        // rail on the right edge; the Oracle chat drawer (an overlay on the split
+        // view only) slides in flush against the rail's left edge.
+        return HStack(spacing: 0) {
+        NavigationSplitView(columnVisibility: Binding(
             get: { model.projectsSidebarVisible ? .all : .detailOnly },
             set: { model.projectsSidebarVisible = $0 != .detailOnly }
         )) {
@@ -116,6 +123,11 @@ struct RootView: View {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+        if oracleRailShown {
+            Divider()
+            OracleGlobalRail().frame(width: 220)
+        }
         }
     }
 }

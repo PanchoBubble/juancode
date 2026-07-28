@@ -244,6 +244,17 @@ final class OracleModel {
         chatFocusToken += 1
     }
 
+    /// Expand the dock on the chat tab without `open(tab:)`'s toggle behavior — the
+    /// always-visible session rail's way in (row tap / "+"): opening from the rail
+    /// must never collapse an already-open dock. Skips `ensureAgentSession` — rail
+    /// entry points always follow up with an explicit select or spawn.
+    func reveal() {
+        tab = .chat
+        guard !expanded else { return }
+        expanded = true
+        bootstrap()
+    }
+
     /// Switch the chat to an existing Oracle session (rail tap). No-op if it's already
     /// active; focuses the chat input on switch. If the tapped Oracle has exited, revive
     /// it (resume its CLI conversation via the pinned session id) so a past session can

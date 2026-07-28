@@ -17,9 +17,9 @@ struct OracleDock: View {
     /// Floored so the agent CLI never renders into too few columns (which garbles
     /// its TUI).
     @AppStorage("oracle.panel.width") private var storedPanelWidth: Double?
-    /// Whether the chat tab's mini session rail (juancode-cwa) is shown. Shared with
-    /// `OracleChatView` via the same @AppStorage key so the header toggle and the rail
-    /// stay in lock-step.
+    /// Whether the always-visible Oracle session rail on the window's right edge is
+    /// shown. Shared with `RootView` (which mounts the rail) via the same @AppStorage
+    /// key so the header toggle and the rail stay in lock-step.
     @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
     private static let minWidth: Double = 460
 
@@ -61,6 +61,10 @@ struct OracleDock: View {
         // `.trailing` keeps the panel flush against the real right edge in both
         // states, so the slide-off-screen geometry is correct.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        // The overlay covers the split view only — the always-visible Oracle rail
+        // sits to its right in RootView's HStack. Clip so the collapsed/sliding
+        // drawer tucks behind the rail's left edge instead of gliding over it.
+        .clipped()
         // Gate the WHOLE overlay's hit testing on `expanded`. This overlay covers the
         // entire window (RootView), so any hittable shape inside it (the scrim, or a
         // scrim still fading out under the removal transition) would swallow every
@@ -144,8 +148,8 @@ struct OracleDock: View {
                     oracle.tab = .issues
                     oracle.loadGlobalBeads()
                 }
-                headerButton(sessionRailShown ? "sidebar.left" : "sidebar.squares.left",
-                             help: sessionRailShown ? "Hide the session list" : "Show the session list") {
+                headerButton(sessionRailShown ? "sidebar.right" : "sidebar.squares.right",
+                             help: sessionRailShown ? "Hide the Oracle session rail" : "Show the Oracle session rail") {
                     sessionRailShown.toggle()
                 }
                 if oracle.session != nil {
@@ -367,23 +371,16 @@ private struct OracleDispatchPicker: View {
     }
 }
 
-/// The Oracle agent's live chat terminal, with an optional mini session rail on the
-/// left (juancode-cwa) so all your work is navigable at a glance without leaving the
-/// dock, or a starting affordance when the agent isn't up.
+/// The Oracle agent's live chat terminal, or a starting affordance when the agent
+/// isn't up. The session rail moved out of the drawer to the window's right edge
+/// (`OracleGlobalRail`, mounted by RootView) so it's visible even with the dock
+/// collapsed — the chat is the drawer's whole surface.
 private struct OracleChatView: View {
     @Environment(OracleModel.self) private var oracle
-    @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
 
     var body: some View {
-        HStack(spacing: 0) {
-            if sessionRailShown {
-                OracleSessionRail()
-                    .frame(width: 220)
-                Divider()
-            }
-            terminal
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        terminal
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var terminal: some View {
@@ -419,12 +416,21 @@ private struct OracleChatView: View {
 }
 
 /// A compact rail listing the running Oracle agents (you can spin up several in
-/// parallel; they all live in the control dir). Each row shows a live-status dot and
-/// title; tapping switches the chat to that Oracle, and the "+" starts a new one
-/// (juancode-cwa). Only Oracle sessions appear here — never project/dispatched work.
-private struct OracleSessionRail: View {
+/// parallel; they all live in the control dir), docked ALWAYS-VISIBLE on the
+/// window's right edge (mounted by RootView, toggled from the dock header). Each
+/// row shows a live-status dot and title; tapping reveals the chat drawer (sliding
+/// in from this edge) on that Oracle, and the "+" starts a new one (juancode-cwa).
+/// Only Oracle sessions appear here — never project/dispatched work.
+struct OracleGlobalRail: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
+    /// The Oracle awaiting delete confirmation (drives the alert). Set from the
+    /// row's hover ✕ and the menus' Delete — an .alert, matching the sidebar's
+    /// close confirmation (dialogs don't present from context menus, juancode-05u).
+    @State private var confirmingDelete: SessionMeta?
+    /// The Oracle being renamed (drives the rename alert).
+    @State private var renaming: SessionMeta?
+    @State private var renameText = ""
 
     /// The running Oracles, most-recent first (see `OracleModel.oracleSessions`).
     private var sessions: [SessionMeta] { oracle.oracleSessions }
@@ -436,7 +442,7 @@ private struct OracleSessionRail: View {
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
                 Spacer()
-                Button { oracle.newOracle() } label: { Image(systemName: "plus") }
+                Button { oracle.reveal(); oracle.newOracle() } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
                     .help("Start another Oracle")
                     .clickCursor()
@@ -449,7 +455,7 @@ private struct OracleSessionRail: View {
                     Text("No Oracle running.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                    Button("Start Oracle") { oracle.newOracle() }
+                    Button("Start Oracle") { oracle.reveal(); oracle.newOracle() }
                         .controlSize(.small).clickCursor()
                     Spacer()
                 }
@@ -467,6 +473,31 @@ private struct OracleSessionRail: View {
         }
         .frame(maxHeight: .infinity)
         .background(Color.appPanelElevated)
+        .alert("Rename Oracle", isPresented: Binding(
+            get: { renaming != nil },
+            set: { if !$0 { renaming = nil } }
+        )) {
+            TextField("Title", text: $renameText)
+            Button("Cancel", role: .cancel) { renaming = nil }
+            Button("Rename") {
+                if let target = renaming { model.rename(target.id, to: renameText) }
+                renaming = nil
+            }
+        }
+        .alert("Delete \"\(confirmingDelete?.title ?? "Oracle")\"?", isPresented: Binding(
+            get: { confirmingDelete != nil },
+            set: { if !$0 { confirmingDelete = nil } }
+        ), presenting: confirmingDelete) { meta in
+            Button("Cancel", role: .cancel) { confirmingDelete = nil }
+            Button("Delete Oracle", role: .destructive) {
+                oracle.deleteOracle(meta.id)
+                confirmingDelete = nil
+            }
+        } message: { meta in
+            Text(model.isLive(meta.id)
+                 ? "This will terminate the running agent and discard the conversation and its scrollback for good."
+                 : "This will discard the conversation and its scrollback for good.")
+        }
     }
 
     /// A session row leads with its auto-derived title — the CLI's own model-written
@@ -476,11 +507,43 @@ private struct OracleSessionRail: View {
     /// identical for every Oracle since they share the control dir), so we fall back
     /// to the spawn-order number (oldest = 1) to keep rows distinct.
     private func row(_ meta: SessionMeta, number: Int) -> some View {
-        let selected = oracle.oracleSessionId == meta.id
+        OracleRailRow(
+            meta: meta, number: number,
+            selected: oracle.oracleSessionId == meta.id,
+            live: model.isLive(meta.id),
+            activity: model.activity(meta.id),
+            // Reveal first: tapping a row with the drawer closed slides the chat in
+            // from this edge; with it open, it just switches the active Oracle.
+            onSelect: { oracle.reveal(); oracle.selectOracle(meta.id) },
+            onKill: model.isLive(meta.id) ? { model.killSession(meta.id) } : nil,
+            onRename: { renameText = meta.title; renaming = meta },
+            onDeleteRequested: { confirmingDelete = meta })
+    }
+}
+
+/// One Oracle rail row: status dot + title, with the same hover affordances as the
+/// sidebar's session rows — an ellipsis action menu and a ✕ that deletes after
+/// confirmation (the right-click menu mirrors the ellipsis).
+private struct OracleRailRow: View {
+    let meta: SessionMeta
+    let number: Int
+    let selected: Bool
+    let live: Bool
+    let activity: SessionActivity?
+    let onSelect: () -> Void
+    /// Stop the running agent but keep the conversation in the rail (kill ≠ delete);
+    /// nil when the session isn't live.
+    let onKill: (() -> Void)?
+    let onRename: () -> Void
+    /// Ask to delete this Oracle — the caller owns the confirmation alert.
+    let onDeleteRequested: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
         let placeholder = meta.title.hasPrefix(Providers.spec(for: meta.provider).label + " ·")
-        return HStack(alignment: .top, spacing: 7) {
+        HStack(alignment: .top, spacing: 7) {
             Circle()
-                .fill(sessionDotColor(live: model.isLive(meta.id), activity: model.activity(meta.id)))
+                .fill(sessionDotColor(live: live, activity: activity))
                 .frame(width: 7, height: 7)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 2) {
@@ -491,16 +554,43 @@ private struct OracleSessionRail: View {
                 }
             }
             Spacer(minLength: 0)
+            if hovering {
+                Menu { menuItems } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 11))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Oracle actions")
+                .clickCursor()
+                Button(action: onDeleteRequested) {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .help("Delete this Oracle (asks to confirm)")
+                .clickCursor()
+            }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
-        .onTapGesture { oracle.selectOracle(meta.id) }
-        .contextMenu {
-            Button("Delete", role: .destructive) { oracle.deleteOracle(meta.id) }
-        }
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+        .contextMenu { menuItems }
         .help(meta.title)
         .clickCursor()
+    }
+
+    @ViewBuilder private var menuItems: some View {
+        Button("Rename…", action: onRename)
+        if let onKill {
+            // Stop a stuck/looping Oracle without discarding its conversation —
+            // it stays in the rail and can be resumed by selecting it.
+            Button("Kill Agent", role: .destructive, action: onKill)
+        }
+        // Routed through the confirm alert (same one as the hover ✕).
+        Button("Delete", role: .destructive, action: onDeleteRequested)
     }
 }
