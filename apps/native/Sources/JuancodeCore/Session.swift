@@ -190,6 +190,9 @@ public final class Session: @unchecked Sendable {
     /// the expensive full write (column + FTS reindex) off the per-output hot path.
     /// Guarded by `lock`. See `ScrollbackWriteThrottle` (juancode-5qw.1).
     private var writeThrottle = ScrollbackWriteThrottle(flushThresholdBytes: 128 * 1024)
+    /// Generation guard for the deferred full flush armed when a turn edge asked for a
+    /// reindex sooner than the throttle's window allows. Guarded by `lock`.
+    private var deferredFullGeneration = 0
     /// Previous activity, tracked to fire a full (FTS-reindexing) flush on the edge
     /// into idle — a turn boundary is when search wants the latest scrollback.
     /// Guarded by `lock`.
@@ -539,13 +542,43 @@ public final class Session: @unchecked Sendable {
     /// On the edge into idle (a turn boundary), do a full flush so search picks up the
     /// turn's output. No-op unless something new was written since the last full
     /// flush, so a chattery detector flipping idle->busy->idle can't spam full writes.
+    ///
+    /// Rate-limited by the throttle (juancode-5bwj): an agent crosses this edge once
+    /// per tool call, and a reindex re-tokenizes the whole ring, so edges arriving
+    /// inside the window arm a single deferred flush instead of running one each. The
+    /// deferral is what keeps it correct — a session that goes idle and stays idle
+    /// still indexes its last turn, just a few seconds later.
     private func maybePersistOnIdleEdge(_ state: SessionActivity) {
-        let shouldFlush = lock.withLock { () -> Bool in
+        let decision = lock.withLock { () -> ScrollbackWriteThrottle.FullFlushDecision in
             let was = prevPersistActivity
             prevPersistActivity = state
-            return state == .idle && was != nil && was != .idle && writeThrottle.ftsStale
+            guard state == .idle, was != nil, was != .idle else { return .skip }
+            return writeThrottle.fullFlushDecision(nowMs: nowMs())
         }
-        if shouldFlush { enqueuePersist(.full) }
+        switch decision {
+        case .skip: break
+        case .now: enqueuePersist(.full)
+        case .after(let ms): scheduleDeferredFullFlush(afterMs: ms)
+        }
+    }
+
+    /// Arm the one deferred full flush for this session, replacing any already armed
+    /// (later edges inside the same window are covered by the pending one — it reads
+    /// the ring when it runs). Re-checks the throttle on wake so an intervening flush
+    /// (an exit, a threshold write) turns this into a no-op.
+    private func scheduleDeferredFullFlush(afterMs: Int) {
+        let gen = lock.withLock { () -> Int in
+            deferredFullGeneration += 1
+            return deferredFullGeneration
+        }
+        workQueue.asyncAfter(deadline: .now() + .milliseconds(afterMs)) { [weak self] in
+            guard let self else { return }
+            let due = self.lock.withLock { () -> Bool in
+                guard gen == self.deferredFullGeneration else { return false }
+                return self.writeThrottle.fullFlushDecision(nowMs: nowMs()) == .now
+            }
+            if due { self.enqueuePersist(.full) }
+        }
     }
 
     // MARK: - input / lifecycle
@@ -1434,7 +1467,8 @@ public final class Session: @unchecked Sendable {
         let (meta, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             _meta.updatedAt = nowMs()
             persistGeneration += 1 // cancel any pending debounce
-            writeThrottle.didFullFlush()
+            deferredFullGeneration += 1 // and any deferred reindex: this covers it
+            writeThrottle.didFullFlush(nowMs: _meta.updatedAt)
             return (_meta, scroll.replay)
         }
         if persistEnabled { env.store.update(meta, scrollback: bytes) }

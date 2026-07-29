@@ -172,6 +172,59 @@ final class WorkAtRiskTests: XCTestCase {
         XCTAssertEqual(WorkAtRiskScan.nudges([n], nowMs: 10_000, idleMs: 5_000, alreadyNudged: []), [])
     }
 
+    // MARK: - parseGitStatusSummary (the single-fork probe, juancode-78c4)
+
+    func testParsesBranchUpstreamAheadBehindAndDirtyCount() {
+        let out = """
+        # branch.oid 1111111111111111111111111111111111111111
+        # branch.head feature/x
+        # branch.upstream origin/feature/x
+        # branch.ab +3 -1
+        1 .M N... 100644 100644 100644 aaa bbb src/a.ts
+        1 M. N... 100644 100644 100644 ccc ddd src/b.ts
+        ? untracked.txt
+        """
+        let s = parseGitStatusSummary(out)
+        XCTAssertEqual(s.branch, "feature/x")
+        XCTAssertFalse(s.detached)
+        XCTAssertEqual(s.upstream, "origin/feature/x")
+        XCTAssertEqual(s.ahead, 3)
+        XCTAssertEqual(s.behind, 1)
+        XCTAssertEqual(s.dirtyFiles, 3)
+    }
+
+    func testParsesDetachedHeadAndNoUpstream() {
+        // No `branch.ab` header at all when there's no upstream.
+        let out = """
+        # branch.oid 2222222222222222222222222222222222222222
+        # branch.head (detached)
+        """
+        let s = parseGitStatusSummary(out)
+        XCTAssertTrue(s.detached)
+        XCTAssertNil(s.branch)
+        XCTAssertNil(s.upstream)
+        XCTAssertEqual(s.ahead, 0)
+        XCTAssertEqual(s.behind, 0)
+        XCTAssertEqual(s.dirtyFiles, 0)
+    }
+
+    func testCountsUnmergedAndRenamedEntriesAsDirty() {
+        let out = """
+        # branch.head main
+        2 R. N... 100644 100644 100644 aaa bbb R100 new.ts\told.ts
+        u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.ts
+        """
+        let s = parseGitStatusSummary(out)
+        XCTAssertEqual(s.dirtyFiles, 2)
+        XCTAssertEqual(s.branch, "main")
+    }
+
+    func testCleanTreeOnHeaderOnlyOutputIsNotDirty() {
+        let s = parseGitStatusSummary("# branch.head main\n# branch.ab +0 -0\n")
+        XCTAssertEqual(s.dirtyFiles, 0)
+        XCTAssertEqual(s.ahead, 0)
+    }
+
     // MARK: - probeWorkAtRisk (real git)
 
     private func runGit(_ args: [String], cwd: String) throws {

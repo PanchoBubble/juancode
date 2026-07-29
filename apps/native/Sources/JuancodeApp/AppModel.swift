@@ -2,10 +2,15 @@ import Foundation
 import Observation
 import AppKit
 import SwiftUI
+import OSLog
 import JuancodeCore
 import JuancodeServices
 import JuancodePersistence
 import JuancodeServer
+
+/// Launch-time database compaction (juancode-hv06) — rare, so it reports to the
+/// system log rather than the per-session activity trail.
+private let storeMaintenanceLog = Logger(subsystem: "dev.juancode.app", category: "db-maintenance")
 
 /// UserDefaults key for the turn-boundary notification toggle (Dock bounce + badge).
 private let notifyDefaultsKey = "juancode.notify.turnEnd"
@@ -445,7 +450,8 @@ final class AppModel {
         restoreSessionTemplates()
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyReaperWindow() // the user's idle window (not the boot default) drives the reaper
-        startWorkAtRiskLoop() // periodic dirty/unpushed scan (juancode-rxu)
+        startWorkAtRiskLoop() // event-driven dirty/unpushed tracking (juancode-rxu, -78c4)
+        runStoreMaintenance() // reclaim freelist + compact the FTS index (juancode-hv06)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on,
         // and marks the desktop active so the phone-push gate stays quiet (juancode-2zp).
@@ -545,6 +551,9 @@ final class AppModel {
         livePanes.prune { [appState] in appState.registry.get($0) }
         pruneDrawnPanes(live: Set(liveSessions.map(\.id)))
         refreshWorktreeMap()
+        // Every create/exit/adopt lands here, so this is where the at-risk watch set
+        // follows the sessions we're actually driving (juancode-78c4).
+        reconcileWorkAtRiskWatches()
     }
 
     /// Apply a single live session's meta change (title/usage poll, rename, archive)
@@ -563,6 +572,29 @@ final class AppModel {
             break
         case .fullRefresh:
             refresh()
+        }
+    }
+
+    /// Compact the store once per launch, well off the startup path: the retention cap
+    /// deletes rows on every launch but nothing ever gave the pages back or merged the
+    /// FTS index's tombstones (juancode-hv06). Utility QoS and fire-and-forget — it
+    /// takes a write lock for seconds on a large file, so nothing waits on it, and a
+    /// failure is logged rather than surfaced (a db that won't vacuum still works).
+    private func runStoreMaintenance() {
+        let store = appState.store
+        Task.detached(priority: .utility) {
+            do {
+                let report = try store.performMaintenance()
+                storeMaintenanceLog.info(
+                    """
+                    db maintenance: freelist \(report.freelistPagesBefore, privacy: .public) pages before, \
+                    \(report.pageCountAfter, privacy: .public) pages after, \
+                    vacuumed=\(report.vacuumed, privacy: .public) \
+                    optimizedFts=\(report.optimizedFts, privacy: .public)
+                    """)
+            } catch {
+                storeMaintenanceLog.error("db maintenance failed: \(error, privacy: .public)")
+            }
         }
     }
 
@@ -3923,13 +3955,45 @@ final class AppModel {
         workAtRiskNotices.removeAll { $0.id == id }
     }
 
-    /// Scan cadence. Coarse — forgotten work is a minutes-scale concern, and each
-    /// pass shells `git status` into every distinct session folder and worktree.
-    private let workAtRiskInterval: Duration = .seconds(45)
+    /// Cadence of the *full* sweep — the one that enumerates worktrees to find
+    /// orphaned ones (no session references them), which no filesystem event can
+    /// announce. Deliberately coarse: the folders you're actually working in are
+    /// covered event-driven by `workAtRiskWatchTokens`, so this only has to catch
+    /// trees that went stale without any session of ours touching them.
+    ///
+    /// Was 45s and shelled ~1,100 git processes per pass across all 544 persisted
+    /// sessions' folders — ~7 forks/sec sustained, running even when the window was
+    /// hidden (juancode-78c4). Now: zero forks while nothing changes on disk.
+    private let workAtRiskSweepInterval: Duration = .seconds(600)
+    /// Cadence of the nudge re-evaluation. Pure in-memory — it re-reads the cached
+    /// at-risk map against session idle times and forks nothing, so it can be
+    /// frequent without costing anything. Needed on a timer because the rule is
+    /// time-based ("has sat silent for 15 min"), not change-based.
+    private let workAtRiskNudgeInterval: Duration = .seconds(60)
     /// How long a non-busy session must sit silent before its at-risk work nudges.
     private let workAtRiskIdleNudgeMs = 15 * 60_000
     @ObservationIgnored private var workAtRiskLoop: Task<Void, Never>?
+    @ObservationIgnored private var workAtRiskNudgeLoop: Task<Void, Never>?
     @ObservationIgnored private var workAtRiskScanInFlight = false
+
+    /// One FSEvents subscription per watched root, keyed by normalized path. A root
+    /// is watched while a session of ours lives in it; the shared registry means
+    /// several sessions in one worktree cost one kernel stream, and an idle stream
+    /// costs no CPU at all.
+    @ObservationIgnored private var workAtRiskWatchTokens: [String: WorktreeWatchToken] = [:]
+    /// Second subscription per *linked* worktree, on the real git dir that its `.git`
+    /// file points at (`<main>/.git/worktrees/<name>`). A commit inside a linked
+    /// worktree writes its index and refs THERE, not under the worktree root, so
+    /// without this the at-risk flag would never clear on commit — only on the next
+    /// unrelated file edit (juancode-gep).
+    @ObservationIgnored private var workAtRiskGitDirTokens: [String: WorktreeWatchToken] = [:]
+    /// Roots probed at least once, so a newly watched folder gets its cold read and
+    /// repeat reconciles don't re-probe an unchanged tree.
+    @ObservationIgnored private var workAtRiskProbed: Set<String> = []
+    /// cwd → repo main-worktree path, remembered across sweeps. Paths don't move, so
+    /// after the first sweep the enumeration costs one `git worktree list` per repo
+    /// instead of one per distinct session folder (116 of them, here).
+    @ObservationIgnored private var workAtRiskRepoRootCache: [String: String] = [:]
     /// Sessions already nudged for the current at-risk episode of their folder;
     /// cleared when the folder comes clean or the session goes busy again, so a
     /// new episode re-alerts (mirrors `dismissedHealth`'s recover-then-fail rule).
@@ -3940,14 +4004,125 @@ final class AppModel {
         workAtRiskLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scanWorkAtRiskOnce()
-                try? await Task.sleep(for: self?.workAtRiskInterval ?? .seconds(45))
+                try? await Task.sleep(for: self?.workAtRiskSweepInterval ?? .seconds(600))
+            }
+        }
+        guard workAtRiskNudgeLoop == nil else { return }
+        workAtRiskNudgeLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: self?.workAtRiskNudgeInterval ?? .seconds(60))
+                self?.evaluateWorkAtRiskNudges()
             }
         }
     }
 
-    /// One pass: collect scan roots (session folders + every worktree of the repos
-    /// in play, including orphans), probe them off the main actor, publish the
-    /// at-risk map, then nudge sessions whose work looks forgotten.
+    // MARK: - event-driven at-risk tracking (juancode-78c4)
+
+    /// Reconcile the watched-root set against the sessions we're actually driving:
+    /// subscribe to folders that appeared, drop folders that went away, and cold-probe
+    /// anything new. Called from `refresh()`, so it tracks every create/exit/adopt.
+    ///
+    /// Scoped to *live* sessions on purpose. History (539 exited sessions across 116
+    /// folders here) is covered by the slow sweep instead — it doesn't change while
+    /// nobody is working in it, so watching it earns nothing.
+    private func reconcileWorkAtRiskWatches() {
+        var wanted: Set<String> = []
+        for s in appState.registry.all() {
+            let meta = s.meta
+            guard meta.cwd != OraclePaths.controlDir else { continue }
+            wanted.insert(WorkAtRiskScan.normalize(meta.cwd))
+            if let wt = meta.worktreePath { wanted.insert(WorkAtRiskScan.normalize(wt)) }
+        }
+        // Keep whatever the user has open in a pane, even after its pty exited — that's
+        // the folder they're most likely about to commit in.
+        if let sel = selection, let cwd = gitCwd(of: sel) {
+            wanted.insert(WorkAtRiskScan.normalize(cwd))
+        }
+
+        for gone in workAtRiskWatchTokens.keys where !wanted.contains(gone) {
+            workAtRiskWatchTokens.removeValue(forKey: gone)?.cancel()
+            workAtRiskGitDirTokens.removeValue(forKey: gone)?.cancel()
+            workAtRiskProbed.remove(gone)
+        }
+        for root in wanted where workAtRiskWatchTokens[root] == nil {
+            guard let token = worktreeWatchers.watch(path: root, onChange: { [weak self] in
+                Task { @MainActor in self?.probeWorkAtRiskRoot(root) }
+            }) else { continue }
+            workAtRiskWatchTokens[root] = token
+            watchLinkedWorktreeGitDir(root)
+            probeWorkAtRiskRoot(root) // cold read: state before any event arrives
+        }
+    }
+
+    /// For a linked worktree, also watch the git dir its `.git` file points at, so a
+    /// commit there clears the flag (see `workAtRiskGitDirTokens`). No-op for a normal
+    /// checkout, whose `.git` is a directory the root watch already covers.
+    private func watchLinkedWorktreeGitDir(_ root: String) {
+        guard workAtRiskGitDirTokens[root] == nil,
+              let gitDir = linkedWorktreeGitDir(root) else { return }
+        let token = worktreeWatchers.watch(path: gitDir, onChange: { [weak self] in
+            Task { @MainActor in self?.probeWorkAtRiskRoot(root) }
+        })
+        if let token { workAtRiskGitDirTokens[root] = token }
+    }
+
+    /// The git dir a linked worktree's `.git` *file* points at, or nil when `.git` is a
+    /// directory (a normal checkout) or unreadable. Parsed rather than shelled: the
+    /// file is a one-line `gitdir: <path>` pointer.
+    private func linkedWorktreeGitDir(_ root: String) -> String? {
+        let dotGit = (root as NSString).appendingPathComponent(".git")
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dotGit, isDirectory: &isDir), !isDir.boolValue,
+              let raw = try? String(contentsOfFile: dotGit, encoding: .utf8) else { return nil }
+        let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.hasPrefix("gitdir:") else { return nil }
+        let path = String(line.dropFirst("gitdir:".count)).trimmingCharacters(in: .whitespaces)
+        guard !path.isEmpty else { return nil }
+        // A relative pointer resolves against the worktree root.
+        let abs = path.hasPrefix("/") ? path : (root as NSString).appendingPathComponent(path)
+        let normalized = WorkAtRiskScan.normalize(abs)
+        return FileManager.default.fileExists(atPath: normalized) ? normalized : nil
+    }
+
+    /// Probe one root and publish the delta. This is the whole hot path now: it runs
+    /// when that folder actually changed (FSEvents, debounced 500ms by the watcher) or
+    /// once when the watch is first established — not on a timer.
+    private func probeWorkAtRiskRoot(_ root: String) {
+        workAtRiskProbed.insert(root)
+        let sessionIds = sessions
+            .filter { s in
+                WorkAtRiskScan.normalize(s.cwd) == root
+                    || s.worktreePath.map { WorkAtRiskScan.normalize($0) == root } == true
+            }
+            .map(\.id)
+        let repoRoot = workAtRiskRepoRootCache[root] ?? worktreeRepoRoots[root] ?? ""
+        let ref = WorkAtRiskScan.RootRef(path: root, repoRoot: repoRoot, sessionIds: sessionIds)
+        Task {
+            let risk = await Task.detached(priority: .utility) { () -> WorkAtRisk? in
+                guard let probed = await probeWorkAtRisk(root) else { return nil }
+                return WorkAtRiskScan.classify(ref, state: probed.state,
+                                               dirtyFiles: probed.dirtyFiles,
+                                               aheadOfBase: probed.aheadOfBase,
+                                               headOnRemote: probed.headOnRemote)
+            }.value
+            if let risk {
+                workAtRiskByPath[root] = risk
+            } else {
+                workAtRiskByPath.removeValue(forKey: root)
+            }
+            evaluateWorkAtRiskNudges()
+        }
+    }
+
+    /// The slow sweep: enumerate the worktrees of the repos in play and probe the roots
+    /// that AREN'T event-watched, so orphaned trees (no session references them, so no
+    /// watcher covers them) still surface. Watched roots are skipped — they were just
+    /// probed on their own change, and re-probing here would both waste forks and let a
+    /// slow sweep overwrite a fresher event-driven read.
+    ///
+    /// Enumeration is per *repo*, not per session folder: `workAtRiskRepoRootCache`
+    /// remembers cwd → main worktree across sweeps, so the second sweep onward costs
+    /// one `git worktree list` per repo instead of 116 (juancode-78c4).
     func scanWorkAtRiskOnce() async {
         guard !workAtRiskScanInFlight else { return }
         workAtRiskScanInFlight = true
@@ -3956,18 +4131,31 @@ final class AppModel {
         let sessionRefs = sessions
             .filter { $0.cwd != OraclePaths.controlDir }
             .map { WorkAtRiskScan.SessionRef(id: $0.id, cwd: $0.cwd, worktreePath: $0.worktreePath) }
+        let cachedRepoRoots = workAtRiskRepoRootCache
+        let watched = Set(workAtRiskWatchTokens.keys)
 
-        let results = await Task.detached(priority: .utility) { () -> [String: WorkAtRisk] in
+        let (results, discoveredRepoRoots) = await Task.detached(priority: .utility) {
+            () -> ([String: WorkAtRisk], [String: String]) in
             // One worktree listing per repo: `git worktree list` from any worktree
-            // returns the whole set with the main one first (stable per-repo key).
+            // returns the whole set with the main one first (stable per-repo key). Folders
+            // whose repo we already resolved on an earlier sweep don't need the fork —
+            // the listing for their repo covers them.
             var worktreesByRepo: [String: [Worktree]] = [:]
-            for cwd in Set(sessionRefs.map(\.cwd) + sessionRefs.compactMap(\.worktreePath)) {
+            var learned: [String: String] = [:]
+            let folders = Set(sessionRefs.map(\.cwd) + sessionRefs.compactMap(\.worktreePath))
+            for cwd in folders.sorted() {
+                if let known = cachedRepoRoots[cwd], worktreesByRepo[known] != nil { continue }
                 let trees = await listWorktrees(cwd)
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 if worktreesByRepo[main.path] == nil { worktreesByRepo[main.path] = trees }
+                learned[cwd] = main.path
+                // Every tree in this listing shares the repo — remember them all so a
+                // sibling worktree never needs its own fork.
+                for t in trees { learned[t.path] = main.path }
             }
             let roots = WorkAtRiskScan.collectRoots(sessions: sessionRefs,
                                                     worktreesByRepo: worktreesByRepo)
+                .filter { !watched.contains($0.path) }
             // Probe with bounded concurrency — a wide scan shouldn't fork a git
             // process per folder all at once.
             var out: [String: WorkAtRisk] = [:]
@@ -3990,11 +4178,22 @@ final class AppModel {
                     enqueue()
                 }
             }
-            return out
+            return (out, learned)
         }.value
 
-        workAtRiskByPath = results
+        workAtRiskRepoRootCache.merge(discoveredRepoRoots) { _, new in new }
+        // Replace only the unwatched half of the map; watched roots keep their
+        // event-driven state.
+        for key in workAtRiskByPath.keys where !watched.contains(key) {
+            workAtRiskByPath.removeValue(forKey: key)
+        }
+        workAtRiskByPath.merge(results) { _, new in new }
+        evaluateWorkAtRiskNudges()
+    }
 
+    /// Re-run the nudge rule against the current cached at-risk map. Forks nothing —
+    /// safe to call on every probe and on the 60s timer.
+    private func evaluateWorkAtRiskNudges() {
         // Episode reset: forget a nudge once the session's folder is clean again,
         // the session went back to work, or the session is gone.
         workAtRiskNudged = workAtRiskNudged.filter { id in

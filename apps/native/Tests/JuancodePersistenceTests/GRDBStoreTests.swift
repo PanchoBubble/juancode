@@ -428,4 +428,37 @@ final class GRDBStoreTests: XCTestCase {
         // Even the oldest archived survives despite sitting far past the cap.
         XCTAssertNotNil(store.get("a-0"))
     }
+
+    // MARK: - maintenance (juancode-hv06)
+
+    func testMaintenanceCompactsAndReportsWithoutLosingData() throws {
+        // Build some history, then delete most of it so pages land on the freelist.
+        for i in 0..<40 {
+            var m = meta("keep-\(i)")
+            store.insert(m)
+            m.title = "session \(i)"
+            store.update(m, scrollback: Array(String(repeating: "searchable output ", count: 2_000).utf8))
+        }
+        let survivor = store.get("keep-0")
+        for i in 10..<40 { _ = store.delete("keep-\(i)") }
+
+        // Threshold 0 forces the VACUUM so the test is deterministic.
+        let report = try store.performMaintenance(vacuumIfFreelistPagesExceeds: 0)
+        XCTAssertTrue(report.vacuumed)
+        XCTAssertTrue(report.optimizedFts)
+        XCTAssertGreaterThan(report.pageCountAfter, 0)
+
+        // Surviving rows and their search index are intact after the rewrite.
+        XCTAssertEqual(store.get("keep-0"), survivor)
+        XCTAssertEqual(store.list().count, 10)
+        XCTAssertFalse(store.search("searchable", limit: 20).isEmpty)
+    }
+
+    func testMaintenanceSkipsVacuumBelowThreshold() throws {
+        store.insert(meta())
+        // A fresh db has almost nothing on the freelist, so a high threshold no-ops.
+        let report = try store.performMaintenance(vacuumIfFreelistPagesExceeds: 1_000_000)
+        XCTAssertFalse(report.vacuumed)
+        XCTAssertTrue(report.optimizedFts)
+    }
 }

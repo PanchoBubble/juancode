@@ -168,6 +168,56 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         }
     }
 
+    // MARK: - maintenance (juancode-hv06)
+
+    /// What one maintenance pass did, for logging / tests.
+    public struct MaintenanceReport: Sendable, Equatable {
+        /// Pages on the freelist before the pass.
+        public var freelistPagesBefore: Int
+        /// Total database size in pages after the pass.
+        public var pageCountAfter: Int
+        /// Whether a VACUUM actually ran (it only does past the threshold).
+        public var vacuumed: Bool
+        /// Whether the FTS index was compacted.
+        public var optimizedFts: Bool
+    }
+
+    /// Compact the database: merge the FTS index's b-tree segments and, if enough
+    /// pages are sitting on the freelist, rewrite the file to give the space back.
+    ///
+    /// Deletes (the per-project retention cap, `enforceSessionCap`) return pages to
+    /// SQLite's freelist but never to the filesystem, and fts5 deletes leave tombstone
+    /// entries that slow every subsequent query and merge — nothing in the app had ever
+    /// reclaimed either. Measured on a real db: 445 MB total, ~24 MB of it freelist.
+    ///
+    /// Both statements are slow (seconds, on a large file) and take a write lock, so
+    /// this belongs on a background queue at launch — never on a path a frame waits on.
+    /// `vacuumIfFreelistPagesExceeds` keeps a routine launch from rewriting the whole
+    /// file for a few stray pages.
+    @discardableResult
+    public func performMaintenance(vacuumIfFreelistPagesExceeds threshold: Int = 2_000) throws -> MaintenanceReport {
+        // VACUUM cannot run inside a transaction, so this deliberately avoids `write`.
+        try dbQueue.writeWithoutTransaction { db in
+            let freelist = try Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0
+
+            var optimized = false
+            // 'optimize' is a no-op-ish merge when the index is already tidy.
+            if (try? db.execute(sql: "INSERT INTO sessions_fts (sessions_fts) VALUES ('optimize')")) != nil {
+                optimized = true
+            }
+
+            var vacuumed = false
+            if freelist > threshold {
+                try db.execute(sql: "VACUUM")
+                vacuumed = true
+            }
+
+            let pages = try Int.fetchOne(db, sql: "PRAGMA page_count") ?? 0
+            return MaintenanceReport(freelistPagesBefore: freelist, pageCountAfter: pages,
+                                     vacuumed: vacuumed, optimizedFts: optimized)
+        }
+    }
+
     // MARK: - row mapping
 
     private func rowToMeta(_ r: Row) -> SessionMeta {
