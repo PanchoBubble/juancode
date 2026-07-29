@@ -1346,7 +1346,9 @@ private struct FolderHeader: View {
     /// (uncommitted/unpushed on the folder itself); `worktrees` counts distinct
     /// at-risk linked worktrees under this repo, including orphaned ones.
     private var atRiskRoots: (main: WorkAtRisk?, worktrees: Int) {
-        let root = WorkAtRiskScan.normalize(group.cwd)
+        // Memoized normalize: this runs per folder header per render, and
+        // `standardizingPath` is not cheap.
+        let root = model.normalizedPath(group.cwd)
         var seen = Set<String>()
         var main: WorkAtRisk?
         var worktrees = 0

@@ -1457,14 +1457,20 @@ final class AppModel {
             let result = await Task.detached(priority: .utility) {
                 await discoverExternalSessions(limit: limit, excluding: used)
             }.value
-            externalSessions = result.sessions.map { ext in
+            let discovered = result.sessions.map { ext in
                 SessionMeta(id: ext.id, provider: ext.provider, cwd: ext.cwd, title: ext.title,
                             status: .exited, exitCode: nil, createdAt: ext.lastActiveMs,
                             updatedAt: ext.lastActiveMs, cliSessionId: ext.id,
                             skipPermissions: true, worktreePath: nil, usage: nil)
             }
-            externalIds = Set(externalSessions.map(\.id))
-            externalHasMore = result.hasMore
+            // Re-discovery usually returns the same transcripts. Assigning regardless
+            // notified observers and re-ran the sidebar for nothing (`@Observable` fires
+            // on equal writes), so only publish a real change.
+            if discovered != externalSessions {
+                externalSessions = discovered
+                externalIds = Set(discovered.map(\.id))
+            }
+            if externalHasMore != result.hasMore { externalHasMore = result.hasMore }
             externalLoading = false
         }
     }
@@ -3928,15 +3934,45 @@ final class AppModel {
     // MARK: - Work at risk (uncommitted/unpushed scanner) — juancode-rxu
 
     /// Folders holding uncommitted or unpushed work, keyed by normalized path.
-    /// Only at-risk entries are held; each scan pass replaces the whole map.
-    var workAtRiskByPath: [String: WorkAtRisk] = [:]
+    /// Only at-risk entries are held. Mutate through `publishWorkAtRisk` /
+    /// `replaceUnwatchedWorkAtRisk` so the derived list stays in step.
+    private(set) var workAtRiskByPath: [String: WorkAtRisk] = [:]
 
     /// Panel-ready list: session-attached folders first, orphaned worktrees last.
-    var workAtRiskList: [WorkAtRisk] {
-        workAtRiskByPath.values.sorted {
+    ///
+    /// Stored, not computed. Every folder header reads this to roll up its badges, so
+    /// as a computed property it re-sorted the whole map (with `localizedCompare`) once
+    /// per header per render — 29 of 396 main-thread samples in one profile. It changes
+    /// only when the map does, which is rarely.
+    private(set) var workAtRiskList: [WorkAtRisk] = []
+
+    private func rebuildWorkAtRiskList() {
+        workAtRiskList = workAtRiskByPath.values.sorted {
             if $0.orphaned != $1.orphaned { return !$0.orphaned }
             return $0.path.localizedCompare($1.path) == .orderedAscending
         }
+    }
+
+    /// Set (or clear, with nil) one folder's entry. No-op when nothing changes, so a
+    /// probe that re-confirms the same state doesn't notify observers.
+    private func publishWorkAtRisk(_ risk: WorkAtRisk?, for root: String) {
+        guard workAtRiskByPath[root] != risk else { return }
+        if let risk {
+            workAtRiskByPath[root] = risk
+        } else {
+            workAtRiskByPath.removeValue(forKey: root)
+        }
+        rebuildWorkAtRiskList()
+    }
+
+    /// Swap in the slow sweep's results for the roots it owns (everything not
+    /// event-watched), leaving watched roots on their fresher event-driven state.
+    private func replaceUnwatchedWorkAtRisk(_ results: [String: WorkAtRisk], watched: Set<String>) {
+        var next = workAtRiskByPath.filter { watched.contains($0.key) }
+        next.merge(results) { _, new in new }
+        guard next != workAtRiskByPath else { return }
+        workAtRiskByPath = next
+        rebuildWorkAtRiskList()
     }
 
     /// Memoized `WorkAtRiskScan.normalize` results. `standardizingPath` is a real cost
@@ -3945,7 +3981,7 @@ final class AppModel {
     /// are immutable strings, so the answer never changes once computed.
     @ObservationIgnored private var normalizedPathCache: [String: String] = [:]
 
-    private func normalizedPath(_ path: String) -> String {
+    func normalizedPath(_ path: String) -> String {
         if let hit = normalizedPathCache[path] { return hit }
         let normalized = WorkAtRiskScan.normalize(path)
         normalizedPathCache[normalized] = normalized // a normalized path maps to itself
@@ -4127,22 +4163,12 @@ final class AppModel {
                                                aheadOfBase: probed.aheadOfBase,
                                                headOnRemote: probed.headOnRemote)
             }.value
-            // Only publish an actual change. A probe fires on every settled write in
-            // the folder, and an agent mid-turn changes files constantly — but the
-            // answer ("3 dirty files, 1 unpushed commit") usually doesn't move.
-            // `@Observable` notifies on any assignment, equal or not, and every
-            // notification re-runs `SidebarView.makeGroups()` over the whole session
-            // list, so writing an unchanged value here is a re-render storm.
-            let previous = workAtRiskByPath[root]
-            guard previous != risk else {
-                evaluateWorkAtRiskNudges()
-                return
-            }
-            if let risk {
-                workAtRiskByPath[root] = risk
-            } else {
-                workAtRiskByPath.removeValue(forKey: root)
-            }
+            // `publishWorkAtRisk` drops an unchanged result. A probe fires on every
+            // settled write in the folder, and an agent mid-turn changes files
+            // constantly — but the answer ("3 dirty files, 1 unpushed commit") usually
+            // hasn't moved. `@Observable` notifies on any assignment, equal or not, and
+            // every notification re-runs the sidebar.
+            publishWorkAtRisk(risk, for: root)
             evaluateWorkAtRiskNudges()
         }
     }
@@ -4215,12 +4241,7 @@ final class AppModel {
         }.value
 
         workAtRiskRepoRootCache.merge(discoveredRepoRoots) { _, new in new }
-        // Replace only the unwatched half of the map; watched roots keep their
-        // event-driven state.
-        for key in workAtRiskByPath.keys where !watched.contains(key) {
-            workAtRiskByPath.removeValue(forKey: key)
-        }
-        workAtRiskByPath.merge(results) { _, new in new }
+        replaceUnwatchedWorkAtRisk(results, watched: watched)
         evaluateWorkAtRiskNudges()
     }
 
