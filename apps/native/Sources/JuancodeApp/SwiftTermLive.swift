@@ -49,7 +49,21 @@ private enum SwiftTermTheme {
         tv.installColors(palette.map(color))
         tv.nativeForegroundColor = NSColor(color(foreground))
         tv.nativeBackgroundColor = NSColor(color(background))
+        applySteadyCursor(to: tv)
     }
+}
+
+/// Stop the caret blinking on a SwiftTerm surface.
+///
+/// SwiftTerm's default cursor style is `.blinkBlock`, which installs a permanent
+/// autoreversing opacity animation on the caret layer — 0.7s, repeating forever, for
+/// as long as the pane is mounted. A steady block reads calmer beside an agent that is
+/// already animating its own spinner, and drops an endless CoreAnimation from every
+/// mounted pane. A program that explicitly asks for a blinking cursor (DECSCUSR
+/// `CSI Ps SP q`) still wins; the CLIs we host don't.
+@MainActor
+func applySteadyCursor(to tv: TerminalView) {
+    tv.getTerminal().setCursorStyle(.steadyBlock)
 }
 
 private extension NSColor {

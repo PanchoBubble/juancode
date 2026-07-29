@@ -144,6 +144,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalHostView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         tv.terminalDelegate = context.coordinator
+        applySteadyCursor(to: tv)
         context.coordinator.attach(to: tv)
         // Sync the freshly spawned pty to the view's real size so the editor repaints.
         let t = tv.getTerminal()
