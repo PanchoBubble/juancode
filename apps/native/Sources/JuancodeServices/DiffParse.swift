@@ -101,6 +101,32 @@ public func parseUnifiedDiff(_ diff: String) -> [DiffHunk] {
     return hunks
 }
 
+// MARK: - review-comment hunks (GitHub view)
+
+/// A review comment's `diffHunk` prepared for display: the lines to show, and how
+/// many were hidden to get there.
+public struct ReviewHunk: Sendable, Equatable {
+    public let lines: [DiffLine]
+    /// Lines dropped off the top by the `visible` cap; 0 when the whole hunk fits.
+    public let hiddenAbove: Int
+    public init(lines: [DiffLine], hiddenAbove: Int) {
+        self.lines = lines; self.hiddenAbove = hiddenAbove
+    }
+}
+
+/// Parse the `diffHunk` GitHub returns for an inline review comment and keep only
+/// its last `visible` lines. The hunk always *ends* at the commented line, so the
+/// tail is the interesting part: the line under discussion plus the context just
+/// above it. `visible <= 0` (or larger than the hunk) keeps everything.
+public func reviewHunk(_ diffHunk: String, visible: Int) -> ReviewHunk {
+    let lines = parseUnifiedDiff(diffHunk).flatMap(\.lines)
+    guard visible > 0, lines.count > visible else {
+        return ReviewHunk(lines: lines, hiddenAbove: 0)
+    }
+    return ReviewHunk(lines: Array(lines.suffix(visible)),
+                      hiddenAbove: lines.count - visible)
+}
+
 // MARK: - multi-file patch splitting (PR diffs, juancode-49w)
 
 /// Per-file cap mirroring `Git.swift`'s `MAX_DIFF_BYTES`: a single file's diff

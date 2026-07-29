@@ -278,4 +278,46 @@ final class DiffParseTests: XCTestCase {
     func testQuotedDiffLinesEmptyWhenNoMatch() {
         XCTAssertEqual(quotedDiffLines(sampleFlatLines(), side: .new, from: 99, through: 99), "")
     }
+
+    // MARK: - review-comment hunks
+
+    /// The shape GitHub's `diffHunk` comes in: one `@@` header, context, then the
+    /// change the comment was left on — five content lines in all.
+    private let commentHunk = """
+    @@ -38,6 +38,7 @@ func load() {
+         let a = 1
+         let b = 2
+         let c = 3
+    -    return a
+    +    return unwrap(a)
+    """
+
+    func testReviewHunkKeepsTheTailAndCountsWhatItHid() {
+        let hunk = reviewHunk(commentHunk, visible: 4)
+        XCTAssertEqual(hunk.lines.count, 4)
+        XCTAssertEqual(hunk.hiddenAbove, 1)
+        // The commented line (the insert) is last — that's why the tail is the
+        // interesting end of a diffHunk.
+        XCTAssertEqual(hunk.lines.last?.kind, .insert)
+        XCTAssertEqual(hunk.lines.last?.text, "    return unwrap(a)")
+        XCTAssertEqual(hunk.lines.first?.text, "    let b = 2")
+        // Line numbers survive the trim, so the gutter is still right.
+        XCTAssertEqual(hunk.lines.last?.newLine, 41)
+    }
+
+    func testReviewHunkVisibleZeroOrLargerThanHunkKeepsEverything() {
+        for visible in [0, -1, 5, 99] {
+            let hunk = reviewHunk(commentHunk, visible: visible)
+            XCTAssertEqual(hunk.lines.count, 5, "visible: \(visible)")
+            XCTAssertEqual(hunk.hiddenAbove, 0, "visible: \(visible)")
+        }
+    }
+
+    func testReviewHunkEmptyForBlankOrHeaderlessHunk() {
+        for input in ["", "not a diff", "     let a = 1"] {
+            let hunk = reviewHunk(input, visible: 4)
+            XCTAssertTrue(hunk.lines.isEmpty, "input: \(input)")
+            XCTAssertEqual(hunk.hiddenAbove, 0)
+        }
+    }
 }

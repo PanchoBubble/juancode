@@ -64,15 +64,22 @@ public struct PrConversationComment: Sendable, Equatable, Identifiable {
     /// it. Both nil for an issue-level comment (which has no location).
     public let path: String?
     public let line: Int?
+    /// The unified-diff hunk the comment is anchored to — GitHub's `diffHunk`: an
+    /// `@@ … @@` header plus the few lines of context ending at the commented
+    /// line. Nil for an issue-level comment (no location, so no hunk). Rendering
+    /// it is what lets a review be read without opening github.com.
+    public let diffHunk: String?
     /// Emoji reactions on this comment, non-empty buckets only.
     public let reactions: [PrReaction]
     public init(id: String, databaseId: Int?, author: String, body: String,
                 createdAt: Date?, url: String, authorAvatarUrl: String? = nil,
-                path: String? = nil, line: Int? = nil, reactions: [PrReaction] = []) {
+                path: String? = nil, line: Int? = nil, diffHunk: String? = nil,
+                reactions: [PrReaction] = []) {
         self.id = id; self.databaseId = databaseId; self.author = author
         self.authorAvatarUrl = authorAvatarUrl
         self.body = body; self.createdAt = createdAt; self.url = url
-        self.path = path; self.line = line; self.reactions = reactions
+        self.path = path; self.line = line; self.diffHunk = diffHunk
+        self.reactions = reactions
     }
 }
 
@@ -206,6 +213,7 @@ private struct ConversationResponse: Decodable {
         let url: String?
         let path: String?
         let line: Int?
+        let diffHunk: String?
         let reactionGroups: [ReactionGroupNode]?
     }
     struct ReactionGroupNode: Decodable {
@@ -287,7 +295,7 @@ func parsePrConversation(_ json: String) -> PrConversation? {
                 id: id, databaseId: c.databaseId, author: c.author?.login ?? "",
                 body: c.body ?? "", createdAt: parseIsoDate(c.createdAt), url: c.url ?? "",
                 authorAvatarUrl: c.author?.avatarUrl, path: c.path, line: c.line,
-                reactions: mapReactions(c.reactionGroups))
+                diffHunk: c.diffHunk, reactions: mapReactions(c.reactionGroups))
         }
     }
 
@@ -353,13 +361,13 @@ public func getPrConversation(_ cwd: String, number: Int, prUrl: String) async -
           reviews(last: 30) {
             nodes {
               id author { login avatarUrl } state body createdAt url reactionGroups { content reactors { totalCount } }
-              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line reactionGroups { content reactors { totalCount } } } }
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line diffHunk reactionGroups { content reactors { totalCount } } } }
             }
           }
           reviewThreads(first: 100) {
             nodes {
               id isResolved isOutdated path line
-              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line reactionGroups { content reactors { totalCount } } } }
+              comments(first: 50) { nodes { id databaseId author { login avatarUrl } body createdAt url path line diffHunk reactionGroups { content reactors { totalCount } } } }
             }
           }
           commits(last: 100) {

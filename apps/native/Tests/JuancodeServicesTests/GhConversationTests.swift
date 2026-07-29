@@ -34,7 +34,8 @@ final class GhConversationTests: XCTestCase {
          "comments":{"nodes":[
            {"id":"RC_1","databaseId":222,"author":{"login":"bob"},
             "body":"This can crash on nil","createdAt":"2026-07-01T13:31:00Z",
-            "url":"https://github.com/o/r/pull/5#discussion_r222"},
+            "url":"https://github.com/o/r/pull/5#discussion_r222",
+            "diffHunk":"@@ -38,6 +38,7 @@ func load() {\\n     let a = 1\\n-    return a\\n+    return unwrap(a)"},
            {"id":"RC_2","databaseId":333,"author":{"login":"carol"},
             "body":"Agreed","createdAt":"2026-07-01T13:32:00Z",
             "url":"https://github.com/o/r/pull/5#discussion_r333"}
@@ -109,6 +110,14 @@ final class GhConversationTests: XCTestCase {
         XCTAssertFalse(thread.isResolved)
         XCTAssertFalse(thread.isOutdated)
         XCTAssertEqual(thread.comments.map(\.author), ["bob", "carol"])
+        // The hunk the comment hangs off comes through verbatim, newlines intact —
+        // it's what the panel renders instead of sending the user to github.com.
+        let hunk = try XCTUnwrap(thread.comments[0].diffHunk)
+        XCTAssertTrue(hunk.hasPrefix("@@ -38,6 +38,7 @@"))
+        XCTAssertTrue(hunk.contains("\n+    return unwrap(a)"))
+        // A comment GitHub gave no hunk for stays nil (issue comments never have one).
+        XCTAssertNil(thread.comments[1].diffHunk)
+        XCTAssertNil(ic.diffHunk)
     }
 
     func testParsesMinimalConversationWithNullsAndGarbageDate() throws {
@@ -179,6 +188,31 @@ final class GhConversationTests: XCTestCase {
         // Must instruct the agent to close the loop on the thread.
         XCTAssertTrue(prompt.lowercased().contains("reply"))
         XCTAssertTrue(prompt.contains("`gh`"))
+    }
+
+    func testCommentTaskPromptCarriesTheDiffHunk() {
+        let prompt = commentTaskPrompt(
+            number: 42, path: "Sources/App/Main.swift", line: 17,
+            author: "bob", body: "This can crash on nil", url: "u",
+            diffHunk: "@@ -15,3 +15,4 @@\n     let a = 1\n-    return a\n+    return unwrap(a)")
+        XCTAssertTrue(prompt.contains("```diff"))
+        XCTAssertTrue(prompt.contains("+    return unwrap(a)"))
+        // The comment body still leads; the hunk is context beneath it.
+        guard let bodyAt = prompt.range(of: "This can crash on nil"),
+              let hunkAt = prompt.range(of: "```diff") else {
+            return XCTFail("prompt missing the body or the hunk")
+        }
+        XCTAssertTrue(bodyAt.lowerBound < hunkAt.lowerBound)
+    }
+
+    func testCommentTaskPromptOmitsEmptyDiffHunk() {
+        for hunk in [nil, "", "   \n  "] as [String?] {
+            let prompt = commentTaskPrompt(
+                number: 42, path: "a.swift", line: 1, author: "bob", body: "note",
+                url: "u", diffHunk: hunk)
+            XCTAssertFalse(prompt.contains("```diff"))
+            XCTAssertFalse(prompt.contains("The code it was left on"))
+        }
     }
 
     func testCommentTaskPromptWithoutPathOmitsLocation() {

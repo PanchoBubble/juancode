@@ -273,10 +273,13 @@ public func autoFixPrompt(number: Int, branch: String, reasons: [String]) -> Str
 
 /// The prompt queued into a session when the user clicks "Send to agent" on a
 /// single review comment in the GitHub view. Carries the comment verbatim (the
-/// agent shouldn't have to re-find it) and asks for a threaded reply via `gh`
-/// once addressed, so the reviewer sees it was handled.
+/// agent shouldn't have to re-find it), the diff hunk it was left on when GitHub
+/// gave us one — the reviewer's line numbers may have drifted since, so the code
+/// itself is the reliable anchor — and asks for a threaded reply via `gh` once
+/// addressed, so the reviewer sees it was handled.
 public func commentTaskPrompt(number: Int, path: String?, line: Int?,
-                              author: String, body: String, url: String) -> String {
+                              author: String, body: String, url: String,
+                              diffHunk: String? = nil) -> String {
     let who = author.isEmpty ? "a reviewer" : "@\(author)"
     let location: String
     if let path {
@@ -285,11 +288,23 @@ public func commentTaskPrompt(number: Int, path: String?, line: Int?,
     } else {
         location = ""
     }
+    var code = ""
+    if let diffHunk, !diffHunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        code = """
+
+
+        The code it was left on:
+
+        ```diff
+        \(diffHunk)
+        ```
+        """
+    }
     return """
     [juancode GitHub view] Please address this review comment from \(who)\(location) \
     on PR #\(number):
 
-    \(body)
+    \(body)\(code)
 
     (\(url))
 

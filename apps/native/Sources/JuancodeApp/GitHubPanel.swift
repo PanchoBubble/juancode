@@ -1669,7 +1669,11 @@ private struct InlineReviewCommentRow: View {
                     pr: pr, cwd: cwd, itemId: comment.id,
                     prompt: commentTaskPrompt(
                         number: pr.number, path: comment.path, line: comment.line,
-                        author: comment.author, body: comment.body, url: comment.url))
+                        author: comment.author, body: comment.body, url: comment.url,
+                        diffHunk: comment.diffHunk))
+            }
+            if let hunk = comment.diffHunk, !hunk.isEmpty {
+                ReviewHunkView(diffHunk: hunk, path: comment.path ?? "")
             }
             HStack(spacing: 6) {
                 CommentAvatar(url: comment.authorAvatarUrl, size: 14)
