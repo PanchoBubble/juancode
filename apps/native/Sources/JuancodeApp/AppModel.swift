@@ -859,14 +859,20 @@ final class AppModel {
             Task { @MainActor in
                 guard let self else { return }
                 let prev = self.activities[s.id]
-                self.activities[s.id] = st
+                // Assign only on a real change. This handler runs on the typing path —
+                // a keystroke echoes, the detector re-evaluates, and an `@Observable`
+                // write notifies even when the value is identical, re-running the
+                // sidebar on the main thread while the echo waits to paint (juancode-2n0).
+                if prev != st { self.activities[s.id] = st }
                 if isEditor { return }
                 // Sidebar "done since you last looked" check (juancode-t9p): set on
                 // a turn finishing off-screen, dropped when a new turn starts.
                 switch unseenCompletionEffect(prev: prev, next: st, notify: notify,
                                               isSelected: self.selection == s.id) {
-                case .set: self.unseenCompletions.insert(s.id)
-                case .clear: self.unseenCompletions.remove(s.id)
+                // Set/Set insert and remove both go through the observable setter even
+                // when the membership doesn't change, so both are guarded too.
+                case .set: if !self.unseenCompletions.contains(s.id) { self.unseenCompletions.insert(s.id) }
+                case .clear: if self.unseenCompletions.contains(s.id) { self.unseenCompletions.remove(s.id) }
                 case .none: break
                 }
                 // `notify` marks a real turn boundary (the agent finished or now
