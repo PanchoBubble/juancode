@@ -149,30 +149,104 @@ public func resolveBin(_ cmd: String, override: String?) -> String {
     // Memoize the no-override resolution per command (juancode-8fp). The result is
     // stable for the process (PATH and the login shell don't change under us), and
     // the resolver is hit on every git/gh/bd spawn — without this, a Finder/stripped
-    // -PATH launch pays the blocking `lookupViaLoginShell` probe below on every call,
-    // which starves the concurrency pool when several spawns fan out at once.
+    // -PATH launch pays the blocking shell probes below on every call, which starves
+    // the concurrency pool when several spawns fan out at once.
     if let cached = resolveBinCache.get(cmd) { return cached }
+    // A recent probe already came up empty. Skip straight to the bare name rather
+    // than re-paying the shell round-trips; the cooldown expires so a binary
+    // installed (or a shell that got faster) while the app runs still resolves.
+    if resolveBinCache.inMissCooldown(cmd) { return cmd }
 
-    // Fast path: resolve against the inherited PATH directly, no subprocess. When
-    // juancode is launched from a terminal it already has the user's full PATH, so
-    // this finds claude/codex instantly — and avoids spawning the user's login
-    // shell at all (a slow or hanging interactive rc must never wedge a spawn).
-    // Fallback (e.g. launched from Finder with a stripped PATH): ask the login shell
-    // where the command is, capped by a timeout so a slow/hanging rc can't block —
-    // falling back to the bare name (execvp resolves it via PATH).
-    let resolved = lookupInPath(cmd) ?? lookupViaLoginShell(cmd, timeout: 5) ?? cmd
-    resolveBinCache.set(cmd, resolved)
-    return resolved
+    // Probes, cheapest first — each one alone is enough on some setup:
+    //  1. the inherited PATH, no subprocess. A terminal-launched juancode already
+    //     has the user's full PATH, so this hits instantly.
+    //  2. `$SHELL -lc`: a login-but-not-interactive shell, so /etc/zprofile
+    //     (path_helper, /etc/paths.d — where Homebrew registers itself) and
+    //     .zprofile/.zshenv apply. Milliseconds on a normal setup.
+    //  3. the well-known install dirs, no subprocess — covers a Homebrew/local
+    //     install even when the shell probes are unavailable or slow.
+    //  4. `$SHELL -lic`: the interactive shell, the only one that sees a PATH built
+    //     in .zshrc. Last because it pays for the user's whole interactive rc —
+    //     6s+ with a plugin-heavy zsh, which is exactly what used to time out and
+    //     leave every `gh` call broken for the app's lifetime (juancode-z0c6).
+    if let hit = lookupInPath(cmd)
+        ?? lookupViaShell(cmd, interactive: false, timeout: 5)
+        ?? lookupInWellKnownDirs(cmd)
+        ?? lookupViaShell(cmd, interactive: true, timeout: 20) {
+        resolveBinCache.set(cmd, hit)
+        return hit
+    }
+    // Nothing found. Fall back to the bare name (execvp still resolves it via PATH
+    // in the child) but do NOT cache that as the answer: a probe can come up empty
+    // for reasons that have nothing to do with the binary — a slow rc, a transient
+    // spawn failure — and caching it would wedge every later call until restart.
+    resolveBinCache.noteMiss(cmd)
+    return cmd
 }
 
 /// Process-lifetime memo of `resolveBin`'s no-override results, keyed by command.
 private let resolveBinCache = ResolveBinCache()
 
-private final class ResolveBinCache: @unchecked Sendable {
+/// Hits are cached for the process's lifetime; misses only for `missTTL`, so a
+/// failed probe costs one cooldown window instead of the whole session.
+final class ResolveBinCache: @unchecked Sendable {
     private let lock = NSLock()
     private var map: [String: String] = [:]
+    private var misses: [String: Date] = [:]
+    private let missTTL: TimeInterval
+
+    init(missTTL: TimeInterval = 60) { self.missTTL = missTTL }
+
     func get(_ key: String) -> String? { lock.lock(); defer { lock.unlock() }; return map[key] }
-    func set(_ key: String, _ value: String) { lock.lock(); map[key] = value; lock.unlock() }
+
+    func set(_ key: String, _ value: String) {
+        lock.lock(); defer { lock.unlock() }
+        map[key] = value
+        misses[key] = nil
+    }
+
+    /// Record that every probe for `key` came up empty, just now.
+    func noteMiss(_ key: String, now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        misses[key] = now
+    }
+
+    /// Whether a miss for `key` is recent enough to skip re-probing.
+    func inMissCooldown(_ key: String, now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let at = misses[key] else { return false }
+        let age = now.timeIntervalSince(at)
+        // A backwards clock jump would otherwise pin the cooldown on forever.
+        guard age >= 0 else { misses[key] = now; return true }
+        if age >= missTTL { misses[key] = nil; return false }
+        return true
+    }
+}
+
+/// Where a Mac keeps user-installed CLIs, in the order a login shell would put
+/// them on PATH. Probed directly so a stripped-PATH launch resolves `gh`/`claude`
+/// without depending on a shell round-trip succeeding.
+let wellKnownBinDirs: [String] = {
+    let home = NSHomeDirectory()
+    return [
+        "/opt/homebrew/bin", "/opt/homebrew/sbin",  // Homebrew (Apple silicon)
+        "/usr/local/bin",                           // Homebrew (Intel), manual installs
+        "\(home)/.local/bin",                       // pipx, uv, hand-rolled
+        "\(home)/.bun/bin", "\(home)/.cargo/bin", "\(home)/go/bin",
+        "\(home)/.volta/bin", "\(home)/.npm-global/bin",
+        "/opt/local/bin",                           // MacPorts
+    ]
+}()
+
+/// Look for `cmd` in `dirs` (defaults to `wellKnownBinDirs`).
+func lookupInWellKnownDirs(_ cmd: String, dirs: [String] = wellKnownBinDirs) -> String? {
+    if cmd.contains("/") { return cmd }
+    let fm = FileManager.default
+    for dir in dirs {
+        let full = "\(dir)/\(cmd)"
+        if fm.isExecutableFile(atPath: full) { return full }
+    }
+    return nil
 }
 
 /// Search the process's inherited `PATH` for an executable named `cmd`.
@@ -187,13 +261,15 @@ private func lookupInPath(_ cmd: String) -> String? {
     return nil
 }
 
-/// Resolve `cmd` via the user's login+interactive shell (so `.zshrc` PATH edits
-/// apply), bounded by `timeout` seconds. Returns nil on timeout/failure.
-private func lookupViaLoginShell(_ cmd: String, timeout: TimeInterval) -> String? {
+/// Resolve `cmd` by asking the user's shell, bounded by `timeout` seconds. Returns
+/// nil on timeout/failure. `interactive` adds `-i`, which is what makes `.zshrc`
+/// PATH edits visible — and what makes the probe cost the user's whole interactive
+/// rc, so callers try the non-interactive form first.
+private func lookupViaShell(_ cmd: String, interactive: Bool, timeout: TimeInterval) -> String? {
     let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: shell)
-    proc.arguments = ["-lic", "command -v \(cmd) 2>/dev/null"]
+    proc.arguments = [interactive ? "-lic" : "-lc", "command -v \(cmd) 2>/dev/null"]
     let pipe = Pipe()
     proc.standardOutput = pipe
     proc.standardError = FileHandle.nullDevice
