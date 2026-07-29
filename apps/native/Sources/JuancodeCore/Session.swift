@@ -160,6 +160,32 @@ public final class Session: @unchecked Sendable {
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
 
+    /// Serial queue every *routine* store write hops onto, shared by all sessions
+    /// (juancode-mapj). A `dbQueue.write` is a whole-ring TEXT UPDATE plus (for a
+    /// full flush) an FTS re-tokenize, and the store serializes every session's
+    /// writes onto one database queue — so doing it inline left one session's
+    /// workQueue, the queue that feeds the terminal model and fans bytes to the
+    /// attached views, parked behind every other session's disk write. Utility QoS:
+    /// crash-safety persistence must never outrank painting a frame. The exit-time
+    /// write stays synchronous (see `handleExit`) so a quit can't lose the final row.
+    private static let persistQueue = DispatchQueue(
+        label: "juancode.session.persist", qos: .utility)
+
+    /// The store write waiting on `persistQueue`, if any — the coalescing gate. A
+    /// queued write reads the ring when it runs, so it already covers everything
+    /// appended since it was queued; a second one would be duplicate work. A
+    /// scrollback-only write pending when a full one is asked for upgrades in place.
+    /// Guarded by `lock`.
+    private var queuedPersist: PersistKind?
+
+    /// The two routine store writes, ordered by how much they do.
+    private enum PersistKind {
+        /// Scrollback column + `updated_at` (crash safety, no FTS reindex).
+        case scrollbackOnly
+        /// Metadata + scrollback + FTS reindex (turn boundary: search catches up).
+        case full
+    }
+
     /// Throttles how eagerly the (capped) scrollback ring is written back, keeping
     /// the expensive full write (column + FTS reindex) off the per-output hot path.
     /// Guarded by `lock`. See `ScrollbackWriteThrottle` (juancode-5qw.1).
@@ -475,7 +501,7 @@ public final class Session: @unchecked Sendable {
         // Mid-burst crash-safety flush once enough new output has piled up (a
         // continuously streaming session never pauses long enough to trip the
         // trailing debounce), otherwise (re)arm the debounce for the tail.
-        if flushNow { flushScrollbackOnly() }
+        if flushNow { enqueuePersist(.scrollbackOnly) }
         schedulePersist()
     }
 
@@ -519,7 +545,7 @@ public final class Session: @unchecked Sendable {
             prevPersistActivity = state
             return state == .idle && was != nil && was != .idle && writeThrottle.ftsStale
         }
-        if shouldFlush { persistNow() }
+        if shouldFlush { enqueuePersist(.full) }
     }
 
     // MARK: - input / lifecycle
@@ -1312,13 +1338,51 @@ public final class Session: @unchecked Sendable {
         let gen = lock.withLock { () -> Int in persistGeneration += 1; return persistGeneration }
         workQueue.asyncAfter(deadline: .now() + .milliseconds(persistDebounceMs)) { [weak self] in
             guard let self, self.lock.withLock({ gen == self.persistGeneration }) else { return }
-            self.flushScrollbackOnly()
+            self.enqueuePersist(.scrollbackOnly)
+        }
+    }
+
+    /// Hand a routine store write to `persistQueue`, coalescing against one already
+    /// waiting there (juancode-mapj) — so the caller's queue (the pty workQueue for a
+    /// crash-safety flush, the detector queue for a turn boundary) returns immediately
+    /// instead of blocking on the shared database queue.
+    private func enqueuePersist(_ kind: PersistKind) {
+        guard persistEnabled else { return }
+        let dispatch = lock.withLock { () -> Bool in
+            switch (queuedPersist, kind) {
+            case (nil, _):
+                queuedPersist = kind
+                return true
+            case (.scrollbackOnly, .full):
+                // Upgrade the waiting write; it hasn't read the ring yet.
+                queuedPersist = .full
+                return false
+            default:
+                return false // an equal-or-heavier write is already waiting
+            }
+        }
+        guard dispatch else { return }
+        Self.persistQueue.async { [weak self] in self?.runQueuedPersist() }
+    }
+
+    /// Run whatever write was waiting, on `persistQueue`.
+    private func runQueuedPersist() {
+        let kind = lock.withLock { () -> PersistKind? in
+            let k = queuedPersist
+            queuedPersist = nil
+            return k
+        }
+        switch kind {
+        case .scrollbackOnly: flushScrollbackOnly()
+        case .full: persistNow()
+        case nil: break
         }
     }
 
     /// Crash-safety flush of the scrollback column only — no metadata write, no FTS
     /// reindex (juancode-5qw.1). Driven by the output debounce and the mid-burst
     /// byte-threshold flush; search is refreshed on the busy->idle edge / exit.
+    /// Runs on `persistQueue`; the ring join happens under `lock`, the write outside it.
     private func flushScrollbackOnly() {
         guard persistEnabled else { return }
         let (id, bytes, updatedAt) = lock.withLock { () -> (String, [UInt8], Int) in
@@ -1346,6 +1410,10 @@ public final class Session: @unchecked Sendable {
     /// Full persist: metadata + scrollback + FTS reindex — the heavy write, reserved
     /// for the busy->idle edge and exit, where search needs to catch up. Pass
     /// `notify: true` to rebuild the sidebar.
+    ///
+    /// Called on `persistQueue` for the turn boundary (via `enqueuePersist`) and
+    /// SYNCHRONOUSLY from `handleExit`: the final row must be on disk before the app
+    /// can quit, so that one write is deliberately not deferred.
     private func persistNow(notify: Bool = false) {
         let (meta, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             _meta.updatedAt = nowMs()

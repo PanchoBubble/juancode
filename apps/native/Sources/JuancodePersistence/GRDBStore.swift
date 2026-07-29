@@ -328,15 +328,29 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
 
     // MARK: - PersistentStore: read / admin
 
+    /// Every column `rowToMeta` reads — deliberately NOT `SELECT *`, which also hauls
+    /// the `scrollback` TEXT column (up to the ring cap per row) out of SQLite and
+    /// decodes it just for `rowToMeta` to throw it away. The sidebar rebuild runs
+    /// `list()` on the main actor, so with a few dozen persisted sessions that was
+    /// megabytes of pointless main-thread work per refresh (juancode-mapj).
+    private static let metaColumns = """
+        id, provider, cwd, title, status, exit_code, created_at, updated_at, \
+        cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id
+        """
+
     public func get(_ id: String) -> SessionMeta? {
         try? dbQueue.read { db in
-            try Row.fetchOne(db, sql: "SELECT * FROM sessions WHERE id = ?", arguments: [id]).map(rowToMeta)
+            try Row.fetchOne(
+                db, sql: "SELECT \(Self.metaColumns) FROM sessions WHERE id = ?", arguments: [id]
+            ).map(rowToMeta)
         } ?? nil
     }
 
     public func list() -> [SessionMeta] {
         (try? dbQueue.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM sessions ORDER BY created_at DESC").map(rowToMeta)
+            try Row.fetchAll(
+                db, sql: "SELECT \(Self.metaColumns) FROM sessions ORDER BY created_at DESC"
+            ).map(rowToMeta)
         }) ?? []
     }
 
