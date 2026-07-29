@@ -13,10 +13,17 @@ import Foundation
 /// the terminal crash-loop of juancode-9goj.
 ///
 /// Every SwiftTerm `feed`/`resize` call in the app funnels through `locked`, so all
-/// parsing is serialized regardless of which thread drives it. Acquire this AFTER
-/// any per-instance model lock (`SessionTerminalModel.feed` takes its model lock
-/// then this; GUI feeds take only this), so the lock order is fixed and no cycle
-/// can form.
+/// parsing is serialized regardless of which thread drives it.
+///
+/// LOCK ORDER — acquire this **BEFORE** any per-instance model lock, never after.
+/// This used to say the opposite, and that inversion deadlocked the app (juancode-c438):
+/// the GUI pane feeds its view holding this lock, and when SwiftTerm dispatches
+/// `sizeChanged` from inside that parse the pane synchronously resizes the session's
+/// `SessionTerminalModel` — so the GUI path is unavoidably this-lock-then-model-lock.
+/// A `SessionTerminalModel.feed` that took its model lock first and then waited here
+/// closed an AB-BA cycle, and the app hung with no way out (opening a session froze
+/// it). Model *reads* (`visibleText`, `snapshot`, `seedBytes`) take only the model
+/// lock and never reach for this one, so they cannot form a cycle either way.
 ///
 /// RECURSIVE on purpose: SwiftTerm calls its delegate synchronously *during* a
 /// feed, and some of those callbacks re-enter a locked section on the SAME thread —

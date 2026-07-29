@@ -163,14 +163,21 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     /// dirty range and emits one damage delta per changed feed.
     public func feed(_ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
-        let damage: TerminalDamage? = lock.withLock {
-            // Serialize against every other SwiftTerm parse in the process — the GUI
-            // views feed the same stream on the main actor, and all instances share
-            // the global OSC 8 atom table (juancode-9goj).
-            SwiftTermParse.locked { terminal.feed(byteArray: bytes) }
-            guard let range = terminal.getScrollInvariantUpdateRange() else { return nil }
-            terminal.clearUpdateRange()
-            return TerminalDamage(startY: range.startY, endY: range.endY)
+        // Lock ORDER: global parse lock OUTSIDE the model lock, always (juancode-c438).
+        // The GUI pane feeds its own view holding the global lock and, when SwiftTerm
+        // dispatches `sizeChanged` from inside that parse, synchronously resizes this
+        // model — i.e. it takes global-then-model. Taking them the other way round here
+        // is an AB-BA deadlock that hangs the app outright, which is what made opening
+        // a session freeze it. `SwiftTermParse` itself serializes every parse in the
+        // process, since all SwiftTerm instances share the OSC 8 atom table
+        // (juancode-9goj).
+        let damage: TerminalDamage? = SwiftTermParse.locked {
+            lock.withLock {
+                terminal.feed(byteArray: bytes)
+                guard let range = terminal.getScrollInvariantUpdateRange() else { return nil }
+                terminal.clearUpdateRange()
+                return TerminalDamage(startY: range.startY, endY: range.endY)
+            }
         }
         // Both listener kinds fire with no lock held, so a listener can do real work
         // (persist, read the screen back) without stalling every other parse.
@@ -183,9 +190,12 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     /// Reflow the model to a new grid — ONE reflow in the core instead of the
     /// per-view SIGWINCH choreography (see the epic). Called from `Session.resize`.
     public func resize(cols: Int, rows: Int) {
-        lock.withLock {
-            guard cols > 0, rows > 0 else { return }
-            SwiftTermParse.locked { terminal.resize(cols: cols, rows: rows) }
+        guard cols > 0, rows > 0 else { return }
+        // Same order as `feed`: global parse lock outside the model lock. Reached from
+        // the main thread mid-parse via `sizeChanged`, where the global lock is already
+        // held by this thread (it is recursive), so only the model lock is new here.
+        SwiftTermParse.locked {
+            lock.withLock { terminal.resize(cols: cols, rows: rows) }
         }
         drainPendingTitles() // a reflow can dispatch a queued OSC too
     }
