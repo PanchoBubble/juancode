@@ -10,6 +10,9 @@ final class ConfigTests: XCTestCase {
         super.setUp()
         savedOverride = ProcessInfo.processInfo.environment["JUANCODE_DEFAULT_CWD"]
         setenv("JUANCODE_DEFAULT_CWD", "/Users/me/workdir", 1)
+        // The standardized root is memoized per process (it's read ~550x per sidebar
+        // render), so moving the env override mid-run needs an explicit invalidation.
+        Config.invalidateWorkspaceRootCache()
     }
 
     override func tearDown() {
@@ -40,6 +43,38 @@ final class ConfigTests: XCTestCase {
     func testSiblingSharingNamePrefixNotMatched() {
         // `/Users/me/workdir-other` must not be treated as inside `/Users/me/workdir`.
         XCTAssertFalse(Config.isUnderWorkspaceRoot("/Users/me/workdir-other/repo"))
+    }
+
+    /// The clean-path fast path skips `standardizingPath`, so it has to agree with the
+    /// standardizing path on every shape — including the messy ones it must NOT skip.
+    func testUnstandardizedPathsStillResolveCorrectly() {
+        for path in ["/Users/me/workdir/./repo",
+                     "/Users/me/workdir/personal/../repo",
+                     "/Users/me/workdir//repo",
+                     "/Users/me/workdir/repo/",
+                     "/Users/me/workdir/repo/.",
+                     "/Users/me/workdir/.."] {
+            XCTAssertEqual(Config.isUnderWorkspaceRoot(path),
+                           referenceIsUnderWorkspaceRoot(path),
+                           "disagreed on \(path)")
+        }
+    }
+
+    func testStandardizedPathsMatchReference() {
+        for path in ["/Users/me/workdir", "/Users/me/workdir/repo", "/Users/me/workdir-other/x",
+                     "/tmp/elsewhere", "/", "relative/path"] {
+            XCTAssertEqual(Config.isUnderWorkspaceRoot(path),
+                           referenceIsUnderWorkspaceRoot(path),
+                           "disagreed on \(path)")
+        }
+    }
+
+    /// The original implementation, standardizing unconditionally — the oracle the
+    /// optimized version is checked against.
+    private func referenceIsUnderWorkspaceRoot(_ path: String) -> Bool {
+        let root = (Config.workspaceRoot as NSString).standardizingPath
+        let p = (path as NSString).standardizingPath
+        return p == root || p.hasPrefix(root + "/")
     }
 
     // MARK: - tracked-PR poll interval (webhook-gated slow reconciler)

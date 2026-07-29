@@ -75,11 +75,48 @@ public enum Config {
     /// siblings too, so worktrees of in-workspace repos stay visible.
     public static var workspaceRoot: String { defaultCwd }
 
+    private static let rootCacheLock = NSLock()
+    /// `nonisolated(unsafe)` because every access goes through `rootCacheLock` — the
+    /// lock, not the compiler, is what makes this safe.
+    nonisolated(unsafe) private static var cachedStandardizedRoot: String?
+
+    /// The standardized workspace root, resolved once per process.
+    ///
+    /// `isUnderWorkspaceRoot` runs for every session on every sidebar body evaluation
+    /// (~550 calls per render here), and resolving the root is far from free: reaching
+    /// `workspaceRoot` builds a fresh `ProcessInfo.environment` dictionary, may `stat`
+    /// the filesystem, and then `standardizingPath` walks the result. None of that can
+    /// change while the process runs, so it's memoized.
+    private static func standardizedWorkspaceRoot() -> String {
+        if let hit = rootCacheLock.withLock({ cachedStandardizedRoot }) { return hit }
+        let resolved = (workspaceRoot as NSString).standardizingPath
+        rootCacheLock.withLock { cachedStandardizedRoot = resolved }
+        return resolved
+    }
+
+    /// Drop the memoized workspace root. Only needed by tests, which move
+    /// `JUANCODE_DEFAULT_CWD` mid-process — the app's root is fixed at launch.
+    public static func invalidateWorkspaceRootCache() {
+        rootCacheLock.withLock { cachedStandardizedRoot = nil }
+    }
+
+    /// Whether a path needs `standardizingPath` at all: absolute, no `~`, no `.`/`..`
+    /// segments, no doubled or trailing slash. Session cwds are almost always already
+    /// in that form, so this skips the expensive call in the common case while leaving
+    /// anything unusual to take the original path.
+    private static func isAlreadyStandardized(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), !path.hasPrefix("~"), path.count > 1,
+              !path.hasSuffix("/"), !path.contains("//"), !path.contains("/./"),
+              !path.contains("/../"), !path.hasSuffix("/."), !path.hasSuffix("/..")
+        else { return false }
+        return true
+    }
+
     /// Whether `path` lives at or under `workspaceRoot`, normalised so a folder
     /// isn't matched by a sibling that merely shares a name prefix.
     public static func isUnderWorkspaceRoot(_ path: String) -> Bool {
-        let root = (workspaceRoot as NSString).standardizingPath
-        let p = (path as NSString).standardizingPath
+        let root = standardizedWorkspaceRoot()
+        let p = isAlreadyStandardized(path) ? path : (path as NSString).standardizingPath
         return p == root || p.hasPrefix(root + "/")
     }
 

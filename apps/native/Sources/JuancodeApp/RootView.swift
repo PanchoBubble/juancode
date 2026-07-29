@@ -592,10 +592,15 @@ struct SidebarView: View {
             // temporary: the persisted order is untouched, so a handled session
             // falls back to its manual slot.
             let slots = manualSlots(cwd)
-            let ordered = sessions.sorted {
-                manualWithBubblePrecedes(manualSortKey($0, slots: slots),
-                                         manualSortKey($1, slots: slots))
-            }
+            // Decorate-sort-undecorate: `manualSortKey` reads live state per session
+            // (isLive, activity, unseenCompletions, isCrashOrphan), and computing it
+            // inside the comparator ran it O(n log n) times per body eval — measured as
+            // the single hottest thing in the app once the persistence and git storms
+            // were gone. Now it's exactly once per session.
+            let ordered = sessions
+                .map { (meta: $0, key: manualSortKey($0, slots: slots)) }
+                .sorted { manualWithBubblePrecedes($0.key, $1.key) }
+                .map(\.meta)
             return FolderGroup(
                 cwd: cwd,
                 name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,

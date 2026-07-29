@@ -3933,11 +3933,27 @@ final class AppModel {
         }
     }
 
+    /// Memoized `WorkAtRiskScan.normalize` results. `standardizingPath` is a real cost
+    /// (it walks the path and touches the filesystem representation), and the sidebar
+    /// badge lookup below runs it for every visible session on every body eval. Paths
+    /// are immutable strings, so the answer never changes once computed.
+    @ObservationIgnored private var normalizedPathCache: [String: String] = [:]
+
+    private func normalizedPath(_ path: String) -> String {
+        if let hit = normalizedPathCache[path] { return hit }
+        let normalized = WorkAtRiskScan.normalize(path)
+        normalizedPathCache[normalized] = normalized // a normalized path maps to itself
+        normalizedPathCache[path] = normalized
+        return normalized
+    }
+
     /// The at-risk entry for a session's folder, if any — the sidebar badge lookup.
+    /// Hot: called per visible session per sidebar render.
     func workAtRisk(forSession meta: SessionMeta) -> WorkAtRisk? {
+        guard !workAtRiskByPath.isEmpty else { return nil }
         if let wt = meta.worktreePath,
-           let hit = workAtRiskByPath[WorkAtRiskScan.normalize(wt)] { return hit }
-        return workAtRiskByPath[WorkAtRiskScan.normalize(meta.cwd)]
+           let hit = workAtRiskByPath[normalizedPath(wt)] { return hit }
+        return workAtRiskByPath[normalizedPath(meta.cwd)]
     }
 
     /// A raised "this session's work is about to be forgotten" notice, listed in
@@ -4105,6 +4121,17 @@ final class AppModel {
                                                aheadOfBase: probed.aheadOfBase,
                                                headOnRemote: probed.headOnRemote)
             }.value
+            // Only publish an actual change. A probe fires on every settled write in
+            // the folder, and an agent mid-turn changes files constantly — but the
+            // answer ("3 dirty files, 1 unpushed commit") usually doesn't move.
+            // `@Observable` notifies on any assignment, equal or not, and every
+            // notification re-runs `SidebarView.makeGroups()` over the whole session
+            // list, so writing an unchanged value here is a re-render storm.
+            let previous = workAtRiskByPath[root]
+            guard previous != risk else {
+                evaluateWorkAtRiskNudges()
+                return
+            }
             if let risk {
                 workAtRiskByPath[root] = risk
             } else {
