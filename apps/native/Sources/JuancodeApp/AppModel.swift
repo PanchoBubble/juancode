@@ -1991,6 +1991,15 @@ final class AppModel {
     }
 
     private func applyTrackedMirror(_ list: [TrackedPr]) {
+        // A poll pass that advanced a PR's baseline saw real movement (new comments,
+        // reviews, or a CI status change), so anything the GitHub view is showing for
+        // that PR is stale. Flag it rather than refetch here: only the open detail
+        // pane cares, and it acts on the flag on its next tick (juancode-zp29).
+        // `lastPolledAt` is deliberately NOT the signal — it advances on every pass,
+        // movement or not.
+        for entry in list where entry.snapshot != tracked[entry.id]?.snapshot {
+            github.notePollerActivity(entry.id)
+        }
         tracked = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
         updateTrackKeepAwake()
     }

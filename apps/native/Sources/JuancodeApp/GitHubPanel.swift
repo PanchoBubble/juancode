@@ -23,8 +23,15 @@ final class GitHubModel {
     private(set) var conversations: [String: PrConversation] = [:]
     /// Fetched CI check runs per PR.
     private(set) var checks: [String: [PrCheckRun]] = [:]
+    /// When each PR's detail last landed — the "updated …" stamp in the detail
+    /// header, and the input to `prDetailRefreshDue`.
+    private(set) var fetchedAt: [String: Date] = [:]
+    /// PR keys the tracked-PR poller saw move since their last detail fetch, so an
+    /// open pane refetches on its next tick instead of waiting out the interval.
+    private(set) var pollerActivity: Set<String> = []
     /// Fetched PR diffs per PR, for the detail's Diff tab (fetched lazily the first
-    /// time that tab is shown; cached for the app's lifetime).
+    /// time that tab is shown, then refreshed with the rest of the detail while the
+    /// tab is on screen).
     private(set) var diffs: [String: DiffResult] = [:]
     /// PR keys with a diff fetch in flight, so the tab doesn't stampede `gh pr diff`.
     private(set) var diffLoading: Set<String> = []
@@ -97,6 +104,9 @@ final class GitHubModel {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard !loading.contains(key) else { return }
         loading.insert(key)
+        // This fetch answers whatever the poller flagged; a signal arriving while it
+        // is in flight re-flags the key and the next tick picks it up.
+        pollerActivity.remove(key)
         let number = pr.number
         let url = pr.url
         Task {
@@ -109,16 +119,44 @@ final class GitHubModel {
             let (c, r) = await (conversation, runs)
             if let c { conversations[key] = c }
             checks[key] = r
+            fetchedAt[key] = Date()
             loading.remove(key)
         }
+    }
+
+    /// Note that the tracked-PR poller saw new activity on a PR (new comments /
+    /// reviews / a CI status change). Called from `AppModel`'s tracked mirror; the
+    /// open detail pane acts on it within a tick.
+    func notePollerActivity(_ key: String) { pollerActivity.insert(key) }
+
+    /// Refetch the selected PR's detail if what the pane is showing has gone stale
+    /// (`prDetailRefreshDue`) — the tick the detail pane runs while it is on screen,
+    /// so a PR left open keeps up with GitHub instead of freezing at first open.
+    /// `includeDiff` refreshes the diff too, and is only true while the Diff tab is
+    /// showing (nobody pays for a `gh pr diff` they aren't looking at).
+    func refreshIfStale(cwd: String, pr: PullRequest, includeDiff: Bool, focused: Bool) {
+        let key = TrackedPr.key(cwd: cwd, number: pr.number)
+        guard prDetailRefreshDue(lastFetched: fetchedAt[key], now: Date(), focused: focused,
+                                 pollerActivity: pollerActivity.contains(key)) else { return }
+        loadDetail(cwd: cwd, pr: pr)
+        if includeDiff { loadDiff(cwd: cwd, pr: pr, force: true) }
+    }
+
+    /// Refetch the selected PR's detail now, whatever its age — the header's manual
+    /// refresh, and the "Retry" after a failed load.
+    func reloadDetail(cwd: String, pr: PullRequest, includeDiff: Bool) {
+        loadDetail(cwd: cwd, pr: pr)
+        if includeDiff { loadDiff(cwd: cwd, pr: pr, force: true) }
     }
 
     /// Fetch the PR's diff (`gh pr diff --patch`, split into per-file `DiffFile`s)
     /// for the detail's Diff tab. Off-main; cached per PR and coalesced so re-opening
     /// the tab is instant. A failed fetch leaves the cache empty so the tab retries.
-    func loadDiff(cwd: String, pr: PullRequest) {
+    /// `force` refetches over a cached diff (the freshness tick, a manual refresh);
+    /// the old diff stays on screen until the new one lands, so the tab never blanks.
+    func loadDiff(cwd: String, pr: PullRequest, force: Bool = false) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
-        guard diffs[key] == nil, !diffLoading.contains(key) else { return }
+        guard force || diffs[key] == nil, !diffLoading.contains(key) else { return }
         diffLoading.insert(key)
         let number = pr.number
         Task {
@@ -1018,6 +1056,22 @@ private struct GitHubPrDetail: View {
                 }
             }
         }
+        // Keep what's on screen honest (juancode-zp29): while this pane is up, tick
+        // and refetch the PR once its data goes stale — on the interval, or as soon
+        // as the tracked-PR poller reports the PR moved. Restarts on PR/tab change so
+        // the loop's view of both stays current.
+        .task(id: "\(key)|\(tab.rawValue)") { await freshnessTick() }
+    }
+
+    /// The freshness loop. Short tick, cheap body: the policy decides whether a fetch
+    /// actually happens, so the interval and the focus backoff live in one place and
+    /// regaining focus refreshes within a tick rather than at the next interval edge.
+    private func freshnessTick() async {
+        while !Task.isCancelled {
+            model.github.refreshIfStale(cwd: cwd, pr: pr, includeDiff: tab == .diff,
+                                        focused: NSApp.isActive)
+            try? await Task.sleep(for: .seconds(5))
+        }
     }
 
     private var hasNotifications: Bool { !(tracked?.notifications.isEmpty ?? true) }
@@ -1028,18 +1082,30 @@ private struct GitHubPrDetail: View {
     private var pinnedHead: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            Picker("", selection: $tab) {
-                ForEach(PrDetailTab.allCases, id: \.self) { Text($0.label).tag($0) }
+            HStack(spacing: 8) {
+                Picker("", selection: $tab) {
+                    ForEach(PrDetailTab.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Spacer()
+                freshness
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.appSurface)
+    }
+
+    /// How old the data on screen is, plus a manual refresh.
+    private var freshness: some View {
+        PrFreshnessStamp(
+            fetchedAt: model.github.fetchedAt[key],
+            loading: model.github.loading.contains(key),
+            refresh: { model.github.reloadDetail(cwd: cwd, pr: pr, includeDiff: tab == .diff) })
     }
 
     // MARK: header
@@ -1172,11 +1238,54 @@ private struct GitHubPrDetail: View {
                 Text("Couldn't load conversation")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
-                Button("Retry") { model.github.loadDetail(cwd: cwd, pr: pr) }
+                Button("Retry") { model.github.reloadDetail(cwd: cwd, pr: pr, includeDiff: false) }
                     .controlSize(.small)
                     .clickCursor()
             }
         }
+    }
+}
+
+/// The selected PR's "updated 2 min ago" stamp + manual refresh (juancode-zp29).
+/// Owns its own clock so re-labelling the age doesn't re-render the whole detail
+/// pane, and shows a spinner while a refresh (auto or manual) is in flight.
+private struct PrFreshnessStamp: View {
+    let fetchedAt: Date?
+    let loading: Bool
+    let refresh: () -> Void
+    /// Re-read on a slow tick purely to advance the label.
+    @State private var now = Date()
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if loading {
+                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 12, height: 12)
+            }
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .help("The PR refreshes on its own while this pane is open — slower when juancode isn't frontmost")
+            Button(action: refresh) {
+                Image(systemName: "arrow.clockwise").font(.system(size: 9))
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh this PR now")
+            .clickCursor()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                now = Date()
+            }
+        }
+    }
+
+    private var label: String {
+        guard let fetchedAt else { return loading ? "loading…" : "not loaded" }
+        // `now` only exists to invalidate this label; the string itself is relative
+        // to the real current time.
+        _ = now
+        return "updated \(relativeTime(Int(fetchedAt.timeIntervalSince1970 * 1000)))"
     }
 }
 
