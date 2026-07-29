@@ -120,11 +120,11 @@ public final class ActivityDetector: @unchecked Sendable {
     private var pendingToolUseIds: Set<String> = []
     /// When the last structured agent pulse arrived; anchors the `toolHoldCapMs` cap.
     private var lastStructuredAt = Date.distantPast
-    /// Trailing bytes of a multibyte UTF-8 sequence split across a `feed` boundary,
-    /// carried into the next chunk so a split multibyte gate token (the "❯" menu
-    /// cursor) still decodes intact for the cheap substring gates rather than as
-    /// replacement characters. Touched only on `queue`. (juancode-5qw.6)
-    private var pendingBytes: [UInt8] = []
+    /// Tail of the previous chunk, re-scanned with the next one so a gate token split
+    /// across a `feed` boundary (the multibyte "❯" menu cursor, or a word broken mid-
+    /// way by a pty read) is still seen. Only as long as the longest token needs.
+    /// Touched only on `queue`. (juancode-5qw.6 / juancode-zazn)
+    private var gateCarry: [UInt8] = []
 
     /// Byte-fed mode: the detector owns a private headless model and renders the
     /// stream itself. Kept for tests (the corpus feeds raw CLI bytes directly);
@@ -181,19 +181,17 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.sync { lastMatchedPrompt }
     }
 
-    /// Feed a chunk of raw pty output as bytes — the hot path from `Session`.
-    /// Decodes incrementally on the detector's queue, carrying an incomplete
-    /// trailing UTF-8 sequence across the chunk boundary so a multibyte gate token
-    /// (the "❯" menu cursor) split between two pty reads is never corrupted into
-    /// replacement characters before the cheap substring gates see it. No `String`
-    /// is allocated on the caller's (pty) thread (juancode-5qw.6).
+    /// Feed a chunk of raw pty output as bytes — the hot path from `Session`. The
+    /// cheap gates run straight over the bytes on the detector's queue, so nothing is
+    /// decoded or allocated per chunk (juancode-zazn); a token split across two pty
+    /// reads is still caught via `gateCarry`. Classification itself always re-reads
+    /// the rendered screen, never this chunk.
     public func feed(_ bytes: [UInt8]) {
         queue.async { self._feedBytes(bytes) }
     }
 
     /// Feed a chunk of already-decoded output. Convenience for callers holding a
-    /// `String` (tests); routes through the same incremental decoder, which is a
-    /// no-op carry for a whole (always-complete) string.
+    /// `String` (tests); the bytes take exactly the same path.
     public func feed(_ data: String) {
         feed(Array(data.utf8))
     }
@@ -219,45 +217,36 @@ public final class ActivityDetector: @unchecked Sendable {
             self.generation += 1
             self.structuredTurn = false
             self.pendingToolUseIds.removeAll()
-            self.pendingBytes.removeAll()
+            self.gateCarry.removeAll()
             self.transition(.idle, notify: false)
         }
     }
 
     // MARK: - internals (always on `queue`)
 
-    /// Incrementally decode `bytes`, prepending any carried tail from the previous
-    /// chunk and holding back a still-incomplete trailing sequence for the next one,
-    /// then feed the complete decoded prefix to `_feed`. Only a plausibly-incomplete
-    /// multibyte tail is carried; malformed bytes stay in the prefix so
-    /// `String(decoding:)` replaces them exactly as before. The decoded string only
-    /// drives the cheap gates — the screen itself renders from raw bytes.
+    /// Run the cheap gates over `bytes`, prefixed with the tail of the previous chunk
+    /// so a token straddling the boundary still matches. Nothing is decoded: the gates
+    /// only decide whether a screen re-read is worth doing, and the screen is rendered
+    /// from the raw bytes by the model either way (juancode-zazn).
     private func _feedBytes(_ bytes: [UInt8]) {
         // In byte-fed mode the own screen must see every raw byte (SwiftTerm carries
         // partial escape/UTF-8 sequences itself); a shared model was already fed by
         // the session before this chunk was enqueued.
         if ownsScreen { screen.feed(bytes) }
-        let combined: [UInt8]
-        if pendingBytes.isEmpty {
-            combined = bytes
-        } else {
-            combined = pendingBytes + bytes
-            pendingBytes = []
-        }
-        let cut = Utf8Boundary.completePrefixLength(combined)
-        if cut < combined.count { pendingBytes = Array(combined[cut...]) }
-        guard cut > 0 else { return } // whole chunk is an incomplete tail — nothing to feed yet
-        _feed(String(decoding: combined[0..<cut], as: UTF8.self))
+        let scan = gateCarry.isEmpty ? bytes : gateCarry + bytes
+        gateCarry = scan.count > Self.gateCarryBytes
+            ? Array(scan.suffix(Self.gateCarryBytes)) : scan
+        _feedGates(scan)
     }
 
-    private func _feed(_ data: String) {
+    private func _feedGates(_ bytes: [UInt8]) {
         if state == .busy {
             // Already working: any output (re)starts the settle/watchdog clocks.
             armTimers()
             return
         }
-        let lower = data.lowercased()
-        if lower.contains("interrupt"), Self.workingRe.firstMatch(in: normalizedScreen()) {
+        if ByteSearch.contains(bytes, Self.interruptGate),
+           Self.workingRe.firstMatch(in: normalizedScreen()) {
             // Cheap gate: only a frame that could carry the working footer is worth
             // re-reading the screen for. If the footer is now visible we go busy.
             structuredTurn = false
@@ -270,7 +259,7 @@ public final class ActivityDetector: @unchecked Sendable {
         // menu (juancode-8w5). Gate on cheap markers, then re-read on settle. While
         // already waiting we re-check on *any* output, since the answer that clears the
         // menu carries no marker of its own.
-        if state == .waitingInput || Self.promptGate.contains(where: { lower.contains($0) }) {
+        if state == .waitingInput || ByteSearch.containsAny(bytes, Self.promptGate) {
             armPromptTimer()
         }
     }
@@ -447,7 +436,17 @@ public final class ActivityDetector: @unchecked Sendable {
     /// Cheap lowercase substrings that gate the idle→waiting re-read: only a frame
     /// whose bytes could carry (part of) a prompt marker is worth re-scanning for. A
     /// false positive here just costs one wasted regex pass; it never alone changes state.
-    private static let promptGate: [String] = ["?", "❯", "y/n", "trust", "continue", "esc to cancel"]
+    /// Matched as bytes (ASCII-insensitive), so "❯" compares as its UTF-8 encoding.
+    private static let promptGate: [[UInt8]] =
+        ["?", "❯", "y/n", "trust", "continue", "esc to cancel"].map { Array($0.utf8) }
+
+    /// Gate for entering busy off the screen path: the working footer's stable word.
+    private static let interruptGate: [UInt8] = Array("interrupt".utf8)
+
+    /// How much of a chunk's tail is re-scanned with the next one — one byte less than
+    /// the longest gate token, which is all it takes to catch a token split in two.
+    private static let gateCarryBytes: Int =
+        (promptGate + [interruptGate]).map(\.count).max().map { $0 - 1 } ?? 0
 }
 
 /// Thin NSRegularExpression wrapper so the patterns above read cleanly.

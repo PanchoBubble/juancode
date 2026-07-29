@@ -181,6 +181,24 @@ import Testing
         #expect(c.snapshot.last?.1 == true)
     }
 
+    /// A pty read can split a gate token in two. The screen still renders correctly
+    /// (the model carries partial sequences itself), but the cheap gate would miss the
+    /// token and never arm the re-read — so the detector re-scans the previous chunk's
+    /// tail alongside the new one (juancode-zazn / juancode-5qw.6).
+    @Test func gateTokenSplitAcrossTwoFeedsStillArmsThePromptReRead() async {
+        let c = Collector()
+        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        // Only the "❯" select-cursor gates this screen — no "?", "trust" or "y/n" —
+        // and its 3 UTF-8 bytes are broken across the two feeds.
+        let full = Array("Choose:\n ❯ 1. Yes\n   2. No\n".utf8)
+        let cursor = Array("❯".utf8)
+        let cut = full.firstRange(of: cursor)!.lowerBound + 1
+        det.feed(Array(full[0..<cut]))
+        det.feed(Array(full[cut...]))
+        await poll { c.snapshot.last?.0 == .waitingInput }
+        #expect(c.snapshot.last?.0 == .waitingInput)
+    }
+
     /// The transcript says the agent stopped; the CLI just hasn't erased the footer
     /// yet. The structured path must not pin us busy on a stale footer.
     @Test func structuredTurnSettlesOnQuietDespiteLingeringFooter() async {
