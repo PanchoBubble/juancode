@@ -85,6 +85,9 @@ import Testing
 
         s.setTitle("A deliberate name")
 
+        // The store write is deferred to the shared persist queue (juancode-c438), so
+        // wait for it to land before counting.
+        await poll { store.counts.meta == before.meta + 1 }
         // The rename hit the meta-only path — no extra full/scrollback write.
         #expect(store.counts.meta == before.meta + 1)
         #expect(store.counts.full == before.full)

@@ -1272,6 +1272,12 @@ public final class Session: @unchecked Sendable {
     /// Adopt an OSC 0/2 window title the CLI set (via `terminalModel.onTitleChange`)
     /// as the session title, unless the user pinned a manual name. Once one lands,
     /// the transcript poll stops writing the title (see `titleFromOsc`).
+    ///
+    /// Deliberately does NOT reindex the FTS title: a CLI repaints its window title
+    /// many times per turn, and `reindexTitleFts` re-reads the stored scrollback and
+    /// re-tokenizes the whole ring — per repaint. Search picks the new title up on the
+    /// next full flush (the busy->idle edge / exit), exactly as scrollback already
+    /// does. A manual rename still reindexes immediately (juancode-c438).
     private func adoptOscTitle(_ raw: String) {
         let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
@@ -1282,7 +1288,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: true) }
+        if changed { persistMeta(titleChanged: false) }
     }
 
     /// Read the CLI's generated title (or first prompt) and persist if changed.
@@ -1403,7 +1409,17 @@ public final class Session: @unchecked Sendable {
             _meta.updatedAt = nowMs()
             return _meta
         }
-        if persistEnabled { env.store.updateMeta(meta, reindexTitleFts: titleChanged) }
+        // The store write goes to `persistQueue` with the snapshot taken here, so the
+        // caller never waits on SQLite. That matters most for a meta edit raised from
+        // inside a parse (an OSC window title): a synchronous write there held the
+        // model + global parse locks across a disk write, stalling every session's
+        // parse and the main thread's own feed (juancode-c438). The listener side stays
+        // inline — the sidebar shouldn't wait behind a utility-QoS disk queue.
+        if persistEnabled {
+            Self.persistQueue.async { [weak self] in
+                self?.env.store.updateMeta(meta, reindexTitleFts: titleChanged)
+            }
+        }
         emitMetaChange(meta)
     }
 

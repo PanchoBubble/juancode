@@ -134,6 +134,14 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     private var damageListeners: [Int: DamageListener] = [:]
     private var titleListeners: [Int: TitleListener] = [:]
     private var nextToken = 0
+    /// OSC window titles the parser reported during the current feed, notified only
+    /// once the feed has finished and both locks are released (`drainPendingTitles`).
+    /// SwiftTerm calls `setTerminalTitle` synchronously from inside `terminal.feed`,
+    /// so notifying inline ran the listener while this model's lock AND the global
+    /// parse lock were held — and `Session`'s listener persists the adopted title, so
+    /// one title repaint blocked every other session's parse, that session's activity
+    /// detector, and the main thread's own feed behind a SQLite write (juancode-c438).
+    private var pendingTitles: [String] = []
 
     /// - Parameters:
     ///   - cols/rows: initial grid, seeded with the pty's spawn size.
@@ -164,8 +172,12 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             terminal.clearUpdateRange()
             return TerminalDamage(startY: range.startY, endY: range.endY)
         }
-        guard let damage else { return }
-        for l in lock.withLock({ Array(damageListeners.values) }) { l(damage) }
+        // Both listener kinds fire with no lock held, so a listener can do real work
+        // (persist, read the screen back) without stalling every other parse.
+        if let damage {
+            for l in lock.withLock({ Array(damageListeners.values) }) { l(damage) }
+        }
+        drainPendingTitles()
     }
 
     /// Reflow the model to a new grid — ONE reflow in the core instead of the
@@ -175,6 +187,7 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             guard cols > 0, rows > 0 else { return }
             SwiftTermParse.locked { terminal.resize(cols: cols, rows: rows) }
         }
+        drainPendingTitles() // a reflow can dispatch a queued OSC too
     }
 
     // MARK: - read API (thread-safe projections)
@@ -505,8 +518,29 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     public func showCursor(source: Terminal) { lock.withLock { cursorVisible = true } }
     public func hideCursor(source: Terminal) { lock.withLock { cursorVisible = false } }
 
+    /// Called by the emulator DURING a parse, with this model's lock and the global
+    /// parse lock both held — so it only records the title; `drainPendingTitles`
+    /// notifies once the feed is done and the locks are gone.
     public func setTerminalTitle(source: Terminal, title: String) {
-        lock.withLock { lastTitle = title }
-        for l in lock.withLock({ Array(titleListeners.values) }) { l(title) }
+        lock.withLock {
+            lastTitle = title
+            // Consecutive repeats of the same title carry no information.
+            if pendingTitles.last != title { pendingTitles.append(title) }
+        }
+    }
+
+    /// Notify title listeners for the titles the last parse produced, with no lock
+    /// held. A no-op (one uncontended lock acquisition) for the overwhelming majority
+    /// of feeds, which carry no OSC title at all.
+    private func drainPendingTitles() {
+        let (titles, listeners) = lock.withLock { () -> ([String], [TitleListener]) in
+            guard !pendingTitles.isEmpty else { return ([], []) }
+            let t = pendingTitles
+            pendingTitles.removeAll(keepingCapacity: true)
+            return (t, Array(titleListeners.values))
+        }
+        for title in titles {
+            for l in listeners { l(title) }
+        }
     }
 }
