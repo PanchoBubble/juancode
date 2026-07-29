@@ -2719,7 +2719,11 @@ struct SessionContainer: View {
                         .allowsHitTesting(visible)
                 }
                 if current == nil {
-                    SwiftTermReplay(scrollback: model.scrollback(meta.id))
+                    if model.isStoppedPane(meta.id) {
+                        SessionStoppedCard(meta: meta)
+                    } else {
+                        SwiftTermReplay(scrollback: model.scrollback(meta.id))
+                    }
                 }
             }
         } else if let session = model.liveSession(meta.id) {
@@ -2733,8 +2737,49 @@ struct SessionContainer: View {
                           autoFocusOnAppear: !model.suppressTerminalAutoFocus,
                           onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
+        } else if model.isStoppedPane(meta.id) {
+            // Agent killed from the UI this run: a scrollback replay here renders the
+            // dead CLI's TUI escapes at the wrong grid size (juancode-x46x), so state
+            // it plainly instead. Only reached when the kill had no live session to
+            // hand the selection to.
+            SessionStoppedCard(meta: meta)
         } else {
             SwiftTermReplay(scrollback: model.scrollback(meta.id))
+        }
+    }
+}
+
+/// The pane for a session whose agent was just killed: a black surface stating so,
+/// with a one-click resume. Replaces the raw scrollback replay, which repaints a
+/// killed CLI's escape sequences into a mismatched grid (juancode-x46x).
+private struct SessionStoppedCard: View {
+    @Environment(AppModel.self) private var model
+    let meta: SessionMeta
+
+    var body: some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 14) {
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("Agent stopped")
+                    .font(.title3)
+                Text("This session's agent was terminated. Its changes, worktree, and transcript are untouched.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                Button {
+                    Task { await model.openPersistedPane(meta.id) }
+                } label: {
+                    Label("Resume session", systemImage: "play.fill")
+                }
+                .disabled(model.isActivating(meta.id))
+                .clickCursor()
+                .help("Restart the CLI and resume this conversation")
+            }
+            .padding(24)
         }
     }
 }

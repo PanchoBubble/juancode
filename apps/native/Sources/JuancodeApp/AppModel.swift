@@ -99,6 +99,11 @@ final class AppModel {
     private(set) var activatingSessions: Set<String> = []
     func isActivating(_ id: String) -> Bool { activatingSessions.contains(id) }
 
+    /// Sessions whose agent was killed from the UI this run (juancode-x46x). Their
+    /// pane shows a stopped card instead of a raw scrollback replay until they're
+    /// revived. See `killSession` / `isStoppedPane`.
+    private var stoppedPanes: Set<String> = []
+
     /// Live window content width, published by `RootView`. Drives the screen-size-
     /// proportional *default* widths of the sidebar / Changes panel / Oracle dock —
     /// only until the user drags a panel edge, after which the persisted manual
@@ -2230,6 +2235,9 @@ final class AppModel {
     /// (already live, or revived earlier this run) just fall through to `reactivate`.
     func openPersistedPane(_ id: String) async {
         guard !isLive(id) else { return }
+        // Reopening a killed pane resumes it, so its stopped card has served its
+        // purpose — drop the flag now so the revived pty renders, not the card.
+        stoppedPanes.remove(id)
         // Drive a per-row spinner while the (async, up to ~5s) resume is in flight, so
         // clicking an exited session gives immediate "working on it" feedback.
         activatingSessions.insert(id)
@@ -3701,6 +3709,7 @@ final class AppModel {
         stopWatchingChanges(id)
         agentWorktreeBySession.removeValue(forKey: id)
         remoteGridOwners.removeValue(forKey: id)
+        stoppedPanes.remove(id)
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
         refresh()
@@ -3716,11 +3725,42 @@ final class AppModel {
     /// (juancode-101), e.g. a dispatched ticket whose prompt never submitted.
     /// No-op if the session isn't live. The process exit drives status → .exited
     /// through the normal `handleExit` path.
+    /// Killing the SELECTED session hands the pane to a still-running neighbour
+    /// (juancode-x46x): the dead pty falls out of the live registry, and the
+    /// fallback pane re-feeds raw scrollback into a fresh terminal, which renders
+    /// the CLI's TUI escapes at the wrong grid size as a wall of garble. With
+    /// nothing else running the selection stays and the pane shows an explicit
+    /// stopped card instead (`isStoppedPane`).
     func killSession(_ id: String) {
         guard let session = appState.registry.get(id) else { return }
+        // Resolved BEFORE the kill: liveness is read off the registry, so after the
+        // kill the dying row would look like every other dead row.
+        let landing = selection == id ? landingAfterKill(id) : nil
         session.kill()
+        stoppedPanes.insert(id)
+        if let landing { selection = landing }
         refresh()
     }
+
+    /// The live session to select after `id`'s agent is killed, or nil to stay put.
+    private func landingAfterKill(_ id: String) -> String? {
+        let candidate: (String) -> KilledSessionLanding.Candidate? = { [self] sid in
+            guard let meta = sessions.first(where: { $0.id == sid }) else { return nil }
+            return .init(id: sid, cwd: meta.cwd, live: isLive(sid), isEditor: isEditorSession(sid))
+        }
+        let visible = navOrder.compactMap(candidate)
+        if let target = KilledSessionLanding.landing(after: id, in: visible) { return target }
+        // The killed row may not be on screen (collapsed folder, active filter), so
+        // `landing` has no anchor — take any running session instead.
+        return KilledSessionLanding.anyLive(excluding: id,
+                                            in: sessions.compactMap { candidate($0.id) })
+    }
+
+    /// Whether `id`'s pane should show the "agent stopped" card rather than a
+    /// scrollback replay: its agent was killed from the UI this run and it hasn't
+    /// been revived since. Selecting the row revives it (`openPersistedPane`),
+    /// which clears the card.
+    func isStoppedPane(_ id: String) -> Bool { stoppedPanes.contains(id) && !isLive(id) }
 
     /// Reveal the rolling session activity log in Finder — the JSONL trail of
     /// spawn/seed/activity/exit events (grep by session id to follow one session).
@@ -3757,6 +3797,7 @@ final class AppModel {
             stopWatchingChanges(id)
             agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
+            stoppedPanes.remove(id)
             if selection == id {
                 selection = editorParent.flatMap { idSet.contains($0) ? nil : $0 } ?? fallback
             }
