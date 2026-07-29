@@ -85,6 +85,12 @@ final class AppModel {
             // of unmounting, and the new one mounts (or is revealed) in the same
             // frame (juancode-073).
             if let sel = selection { noteLivePaneVisible(sel) }
+            // Also synchronously, so the first frame after the click already shows the
+            // loading card: the auto-revive runs from SessionContainer's `.task`, a
+            // frame or two later, and until it lands the pane would paint a raw
+            // scrollback replay of a dead CLI's TUI — the garble this flag suppresses
+            // (juancode-p6tw).
+            if let sel = selection { markPaneOpening(sel) }
             // Navigating to a session (jump palette, notification click-through,
             // "Go to session", search hits) dismisses the GitHub overlay — every
             // landing path routes through this setter (juancode-2t6).
@@ -98,6 +104,64 @@ final class AppModel {
     /// the pty is back. Set/cleared by `openPersistedPane`.
     private(set) var activatingSessions: Set<String> = []
     func isActivating(_ id: String) -> Bool { activatingSessions.contains(id) }
+
+    /// Mark a pane as opening the moment its row is selected, ahead of the async
+    /// `openPersistedPane` that clears it. Only for our own not-yet-live sessions:
+    /// externals never mount a pane (nothing would ever clear the flag), and a live
+    /// one has nothing to wait for.
+    private func markPaneOpening(_ id: String) {
+        guard !isLive(id), !isExternal(id), sessions.contains(where: { $0.id == id }) else { return }
+        activatingSessions.insert(id)
+    }
+
+    /// Live sessions whose pty has emitted at least one byte, so their pane has
+    /// actually painted. A brand-new `claude`/`codex` spawn is a black rectangle for a
+    /// second or two before its TUI draws — `SessionPanePhase.booting` floats a hint
+    /// over that gap instead of leaving it looking dead (juancode-p6tw).
+    private(set) var drawnPanes: Set<String> = []
+    /// First-byte subscription cancels for panes still waiting to paint.
+    @ObservationIgnored private var firstOutputCancels: [String: () -> Void] = [:]
+
+    func hasPaneDrawn(_ id: String) -> Bool { drawnPanes.contains(id) }
+
+    /// What `id`'s pane should render right now (pure decision in `SessionPaneState`).
+    func panePhase(_ id: String) -> SessionPanePhase {
+        SessionPaneState.phase(isLive: isLive(id), hasDrawn: hasPaneDrawn(id),
+                               isActivating: isActivating(id), isStopped: isStoppedPane(id))
+    }
+
+    /// Watch a newly-live session for its first output byte. A resumed session is
+    /// seeded with its prior scrollback, so it counts as painted immediately — only a
+    /// genuinely blank pty waits.
+    private func watchFirstPaneOutput(_ s: Session) {
+        firstOutputCancels.removeValue(forKey: s.id)?()
+        if !s.getScrollback().isEmpty {
+            drawnPanes.insert(s.id)
+            return
+        }
+        drawnPanes.remove(s.id)
+        firstOutputCancels[s.id] = s.subscribeOutput(replay: false) { [weak self] _ in
+            Task { @MainActor in self?.notePaneDrawn(s.id) }
+        }
+    }
+
+    private func notePaneDrawn(_ id: String) {
+        firstOutputCancels.removeValue(forKey: id)?()
+        guard !drawnPanes.contains(id) else { return }
+        drawnPanes.insert(id)
+    }
+
+    /// Drop first-byte bookkeeping for sessions that are no longer live, so a pane
+    /// that dies mid-boot doesn't hold its subscription (or a stale "drawn" flag that
+    /// would suppress the hint on its next spawn). Called from `refresh`, which every
+    /// registry change routes through.
+    private func pruneDrawnPanes(live: Set<String>) {
+        for id in firstOutputCancels.keys where !live.contains(id) {
+            firstOutputCancels.removeValue(forKey: id)?()
+        }
+        let stale = drawnPanes.subtracting(live)
+        if !stale.isEmpty { drawnPanes.subtract(stale) }
+    }
 
     /// Sessions whose agent was killed from the UI this run (juancode-x46x). Their
     /// pane shows a stopped card instead of a raw scrollback replay until they're
@@ -479,6 +543,7 @@ final class AppModel {
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
         livePanes.prune { [appState] in appState.registry.get($0) }
+        pruneDrawnPanes(live: Set(liveSessions.map(\.id)))
         refreshWorktreeMap()
     }
 
@@ -749,6 +814,10 @@ final class AppModel {
 
     private func watch(_ s: Session) {
         activities[s.id] = s.activity
+        // Every session reaches here exactly once per pty (registry `onCreate`, plus a
+        // sweep at init), which is also the right moment to start waiting for its
+        // first painted byte.
+        watchFirstPaneOutput(s)
         // Editor sessions (nvim etc.) aren't agent turns — their screen churn must
         // never ding a notification, bump the Dock badge, or set the sidebar's
         // "done" check. Their activity is still tracked for the spinner.

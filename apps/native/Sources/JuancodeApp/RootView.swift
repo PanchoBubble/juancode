@@ -2528,6 +2528,9 @@ struct SessionContainer: View {
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
                     .overlay(alignment: .topTrailing) { remoteDriveBadge }
                     .overlay(alignment: .topLeading) { sessionRestoredBadge }
+                    // "Starting agent…" over a live-but-unpainted pane, faded out on
+                    // its first pty byte (juancode-p6tw).
+                    .overlay { paneBootingHint }
                     // Review nudge floated at the bottom edge — out of the way of the
                     // top badges + find bar, and an overlay so the pty grid never reflows.
                     .overlay(alignment: .bottom) { changeReviewBanner }
@@ -2718,13 +2721,7 @@ struct SessionContainer: View {
                         .opacity(visible ? 1 : 0)
                         .allowsHitTesting(visible)
                 }
-                if current == nil {
-                    if model.isStoppedPane(meta.id) {
-                        SessionStoppedCard(meta: meta)
-                    } else {
-                        SwiftTermReplay(scrollback: model.scrollback(meta.id))
-                    }
-                }
+                if current == nil { nonLivePane }
             }
         } else if let session = model.liveSession(meta.id) {
             // SwiftTerm fallback (JUANCODE_SWIFTTERM=1): no keep-alive pool —
@@ -2737,15 +2734,93 @@ struct SessionContainer: View {
                           autoFocusOnAppear: !model.suppressTerminalAutoFocus,
                           onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
-        } else if model.isStoppedPane(meta.id) {
-            // Agent killed from the UI this run: a scrollback replay here renders the
-            // dead CLI's TUI escapes at the wrong grid size (juancode-x46x), so state
-            // it plainly instead. Only reached when the kill had no live session to
-            // hand the selection to.
-            SessionStoppedCard(meta: meta)
         } else {
-            SwiftTermReplay(scrollback: model.scrollback(meta.id))
+            nonLivePane
         }
+    }
+
+    /// What a pane with no live pty shows (`SessionPaneState`, juancode-p6tw). A raw
+    /// scrollback replay repaints a dead CLI's TUI escapes into a freshly-sized
+    /// terminal — garbage — so it's the last resort, reached only once a resume has
+    /// been tried and failed. While one is in flight (which opening an exited session
+    /// always starts) the loading card holds the pane instead; a kill this run gets the
+    /// stopped card (juancode-x46x).
+    @ViewBuilder
+    private var nonLivePane: some View {
+        switch model.panePhase(meta.id) {
+        case .resuming: SessionLoadingCard(meta: meta)
+        case .stopped: SessionStoppedCard(meta: meta)
+        case .live, .booting, .replay: SwiftTermReplay(scrollback: model.scrollback(meta.id))
+        }
+    }
+
+    /// Floating "starting up" hint over a live pane that hasn't painted yet: a fresh
+    /// CLI spawn is an empty black rectangle for a second or two before its TUI draws.
+    /// Never hit-tests, so the pty keeps focus and typing goes through. The fade is
+    /// scoped to this overlay — nothing in the terminal's own layout may animate.
+    private var paneBootingHint: some View {
+        let phase = model.panePhase(meta.id)
+        return Group {
+            if phase == .booting {
+                SessionBootingHint(meta: meta)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: phase)
+    }
+}
+
+/// The pane for a session whose pty is being brought back (juancode-p6tw): opening an
+/// exited session auto-resumes it, and until the fresh pty attaches there is nothing
+/// honest to draw — the recorded scrollback is a dead CLI's TUI escapes, which repaint
+/// as garbage in a differently-sized terminal. So hold the pane with a spinner instead.
+/// Replaced by the live pane the moment the resume lands.
+private struct SessionLoadingCard: View {
+    let meta: SessionMeta
+
+    var body: some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 12) {
+                ProgressView().controlSize(.small)
+                Text("Resuming session…")
+                    .font(.title3)
+                Text("\(Providers.spec(for: meta.provider).label) · \(folderName)")
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                Text("Restarting the CLI and replaying this conversation from its transcript.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+            .padding(24)
+        }
+    }
+
+    private var folderName: String {
+        URL(fileURLWithPath: meta.effectiveCwd).lastPathComponent
+    }
+}
+
+/// Floating hint over a live pane whose CLI hasn't drawn its first frame yet — the
+/// second or two a fresh `claude`/`codex` spawn spends as an empty black rectangle
+/// (juancode-p6tw). A capsule rather than a full-pane cover, so the TUI shows through
+/// the instant it paints.
+private struct SessionBootingHint: View {
+    let meta: SessionMeta
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Starting \(Providers.spec(for: meta.provider).label)…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.thinMaterial, in: Capsule())
     }
 }
 
