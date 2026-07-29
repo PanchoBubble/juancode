@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/apps/oracle-mcp/src/memory-candidates.ts\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

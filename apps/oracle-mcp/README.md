@@ -165,6 +165,53 @@ This is what lets the phone authenticate. In **Zero Trust → Access → Applica
 > OAuth handshake end-to-end when you add the connector (step 4); that's the one part
 > to confirm live.
 
+## Session recall (`oracle_session_search` / `oracle_session_excerpt`)
+
+Claude Code already writes every session to `~/.claude/projects/<slug>/<sessionId>.jsonl`,
+so recall reads what is on disk instead of capturing anything new — no vector DB, no extra
+runtime, no always-on worker. `transcript-index.ts` keeps a SQLite FTS5 index at
+`~/.juancode/data/transcript-index.db` and refreshes it on every search, reading only the
+bytes appended since last time.
+
+Two tools, on purpose:
+
+| tool | returns |
+| --- | --- |
+| `oracle_session_search` | compact hit list — id, session, project, branch, ts, one-line snippet |
+| `oracle_session_excerpt` | full text for **one** id, optionally ±N surrounding turns |
+
+Dumping matches straight into context is what makes transcript recall expensive, so the
+hit list carries no bodies. Ask for the ids that look relevant, nothing more.
+
+First call builds the whole index (~9s for 940 files / 121k entries here); later calls
+refresh in ~100ms. Overrides: `JUANCODE_CLAUDE_PROJECTS_DIR`,
+`JUANCODE_TRANSCRIPT_INDEX_DB`.
+
+The index is **local only**. Transcripts contain confidential tool output, so nothing
+here fans out on its own — no web-console view, no Telegram surface. Callers decide what
+to surface.
+
+## SessionEnd memory candidates
+
+`memory-candidates.ts` runs as a `SessionEnd` hook (wired in `.claude/settings.json`).
+When a session ends it digests its own transcript, asks a cheap model for at most three
+facts that were **non-obvious**, and appends them to
+`~/.claude/projects/<slug>/memory/CANDIDATES.md`.
+
+It never writes `memory/*.md` or `MEMORY.md` — promoting a candidate stays a manual act,
+which is what keeps the curated set worth reading. It also skips sessions under 12 turns,
+drops candidates whose slug already exists (or was already proposed), drops near-dupes of
+the existing index, rejects anything matching a credential/contact pattern, and always
+exits 0 so it can never block a session ending.
+
+It runs as plain `node …/memory-candidates.ts` — Node ≥ 22.18 strips the types — so the
+hook needs nothing installed from this repo.
+
+Env: `JUANCODE_MEMORY_CANDIDATES=0` to disable,
+`JUANCODE_MEMORY_CANDIDATES_MIN_TURNS`, `JUANCODE_MEMORY_CANDIDATES_MODEL`,
+`JUANCODE_MEMORY_CANDIDATES_DEBUG=1`. To run it in every project rather than just this
+one, move the same hook block into `~/.claude/settings.json` with an absolute path.
+
 ## GitHub webhooks (tracked-PR fast path)
 
 The native app's PR tracker normally polls `gh` every 60s. With webhooks wired up,

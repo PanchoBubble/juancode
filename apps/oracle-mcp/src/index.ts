@@ -50,6 +50,7 @@ import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { startActivityListener } from "./native-events.ts";
+import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
@@ -295,6 +296,77 @@ function buildServer(): McpServer {
     async (args) => {
       try {
         return ok(unobserveMessage(await unobserveSessionForOracle(args.sessionId)));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  // ── Recall over past sessions (juancode-48wz) ──────────────────────────────
+  // Two steps on purpose: `search` returns a compact id + snippet list, `excerpt`
+  // fetches bodies only for the ids worth reading. Dumping matches straight into
+  // context is what makes transcript recall expensive.
+
+  server.registerTool(
+    "oracle_session_search",
+    {
+      title: "Search past session transcripts",
+      description:
+        "Keyword-search everything said in past Claude Code sessions on this machine (all projects) and get back a COMPACT hit list: id, session, project, branch, timestamp, one-line snippet. Use for 'what did we decide about X', 'which session touched Y', 'have I hit this error before'. Full text is NOT returned — pass the ids you care about to oracle_session_excerpt. The index is built from the local transcript files and refreshes itself on each call.",
+      inputSchema: {
+        query: z
+          .string()
+          .min(1)
+          .describe("Words to look for; every term must appear in a matching turn"),
+        limit: z.number().int().min(1).max(100).optional().describe("Max hits (default 20)"),
+        project: z
+          .string()
+          .optional()
+          .describe("Only sessions whose working directory contains this substring, e.g. 'juancode'"),
+        since: z.string().optional().describe("ISO timestamp lower bound, e.g. 2026-07-01"),
+      },
+    },
+    async (args) => {
+      try {
+        const { hits, refresh } = searchWithRefresh(args.query, {
+          limit: args.limit,
+          project: args.project,
+          since: args.since,
+        });
+        if (!hits.length) {
+          return ok(
+            `No matches for "${args.query}" across ${refresh.filesScanned} transcript file(s). Try fewer or broader terms.`,
+          );
+        }
+        return ok(JSON.stringify(hits, null, 2));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_session_excerpt",
+    {
+      title: "Read one transcript hit in full",
+      description:
+        "Fetch the full text behind a hit id from oracle_session_search, optionally with the surrounding turns of that session. Call it only for the ids that look relevant — one at a time — so recall stays cheap.",
+      inputSchema: {
+        id: z.number().int().describe("Hit id from oracle_session_search"),
+        context: z
+          .number()
+          .int()
+          .min(0)
+          .max(20)
+          .optional()
+          .describe("Turns of surrounding context on each side (default 0)"),
+      },
+    },
+    async (args) => {
+      try {
+        const excerpt = getExcerpt(args.id, args.context ?? 0);
+        if (!excerpt) return fail(`No transcript entry with id ${args.id}.`);
+        return ok(JSON.stringify(excerpt, null, 2));
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }

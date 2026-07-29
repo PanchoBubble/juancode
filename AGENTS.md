@@ -19,7 +19,11 @@ is the core value of this project — never inject a shadow `HOME`/`CODEX_HOME` 
   [apps/native/README.md](./apps/native/README.md).
 - **`apps/oracle-mcp`**: Node sidecar (Express 5 + `ws` + MCP SDK, TypeScript via `tsx`).
   MCP server + Telegram bridge + a small phone web console; talks to the native app's
-  embedded server on `:4280`. Telegram is the notification/remote-steering path.
+  embedded server on `:4280`. Telegram is the notification/remote-steering path. It also
+  owns **session recall** (`oracle_session_search` → `oracle_session_excerpt`, a local FTS5
+  index over `~/.claude/projects/**/*.jsonl`) and the **SessionEnd memory-candidate hook** —
+  search there first when asking "what did we decide about X"; see
+  [apps/oracle-mcp/README.md](./apps/oracle-mcp/README.md).
 - pnpm workspaces, Node ≥ 22 (for the sidecar only; the native app builds with SwiftPM).
 
 ## Architecture (one paragraph)
