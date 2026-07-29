@@ -629,16 +629,28 @@ struct SidebarView: View {
     /// every body evaluation just to be compared and thrown away. A hash collision would
     /// cost one skipped slide, which is invisible.
     private func structureKey(_ groups: [FolderGroup]) -> Int {
-        var hasher = Hasher()
+        // XOR, not sequential `Hasher.combine`: combining ids in iteration order makes
+        // the digest order-SENSITIVE, so a reorder changes it and animates — the exact
+        // thing this is supposed to ignore. XOR is commutative, so the key depends on
+        // WHICH (folder, session, liveness) triples exist, not the order they appear in.
+        // Session ids are unique, so nothing cancels itself out.
+        var acc = 0
         for g in groups {
-            hasher.combine(g.cwd)
-            hasher.combine(g.sessions.count)
+            if g.sessions.isEmpty {
+                var h = Hasher()
+                h.combine(g.cwd)
+                acc ^= h.finalize()
+                continue
+            }
             for s in g.sessions {
-                hasher.combine(s.id)
-                hasher.combine(model.isLive(s.id))
+                var h = Hasher()
+                h.combine(g.cwd) // so moving a session between folders still animates
+                h.combine(s.id)
+                h.combine(model.isLive(s.id))
+                acc ^= h.finalize()
             }
         }
-        return hasher.finalize()
+        return acc
     }
 
     /// The user's manual slot per session id for one project (empty when the
