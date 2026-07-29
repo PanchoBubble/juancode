@@ -78,18 +78,82 @@ private final class FileCache: @unchecked Sendable {
 }
 private let fileCache = FileCache()
 
-/// A zeroed `SessionUsage` with cost starting at 0 (becomes nil if a turn's model
-/// is un-priced). Mirrors the TS `empty()` accumulator.
-private func empty() -> SessionUsage {
-    SessionUsage(
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        totalTokens: 0,
-        costUsd: 0
-    )
+/// Namespace for this module's read positions in `TranscriptReader` (the title poll
+/// reads the same files at its own pace under its own namespace).
+private let usageNamespace = "usage"
+
+/// Running usage state for one session, carried across polls so each 4s pass only
+/// has to fold in the records the CLI appended since the last one (juancode-dfhg).
+/// `seen` persists too: the same turn is sometimes logged twice, and the duplicate
+/// can land in a later pass than the original.
+private struct UsageAccumulator {
+    var inputTokens = 0
+    var outputTokens = 0
+    var cacheReadTokens = 0
+    var cacheWriteTokens = 0
+    /// Summed per-message cost; only meaningful while `costKnown`.
+    var costUsd = 0.0
+    /// Stays true only while every priced turn had a known model.
+    var costKnown = true
+    var sawTurn = false
+    /// `message.id` + `requestId` of every turn already counted.
+    var seen: Set<String> = []
+
+    /// The public projection: totals summed, cost dropped when any turn's model was
+    /// un-priced, nil until a real assistant turn has been counted.
+    var usage: SessionUsage? {
+        guard sawTurn else { return nil }
+        return SessionUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheWriteTokens: cacheWriteTokens,
+            totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+            costUsd: costKnown ? costUsd : nil)
+    }
 }
+
+/// The cumulative tally Codex reports, carried across polls for the same reason.
+private struct CodexTotals {
+    var inputTokens = 0
+    var outputTokens = 0
+    var cacheReadTokens = 0
+    var totalTokens = 0
+
+    var usage: SessionUsage {
+        SessionUsage(
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheWriteTokens: 0,
+            totalTokens: totalTokens,
+            costUsd: nil)
+    }
+}
+
+/// Per-session running usage state, keyed by CLI session id.
+private final class UsageStateStore: @unchecked Sendable {
+    private var claude: [String: UsageAccumulator] = [:]
+    private var codex: [String: CodexTotals] = [:]
+    private let lock = NSLock()
+
+    func claudeState(_ id: String) -> UsageAccumulator? {
+        lock.withLock { claude[id] }
+    }
+    func setClaude(_ id: String, _ acc: UsageAccumulator) {
+        lock.withLock { claude[id] = acc }
+    }
+    func codexState(_ id: String) -> CodexTotals? {
+        lock.withLock { codex[id] }
+    }
+    func setCodex(_ id: String, _ totals: CodexTotals) {
+        lock.withLock { codex[id] = totals }
+    }
+    func clearCodex(_ id: String) {
+        lock.withLock { _ = codex.removeValue(forKey: id) }
+    }
+}
+private let usageState = UsageStateStore()
 
 /// Coerce a JSON numeric value to Int (transcript token fields are integers).
 /// Falls back to `fallback` when absent or non-numeric, matching `?? 0`.
@@ -113,58 +177,59 @@ public func deriveClaudeUsage(
         file = found
     }
 
-    var usage = empty()
-    var seen = Set<String>()
-    var sawTurn = false
-    // Stays true only while every priced turn had a known model; a `<synthetic>`
-    // (local, no API call) message contributes no tokens and no cost.
-    var costKnown = true
-
-    await forEachRecord(file!) { rec in
-        if rec["type"] as? String != "assistant" { return nil }
-        let msg = rec["message"] as? [String: Any]
-        let u = msg?["usage"] as? [String: Any]
-        guard let u else { return nil }
-
-        // Dedup: the same API response is sometimes written multiple times.
-        let msgId = msg?["id"] as? String ?? ""
-        let requestId = rec["requestId"] as? String ?? ""
-        let key = "\(msgId):\(requestId)"
-        if key != ":" && seen.contains(key) { return nil }
-        seen.insert(key)
-
-        let model = msg?["model"] as? String ?? ""
-        if model == "<synthetic>" { return nil }  // local message, not a billed API call
-
-        let input = intField(u, "input_tokens")
-        let output = intField(u, "output_tokens")
-        let cacheRead = intField(u, "cache_read_input_tokens")
-        let cacheWrite = intField(u, "cache_creation_input_tokens")
-
-        sawTurn = true
-        usage.inputTokens += input
-        usage.outputTokens += output
-        usage.cacheReadTokens += cacheRead
-        usage.cacheWriteTokens += cacheWrite
-
-        if let price = priceFor(model) {
-            usage.costUsd! +=
-                (Double(input) * price.inputPerMTok
-                    + Double(cacheRead) * price.inputPerMTok * CACHE_READ_MULT
-                    + Double(cacheWrite) * price.inputPerMTok * CACHE_WRITE_MULT
-                    + Double(output) * price.outputPerMTok)
-                / 1_000_000
-        } else {
-            costKnown = false  // an un-priced model means the total is only partial
-        }
+    // Fold only the records appended since the last poll into the session's running
+    // totals. Starting from the remembered state is what makes a poll with nothing
+    // new a no-op; `onStart` only fires when the reader had to restart from the top
+    // of the file, in which case the accumulated state is stale and must be rebuilt.
+    var acc = usageState.claudeState(cliSessionId) ?? UsageAccumulator()
+    TranscriptReader.shared.scan(file: file!, namespace: usageNamespace, onStart: { fromStart in
+        if fromStart { acc = UsageAccumulator() }
+    }) { rec in
+        addClaudeTurn(rec, to: &acc)
         return nil
     }
+    usageState.setClaude(cliSessionId, acc)
+    return acc.usage
+}
 
-    if !sawTurn { return nil }
-    usage.totalTokens =
-        usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-    if !costKnown { usage.costUsd = nil }
-    return usage
+/// Fold one transcript record into `acc` if it is a billable assistant turn we
+/// haven't already counted.
+private func addClaudeTurn(_ rec: [String: Any], to acc: inout UsageAccumulator) {
+    guard rec["type"] as? String == "assistant" else { return }
+    let msg = rec["message"] as? [String: Any]
+    guard let u = msg?["usage"] as? [String: Any] else { return }
+
+    // Dedup: the same API response is sometimes written multiple times.
+    let msgId = msg?["id"] as? String ?? ""
+    let requestId = rec["requestId"] as? String ?? ""
+    let key = "\(msgId):\(requestId)"
+    if key != ":" && acc.seen.contains(key) { return }
+    acc.seen.insert(key)
+
+    let model = msg?["model"] as? String ?? ""
+    if model == "<synthetic>" { return }  // local message, not a billed API call
+
+    let input = intField(u, "input_tokens")
+    let output = intField(u, "output_tokens")
+    let cacheRead = intField(u, "cache_read_input_tokens")
+    let cacheWrite = intField(u, "cache_creation_input_tokens")
+
+    acc.sawTurn = true
+    acc.inputTokens += input
+    acc.outputTokens += output
+    acc.cacheReadTokens += cacheRead
+    acc.cacheWriteTokens += cacheWrite
+
+    if let price = priceFor(model) {
+        acc.costUsd +=
+            (Double(input) * price.inputPerMTok
+                + Double(cacheRead) * price.inputPerMTok * CACHE_READ_MULT
+                + Double(cacheWrite) * price.inputPerMTok * CACHE_WRITE_MULT
+                + Double(output) * price.outputPerMTok)
+            / 1_000_000
+    } else {
+        acc.costKnown = false  // an un-priced model means the total is only partial
+    }
 }
 
 /// Token usage for a Codex session: the last cumulative `token_count` event.
@@ -172,11 +237,31 @@ public func deriveCodexUsage(
     _ cliSessionId: String,
     _ root: String = CODEX_SESSIONS
 ) async -> SessionUsage? {
-    let cached = fileCache.get(cliSessionId)
-    let files = cached != nil ? [cached!] : await codexRolloutFiles(root)
+    // Rollout already resolved: tail-read only what was appended since the last poll
+    // and keep the newest cumulative tally (juancode-dfhg).
+    if let cached = fileCache.get(cliSessionId) {
+        var latest: CodexTotals? = nil
+        let scan = TranscriptReader.shared.scan(file: cached, namespace: usageNamespace) { rec in
+            guard let payload = rec["payload"] as? [String: Any],
+                  payload["type"] as? String == "token_count",
+                  let info = payload["info"] as? [String: Any],
+                  let total = info["total_token_usage"] as? [String: Any] else { return nil }
+            latest = codexTotals(from: total)
+            return nil
+        }
+        if scan.fromStart { usageState.clearCodex(cliSessionId) }
+        if let latest { usageState.setCodex(cliSessionId, latest) }
+        // Matched the session but no turn has run yet ⇒ still nil.
+        return usageState.codexState(cliSessionId)?.usage
+    }
+
+    // Discovery: matching a rollout to a session id means reading its `session_meta`,
+    // so these passes stay whole-file. Once one matches, the path is cached and every
+    // later poll takes the incremental path above.
+    let files = await codexRolloutFiles(root)
 
     for full in files {
-        var isMatch = cached == full
+        var isMatch = false
         var total: [String: Any]? = nil
         await forEachRecord(full) { rec in
             let payload = rec["payload"] as? [String: Any]
@@ -197,23 +282,27 @@ public func deriveCodexUsage(
         if isMatch {
             fileCache.set(cliSessionId, full)
             guard let t = total else { return nil }  // matched the session but no turn has run yet
-            // Codex `input_tokens` already includes the cached portion, so subtract
-            // it out to report fresh input separately. No per-token price → no cost.
-            let cacheRead = intField(t, "cached_input_tokens")
-            let input = max(0, intField(t, "input_tokens") - cacheRead)
-            let output = intField(t, "output_tokens")
-            let totalTokens = intField(t, "total_tokens", input + output + cacheRead)
-            return SessionUsage(
-                inputTokens: input,
-                outputTokens: output,
-                cacheReadTokens: cacheRead,
-                cacheWriteTokens: 0,
-                totalTokens: totalTokens,
-                costUsd: nil
-            )
+            let totals = codexTotals(from: t)
+            usageState.setCodex(cliSessionId, totals)
+            return totals.usage
         }
     }
     return nil
+}
+
+/// Read Codex's cumulative `total_token_usage` block into totals. Its
+/// `input_tokens` already includes the cached portion, so the cached tokens are
+/// subtracted out to report fresh input separately. Codex exposes no per-token
+/// price, so cost stays nil (see `CodexTotals.usage`).
+private func codexTotals(from total: [String: Any]) -> CodexTotals {
+    let cacheRead = intField(total, "cached_input_tokens")
+    let input = max(0, intField(total, "input_tokens") - cacheRead)
+    let output = intField(total, "output_tokens")
+    return CodexTotals(
+        inputTokens: input,
+        outputTokens: output,
+        cacheReadTokens: cacheRead,
+        totalTokens: intField(total, "total_tokens", input + output + cacheRead))
 }
 
 public func deriveSessionUsage(

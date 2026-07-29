@@ -32,6 +32,20 @@ final class SessionUsageTests: XCTestCase {
         try! contents.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
+    /// Append records the way a CLI does — in place, so the incremental reader's
+    /// remembered offset stays meaningful (juancode-dfhg).
+    private func appendRecords(_ path: String, _ records: [Any]) {
+        let handle = FileHandle(forWritingAtPath: path)!
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try! handle.write(contentsOf: Data(jsonl(records).utf8))
+    }
+
+    private func claudeTranscript(_ root: String, _ id: String) -> String {
+        let dir = (root as NSString).appendingPathComponent("-Users-someone-project")
+        return (dir as NSString).appendingPathComponent("\(id).jsonl")
+    }
+
     private func claudeFixture(_ id: String, _ records: [Any]) -> String {
         let root = (Self.tmp as NSString).appendingPathComponent("claude-\(id)")
         let dir = (root as NSString).appendingPathComponent("-Users-someone-project")
@@ -136,6 +150,49 @@ final class SessionUsageTests: XCTestCase {
         XCTAssertNil(u)
     }
 
+    // MARK: - incremental polling (juancode-dfhg)
+
+    /// Each poll folds only the newly appended turns into the running total, and a
+    /// turn logged again in a later pass is still deduped.
+    func testAccumulatesAppendedTurnsAcrossPollsWithoutDoubleCounting() async {
+        let id = "88888888-8888-8888-8888-888888888888"
+        let first = assistant("m1", "r1", ["input_tokens": 100, "output_tokens": 50])
+        let root = claudeFixture(id, [first])
+        let file = claudeTranscript(root, id)
+
+        var u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.inputTokens, 100)
+        XCTAssertEqual(u.outputTokens, 50)
+
+        appendRecords(file, [assistant("m2", "r2", ["input_tokens": 7, "output_tokens": 3])])
+        u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.inputTokens, 107, "the earlier turn's tokens must survive the next poll")
+        XCTAssertEqual(u.outputTokens, 53)
+
+        // The same response logged a second time, one poll later.
+        appendRecords(file, [first])
+        u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.inputTokens, 107, "a duplicate in a later pass must not be counted")
+        XCTAssertEqual(u.outputTokens, 53)
+
+        // Nothing appended: the totals hold.
+        u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.totalTokens, 160)
+    }
+
+    /// A turn appended after a poll that found nothing still flips usage from nil.
+    func testFirstTurnAppendedAfterAnEmptyPollIsPickedUp() async {
+        let id = "99999999-9999-9999-9999-999999999999"
+        let root = claudeFixture(id, [["type": "user", "message": "hi"]])
+        let beforeAnyTurn = await deriveClaudeUsage(id, root)
+        XCTAssertNil(beforeAnyTurn)
+
+        appendRecords(claudeTranscript(root, id),
+                      [assistant("m1", "r1", ["input_tokens": 4, "output_tokens": 6])])
+        let u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.totalTokens, 10)
+    }
+
     // MARK: - deriveCodexUsage
 
     private func tokenCount(_ info: [String: Int]) -> [String: Any] {
@@ -169,6 +226,32 @@ final class SessionUsageTests: XCTestCase {
         ])
         let u = await deriveCodexUsage(id, root)
         XCTAssertNil(u)
+    }
+
+    /// Codex reports a cumulative tally, so a later poll's newest `token_count` wins
+    /// and a poll with nothing appended keeps the last one.
+    func testCodexKeepsTheNewestCumulativeTallyAcrossPolls() async {
+        let id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let root = codexFixture(id, [
+            ["type": "session_meta", "payload": ["id": id, "cwd": "/x"]],
+            tokenCount(["input_tokens": 100, "cached_input_tokens": 0,
+                        "output_tokens": 10, "total_tokens": 110]),
+        ])
+        let file = (((root as NSString).appendingPathComponent("2026/06") as NSString)
+            .appendingPathComponent("23") as NSString).appendingPathComponent("rollout-x.jsonl")
+
+        var u = (await deriveCodexUsage(id, root))!
+        XCTAssertEqual(u.totalTokens, 110)
+
+        appendRecords(file, [tokenCount(["input_tokens": 5000, "cached_input_tokens": 4000,
+                                         "output_tokens": 600, "total_tokens": 5600])])
+        u = (await deriveCodexUsage(id, root))!
+        XCTAssertEqual(u.inputTokens, 1000)
+        XCTAssertEqual(u.cacheReadTokens, 4000)
+        XCTAssertEqual(u.totalTokens, 5600)
+
+        u = (await deriveCodexUsage(id, root))!
+        XCTAssertEqual(u.totalTokens, 5600, "a poll with nothing new keeps the last tally")
     }
 
     func testIgnoresRolloutsForOtherSessions() async {

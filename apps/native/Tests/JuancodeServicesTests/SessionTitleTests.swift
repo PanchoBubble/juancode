@@ -95,6 +95,42 @@ final class SessionTitleTests: XCTestCase {
         XCTAssertNil(title)
     }
 
+    // MARK: - incremental polling (juancode-dfhg)
+
+    /// Successive polls read only what was appended: a newer `ai-title` replaces the
+    /// old one, and a poll that brought nothing new keeps the title already found
+    /// (rather than falling back to the placeholder).
+    func testKeepsAndUpdatesTheTitleAcrossPolls() async {
+        let id = "77777777-7777-7777-7777-777777777777"
+        let root = claudeFixture(id, [["type": "user", "message": "hi"]])
+        let file = ((root as NSString).appendingPathComponent("-Users-someone-project") as NSString)
+            .appendingPathComponent("\(id).jsonl")
+        let beforeAnyTitle = await deriveClaudeTitle(id, root)
+        XCTAssertNil(beforeAnyTitle)
+
+        appendRecords(file, [["type": "ai-title", "aiTitle": "First guess", "sessionId": id]])
+        var title = await deriveClaudeTitle(id, root)
+        XCTAssertEqual(title, "First guess")
+
+        // Nothing appended: the title an earlier pass found still stands.
+        title = await deriveClaudeTitle(id, root)
+        XCTAssertEqual(title, "First guess")
+
+        appendRecords(file, [["type": "ai-title", "aiTitle": "Fix the auth redirect bug",
+                              "sessionId": id]])
+        title = await deriveClaudeTitle(id, root)
+        XCTAssertEqual(title, "Fix the auth redirect bug")
+    }
+
+    /// Append records the way a CLI does — in place, so the incremental reader's
+    /// remembered offset stays meaningful.
+    private func appendRecords(_ path: String, _ records: [Any]) {
+        let handle = FileHandle(forWritingAtPath: path)!
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try! handle.write(contentsOf: Data(jsonl(records).utf8))
+    }
+
     // MARK: - deriveCodexTitle
 
     func testReturnsFirstUserMessageForMatchingSession() async {

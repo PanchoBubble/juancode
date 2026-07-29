@@ -51,6 +51,16 @@ private final class FileCache: @unchecked Sendable {
 }
 private let fileCache = FileCache()
 
+/// Namespace for this module's read positions in `TranscriptReader` (the usage poll
+/// reads the same files at its own pace under its own namespace).
+private let titleNamespace = "title"
+
+/// The latest `ai-title` seen for a session, carried across polls: an incremental
+/// pass that appended no new title must keep reporting the previous one rather than
+/// fall back to the placeholder (juancode-dfhg). Also holds a resolved Codex title,
+/// which never changes once its first user message is written.
+private let titleCache = FileCache()
+
 /// Collapse whitespace and trim/truncate a raw prompt or summary into a title.
 public func tidy(_ raw: String) -> String? {
     // Replace each run of whitespace with a single space, then trim. Mirrors the
@@ -127,6 +137,11 @@ public func forEachRecord(
 }
 
 /// Latest `ai-title` (model-generated summary) from a Claude transcript.
+///
+/// Reads only the records appended since the last call (`TranscriptReader`): the CLI
+/// appends one `ai-title` per rename, so the newest one in this pass wins, and a pass
+/// that brought none keeps the title an earlier pass found. Re-parsing the whole
+/// transcript every 4s per session is what this replaces (juancode-dfhg).
 public func deriveClaudeTitle(
     _ cliSessionId: String,
     _ root: String = CLAUDE_PROJECTS
@@ -138,21 +153,30 @@ public func deriveClaudeTitle(
         file = found
     }
     var title: String? = nil
-    await forEachRecord(file!) { rec in
+    let scan = TranscriptReader.shared.scan(file: file!, namespace: titleNamespace) { rec in
         if rec["type"] as? String == "ai-title", let aiTitle = rec["aiTitle"] as? String {
             title = aiTitle  // keep scanning — take the most recent one
         }
         return nil
     }
-    if let title { return tidy(title) }
-    return nil
+    // A restarted pass (first sight, or a rewritten file) re-read everything, so the
+    // remembered title is superseded by whatever this pass found — including nothing.
+    let prior = scan.fromStart ? nil : titleCache.get(cliSessionId)
+    guard let raw = title ?? prior else { return nil }
+    titleCache.set(cliSessionId, raw)
+    return tidy(raw)
 }
 
 /// First user prompt from a Codex rollout, located by its session_meta id.
+///
+/// The first user message never changes, so once found it is cached and no further
+/// poll touches the file at all (juancode-dfhg) — discovery still needs whole-file
+/// scans, since matching a rollout to a session id means reading its `session_meta`.
 public func deriveCodexTitle(
     _ cliSessionId: String,
     _ root: String = CODEX_SESSIONS
 ) async -> String? {
+    if let resolved = titleCache.get(cliSessionId) { return tidy(resolved) }
     let cached = fileCache.get(cliSessionId)
     let files = cached != nil ? [cached!] : await codexRolloutFiles(root)
 
@@ -177,8 +201,9 @@ public func deriveCodexTitle(
         }
         if isMatch {
             fileCache.set(cliSessionId, full)
-            if let prompt { return tidy(prompt) }  // matched; nil if no prompt yet
-            return nil
+            guard let prompt else { return nil }  // matched; no prompt written yet
+            titleCache.set(cliSessionId, prompt)
+            return tidy(prompt)
         }
     }
     return nil
