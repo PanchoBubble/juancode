@@ -58,6 +58,19 @@ struct ResumableSession: Identifiable, Sendable {
     var id: String { cliSessionId }
 }
 
+/// One session's activity, observable on its own.
+///
+/// `AppModel.activities` is a single `@Observable` property, so a row body that reads it
+/// depends on EVERY session's activity: one echoing keystroke re-rendered every visible
+/// row (and, before the split, the whole sidebar). A box per session narrows that to the
+/// one row whose agent actually changed state (juancode-2n0).
+@MainActor
+@Observable
+final class SessionActivityBox {
+    var activity: SessionActivity?
+    init(_ activity: SessionActivity?) { self.activity = activity }
+}
+
 /// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
 /// local UI is an in-process subscriber to the same `SessionRegistry` the
 /// embedded server drives — there is no WS hop for the local view.
@@ -508,7 +521,10 @@ final class AppModel {
     }
 
     private func clearUnread(_ id: String) {
+        let hadUnseen = unseenCompletions.contains(id)
         unseenCompletions.remove(id)
+        // A cleared done-unseen check drops the row out of the bubbled tier.
+        if hadUnseen { syncSidebarOrder() }
         // Drop any lingering OS notification so a seen session doesn't leave a stale
         // ding in Notification Center (juancode-bao).
         agentNotifier.clear(sessionId: id)
@@ -545,6 +561,15 @@ final class AppModel {
         merged.append(contentsOf: liveSessions.map(\.meta).filter { !persistedIds.contains($0.id) })
         sessions = merged
         for m in sessions { metaCache[m.id] = m }
+        // Liveness just changed for someone (this is the create/exit/adopt path), which
+        // is exactly what the sidebar's sink/bubble order keys off.
+        syncSidebarOrder()
+        // Drop activity boxes for sessions that are gone, so a long run doesn't
+        // accumulate one per deleted session.
+        let known = Set(sessions.map(\.id))
+        if activityBoxes.contains(where: { !known.contains($0.key) }) {
+            activityBoxes = activityBoxes.filter { known.contains($0.key) }
+        }
         // Every registry change routes through here (create / exit / swap), so this
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
@@ -651,6 +676,56 @@ final class AppModel {
     }
 
     func activity(_ id: String) -> SessionActivity? { activities[id] }
+
+    /// The observable box carrying `id`'s activity, or nil for a session that hasn't
+    /// run this launch. Sidebar rows read this instead of `activities` so one session's
+    /// flip doesn't invalidate every other row (see `SessionActivityBox`).
+    func activityBox(_ id: String) -> SessionActivityBox? { activityBoxes[id] }
+
+    /// Single writer for a session's activity: patches the shared dictionary (the
+    /// palettes, the Oracle bridge) and the per-session box (the sidebar row), each
+    /// only on a real change — `@Observable` notifies on equal writes too.
+    private func setActivity(_ id: String, _ state: SessionActivity?) {
+        if activities[id] != state { activities[id] = state }
+        if let box = activityBoxes[id] {
+            if box.activity != state { box.activity = state }
+        } else {
+            activityBoxes[id] = SessionActivityBox(state)
+        }
+    }
+
+    /// Activity boxes by session id. The dictionary changes only when a session first
+    /// runs or is dropped, so a row's dependency on it is structural, not per-tick.
+    private var activityBoxes: [String: SessionActivityBox] = [:]
+
+    // MARK: - Sidebar order projection (juancode-2n0)
+
+    /// Per-session order bucket the sidebar's within-project sort reads, kept apart
+    /// from `activities` so the grouping/sorting pass depends only on state that can
+    /// actually move a row. Busy↔idle is collapsed out (`sidebarOrderAttention`), so
+    /// an agent working — the typing path — leaves this untouched.
+    private(set) var sidebarOrder: [String: SessionAttention] = [:]
+
+    /// `id`'s order bucket, defaulting to a resting live session for anything not yet
+    /// projected. Every create/exit routes through `refresh`, which re-sweeps.
+    func orderAttention(_ id: String) -> SessionAttention { sidebarOrder[id] ?? .idle }
+
+    /// Re-project every known session's order bucket, publishing only on a real
+    /// change. Called from each path that can move a row: registry create/exit
+    /// (`refresh`), activity edges, unread/unseen clears, and external discovery.
+    private func syncSidebarOrder() {
+        let live = Set(appState.registry.all().map(\.id))
+        var next: [String: SessionAttention] = [:]
+        next.reserveCapacity(sessions.count + externalSessions.count)
+        func project(_ id: String) {
+            next[id] = sidebarOrderAttention(live: live.contains(id), activity: activities[id],
+                                             unseenDone: unseenCompletions.contains(id),
+                                             crashOrphan: pendingCrashOrphans.contains(id))
+        }
+        for meta in sessions { project(meta.id) }
+        for meta in externalSessions where next[meta.id] == nil { project(meta.id) }
+        if next != sidebarOrder { sidebarOrder = next }
+    }
 
     func isLive(_ id: String) -> Bool { appState.registry.get(id) != nil }
 
@@ -845,7 +920,7 @@ final class AppModel {
     }
 
     private func watch(_ s: Session) {
-        activities[s.id] = s.activity
+        setActivity(s.id, s.activity)
         // Every session reaches here exactly once per pty (registry `onCreate`, plus a
         // sweep at init), which is also the right moment to start waiting for its
         // first painted byte.
@@ -863,8 +938,14 @@ final class AppModel {
                 // a keystroke echoes, the detector re-evaluates, and an `@Observable`
                 // write notifies even when the value is identical, re-running the
                 // sidebar on the main thread while the echo waits to paint (juancode-2n0).
-                if prev != st { self.activities[s.id] = st }
-                if isEditor { return }
+                self.setActivity(s.id, st)
+                if isEditor {
+                    // An editor pane's activity still feeds its row glyph, and .editor
+                    // sessions sort with the rest, so the projection follows even though
+                    // none of the turn-end bookkeeping below applies to them.
+                    self.syncSidebarOrder()
+                    return
+                }
                 // Sidebar "done since you last looked" check (juancode-t9p): set on
                 // a turn finishing off-screen, dropped when a new turn starts.
                 switch unseenCompletionEffect(prev: prev, next: st, notify: notify,
@@ -875,6 +956,9 @@ final class AppModel {
                 case .clear: if self.unseenCompletions.contains(s.id) { self.unseenCompletions.remove(s.id) }
                 case .none: break
                 }
+                // Both inputs the sidebar order reads (activity bucket, done-unseen) have
+                // settled for this edge; re-project once. A no-op unless a row moved.
+                self.syncSidebarOrder()
                 // `notify` marks a real turn boundary (the agent finished or now
                 // needs you). Bounce the Dock + bump the badge so background work is
                 // noticeable. See `notifyTurnEnd`.
@@ -1469,6 +1553,7 @@ final class AppModel {
             if discovered != externalSessions {
                 externalSessions = discovered
                 externalIds = Set(discovered.map(\.id))
+                syncSidebarOrder()
             }
             if externalHasMore != result.hasMore { externalHasMore = result.hasMore }
             externalLoading = false

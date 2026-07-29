@@ -339,4 +339,66 @@ import Testing
         #expect(manualRestingPrecedes(orphan, dead))
         #expect(manualRestingPrecedes(placed, dead))
     }
+
+    @Test func sidebarOrderIgnoresBusyIdleChurn() {
+        // The whole point of the projection (juancode-2n0): a live agent working and
+        // the same agent resting land on the SAME bucket, so its busy↔idle flips never
+        // change what the sidebar observes.
+        let busy = sidebarOrderAttention(live: true, activity: .busy,
+                                         unseenDone: false, crashOrphan: false)
+        let idle = sidebarOrderAttention(live: true, activity: .idle,
+                                         unseenDone: false, crashOrphan: false)
+        #expect(busy == idle)
+        #expect(busy == .idle)
+    }
+
+    @Test func sidebarOrderKeepsTheBucketsThatMoveRows() {
+        // Bubbling states and the dead-sink still come through, and a crash orphan
+        // still rests instead of sinking.
+        #expect(sidebarOrderAttention(live: true, activity: .waitingInput,
+                                      unseenDone: false, crashOrphan: false) == .waitingInput)
+        #expect(sidebarOrderAttention(live: true, activity: .idle,
+                                      unseenDone: true, crashOrphan: false) == .doneUnseen)
+        #expect(sidebarOrderAttention(live: false, activity: nil,
+                                      unseenDone: false, crashOrphan: false) == .exited)
+        #expect(sidebarOrderAttention(live: false, activity: nil,
+                                      unseenDone: false, crashOrphan: true) == .idle)
+    }
+
+    @Test func sidebarOrderPreservesEveryOrderingDecision() {
+        // Belt-and-braces: for every input combination the projected bucket must sort
+        // identically to the un-collapsed resting attention it replaces. If a future
+        // ordering rule starts distinguishing `.working`, this fails.
+        let states: [SessionActivity?] = [nil, .idle, .busy, .waitingInput]
+        var cases: [(SessionAttention, SessionAttention)] = []
+        for live in [true, false] {
+            for activity in states {
+                for unseenDone in [true, false] {
+                    for crashOrphan in [true, false] {
+                        let projected = sidebarOrderAttention(live: live, activity: activity,
+                                                              unseenDone: unseenDone,
+                                                              crashOrphan: crashOrphan)
+                        let raw = restingAttention(
+                            sessionAttention(live: live, activity: activity, unseenDone: unseenDone),
+                            crashOrphan: crashOrphan)
+                        cases.append((projected, raw))
+                    }
+                }
+            }
+        }
+        for (i, a) in cases.enumerated() {
+            for b in cases[i...] {
+                func key(_ attention: SessionAttention, _ manual: Int?, _ id: String) -> ManualSortKey {
+                    ManualSortKey(key: SessionSortKey(attention: attention, updatedAt: 1, createdAt: 1),
+                                  manualIndex: manual, id: id)
+                }
+                for manualA in [nil, 0] as [Int?] {
+                    for manualB in [nil, 1] as [Int?] {
+                        #expect(manualWithBubblePrecedes(key(a.0, manualA, "a"), key(b.0, manualB, "b"))
+                                == manualWithBubblePrecedes(key(a.1, manualA, "a"), key(b.1, manualB, "b")))
+                    }
+                }
+            }
+        }
+    }
 }

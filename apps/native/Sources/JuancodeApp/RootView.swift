@@ -660,21 +660,25 @@ struct SidebarView: View {
         return Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
-    /// One session's attention bucket, mirroring the row glyph exactly.
+    /// One session's *order* bucket, read from the model's narrow projection
+    /// (`sidebarOrderAttention`) rather than derived here from live activity,
+    /// liveness and the done-unseen set.
+    ///
+    /// That indirection is the point: deriving it inline made this whole view depend
+    /// on `activities`, so every busy↔idle flip on the typing path re-grouped all
+    /// ~550 sessions. The projection already folds in `restingAttention` (crash
+    /// orphans rest instead of sinking) and collapses `.working` into `.idle`, which
+    /// no ordering rule distinguishes. Row glyphs still read the real activity —
+    /// see `SessionRowHost` (juancode-2n0).
     private func attention(_ meta: SessionMeta) -> SessionAttention {
-        sessionAttention(live: model.isLive(meta.id),
-                         activity: model.activity(meta.id),
-                         unseenDone: model.unseenCompletions.contains(meta.id))
+        model.orderAttention(meta.id)
     }
 
-    /// The manual-order sort inputs for one session: its attention (bubbling +
+    /// The manual-order sort inputs for one session: its order bucket (bubbling +
     /// dead-sink), timestamps, and its slot in the user's persisted drag order.
-    /// Unrevived crash orphans rest like idle live sessions (`restingAttention`)
-    /// so a crash/relaunch doesn't bury them behind "Load more".
     private func manualSortKey(_ meta: SessionMeta, slots: [String: Int]) -> ManualSortKey {
         ManualSortKey(
-            key: SessionSortKey(attention: restingAttention(attention(meta),
-                                                            crashOrphan: model.isCrashOrphan(meta.id)),
+            key: SessionSortKey(attention: attention(meta),
                                 updatedAt: meta.updatedAt, createdAt: meta.createdAt),
             manualIndex: slots[meta.id],
             id: meta.id)
@@ -1132,7 +1136,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func nativeRow(_ meta: SessionMeta) -> some View {
         let external = model.isExternal(meta.id)
-        let row = sessionRow(meta)
+        let row = sessionRow(meta, external: external)
             .tag(meta.id)
             .selectionDisabled(external)
             // A minimal hairline between session rows for visual separation.
@@ -1158,7 +1162,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func scrollRow(_ meta: SessionMeta) -> some View {
         let external = model.isExternal(meta.id)
-        let row = sessionRow(meta)
+        let row = sessionRow(meta, external: external)
             .padding(.horizontal, 8)
             .padding(.vertical, 1)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1231,24 +1235,13 @@ struct SidebarView: View {
         }
     }
 
-    private func sessionRow(_ meta: SessionMeta) -> SessionRow {
-        let external = model.isExternal(meta.id)
-        return SessionRow(meta: meta, activity: model.activity(meta.id),
-                          live: model.isLive(meta.id), external: external,
-                          tracked: external ? nil : model.trackedPr(forSession: meta.id),
-                          trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
-                          unread: model.unreadSessions.contains(meta.id),
-                          unseenDone: model.unseenCompletions.contains(meta.id),
-                          atRisk: !external && model.workAtRisk(forSession: meta) != nil,
-                          worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
-                          changeBadge: external ? nil : model.changeBadge(meta.id),
-                          onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
-                          onResume: external ? { model.importExternalSession(meta.id) } : nil,
-                          onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
-                          menuContent: external ? nil : { AnyView(rowContextMenu(meta)) },
-                          onCloseRequested: external ? nil : { confirmingClose = meta },
-                          selected: model.selection == meta.id,
-                          activating: model.isActivating(meta.id))
+    /// One session's row, as its own view so the per-session state it paints is
+    /// observed there instead of here (see `SessionRowHost`).
+    private func sessionRow(_ meta: SessionMeta, external: Bool) -> SessionRowHost {
+        SessionRowHost(meta: meta, external: external,
+                       selected: model.selection == meta.id,
+                       confirmClose: { confirmingClose = meta },
+                       menu: { AnyView(rowContextMenu(meta)) })
     }
 
     /// What closing this session actually discards, spelled out in the confirm alert.
@@ -1313,6 +1306,51 @@ struct SidebarView: View {
     private func beginRename(_ meta: SessionMeta) {
         renameText = meta.title
         renaming = meta
+    }
+}
+
+/// One session row, split out so its per-session state is observed here rather than
+/// in `SidebarView.body`.
+///
+/// Every read below used to happen inside the sidebar's own body, which made the whole
+/// sidebar — filter, grouping, sort, every folder header — depend on all of it: one
+/// agent flipping busy re-derived the lot while the keystroke that caused the echo
+/// waited to paint. Now an activity tick invalidates only the rows, and the activity
+/// arrives through a per-session box (`AppModel.activityBox`) so it's only the row whose
+/// agent actually moved. The grouping pass upstream never sees it (juancode-2n0).
+private struct SessionRowHost: View {
+    @Environment(AppModel.self) private var model
+    let meta: SessionMeta
+    /// A discovered terminal session not yet imported. Resolved by the caller, which
+    /// needs it for the List's `.tag`/selection anyway, off a set that only changes
+    /// when discovery re-runs.
+    let external: Bool
+    /// Whether this row is the current selection — also the caller's, for the same
+    /// reason (it drives the row's own background chrome).
+    let selected: Bool
+    /// Ask to close this session; the caller owns the confirmation alert.
+    let confirmClose: () -> Void
+    /// The hover ellipsis menu's content (the context menu's items).
+    let menu: () -> AnyView
+
+    var body: some View {
+        SessionRow(meta: meta,
+                   activity: model.activityBox(meta.id)?.activity,
+                   live: model.isLive(meta.id), external: external,
+                   tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                   trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
+                   unread: model.unreadSessions.contains(meta.id),
+                   unseenDone: model.unseenCompletions.contains(meta.id),
+                   atRisk: !external && model.workAtRisk(forSession: meta) != nil,
+                   worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
+                   changeBadge: external ? nil : model.changeBadge(meta.id),
+                   onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
+                   onResume: external ? { model.importExternalSession(meta.id) } : nil,
+                   onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
+                   menuContent: external ? nil : menu,
+                   onCloseRequested: external ? nil : confirmClose,
+                   selected: selected,
+                   activating: model.isActivating(meta.id))
     }
 }
 

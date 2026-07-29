@@ -101,6 +101,24 @@ public func restingAttention(_ attention: SessionAttention, crashOrphan: Bool) -
     (crashOrphan && attention == .exited) ? .idle : attention
 }
 
+/// The sidebar's *order* bucket for one session: `restingAttention` with `.working`
+/// collapsed into `.idle`.
+///
+/// The within-project order is deliberately blind to busy↔idle — `manualRestingPrecedes`
+/// reads only `.exited` and `manualWithBubblePrecedes` only the two bubbling states — so
+/// collapsing `.working` changes no ordering. What it buys is stillness: a working agent's
+/// activity flips no longer change the projection the sidebar observes, so an echoing
+/// keystroke can't re-derive the folder grouping (juancode-2n0). Row glyphs keep reading
+/// the real activity.
+public func sidebarOrderAttention(
+    live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool
+) -> SessionAttention {
+    let resting = restingAttention(
+        sessionAttention(live: live, activity: activity, unseenDone: unseenDone),
+        crashOrphan: crashOrphan)
+    return resting == .working ? .idle : resting
+}
+
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
 /// sort: its smart-sort key, its slot in the user's persisted drag order
 /// (`nil` when the user hasn't placed it yet), and its id as the stable
