@@ -1302,16 +1302,7 @@ private struct GitHubChecksSection: View {
                 }
                 .padding(.vertical, 4)
             } else if let logs = model.github.ciLogs[key] {
-                ScrollView {
-                    Text(logs)
-                        .font(.system(size: 10, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 180)
-                .padding(6)
-                .background(Color.red.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                ActionsLogView(text: logs)
             }
         }
     }
