@@ -621,6 +621,26 @@ struct SidebarView: View {
         }
     }
 
+    /// Fingerprint of the sidebar's *structure*: which sessions sit in which folder and
+    /// whether each one is live. Drives the row-slide animation.
+    ///
+    /// Deliberately order-insensitive — see the `.animation` call site. A hash rather
+    /// than the nested `[[String]]` it replaced, which allocated an array per folder on
+    /// every body evaluation just to be compared and thrown away. A hash collision would
+    /// cost one skipped slide, which is invisible.
+    private func structureKey(_ groups: [FolderGroup]) -> Int {
+        var hasher = Hasher()
+        for g in groups {
+            hasher.combine(g.cwd)
+            hasher.combine(g.sessions.count)
+            for s in g.sessions {
+                hasher.combine(s.id)
+                hasher.combine(model.isLive(s.id))
+            }
+        }
+        return hasher.finalize()
+    }
+
     /// The user's manual slot per session id for one project (empty when the
     /// user never dragged in that folder).
     private func manualSlots(_ cwd: String) -> [String: Int] {
@@ -890,9 +910,17 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             // Slide rows to their new slot when a session dies and sinks, instead
-            // of snapping (juancode-05u). Keyed on the per-group ordered id lists so
-            // it fires only on an actual reorder, not on every activity tick.
-            .animation(.easeInOut(duration: 0.28), value: groups.map { $0.sessions.map(\.id) })
+            // of snapping (juancode-05u).
+            //
+            // Keyed on STRUCTURE, not order. Attention bubbling reorders rows on every
+            // tool call, so keying on the ordered id lists meant an activity tick
+            // animated the entire List for 0.28s — and SwiftUI re-evaluates the animating
+            // subtree every frame, so `makeGroups()` and every `FolderHeader` ran ~17
+            // times per tick instead of once. Measured as ~46% of the main thread inside
+            // NSAnimationContext/CA::Transaction::commit, which is what made typing feel
+            // laggy (juancode-2n0). A death still animates: liveness changes, which is
+            // the sink this exists for. A pure reorder now snaps.
+            .animation(.easeInOut(duration: 0.28), value: structureKey(groups))
             .focused($listFocused)
             // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
             .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
