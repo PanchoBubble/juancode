@@ -175,6 +175,109 @@ final class SessionReaperTests: XCTestCase {
         XCTAssertEqual(evaluate(sample, baseline: base, nowMs: t0 + windowMs - 2000), .holding(base))
     }
 
+    // MARK: - the 2026-07-30 bulk-kill incident (juancode-lgq regression guards)
+
+    /// The 843d8826 timeline from `session-activity.log`, replayed against the pure
+    /// policy: spawned 11:32:51, flipping busy/idle up to 11:42:47, killed 11:42:56.
+    ///
+    /// This one PASSES unchanged — deliberately. The incident report blamed the
+    /// streak for expiring while the session was working, and the point of pinning
+    /// the timeline here is that the policy never could have done that: nine
+    /// seconds of idle cannot serve a 30-minute window, whatever the baseline says.
+    /// The kills came from the app-quit path, which never consults this policy at
+    /// all (`AppState.shutdownGracefully`). Keeping the guard means a future change
+    /// that *does* make the policy trigger-happy fails here first.
+    func testBusyNineSecondsBeforeTheKillIsNowhereNearEligible() {
+        let busyAt = t0
+        let killAt = busyAt + 9_000
+        // Even with a baseline as old as the session's whole life, the busy sample
+        // hard-resets, and the following idle sample restarts the streak from now.
+        let stale = SessionReapPolicy.Baseline(idleSinceMs: t0 - 10 * windowMs,
+                                               descendantCount: 3, cpuTimeMs: 10_000)
+        XCTAssertEqual(evaluate(idleSample(activity: .busy), baseline: stale, nowMs: busyAt),
+                       .notIdle)
+        // One second later it reads idle again: a FRESH baseline, not eligibility.
+        XCTAssertEqual(
+            evaluate(idleSample(), baseline: nil, nowMs: busyAt + 1_000),
+            .holding(.init(idleSinceMs: busyAt + 1_000, descendantCount: 3, cpuTimeMs: 10_000))
+        )
+        // And at the kill instant the streak is 8s old against a 30-minute window.
+        XCTAssertEqual(
+            evaluate(idleSample(),
+                     baseline: .init(idleSinceMs: busyAt + 1_000, descendantCount: 3,
+                                     cpuTimeMs: 10_000),
+                     nowMs: killAt),
+            .holding(.init(idleSinceMs: busyAt + 1_000, descendantCount: 3, cpuTimeMs: 10_000))
+        )
+    }
+
+    /// An autonomous dispatched agent never receives pty input, so `lastInputMs`
+    /// stays at spawn time forever. That must not on its own make it reapable while
+    /// it is demonstrably working — the activity/transcript/CPU signals still rule.
+    func testDispatchedAgentWithNoHumanInputIsStillSparedWhileBusy() {
+        let neverTyped = t0 - 6 * 60 * 60 * 1000 // spawned six hours ago, no keystrokes
+        XCTAssertEqual(
+            evaluate(idleSample(activity: .busy, lastInputMs: neverTyped),
+                     baseline: baseAtT0, nowMs: t0 + windowMs),
+            .notIdle
+        )
+        XCTAssertEqual(
+            evaluate(idleSample(activity: .waitingInput, lastInputMs: neverTyped),
+                     baseline: baseAtT0, nowMs: t0 + windowMs),
+            .notIdle
+        )
+        // Idle but with a transcript that grew: still spared, input age irrelevant.
+        XCTAssertEqual(
+            evaluate(idleSample(lastInputMs: neverTyped, transcriptMtimeMs: t0 + 1),
+                     baseline: baseAtT0, nowMs: t0 + windowMs),
+            .holding(.init(idleSinceMs: t0 + windowMs, descendantCount: 3, cpuTimeMs: 10_000))
+        )
+    }
+
+    // MARK: - quit-sleep classification (the path that actually issued the kills)
+
+    func testQuitSleepFlagsBusyAndWaitingInputAsWorkInFlight() {
+        XCTAssertEqual(SessionQuitSleep.reason(for: .busy), .quitBusy)
+        XCTAssertEqual(SessionQuitSleep.reason(for: .waitingInput), .quitWaitingInput)
+        XCTAssertTrue(SessionQuitSleep.reason(for: .busy).workInFlight)
+        XCTAssertTrue(SessionQuitSleep.reason(for: .waitingInput).workInFlight)
+    }
+
+    func testQuitSleepOfAnIdleSessionLosesNothing() {
+        XCTAssertEqual(SessionQuitSleep.reason(for: .idle), .quit)
+        XCTAssertFalse(SessionQuitSleep.reason(for: .idle).workInFlight)
+        XCTAssertFalse(SessionSleepReason.idleReap.workInFlight)
+    }
+
+    func testWouldInterruptWorkDetectsAnyUnfinishedTurnInTheBatch() {
+        XCTAssertFalse(SessionQuitSleep.wouldInterruptWork([]))
+        XCTAssertFalse(SessionQuitSleep.wouldInterruptWork([.idle, .idle]))
+        // One busy agent among two dozen idle ones still means work is lost.
+        XCTAssertTrue(SessionQuitSleep.wouldInterruptWork(
+            Array(repeating: .idle, count: 24) + [.busy]))
+        XCTAssertTrue(SessionQuitSleep.wouldInterruptWork([.idle, .waitingInput]))
+    }
+
+    // MARK: - the focused pane really is protected in production
+
+    /// `ReapSample.isProtected` documented the focused pane as never-reaped and the
+    /// policy honoured it, but the production probe factory took the
+    /// never-protected default — so the guard was dead code outside the tests. The
+    /// 6b6cf81f oracle pane was reaped with `isProtected` structurally false.
+    func testLiveProbesHonourTheProtectionBox() {
+        let protection = SessionProtection()
+        let probes = SessionReaperProbes.live(protection: protection)
+        XCTAssertFalse(probes.isProtected("focused-pane"))
+        protection.setProtected(["focused-pane"])
+        XCTAssertTrue(probes.isProtected("focused-pane"))
+        XCTAssertFalse(probes.isProtected("some-other-session"))
+        // Selection moving away releases the old pane.
+        protection.setProtected(["another-pane"])
+        XCTAssertFalse(probes.isProtected("focused-pane"))
+        protection.setProtected([])
+        XCTAssertFalse(probes.isProtected("another-pane"))
+    }
+
     // MARK: - sweep integration (fake pty + fake probes)
 
     private struct FakeResolver: BinaryResolver {
@@ -218,11 +321,128 @@ final class SessionReaperTests: XCTestCase {
         )
     }
 
+    /// A fresh registry over a fake pty script, plus its store and queue.
+    private func makeRegistry() -> (SessionRegistry, InMemorySessionStore, MessageQueue) {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCodexId: { _, _ in nil }
+        ))
+        return (registry, store, queue)
+    }
+
+    /// The focused pane survives a served window, then dies once focus moves off it.
+    ///
+    /// Built from the PRODUCTION probe factory and keeping its real `isProtected`
+    /// closure — that closure is the thing under test, since the defect was the
+    /// wiring rather than the policy. Only the clock and the transcript stat are
+    /// swapped: the real one rescans the CLI transcript directories on every sweep
+    /// (seconds, for a fake session id that will never be found) which makes the
+    /// test both slow and time-dependent. The libproc tree/CPU probes stay real.
+    func testSweepWithLiveProbesSparesTheFocusedPane() async throws {
+        let (registry, store, queue) = makeRegistry()
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        let protection = SessionProtection()
+        protection.setProtected([session.id]) // this is the pane the user is looking at
+        let clock = Clock(nowMs())
+        var probes = SessionReaperProbes.live(protection: protection)
+        probes.nowMs = { clock.now }
+        probes.transcriptMtimeMs = { _, _ in nil }
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: probes, windowMs: windowMs)
+
+        // Sweep across several served windows: a protected pane is never reaped,
+        // however long it sits there looking idle.
+        for _ in 0..<3 {
+            clock.now += windowMs
+            let reaped = await reaper.sweepOnce()
+            XCTAssertEqual(reaped, [])
+        }
+        XCTAssertTrue(session.isRunning)
+        XCTAssertNotEqual(store.get(session.id)?.dormant, true)
+
+        // Focus moves away: it becomes an ordinary idle session and is reaped, so the
+        // protection is genuinely doing the sparing (not some unrelated exemption).
+        protection.setProtected([])
+        _ = await reaper.sweepOnce() // fresh baseline now that it's eligible at all
+        clock.now += windowMs
+        let reapedAfterBlur = await reaper.sweepOnce()
+        XCTAssertEqual(reapedAfterBlur, [session.id])
+        await waitUntil("idle-reap reason persisted") {
+            store.get(session.id)?.sleepReason == .idleReap
+        }
+    }
+
+    /// The verdict must be re-checked at the instant of the kill, not just at the
+    /// instant of the decision: a sweep awaits a transcript stat per session, so an
+    /// `.eligible` computed for the first session can be stale by the time the loop
+    /// acts on it. Here `isProtected` answers false while the sample is assembled and
+    /// true at the kill-time re-check — the session must survive on the second answer.
+    func testEligibleVerdictIsRecheckedBeforeTheKill() async throws {
+        let (registry, store, queue) = makeRegistry()
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        // Protection flips to true only from the second probe call onwards, i.e.
+        // after the sample was assembled with isProtected == false.
+        let calls = Counter()
+        let clock = Clock(nowMs())
+        var probes = quietProbes(clock: clock)
+        probes.isProtected = { _ in calls.bump() > 1 }
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: probes, windowMs: windowMs)
+
+        _ = await reaper.sweepOnce() // baseline (2 probe calls: sample + no kill)
+        calls.reset()
+        clock.now += windowMs
+        // The policy says eligible off the sample, and the re-check vetoes it.
+        let reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        XCTAssertGreaterThan(calls.value, 1, "kill site must consult the probe again")
+        XCTAssertTrue(session.isRunning)
+        XCTAssertNotEqual(store.get(session.id)?.dormant, true)
+    }
+
+    /// A thread-safe call counter for probe closures.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        /// Increment and return the new count.
+        func bump() -> Int { lock.withLock { n += 1; return n } }
+        var value: Int { lock.withLock { n } }
+        func reset() { lock.withLock { n = 0 } }
+    }
+
     private func waitForIdle(_ session: Session) async {
         for _ in 0..<100 where session.activity != .idle {
             try? await Task.sleep(for: .milliseconds(100))
         }
         XCTAssertEqual(session.activity, .idle)
+    }
+
+    /// Poll until `check()` holds. `markDormant` snapshots the meta under the lock
+    /// and hands the write to a background `persistQueue`, so the store trails the
+    /// in-memory meta by a queue hop — asserting on it inline is a race (an
+    /// intermittent one these tests were already losing sometimes).
+    private func waitUntil(
+        _ message: String,
+        _ check: @escaping () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<200 where !check() {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(check(), message, file: file, line: line)
     }
 
     func testSweepReapsToDormantAndResumeClearsIt() async throws {
@@ -260,7 +480,10 @@ final class SessionReaperTests: XCTestCase {
         clock.now += windowMs / 2
         reaped = await reaper.sweepOnce()
         XCTAssertEqual(reaped, [session.id])
-        XCTAssertEqual(store.get(session.id)?.dormant, true)
+        await waitUntil("dormant flag persisted") { store.get(session.id)?.dormant == true }
+        // Stamped as a verified-idle reap, so the UI can say "nothing was lost".
+        XCTAssertEqual(store.get(session.id)?.sleepReason, .idleReap)
+        XCTAssertEqual(store.get(session.id)?.sleepReason?.workInFlight, false)
 
         // The normal exit path persists scrollback + exited status underneath.
         for _ in 0..<100 where store.get(session.id)?.status != .exited {
@@ -279,7 +502,8 @@ final class SessionReaperTests: XCTestCase {
         defer { awake.kill() }
         XCTAssertTrue(awake.isRunning)
         XCTAssertFalse(awake.meta.dormant)
-        XCTAssertEqual(store.get(session.id)?.dormant, false)
+        await waitUntil("dormant cleared on wake") { store.get(session.id)?.dormant == false }
+        XCTAssertNil(store.get(session.id)?.sleepReason)
     }
 
     func testSweepSparesSessionWithQueuedMessages() async throws {
@@ -372,7 +596,7 @@ final class SessionReaperTests: XCTestCase {
         clock.now += windowMs
         reaped = await reaper.sweepOnce()
         XCTAssertEqual(reaped, [session.id])
-        XCTAssertEqual(store.get(session.id)?.dormant, true)
+        await waitUntil("dormant flag persisted") { store.get(session.id)?.dormant == true }
     }
 
     func testDisablingMidStreakDropsTheBaseline() async throws {

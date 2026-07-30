@@ -95,6 +95,12 @@ final class AppModel {
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
         didSet {
+            // The pane you're looking at is exempt from the idle reaper: it can look
+            // arbitrarily quiet (you're reading it, or typing into a prompt the
+            // detector can't see) and killing it yanks the terminal out from under
+            // the cursor. Pushed synchronously so there is never a sweep window
+            // where the newly-focused session is still unprotected.
+            appState.reapProtection.setProtected(selection.map { [$0] } ?? [])
             // Viewing a session clears its pending turn-end notification (and the
             // Dock badge count it contributed).
             if let sel = selection { clearUnread(sel) }

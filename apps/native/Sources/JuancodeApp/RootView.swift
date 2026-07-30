@@ -2374,7 +2374,8 @@ struct SessionRow: View {
     /// Status glyph in the leading slot — the shared agent-state vocabulary.
     private var statusIndicator: some View {
         SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                          unread: unread, activating: activating, dormant: meta.dormant)
+                          unread: unread, activating: activating, dormant: meta.dormant,
+                          sleepReason: meta.sleepReason)
     }
 }
 
@@ -2395,11 +2396,18 @@ struct SessionStateGlyph: View {
     /// The reaper put this session to sleep (`meta.dormant`) — render a moon, not
     /// the exited grey dot, so intentional sleep never reads as a crash.
     var dormant: Bool = false
+    /// Why it slept. `workInFlight` reasons get their own glyph: a session cut off
+    /// mid-turn is unfinished business, and the quiet moon of a clean idle-sleep
+    /// actively hides that. Nil for rows slept before the reason was recorded.
+    var sleepReason: SessionSleepReason?
 
-    private enum Glyph { case working, waiting, doneUnseen, dot, sleeping }
+    private enum Glyph { case working, waiting, doneUnseen, dot, sleeping, sleptInterrupted }
 
     private var glyph: Glyph {
-        guard live else { return dormant ? .sleeping : .dot }
+        guard live else {
+            guard dormant else { return .dot }
+            return sleepReason?.workInFlight == true ? .sleptInterrupted : .sleeping
+        }
         switch activity {
         case .busy: return .working
         case .waitingInput: return .waiting
@@ -2442,6 +2450,13 @@ struct SessionStateGlyph: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary.opacity(0.7))
                     .help("Sleeping — auto-slept after idle. Open it to wake it up.")
+            case .sleptInterrupted:
+                // Full-strength amber, not the muted moon: this one lost work.
+                Image(systemName: "moon.badge.exclamationmark.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .help("Interrupted — its pty was killed mid-turn. Open it to resume; "
+                          + "the work in flight needs picking back up.")
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
                     .frame(width: 8, height: 8)

@@ -63,6 +63,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     usage            TEXT,
                     archived         INTEGER NOT NULL DEFAULT 0,
                     dormant          INTEGER NOT NULL DEFAULT 0,
+                    sleep_reason     TEXT,
                     dispatch_id      TEXT,
                     created_at       INTEGER NOT NULL,
                     updated_at       INTEGER NOT NULL
@@ -89,6 +90,9 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             }
             if !cols.contains("dormant") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dormant INTEGER NOT NULL DEFAULT 0")
+            }
+            if !cols.contains("sleep_reason") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN sleep_reason TEXT")
             }
             if !cols.contains("dispatch_id") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dispatch_id TEXT")
@@ -236,6 +240,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             usage: Self.decodeUsage(r["usage"]),
             archived: (r["archived"] as Int? ?? 0) == 1,
             dormant: (r["dormant"] as Int? ?? 0) == 1,
+            sleepReason: (r["sleep_reason"] as String?).flatMap(SessionSleepReason.init(rawValue:)),
             dispatchId: r["dispatch_id"]
         )
     }
@@ -270,13 +275,14 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         try? dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id,
-                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, sleep_reason, dispatch_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     meta.id, meta.provider.rawValue, meta.cwd, meta.title, meta.status.rawValue,
                     meta.exitCode, meta.cliSessionId, meta.skipPermissions ? 1 : 0,
                     meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
-                    meta.dormant ? 1 : 0, meta.dispatchId, meta.createdAt, meta.updatedAt,
+                    meta.dormant ? 1 : 0, meta.sleepReason?.rawValue, meta.dispatchId,
+                    meta.createdAt, meta.updatedAt,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: "")
         }
@@ -288,12 +294,14 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?, scrollback = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?,
+                    sleep_reason = ?, dispatch_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId, text,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.sleepReason?.rawValue,
+                    meta.dispatchId, meta.updatedAt, meta.id,
                 ])
             try syncFts(db, id: meta.id, title: meta.title, scrollback: text)
         }
@@ -308,12 +316,14 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?,
+                    sleep_reason = ?, dispatch_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.sleepReason?.rawValue,
+                    meta.dispatchId, meta.updatedAt, meta.id,
                 ])
             if reindexTitleFts {
                 let scroll = try String.fetchOne(
@@ -385,7 +395,8 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
     /// megabytes of pointless main-thread work per refresh (juancode-mapj).
     private static let metaColumns = """
         id, provider, cwd, title, status, exit_code, created_at, updated_at, \
-        cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id
+        cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, sleep_reason, \
+        dispatch_id
         """
 
     public func get(_ id: String) -> SessionMeta? {
