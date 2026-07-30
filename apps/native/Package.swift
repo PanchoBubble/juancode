@@ -25,7 +25,14 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         // Native terminal emulator view for the SwiftUI shell (juancode-u34.4).
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        //
+        // Pinned to our fork of 1.13.0, which carries one patch the GPU path needs:
+        // the Metal renderer placed glyphs on CoreText's shaped advances instead of
+        // the terminal's cell grid, so rows drifted left of the cursor as you typed
+        // (~3 cells by column 80). Branch `metal-cell-grid-glyph-x`; offered
+        // upstream. Drop the fork once upstream carries the fix.
+        .package(url: "https://github.com/PanchoBubble/SwiftTerm.git",
+                 revision: "96ad7809fd708b9011e22a545c785e0aedba248f"),
         // SPIKE: GhosttyKit (libghostty) — evaluating as a GPU-rendered replacement
         // for SwiftTerm (cleaner resize, fewer render glitches). Host-driven via
         // InMemoryTerminalSession so we keep owning the pty/byte stream.
