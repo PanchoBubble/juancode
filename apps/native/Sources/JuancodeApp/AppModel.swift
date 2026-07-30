@@ -4031,11 +4031,35 @@ final class AppModel {
     /// only when the map does, which is rarely.
     private(set) var workAtRiskList: [WorkAtRisk] = []
 
+    /// Per-repo-root rollup of the map above, rebuilt with the list: `main` is the
+    /// root's own entry, `worktrees` counts distinct at-risk linked worktrees under
+    /// it, `counted` the at-risk paths already attributed to the root (so a folder
+    /// header can dedup its sessions' contributions against it). Stored for the same
+    /// reason as `workAtRiskList`: every folder header used to scan the whole list
+    /// per render to derive this (juancode-6bmw).
+    struct AtRiskRollup: Equatable {
+        var main: WorkAtRisk?
+        var worktrees = 0
+        var counted: Set<String> = []
+    }
+
+    private(set) var workAtRiskRollupByRoot: [String: AtRiskRollup] = [:]
+
     private func rebuildWorkAtRiskList() {
         workAtRiskList = workAtRiskByPath.values.sorted {
             if $0.orphaned != $1.orphaned { return !$0.orphaned }
             return $0.path.localizedCompare($1.path) == .orderedAscending
         }
+        var rollups: [String: AtRiskRollup] = [:]
+        for r in workAtRiskList {
+            rollups[r.path, default: AtRiskRollup()].main = r
+            rollups[r.path, default: AtRiskRollup()].counted.insert(r.path)
+            if !r.repoRoot.isEmpty, r.repoRoot != r.path {
+                rollups[r.repoRoot, default: AtRiskRollup()].worktrees += 1
+                rollups[r.repoRoot, default: AtRiskRollup()].counted.insert(r.path)
+            }
+        }
+        workAtRiskRollupByRoot = rollups
     }
 
     /// Set (or clear, with nil) one folder's entry. No-op when nothing changes, so a

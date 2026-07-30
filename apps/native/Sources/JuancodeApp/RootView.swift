@@ -1387,20 +1387,17 @@ private struct FolderHeader: View {
         // Memoized normalize: this runs per folder header per render, and
         // `standardizingPath` is not cheap.
         let root = model.normalizedPath(group.cwd)
-        var seen = Set<String>()
-        var main: WorkAtRisk?
-        var worktrees = 0
-        func take(_ r: WorkAtRisk) {
-            guard seen.insert(r.path).inserted else { return }
-            if r.path == root { main = r } else { worktrees += 1 }
-        }
-        for r in model.workAtRiskList where r.path == root || r.repoRoot == root { take(r) }
+        // The list scan lives in the model, rebuilt only when the at-risk map
+        // changes; per render this is one dictionary lookup (juancode-6bmw).
+        var rollup = model.workAtRiskRollupByRoot[root] ?? AppModel.AtRiskRollup()
         // Sessions whose at-risk root isn't tied to this repo root (e.g. a cwd in
         // a subdirectory the worktree listing doesn't know) still count once.
         for s in group.sessions {
-            if let r = model.workAtRisk(forSession: s) { take(r) }
+            guard let r = model.workAtRisk(forSession: s),
+                  rollup.counted.insert(r.path).inserted else { continue }
+            if r.path == root { rollup.main = r } else { rollup.worktrees += 1 }
         }
-        return (main, worktrees)
+        return (rollup.main, rollup.worktrees)
     }
 
     /// Tooltip for the main-checkout uncommitted badge.
