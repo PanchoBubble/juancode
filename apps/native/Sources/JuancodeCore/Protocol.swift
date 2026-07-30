@@ -22,6 +22,36 @@ public enum SessionStatus: String, Codable, Sendable {
     case exited
 }
 
+/// Why a session's pty was killed while the conversation was kept resumable
+/// (`meta.dormant`). Recorded at kill time because it's the only moment the
+/// session's live activity is still known — once the pty is gone, a dormant row
+/// looks identical whether it was verifiably idle or cut off mid-tool-call.
+///
+/// The distinction is not cosmetic: `.idleReap` means nothing was lost, while the
+/// `workInFlight` cases mean a turn was aborted and the session needs a human (or
+/// an auto-revive) to pick it back up. The sidebar renders the two differently so
+/// an interrupted agent can't hide behind the same quiet moon as a slept one.
+public enum SessionSleepReason: String, Codable, Sendable {
+    /// The idle reaper's verified-idle window elapsed — no work was in flight.
+    case idleReap
+    /// The app quit while this session was idle. Equivalent loss to `.idleReap`.
+    case quit
+    /// The app quit while the agent was mid-turn. Work was aborted.
+    case quitBusy
+    /// The app quit on a pending permission prompt. The tool call never ran, and
+    /// a resume won't re-render the menu (the prompt isn't in the transcript).
+    case quitWaitingInput
+
+    /// True when the pty died with an unfinished turn, so the UI must flag it and
+    /// a revive is a recovery rather than a convenience.
+    public var workInFlight: Bool {
+        switch self {
+        case .idleReap, .quit: return false
+        case .quitBusy, .quitWaitingInput: return true
+        }
+    }
+}
+
 /// What a session's pty is running. `.agent` is a real Claude/Codex CLI (the
 /// default, and everything that predates the field). `.editor` is a full-screen
 /// editor (`$JUANCODE_EDITOR`, default nvim) opened in a source session's working
@@ -92,6 +122,12 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// clients can't decode would break them, while an extra bool is ignored.
     /// Cleared on resume. Defaults to false.
     public var dormant: Bool
+    /// Why the pty was killed, set alongside `dormant` at kill time and cleared on
+    /// resume. Nil for rows that were never slept, and for dormant rows written
+    /// before the field existed (they read as "slept, cause unknown"). Same
+    /// rationale as `dormant` for being an additive field rather than a new
+    /// `SessionStatus` case: old peers ignore it instead of failing to decode.
+    public var sleepReason: SessionSleepReason?
     /// What the pty is running (see `SessionKind`). Defaults to `.agent` so rows
     /// predating the field — and any peer that doesn't model it — read as agents.
     public var kind: SessionKind
@@ -125,6 +161,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         usage: SessionUsage?,
         archived: Bool = false,
         dormant: Bool = false,
+        sleepReason: SessionSleepReason? = nil,
         kind: SessionKind = .agent,
         parentSessionId: String? = nil,
         dispatchId: String? = nil
@@ -143,6 +180,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.usage = usage
         self.archived = archived
         self.dormant = dormant
+        self.sleepReason = sleepReason
         self.kind = kind
         self.parentSessionId = parentSessionId
         self.dispatchId = dispatchId
@@ -166,6 +204,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         usage = try c.decodeIfPresent(SessionUsage.self, forKey: .usage)
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         dormant = try c.decodeIfPresent(Bool.self, forKey: .dormant) ?? false
+        sleepReason = try c.decodeIfPresent(SessionSleepReason.self, forKey: .sleepReason)
         kind = try c.decodeIfPresent(SessionKind.self, forKey: .kind) ?? .agent
         parentSessionId = try c.decodeIfPresent(String.self, forKey: .parentSessionId)
         dispatchId = try c.decodeIfPresent(String.self, forKey: .dispatchId)

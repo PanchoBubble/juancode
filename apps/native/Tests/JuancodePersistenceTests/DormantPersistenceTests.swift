@@ -69,4 +69,55 @@ final class DormantPersistenceTests: XCTestCase {
         store = try GRDBStore(path: path)
         XCTAssertEqual(store.get(m.id)?.dormant, false)
     }
+
+    // MARK: - sleepReason (why the pty was killed)
+
+    /// The reason must survive all three write paths, because the UI reads it off a
+    /// persisted row long after the process that set it is gone. `updateMeta` is the
+    /// one `markDormant` actually uses.
+    func testSleepReasonRoundTripsThroughEveryWritePath() {
+        let m = meta()
+        store.insert(m)
+        XCTAssertNil(store.get(m.id)?.sleepReason, "never-slept rows carry no reason")
+
+        var reaped = m
+        reaped.dormant = true
+        reaped.status = .exited
+        reaped.sleepReason = .idleReap
+        store.updateMeta(reaped, reindexTitleFts: false)
+        XCTAssertEqual(store.get(m.id)?.sleepReason, .idleReap)
+
+        // A quit that interrupted a turn — the case the UI must flag.
+        var interrupted = reaped
+        interrupted.sleepReason = .quitBusy
+        store.update(interrupted, scrollback: Array("BYE".utf8))
+        XCTAssertEqual(store.get(m.id)?.sleepReason, .quitBusy)
+        XCTAssertEqual(store.get(m.id)?.sleepReason?.workInFlight, true)
+
+        // Waking clears it alongside the dormant flag.
+        var awake = interrupted
+        awake.dormant = false
+        awake.sleepReason = nil
+        awake.status = .running
+        store.update(awake, scrollback: [])
+        XCTAssertNil(store.get(m.id)?.sleepReason)
+    }
+
+    func testInsertPersistsSleepReason() {
+        var m = meta(dormant: true)
+        m.sleepReason = .quitWaitingInput
+        store.insert(m)
+        XCTAssertEqual(store.get(m.id)?.sleepReason, .quitWaitingInput)
+    }
+
+    /// Rows written before the column existed read back as "slept, cause unknown"
+    /// rather than failing to decode.
+    func testMigrationAddsSleepReasonColumnToOldDb() throws {
+        let m = meta(dormant: true)
+        store.insert(m)
+        store = nil
+        store = try GRDBStore(path: path)
+        XCTAssertEqual(store.get(m.id)?.dormant, true)
+        XCTAssertNil(store.get(m.id)?.sleepReason)
+    }
 }

@@ -4,6 +4,7 @@ import Darwin
 import JuancodeCore
 import JuancodePersistence
 import JuancodeServer
+import JuancodeServices
 
 /// A bare SPM executable launches with background (accessory) activation, so its
 /// window never appears and it isn't in the Dock. Promote it to a regular
@@ -165,7 +166,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for sub in view.subviews { markNeedsDisplay(sub) }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window must NOT quit: quitting tears down every live pty (see
+    /// `applicationShouldTerminate`), so returning `true` here made ⌘W a silent
+    /// "kill every running agent" — the app has no other way back to those ptys.
+    /// The window reopens from the Dock; ⌘Q is the deliberate way out.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// True once a graceful shutdown has been kicked off, so a second terminate
     /// (e.g. macOS re-asking, or a SIGTERM landing mid-drain) doesn't start another.
@@ -179,12 +184,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// after we reply and force-kills any straggler, so a wedged CLI can't hang quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let state = AppEnv.state, !terminating else { return .terminateNow }
+        // Quitting kills every live pty, so when agents are mid-turn or sitting on a
+        // permission prompt, make the user say so. Only for an interactive quit:
+        // a signal-driven quit (Ctrl-C in the terminal that launched us, SIGTERM
+        // from a rebuild) must never block on an alert nobody is there to answer.
+        if !signalQuitRequested {
+            let busy = state.registry.all().filter(\.isRunning).map(\.activity)
+            if SessionQuitSleep.wouldInterruptWork(busy),
+               !confirmQuitInterruptingWork(count: busy.filter {
+                   SessionQuitSleep.reason(for: $0).workInFlight
+               }.count) {
+                return .terminateCancel
+            }
+        }
         terminating = true
         DispatchQueue.global(qos: .userInitiated).async {
             state.shutdownGracefully(timeout: 3.0)
             DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
         }
         return .terminateLater
+    }
+
+    /// Modal "N agents are still working" gate. Returns true to go ahead and quit.
+    /// Sleeping is still resumable, so this is a warning, not a block — the point is
+    /// that losing a batch of in-flight turns should take one deliberate click.
+    @MainActor private func confirmQuitInterruptingWork(count: Int) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = count == 1
+            ? "1 agent is still working"
+            : "\(count) agents are still working"
+        alert.informativeText = """
+            Quitting kills their CLI processes mid-turn. The conversations stay \
+            resumable, but the work in flight is lost and has to be picked back up.
+            """
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     func applicationWillTerminate(_ notification: Notification) {

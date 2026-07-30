@@ -289,6 +289,7 @@ public final class Session: @unchecked Sendable {
         meta.status = .running
         meta.exitCode = nil
         meta.dormant = false // waking a reaped session — it's live again
+        meta.sleepReason = nil
         meta.updatedAt = nowMs()
         let opts = SpawnOptions(skipPermissions: meta.skipPermissions)
         return try Session(meta: meta, args: spec.resumeArgs(cliSessionId, opts), cols: cols, rows: rows,
@@ -315,6 +316,7 @@ public final class Session: @unchecked Sendable {
         meta.status = .running
         meta.exitCode = nil
         meta.dormant = false
+        meta.sleepReason = nil
         meta.updatedAt = nowMs()
         let freshPin = UUID().uuidString.lowercased()
         meta.cliSessionId = spec.pinsSessionId ? freshPin : nil
@@ -1129,9 +1131,21 @@ public final class Session: @unchecked Sendable {
     /// row `handleExit` finalises already carries `dormant = true` and the UI can
     /// tell "reaped while idle, wake me on demand" from a crash/exit. The flag is
     /// cleared by `Session.resume`.
-    public func markDormant() {
-        logEvent("dormant")
-        lock.withLock { _meta.dormant = true }
+    ///
+    /// `reason` must be recorded here and not inferred later: this is the last
+    /// moment the session's live `activity` is known, and it is the only thing that
+    /// distinguishes a verified-idle reap from a pty cut off mid-turn. It lands in
+    /// the activity log too, so a post-mortem can tell the two paths apart — the
+    /// original bulk-quit incident was unreadable precisely because every sleep
+    /// logged the same bare `dormant` line.
+    public func markDormant(reason: SessionSleepReason) {
+        logEvent("dormant", ["reason": reason.rawValue,
+                             "workInFlight": "\(reason.workInFlight)",
+                             "activity": activity.rawValue])
+        lock.withLock {
+            _meta.dormant = true
+            _meta.sleepReason = reason
+        }
         persistMeta(titleChanged: false)
     }
 

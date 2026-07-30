@@ -22,6 +22,10 @@ public final class AppState: @unchecked Sendable {
     /// Idle-session reaper (juancode-lgq) — kills verifiably idle CLI process
     /// trees to free RAM, leaving each session dormant and resumable on demand.
     public let sessionReaper: SessionReaper
+    /// Session ids the reaper must never kill — the GUI keeps its focused pane in
+    /// here. Owned by AppState (not the reaper actor) so the main actor can update
+    /// it synchronously on every selection change.
+    public let reapProtection = SessionProtection()
     /// Rolling on-disk session activity log (`Config.logsDir`) — the durable
     /// lifecycle/seed/activity trail for debugging frozen sessions after the fact.
     public let activityLog: SessionActivityLog
@@ -39,6 +43,17 @@ public final class AppState: @unchecked Sendable {
     /// open session as plain dead rows.
     private static let sleptOnQuitKey = "juancode.sleptOnQuit"
 
+    /// UserDefaults key holding the subset of `sleptOnQuitKey` that was mid-turn or
+    /// holding a permission prompt when the app quit — i.e. sessions whose work was
+    /// actually aborted. Written by `shutdownGracefully`, read (and cleared) at the
+    /// next boot into `interruptedOnQuitIds`.
+    private static let interruptedOnQuitKey = "juancode.interruptedOnQuit"
+
+    /// Sessions whose turn was cut off by the last quit. A superset-free subset of
+    /// `crashOrphanIds`: these need picking back up, not merely waking. Empty when
+    /// the last quit was clean.
+    public let interruptedOnQuitIds: Set<String>
+
     public init(store: GRDBStore) {
         self.store = store
         let activityLog = SessionActivityLog()
@@ -53,7 +68,8 @@ public final class AppState: @unchecked Sendable {
                                                   log: activityLog))
         self.registry = registry
         self.prTracking = PrTrackingEngine(registry: registry, store: store, activityLog: activityLog)
-        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue)
+        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue,
+                                          probes: .live(protection: reapProtection))
         self.sessionReaper = sessionReaper
         Task { await sessionReaper.start() }
         // Any session still "running" in the db is stale — its pty died with the
@@ -66,8 +82,11 @@ public final class AppState: @unchecked Sendable {
         // exist, so a session deleted since quit can't resurface).
         let quitSlept = Set(UserDefaults.standard.stringArray(forKey: Self.sleptOnQuitKey) ?? [])
         UserDefaults.standard.removeObject(forKey: Self.sleptOnQuitKey)
+        let quitInterrupted = Set(UserDefaults.standard.stringArray(forKey: Self.interruptedOnQuitKey) ?? [])
+        UserDefaults.standard.removeObject(forKey: Self.interruptedOnQuitKey)
         let known = Set(store.list().filter(\.dormant).map(\.id))
         crashOrphanIds = Set(store.markOrphansDormant()).union(quitSlept.intersection(known))
+        interruptedOnQuitIds = quitInterrupted.intersection(known)
         // Enforce the per-project retention cap on the persisted history (juancode-477).
         // Nothing is live this early, so no ids need protecting.
         store.enforceSessionCap()
@@ -128,8 +147,20 @@ public final class AppState: @unchecked Sendable {
         // kill so the row `handleExit` finalises reads "sleeping, resumable", and
         // record the ids so the next boot keeps them surfaced exactly like crash
         // orphans. Quitting the app used to bury all open sessions as dead rows.
-        for session in live { session.markDormant() }
+        //
+        // This path cannot spare a busy session — every pty is a child of this
+        // process and dies with it — so it stamps WHY each one slept instead.
+        // Without that, a quit that interrupted 25 mid-turn agents persisted
+        // exactly the same state as a quiet one, and the only trace was a burst of
+        // identical `dormant` lines that read like a reaper sweep gone rogue.
+        var interrupted: [String] = []
+        for session in live {
+            let reason = SessionQuitSleep.reason(for: session.activity)
+            session.markDormant(reason: reason)
+            if reason.workInFlight { interrupted.append(session.id) }
+        }
         UserDefaults.standard.set(live.map(\.id), forKey: Self.sleptOnQuitKey)
+        UserDefaults.standard.set(interrupted, forKey: Self.interruptedOnQuitKey)
         let group = DispatchGroup()
         var cancels: [() -> Void] = []
         for session in live {

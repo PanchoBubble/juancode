@@ -242,7 +242,14 @@ public struct SessionReaperProbes: Sendable {
 
     /// Production probes: libproc process walking and the real transcript files
     /// (path resolution cached per cli session id — transcripts never move).
-    public static func live() -> SessionReaperProbes {
+    ///
+    /// `protection` is REQUIRED, not defaulted: `ReapSample.isProtected` documents
+    /// the focused pane as never-reaped, but an earlier `live()` took the
+    /// never-protected default and so shipped a policy input that was hard-wired
+    /// to `false` — the guard existed in the state machine and in the tests while
+    /// production could never trigger it. Threading the real box through the one
+    /// production constructor makes that impossible to reintroduce silently.
+    public static func live(protection: SessionProtection) -> SessionReaperProbes {
         let paths = TranscriptPathCache()
         return SessionReaperProbes(
             descendantCount: { ProcessTree.descendants(of: $0).count },
@@ -252,8 +259,61 @@ public struct SessionReaperProbes: Sendable {
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: file),
                       let mtime = attrs[.modificationDate] as? Date else { return nil }
                 return Int(mtime.timeIntervalSince1970 * 1000)
-            }
+            },
+            isProtected: { protection.isProtected($0) }
         )
+    }
+}
+
+/// The set of session ids the reaper must never touch, owned outside it so the GUI
+/// can keep it current without reaching into the actor. Currently just the focused
+/// pane: whatever you are looking at stays alive regardless of how quiet it looks,
+/// because reaping it yanks the terminal out from under the cursor.
+///
+/// Lock-guarded and `@unchecked Sendable` for the usual reason in this codebase —
+/// the app writes it on the main actor while the reaper's sweep reads it from the
+/// actor's executor.
+public final class SessionProtection: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+
+    public init() {}
+
+    /// Replace the protected set with exactly `ids` (the GUI pushes its current
+    /// selection; an empty set means nothing is focused).
+    public func setProtected(_ ids: Set<String>) {
+        lock.withLock { self.ids = ids }
+    }
+
+    public func isProtected(_ id: String) -> Bool {
+        lock.withLock { ids.contains(id) }
+    }
+}
+
+/// Classifies the sleep a process-exit path is about to impose, from the session's
+/// live activity at that moment.
+///
+/// App quit is the one path that CANNOT honour the reap policy: the ptys are
+/// children of this process, so they die with it whatever the agent was doing. The
+/// honest fix is therefore not "spare the busy ones" but "record that they were
+/// busy" — a bulk quit-sleep of 25 sessions previously wrote the same bare
+/// `dormant` flag as a verified-idle reap, which is why an interrupted batch was
+/// indistinguishable from a clean one after the fact.
+public enum SessionQuitSleep {
+    /// The reason to stamp on a session being slept by process exit.
+    public static func reason(for activity: SessionActivity) -> SessionSleepReason {
+        switch activity {
+        case .idle: return .quit
+        case .busy: return .quitBusy
+        case .waitingInput: return .quitWaitingInput
+        }
+    }
+
+    /// Whether quitting right now would abort work — the signal a confirm-on-quit
+    /// prompt needs. True when any session is mid-turn or holding a permission
+    /// prompt.
+    public static func wouldInterruptWork(_ activities: [SessionActivity]) -> Bool {
+        activities.contains { reason(for: $0).workInFlight }
     }
 }
 
@@ -298,7 +358,7 @@ public actor SessionReaper {
     public init(
         registry: SessionRegistry,
         messageQueue: MessageQueue,
-        probes: SessionReaperProbes = .live(),
+        probes: SessionReaperProbes,
         windowMs: Int = Config.reapIdleMinutes * 60_000,
         cpuEpsilonMs: Int = SessionReapPolicy.defaultCpuEpsilonMs,
         sweepInterval: Duration = .seconds(90)
@@ -376,9 +436,24 @@ public actor SessionReaper {
             case .holding(let baseline):
                 next[meta.id] = baseline
             case .eligible:
+                // Re-read the volatile signals at the instant of the kill, not just
+                // at the instant of the decision. A sweep walks every session and
+                // awaits a transcript stat per session, so the verdict for the first
+                // session can be tens of ms old by the time we act on it — and a
+                // session that woke up in that gap must not be killed on a stale
+                // "eligible". Cheap insurance against the whole failure mode this
+                // reaper exists to avoid.
+                guard session.activity == .idle, !probes.isProtected(meta.id) else {
+                    next[meta.id] = SessionReapPolicy.Baseline(
+                        idleSinceMs: now,
+                        descendantCount: sample.descendantCount,
+                        cpuTimeMs: sample.cpuTimeMs
+                    )
+                    continue
+                }
                 // Flag first so the exited row `handleExit` persists already reads
                 // as dormant; scrollback + meta survive via the normal exit path.
-                session.markDormant()
+                session.markDormant(reason: .idleReap)
                 session.kill()
                 reaped.append(meta.id)
             }
