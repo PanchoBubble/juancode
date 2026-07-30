@@ -561,6 +561,7 @@ final class AppModel {
         merged.append(contentsOf: liveSessions.map(\.meta).filter { !persistedIds.contains($0.id) })
         sessions = merged
         for m in sessions { metaCache[m.id] = m }
+        rebuildWorkAtRiskSessionIndex()
         // Liveness just changed for someone (this is the create/exit/adopt path), which
         // is exactly what the sidebar's sink/bubble order keys off.
         syncSidebarOrder()
@@ -591,8 +592,13 @@ final class AppModel {
     func applyMetaPatch(_ meta: SessionMeta) {
         switch metaPatchOutcome(for: meta, in: sessions) {
         case .patch(let idx):
+            let moved = sessions[idx].cwd != meta.cwd
+                || sessions[idx].worktreePath != meta.worktreePath
             sessions[idx] = meta
             metaCache[meta.id] = meta
+            // Title/usage patches don't touch the folder, so the at-risk index only
+            // needs rebuilding on the rare patch that relocates a session.
+            if moved { rebuildWorkAtRiskSessionIndex() }
         case .noChange:
             break
         case .fullRefresh:
@@ -4165,6 +4171,33 @@ final class AppModel {
     /// cleared when the folder comes clean or the session goes busy again, so a
     /// new episode re-alerts (mirrors `dismissedHealth`'s recover-then-fail rule).
     @ObservationIgnored private var workAtRiskNudged: Set<String> = []
+    /// normalized root → ids of the sessions living in it, rebuilt with `sessions`.
+    /// A probe needs this to attribute the risk it finds, and deriving it per probe
+    /// meant filtering every session on the main actor each time.
+    @ObservationIgnored private var workAtRiskSessionIdsByRoot: [String: [String]] = [:]
+
+    /// Roots that changed on disk and still owe a read, drained one at a time by
+    /// `workAtRiskDrain`. Probes do NOT run straight off the FSEvents callback any
+    /// more: one probe costs 4-6 git forks (`status`, then `branch --contains`,
+    /// `rev-parse` and `rev-list` when the branch has no upstream — the normal case
+    /// for agent worktrees), and ~30 agents writing into 31 watched roots shelled
+    /// ~17 git processes/sec sustained even with the watcher's own 500ms debounce.
+    @ObservationIgnored private var workAtRiskProbeQueue: [String] = []
+    @ObservationIgnored private var workAtRiskQueued: Set<String> = []
+    /// Roots inside their cooldown with a trailing read already scheduled, so the
+    /// changes that keep arriving during the window collapse into that one read.
+    @ObservationIgnored private var workAtRiskCooling: Set<String> = []
+    @ObservationIgnored private var workAtRiskLastProbeMs: [String: Int] = [:]
+    @ObservationIgnored private var workAtRiskDrain: Task<Void, Never>?
+    /// Floor between two reads of the *same* root. The answer a probe produces
+    /// ("3 dirty files, 1 unpushed commit") doesn't move on a sub-minute scale, so
+    /// re-reading a folder an agent is actively writing costs forks and buys nothing.
+    private let workAtRiskProbeCooldownMs = 15_000
+    /// Floor between any two probes, whatever the root — bounds the burst when many
+    /// roots come off cooldown together.
+    private let workAtRiskProbeGapMs = 500
+    /// Set while a coalesced nudge re-evaluation is already scheduled.
+    @ObservationIgnored private var workAtRiskNudgeEvalPending = false
 
     private func startWorkAtRiskLoop() {
         guard workAtRiskLoop == nil else { return }
@@ -4184,6 +4217,23 @@ final class AppModel {
     }
 
     // MARK: - event-driven at-risk tracking (juancode-78c4)
+
+    /// Rebuild `workAtRiskSessionIdsByRoot` from the current session list. One O(n)
+    /// pass when the list changes, in place of an O(n) filter inside every probe.
+    private func rebuildWorkAtRiskSessionIndex() {
+        var index: [String: [String]] = [:]
+        for s in sessions {
+            index[WorkAtRiskScan.normalize(s.cwd), default: []].append(s.id)
+            if let wt = s.worktreePath {
+                let root = WorkAtRiskScan.normalize(wt)
+                // A session whose worktree IS its cwd must not be listed twice.
+                if root != WorkAtRiskScan.normalize(s.cwd) {
+                    index[root, default: []].append(s.id)
+                }
+            }
+        }
+        workAtRiskSessionIdsByRoot = index
+    }
 
     /// Reconcile the watched-root set against the sessions we're actually driving:
     /// subscribe to folders that appeared, drop folders that went away, and cold-probe
@@ -4210,14 +4260,21 @@ final class AppModel {
             workAtRiskWatchTokens.removeValue(forKey: gone)?.cancel()
             workAtRiskGitDirTokens.removeValue(forKey: gone)?.cancel()
             workAtRiskProbed.remove(gone)
+            // Drop any read still owed for a root we no longer watch, so a folder
+            // that comes back later isn't stuck behind a stale cooldown entry.
+            workAtRiskCooling.remove(gone)
+            workAtRiskLastProbeMs.removeValue(forKey: gone)
+            if workAtRiskQueued.remove(gone) != nil {
+                workAtRiskProbeQueue.removeAll { $0 == gone }
+            }
         }
         for root in wanted where workAtRiskWatchTokens[root] == nil {
             guard let token = worktreeWatchers.watch(path: root, onChange: { [weak self] in
-                Task { @MainActor in self?.probeWorkAtRiskRoot(root) }
+                Task { @MainActor in self?.enqueueWorkAtRiskProbe(root) }
             }) else { continue }
             workAtRiskWatchTokens[root] = token
             watchLinkedWorktreeGitDir(root)
-            probeWorkAtRiskRoot(root) // cold read: state before any event arrives
+            enqueueWorkAtRiskProbe(root) // cold read: state before any event arrives
         }
     }
 
@@ -4228,7 +4285,7 @@ final class AppModel {
         guard workAtRiskGitDirTokens[root] == nil,
               let gitDir = linkedWorktreeGitDir(root) else { return }
         let token = worktreeWatchers.watch(path: gitDir, onChange: { [weak self] in
-            Task { @MainActor in self?.probeWorkAtRiskRoot(root) }
+            Task { @MainActor in self?.enqueueWorkAtRiskProbe(root) }
         })
         if let token { workAtRiskGitDirTokens[root] = token }
     }
@@ -4251,34 +4308,82 @@ final class AppModel {
         return FileManager.default.fileExists(atPath: normalized) ? normalized : nil
     }
 
-    /// Probe one root and publish the delta. This is the whole hot path now: it runs
-    /// when that folder actually changed (FSEvents, debounced 500ms by the watcher) or
-    /// once when the watch is first established — not on a timer.
-    private func probeWorkAtRiskRoot(_ root: String) {
-        workAtRiskProbed.insert(root)
-        let sessionIds = sessions
-            .filter { s in
-                WorkAtRiskScan.normalize(s.cwd) == root
-                    || s.worktreePath.map { WorkAtRiskScan.normalize($0) == root } == true
+    /// Ask for a read of one root. This is the entry point every change event uses —
+    /// it never probes inline. A root that was read within `workAtRiskProbeCooldownMs`
+    /// gets one trailing read scheduled for when the window expires instead, and
+    /// further changes inside the window fold into it; anything else joins the drain
+    /// queue.
+    private func enqueueWorkAtRiskProbe(_ root: String) {
+        if let last = workAtRiskLastProbeMs[root], nowMs() - last < workAtRiskProbeCooldownMs {
+            guard workAtRiskCooling.insert(root).inserted else { return }
+            let wait = workAtRiskProbeCooldownMs - (nowMs() - last)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(wait))
+                guard let self else { return }
+                self.workAtRiskCooling.remove(root)
+                // The folder may have stopped being ours while we waited.
+                guard self.workAtRiskWatchTokens[root] != nil else { return }
+                self.enqueueWorkAtRiskProbe(root)
             }
-            .map(\.id)
+            return
+        }
+        guard workAtRiskQueued.insert(root).inserted else { return }
+        workAtRiskProbeQueue.append(root)
+        startWorkAtRiskDrain()
+    }
+
+    /// Work the probe queue one root at a time, with a floor between reads. Serial on
+    /// purpose: probes are pure I/O that nothing waits on, and letting 31 roots fork
+    /// git at once is exactly the burst this replaces.
+    private func startWorkAtRiskDrain() {
+        guard workAtRiskDrain == nil else { return }
+        let gap = workAtRiskProbeGapMs
+        workAtRiskDrain = Task { @MainActor [weak self] in
+            while true {
+                guard let self, !self.workAtRiskProbeQueue.isEmpty else { break }
+                let root = self.workAtRiskProbeQueue.removeFirst()
+                self.workAtRiskQueued.remove(root)
+                self.workAtRiskLastProbeMs[root] = nowMs()
+                await self.runWorkAtRiskProbe(root)
+                try? await Task.sleep(for: .milliseconds(gap))
+            }
+            self?.workAtRiskDrain = nil
+        }
+    }
+
+    /// Probe one root and publish the delta.
+    private func runWorkAtRiskProbe(_ root: String) async {
+        workAtRiskProbed.insert(root)
+        let sessionIds = workAtRiskSessionIdsByRoot[root] ?? []
         let repoRoot = workAtRiskRepoRootCache[root] ?? worktreeRepoRoots[root] ?? ""
         let ref = WorkAtRiskScan.RootRef(path: root, repoRoot: repoRoot, sessionIds: sessionIds)
-        Task {
-            let risk = await Task.detached(priority: .utility) { () -> WorkAtRisk? in
-                guard let probed = await probeWorkAtRisk(root) else { return nil }
-                return WorkAtRiskScan.classify(ref, state: probed.state,
-                                               dirtyFiles: probed.dirtyFiles,
-                                               aheadOfBase: probed.aheadOfBase,
-                                               headOnRemote: probed.headOnRemote)
-            }.value
-            // `publishWorkAtRisk` drops an unchanged result. A probe fires on every
-            // settled write in the folder, and an agent mid-turn changes files
-            // constantly — but the answer ("3 dirty files, 1 unpushed commit") usually
-            // hasn't moved. `@Observable` notifies on any assignment, equal or not, and
-            // every notification re-runs the sidebar.
-            publishWorkAtRisk(risk, for: root)
-            evaluateWorkAtRiskNudges()
+        let risk = await Task.detached(priority: .utility) { () -> WorkAtRisk? in
+            guard let probed = await probeWorkAtRisk(root) else { return nil }
+            return WorkAtRiskScan.classify(ref, state: probed.state,
+                                           dirtyFiles: probed.dirtyFiles,
+                                           aheadOfBase: probed.aheadOfBase,
+                                           headOnRemote: probed.headOnRemote)
+        }.value
+        // `publishWorkAtRisk` drops an unchanged result. A probe fires on every
+        // settled write in the folder, and an agent mid-turn changes files
+        // constantly — but the answer ("3 dirty files, 1 unpushed commit") usually
+        // hasn't moved. `@Observable` notifies on any assignment, equal or not, and
+        // every notification re-runs the sidebar.
+        publishWorkAtRisk(risk, for: root)
+        scheduleWorkAtRiskNudgeEval()
+    }
+
+    /// Coalesce nudge re-evaluation onto a one-second trailing edge. The pass walks
+    /// every session, and running it inline on each probe put it at 57% of main-thread
+    /// samples; the rule it feeds has a 15-minute threshold, so a second's lag is free.
+    private func scheduleWorkAtRiskNudgeEval() {
+        guard !workAtRiskNudgeEvalPending else { return }
+        workAtRiskNudgeEvalPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self else { return }
+            self.workAtRiskNudgeEvalPending = false
+            self.evaluateWorkAtRiskNudges()
         }
     }
 
@@ -4357,10 +4462,14 @@ final class AppModel {
     /// Re-run the nudge rule against the current cached at-risk map. Forks nothing —
     /// safe to call on every probe and on the 60s timer.
     private func evaluateWorkAtRiskNudges() {
+        let metasById = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
         // Episode reset: forget a nudge once the session's folder is clean again,
-        // the session went back to work, or the session is gone.
+        // the session went back to work, or the session is gone. Keyed off the map
+        // above — the linear `sessions.first(where:)` this used to do made the whole
+        // pass quadratic, and at 626 sessions that alone was 57% of the main thread.
         workAtRiskNudged = workAtRiskNudged.filter { id in
-            guard let meta = sessions.first(where: { $0.id == id }) else { return false }
+            guard let meta = metasById[id] else { return false }
             return workAtRisk(forSession: meta) != nil && activity(id) != .busy
         }
 
@@ -4368,7 +4477,6 @@ final class AppModel {
         // published `sessions` snapshot's `updatedAt` can lag (see health loop).
         let liveMeta = Dictionary(appState.registry.all().map { ($0.id, $0.meta) },
                                   uniquingKeysWith: { a, _ in a })
-        let metasById = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let inputs: [WorkAtRiskScan.NudgeInput] = sessions
             .filter { $0.cwd != OraclePaths.controlDir }
             .map { meta in
