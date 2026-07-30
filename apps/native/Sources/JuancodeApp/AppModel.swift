@@ -277,6 +277,8 @@ final class AppModel {
     var showingSessionHealth = false
     /// Recurring-tasks create/manage panel (juancode-46g).
     var showingRecurringTasks = false
+    /// Heavy-command queue panel (juancode-ik11).
+    var showingHeavyQueue = false
     /// ⌘⇧K prompt-template palette (juancode-2vd): quick-insert saved prompts.
     var showingPromptPalette = false
     /// ⌘K session jump palette (juancode-dr0): fuzzy-find and switch sessions.
@@ -3814,6 +3816,43 @@ final class AppModel {
             providerStatus = result
             statusLoading = false
         }
+    }
+
+    // MARK: - Heavy command queue (juancode-ik11)
+
+    /// The global `heavy` slot queue — memory-heavy commands (CI, integration tests)
+    /// serialized across every Claude session on this Mac. Read from the shared
+    /// filesystem registry; empty when nothing is queued.
+    var heavyQueue = HeavyQueueSnapshot()
+
+    /// Reload the queue off the main actor. Cheap (a handful of small JSON files),
+    /// so the panel can poll it and the Tools menu can refresh on open.
+    func refreshHeavyQueue() {
+        Task {
+            heavyQueue = await Task.detached(priority: .utility) {
+                HeavyQueue.shared.snapshot()
+            }.value
+        }
+    }
+
+    /// Jump a waiting job to the head of the line. The wrapper re-reads its priority
+    /// every poll, so it takes effect within a few seconds without signalling it.
+    func heavyQueueMoveToFront(_ pid: Int) {
+        HeavyQueue.shared.moveToFront(pid: pid, in: heavyQueue)
+        refreshHeavyQueue()
+    }
+
+    /// Move a waiting job one place up or down the line.
+    func heavyQueueNudge(_ pid: Int, up: Bool) {
+        HeavyQueue.shared.nudge(pid: pid, up: up, in: heavyQueue)
+        refreshHeavyQueue()
+    }
+
+    /// Cancel a queued or running heavy job (SIGTERM to its wrapper, which takes the
+    /// command down with it and frees the slot).
+    func cancelHeavyJob(_ pid: Int) {
+        HeavyQueue.shared.cancel(pid: pid)
+        refreshHeavyQueue()
     }
 
     // MARK: - Worktree cleanup (juancode-q6q)

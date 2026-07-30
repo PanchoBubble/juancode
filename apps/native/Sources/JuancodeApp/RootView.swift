@@ -92,6 +92,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingRecurringTasks) {
             RecurringTasksSheet()
         }
+        .sheet(isPresented: $model.showingHeavyQueue) {
+            HeavyQueuePanel()
+        }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
         }
@@ -403,7 +406,11 @@ private struct ToolsMenu: View {
     private var atRisk: Bool { !model.workAtRiskList.isEmpty }
 
     var body: some View {
-        Button { showing = true } label: {
+        Button {
+            showing = true
+            // So the Heavy Queue row's count is current the moment the menu opens.
+            model.refreshHeavyQueue()
+        } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
         .foregroundStyle(atRisk ? Color.orange : Color.primary)
@@ -433,6 +440,10 @@ private struct ToolsMenu: View {
                            trailing: atRisk ? "\(model.workAtRiskList.count)" : nil) {
                     model.showingWorktrees = true
                     model.loadWorktrees()
+                }
+                toolButton("square.stack.3d.up", "Heavy Queue",
+                           trailing: model.heavyQueue.isEmpty ? nil : "\(model.heavyQueue.total)") {
+                    model.showingHeavyQueue = true
                 }
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
