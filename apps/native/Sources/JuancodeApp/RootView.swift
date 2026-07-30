@@ -2205,6 +2205,8 @@ struct SessionRow: View {
         // failed — the moon glyph carries the "why".
         .opacity(sleeping ? 0.55 : 1)
         .padding(.vertical, 3)
+        // Floated, not laid out: see `hoverActions`.
+        .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
     }
 
@@ -2241,32 +2243,18 @@ struct SessionRow: View {
             .clickCursor()
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
-        // Hover-revealed row actions for own sessions — an ellipsis menu (the
-        // context menu's items, made discoverable without a right-click) and a ✕
-        // that closes the session after confirmation. Same reveal pattern as the
-        // external resume button above.
-        if !external, hovering {
-            if let menuContent {
-                Menu { menuContent() } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 12))
-                }
-                .menuStyle(.button)
-                .buttonStyle(.borderless)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Session actions")
-                .clickCursor()
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
-            }
-            if let onCloseRequested {
-                Button(action: onCloseRequested) {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(.borderless)
-                .help("Close session (asks to confirm)")
-                .clickCursor()
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
-            }
+    }
+
+    /// Hover-revealed row actions for own sessions — the shared `RowHoverActions` chip
+    /// (ellipsis menu + ✕ that closes the session after confirmation), floated over the
+    /// row's trailing edge.
+    @ViewBuilder
+    private var hoverActions: some View {
+        if !external, hovering, menuContent != nil || onCloseRequested != nil {
+            RowHoverActions(menuContent: menuContent,
+                            menuHelp: "Session actions",
+                            onCloseRequested: onCloseRequested,
+                            closeHelp: "Close session (asks to confirm)")
         }
     }
 

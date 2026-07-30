@@ -612,26 +612,12 @@ private struct OracleRailRow: View {
                 }
             }
             Spacer(minLength: 0)
-            if hovering {
-                Menu { menuItems } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 11))
-                }
-                .menuStyle(.button)
-                .buttonStyle(.borderless)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Oracle actions")
-                .clickCursor()
-                Button(action: onDeleteRequested) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .medium))
-                }
-                .buttonStyle(.borderless)
-                .help("Delete this Oracle (asks to confirm)")
-                .clickCursor()
-            }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Floated, not laid out — same reason as the sidebar rows: inline they stole
+        // width from the title, so it re-truncated the moment the pointer arrived.
+        .overlay(alignment: .trailing) { hoverActions }
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -639,6 +625,16 @@ private struct OracleRailRow: View {
         .contextMenu { menuItems }
         .help(meta.title)
         .clickCursor()
+    }
+
+    @ViewBuilder private var hoverActions: some View {
+        if hovering {
+            RowHoverActions(menuContent: { AnyView(menuItems) },
+                            menuHelp: "Oracle actions",
+                            onCloseRequested: onDeleteRequested,
+                            closeHelp: "Delete this Oracle (asks to confirm)",
+                            glyphSize: 11)
+        }
     }
 
     @ViewBuilder private var menuItems: some View {

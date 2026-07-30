@@ -1,0 +1,75 @@
+import SwiftUI
+
+/// Hover-revealed trailing actions for a list row — an ellipsis menu (the row's
+/// context-menu items, made discoverable without a right-click) and a ✕.
+///
+/// Meant to be floated by the caller (`.overlay(alignment: .trailing)`) rather than
+/// laid out inline: as inline content the buttons took width from the title, so every
+/// title re-truncated and the text visibly jumped the instant the pointer entered a
+/// row.
+///
+/// Drawn as a self-contained rounded pill — inset from the row's edges, hairline
+/// border, drop shadow — rather than an edge-to-edge slab faded into the title. The
+/// faded slab read as a smudge over the text; a pill with crisp edges reads as a
+/// control floating *above* the row, which is what it is.
+///
+/// Shared by the sidebar's session rows and the Oracle rail's rows so the affordance
+/// stays identical in both lists.
+struct RowHoverActions: View {
+    /// Items for the ellipsis menu; nil hides the menu.
+    let menuContent: (() -> AnyView)?
+    let menuHelp: String
+    /// Nil hides the ✕.
+    let onCloseRequested: (() -> Void)?
+    let closeHelp: String
+    var glyphSize: CGFloat = 12
+
+    private let corner: CGFloat = 7
+
+    var body: some View {
+        HStack(spacing: 1) {
+            if let menuContent {
+                Menu { menuContent() } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: glyphSize, weight: .semibold))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(menuHelp)
+                .clickCursor()
+            }
+            if let onCloseRequested {
+                Button(action: onCloseRequested) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: glyphSize - 1, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help(closeHelp)
+                .clickCursor()
+            }
+        }
+        // A borderless button tints its glyph with the accent colour, which reads as
+        // low-contrast mud on the pill — force the full-contrast glyph instead (white
+        // on the dark theme, near-black on the light one).
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(pill)
+        // Keeps the pill clear of the row's own rounded edge.
+        .padding(.trailing, 5)
+    }
+
+    /// Frosted pill: a blur strong enough to fully hide the title behind it (a
+    /// half-legible word under thin glass was the worst part of the old slab), lifted a
+    /// touch brighter than the row and outlined so its edge is unambiguous.
+    private var pill: some View {
+        let shape = RoundedRectangle(cornerRadius: corner, style: .continuous)
+        return shape
+            .fill(.ultraThickMaterial)
+            .overlay(shape.fill(Color.appHairline(0.10)))
+            .overlay(shape.strokeBorder(Color.appHairline(0.22), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.45), radius: 5, y: 1)
+    }
+}
