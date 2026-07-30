@@ -392,7 +392,7 @@ private struct OracleChatView: View {
             Group {
                 // `.id` folds in `chatRefreshToken`: the Refresh button bumps it,
                 // recreating the view so it replays scrollback and repaints clean.
-                if TerminalBackendChoice.useGhostty {
+                if TerminalBackend.shared.useGhostty {
                     GhosttyLive(session: session, remembersSize: false,
                                 focusToken: oracle.chatFocusToken,
                                 onGrid: { cols, rows in oracle.rememberDockGrid(cols: cols, rows: rows) })

@@ -2778,7 +2778,7 @@ struct SessionContainer: View {
         // is its Session object + the refresh token it mounted with, so the
         // Refresh CTA (token bump on the visible entry) and a permissions flip
         // (new Session object) still fully recreate that one pane.
-        if TerminalBackendChoice.useGhostty {
+        if TerminalBackend.shared.useGhostty {
             let current = model.liveSession(meta.id)
             ZStack {
                 ForEach(model.livePanes.entries) { entry in

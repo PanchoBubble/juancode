@@ -134,7 +134,7 @@ struct BottomTerminalPanel: View {
     private func paneView(_ pane: TerminalPaneID, focusToken: Int = 0) -> some View {
         if let pty = model.shellPty(pane) {
             Group {
-                if TerminalBackendChoice.useGhostty {
+                if TerminalBackend.shared.useGhostty {
                     GhosttyEphemeral(pty: pty, hidden: hidden, onExit: {})
                 } else {
                     SwiftTermEphemeral(pty: pty, hidden: hidden, focusToken: focusToken, onExit: {})

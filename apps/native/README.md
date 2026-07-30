@@ -123,26 +123,33 @@ browser/phone clients attach to the identical registry over `/ws`.
 Core shell shipped: sidebar with live activity dots, session view,
 new-session + reactivate + delete.
 
-### Terminal backend — GhosttyKit spike (`juancode-gq9`)
+### Terminal backend — two surfaces, one seam (`juancode-gq9`)
 
-SwiftTerm 1.13.0 had unreliable resize + render glitches in full-screen TUIs, so
-the live surface was spiked over to **GhosttyKit** (`Lakr233/libghostty-spm`,
-GPU-rendered) behind the existing `SwiftTermLive` seam. The architecture is
-unchanged: _we_ still own the pty. libghostty runs as a host-driven backend via
+Live panes render through one of two interchangeable surfaces. The architecture is the
+same either way: _we_ own the pty. libghostty runs as a host-driven backend via
 `InMemoryTerminalSession` — pty output is pushed in with `receive(_:)`, keystrokes
 come back through the `write` callback, and grid changes arrive on the resize
 delegate → our SIGWINCH. Ghostty spawns no process of its own.
 
-`TerminalBackendChoice.useGhostty` picks the backend at every call site
+`TerminalBackend.shared.useGhostty` picks the surface at every call site
 (`RootView` main session, `OracleDock` chat, `BottomTerminalPanel` shell):
 
-- **default** → `GhosttyLive` / `GhosttyEphemeral` (GhosttyKit)
-- `JUANCODE_SWIFTTERM=1` → `SwiftTermLive` / `SwiftTermEphemeral` (fallback for A/B)
+- **default** → `SwiftTermLive` / `SwiftTermEphemeral`, CoreGraphics, with an opt-in
+  Metal path (`TerminalRenderer`)
+- toggled on → `GhosttyLive` / `GhosttyEphemeral`, always GPU
 
-SwiftTerm is retained as the fallback (not retired) until the spike is signed off;
-`EditorOverlay`'s ephemeral pty still runs on SwiftTerm. Both backends build clean
-(`swift build`); the remaining sign-off is visual — confirming glitch-free
-full-screen TUI + resize on a real display.
+It is a **Settings → Terminal** toggle, persisted in UserDefaults, `@Observable` so a
+flip re-runs the pane bodies: visible panes swap surface immediately and replay their
+scrollback. `JUANCODE_GHOSTTY=1` only seeds the first launch. `EditorOverlay`'s
+ephemeral pty is SwiftTerm-only.
+
+Ghostty was the default until a7ce9f1 (2026-07-09), when it was demoted over a
+main-thread deadlock: libghostty 1.2.x wrote to the surface synchronously on the calling
+thread, and several panes attaching at once wedged the app on a Zig futex (juancode-d89,
+filed as `libghostty-spm#28`). Upstream fixed it in 1.3.0 by queueing those writes per
+session, so the dependency now floors at 1.3.2 and the surface is a user choice again.
+SwiftTerm stays the default until the Ghostty path has real time on it under multi-pane
+load.
 
 ### Panels (`juancode-5za`, shipped)
 

@@ -31,10 +31,15 @@ let package = Package(
         // rows drifted left of the cursor as you typed (~3 cells by column 80).
         // Upstream 13732b7 fixed it, first released in 1.14.0.
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.15.0"),
-        // SPIKE: GhosttyKit (libghostty) — evaluating as a GPU-rendered replacement
-        // for SwiftTerm (cleaner resize, fewer render glitches). Host-driven via
-        // InMemoryTerminalSession so we keep owning the pty/byte stream.
-        .package(url: "https://github.com/Lakr233/libghostty-spm.git", from: "1.2.0"),
+        // GhosttyKit (libghostty): GPU-rendered alternative live surface, selectable
+        // in Settings → Terminal. Host-driven via InMemoryTerminalSession so we keep
+        // owning the pty/byte stream.
+        //
+        // 1.3.0 or newer is required: 1.2.x wrote to the surface synchronously on the
+        // calling thread, which deadlocked the main thread on a Zig futex when several
+        // panes attached at once (juancode-d89, filed as libghostty-spm#28). Their
+        // PR #29 moved those writes onto a per-session serial queue.
+        .package(url: "https://github.com/Lakr233/libghostty-spm.git", from: "1.3.2"),
         // GitHub-flavored markdown rendering for PR-panel comment bodies
         // (juancode-lqw). Handles headings, task lists, code fences, links; HTML
         // blocks (<details> etc.) render as their inner text.

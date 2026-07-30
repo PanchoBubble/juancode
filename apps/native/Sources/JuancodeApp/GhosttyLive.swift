@@ -1,26 +1,54 @@
 import SwiftUI
 import AppKit
+import Observation
 import GhosttyTerminal
 import JuancodeCore
 import JuancodeServices
 
-/// SPIKE (juancode bd: replace SwiftTerm with GhosttyKit): a drop-in alternative
-/// to `SwiftTermLive`, rendering the live pty with libghostty's GPU surface instead
-/// of SwiftTerm's CoreGraphics one. Same public `View` interface so the call site
-/// can A/B between them: SwiftTerm is the default, `JUANCODE_GHOSTTY=1` opts into
-/// libghostty for comparison (see `TerminalBackendChoice`).
+/// A drop-in alternative to `SwiftTermLive`, rendering the live pty with libghostty's
+/// GPU surface instead of SwiftTerm's CoreGraphics one. Same public `View` interface, so
+/// the call site can swap between them (see `TerminalBackend`).
 ///
 /// The architecture is preserved: *we* own the pty (local `forkpty` / remote
 /// `node-pty`); libghostty's `InMemoryTerminalSession` is a host-driven backend —
 /// pty output is pushed in via `receive(_:)`, user input comes back via the `write`
 /// callback, and grid changes arrive via the resize delegate → our SIGWINCH. No
 /// process is spawned by Ghostty.
-/// Which terminal surface the live panes use. SwiftTerm is the default; libghostty's
-/// host-managed write path (`ghostty_surface_write_buffer`) can deadlock the main
-/// thread under load (juancode-d89), so it's opt-in via `JUANCODE_GHOSTTY=1`.
-enum TerminalBackendChoice {
-    static var useGhostty: Bool {
-        ProcessInfo.processInfo.environment["JUANCODE_GHOSTTY"] == "1"
+
+/// Which surface the live panes use: SwiftTerm (default) or libghostty. A user-facing
+/// Setting rather than the old `JUANCODE_GHOSTTY=1`-only switch, which is now just the
+/// first-launch seed.
+///
+/// Ghostty was forced off entirely for a while: on 1.2.x, `ghostty_surface_write_buffer`
+/// wrote synchronously on the calling thread and deadlocked main on a Zig futex when
+/// several panes attached at once (juancode-d89). Fixed upstream in libghostty-spm 1.3.0
+/// (their PR #29 queues those writes per session), which is why this is a toggle again
+/// and why `Package.swift` floors the dependency at 1.3.2.
+///
+/// `@Observable` so flipping it re-runs the pane bodies that read it: visible panes swap
+/// surface immediately, replaying their scrollback into the new one, exactly as they do
+/// when a session is first opened. Same singleton pattern as `TerminalRenderer`.
+@MainActor
+@Observable
+final class TerminalBackend {
+    static let shared = TerminalBackend()
+
+    private let defaultsKey = "juancode.terminal.useGhostty"
+
+    private(set) var useGhostty: Bool
+
+    private init() {
+        if UserDefaults.standard.object(forKey: defaultsKey) != nil {
+            useGhostty = UserDefaults.standard.bool(forKey: defaultsKey)
+        } else {
+            useGhostty = ProcessInfo.processInfo.environment["JUANCODE_GHOSTTY"] == "1"
+        }
+    }
+
+    func setUseGhostty(_ on: Bool) {
+        guard on != useGhostty else { return }
+        useGhostty = on
+        UserDefaults.standard.set(on, forKey: defaultsKey)
     }
 }
 
