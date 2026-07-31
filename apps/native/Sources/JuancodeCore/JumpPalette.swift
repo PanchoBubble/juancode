@@ -58,11 +58,15 @@ public func smartSortPrecedes(_ a: SessionSortKey, _ b: SessionSortKey) -> Bool 
     return a.createdAt > b.createdAt
 }
 
-/// Attention states that pull a session above the user's manual order — the two
-/// that want the user to act: a reply is due, or a finished turn is unseen.
-/// Working/idle/exited sessions rest in their manual slot instead.
+/// The one attention state that pulls a session above the user's manual order: a
+/// reply is due, so the turn cannot continue until the user answers.
+///
+/// A finished-but-unseen turn deliberately does NOT bubble. It used to, and the
+/// result was a sidebar that reshuffled every time any agent ended a turn — the
+/// rows moved under the cursor for something the green check already says in
+/// place. Only a question moves a row now; everything else rests in its slot.
 public func attentionBubblesAboveManualOrder(_ attention: SessionAttention) -> Bool {
-    attention == .waitingInput || attention == .doneUnseen
+    attention == .waitingInput
 }
 
 /// One session's inputs for the sidebar's stable "sink dead ones" order. `down`
@@ -102,21 +106,23 @@ public func restingAttention(_ attention: SessionAttention, crashOrphan: Bool) -
 }
 
 /// The sidebar's *order* bucket for one session: `restingAttention` with `.working`
-/// collapsed into `.idle`.
+/// and `.doneUnseen` both collapsed into `.idle`.
 ///
-/// The within-project order is deliberately blind to busy↔idle — `manualRestingPrecedes`
-/// reads only `.exited` and `manualWithBubblePrecedes` only the two bubbling states — so
-/// collapsing `.working` changes no ordering. What it buys is stillness: a working agent's
-/// activity flips no longer change the projection the sidebar observes, so an echoing
-/// keystroke can't re-derive the folder grouping (juancode-2n0). Row glyphs keep reading
-/// the real activity.
+/// The within-project order is deliberately blind to everything but "waiting" and
+/// "exited" — `manualRestingPrecedes` reads only `.exited` and
+/// `manualWithBubblePrecedes` only `.waitingInput` — so collapsing the other two
+/// changes no ordering. What it buys is stillness: neither a working agent's
+/// activity flips nor a turn ending changes the projection the sidebar observes, so
+/// an echoing keystroke can't re-derive the folder grouping (juancode-2n0) and a
+/// finished turn can't either. Row glyphs keep reading the real activity, so the
+/// green check still appears — the row just doesn't move to show it.
 public func sidebarOrderAttention(
     live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool
 ) -> SessionAttention {
     let resting = restingAttention(
         sessionAttention(live: live, activity: activity, unseenDone: unseenDone),
         crashOrphan: crashOrphan)
-    return resting == .working ? .idle : resting
+    return (resting == .working || resting == .doneUnseen) ? .idle : resting
 }
 
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
@@ -136,11 +142,21 @@ public struct ManualSortKey: Sendable, Equatable {
 }
 
 /// The resting order — where a session sits once nothing is bubbling: unplaced
-/// live sessions first (newest-first, so a fresh spawn appears at the top just
-/// like the pre-manual-order sort), then the user's drag order, then unplaced
-/// dead sessions sinking to the bottom. Placed sessions hold their slot dead or
-/// alive — the manual order is the baseline, not liveness. Deliberately reads
-/// no activity/`updatedAt`, so a session flipping busy↔idle never moves.
+/// live sessions first (most-recently-active first, so a fresh spawn appears at
+/// the top just like the pre-manual-order sort), then the user's drag order, then
+/// unplaced dead sessions sinking to the bottom. Placed sessions hold their slot
+/// dead or alive — the manual order is the baseline, not liveness. Reads no
+/// activity, so a session flipping busy↔idle never moves.
+///
+/// Within a tier it orders by `key.updatedAt` descending — last activity, not
+/// creation — so the session you actually worked in yesterday outranks 40 newer
+/// but untouched ones. That only holds still because the sidebar fills
+/// `updatedAt` with a *launch snapshot* (`AppModel.restingRecency`), never the
+/// live column: a running session's `updatedAt` moves on every scrollback flush,
+/// and ordering on that directly would reshuffle the folder mid-work — the churn
+/// juancode-05u/2n0 exists to prevent. `createdAt` then breaks ties (sessions
+/// with no recorded activity share an `updatedAt`), and `id` after that, so
+/// bulk-spawned sessions stay deterministic.
 public func manualRestingPrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
     func tier(_ k: ManualSortKey) -> Int {
         if k.manualIndex != nil { return 1 }
@@ -149,21 +165,21 @@ public func manualRestingPrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Boo
     let ta = tier(a), tb = tier(b)
     if ta != tb { return ta < tb }
     if let x = a.manualIndex, let y = b.manualIndex { return x < y }
+    if a.key.updatedAt != b.key.updatedAt { return a.key.updatedAt > b.key.updatedAt }
     if a.key.createdAt != b.key.createdAt { return a.key.createdAt > b.key.createdAt }
     return a.id < b.id
 }
 
 /// Strict-weak ordering blending a user's manual drag order with attention
-/// bubbling: sessions wanting action float above everything (waiting before
-/// done-unseen, then their resting order, so two waiting sessions keep their
-/// relative slots), and the rest sit in the resting order. So a waiting session
-/// bubbles up, then drops back to its manual slot once the user has handled it —
-/// the persisted order is never rewritten by the bubble.
+/// bubbling: sessions waiting on a reply float above everything (in their resting
+/// order, so two waiting sessions keep their relative slots), and the rest sit in
+/// the resting order. So a waiting session bubbles up, then drops back to its
+/// manual slot once the user has answered — the persisted order is never
+/// rewritten by the bubble.
 public func manualWithBubblePrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
     let aBubble = attentionBubblesAboveManualOrder(a.key.attention)
     let bBubble = attentionBubblesAboveManualOrder(b.key.attention)
     if aBubble != bBubble { return aBubble }
-    if aBubble, a.key.attention != b.key.attention { return a.key.attention < b.key.attention }
     return manualRestingPrecedes(a, b)
 }
 

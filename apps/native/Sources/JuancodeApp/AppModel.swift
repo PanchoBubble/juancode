@@ -95,6 +95,10 @@ final class AppModel {
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
         didSet {
+            // Remember where we came from so the mouse's back button (⌘[) can return.
+            // Every navigation path lands here, so this one hook covers the jump
+            // palette, notifications, search hits and plain sidebar clicks alike.
+            if !navigatingHistory { navHistory.record(leaving: oldValue) }
             // Viewing a session clears its pending turn-end notification (and the
             // Dock badge count it contributed).
             if let sel = selection { clearUnread(sel) }
@@ -413,6 +417,24 @@ final class AppModel {
     /// pty registry, so this is every persisted session that isn't already running.
     private let launchRestoredIds: Set<String>
 
+    /// Each persisted session's `updatedAt` as it stood at launch — the sidebar's
+    /// resting recency, so a folder opens ordered by what you last worked in rather
+    /// than by what was created most recently.
+    ///
+    /// A snapshot, deliberately: a running session's `updatedAt` advances on every
+    /// scrollback flush, so reading the live value here would reorder the folder
+    /// under the cursor all day (the churn juancode-05u/2n0 removed). Frozen for the
+    /// run, it buys cross-restart recency at no cost to in-run stillness.
+    @ObservationIgnored private let launchRecency: [String: Int]
+
+    /// Resting recency for one session: its launch `updatedAt`, or its `createdAt`
+    /// for rows this run created or discovered. Both are epoch-ms so they compare
+    /// directly — and a session born this run outranks every snapshot, which is what
+    /// keeps a fresh spawn at the top of its tier.
+    func restingRecency(_ meta: SessionMeta) -> Int {
+        launchRecency[meta.id] ?? meta.createdAt
+    }
+
     /// Restore candidates already revived once this run, so re-opening one within the
     /// same run (after it exits again, say) doesn't re-announce a restore.
     private var revivedRestoresThisRun: Set<String> = []
@@ -435,8 +457,11 @@ final class AppModel {
         self.corruptDbPath = corruptDbPath
         // Snapshot the disk-restore candidates before anything revives: persisted
         // sessions not already live in the (post-restart, usually empty) registry.
+        let persistedAtLaunch = appState.store.list()
         let liveAtLaunch = Set(appState.registry.all().map(\.id))
-        self.launchRestoredIds = Set(appState.store.list().map(\.id)).subtracting(liveAtLaunch)
+        self.launchRestoredIds = Set(persistedAtLaunch.map(\.id)).subtracting(liveAtLaunch)
+        self.launchRecency = Dictionary(persistedAtLaunch.map { ($0.id, $0.updatedAt) },
+                                        uniquingKeysWith: { a, _ in a })
         self.pendingCrashOrphans = appState.crashOrphanIds
         appState.registry.onCreate { [weak self] s in
             Task { @MainActor in
@@ -757,6 +782,42 @@ final class AppModel {
 
     func selectFirst() { if let f = navOrder.first { selection = f } }
     func selectLast() { if let l = navOrder.last { selection = l } }
+
+    /// Viewed-session history for the mouse's back/forward buttons (and ⌘[ / ⌘]).
+    /// Fed from `selection.didSet`; `navigatingHistory` keeps our own moves out of
+    /// it so back and forward don't overwrite each other.
+    private var navHistory = NavHistory()
+    @ObservationIgnored private var navigatingHistory = false
+
+    var canGoBack: Bool { navHistory.canGoBack }
+    var canGoForward: Bool { navHistory.canGoForward }
+
+    /// Return to the previously viewed session. No-op with nothing behind us (or
+    /// when every entry back there has since been deleted).
+    func goBack() {
+        navigate(to: navHistory.goBack(from: selection, exists: { self.sessionExists($0) }))
+    }
+
+    /// Re-walk forward after one or more `goBack`s.
+    func goForward() {
+        navigate(to: navHistory.goForward(from: selection, exists: { self.sessionExists($0) }))
+    }
+
+    private func navigate(to target: String?) {
+        guard let target else { return }
+        navigatingHistory = true
+        selection = target
+        navigatingHistory = false
+        // Same landing treatment as the ⌘K jump: flash the rim so the eye finds the
+        // pane it teleported to (juancode-vz1).
+        flashFocusRim()
+    }
+
+    /// Does this id still have a row to land on? Externals count — selecting one is
+    /// how they get imported.
+    private func sessionExists(_ id: String) -> Bool {
+        sessions.contains { $0.id == id }
+    }
 
     /// Move keyboard focus to the sidebar (⌃H): suppress terminal auto-focus so j/k
     /// don't bounce focus back into the pty, and nudge the list to become first responder.
@@ -3964,6 +4025,7 @@ final class AppModel {
         stoppedPanes.remove(id)
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
+        navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
         refresh()
         if let wt = meta?.worktreePath {
             Task { try? await removeWorktree(wt) }

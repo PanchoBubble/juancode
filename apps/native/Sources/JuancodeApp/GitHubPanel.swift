@@ -1448,7 +1448,9 @@ private struct GitHubConversationSection: View {
     @State private var composerOpen = true
 
     var body: some View {
-        let timeline = prTimeline(conversation)
+        // Visible, not raw: a review that carried nothing but replies to an existing
+        // thread has no card of its own — its replies show inside that thread.
+        let timeline = prVisibleTimeline(conversation)
         VStack(alignment: .leading, spacing: 10) {
             Text("Conversation")
                 .font(.system(size: 11, weight: .semibold))
@@ -1480,6 +1482,10 @@ private struct GitHubConversationSection: View {
 
 /// The card chrome every conversation entry sits in: padded, panel-tinted, and
 /// bordered, so each comment/review reads as a discrete unit (juancode-bkj).
+///
+/// Fill and border both sit well above the old half-opacity panel tint: against
+/// the panel's near-black background a card at 0.5/0.15 was effectively invisible,
+/// so a long thread read as one undifferentiated wall of text.
 private struct ConversationCard<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -1487,10 +1493,10 @@ private struct ConversationCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 6) { content }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.appPanel.opacity(0.5))
+            .background(Color.appPanel)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.secondary.opacity(0.15)))
+                .strokeBorder(Color.secondary.opacity(0.3)))
     }
 }
 
@@ -1580,12 +1586,56 @@ private struct CommentMarkdown: View {
     let text: String
 
     var body: some View {
+        // A review bot's P1/P2 badge is a remote image the panel never draws, so it
+        // is parsed out of the body and drawn as a chip — the severity is the first
+        // thing you need off a finding.
+        let (priority, body) = extractCommentPriority(text)
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(parseCommentSegments(text).enumerated()), id: \.offset) { _, seg in
+            if let priority {
+                PriorityChip(priority: priority)
+            }
+            ForEach(Array(parseCommentSegments(body).enumerated()), id: \.offset) { _, seg in
                 CommentSegmentView(segment: seg)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A review finding's severity as a native chip ("P1", "P2", …), coloured from the
+/// badge url's shields.io colour word and falling back to a sensible ramp by
+/// number when the url doesn't carry one.
+private struct PriorityChip: View {
+    let priority: CommentPriority
+
+    var body: some View {
+        Text(priority.label)
+            .font(.system(size: 10, weight: .bold).monospacedDigit())
+            .foregroundStyle(color)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(color.opacity(0.18))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(color.opacity(0.45)))
+            .help("Reviewer-assigned priority \(priority.label)")
+    }
+
+    private var color: Color {
+        switch priority.colorName {
+        case "red", "brightred", "critical": return .red
+        case "orange": return .orange
+        case "yellow", "important": return .yellow
+        case "blue", "informational": return .blue
+        case "green", "brightgreen", "success": return .green
+        case "grey", "gray", "lightgrey", "lightgray": return .secondary
+        default: break
+        }
+        // No colour word in the url: P1 loudest, then down the ramp.
+        switch priority.label.dropFirst() {
+        case "1": return .red
+        case "2": return .yellow
+        case "3": return .blue
+        default: return .secondary
+        }
     }
 }
 
@@ -1678,35 +1728,38 @@ private struct ReviewEventRow: View {
                     .font(.system(size: 11, weight: .semibold))
                 Text(verdictText)
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(chipColor)
+                    // A grey chip label on a grey chip fill on a near-black card was
+                    // three shades of the same nothing; the neutral verdict borrows
+                    // the card's text colour instead.
+                    .foregroundStyle(chipColor == .secondary ? Color.primary.opacity(0.8) : chipColor)
                     .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(chipColor.opacity(0.15))
+                    .background(chipColor.opacity(0.2))
                     .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(chipColor.opacity(0.35)))
                 if review.comments.count > 1 {
                     Text("\(review.comments.count) comments")
                         .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
                 Text(relativeDate(review.createdAt))
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             }
             if !review.body.isEmpty {
                 CommentMarkdown(text: review.body)
             }
             ReactionsRow(reactions: review.reactions)
-            if !review.comments.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(review.comments) { c in
-                        InlineReviewCommentRow(
-                            pr: pr, cwd: cwd, comment: c,
-                            info: conversation.threadInfo(forCommentId: c.id))
+            let groups = reviewThreadGroups(review: review, threads: conversation.threads)
+            if !groups.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(groups) { group in
+                        ReviewThreadRow(pr: pr, cwd: cwd, group: group)
                     }
                 }
                 .padding(.leading, 10)
                 .overlay(alignment: .leading) {
-                    Rectangle().fill(Color.secondary.opacity(0.2)).frame(width: 2)
+                    Rectangle().fill(Color.secondary.opacity(0.35)).frame(width: 2)
                 }
             }
         }
@@ -1732,63 +1785,103 @@ private struct ReviewEventRow: View {
     }
 }
 
-/// One inline file comment inside a review event: `path:line` header with
-/// resolved/outdated badge, author + time, body, and Reply (targets its thread's
-/// top-level comment — GitHub's replies API only accepts those) + Send-to-agent.
-private struct InlineReviewCommentRow: View {
+/// One inline review *thread* inside a review event: the `path:line` header with
+/// resolved/outdated badges, the diff hunk once, then every comment in the thread
+/// — the root finding followed by the replies, indented under a rule so a
+/// back-and-forth reads as one conversation. Reply targets the thread's top-level
+/// comment (GitHub's replies API only accepts those).
+private struct ReviewThreadRow: View {
     let pr: PullRequest
     let cwd: String
-    let comment: PrConversationComment
-    let info: PrConversation.CommentThreadInfo?
+    let group: PrThreadGroup
     @State private var replying = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                if let path = comment.path, !path.isEmpty {
-                    Text(comment.line.map { "\(path):\($0)" } ?? path)
-                        .font(.system(size: 10).monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(path)
+            header
+            if let root = group.root {
+                if let hunk = root.diffHunk, !hunk.isEmpty {
+                    ReviewHunkView(diffHunk: hunk, path: group.path ?? "")
                 }
-                if info?.isResolved == true {
-                    Text("resolved").font(.system(size: 9)).foregroundStyle(.green)
-                }
-                if info?.isOutdated == true {
-                    Text("outdated").font(.system(size: 9)).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 4)
-                if info?.replyTargetId != nil {
-                    Button("Reply") { replying.toggle() }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 10))
-                        .clickCursor()
-                }
-                SendToAgentControl(
-                    pr: pr, cwd: cwd, itemId: comment.id,
-                    prompt: commentTaskPrompt(
-                        number: pr.number, path: comment.path, line: comment.line,
-                        author: comment.author, body: comment.body, url: comment.url,
-                        diffHunk: comment.diffHunk))
+                commentBlock(root, avatarSize: 14)
             }
-            if let hunk = comment.diffHunk, !hunk.isEmpty {
-                ReviewHunkView(diffHunk: hunk, path: comment.path ?? "")
+            if !group.replies.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(group.replies) { reply in
+                        commentBlock(reply, avatarSize: 13)
+                    }
+                }
+                .padding(.leading, 10)
+                .padding(.top, 2)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Color.secondary.opacity(0.3)).frame(width: 1)
+                }
             }
-            HStack(spacing: 6) {
-                CommentAvatar(url: comment.authorAvatarUrl, size: 14)
-                Text(comment.author.isEmpty ? "(unknown)" : "@\(comment.author)")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(relativeDate(comment.createdAt))
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-            }
-            CommentMarkdown(text: comment.body)
-            ReactionsRow(reactions: comment.reactions)
             if replying {
                 ReplyComposer(pr: pr, cwd: cwd,
-                              replyTargetId: info?.replyTargetId, isPresented: $replying)
+                              replyTargetId: group.replyTargetId, isPresented: $replying)
             }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            if let path = group.path, !path.isEmpty {
+                Text(group.line.map { "\(path):\($0)" } ?? path)
+                    .font(.system(size: 10).monospaced())
+                    .foregroundStyle(.primary.opacity(0.75))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .help(path)
+            }
+            if group.isResolved { stateChip("resolved", .green) }
+            if group.isOutdated { stateChip("outdated", .secondary) }
+            if group.replies.count > 0 {
+                stateChip("\(group.replies.count) \(group.replies.count == 1 ? "reply" : "replies")",
+                          .secondary)
+            }
+            Spacer(minLength: 4)
+            if group.replyTargetId != nil {
+                Button("Reply") { replying.toggle() }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10))
+                    .clickCursor()
+            }
+            if let root = group.root {
+                SendToAgentControl(
+                    pr: pr, cwd: cwd, itemId: root.id,
+                    prompt: commentTaskPrompt(
+                        number: pr.number, path: root.path, line: root.line,
+                        author: root.author, body: root.body, url: root.url,
+                        diffHunk: root.diffHunk))
+            }
+        }
+    }
+
+    /// A bordered chip, not bare grey text: at 9pt on the panel's near-black
+    /// background the plain labels were barely there.
+    private func stateChip(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(color == .secondary ? Color.primary.opacity(0.7) : color)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(color.opacity(0.16))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(color.opacity(0.3)))
+    }
+
+    private func commentBlock(_ c: PrConversationComment, avatarSize: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                CommentAvatar(url: c.authorAvatarUrl, size: avatarSize)
+                Text(c.author.isEmpty ? "(unknown)" : "@\(c.author)")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(relativeDate(c.createdAt))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            CommentMarkdown(text: c.body)
+            ReactionsRow(reactions: c.reactions)
         }
     }
 }
@@ -1810,7 +1903,7 @@ private struct IssueCommentRow: View {
                     .font(.system(size: 11, weight: .semibold))
                 Text(relativeDate(comment.createdAt))
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
                 Button("Reply") { replying.toggle() }
                     .buttonStyle(.borderless)

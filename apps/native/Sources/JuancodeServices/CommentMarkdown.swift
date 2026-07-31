@@ -22,6 +22,53 @@ public func parseCommentSegments(_ raw: String) -> [CommentSegment] {
     splitDetails(cleanCommentHTML(raw))
 }
 
+/// The severity badge review bots (Codex, Claude) put at the head of a finding:
+/// `![P1 Badge](https://img.shields.io/badge/P1-red?style=flat)`, usually wrapped
+/// in `<sub>`s. It's a remote PNG, so in the panel it renders as nothing — which
+/// hid the one bit that decides whether you read the finding now or later. Parsed
+/// out here and drawn as a native chip instead.
+public struct CommentPriority: Sendable, Equatable {
+    /// The label as written — "P1", "P2", …
+    public let label: String
+    /// The shields.io colour word from the badge url ("red", "yellow", …), when
+    /// the url carries one; the view maps it to a real colour.
+    public let colorName: String?
+
+    public init(label: String, colorName: String?) {
+        self.label = label; self.colorName = colorName
+    }
+}
+
+/// Pull a leading priority badge out of a comment body: the badge (nil when the
+/// body has none) and the body with the badge markup — plus the `<sub>` wrappers
+/// and padding spaces around it — removed, so the finding's title is left flush.
+public func extractCommentPriority(_ body: String) -> (priority: CommentPriority?, body: String) {
+    // The badge image, optionally wrapped in any number of <sub>/<sup> tags, plus
+    // the spaces the bots pad it with. Only ever matched once, at the head.
+    let pattern = "(?:</?su[bp]>\\s*)*!\\[\\s*(P\\d+)[^\\]]*\\]\\(([^)]*)\\)(?:\\s*</?su[bp]>)*[ \\t]*"
+    guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+        return (nil, body)
+    }
+    let ns = body as NSString
+    guard let m = re.firstMatch(in: body, range: NSRange(location: 0, length: ns.length)),
+          m.numberOfRanges >= 3 else { return (nil, body) }
+    let label = ns.substring(with: m.range(at: 1))
+    let url = ns.substring(with: m.range(at: 2))
+    let stripped = ns.replacingCharacters(in: m.range, with: "")
+    return (CommentPriority(label: label, colorName: shieldsColorName(url)), stripped)
+}
+
+/// The colour word out of a shields.io badge url — `…/badge/P1-red?style=flat`
+/// → "red". Nil for any url that doesn't carry one.
+private func shieldsColorName(_ url: String) -> String? {
+    guard let r = url.range(of: "/badge/") else { return nil }
+    let segment = url[r.upperBound...].prefix { $0 != "?" && $0 != "/" && $0 != "#" }
+    let parts = segment.split(separator: "-", omittingEmptySubsequences: true)
+    guard parts.count >= 2 else { return nil }
+    let color = parts[1].lowercased()
+    return color.isEmpty ? nil : color
+}
+
 /// Translate the inline/block HTML GitHub bodies carry into markdown, strip the
 /// noise wrappers, and leave `<details>`/`<summary>` for `splitDetails`.
 /// Internal (not private) so the unit tests can exercise it directly.

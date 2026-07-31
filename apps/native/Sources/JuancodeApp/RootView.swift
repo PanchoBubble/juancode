@@ -245,9 +245,10 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
     final class Coordinator { var hosting: NSHostingView<AnyView>? }
 }
 
-/// Hidden bridge that installs the window-scoped keyboard monitor for vim-style
-/// sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm). The monitor must sit ahead
-/// of the terminal in the responder chain, which only an NSEvent local monitor can do.
+/// Hidden bridge that installs the window-scoped monitors that must sit ahead of the
+/// terminal in the responder chain (only an NSEvent local monitor can): the keyboard
+/// one for vim-style sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm), and the
+/// mouse one for the side buttons' back/forward session history.
 private struct PaneNavInstaller: NSViewRepresentable {
     let model: AppModel
     let oracle: OracleModel
@@ -255,21 +256,23 @@ private struct PaneNavInstaller: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
-        context.coordinator.monitor = installPaneNavigation(
-            model: model, oracle: oracle, shortcuts: shortcuts, host: v)
+        context.coordinator.monitors = [
+            installPaneNavigation(model: model, oracle: oracle, shortcuts: shortcuts, host: v),
+            installBackForwardMouse(model: model, oracle: oracle, host: v),
+        ].compactMap { $0 }
         return v
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        if let m = coordinator.monitor { NSEvent.removeMonitor(m) }
-        coordinator.monitor = nil
+        for m in coordinator.monitors { NSEvent.removeMonitor(m) }
+        coordinator.monitors = []
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator { var monitor: Any? }
+    final class Coordinator { var monitors: [Any] = [] }
 }
 
 /// `projectCwd(for:)` (the worktree→repo folding used for sidebar grouping) now
@@ -596,12 +599,12 @@ struct SidebarView: View {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
         return byCwd.map { cwd, sessions in
-            // Within a project: sessions needing action (waiting for a reply,
-            // finished-but-unseen) bubble to the top; the rest hold the user's
-            // drag order, with unplaced ones resting where the stable sort puts
-            // them (live newest-first, dead sinking — juancode-05u). Bubbling is
-            // temporary: the persisted order is untouched, so a handled session
-            // falls back to its manual slot.
+            // Within a project: only sessions waiting on a reply bubble to the top;
+            // the rest hold the user's drag order, with unplaced ones resting where
+            // the stable sort puts them (live newest-first, dead sinking —
+            // juancode-05u). A finished turn no longer moves a row, it just glyphs.
+            // Bubbling is temporary: the persisted order is untouched, so an
+            // answered session falls back to its manual slot.
             let slots = manualSlots(cwd)
             // Decorate-sort-undecorate: `manualSortKey` reads live state per session
             // (isLive, activity, unseenCompletions, isCrashOrphan), and computing it
@@ -687,10 +690,14 @@ struct SidebarView: View {
 
     /// The manual-order sort inputs for one session: its order bucket (bubbling +
     /// dead-sink), timestamps, and its slot in the user's persisted drag order.
+    ///
+    /// `updatedAt` carries the model's launch snapshot, not `meta.updatedAt`: it is
+    /// what `manualRestingPrecedes` orders a tier by, and the live column moves on
+    /// every scrollback flush of every running session.
     private func manualSortKey(_ meta: SessionMeta, slots: [String: Int]) -> ManualSortKey {
         ManualSortKey(
             key: SessionSortKey(attention: attention(meta),
-                                updatedAt: meta.updatedAt, createdAt: meta.createdAt),
+                                updatedAt: model.restingRecency(meta), createdAt: meta.createdAt),
             manualIndex: slots[meta.id],
             id: meta.id)
     }
@@ -759,15 +766,30 @@ struct SidebarView: View {
     }
 
     /// `.onMove` handler for the List's session rows. `shown` is the ForEach's
-    /// data — the whole group or the preview prefix — and `from`/`to` are in its
-    /// coordinates; rows hidden behind "Load more" keep their tail order.
+    /// data — the whole group or the folded preview — and `from`/`to` are in its
+    /// coordinates; rows hidden behind "Load more" keep their relative order.
     private func moveSessions(in group: FolderGroup, shown: [SessionMeta], from: IndexSet, to: Int) {
         guard let first = from.first else { return }
         var shownIds = shown.map(\.id)
         let movedId = shownIds[first]
         shownIds.move(fromOffsets: from, toOffset: to)
-        let displayed = shownIds + group.sessions.map(\.id).dropFirst(shown.count)
+        // The preview isn't necessarily a prefix (`previewSessions` pulls live rows
+        // up out of the tail), so the hidden remainder is "everything not shown".
+        let shownSet = Set(shownIds)
+        let displayed = shownIds + group.sessions.map(\.id).filter { !shownSet.contains($0) }
         persistSessionOrder(group, displayedAfterMove: displayed, moved: movedId)
+    }
+
+    /// The rows a folder shows while folded: the first `folderPreviewCount`, plus any
+    /// live session sorting below them. Live rows usually float to the top, but a manual
+    /// drag order can park dead ones in the preview slots — and an active session must
+    /// never be hidden behind "Load more", least of all one that just auto-started.
+    private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
+        let s = group.sessions
+        guard s.count > folderPreviewCount else { return s }
+        return s.enumerated()
+            .filter { $0.offset < folderPreviewCount || model.isLive($0.element.id) }
+            .map(\.element)
     }
 
     /// Scroll-box drop handler: place `dragged` just before `target`, the same
@@ -791,9 +813,8 @@ struct SidebarView: View {
     private func visibleOrderedIDs(from groups: [FolderGroup]) -> [String] {
         var ids: [String] = []
         for group in groups where !collapsedFolders.contains(group.cwd) {
-            let s = group.sessions
-            let shown = (s.count <= folderPreviewCount || expandedFolders.contains(group.cwd))
-                ? s : Array(s.prefix(folderPreviewCount))
+            let shown = expandedFolders.contains(group.cwd)
+                ? group.sessions : previewSessions(group)
             for meta in shown where !model.isExternal(meta.id) { ids.append(meta.id) }
         }
         return ids
@@ -1056,14 +1077,13 @@ struct SidebarView: View {
 
     /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
     /// with a "Load more" affordance, and once expanded a fixed-height box that scrolls
-    /// internally so the sidebar doesn't grow. The preview is sized to fit every active
-    /// (live) session — by default live sessions sort ahead of dead ones, though a
-    /// manual drag order can hold a dead session in a preview slot.
+    /// internally so the sidebar doesn't grow. The preview always carries every active
+    /// (live) session, wherever it sorts — see `previewSessions`.
     @ViewBuilder
     private func sessionList(_ group: FolderGroup) -> some View {
         let sessions = group.sessions
-        let previewCount = max(folderPreviewCount, group.running)
-        if sessions.count <= previewCount {
+        let shown = previewSessions(group)
+        if shown.count == sessions.count {
             ForEach(sessions, id: \.id) { meta in nativeRow(meta) }
                 .onMove { from, to in
                     moveSessions(in: group, shown: sessions, from: from, to: to)
@@ -1071,13 +1091,12 @@ struct SidebarView: View {
         } else if expandedFolders.contains(group.cwd) {
             scrollBox(group)
         } else {
-            let shown = Array(sessions.prefix(previewCount))
             ForEach(shown, id: \.id) { meta in nativeRow(meta) }
                 .onMove { from, to in
                     moveSessions(in: group, shown: shown, from: from, to: to)
                 }
             Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.insert(group.cwd) } } label: {
-                Label("Load more (\(sessions.count - previewCount))",
+                Label("Load more (\(sessions.count - shown.count))",
                       systemImage: "chevron.down.circle")
                     .font(.system(size: 11))
             }
@@ -2202,8 +2221,20 @@ struct SessionRow: View {
                     }
                     .help(usageHelp)
                 }
-                if let changeBadge, let onOpenChanges {
-                    changeBadgeCapsule(changeBadge, onOpen: onOpenChanges)
+                // Badge line, under the subtitle: the tracking capsule sits next to the
+                // change badge on the leading edge, so the trailing edge stays free for
+                // the hover pill (which used to land on top of the PR capsule).
+                if showPr || showIssue || changeBadge != nil {
+                    HStack(spacing: 5) {
+                        if showPr, let t = tracked {
+                            prCapsule(t)
+                        } else if showIssue, let ti = trackedIssue {
+                            issueCapsule(ti)
+                        }
+                        if let changeBadge, let onOpenChanges {
+                            changeBadgeCapsule(changeBadge, onOpen: onOpenChanges)
+                        }
+                    }
                 }
             }
             Spacer(minLength: 6)
@@ -2221,16 +2252,11 @@ struct SessionRow: View {
     /// The reaper put this session to sleep and it hasn't been revived yet.
     private var sleeping: Bool { !live && meta.dormant }
 
-    /// At most one tracking capsule plus (for external rows) a hover-revealed
-    /// resume button. Usage moved into the subtitle, so the trailing edge stays
-    /// quiet (juancode-341).
+    /// The at-risk warning plus (for external rows) a hover-revealed resume button.
+    /// Usage moved into the subtitle and the tracking capsule moved to the leading
+    /// badge line, so the trailing edge stays quiet (juancode-341).
     @ViewBuilder
     private var trailingOrnament: some View {
-        if showPr, let t = tracked {
-            prCapsule(t)
-        } else if showIssue, let ti = trackedIssue {
-            issueCapsule(ti)
-        }
         // At-risk warning only on worktree rows: an isolated worktree's uncommitted
         // work can be orphaned/forgotten, so it's worth flagging. Main-checkout
         // sessions all share one checkout — the dirty state is just the current

@@ -22,23 +22,21 @@ struct TerminalSettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Ghostty surface (experimental)", isOn: $ghostty)
+                Toggle("Ghostty surface (default)", isOn: $ghostty)
                     .onChange(of: ghostty) { _, on in
                         TerminalBackend.shared.setUseGhostty(on)
                     }
                 Text("Renders panes with libghostty (Ghostty's engine, always GPU) "
                     + "instead of SwiftTerm. Cleaner resize, and it owns its own "
                     + "frame pacing. Applies instantly: open panes swap surface and "
-                    + "replay their scrollback. Experimental — on libghostty 1.2.x "
-                    + "this could freeze the app when several panes attached at once; "
-                    + "that was fixed upstream in 1.3.0, but if a pane ever wedges, "
-                    + "switch back here.")
+                    + "replay their scrollback. Turn it off to fall back to SwiftTerm — "
+                    + "worth trying if a pane ever wedges or draws wrong.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider().padding(.vertical, 4)
 
-                Toggle("GPU rendering (Metal, experimental)", isOn: $metal)
+                Toggle("GPU rendering (Metal)", isOn: $metal)
                     .disabled(ghostty)
                     .onChange(of: metal) { _, on in
                         TerminalRenderer.shared.setMetalEnabled(on)
@@ -47,9 +45,9 @@ struct TerminalSettingsView: View {
                     ? "Only applies to the SwiftTerm surface. The Ghostty surface is "
                         + "GPU-rendered either way."
                     : "Draws terminal text on the GPU instead of CoreText — much "
-                        + "lower CPU while agents stream output. Experimental: if you "
-                        + "see rendering artifacts, switch it back off (applies "
-                        + "instantly, no restart).")
+                        + "lower CPU while agents stream output. On by default; if you "
+                        + "see rendering artifacts, switch it off (applies instantly, "
+                        + "no restart).")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 

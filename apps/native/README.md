@@ -134,22 +134,23 @@ delegate → our SIGWINCH. Ghostty spawns no process of its own.
 `TerminalBackend.shared.useGhostty` picks the surface at every call site
 (`RootView` main session, `OracleDock` chat, `BottomTerminalPanel` shell):
 
-- **default** → `SwiftTermLive` / `SwiftTermEphemeral`, CoreGraphics, with an opt-in
-  Metal path (`TerminalRenderer`)
-- toggled on → `GhosttyLive` / `GhosttyEphemeral`, always GPU
+- **default** → `GhosttyLive` / `GhosttyEphemeral`, always GPU
+- toggled off → `SwiftTermLive` / `SwiftTermEphemeral`, with the Metal path
+  (`TerminalRenderer`) also on by default and CoreGraphics one toggle away
 
 It is a **Settings → Terminal** toggle, persisted in UserDefaults, `@Observable` so a
 flip re-runs the pane bodies: visible panes swap surface immediately and replay their
-scrollback. `JUANCODE_GHOSTTY=1` only seeds the first launch. `EditorOverlay`'s
-ephemeral pty is SwiftTerm-only.
+scrollback. Both defaults are GPU paths, so a fresh clone gets the fast surface without
+visiting Settings; a first launch can opt out with `JUANCODE_GHOSTTY=0` /
+`JUANCODE_SWIFTTERM_METAL=0`. `EditorOverlay`'s ephemeral pty is SwiftTerm-only.
 
-Ghostty was the default until a7ce9f1 (2026-07-09), when it was demoted over a
-main-thread deadlock: libghostty 1.2.x wrote to the surface synchronously on the calling
-thread, and several panes attaching at once wedged the app on a Zig futex (juancode-d89,
-filed as `libghostty-spm#28`). Upstream fixed it in 1.3.0 by queueing those writes per
-session, so the dependency now floors at 1.3.2 and the surface is a user choice again.
-SwiftTerm stays the default until the Ghostty path has real time on it under multi-pane
-load.
+Ghostty was demoted from default in a7ce9f1 (2026-07-09) over a main-thread deadlock:
+libghostty 1.2.x wrote to the surface synchronously on the calling thread, and several
+panes attaching at once wedged the app on a Zig futex (juancode-d89, filed as
+`libghostty-spm#28`). Upstream fixed it in 1.3.0 by queueing those writes per session,
+the dependency floors at 1.3.2, and it is the default again as of 2026-07-31 — it's the
+surface this app is developed against. SwiftTerm's Metal path leads for the same reason:
+upstream fixed its glyph drift in 1.14 (13732b7) and `Package.swift` floors at 1.15.
 
 ### Panels (`juancode-5za`, shipped)
 

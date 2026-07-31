@@ -290,15 +290,18 @@ final class GhConversationTests: XCTestCase {
         XCTAssertTrue(conv.reviews[1].comments.isEmpty)
     }
 
-    func testThreadInfoLookupCrossReferencesResolution() throws {
+    func testThreadGroupsCrossReferenceResolutionFromTheThreads() throws {
         let conv = try XCTUnwrap(parsePrConversation(groupedFixture))
+        let groups = reviewThreadGroups(review: conv.reviews[0], threads: conv.threads)
         // RC_1 belongs to a resolved thread; the reply target is its db id.
-        let info = try XCTUnwrap(conv.threadInfo(forCommentId: "RC_1"))
-        XCTAssertTrue(info.isResolved)
-        XCTAssertFalse(info.isOutdated)
-        XCTAssertEqual(info.replyTargetId, 222)
-        // RC_2 has no matching thread in the fixture → no info.
-        XCTAssertNil(conv.threadInfo(forCommentId: "RC_2"))
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(groups[0].comments.map(\.id), ["RC_1"])
+        XCTAssertTrue(groups[0].isResolved)
+        XCTAssertFalse(groups[0].isOutdated)
+        XCTAssertEqual(groups[0].replyTargetId, 222)
+        // RC_2 has no matching thread in the fixture — still rendered, on its own.
+        XCTAssertEqual(groups[1].comments.map(\.id), ["RC_2"])
+        XCTAssertFalse(groups[1].isResolved)
     }
 
     func testParsesCommits() throws {
@@ -322,6 +325,43 @@ final class GhConversationTests: XCTestCase {
     }
 
     // MARK: - comment HTML → markdown
+
+    // MARK: - priority badge
+
+    func testExtractsCodexPriorityBadgeAndLeavesTheTitleFlush() {
+        let body = """
+        **<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  \
+        Reject text alongside GIF-only messages**
+
+        When a caller supplies both.
+        """
+        let (priority, stripped) = extractCommentPriority(body)
+        XCTAssertEqual(priority?.label, "P2")
+        XCTAssertEqual(priority?.colorName, "yellow")
+        XCTAssertTrue(stripped.hasPrefix("**Reject text alongside GIF-only messages**"),
+                      "badge, <sub> wrappers and padding spaces all removed: \(stripped)")
+        XCTAssertFalse(stripped.contains("shields.io"))
+    }
+
+    func testPriorityBadgeWithoutWrappersOrColourWord() {
+        let (p1, _) = extractCommentPriority("![P1 Badge](https://img.shields.io/badge/P1-red)x")
+        XCTAssertEqual(p1?.label, "P1")
+        XCTAssertEqual(p1?.colorName, "red")
+        // A url with no colour word at all → label only, view picks the fallback.
+        let (p3, body) = extractCommentPriority("![P3](https://example.com/p3.png) title")
+        XCTAssertEqual(p3?.label, "P3")
+        XCTAssertNil(p3?.colorName)
+        XCTAssertEqual(body, "title")
+    }
+
+    func testBodyWithNoBadgeIsReturnedUnchanged() {
+        let body = "Just a comment with an ![image](https://x.dev/a.png) in it."
+        let (priority, out) = extractCommentPriority(body)
+        XCTAssertNil(priority)
+        XCTAssertEqual(out, body)
+    }
+
+    // MARK: - comment HTML → markdown (continued)
 
     func testCleanCommentHTMLConvertsInlineEmphasis() {
         let out = cleanCommentHTML("<strong>bold</strong> and <em>em</em> and <code>x()</code>")

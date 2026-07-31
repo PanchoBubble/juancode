@@ -32,7 +32,13 @@ struct RowHoverActions: View {
                 Menu { menuContent() } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: glyphSize, weight: .semibold))
+                        // A Menu tints its own label from the control tint, so the
+                        // container's `.foregroundStyle(.primary)` below never reaches
+                        // it — the glyph rendered grey next to a white ✕. Set it here
+                        // and match the tint so both glyphs read the same.
+                        .foregroundStyle(.primary)
                 }
+                .tint(.primary)
                 .menuStyle(.button)
                 .buttonStyle(.borderless)
                 .menuIndicator(.hidden)

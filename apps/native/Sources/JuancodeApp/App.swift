@@ -279,6 +279,20 @@ struct JuancodeApp: App {
                     performShortcut(.jumpPalette, model: model, oracle: oracle)
                 }
                 .appShortcut(.jumpPalette, shortcuts)
+                // Session history — the same thing the mouse's side buttons do. Back
+                // peels off an open overlay first, so it's enabled whenever either
+                // has something to undo.
+                Button("Back") {
+                    performShortcut(.navigateBack, model: model, oracle: oracle)
+                }
+                .appShortcut(.navigateBack, shortcuts)
+                .disabled(!model.canGoBack && !model.showingGitHub && !model.showingFindBar
+                          && model.editing == nil && !oracle.expanded)
+                Button("Forward") {
+                    performShortcut(.navigateForward, model: model, oracle: oracle)
+                }
+                .appShortcut(.navigateForward, shortcuts)
+                .disabled(!model.canGoForward)
                 // ⌘P Quick Open: fuzzy-find and open a file in the selected session's
                 // worktree (open in the editor pane, reveal in Changes, or reference it
                 // in the prompt).

@@ -119,14 +119,31 @@ import Testing
         #expect(out == ["a", "b", "c"])
     }
 
-    @Test func attentionBubblesAboveTheManualOrder() {
+    @Test func waitingForInputBubblesAboveTheManualOrder() {
         let out = sortedIds([
             manualKey("a", attention: .idle, slot: 0),
             manualKey("b", attention: .waitingInput, slot: 2),
             manualKey("c", attention: .doneUnseen, slot: 1),
         ])
-        // Waiting beats done-unseen; both beat the manual slots.
-        #expect(out == ["b", "c", "a"])
+        // Only the waiting row bubbles; a finished-but-unseen turn holds its slot.
+        #expect(out == ["b", "a", "c"])
+    }
+
+    @Test func aFinishedTurnDoesNotMoveTheRow() {
+        // Same group, before and after "b" finishes a turn: identical order, so
+        // the row only re-glyphs (green check) instead of jumping to the top.
+        let before = sortedIds([
+            manualKey("a", attention: .idle, slot: 0),
+            manualKey("b", attention: .working, slot: 1),
+            manualKey("c", attention: .idle, slot: 2),
+        ])
+        let after = sortedIds([
+            manualKey("a", attention: .idle, slot: 0),
+            manualKey("b", attention: .doneUnseen, slot: 1),
+            manualKey("c", attention: .idle, slot: 2),
+        ])
+        #expect(before == after)
+        #expect(after == ["a", "b", "c"])
     }
 
     @Test func clearedAttentionReturnsToTheManualSlot() {
@@ -340,6 +357,43 @@ import Testing
         #expect(manualRestingPrecedes(placed, dead))
     }
 
+    @Test func restingOrderRanksByLastActivityNotCreation() {
+        // Within a tier, the session worked in most recently wins even when it is by
+        // far the oldest — the whole point of ordering on (snapshotted) `updatedAt`.
+        func row(_ id: String, updated: Int, created: Int) -> ManualSortKey {
+            ManualSortKey(key: SessionSortKey(attention: .exited, updatedAt: updated,
+                                              createdAt: created),
+                          manualIndex: nil, id: id)
+        }
+        let oldButActive = row("old", updated: 900, created: 100)
+        let newButStale = row("new", updated: 200, created: 800)
+        #expect(manualRestingPrecedes(oldButActive, newButStale))
+        #expect(!manualRestingPrecedes(newButStale, oldButActive))
+
+        // Equal activity (nothing recorded since creation) falls back to newest-created,
+        // then to id — so bulk-spawned rows stay deterministic.
+        #expect(manualRestingPrecedes(row("a", updated: 5, created: 9),
+                                      row("b", updated: 5, created: 1)))
+        #expect(manualRestingPrecedes(row("a", updated: 5, created: 5),
+                                      row("b", updated: 5, created: 5)))
+    }
+
+    @Test func restingOrderStillPutsRecencyBelowTierAndManualOrder() {
+        // Recency is the *last* word, not the first: a live row outranks a more
+        // recently active dead one, and a manually placed row keeps its slot against
+        // an unplaced row that was touched later.
+        func row(_ id: String, _ attention: SessionAttention, updated: Int,
+                 manual: Int? = nil) -> ManualSortKey {
+            ManualSortKey(key: SessionSortKey(attention: attention, updatedAt: updated,
+                                              createdAt: 0),
+                          manualIndex: manual, id: id)
+        }
+        #expect(manualRestingPrecedes(row("live", .idle, updated: 1),
+                                      row("dead", .exited, updated: 999)))
+        #expect(manualRestingPrecedes(row("placed", .exited, updated: 1, manual: 0),
+                                      row("unplaced", .exited, updated: 999)))
+    }
+
     @Test func sidebarOrderIgnoresBusyIdleChurn() {
         // The whole point of the projection (juancode-2n0): a live agent working and
         // the same agent resting land on the SAME bucket, so its busy↔idle flips never
@@ -352,13 +406,18 @@ import Testing
         #expect(busy == .idle)
     }
 
+    @Test func sidebarOrderIgnoresAFinishedTurn() {
+        // A turn ending no longer moves a row, so it must not change the projection
+        // either — the green check comes from the row's own activity read.
+        #expect(sidebarOrderAttention(live: true, activity: .idle,
+                                      unseenDone: true, crashOrphan: false) == .idle)
+    }
+
     @Test func sidebarOrderKeepsTheBucketsThatMoveRows() {
-        // Bubbling states and the dead-sink still come through, and a crash orphan
-        // still rests instead of sinking.
+        // The one bubbling state and the dead-sink still come through, and a crash
+        // orphan still rests instead of sinking.
         #expect(sidebarOrderAttention(live: true, activity: .waitingInput,
                                       unseenDone: false, crashOrphan: false) == .waitingInput)
-        #expect(sidebarOrderAttention(live: true, activity: .idle,
-                                      unseenDone: true, crashOrphan: false) == .doneUnseen)
         #expect(sidebarOrderAttention(live: false, activity: nil,
                                       unseenDone: false, crashOrphan: false) == .exited)
         #expect(sidebarOrderAttention(live: false, activity: nil,

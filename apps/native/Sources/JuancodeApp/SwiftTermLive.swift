@@ -265,6 +265,43 @@ func installPathClickOpen(on tv: CopyOnSelectTerminalView) -> Any? {
     }
 }
 
+/// Mouse side buttons (back/forward) step through the sessions you've viewed.
+///
+/// AppKit delivers them as `.otherMouseDown` with `buttonNumber` 3 (back) and 4
+/// (forward). A window-scoped monitor is the only place to catch them: a focused
+/// terminal is first responder, and with mouse reporting on SwiftTerm would encode
+/// the press for the pty instead. We consume both buttons unconditionally while our
+/// key window is up (no sheet attached) — nothing in the app wants a raw button 3/4
+/// — so the agent CLI never sees a stray SGR mouse report.
+@MainActor
+func installBackForwardMouse(model: AppModel, oracle: OracleModel, host: NSView) -> Any? {
+    let inOurWindow: @MainActor (Int) -> Bool = { [weak host] windowNumber in
+        guard let window = host?.window else { return false }
+        return window.isKeyWindow && window.attachedSheet == nil
+            && window.windowNumber == windowNumber
+    }
+    let handle: @MainActor (Int, Int) -> Bool = { buttonNumber, windowNumber in
+        guard inOurWindow(windowNumber) else { return false }
+        switch buttonNumber {
+        case 3: performShortcut(.navigateBack, model: model, oracle: oracle); return true
+        case 4: performShortcut(.navigateForward, model: model, oracle: oracle); return true
+        default: return false
+        }
+    }
+    return NSEvent.addLocalMonitorForEvents(matching: [.otherMouseDown, .otherMouseUp]) { event in
+        let buttonNumber = event.buttonNumber
+        let windowNumber = event.windowNumber
+        // Act on the down edge only, but swallow the matching up as well so the
+        // terminal doesn't report half a click.
+        guard buttonNumber == 3 || buttonNumber == 4 else { return event }
+        if event.type == .otherMouseUp {
+            return MainActor.assumeIsolated { inOurWindow(windowNumber) } ? nil : event
+        }
+        let consumed = MainActor.assumeIsolated { handle(buttonNumber, windowNumber) }
+        return consumed ? nil : event
+    }
+}
+
 /// Vim-style sidebar navigation + ⌃H/⌃L pane focus (juancode-vgm).
 ///
 /// The live terminal makes itself first responder and SwiftTerm swallows every

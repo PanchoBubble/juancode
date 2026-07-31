@@ -170,23 +170,6 @@ public struct PrConversation: Sendable, Equatable {
         self.reviews = reviews; self.threads = threads; self.commits = commits
     }
 
-    /// Resolution state for a review comment, keyed by its GraphQL node id, lifted
-    /// from the review threads (comments don't carry it themselves). Lets the
-    /// review-grouped rendering show a "resolved"/"outdated" badge and find the
-    /// reply target without re-fetching threads.
-    public struct CommentThreadInfo: Sendable, Equatable {
-        public let isResolved: Bool
-        public let isOutdated: Bool
-        public let replyTargetId: Int?
-    }
-
-    public func threadInfo(forCommentId id: String) -> CommentThreadInfo? {
-        for t in threads where t.comments.contains(where: { $0.id == id }) {
-            return CommentThreadInfo(isResolved: t.isResolved, isOutdated: t.isOutdated,
-                                     replyTargetId: t.replyTargetId)
-        }
-        return nil
-    }
 }
 
 // MARK: - parsing (pure)

@@ -15,15 +15,17 @@ import JuancodeServices
 /// callback, and grid changes arrive via the resize delegate → our SIGWINCH. No
 /// process is spawned by Ghostty.
 
-/// Which surface the live panes use: SwiftTerm (default) or libghostty. A user-facing
+/// Which surface the live panes use: libghostty (the default) or SwiftTerm. A user-facing
 /// Setting rather than the old `JUANCODE_GHOSTTY=1`-only switch, which is now just the
-/// first-launch seed.
+/// first-launch seed — set `JUANCODE_GHOSTTY=0` to start a fresh install on SwiftTerm.
 ///
 /// Ghostty was forced off entirely for a while: on 1.2.x, `ghostty_surface_write_buffer`
 /// wrote synchronously on the calling thread and deadlocked main on a Zig futex when
 /// several panes attached at once (juancode-d89). Fixed upstream in libghostty-spm 1.3.0
 /// (their PR #29 queues those writes per session), which is why this is a toggle again
-/// and why `Package.swift` floors the dependency at 1.3.2.
+/// and why `Package.swift` floors the dependency at 1.3.2. It's the default again as of
+/// 2026-07-31: it's the surface this app is developed against, so a fresh clone should
+/// get the fast GPU path without hunting through Settings first.
 ///
 /// `@Observable` so flipping it re-runs the pane bodies that read it: visible panes swap
 /// surface immediately, replaying their scrollback into the new one, exactly as they do
@@ -41,7 +43,9 @@ final class TerminalBackend {
         if UserDefaults.standard.object(forKey: defaultsKey) != nil {
             useGhostty = UserDefaults.standard.bool(forKey: defaultsKey)
         } else {
-            useGhostty = ProcessInfo.processInfo.environment["JUANCODE_GHOSTTY"] == "1"
+            // On by default; the env var is only an escape hatch for a first launch
+            // (`JUANCODE_GHOSTTY=0`) before the Setting exists to be flipped.
+            useGhostty = ProcessInfo.processInfo.environment["JUANCODE_GHOSTTY"] != "0"
         }
     }
 
