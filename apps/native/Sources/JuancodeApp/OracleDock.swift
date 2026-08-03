@@ -407,8 +407,11 @@ private struct OracleChatView: View {
         } else {
             VStack(spacing: 8) {
                 Spacer()
-                Text("Oracle agent isn't running.").font(.system(size: 12)).foregroundStyle(.secondary)
-                Button("Start Oracle") { oracle.startAgent() }.controlSize(.small).clickCursor()
+                let resume = oracle.canResumeActiveOracle
+                Text(resume ? "This Oracle's agent isn't running." : "Oracle agent isn't running.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                Button(resume ? "Resume Oracle" : "Start Oracle") { oracle.startAgent() }
+                    .controlSize(.small).clickCursor()
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

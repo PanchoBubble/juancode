@@ -63,6 +63,9 @@ final class OracleModel {
     /// persisted to `ask.offset`).
     @ObservationIgnored private var askOffset = 0
     @ObservationIgnored private var loop: Task<Void, Never>?
+    /// Oracles with a resume in flight, so re-tapping a row during the (up to ~5s)
+    /// confirmation can't stack a second revive on the same session.
+    @ObservationIgnored private var reviving: Set<String> = []
     @ObservationIgnored private var beadsLoading = false
     /// Last snapshot written to `state.json`, to skip rewriting an unchanged file
     /// every tick (the timestamp is excluded from the comparison).
@@ -207,9 +210,24 @@ final class OracleModel {
     /// Bring the Oracle agent back up from the chat tab's "Start Oracle" button.
     /// `bootstrap()` is a one-shot (its guard no-ops once `ready`/`loop` are set),
     /// so once the agent session exits the chat needs its own re-entry point.
+    ///
+    /// Routed through `OracleChatRouting.start` rather than straight into
+    /// `ensureAgentSession`: the CTA sits under the conversation the user is looking
+    /// at, so reviving THAT Oracle has to win over adopting some other live one.
     func startAgent() {
         guard ready else { bootstrap(); return }
-        ensureAgentSession()
+        let resumable = oracleSessionId.map { id in oracleSessions.contains { $0.id == id } } ?? false
+        apply(OracleChatRouting.start(
+            active: oracleSessionId, activeIsResumable: resumable,
+            otherLive: app.liveSession(inCwd: controlDir)?.id,
+            mostRecent: oracleSessions.first?.id))
+    }
+
+    /// Whether the chat's CTA is continuing an existing conversation (vs. starting a
+    /// brand-new Oracle), so the button can say which.
+    var canResumeActiveOracle: Bool {
+        guard let id = oracleSessionId, app.liveSession(id) == nil else { return false }
+        return oracleSessions.contains { $0.id == id }
     }
 
     /// Restart the Oracle agent from the chat tab: spawn a fresh Oracle when the current
@@ -263,19 +281,55 @@ final class OracleModel {
         bootstrap()
     }
 
-    /// Switch the chat to an existing Oracle session (rail tap). No-op if it's already
-    /// active; focuses the chat input on switch. If the tapped Oracle has exited, revive
-    /// it (resume its CLI conversation via the pinned session id) so a past session can
-    /// be continued, not just viewed.
+    /// Switch the chat to an existing Oracle session (rail tap). No-op only when that
+    /// Oracle is already the active chat AND still running; focuses the chat input on
+    /// switch. If the tapped Oracle has exited, revive it (resume its CLI conversation
+    /// via the pinned session id) so a past session can be continued, not just viewed —
+    /// including when it's the one already showing, which an identity-only guard used
+    /// to skip.
     func selectOracle(_ id: String) {
-        guard oracleSessionId != id else { return }
-        oracleSessionId = id
-        tab = .chat
-        chatFocusToken += 1
-        if app.liveSession(id) == nil {
+        apply(OracleChatRouting.select(id, active: oracleSessionId,
+                                       isLive: app.liveSession(id) != nil))
+    }
+
+    /// Carry out a routing decision: point the chat at the chosen Oracle and, when it
+    /// isn't running, revive it.
+    private func apply(_ action: OracleChatAction) {
+        switch action {
+        case .none:
+            return
+        case let .focus(id), let .adopt(id):
+            oracleSessionId = id
+            tab = .chat
+            chatFocusToken += 1
+        case let .revive(id):
+            oracleSessionId = id
+            tab = .chat
+            chatFocusToken += 1
+            reviveOracle(id)
+        case .spawnFresh:
+            spawnAgent()
+        }
+    }
+
+    /// Resume an exited Oracle's CLI conversation in place, falling back to a fresh
+    /// spawn when it can't be resumed (stale/absent CLI session) so the chat never
+    /// dead-ends on a pane with no pty. Coalesced: a resume takes up to ~5s to confirm,
+    /// and re-tapping the row meanwhile must not start a second one.
+    private func reviveOracle(_ id: String) {
+        guard app.liveSession(id) == nil, reviving.insert(id).inserted else { return }
+        Task {
+            defer { reviving.remove(id) }
             // Resume into the dock's grid, not the wide main-window one, so the CLI
             // boots at the drawer width instead of wrapping into garbage.
-            Task { await app.reactivate(id, grid: dockGrid) }
+            if await app.reactivate(id, grid: dockGrid) { return }
+            // The user may have switched Oracles while the resume was in flight —
+            // only the chat still pointed here gets the fresh-spawn fallback.
+            guard oracleSessionId == id else { return }
+            // Clear the resume error so the dock doesn't show a stale "no conversation
+            // to resume" banner over a working fresh Oracle.
+            app.errorMessage = nil
+            spawnAgent()
         }
     }
 
@@ -306,22 +360,11 @@ final class OracleModel {
             return
         }
         // No live Oracle. Rather than discard history, continue the most recent past
-        // Oracle; if its CLI conversation can't be resumed, fall back to a fresh spawn.
+        // Oracle; `reviveOracle` falls back to a fresh spawn if its CLI conversation
+        // can't be resumed. Pointing the chat at it up front (inside `apply`) makes the
+        // resumed pty visible while it boots.
         if let recent = oracleSessions.first {
-            Task {
-                // Point the chat at it up front so the resumed pty is visible while it
-                // boots; resume into the dock grid (not the wide main-window grid) so
-                // the CLI doesn't wrap into garbage inside the drawer.
-                oracleSessionId = recent.id
-                let resumed = await app.reactivate(recent.id, grid: dockGrid)
-                if !resumed {
-                    // Couldn't revive its prior conversation (stale/absent CLI session) —
-                    // start fresh and clear the resume error so the dock doesn't show a
-                    // stale "no conversation to resume" banner.
-                    app.errorMessage = nil
-                    spawnAgent()
-                }
-            }
+            apply(.revive(recent.id))
         } else {
             spawnAgent()
         }
