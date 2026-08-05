@@ -2293,8 +2293,9 @@ struct SessionRow: View {
     }
 
     /// The "N files · +X −Y" review badge shown in the subtitle line once the agent
-    /// settles a turn with unreviewed changes. A button so a click opens the Changes
-    /// panel without also selecting the row.
+    /// settles a turn with unreviewed changes. A button, so the click routes through
+    /// `openChanges` — which lands on this session and opens its Changes panel — rather
+    /// than the List's own row selection.
     private func changeBadgeCapsule(_ stat: ChangeStat, onOpen: @escaping () -> Void) -> some View {
         Button(action: onOpen) {
             HStack(spacing: 3) {

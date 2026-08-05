@@ -3253,7 +3253,14 @@ final class AppModel {
     /// Open the Changes panel for a session pre-loaded on the working tree and clear
     /// its review badge. The action behind the sidebar badge, the session banner, and
     /// the "Open Changes for current session" shortcut.
+    ///
+    /// Lands on the session first: reviewing a diff without its terminal in view means
+    /// the panel talks about work you can't see, and the badge is most often clicked on
+    /// a row that isn't the current selection. `selection`'s didSet also dismisses the
+    /// GitHub overlay, so the diff is actually on screen. Already-selected sessions
+    /// (the ⌘⇧C shortcut, the in-pane banner) just get the panel toggled open.
     func openChanges(for id: String) {
+        if selection != id, sessions.contains(where: { $0.id == id }) { selection = id }
         setChangesSource(id, .workingTree)
         let d = UserDefaults.standard
         d.set("Changes", forKey: "session.sidePanel.tab")

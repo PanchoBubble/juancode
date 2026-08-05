@@ -437,31 +437,101 @@ struct OracleGlobalRail: View {
     @State private var renameText = ""
     /// Free-text filter over Oracle titles (and their "Oracle N" numbers).
     @State private var query = ""
+    /// Whether resting (not-live) Oracles are folded away. The rail answers "who is
+    /// working right now", so idle conversations start hidden behind the footer's
+    /// "Show N more" — they're still one tap away, they just don't cost a screen.
+    @State private var showIdle = false
+    /// Extra rows revealed past the fitted budget, one page per "Show N more" tap.
+    @State private var revealed = 0
+    /// Measured height of the row area. The row budget derives from it, so the rail
+    /// only builds the rows that can actually be on screen instead of all of them.
+    @State private var listHeight: Double = 0
+
+    /// Approximate rendered height of one row (glyph line + subtitle + padding) —
+    /// what the fitted budget divides the measured height by.
+    private static let rowHeight: Double = 44
 
     /// The running Oracles, most-recent first (see `OracleModel.oracleSessions`).
     private var sessions: [SessionMeta] { oracle.oracleSessions }
 
-    /// Every Oracle paired with its stable spawn-order number (oldest = 1), then
-    /// filtered by `query`. Numbering happens BEFORE filtering so "Oracle 12" keeps
-    /// its number no matter what the filter hides.
-    private var filtered: [(meta: SessionMeta, number: Int)] {
+    /// One rail entry: an Oracle plus the live state its row and its ordering read.
+    private struct Entry: Identifiable {
+        let meta: SessionMeta
+        let number: Int
+        let live: Bool
+        let activity: SessionActivity?
+        var id: String { meta.id }
+    }
+
+    /// Every Oracle paired with its stable spawn-order number (oldest = 1), filtered
+    /// by `query` and ordered "who needs me first": waiting for a reply, then working,
+    /// then live-idle, then stopped — recency breaking ties within each tier.
+    /// Numbering happens BEFORE filtering so "Oracle 12" keeps its number no matter
+    /// what the filter hides.
+    private func entries() -> [Entry] {
         let all = sessions
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return all.enumerated().compactMap { idx, meta in
+        let matched = all.enumerated().compactMap { idx, meta -> (Int, Entry)? in
             let number = all.count - idx
             guard q.isEmpty
                 || meta.title.lowercased().contains(q)
                 || "oracle \(number)".contains(q) else { return nil }
-            return (meta, number)
+            return (idx, Entry(meta: meta, number: number,
+                               live: model.isLive(meta.id), activity: model.activity(meta.id)))
+        }
+        // Decorated with the source index because `sorted` isn't stable: without it,
+        // same-tier rows would shuffle between body evals as activity flips.
+        return matched
+            .sorted { a, b in
+                let (ra, rb) = (rank(a.1), rank(b.1))
+                return ra == rb ? a.0 < b.0 : ra < rb
+            }
+            .map(\.1)
+    }
+
+    /// Attention tier — lower sorts first.
+    private func rank(_ e: Entry) -> Int {
+        guard e.live else { return 3 }
+        switch e.activity {
+        case .waitingInput: return 0
+        case .busy: return 1
+        default: return 2
         }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 4) {
+        let all = entries()
+        let active = all.filter(\.live)
+        // Never fewer than 3 rows, even mid-launch before the height is measured.
+        let fitted = max(3, Int(listHeight / Self.rowHeight))
+        // Active rows are never folded away, so the budget floors at their count.
+        let budget = max(fitted, active.count) + revealed
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        // While filtering, every match shows — the user asked for exactly these.
+        // Otherwise resting rows only join the pool once idle is revealed (or when
+        // nothing is live, so the rail is never pointlessly empty).
+        let pool = (searching || showIdle || active.isEmpty) ? all : active
+        let shown = searching ? pool : Array(pool.prefix(budget))
+        let hidden = all.count - shown.count
+        return VStack(spacing: 0) {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
                 Text("Oracles")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase).tracking(0.5)
+                    .foregroundStyle(.secondary)
+                if active.isEmpty {
+                    Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                } else {
+                    // A live count reads at a glance; the total is in the tooltip.
+                    Text("\(active.count) live")
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.2))
+                        .foregroundStyle(Color.accentColor)
+                        .clipShape(Capsule())
+                        .help("\(active.count) of \(sessions.count) Oracles running")
+                }
                 Spacer()
                 Button { oracle.reveal(); oracle.newOracle() } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
@@ -510,7 +580,7 @@ struct OracleGlobalRail: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if filtered.isEmpty {
+            } else if all.isEmpty {
                 VStack {
                     Spacer()
                     Text("No matching Oracles")
@@ -521,12 +591,36 @@ struct OracleGlobalRail: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(filtered, id: \.meta.id) { item in
-                            row(item.meta, number: item.number)
+                        let activeShown = shown.filter(\.live)
+                        let restingShown = shown.filter { !$0.live }
+                        // Only label the groups when both are on screen — with one
+                        // kind showing, a header is noise.
+                        if !activeShown.isEmpty, !restingShown.isEmpty {
+                            groupLabel("Active")
+                        }
+                        ForEach(activeShown) { row($0) }
+                        if !restingShown.isEmpty, !activeShown.isEmpty {
+                            groupLabel("Idle")
+                        }
+                        ForEach(restingShown) { row($0) }
+                        if hidden > 0 {
+                            footerButton("Show \(hidden) more") {
+                                showIdle = true
+                                revealed += fitted
+                            }
+                        }
+                        if shown.count > max(fitted, active.count) {
+                            footerButton("Show less") {
+                                showIdle = false
+                                revealed = 0
+                            }
                         }
                     }
                     .padding(.vertical, 4)
                 }
+                // The row budget follows the rail's real height, so resizing the
+                // window (or dragging the rail's edge) refits it.
+                .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }
             }
         }
         .frame(maxHeight: .infinity)
@@ -567,12 +661,15 @@ struct OracleGlobalRail: View {
     /// the CLI writes one the title is still the spawn placeholder ("<agent> · <dir>",
     /// identical for every Oracle since they share the control dir), so we fall back
     /// to the spawn-order number (oldest = 1) to keep rows distinct.
-    private func row(_ meta: SessionMeta, number: Int) -> some View {
-        OracleRailRow(
-            meta: meta, number: number,
+    private func row(_ entry: Entry) -> some View {
+        let meta = entry.meta
+        return OracleRailRow(
+            meta: meta, number: entry.number,
             selected: oracle.oracleSessionId == meta.id,
-            live: model.isLive(meta.id),
-            activity: model.activity(meta.id),
+            live: entry.live,
+            activity: entry.activity,
+            unread: model.unreadSessions.contains(meta.id),
+            unseenDone: model.unseenCompletions.contains(meta.id),
             // Reveal first: tapping a row with the drawer closed slides the chat in
             // from this edge; with it open, it just switches the active Oracle.
             onSelect: { oracle.reveal(); oracle.selectOracle(meta.id) },
@@ -580,10 +677,35 @@ struct OracleGlobalRail: View {
             onRename: { renameText = meta.title; renaming = meta },
             onDeleteRequested: { confirmingDelete = meta })
     }
+
+    /// Tiny uppercase divider between the Active and Idle groups.
+    private func groupLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .textCase(.uppercase).tracking(0.5)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The list footer's paging control ("Show N more" / "Show less").
+    private func footerButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+    }
 }
 
-/// One Oracle rail row: status dot + title, with the same hover affordances as the
-/// sidebar's session rows — an ellipsis action menu and a ✕ that deletes after
+/// One Oracle rail row: a rounded card with the shared agent-state glyph, the
+/// conversation title and a compact meta line, plus the same hover affordances as
+/// the sidebar's session rows — an ellipsis action menu and a ✕ that deletes after
 /// confirmation (the right-click menu mirrors the ellipsis).
 private struct OracleRailRow: View {
     let meta: SessionMeta
@@ -591,6 +713,10 @@ private struct OracleRailRow: View {
     let selected: Bool
     let live: Bool
     let activity: SessionActivity?
+    /// A turn-end notification is still pending for this Oracle — bolds the title.
+    let unread: Bool
+    /// It finished a turn while you were looking elsewhere — green check until viewed.
+    let unseenDone: Bool
     let onSelect: () -> Void
     /// Stop the running agent but keep the conversation in the rail (kill ≠ delete);
     /// nil when the session isn't live.
@@ -603,31 +729,57 @@ private struct OracleRailRow: View {
     var body: some View {
         let placeholder = meta.title.hasPrefix(Providers.spec(for: meta.provider).label + " ·")
         HStack(alignment: .top, spacing: 7) {
-            Circle()
-                .fill(sessionDotColor(live: live, activity: activity))
-                .frame(width: 7, height: 7)
-                .padding(.top, 4)
+            // The sidebar's state vocabulary, not a bare dot: a working Oracle
+            // pulses, one waiting on a reply shows the amber "?", one that finished
+            // while you were elsewhere keeps a green check until you look.
+            SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
+                              unread: unread, dormant: meta.dormant)
+                .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(placeholder ? "Oracle \(number)" : meta.title)
-                    .font(.system(size: 12)).lineLimit(2)
-                if !placeholder {
-                    Text("Oracle \(number)").font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-                }
+                    .font(.system(size: 12, weight: unread ? .semibold : .regular))
+                    .lineLimit(2)
+                Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10).padding(.vertical, 7)
+        .padding(.horizontal, 8).padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Floated, not laid out — same reason as the sidebar rows: inline they stole
         // width from the title, so it re-truncated the moment the pointer arrived.
         .overlay(alignment: .trailing) { hoverActions }
-        .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
+        .background(RoundedRectangle(cornerRadius: 7).fill(rowFill))
+        // A leading accent bar on the selected row: the tinted fill alone got lost
+        // against the black surface at this width.
+        .overlay(alignment: .leading) {
+            if selected {
+                Capsule().fill(Color.accentColor).frame(width: 2.5).padding(.vertical, 5)
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 7)
+            .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1))
+        // A resting Oracle dims as a whole so live ones carry the eye.
+        .opacity(live ? 1 : 0.62)
+        .padding(.horizontal, 6).padding(.vertical, 1.5)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering = $0 }
         .contextMenu { menuItems }
         .help(meta.title)
         .clickCursor()
+    }
+
+    private var rowFill: Color {
+        if selected { return Color.accentColor.opacity(0.2) }
+        return hovering ? Color.appHairline(0.07) : Color.clear
+    }
+
+    /// Meta line under the title: the stable Oracle number, when it started, and its
+    /// usage rollup once the CLI reports one — the same vocabulary as sidebar rows.
+    private var subtitle: String {
+        var parts = ["Oracle \(number)", SessionDateFormat.compact(msSinceEpoch: meta.createdAt)]
+        if let label = meta.usage?.badgeLabel { parts.append(label) }
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder private var hoverActions: some View {
