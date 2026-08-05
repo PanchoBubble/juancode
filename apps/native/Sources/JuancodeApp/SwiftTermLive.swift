@@ -370,6 +370,26 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             model.showingGitHub = false
             return true
         }
+        // The GitHub overlay covers the window, so it owns plain-key nav while it's up
+        // — including when a terminal underneath still holds first responder, where a
+        // view-local `.onKeyPress` would never fire (same reason as the Esc case).
+        // Skipped while a text field has focus so the PR filter can be typed into.
+        if model.showingGitHub, !(window.firstResponder is NSTextView),
+           mods.intersection([.command, .control, .option]).isEmpty {
+            switch keyCode {
+            case 38, 125: model.github.moveSelection(by: 1); return true   // j / ↓
+            case 40, 126: model.github.moveSelection(by: -1); return true  // k / ↑
+            case 5: // g / G
+                mods.contains(.shift) ? model.github.selectLastRow() : model.github.selectFirstRow()
+                return true
+            case 36, 76: // ⏎ — act on the selected PR: land on its diff
+                if let row = model.github.selectedNavRow {
+                    model.openPrDiff(row.pr, cwd: row.cwd)
+                }
+                return true
+            default: break // every other key stays the responder chain's
+            }
+        }
         let fr = window.firstResponder
         let ctrl = mods.contains(.control)
 

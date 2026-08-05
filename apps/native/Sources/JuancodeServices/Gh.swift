@@ -311,6 +311,22 @@ public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [Pull
     return base + newcomers
 }
 
+/// Whether a PR matches a free-text filter, case-insensitively, over its title,
+/// author, branch and number. An empty query matches everything. A query that is
+/// digits (optionally `#`-prefixed) matches the PR number as a prefix, so "48"
+/// finds #4821 — but it still also matches text, since "48" can legitimately appear
+/// in a title. Pure; exposed for testing.
+public func prMatchesQuery(_ pr: PullRequest, _ query: String) -> Bool {
+    let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+    guard !q.isEmpty else { return true }
+    if pr.title.lowercased().contains(q) { return true }
+    if pr.author.lowercased().contains(q) { return true }
+    if pr.branch.lowercased().contains(q) { return true }
+    let digits = q.hasPrefix("#") ? String(q.dropFirst()) : q
+    guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return false }
+    return String(pr.number).hasPrefix(digits)
+}
+
 // MARK: - "Needs you" triage (juancode-q21q)
 
 /// Why a PR is waiting on the viewer, most urgent first. `rank` orders the pinned

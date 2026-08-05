@@ -53,22 +53,66 @@ final class GitHubModel {
     /// here so they persist while the view is dismissed and re-opened.
     var mineOnly = false
     var assignedOnly = false
+    /// Free-text filter over title / author / branch / #number, mirroring the folder
+    /// PR popover's field. Lives here (not in the view) so it survives dismiss/reopen
+    /// like the toggles do.
+    var query = ""
+    /// The PR rows currently on screen, top to bottom, for j/k navigation. Published
+    /// by the view — the flattened order (pinned triage group, then each folder
+    /// section) only exists there.
+    var navOrder: [PrNavRow] = []
 
-    /// Whether any viewer-scoped filter is active.
-    var filterActive: Bool { mineOnly || assignedOnly }
+    /// One navigable row: the PR plus the folder it belongs to.
+    struct PrNavRow: Equatable, Identifiable {
+        let cwd: String
+        let pr: PullRequest
+        var id: String { TrackedPr.key(cwd: cwd, number: pr.number) }
+    }
+
+    /// Whether any filter is active (viewer-scoped or text).
+    var filterActive: Bool {
+        mineOnly || assignedOnly || !query.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     /// Apply the active filters to a folder's PRs using that folder's viewer
-    /// login. Returns the list unchanged when no filter is active or the viewer
-    /// is unknown, so a folder never hides its PRs just because `gh` couldn't
-    /// report who we are.
+    /// login. The viewer-scoped toggles are skipped when the viewer is unknown, so a
+    /// folder never hides its PRs just because `gh` couldn't report who we are; the
+    /// text filter needs no viewer and always applies.
     func filtered(_ prs: [PullRequest], viewer: String) -> [PullRequest] {
-        guard filterActive, !viewer.isEmpty else { return prs }
+        guard filterActive else { return prs }
         return prs.filter { pr in
-            if mineOnly && pr.author != viewer { return false }
-            if assignedOnly && !pr.assignees.contains(viewer) { return false }
-            return true
+            if !viewer.isEmpty {
+                if mineOnly && pr.author != viewer { return false }
+                if assignedOnly && !pr.assignees.contains(viewer) { return false }
+            }
+            return prMatchesQuery(pr, query)
         }
     }
+
+    /// Move the selection `by` rows through `navOrder` (j/k), clamped at both ends.
+    /// With nothing selected it lands on the first row (or the last, moving up).
+    func moveSelection(by delta: Int) {
+        guard !navOrder.isEmpty else { return }
+        guard let key = selectedKey, let i = navOrder.firstIndex(where: { $0.id == key }) else {
+            select(delta < 0 ? navOrder[navOrder.count - 1] : navOrder[0])
+            return
+        }
+        let next = min(max(0, i + delta), navOrder.count - 1)
+        guard next != i else { return }
+        select(navOrder[next])
+    }
+
+    /// Jump to the first / last visible row (g / G, matching the sidebar's vocabulary).
+    func selectFirstRow() { if let r = navOrder.first { select(r) } }
+    func selectLastRow() { if let r = navOrder.last { select(r) } }
+
+    /// The selected row's (folder, PR) pair, for keyboard actions that act on it.
+    var selectedNavRow: PrNavRow? {
+        guard let key = selectedKey else { return nil }
+        return navOrder.first { $0.id == key }
+    }
+
+    private func select(_ row: PrNavRow) { select(cwd: row.cwd, pr: row.pr) }
 
     /// Kick a PR-list refresh for every folder the view shows (all, or the one
     /// scoped folder). Re-runs the scoped `gh` query too when a filter is active,
@@ -77,17 +121,16 @@ final class GitHubModel {
     func refresh(model: AppModel) {
         for cwd in model.githubScopedFolders {
             model.loadPrs(cwd)
-            if filterActive {
-                model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: "")
-            }
+            if filterActive { applyFilters(model: model) }
         }
     }
 
-    /// Re-run the scoped backfill for every folder — called when a filter toggles
-    /// so matches beyond the firehose fold in.
+    /// Re-run the scoped backfill for every folder — called when a filter toggles or
+    /// the text query settles, so matches beyond the newest-100 firehose fold in.
     func applyFilters(model: AppModel) {
+        let text = query.trimmingCharacters(in: .whitespaces)
         for cwd in model.githubScopedFolders {
-            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: "")
+            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: text)
         }
     }
 
@@ -299,15 +342,17 @@ final class GitHubModel {
 /// terminal pane, so nothing may bleed through.
 struct GitHubView: View {
     @Environment(AppModel.self) private var model
+    /// Whether the text filter holds focus (⌘F jumps to it; j/k must not fight it).
+    @FocusState private var searchFocused: Bool
+    /// The debounced `gh` backfill behind the text field, cancelled on each keystroke.
+    @State private var backfillTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            if canFilterViewer {
-                filterBar
-                Divider()
-            }
+            filterBar
+            Divider()
             HStack(spacing: 0) {
                 prList
                     .frame(width: 300)
@@ -326,6 +371,30 @@ struct GitHubView: View {
         // Deep-link resolution: once the scoped folder's PRs load, select the
         // pending current-branch PR (openGitHubForFolder recorded it).
         .onChange(of: scopedPrCountSignal) { _, _ in model.resolvePendingBranchSelect() }
+        // Publish the on-screen row order for j/k. In `onChange`/`task`, never inline
+        // in `body`: writing observable model state during a body eval re-invalidates
+        // this view and spins.
+        .task(id: navRows) { model.github.navOrder = navRows }
+        // ⌘F focuses the filter; the window monitor routes j/k/g/G/⏎ to the list
+        // (see installPaneNavigation) whenever this view is up and no field is focused.
+        .background {
+            Button("") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0)
+        }
+    }
+
+    /// Every PR row on screen, top to bottom — the pinned triage group first, then
+    /// each folder section in display order. Feeds `GitHubModel.navOrder`.
+    private var navRows: [GitHubModel.PrNavRow] {
+        var rows = needsYou.map { GitHubModel.PrNavRow(cwd: $0.cwd, pr: $0.pr) }
+        for cwd in model.githubScopedFolders {
+            guard let r = model.prs(cwd), r.available else { continue }
+            let shown = model.github.filtered(r.prs, viewer: r.viewer ?? "")
+            if model.github.filterActive, shown.isEmpty { continue }
+            rows += sortPrsBySubmitDate(shown).map { GitHubModel.PrNavRow(cwd: cwd, pr: $0) }
+        }
+        return rows
     }
 
     // MARK: header
@@ -366,25 +435,85 @@ struct GitHubView: View {
 
     // MARK: filter bar
 
-    /// Viewer-scoped filters, in their own full-width row under the header.
+    /// The filter row under the header: a free-text field plus the viewer-scoped
+    /// toggles. The field is always available (it needs no viewer login); the toggles
+    /// only appear once `gh` has told us who we are and there's something to filter.
     private var filterBar: some View {
         HStack(spacing: 8) {
-            Toggle("Mine (\(mineCount))", isOn: mineBinding)
-                .toggleStyle(.button)
-                .controlSize(.small)
-                .font(.system(size: 10))
-                .help("Show only PRs you authored")
-                .clickCursor()
-            Toggle("Assigned (\(assignedCount))", isOn: assignedBinding)
-                .toggleStyle(.button)
-                .controlSize(.small)
-                .font(.system(size: 10))
-                .help("Show only PRs assigned to you")
-                .clickCursor()
-            Spacer()
+            searchField
+            if canFilterViewer {
+                Toggle("Mine (\(mineCount))", isOn: mineBinding)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .font(.system(size: 10))
+                    .help("Show only PRs you authored")
+                    .clickCursor()
+                Toggle("Assigned (\(assignedCount))", isOn: assignedBinding)
+                    .toggleStyle(.button)
+                    .controlSize(.small)
+                    .font(.system(size: 10))
+                    .help("Show only PRs assigned to you")
+                    .clickCursor()
+            }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
+    }
+
+    /// Instant client-side text filter, with a debounced `gh` backfill behind it so
+    /// matches older than the newest-100 firehose still arrive (same contract as the
+    /// folder PR popover). ⌘F focuses it; Esc clears it, then closes the view.
+    private var searchField: some View {
+        let active = !model.github.query.trimmingCharacters(in: .whitespaces).isEmpty
+        return HStack(spacing: 5) {
+            Image(systemName: active ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundStyle(active ? Color.accentColor : Color.secondary)
+            TextField("Filter PRs — title, author, branch, #number", text: queryBinding)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .focused($searchFocused)
+                .onKeyPress(.escape) {
+                    guard active else { return .ignored }
+                    model.github.query = ""
+                    scheduleBackfill()
+                    return .handled
+                }
+            if active {
+                Button {
+                    model.github.query = ""
+                    scheduleBackfill()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter (Esc)")
+                .clickCursor()
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .frame(maxWidth: 300)
+        .background(RoundedRectangle(cornerRadius: 5)
+            .strokeBorder(active ? Color.accentColor : Color.secondary.opacity(0.25), lineWidth: 1))
+    }
+
+    private var queryBinding: Binding<String> {
+        Binding(
+            get: { model.github.query },
+            set: { model.github.query = $0; scheduleBackfill() })
+    }
+
+    /// Debounce the scoped `gh` search behind the text field: the client-side filter
+    /// is instant, and we only pay for a subprocess once typing settles.
+    private func scheduleBackfill() {
+        backfillTask?.cancel()
+        backfillTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            model.github.applyFilters(model: model)
+        }
     }
 
     private var summary: String {
@@ -483,6 +612,23 @@ struct GitHubView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .padding(12)
+                } else if model.github.filterActive, navRows.isEmpty {
+                    // Every folder section folds away under a filter that matches
+                    // nothing — say so instead of showing a blank column.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No matching PRs")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        Button("Clear filters") {
+                            model.github.query = ""
+                            model.github.mineOnly = false
+                            model.github.assignedOnly = false
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                        .clickCursor()
+                    }
+                    .padding(12)
                 }
             }
         }

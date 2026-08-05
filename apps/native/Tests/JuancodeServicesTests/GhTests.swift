@@ -413,3 +413,31 @@ final class PrAttentionReasonTests: XCTestCase {
         XCTAssertEqual(out.first?.cwd, "/b")
     }
 }
+
+final class PrMatchesQueryTests: XCTestCase {
+    private let pr = PullRequest(number: 4821, title: "Fix login redirect",
+                                 url: "u", branch: "juan/fix-login", draft: false,
+                                 checks: .passing, author: "octocat")
+
+    func testEmptyQueryMatchesEverything() {
+        XCTAssertTrue(prMatchesQuery(pr, ""))
+        XCTAssertTrue(prMatchesQuery(pr, "   "))
+    }
+
+    func testMatchesTitleAuthorAndBranchCaseInsensitively() {
+        XCTAssertTrue(prMatchesQuery(pr, "LOGIN"))
+        XCTAssertTrue(prMatchesQuery(pr, "octo"))
+        XCTAssertTrue(prMatchesQuery(pr, "juan/fix"))
+        XCTAssertFalse(prMatchesQuery(pr, "logout"))
+    }
+
+    func testMatchesNumberWithOrWithoutHash() {
+        XCTAssertTrue(prMatchesQuery(pr, "#4821"))
+        XCTAssertTrue(prMatchesQuery(pr, "4821"))
+        // Prefix, so a partial number finds it.
+        XCTAssertTrue(prMatchesQuery(pr, "48"))
+        XCTAssertFalse(prMatchesQuery(pr, "#99"))
+        // A non-numeric "#" query can't match a number and doesn't crash.
+        XCTAssertFalse(prMatchesQuery(pr, "#"))
+    }
+}
