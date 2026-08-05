@@ -169,6 +169,14 @@ public enum PrChecks: String, Codable, Sendable {
     case passing, failing, pending, none
 }
 
+/// GitHub's rolled-up review verdict for a PR (`reviewDecision`). Only the three
+/// states GitHub reports; anything else (including no reviewers at all) is absent.
+public enum PrReviewDecision: String, Codable, Sendable {
+    case approved = "APPROVED"
+    case changesRequested = "CHANGES_REQUESTED"
+    case reviewRequired = "REVIEW_REQUIRED"
+}
+
 public struct PullRequest: Codable, Sendable, Equatable {
     public var number: Int
     public var title: String
@@ -193,14 +201,33 @@ public struct PullRequest: Codable, Sendable, Equatable {
     /// GitHub logins of the PR's assignees (empty when none) — powers the
     /// "Assigned to me" filter alongside `author` for "Mine".
     public var assignees: [String]
+    /// ISO8601 creation timestamp as gh reports it, or nil when unknown. Rendered as
+    /// a compact age ("2d") on the row — how long a PR has been sitting is what says
+    /// whether it's rotting, and the PR number alone can't tell you.
+    public var createdAt: String?
+    /// GitHub's rolled-up review verdict, raw. Kept as a string so an unrecognised
+    /// value can never fail decoding of the whole list; read `reviewDecisionKind`.
+    public var reviewDecision: String?
+    /// Logins (users) and slugs (teams) with a review requested on this PR — powers
+    /// "your review is requested" triage.
+    public var reviewRequests: [String]
+
+    /// The typed review verdict, or nil when absent/unrecognised.
+    public var reviewDecisionKind: PrReviewDecision? {
+        PrReviewDecision(rawValue: (reviewDecision ?? "").uppercased())
+    }
 
     public init(number: Int, title: String, url: String, branch: String,
                 draft: Bool, checks: PrChecks, author: String, assignees: [String] = [],
-                checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0) {
+                checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0,
+                createdAt: String? = nil, reviewDecision: String? = nil,
+                reviewRequests: [String] = []) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
         self.checkCount = checkCount; self.passedCount = passedCount
         self.unresolvedComments = unresolvedComments
+        self.createdAt = createdAt; self.reviewDecision = reviewDecision
+        self.reviewRequests = reviewRequests
     }
 }
 

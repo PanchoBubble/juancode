@@ -18,8 +18,13 @@ private let MAX_BUFFER = 16 * 1024 * 1024
 private let MAX_PRS = 100
 
 /// The `gh pr list --json` fields we request. `assignees` powers the native
-/// "Assigned to me" filter (each element is `{ login }`).
-private let FIELDS = "number,title,url,headRefName,isDraft,statusCheckRollup,author,assignees"
+/// "Assigned to me" filter (each element is `{ login }`); `createdAt`,
+/// `reviewDecision` and `reviewRequests` drive the row's age + review chips and the
+/// "needs you" triage group.
+private let FIELDS = """
+number,title,url,headRefName,isDraft,statusCheckRollup,author,assignees,\
+createdAt,reviewDecision,reviewRequests
+"""
 
 /// Resolve the `gh` binary like the user's terminal would, honouring the
 /// `JUANCODE_GH_BIN` override. Resolved per call (not cached at load) so a test
@@ -48,6 +53,9 @@ struct RawPr: Decodable {
     // Defaulted so the synthesized memberwise init stays back-compatible with
     // existing call sites (e.g. tests) that predate the assignees field.
     var assignees: [RawPrAuthor]? = nil
+    var createdAt: String? = nil
+    var reviewDecision: String? = nil
+    var reviewRequests: [RawReviewRequest]? = nil
 }
 
 struct RawPrAuthor: Decodable {
@@ -55,6 +63,16 @@ struct RawPrAuthor: Decodable {
     // Only populated by the GraphQL conversation query (`author { login avatarUrl }`);
     // `gh pr list --json author` doesn't carry it, so it stays nil on that path.
     var avatarUrl: String?
+}
+
+/// One entry of gh's `reviewRequests`: a User (`login`) or a Team (`slug`/`name`).
+struct RawReviewRequest: Decodable {
+    var login: String?
+    var slug: String?
+    var name: String?
+
+    /// The handle to match a viewer login (or show) against.
+    var handle: String? { login ?? slug ?? name }
 }
 
 /// Collapse a PR's individual checks into a single failing/pending/passing/none.
@@ -112,8 +130,40 @@ func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
             author: p.author?.login ?? "",
             assignees: (p.assignees ?? []).compactMap { $0.login },
             checkCount: p.statusCheckRollup?.count ?? 0,
-            passedCount: countPassedChecks(p.statusCheckRollup))
+            passedCount: countPassedChecks(p.statusCheckRollup),
+            createdAt: p.createdAt,
+            reviewDecision: p.reviewDecision,
+            reviewRequests: (p.reviewRequests ?? []).compactMap(\.handle))
     }
+}
+
+/// A PR's age as a single compact token ("4h", "2d", "3w", "1y") from gh's ISO8601
+/// `createdAt`, or nil when the timestamp is missing or unparseable. Deliberately
+/// coarse — the row needs "is this rotting?", not a duration. Pure; exposed for
+/// testing (`now` is injected so the expectations don't drift).
+public func prAgeLabel(_ iso: String?, now: Date = Date()) -> String? {
+    guard let iso, let created = parseIso8601(iso) else { return nil }
+    let seconds = max(0, now.timeIntervalSince(created))
+    // Rounded, not truncated: a fractional-second timestamp otherwise lands
+    // 239.99 minutes after creation and reads as "3h" instead of "4h".
+    let minutes = Int((seconds / 60).rounded())
+    if minutes < 60 { return "\(max(1, minutes))m" }
+    let hours = minutes / 60
+    if hours < 24 { return "\(hours)h" }
+    let days = hours / 24
+    if days < 14 { return "\(days)d" }
+    let weeks = days / 7
+    if weeks < 52 { return "\(weeks)w" }
+    return "\(days / 365)y"
+}
+
+/// gh emits `2026-08-05T12:34:56Z`; some fields carry fractional seconds. Try both.
+private func parseIso8601(_ s: String) -> Date? {
+    let plain = ISO8601DateFormatter()
+    if let d = plain.date(from: s) { return d }
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: s)
 }
 
 /// The authenticated GitHub login, cached for the process lifetime. Best-effort:

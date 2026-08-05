@@ -620,6 +620,13 @@ private struct GitHubPrRow: View {
                         .foregroundStyle(.orange)
                         .help("\(pr.unresolvedComments) unresolved comment\(pr.unresolvedComments == 1 ? "" : "s")")
                     }
+                    reviewChip
+                    if let age = prAgeLabel(pr.createdAt) {
+                        Text(age)
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .help("Opened \(age) ago by \(pr.author.isEmpty ? "someone" : pr.author)")
+                    }
                     if let t = tracked { TrackBadge(state: t.state) }
                     Spacer(minLength: 0)
                 }
@@ -633,6 +640,32 @@ private struct GitHubPrRow: View {
         .background(selected ? Color.accentColor.opacity(0.18) : Color.clear)
         .clickCursor()
         .contextMenu { GitHubPrActions(pr: pr, cwd: cwd) }
+    }
+
+    /// Review verdict chip. "Review required" is left out: on a repo that requires
+    /// review it's the default state of every open PR, so it would fire on all of
+    /// them and say nothing — approved / changes-requested are the states that
+    /// actually change what you do next.
+    @ViewBuilder private var reviewChip: some View {
+        switch pr.reviewDecisionKind {
+        case .approved:
+            chip("checkmark.seal.fill", "approved", .green)
+        case .changesRequested:
+            chip("arrow.uturn.backward", "changes", .orange)
+        case .reviewRequired, .none:
+            EmptyView()
+        }
+    }
+
+    private func chip(_ icon: String, _ text: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 8))
+            Text(text).font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 4).padding(.vertical, 1)
+        .background(color.opacity(0.16))
+        .clipShape(Capsule())
     }
 
     private var checkColor: Color {

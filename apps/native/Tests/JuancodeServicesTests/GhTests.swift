@@ -296,3 +296,54 @@ final class UnresolvedThreadTests: XCTestCase {
         XCTAssertEqual(ordered.map(\.number), [50, 40, 30, 20])
     }
 }
+
+final class PrAgeLabelTests: XCTestCase {
+    private let now = ISO8601DateFormatter().date(from: "2026-08-05T12:00:00Z")!
+
+    func testFormatsEachCoarseBucket() {
+        XCTAssertEqual(prAgeLabel("2026-08-05T11:35:00Z", now: now), "25m")
+        XCTAssertEqual(prAgeLabel("2026-08-05T08:00:00Z", now: now), "4h")
+        XCTAssertEqual(prAgeLabel("2026-08-03T12:00:00Z", now: now), "2d")
+        // Past a fortnight it switches to weeks.
+        XCTAssertEqual(prAgeLabel("2026-07-01T12:00:00Z", now: now), "5w")
+        XCTAssertEqual(prAgeLabel("2025-01-01T12:00:00Z", now: now), "1y")
+    }
+
+    func testFloorsAtOneMinuteAndNeverGoesNegative() {
+        XCTAssertEqual(prAgeLabel("2026-08-05T11:59:59Z", now: now), "1m")
+        // A clock-skewed future timestamp still reads as brand new, not "-3m".
+        XCTAssertEqual(prAgeLabel("2026-08-05T12:05:00Z", now: now), "1m")
+    }
+
+    func testAcceptsFractionalSecondsAndRejectsGarbage() {
+        XCTAssertEqual(prAgeLabel("2026-08-05T08:00:00.123Z", now: now), "4h")
+        XCTAssertNil(prAgeLabel(nil, now: now))
+        XCTAssertNil(prAgeLabel("yesterday", now: now))
+    }
+}
+
+final class ParsePrsReviewFieldsTests: XCTestCase {
+    func testCarriesCreatedAtReviewDecisionAndRequestedReviewers() {
+        let out = parsePrs([
+            RawPr(number: 9, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: nil, author: RawPrAuthor(login: "octocat"),
+                  createdAt: "2026-08-01T09:00:00Z",
+                  reviewDecision: "CHANGES_REQUESTED",
+                  reviewRequests: [RawReviewRequest(login: "hubber"),
+                                   RawReviewRequest(login: nil, slug: "platform"),
+                                   RawReviewRequest(login: nil, slug: nil, name: nil)]),
+        ])
+        XCTAssertEqual(out.first?.createdAt, "2026-08-01T09:00:00Z")
+        XCTAssertEqual(out.first?.reviewDecisionKind, .changesRequested)
+        XCTAssertEqual(out.first?.reviewRequests, ["hubber", "platform"])
+    }
+
+    func testUnrecognisedReviewDecisionResolvesToNilWithoutLosingTheRawValue() {
+        let out = parsePrs([
+            RawPr(number: 9, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: nil, author: nil, reviewDecision: "SOMETHING_NEW"),
+        ])
+        XCTAssertNil(out.first?.reviewDecisionKind)
+        XCTAssertEqual(out.first?.reviewDecision, "SOMETHING_NEW")
+    }
+}
