@@ -2804,6 +2804,13 @@ struct SessionContainer: View {
         }
     }
 
+    /// How far the open shell panel translates the pane above the visible area. The
+    /// pane's NSView rejects clicks in that band, which AppKit would otherwise route
+    /// to the terminal instead of the header buttons it now covers (`TerminalHitClip`).
+    private var terminalTopHitInset: CGFloat {
+        model.bottomTerminalShown ? CGFloat(bottomHeight) : 0
+    }
+
     @ViewBuilder
     private var terminal: some View {
         // Keep-alive pane pool (juancode-073): every recently-viewed live session
@@ -2824,7 +2831,8 @@ struct SessionContainer: View {
                                 focusToken: model.terminalFocusToken,
                                 resyncToken: model.terminalResyncToken,
                                 autoFocusOnAppear: !model.suppressTerminalAutoFocus,
-                                hidden: !visible)
+                                hidden: !visible,
+                                topHitInset: terminalTopHitInset)
                         .opacity(visible ? 1 : 0)
                         .allowsHitTesting(visible)
                 }
@@ -2839,6 +2847,7 @@ struct SessionContainer: View {
                           focusToken: model.terminalFocusToken,
                           resyncToken: model.terminalResyncToken,
                           autoFocusOnAppear: !model.suppressTerminalAutoFocus,
+                          topHitInset: terminalTopHitInset,
                           onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
         } else {

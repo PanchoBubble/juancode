@@ -435,6 +435,10 @@ final class TerminalHostView: NSView {
     /// a session puts the cursor in the terminal without a manual click. Set only for
     /// the live terminal (the read-only replay view leaves it off).
     var focusOnAppear = false
+    /// Height of our own bounds that SwiftUI has translated above the visible area
+    /// (the bottom shell panel's height). Clicks that land there belong to whatever
+    /// is drawn under the pane — see `TerminalHitClip`.
+    var topHitInset: CGFloat = 0
     private var didAutoFocus = false
     /// Re-applies the renderer choice (CG/Metal) when the Settings toggle flips.
     private var rendererObserver: Any?
@@ -483,6 +487,13 @@ final class TerminalHostView: NSView {
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self.terminal)
         }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = superview.map { convert(point, from: $0) } ?? point
+        if TerminalHitClip.rejects(point: local, bounds: bounds, flipped: isFlipped,
+                                   topInset: topHitInset) { return nil }
+        return super.hitTest(point)
     }
 
     /// Switch the terminal to the current renderer choice. Metal init can fail
@@ -715,6 +726,10 @@ struct SwiftTermLive: View {
     /// while the sidebar is being keyboard-navigated, so opening rows with j/k doesn't
     /// yank focus into the pty on every move (juancode-vgm).
     var autoFocusOnAppear: Bool = true
+    /// How much of the pane is translated above the visible area by the caller's
+    /// `.offset` (the bottom shell panel's height). Clicks in that band fall through
+    /// to the views drawn under the pane — see `TerminalHitClip`.
+    var topHitInset: CGFloat = 0
     /// ⌘-click / ⌘⇧-click on a `path:line` in the terminal calls this with the path
     /// and optional line, so the host can open it (see `AppModel.openEditorSession`).
     var onOpenPath: ((String, Int?) -> Void)? = nil
@@ -730,6 +745,7 @@ struct SwiftTermLive: View {
                                    remembersSize: remembersSize, focusToken: focusToken,
                                    resyncToken: resyncToken,
                                    autoFocusOnAppear: autoFocusOnAppear,
+                                   topHitInset: topHitInset,
                                    onOpenPath: onOpenPath,
                                    onGrid: onGrid)
         }
@@ -751,6 +767,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     /// the grid and forces a SIGWINCH. See `SwiftTermLive.resyncToken`.
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
+    var topHitInset: CGFloat = 0
     var onOpenPath: ((String, Int?) -> Void)? = nil
     var onGrid: ((Int, Int) -> Void)? = nil
 
@@ -790,6 +807,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        nsView.topHitInset = topHitInset
         // Apply the authoritative SwiftUI size to the terminal. This fires whenever
         // the laid-out size changes (open, panel toggle, window/divider drag), so the
         // grid + pty always track the real on-screen size.

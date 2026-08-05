@@ -88,6 +88,10 @@ struct GhosttyLive: View {
     /// unfreeze, one fit at the live bounds, re-claim + flush the grid (deduped),
     /// and a settled-frame repaint. Mirrors `GhosttyEphemeral.hidden`.
     var hidden: Bool = false
+    /// How much of the pane is translated above the visible area by the caller's
+    /// `.offset` (the bottom shell panel's height). Clicks in that band fall through
+    /// to the views drawn under the pane — see `TerminalHitClip`.
+    var topHitInset: CGFloat = 0
     /// Reports the real grid Ghostty measures for the current bounds (cols, rows).
     /// Lets a caller persist a surface-specific spawn size — e.g. the Oracle dock,
     /// which can't use the shared `TerminalGrid` (that's the main panes') and must
@@ -100,7 +104,7 @@ struct GhosttyLive: View {
                                  remembersSize: remembersSize, focusToken: focusToken,
                                  resyncToken: resyncToken,
                                  autoFocusOnAppear: autoFocusOnAppear,
-                                 hidden: hidden, onGrid: onGrid)
+                                 hidden: hidden, topHitInset: topHitInset, onGrid: onGrid)
         }
     }
 }
@@ -121,6 +125,10 @@ final class GhosttyHostView: NSView {
     /// reflow underneath them would mis-wrap its state the same way raw-scrollback
     /// replay does. Reveal unfreezes and runs a single fit at the live bounds.
     var layoutFrozen = false
+    /// Height of our own bounds that SwiftUI has translated above the visible area
+    /// (the bottom shell panel's height). Clicks that land there belong to whatever
+    /// is drawn under the pane — see `TerminalHitClip`.
+    var topHitInset: CGFloat = 0
     private var didAutoFocus = false
 
     init(terminal: TerminalView) {
@@ -143,6 +151,13 @@ final class GhosttyHostView: NSView {
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self.terminal)
         }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = superview.map { convert(point, from: $0) } ?? point
+        if TerminalHitClip.rejects(point: local, bounds: bounds, flipped: isFlipped,
+                                   topInset: topHitInset) { return nil }
+        return super.hitTest(point)
     }
 
     /// Pin the surface to our exact bounds, then let Ghostty re-measure. Unlike
@@ -232,6 +247,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
     var hidden: Bool = false
+    var topHitInset: CGFloat = 0
     var onGrid: ((Int, Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
@@ -255,6 +271,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
         context.coordinator.onGrid = onGrid
+        nsView.topHitInset = topHitInset
         // Hide/reveal first: on hide the freeze must land before this pass's
         // `applySize` (which is a no-op while frozen); on reveal the unfreeze must
         // land before it, so the fit below already runs at the live bounds.
