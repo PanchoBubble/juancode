@@ -347,3 +347,69 @@ final class ParsePrsReviewFieldsTests: XCTestCase {
         XCTAssertEqual(out.first?.reviewDecision, "SOMETHING_NEW")
     }
 }
+
+final class PrAttentionReasonTests: XCTestCase {
+    private func pr(_ n: Int, author: String = "octocat", assignees: [String] = [],
+                    checks: PrChecks = .passing, unresolved: Int = 0, draft: Bool = false,
+                    decision: String? = nil, requests: [String] = []) -> PullRequest {
+        PullRequest(number: n, title: "t\(n)", url: "u", branch: "b", draft: draft,
+                    checks: checks, author: author, assignees: assignees,
+                    unresolvedComments: unresolved, reviewDecision: decision,
+                    reviewRequests: requests)
+    }
+
+    func testNothingNeedsYouWhenTheViewerIsUnknown() {
+        XCTAssertNil(prAttentionReason(pr(1, checks: .failing), viewer: ""))
+    }
+
+    func testYourOwnPrIsRankedByChangesThenCiThenThreads() {
+        XCTAssertEqual(
+            prAttentionReason(pr(1, checks: .failing, unresolved: 2,
+                                 decision: "CHANGES_REQUESTED"), viewer: "octocat"),
+            .changesRequested)
+        XCTAssertEqual(
+            prAttentionReason(pr(1, checks: .failing, unresolved: 2), viewer: "octocat"),
+            .ciFailing)
+        XCTAssertEqual(prAttentionReason(pr(1, unresolved: 2), viewer: "octocat"), .unresolved)
+        XCTAssertNil(prAttentionReason(pr(1), viewer: "octocat"))
+    }
+
+    func testAssignedCountsAsYours() {
+        XCTAssertEqual(
+            prAttentionReason(pr(1, author: "hubber", assignees: ["octocat"], checks: .failing),
+                              viewer: "octocat"),
+            .ciFailing)
+    }
+
+    func testRedCiOnADraftIsNotAnAskButAHumanOneStillIs() {
+        XCTAssertNil(prAttentionReason(pr(1, checks: .failing, draft: true), viewer: "octocat"))
+        XCTAssertEqual(
+            prAttentionReason(pr(1, draft: true, decision: "CHANGES_REQUESTED"), viewer: "octocat"),
+            .changesRequested)
+    }
+
+    func testSomeoneElsesPrOnlyLandsWhenYourReviewIsRequested() {
+        XCTAssertNil(prAttentionReason(pr(1, author: "hubber", checks: .failing), viewer: "octocat"))
+        XCTAssertEqual(
+            prAttentionReason(pr(1, author: "hubber", requests: ["octocat"]), viewer: "octocat"),
+            .reviewRequested)
+        // A team you belong to counts too.
+        XCTAssertEqual(
+            prAttentionReason(pr(1, author: "hubber", requests: ["platform"]),
+                              viewer: "octocat", teams: ["platform"]),
+            .reviewRequested)
+        // Your own PR never joins the review queue, even if gh lists you.
+        XCTAssertNil(prAttentionReason(pr(1, requests: ["octocat"]), viewer: "octocat"))
+    }
+
+    func testGroupOrdersByReasonThenNewestFirstAcrossFolders() {
+        let a = [pr(10, unresolved: 1), pr(20, checks: .failing), pr(30, decision: "APPROVED")]
+        let b = [pr(40, checks: .failing), pr(50, author: "hubber", requests: ["octocat"])]
+        let out = prsNeedingYou([(cwd: "/a", prs: a, viewer: "octocat"),
+                                 (cwd: "/b", prs: b, viewer: "octocat")])
+        // CI failing (newest first) → unresolved → review requested. #30 is clean.
+        XCTAssertEqual(out.map(\.pr.number), [40, 20, 10, 50])
+        XCTAssertEqual(out.map(\.reason), [.ciFailing, .ciFailing, .unresolved, .reviewRequested])
+        XCTAssertEqual(out.first?.cwd, "/b")
+    }
+}

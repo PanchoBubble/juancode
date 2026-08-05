@@ -393,10 +393,13 @@ struct GitHubView: View {
         let prPart = model.github.filterActive
             ? "\(shownPrTotal) of \(total) open PR\(total == 1 ? "" : "s")"
             : "\(total) open PR\(total == 1 ? "" : "s")"
+        // The triage count leads the eye before the totals do.
+        let needs = needsYou.count
+        let needsPart = needs > 0 ? " · \(needs) need\(needs == 1 ? "s" : "") you" : ""
         if let scope = model.githubScope {
-            return "\((scope as NSString).lastPathComponent) · \(prPart)"
+            return "\((scope as NSString).lastPathComponent) · \(prPart)\(needsPart)"
         }
-        return "\(folders.count) folder\(folders.count == 1 ? "" : "s") · \(prPart)"
+        return "\(folders.count) folder\(folders.count == 1 ? "" : "s") · \(prPart)\(needsPart)"
     }
 
     /// Changes when the scoped folder's PRs load, driving deep-link resolution.
@@ -471,6 +474,7 @@ struct GitHubView: View {
     private var prList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                needsYouSection
                 ForEach(model.githubScopedFolders, id: \.self) { cwd in
                     folderSection(cwd)
                 }
@@ -482,6 +486,56 @@ struct GitHubView: View {
                 }
             }
         }
+    }
+
+    /// PRs that need the viewer, across every shown folder — CI red on yours, changes
+    /// requested on yours, open threads on yours, your review requested. Pinned above
+    /// the folder sections because a hundred date-ordered PRs grouped by repo has no
+    /// triage in it: this is the answer to "what do I touch next".
+    ///
+    /// The same PR still appears in its folder section below. That repetition is the
+    /// point — the group is a shortcut, not a filter, so the folder list stays a
+    /// complete picture of the repo.
+    @ViewBuilder private var needsYouSection: some View {
+        let items = needsYou
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10)).foregroundStyle(.orange)
+                    Text("Needs you")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer(minLength: 4)
+                    Text("\(items.count)")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.orange.opacity(0.12))
+                ForEach(items, id: \.key) { item in
+                    GitHubPrRow(pr: item.pr, cwd: item.cwd,
+                                reason: item.reason,
+                                // Folder-scoped views already know the repo; the
+                                // all-projects view needs it to place the row.
+                                showFolder: model.githubScope == nil)
+                    Divider()
+                }
+            }
+        }
+    }
+
+    /// The pinned triage rows, keyed for `ForEach` (a PR can only appear once, so the
+    /// PR key is unique within the group).
+    private var needsYou: [(key: String, cwd: String, pr: PullRequest, reason: PrAttentionReason)] {
+        let byFolder = model.githubScopedFolders.compactMap { cwd -> (String, [PullRequest], String)? in
+            guard let r = model.prs(cwd), r.available, let v = r.viewer, !v.isEmpty else { return nil }
+            // Respects the active Mine/Assigned filters, so the group never
+            // contradicts what the list below is showing.
+            return (cwd, model.github.filtered(r.prs, viewer: v), v)
+        }
+        return prsNeedingYou(byFolder.map { (cwd: $0.0, prs: $0.1, viewer: $0.2) })
+            .map { (key: TrackedPr.key(cwd: $0.cwd, number: $0.pr.number),
+                    cwd: $0.cwd, pr: $0.pr, reason: $0.reason) }
     }
 
     @ViewBuilder
@@ -577,6 +631,11 @@ private struct GitHubPrRow: View {
     @Environment(AppModel.self) private var model
     let pr: PullRequest
     let cwd: String
+    /// Why this row is in the pinned "Needs you" group — shown as a leading tag.
+    /// Nil for the ordinary folder sections.
+    var reason: PrAttentionReason? = nil
+    /// Prefix the meta line with the repo name (the pinned group spans projects).
+    var showFolder: Bool = false
 
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
@@ -607,6 +666,21 @@ private struct GitHubPrRow: View {
                     }
                 }
                 HStack(spacing: 6) {
+                    if let reason {
+                        Text(reason.rawValue)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.16))
+                            .clipShape(Capsule())
+                    }
+                    if showFolder {
+                        Text((cwd as NSString).lastPathComponent)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(cwd)
+                    }
                     HStack(spacing: 3) {
                         Image(systemName: checkIcon).font(.system(size: 9))
                         Text(checksText).font(.system(size: 10).monospacedDigit())

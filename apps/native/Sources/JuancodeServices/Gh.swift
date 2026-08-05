@@ -311,6 +311,76 @@ public func mergePrLists(_ base: [PullRequest], _ extra: [PullRequest]) -> [Pull
     return base + newcomers
 }
 
+// MARK: - "Needs you" triage (juancode-q21q)
+
+/// Why a PR is waiting on the viewer, most urgent first. `rank` orders the pinned
+/// triage group; the raw value is the label shown on the row.
+public enum PrAttentionReason: String, Sendable, CaseIterable {
+    /// Yours, and a reviewer asked for changes — the ball is squarely with you.
+    case changesRequested = "changes requested"
+    /// Yours, and CI is red, so it cannot merge.
+    case ciFailing = "CI failing"
+    /// Yours, with review threads still open.
+    case unresolved = "unresolved threads"
+    /// Someone asked you (or a team of yours) to review it.
+    case reviewRequested = "review requested"
+
+    public var rank: Int {
+        switch self {
+        case .changesRequested: return 0
+        case .ciFailing: return 1
+        case .unresolved: return 2
+        case .reviewRequested: return 3
+        }
+    }
+}
+
+/// Why this PR needs the viewer, or nil when it doesn't. First match in priority
+/// order wins, so each PR appears once with its most urgent reason.
+///
+/// `teams` are the viewer's team slugs, when known, so a team review request counts.
+/// Drafts are excluded from `ciFailing` only: red CI on a draft is the normal state
+/// of work in progress, whereas a human explicitly requesting changes or a review on
+/// a draft is still a real ask. Pure; exposed for testing.
+public func prAttentionReason(_ pr: PullRequest, viewer: String,
+                              teams: Set<String> = []) -> PrAttentionReason? {
+    guard !viewer.isEmpty else { return nil }
+    let mine = pr.author == viewer || pr.assignees.contains(viewer)
+    if mine {
+        if pr.reviewDecisionKind == .changesRequested { return .changesRequested }
+        if pr.checks == .failing, !pr.draft { return .ciFailing }
+        if pr.unresolvedComments > 0 { return .unresolved }
+        // Your own PR never lands in the review queue, even if gh lists you.
+        return nil
+    }
+    let asked = pr.reviewRequests.contains { $0 == viewer || teams.contains($0) }
+    return asked ? .reviewRequested : nil
+}
+
+/// The pinned triage list across every shown folder: each PR that needs the viewer,
+/// ordered by reason then newest-first, carrying the folder it came from. Pure;
+/// exposed for testing.
+public func prsNeedingYou(_ byFolder: [(cwd: String, prs: [PullRequest], viewer: String)],
+                          teams: Set<String> = [])
+    -> [(cwd: String, pr: PullRequest, reason: PrAttentionReason)] {
+    // Built with explicit loops rather than a flatMap/sorted/map chain over
+    // unlabelled tuples: the chain form is what the type checker gives up on
+    // ("unable to type-check this expression in reasonable time").
+    typealias Row = (cwd: String, pr: PullRequest, reason: PrAttentionReason)
+    var rows: [Row] = []
+    for entry in byFolder {
+        for pr in entry.prs {
+            guard let reason = prAttentionReason(pr, viewer: entry.viewer, teams: teams)
+            else { continue }
+            rows.append((cwd: entry.cwd, pr: pr, reason: reason))
+        }
+    }
+    rows.sort { a, b in
+        a.reason.rank == b.reason.rank ? a.pr.number > b.pr.number : a.reason.rank < b.reason.rank
+    }
+    return rows
+}
+
 /// Order a folder's open PRs for the GitHub view: tracked PRs first (they're the
 /// ones being actively driven), each band keeping its incoming (newest-first)
 /// order. Pure; exposed for testing.
