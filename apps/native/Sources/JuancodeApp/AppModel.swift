@@ -1783,6 +1783,15 @@ final class AppModel {
         return githubFolders
     }
 
+    /// The repo root behind the currently selected session — the "current" project.
+    /// The GitHub view sorts this folder's section to the top and accents it, so the
+    /// PRs for what you're actually working on lead the list.
+    var activeProjectFolder: String? {
+        guard let id = selection,
+              let meta = liveSession(id)?.meta ?? appState.store.get(id) else { return nil }
+        return repoRoot(forSession: meta)
+    }
+
     /// Total open PRs across every loaded folder — the sidebar GitHub row badge.
     var openPrTotal: Int {
         prsByCwd.values.filter(\.available).reduce(0) { $0 + $1.prs.count }

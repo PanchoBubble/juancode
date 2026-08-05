@@ -1682,7 +1682,11 @@ private struct FolderHeader: View {
                        role: .destructive) { model.closeSessions(closableSessions.map(\.id)) }
             }
         }
-        .onAppear { model.loadPrs(group.cwd); model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
+        // No `loadPrs` here: PRs are fetched when you ask for them (the PRs button,
+        // or a folder section scrolling into view in the GitHub tab). Every project
+        // row firing three `gh` round trips on appear was the sidebar's biggest
+        // startup cost, and it bought only a count in a button label.
+        .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 }
 
@@ -1733,8 +1737,17 @@ private struct FolderPrs: View {
         }
     }
 
+    /// Whether this folder's PRs have been fetched at least once. Until then the
+    /// button carries no count — showing one would mean shelling out to `gh` for
+    /// every project in the sidebar just to render a number nobody asked for.
+    private var loaded: Bool { result != nil }
+    /// The folder isn't a GitHub repo / `gh` can't reach it — established only after
+    /// a real attempt, and then the button retires itself rather than staying as a
+    /// button that always errors.
+    private var unavailable: Bool { result?.available == false }
+
     var body: some View {
-        if all.isEmpty {
+        if unavailable || (loaded && all.isEmpty) {
             EmptyView()
         } else {
             Button {
@@ -1746,11 +1759,12 @@ private struct FolderPrs: View {
                 }
                 showing.toggle()
             } label: {
-                Text("\(all.count) PR\(all.count == 1 ? "" : "s")")
+                Text(loaded ? "\(all.count) PR\(all.count == 1 ? "" : "s")" : "PRs")
                     .font(.system(size: 10, weight: .medium))
             }
             .buttonStyle(.borderless)
-            .help("\(all.count) open pull request\(all.count == 1 ? "" : "s")")
+            .help(loaded ? "\(all.count) open pull request\(all.count == 1 ? "" : "s")"
+                         : "Open pull requests (loads on click)")
             .popover(isPresented: $showing, arrowEdge: .bottom) {
                 popover
             }
@@ -1780,7 +1794,23 @@ private struct FolderPrs: View {
             }
             .padding(8)
             Divider()
-            if list.isEmpty {
+            if !loaded {
+                // First open of this folder's PRs: the `gh` call starts on the click
+                // that opened this popover.
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading pull requests…")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else if unavailable {
+                Text(result?.error ?? "PRs unavailable")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            } else if list.isEmpty {
                 Text(query.isEmpty && !mineOnly && !assignedOnly ? "No open PRs" : "No matching PRs")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)

@@ -17,6 +17,15 @@ import MarkdownUI
 @MainActor
 @Observable
 final class GitHubModel {
+    /// The two top-level tabs the view shows one at a time (juancode-gh-tabs): the
+    /// PR list, or the selected PR's detail. Full width each — the old side-by-side
+    /// split squeezed the detail into whatever a 300pt list left over, and kept a
+    /// hundred PR rows on screen when you only wanted the one you're reading.
+    enum Tab: String, CaseIterable { case list, detail }
+
+    /// Which tab is showing. Lives here (not in the view) so it survives the view
+    /// being dismissed and re-opened, like the selection and filters do.
+    var tab: Tab = .list
     /// The selected PR's key, or nil when nothing is selected.
     var selectedKey: String?
     /// Fetched conversations (comments / reviews / inline threads) per PR.
@@ -112,30 +121,62 @@ final class GitHubModel {
         return navOrder.first { $0.id == key }
     }
 
-    private func select(_ row: PrNavRow) { select(cwd: row.cwd, pr: row.pr) }
+    /// Keyboard nav selects without leaving the current tab: j/k on the list browses
+    /// the list, and j/k on the detail steps through PRs in place. Only an explicit
+    /// row click (`select(cwd:pr:)`) crosses over to the detail tab.
+    private func select(_ row: PrNavRow) { load(cwd: row.cwd, pr: row.pr) }
 
-    /// Kick a PR-list refresh for every folder the view shows (all, or the one
-    /// scoped folder). Re-runs the scoped `gh` query too when a filter is active,
-    /// since `loadPrs` resets the cache to the newest-100 firehose (which may miss
-    /// your older PRs).
+    /// Leave the detail and go back to the list (Esc, the back button).
+    func backToList() { tab = .list }
+
+    /// Kick a PR-list refresh for the folders the view has actually loaded (plus the
+    /// scoped one, which is always the point of a scoped view). Deliberately does
+    /// *not* fan out to every project: each `getOpenPrs` is three `gh` round trips,
+    /// and a folder you haven't scrolled to hasn't earned them — its section header
+    /// fetches it on first appear instead. Re-runs the scoped `gh` query too when a
+    /// filter is active, since `loadPrs` resets the cache to the newest-100 firehose.
     func refresh(model: AppModel) {
-        for cwd in model.githubScopedFolders {
-            model.loadPrs(cwd)
-            if filterActive { applyFilters(model: model) }
+        for cwd in refreshableFolders(model: model) { model.loadPrs(cwd) }
+        if filterActive { applyFilters(model: model) }
+    }
+
+    /// Fetch a folder's PRs the first time its section comes into view. Already
+    /// loaded (or loading) folders are left alone — `loadPrs` coalesces, and a
+    /// re-appear shouldn't re-shell.
+    func loadFolderIfNeeded(_ cwd: String, model: AppModel) {
+        guard model.prs(cwd) == nil else { return }
+        model.loadPrs(cwd)
+        if filterActive {
+            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly,
+                              query: query.trimmingCharacters(in: .whitespaces))
         }
     }
 
-    /// Re-run the scoped backfill for every folder — called when a filter toggles or
-    /// the text query settles, so matches beyond the newest-100 firehose fold in.
+    /// Re-run the scoped backfill for the loaded folders — called when a filter
+    /// toggles or the text query settles, so matches beyond the newest-100 firehose
+    /// fold in. Unloaded folders pick the filter up in `loadFolderIfNeeded`.
     func applyFilters(model: AppModel) {
         let text = query.trimmingCharacters(in: .whitespaces)
-        for cwd in model.githubScopedFolders {
+        for cwd in refreshableFolders(model: model) {
             model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: text)
         }
     }
 
-    /// Select a PR and prefetch its detail.
+    /// The folders a refresh/backfill may touch: those already loaded, plus the
+    /// scoped folder even when it hasn't loaded yet.
+    private func refreshableFolders(model: AppModel) -> [String] {
+        model.githubScopedFolders.filter { model.prs($0) != nil || model.githubScope == $0 }
+    }
+
+    /// Select a PR, prefetch its detail, and show it — the row click and the
+    /// session-header deep-link both land on the detail tab.
     func select(cwd: String, pr: PullRequest) {
+        load(cwd: cwd, pr: pr)
+        tab = .detail
+    }
+
+    /// Select + prefetch without changing tabs.
+    private func load(cwd: String, pr: PullRequest) {
         selectedKey = TrackedPr.key(cwd: cwd, number: pr.number)
         loadDetail(cwd: cwd, pr: pr)
     }
@@ -351,19 +392,28 @@ struct GitHubView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            filterBar
+            tabBar
             Divider()
-            HStack(spacing: 0) {
-                prList
-                    .frame(width: 300)
+            switch model.github.tab {
+            case .list:
+                filterBar
                 Divider()
+                prList
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .detail:
                 detail
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appSurface)
-        .onExitCommand { model.showingGitHub = false }
+        // Esc backs out one level at a time: detail → list → closed. (The window
+        // monitor in installPaneNavigation mirrors this for the case where a
+        // terminal underneath still holds first responder.)
+        .onExitCommand {
+            if model.github.tab == .detail { model.github.backToList() }
+            else { model.showingGitHub = false }
+        }
         // Opening with a filter still active (persisted across dismiss/reopen): fold
         // in the matches beyond the newest-100 firehose so the count is right from the
         // start, without waiting for a manual refresh or a filter re-toggle.
@@ -381,14 +431,83 @@ struct GitHubView: View {
             Button("") { searchFocused = true }
                 .keyboardShortcut("f", modifiers: .command)
                 .opacity(0).frame(width: 0, height: 0)
+            Button("") { model.github.backToList() }
+                .keyboardShortcut("1", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0)
+            Button("") { if model.github.selectedKey != nil { model.github.tab = .detail } }
+                .keyboardShortcut("2", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0)
         }
+    }
+
+    // MARK: tabs
+
+    /// The list / detail switch. Two tabs instead of a side-by-side split: the list
+    /// is noise once you've picked a PR, and the detail wants the whole window.
+    private var tabBar: some View {
+        HStack(spacing: 6) {
+            tabChip(.list, icon: "list.bullet",
+                    title: "Pull requests",
+                    trailing: model.github.filterActive ? "\(shownPrTotal)" : "\(scopedPrTotal)",
+                    help: "All open PRs (⌘1)")
+            tabChip(.detail, icon: "text.bubble",
+                    title: detailTabTitle,
+                    trailing: nil,
+                    help: model.github.selectedKey == nil
+                        ? "Pick a PR first" : "The selected PR (⌘2)")
+                .disabled(model.github.selectedKey == nil)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    /// The detail tab's label: the selected PR's number, or a plain "Detail" while
+    /// nothing is picked (when the tab is disabled anyway).
+    private var detailTabTitle: String {
+        guard let (_, pr) = selectedPr else { return "Detail" }
+        return "#\(pr.number)"
+    }
+
+    private func tabChip(_ tab: GitHubModel.Tab, icon: String, title: String,
+                         trailing: String?, help: String) -> some View {
+        let on = model.github.tab == tab
+        return Button { model.github.tab = tab } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 10))
+                Text(title).font(.system(size: 11, weight: on ? .semibold : .regular))
+                if let trailing {
+                    Text(trailing)
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(on ? Color.accentColor.opacity(0.18) : Color.appHairline(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(on ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .clickCursor()
+    }
+
+    /// Folders in display order: the active project (the selected session's repo)
+    /// first, so the PRs you're most likely to want lead the list, then the rest in
+    /// their usual order. Its section header is accented to match.
+    private var orderedFolders: [String] {
+        let all = model.githubScopedFolders
+        guard let active = model.activeProjectFolder, all.contains(active) else { return all }
+        return [active] + all.filter { $0 != active }
     }
 
     /// Every PR row on screen, top to bottom — the pinned triage group first, then
     /// each folder section in display order. Feeds `GitHubModel.navOrder`.
     private var navRows: [GitHubModel.PrNavRow] {
         var rows = needsYou.map { GitHubModel.PrNavRow(cwd: $0.cwd, pr: $0.pr) }
-        for cwd in model.githubScopedFolders {
+        for cwd in orderedFolders {
             guard let r = model.prs(cwd), r.available else { continue }
             let shown = model.github.filtered(r.prs, viewer: r.viewer ?? "")
             if model.github.filterActive, shown.isEmpty { continue }
@@ -528,7 +647,13 @@ struct GitHubView: View {
         if let scope = model.githubScope {
             return "\((scope as NSString).lastPathComponent) · \(prPart)\(needsPart)"
         }
-        return "\(folders.count) folder\(folders.count == 1 ? "" : "s") · \(prPart)\(needsPart)"
+        // Folders load as you scroll to them, so say which totals you're looking at
+        // rather than implying these numbers cover every project.
+        let loaded = folders.filter { model.prs($0) != nil }.count
+        let folderPart = loaded == folders.count
+            ? "\(folders.count) folder\(folders.count == 1 ? "" : "s")"
+            : "\(loaded) of \(folders.count) folders"
+        return "\(folderPart) · \(prPart)\(needsPart)"
     }
 
     /// Changes when the scoped folder's PRs load, driving deep-link resolution.
@@ -598,13 +723,19 @@ struct GitHubView: View {
             set: { model.github.assignedOnly = $0; model.github.applyFilters(model: model) })
     }
 
-    // MARK: PR list (left column)
+    // MARK: PR list (the list tab)
 
+    /// Real `LazyVStack` sections — rows are direct lazy children, so a folder with
+    /// a hundred PRs only builds the handful on screen. (Wrapping each folder in its
+    /// own `VStack` made the whole list eager, which is what "opening GitHub hangs"
+    /// actually was.) Headers pin so you always know which repo you're scrolled into,
+    /// and each header's `.task` is what fetches that folder's PRs — a folder you
+    /// never scroll to never costs a `gh` call.
     private var prList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 needsYouSection
-                ForEach(model.githubScopedFolders, id: \.self) { cwd in
+                ForEach(orderedFolders, id: \.self) { cwd in
                     folderSection(cwd)
                 }
                 if model.githubScopedFolders.isEmpty {
@@ -645,7 +776,16 @@ struct GitHubView: View {
     @ViewBuilder private var needsYouSection: some View {
         let items = needsYou
         if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
+            Section {
+                ForEach(items, id: \.key) { item in
+                    GitHubPrRow(pr: item.pr, cwd: item.cwd,
+                                reason: item.reason,
+                                // Folder-scoped views already know the repo; the
+                                // all-projects view needs it to place the row.
+                                showFolder: model.githubScope == nil)
+                    Divider()
+                }
+            } header: {
                 HStack(spacing: 6) {
                     Image(systemName: "bolt.fill")
                         .font(.system(size: 10)).foregroundStyle(.orange)
@@ -657,14 +797,12 @@ struct GitHubView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.orange.opacity(0.12))
-                ForEach(items, id: \.key) { item in
-                    GitHubPrRow(pr: item.pr, cwd: item.cwd,
-                                reason: item.reason,
-                                // Folder-scoped views already know the repo; the
-                                // all-projects view needs it to place the row.
-                                showFolder: model.githubScope == nil)
-                    Divider()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Opaque under the pinned header: the rows must not show through it,
+                // so the tint sits on a solid surface fill rather than on the rows.
+                .background {
+                    Color.appSurface
+                    Color.orange.opacity(0.12)
                 }
             }
         }
@@ -673,7 +811,7 @@ struct GitHubView: View {
     /// The pinned triage rows, keyed for `ForEach` (a PR can only appear once, so the
     /// PR key is unique within the group).
     private var needsYou: [(key: String, cwd: String, pr: PullRequest, reason: PrAttentionReason)] {
-        let byFolder = model.githubScopedFolders.compactMap { cwd -> (String, [PullRequest], String)? in
+        let byFolder = orderedFolders.compactMap { cwd -> (String, [PullRequest], String)? in
             guard let r = model.prs(cwd), r.available, let v = r.viewer, !v.isEmpty else { return nil }
             // Respects the active Mine/Assigned filters, so the group never
             // contradicts what the list below is showing.
@@ -693,54 +831,79 @@ struct GitHubView: View {
         if model.github.filterActive, let r = result, r.available, shown.isEmpty {
             EmptyView()
         } else {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Text((cwd as NSString).lastPathComponent)
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                        .help(cwd)
-                    Spacer(minLength: 4)
-                    if let r = result, r.available {
-                        Text("\(shown.count)")
-                            .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    } else if result == nil {
-                        ProgressView().controlSize(.mini)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.appPanel)
+            Section {
                 if let r = result {
                     if !r.available {
                         // e.g. "gh not authenticated" / not a GitHub repo.
-                        Text(r.error ?? "PRs unavailable")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
+                        folderNote(r.error ?? "PRs unavailable", tone: .orange)
                     } else if r.prs.isEmpty {
-                        Text("No open PRs")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
+                        folderNote("No open PRs", tone: .secondary)
                     } else {
-                        let ordered = sortPrsBySubmitDate(shown)
-                        ForEach(ordered, id: \.number) { pr in
+                        ForEach(sortPrsBySubmitDate(shown), id: \.number) { pr in
                             GitHubPrRow(pr: pr, cwd: cwd)
                             Divider()
                         }
                     }
                 }
+            } header: {
+                folderHeader(cwd, result: result, shownCount: shown.count)
             }
         }
     }
 
-    // MARK: detail (right column)
+    /// A folder's pinned header. Fetches that folder's PRs the first time it comes
+    /// into view (`.task`) — scrolling is what pays for `gh`, not opening the view.
+    private func folderHeader(_ cwd: String, result: PrListResult?, shownCount: Int) -> some View {
+        let active = cwd == model.activeProjectFolder
+        return HStack(spacing: 6) {
+            Image(systemName: active ? "folder.fill" : "folder")
+                .font(.system(size: 10))
+                .foregroundStyle(active ? Color.accentColor : .secondary)
+            Text((cwd as NSString).lastPathComponent)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(active ? Color.accentColor : .primary)
+                .lineLimit(1)
+                .help(cwd)
+            if active {
+                Text("current")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(Color.accentColor.opacity(0.16))
+                    .clipShape(Capsule())
+                    .help("The project your selected session is in")
+            }
+            Spacer(minLength: 4)
+            if let r = result, r.available {
+                Text("\(shownCount)")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else if result == nil {
+                ProgressView().controlSize(.mini)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            Color.appSurface
+            active ? Color.accentColor.opacity(0.12) : Color.appPanel
+        }
+        .overlay(alignment: .leading) {
+            if active { Rectangle().fill(Color.accentColor).frame(width: 2) }
+        }
+        .task(id: cwd) { model.github.loadFolderIfNeeded(cwd, model: model) }
+    }
+
+    private func folderNote(_ text: String, tone: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(tone)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+    }
+
+    // MARK: detail (the detail tab)
 
     @ViewBuilder
     private var detail: some View {
@@ -748,11 +911,14 @@ struct GitHubView: View {
             GitHubPrDetail(pr: pr, cwd: cwd)
                 .id(TrackedPr.key(cwd: cwd, number: pr.number))
         } else {
-            ContentUnavailableView(
-                "Select a pull request",
-                systemImage: "arrow.triangle.pull",
-                description: Text("Pick a PR on the left to see its conversation and checks.")
-            )
+            ContentUnavailableView {
+                Label("No pull request selected", systemImage: "arrow.triangle.pull")
+            } description: {
+                Text("Pick a PR on the Pull requests tab to see its conversation and checks.")
+            } actions: {
+                Button("Back to the list") { model.github.backToList() }
+                    .clickCursor()
+            }
         }
     }
 

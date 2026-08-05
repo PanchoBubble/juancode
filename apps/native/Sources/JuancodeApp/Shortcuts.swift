@@ -317,7 +317,13 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
 func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
     if model.showingFindBar { model.closeFindBar(); return true }
     if model.editing != nil { model.editing = nil; return true }
-    if model.showingGitHub { model.showingGitHub = false; return true }
+    // The GitHub overlay has two levels: back out of the PR detail to the list
+    // before closing the overlay itself.
+    if model.showingGitHub {
+        if model.github.tab == .detail { model.github.backToList() }
+        else { model.showingGitHub = false }
+        return true
+    }
     if oracle.expanded { oracle.collapse(); return true }
     return false
 }
