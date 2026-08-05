@@ -58,11 +58,28 @@ private func configureFileDescriptorLimit() {
     }
 }
 
+/// One-shot latch for the terminal-signal handler, which runs off the main actor.
+///
+/// It can't live as a property on `AppDelegate`: `NSApplicationDelegate` is
+/// `@MainActor`, so reading it from the background signal queue trips Swift's
+/// isolation precondition and traps the process (Trace/BPT) instead of quitting.
+private final class QuitLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+
+    /// Marks a quit as requested; returns true if one was already in flight.
+    func requestQuit() -> Bool {
+        lock.lock()
+        defer { fired = true; lock.unlock() }
+        return fired
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     /// Set once a terminal signal has kicked off termination, so a second
     /// Ctrl-C/SIGTERM hard-exits instead of waiting on a possibly-wedged drain.
-    private var signalQuitRequested = false
+    private let quitLatch = QuitLatch()
     /// Held for the app's lifetime to opt out of App Nap. Without it, minimizing
     /// the window lets macOS nap the process: the pty-read queue is throttled (so
     /// the agent blocks on a full pipe) and the on-demand Metal terminal view stops
@@ -139,15 +156,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // pinned to .main a wedged main thread would make the process unkillable by
         // anything but SIGKILL. A second signal (or the graceful drain hanging) forces
         // a hard exit so Ctrl-C always wins.
+        //
+        // The handler must be explicitly `@Sendable` so it does NOT inherit this
+        // method's main-actor isolation: an inheriting closure gets a runtime
+        // isolation precondition that fails the moment the source fires off-main,
+        // trapping the process instead of quitting it. Everything it touches is
+        // therefore off-actor safe — the latch is lock-guarded, and main-actor work
+        // hops to the main queue first.
+        let latch = quitLatch
+        let handler: @Sendable () -> Void = {
+            if latch.requestQuit() { _exit(0) }
+            DispatchQueue.main.async { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { _exit(0) }
+        }
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
-            src.setEventHandler { [weak self] in
-                if self?.signalQuitRequested == true { _exit(0) }
-                self?.signalQuitRequested = true
-                DispatchQueue.main.async { NSApp.terminate(nil) }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { _exit(0) }
-            }
+            src.setEventHandler(handler: handler)
             src.resume()
             signalSources.append(src)
         }
