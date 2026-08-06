@@ -686,22 +686,6 @@ final class TerminalHostView: NSView {
 
 extension TerminalView: JuancodeTerminalResponder {}
 
-/// Remembers the last on-screen terminal grid (cols×rows) so a newly-spawned CLI
-/// can boot already matching the visible terminal. Persisted in UserDefaults; read
-/// by `AppModel` when spawning/resuming a session. Falls back to a roomy default.
-enum TerminalGrid {
-    private static let key = "juancode.lastTerminalGrid"
-    static func remember(cols: Int, rows: Int) {
-        guard cols >= 20, rows >= 10 else { return }
-        UserDefaults.standard.set("\(cols),\(rows)", forKey: key)
-    }
-    static var spawn: (cols: Int, rows: Int) {
-        let parts = (UserDefaults.standard.string(forKey: key) ?? "").split(separator: ",").compactMap { Int($0) }
-        if parts.count == 2, parts[0] >= 20, parts[1] >= 10 { return (parts[0], parts[1]) }
-        return (120, 40)
-    }
-}
-
 /// Shell-quote a path so a dropped file with spaces/specials is inserted as one
 /// argument. Bare paths (only safe chars) are left as-is.
 private func shellQuote(_ path: String) -> String {
@@ -1131,19 +1115,88 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
 
 /// Read-only terminal for an EXITED session: replays persisted scrollback so the
 /// conversation history is visible, with no live pty behind it.
-struct SwiftTermReplay: NSViewRepresentable {
+///
+/// The scrollback MUST be parsed at the width it will be read at. It was recorded
+/// by a TUI that positioned its own text, so feeding it at one width and then
+/// resizing reflows lines that were never meant to reflow — the shredded,
+/// overlapping paint you'd get after closing a session and landing on an exited
+/// neighbor (the view used to be built at a hardcoded 800x600 and then stretched
+/// to the pane). So: take the laid-out size from SwiftUI, build the terminal at
+/// it, and on a width change rebuild from scratch rather than let SwiftTerm reflow
+/// what's already on screen.
+struct SwiftTermReplay: View {
     let scrollback: [UInt8]
 
-    func makeNSView(context: Context) -> TerminalHostView {
-        let tv = CopyOnSelectTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-        SwiftTermTheme.apply(to: tv)
-        if !scrollback.isEmpty { SwiftTermParse.locked { tv.feed(byteArray: scrollback[...]) } }
-        // No `onDrop`: an exited session is read-only. The host still gives it
-        // correct resize behaviour.
-        return TerminalHostView(terminal: tv)
+    var body: some View {
+        GeometryReader { proxy in
+            SwiftTermReplayRepresentable(scrollback: scrollback, targetSize: proxy.size)
+        }
+    }
+}
+
+private struct SwiftTermReplayRepresentable: NSViewRepresentable {
+    let scrollback: [UInt8]
+    /// The exact size SwiftUI laid this view out at (from the wrapping GeometryReader).
+    var targetSize: CGSize
+
+    @MainActor final class Coordinator {
+        var scrollback: [UInt8] = []
+        /// The column count the current content was parsed at, so a resize only pays
+        /// for a re-feed when the wrap width actually changed (a height change costs
+        /// nothing — the same lines just scroll).
+        var fedCols: Int?
+
+        /// Parse the scrollback into `tv` at its current width, from a clean state.
+        func refeed(_ tv: TerminalView) {
+            guard let term = tv.terminal, term.cols > 0 else { return }
+            SwiftTermParse.locked {
+                term.resetToInitialState()
+                if !scrollback.isEmpty { tv.feed(byteArray: scrollback[...]) }
+            }
+            fedCols = term.cols
+            tv.needsDisplay = true
+        }
+
+        /// The host applied a new grid. Only a width change invalidates the parse.
+        func gridChanged(cols: Int, tv: TerminalView) {
+            guard cols > 0, cols != fedCols else { return }
+            refeed(tv)
+        }
     }
 
-    func updateNSView(_ nsView: TerminalHostView, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> TerminalHostView {
+        // Build at the real laid-out size when SwiftUI already knows it, so the
+        // first parse is already at the width it'll be read at.
+        let size = targetSize.width > 1 && targetSize.height > 1
+            ? targetSize : CGSize(width: 800, height: 600)
+        let tv = CopyOnSelectTerminalView(frame: CGRect(origin: .zero, size: size))
+        SwiftTermTheme.apply(to: tv)
+        context.coordinator.scrollback = scrollback
+        context.coordinator.refeed(tv)
+        // No `onDrop`: an exited session is read-only. The host still gives it
+        // correct resize behaviour.
+        let host = TerminalHostView(terminal: tv)
+        // Fires after the host actually applies a frame (its size changes are
+        // throttled, so this is the only honest signal that the grid moved).
+        host.onGrid = { [weak tv] cols, _ in
+            guard let tv else { return }
+            context.coordinator.gridChanged(cols: cols, tv: tv)
+        }
+        return host
+    }
+
+    func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        // A different session's scrollback landed in the same view (pane reuse):
+        // re-parse from scratch rather than append to someone else's history.
+        if context.coordinator.scrollback != scrollback {
+            context.coordinator.scrollback = scrollback
+            context.coordinator.refeed(nsView.terminal)
+        }
+        // Any width change lands back here via `onGrid`.
+        nsView.applySize(targetSize)
+    }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalHostView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? nsView.frame.width,

@@ -120,10 +120,10 @@ function wsCreate(
           type: "create",
           provider: opts.provider ?? "claude",
           cwd: opts.project,
-          // A nominal boot grid; the desktop viewer claims ownership and resizes
-          // on attach, same as any remotely created session.
-          cols: 120,
-          rows: 40,
+          // No grid: a dispatch has no viewport of its own, so the app boots the
+          // CLI at the desktop's real terminal size. Sending a nominal one printed
+          // the entire first turn at that width, and no later resize can rewrap
+          // what's already in the scrollback.
           initialInput: opts.prompt,
           skipPermissions: true,
           isolateWorktree: opts.worktree ?? false,

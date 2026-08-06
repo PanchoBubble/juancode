@@ -101,8 +101,10 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(frame.initialInput).toBe("seed it");
     expect(frame.skipPermissions).toBe(true);
     expect(frame.isolateWorktree).toBe(true);
-    expect(typeof frame.cols).toBe("number");
-    expect(typeof frame.rows).toBe("number");
+    // No grid is sent: the app boots the CLI at the desktop's real terminal size,
+    // so the dispatched turn isn't printed at a nominal width and stuck there.
+    expect(frame.cols).toBeUndefined();
+    expect(frame.rows).toBeUndefined();
     expect(String(frame.dispatchId)).toMatch(UUID_RE);
   });
 

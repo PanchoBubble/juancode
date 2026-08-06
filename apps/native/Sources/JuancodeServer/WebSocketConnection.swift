@@ -257,7 +257,16 @@ final class WebSocketConnection: @unchecked Sendable {
 
     func handle(_ msg: ClientMessage) async {
         switch msg {
-        case let .create(provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree, dispatchId):
+        case let .create(provider, cwd, requestedCols, requestedRows, initialInput,
+                         skipPermissions, isolateWorktree, dispatchId):
+            // A client that isn't going to display this session (the Oracle
+            // dispatch) sends no grid. Boot at the desktop's real one: whatever the
+            // CLI prints during its first turn is wrapped at the spawn width
+            // forever, so a nominal 120x40 leaves a permanently narrow transcript
+            // that resizing the pane afterwards can't widen.
+            let grid = TerminalGrid.spawn
+            let cols = requestedCols ?? grid.cols
+            let rows = requestedRows ?? grid.rows
             // A dispatch-flavored create (sidecar WS-first path) claims its id up
             // front so the same dispatch arriving via the mailbox fallback is
             // skipped — and vice versa (juancode-2kz.1). Its outcome is also

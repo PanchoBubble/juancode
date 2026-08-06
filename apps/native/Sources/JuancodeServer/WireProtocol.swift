@@ -17,7 +17,10 @@ public enum ClientMessage: Sendable {
     /// server claims it in the dispatch ledger (dedup vs. the mailbox fallback) and
     /// records a durable `OracleDispatchResult` for the outcome. Nil for ordinary
     /// interactive creates.
-    case create(provider: String, cwd: String, cols: Int, rows: Int,
+    /// `cols`/`rows` are optional: a client with no viewport of its own (the Oracle
+    /// dispatch path) omits them and the app boots the CLI at the desktop's real
+    /// grid instead of a nominal one it invented.
+    case create(provider: String, cwd: String, cols: Int?, rows: Int?,
                 initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?,
                 dispatchId: String?)
     case attach(sessionId: String, cols: Int, rows: Int)
@@ -101,8 +104,8 @@ extension ClientMessage: Decodable {
             self = .create(
                 provider: try c.decode(String.self, forKey: .provider),
                 cwd: try c.decode(String.self, forKey: .cwd),
-                cols: try c.decode(Int.self, forKey: .cols),
-                rows: try c.decode(Int.self, forKey: .rows),
+                cols: try c.decodeIfPresent(Int.self, forKey: .cols),
+                rows: try c.decodeIfPresent(Int.self, forKey: .rows),
                 initialInput: try c.decodeIfPresent(String.self, forKey: .initialInput),
                 skipPermissions: try c.decodeIfPresent(Bool.self, forKey: .skipPermissions),
                 isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree),
