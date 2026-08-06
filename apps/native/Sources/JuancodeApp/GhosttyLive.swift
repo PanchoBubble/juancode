@@ -516,6 +516,15 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // a streaming agent stops Metal-drawing on every output burst.
             host.terminal.setSurfaceVisible(!hidden)
             guard hidden else { return true }
+            // Stop feeding a surface we just occluded (juancode-o9h2). Occlusion parks
+            // Ghostty's renderer/io loops, and a write that lands while they're parked
+            // can wedge inside libghostty and never complete — it then holds the
+            // in-memory backend's active-operation count forever, so tearing this
+            // surface down later blocked the MAIN thread and froze the whole app. The
+            // reveal re-seeds from the headless model instead of relying on the
+            // surface having kept up (`resumeStreaming`), which is why this is safe to
+            // cut mid-stream.
+            suspendStreaming()
             resizeWork?.cancel(); resizeWork = nil
             healWork?.cancel(); healWork = nil
             resizeHealArmed = false
@@ -539,7 +548,38 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// drift-only pty verification — `repairWakeDrift` reads the grid the pty
         /// actually applied and nudges only on true drift, so a take-back from a
         /// same-sized remote never makes a clean TUI re-lay-out.
+        /// Cut the pty → surface feed while this pane is occluded (juancode-o9h2).
+        /// Ghostty's own terminal state stops advancing, which is what `resumeStreaming`
+        /// repairs from the headless model on reveal.
+        private func suspendStreaming() {
+            guard streaming else { return }
+            cancel?(); cancel = nil
+            feedCoalescer = nil
+            streaming = false
+        }
+
+        /// Resume feeding after a reveal. `subscribeFromModelSeed` (juancode-a2h.2)
+        /// hands us one clean repaint built from the headless model's parsed rows and
+        /// then every byte that lands after it — no gap and no overlap, because both
+        /// happen in one block on the session's serial workQueue. That beats replaying
+        /// raw pty bytes: the seed is well-formed by construction and is encoded at the
+        /// model's current grid, so it can't land mis-wrapped the way a raw replay at a
+        /// changed width does.
+        private func resumeStreaming() {
+            guard !streaming, let gsession else { return }
+            streaming = true
+            let coalescer = TerminalFeedCoalescer { [weak self, weak gsession] bytes in
+                gsession?.receive(Data(bytes))
+                self?.noteOutputForHeal()
+            }
+            feedCoalescer = coalescer
+            cancel = session.subscribeFromModelSeed { bytes in coalescer.append(bytes) }
+        }
+
         func completeReveal() {
+            // Re-seed before asserting the grid: the seed is encoded at the model's
+            // current dimensions, and `flushSurfaceGrid` may change them.
+            resumeStreaming()
             lastSent = nil
             flushSurfaceGrid()
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
