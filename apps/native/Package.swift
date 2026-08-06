@@ -39,7 +39,17 @@ let package = Package(
         // calling thread, which deadlocked the main thread on a Zig futex when several
         // panes attached at once (juancode-d89, filed as libghostty-spm#28). Their
         // PR #29 moved those writes onto a per-session serial queue.
-        .package(url: "https://github.com/Lakr233/libghostty-spm.git", from: "1.3.2"),
+        //
+        // VENDORED, not fetched (juancode-o9h2): `vendor/libghostty-spm` is upstream
+        // 1.3.2 verbatim plus one fix. PR #29 moved the wedging write off the main
+        // thread but left `InMemoryTerminalSurfaceAccess` draining it with an
+        // unbounded `NSCondition.wait()` — and that drain runs on the MAIN thread from
+        // a view's deinit, so a write wedged inside libghostty froze the whole app
+        // permanently (twice: 3 and 6 Aug 2026). The patch bounds the drain and leaks
+        // the surface instead of freeing it under a live C call. Every patched site is
+        // marked `juancode patch`. Drop the vendoring and go back to the remote
+        // package once this is fixed upstream.
+        .package(path: "vendor/libghostty-spm"),
         // GitHub-flavored markdown rendering for PR-panel comment bodies
         // (juancode-lqw). Handles headings, task lists, code fences, links; HTML
         // blocks (<details> etc.) render as their inner text.
