@@ -441,3 +441,76 @@ final class PrMatchesQueryTests: XCTestCase {
         XCTAssertFalse(prMatchesQuery(pr, "#"))
     }
 }
+
+/// `getPrForBranch` — the per-branch lookup the session header/row falls back to
+/// when a folder's PR list comes back at the firehose cap and so can't answer
+/// "does THIS branch have a PR". Driven through a fake `gh` (JUANCODE_GH_BIN),
+/// which also lets us assert the branch actually reaches gh as `--head`.
+final class GetPrForBranchTests: XCTestCase {
+    private var dir = ""
+
+    override func setUpWithError() throws {
+        dir = NSTemporaryDirectory() + "gh-branch-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        unsetenv("JUANCODE_GH_BIN")
+        try? FileManager.default.removeItem(atPath: dir)
+    }
+
+    /// A fake gh that records its argv and echoes `json` on stdout.
+    private func fakeGh(json: String) throws -> String {
+        let path = (dir as NSString).appendingPathComponent("fake-gh")
+        let argvLog = (dir as NSString).appendingPathComponent("argv")
+        try """
+        #!/bin/sh
+        echo "$@" > \(argvLog)
+        cat <<'JSON'
+        \(json)
+        JSON
+        """.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        setenv("JUANCODE_GH_BIN", path, 1)
+        return argvLog
+    }
+
+    func testReturnsTheBranchesPrAndAsksGhForThatHead() async throws {
+        let argvLog = try fakeGh(json: """
+        [{"number":4821,"title":"Fix login redirect","url":"https://gh/pr/4821",
+          "headRefName":"juan/fix-login","isDraft":false,"statusCheckRollup":[]}]
+        """)
+        let found = await getPrForBranch(dir, branch: "juan/fix-login")
+        let pr = try XCTUnwrap(found)
+        XCTAssertEqual(pr.number, 4821)
+        XCTAssertEqual(pr.branch, "juan/fix-login")
+
+        let argv = try String(contentsOfFile: argvLog, encoding: .utf8)
+        XCTAssertTrue(argv.contains("--head juan/fix-login"),
+                      "the branch must reach gh as --head, not a client-side filter: \(argv)")
+        XCTAssertTrue(argv.contains("--state open"))
+    }
+
+    func testNilWhenTheBranchHasNoOpenPr() async throws {
+        _ = try fakeGh(json: "[]")
+        let pr = await getPrForBranch(dir, branch: "juan/no-pr")
+        XCTAssertNil(pr)
+    }
+
+    func testBlankBranchShortCircuitsWithoutLaunchingGh() async throws {
+        let argvLog = try fakeGh(json: "[]")
+        let blank = await getPrForBranch(dir, branch: "   ")
+        XCTAssertNil(blank)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: argvLog),
+                       "gh must not run for an empty branch")
+    }
+
+    func testNilWhenGhFails() async throws {
+        let path = (dir as NSString).appendingPathComponent("fake-gh")
+        try "#!/bin/sh\nexit 1\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        setenv("JUANCODE_GH_BIN", path, 1)
+        let failed = await getPrForBranch(dir, branch: "juan/fix-login")
+        XCTAssertNil(failed)
+    }
+}

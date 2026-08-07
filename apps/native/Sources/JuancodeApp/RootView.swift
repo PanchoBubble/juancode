@@ -1368,6 +1368,10 @@ private struct SessionRowHost: View {
                    activity: model.activityBox(meta.id)?.activity,
                    live: model.isLive(meta.id), external: external,
                    tracked: external ? nil : model.trackedPr(forSession: meta.id),
+                   // Only for worktree rows: a main-checkout session has no branch of
+                   // its own, so every row in that folder would show the same PR.
+                   branchPr: external || meta.worktreePath == nil
+                       ? nil : model.openPr(forSession: meta),
                    trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
                    unread: model.unreadSessions.contains(meta.id),
                    unseenDone: model.unseenCompletions.contains(meta.id),
@@ -1377,6 +1381,7 @@ private struct SessionRowHost: View {
                    onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
                    onResume: external ? { model.importExternalSession(meta.id) } : nil,
                    onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
+                   onOpenBranchPr: external ? nil : { model.openGitHubForSession(meta) },
                    menuContent: external ? nil : menu,
                    onCloseRequested: external ? nil : confirmClose,
                    selected: selected,
@@ -2186,6 +2191,11 @@ struct SessionRow: View {
     var external: Bool = false
     /// The PR this session is tracking, if any — drives the PR label (juancode-kxy).
     var tracked: TrackedPr? = nil
+    /// The open PR on this session's branch when it isn't tracked — the same label,
+    /// drawn as a quiet outline so tracking still reads as the stronger signal. A
+    /// session that opened a PR is otherwise indistinguishable from one that didn't
+    /// until you open it.
+    var branchPr: PullRequest? = nil
     /// The Linear issue this session is tracking, if any — drives the issue label (juancode-7sa).
     var trackedIssue: TrackedIssue? = nil
     /// Pending turn-end notification for this session — shows an unread dot until viewed.
@@ -2212,6 +2222,8 @@ struct SessionRow: View {
     /// Open the tracked PR in-app (the GitHub view scoped to it) — the capsule's
     /// click target. Nil leaves the capsule inert.
     var onOpenTrackedPr: ((TrackedPr) -> Void)? = nil
+    /// Open the branch's untracked PR in-app — the outline capsule's click target.
+    var onOpenBranchPr: (() -> Void)? = nil
     /// The row's action menu (same content as its context menu) — revealed on hover
     /// as an ellipsis on the trailing edge, replacing the old pencil (Open in Editor
     /// lives inside it, still on ⌘E too). Nil for external rows.
@@ -2262,6 +2274,8 @@ struct SessionRow: View {
                     HStack(spacing: 5) {
                         if showPr, let t = tracked {
                             prCapsule(t)
+                        } else if showPr, let pr = branchPr {
+                            branchPrCapsule(pr)
                         } else if showIssue, let ti = trackedIssue {
                             issueCapsule(ti)
                         }
@@ -2370,6 +2384,27 @@ struct SessionRow: View {
         .help(help)
     }
 
+    /// The branch's open PR when it isn't tracked: same glyph and number as the
+    /// tracked capsule, but outlined and secondary — present enough to spot the
+    /// session that shipped something, quiet enough that a tracked PR still wins.
+    private func branchPrCapsule(_ pr: PullRequest) -> some View {
+        Button {
+            onOpenBranchPr?()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                Text("#\(pr.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+            }
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .foregroundStyle(.secondary)
+            .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 0.5))
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help("Open PR #\(pr.number) \"\(pr.title)\" on this branch — click to open it in juancode")
+    }
+
     private func issueCapsule(_ ti: TrackedIssue) -> some View {
         HStack(spacing: 3) {
             Image(systemName: "ticket").font(.system(size: 8))
@@ -2385,10 +2420,13 @@ struct SessionRow: View {
     /// Which single tracking capsule to show. Prefer whichever is in a non-watching
     /// (active) state; when a PR and an issue are both present, the PR wins unless
     /// only the issue is active — the loser is folded into the survivor's tooltip.
+    /// An untracked branch PR counts as a PR for the capsule slot, but never as an
+    /// active one — a tracked issue mid-flight still outranks it.
+    private var hasPr: Bool { tracked != nil || branchPr != nil }
     private var prActive: Bool { tracked.map { $0.state != .watching } ?? false }
     private var issueActive: Bool { trackedIssue.map { $0.state != .watching } ?? false }
     private var showPr: Bool {
-        guard tracked != nil else { return false }
+        guard hasPr else { return false }
         guard trackedIssue != nil else { return true }
         return !(issueActive && !prActive)
     }

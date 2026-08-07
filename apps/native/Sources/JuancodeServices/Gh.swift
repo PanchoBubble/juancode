@@ -17,6 +17,11 @@ private let MAX_BUFFER = 16 * 1024 * 1024
 
 private let MAX_PRS = 100
 
+/// How many open PRs one `gh pr list` pass returns. A folder whose list comes back
+/// exactly this long may be truncated — callers that need a *specific* branch's PR
+/// (rather than the newest ones) fall back to `getPrForBranch`.
+public let ghPrListLimit = MAX_PRS
+
 /// The `gh pr list --json` fields we request. `assignees` powers the native
 /// "Assigned to me" filter (each element is `{ login }`); `createdAt`,
 /// `reviewDecision` and `reviewRequests` drive the row's age + review chips and the
@@ -253,6 +258,30 @@ public func getOpenPrs(_ cwd: String) async -> PrListResult {
         return PrListResult(available: true, prs: prs, viewer: viewer)
     } catch {
         return PrListResult(available: false, prs: [], error: "Could not parse gh output")
+    }
+}
+
+/// The open PR whose head is `branch`, asked of GitHub directly.
+///
+/// `getOpenPrs` caps at the newest `MAX_PRS` open PRs across all authors, so on a
+/// busy repo a session's own PR can sit outside that window and read as "no PR" —
+/// the session header and row capsule would then stay blank on a branch that
+/// plainly has one. This asks for the single branch instead of the firehose, so the
+/// answer doesn't depend on how loud the repo is. Nil when gh fails or the branch
+/// has no open PR; a branch can have at most one.
+public func getPrForBranch(_ cwd: String, branch: String) async -> PullRequest? {
+    let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    do {
+        let r = try await ProcessRunner.capture(
+            ghBin(),
+            ["pr", "list", "--state", "open", "--head", trimmed, "--limit", "1", "--json", FIELDS],
+            cwd: cwd, maxBytes: MAX_BUFFER)
+        guard r.ok else { return nil }
+        let raw = try JSONDecoder().decode([RawPr].self, from: Data(r.stdout.utf8))
+        return parsePrs(raw).first
+    } catch {
+        return nil
     }
 }
 

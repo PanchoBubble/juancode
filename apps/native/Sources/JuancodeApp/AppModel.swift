@@ -338,6 +338,21 @@ final class AppModel {
     /// reload lands last and clobbers the backfilled matches, snapping the count
     /// back to the newest-100 subset (e.g. "Mine (6)" instead of "Mine (13)").
     private var prsBackfillIntent: [String: String] = [:]
+    /// Per-branch PR lookups that couldn't be answered from `prsByCwd` because that
+    /// folder's list came back at the firehose cap and so may be truncated. Keyed by
+    /// `branchPrKey(cwd:branch:)`. A `nil` pr is a resolved "this branch has no open
+    /// PR" and is kept like any other answer, so a branch without one isn't
+    /// re-queried on every row appear; the timestamp bounds how stale an answer can
+    /// get before an ask re-runs it (a PR opened meanwhile shows up within the TTL).
+    private var branchPrs: [String: BranchPrAnswer] = [:]
+    private struct BranchPrAnswer { var pr: PullRequest?; var at: Date }
+    /// How long a per-branch answer is trusted before the next ask re-queries gh.
+    private static let branchPrTTL: TimeInterval = 120
+    /// Branch lookups in flight, so scrolling a folder's rows doesn't stampede gh.
+    private var branchPrsLoading: Set<String> = []
+    /// Branches asked about before their folder's PR list had loaded, re-decided
+    /// once it does (the list itself answers most of them).
+    private var branchPrPending: [String: Set<String>] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
     private var gridCancels: [String: () -> Void] = [:]
@@ -1706,6 +1721,10 @@ final class AppModel {
             }
             prsByCwd[cwd] = result
             prsLoading.remove(cwd)
+            // Settle anything asked while the list was loading — most branches are
+            // answered by the list itself, so this rarely reaches gh.
+            let pending = branchPrPending.removeValue(forKey: cwd) ?? []
+            for branch in pending { resolveBranchPr(cwd: cwd, branch: branch) }
         }
     }
 
@@ -1861,14 +1880,53 @@ final class AppModel {
     /// repo root. Drives the session header's "Open PR" button visibility.
     func openPr(forSession meta: SessionMeta) -> PullRequest? {
         guard let branch = folderGitState(meta.cwd)?.branch else { return nil }
-        return prs(repoRoot(forSession: meta))?.prs.first { $0.branch == branch }
+        let root = repoRoot(forSession: meta)
+        if let hit = prs(root)?.prs.first(where: { $0.branch == branch }) { return hit }
+        // Not in the folder's list — which on a busy repo means "not in the newest
+        // 100", not "doesn't exist". `loadSessionPrContext` resolves that case by
+        // asking gh for the branch directly; this is where the answer lands.
+        return branchPrs[branchPrKey(cwd: root, branch: branch)]?.pr
     }
+
+    private func branchPrKey(cwd: String, branch: String) -> String { "\(cwd)\n\(branch)" }
 
     /// Load the git state + PR list a session header needs to decide whether its
     /// branch has an open PR. Coalesced downstream; safe to call on every appear.
     func loadSessionPrContext(_ meta: SessionMeta) {
         loadFolderGitState(meta.cwd)
-        loadPrs(repoRoot(forSession: meta))
+        let root = repoRoot(forSession: meta)
+        loadPrs(root)
+        resolveBranchPr(cwd: root, branch: folderGitState(meta.cwd)?.branch)
+    }
+
+    /// Ask gh for this branch's open PR when the folder's cached list can't settle
+    /// the question — i.e. the list is loaded, available, came back at the firehose
+    /// cap (so it may be truncated), and doesn't contain the branch. On a repo whose
+    /// open PRs fit under the cap the list is authoritative and this never fires, so
+    /// the common case still costs zero extra `gh` calls. One lookup per branch:
+    /// both a hit and a miss are cached, and a refresh clears them.
+    private func resolveBranchPr(cwd: String, branch: String?) {
+        guard let branch, !branch.isEmpty else { return }
+        // The list is still loading: remember the branch and decide once it lands,
+        // otherwise the first call (a header `.task`, which fires before the fetch
+        // returns) would be the only one and the question would stay unanswered.
+        guard let list = prs(cwd) else {
+            branchPrPending[cwd, default: []].insert(branch)
+            return
+        }
+        guard list.available, list.prs.count >= ghPrListLimit,
+              !list.prs.contains(where: { $0.branch == branch }) else { return }
+        let key = branchPrKey(cwd: cwd, branch: branch)
+        let fresh = branchPrs[key].map { Date().timeIntervalSince($0.at) < Self.branchPrTTL } ?? false
+        guard !fresh, !branchPrsLoading.contains(key) else { return }
+        branchPrsLoading.insert(key)
+        Task {
+            let found = await Task.detached(priority: .utility) {
+                await getPrForBranch(cwd, branch: branch)
+            }.value
+            branchPrs[key] = BranchPrAnswer(pr: found, at: Date())
+            branchPrsLoading.remove(key)
+        }
     }
 
     /// Open the in-app GitHub view for this session's branch PR (the session-header
