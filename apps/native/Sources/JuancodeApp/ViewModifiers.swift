@@ -80,18 +80,35 @@ private struct ClickCursorModifier: ViewModifier {
 
 /// A SwiftUI `.popover` renders in its own child `NSWindow` that isn't key when it
 /// first appears, so on macOS the first click inside it is swallowed to make that
-/// window key — the button's action only fires on the *second* click. Dropping
-/// this zero-size, invisible view into the popover content (via
-/// `.fixesPopoverFirstClick()`) makes the popover window key the instant it's
-/// attached, so the very first click on a control registers.
+/// window key — the button's action only fires on the *second* click, and until
+/// then SwiftUI draws its controls in the inactive-window gray that reads as
+/// disabled. Dropping this zero-size, invisible view into the popover content (via
+/// `.fixesPopoverFirstClick()`) makes the popover window key, so the very first
+/// click on a control registers and the controls paint active.
 struct PopoverFirstClickFix: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { KeyOnAttachView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? KeyOnAttachView)?.claimKey()
+    }
 
     private final class KeyOnAttachView: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            window?.makeKey()
+            claimKey()
+        }
+
+        /// `makeKey()` is a no-op on a window that isn't on screen yet, and the
+        /// popover's panel is usually still being ordered in when its content is
+        /// attached — so the single attach-time call was silently dropped and the
+        /// two-click behaviour came back. Ask again on the next runloop turn (and
+        /// on every SwiftUI update while the popover is open) until it sticks.
+        func claimKey() {
+            guard let window, !window.isKeyWindow else { return }
+            window.makeKey()
+            DispatchQueue.main.async { [weak self] in
+                guard let window = self?.window, !window.isKeyWindow else { return }
+                window.makeKey()
+            }
         }
     }
 }

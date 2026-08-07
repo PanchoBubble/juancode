@@ -1541,6 +1541,10 @@ private struct FolderHeader: View {
                                 showingAgentPicker = false
                             } label: {
                                 Text(Providers.spec(for: p).label)
+                                    // Explicit primary: a plain button's label paints in
+                                    // the inactive-control gray whenever the popover panel
+                                    // isn't key, which read as "these options are disabled".
+                                    .foregroundStyle(.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .contentShape(Rectangle())
                             }
