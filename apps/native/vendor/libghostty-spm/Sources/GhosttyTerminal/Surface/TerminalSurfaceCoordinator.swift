@@ -16,6 +16,13 @@ import MSDisplayLink
 /// synchronization, and frame rendering via scheduled wakeups.
 @MainActor
 final class TerminalSurfaceCoordinator {
+    /// juancode patch (juancode-o9h2): controllers deliberately kept alive forever
+    /// because a write wedged inside libghostty may still touch their surfaces.
+    /// Letting one deinit would run `ghostty_app_free` over live memory — that is the
+    /// 10 Aug SIGSEGV. Bounded in practice: one entry per wedge, and a wedge is the
+    /// pathological path, not the normal one.
+    private static var quarantine: [TerminalController] = []
+
     weak var delegate: (any TerminalSurfaceViewDelegate)? {
         didSet { bridge.delegate = delegate }
     }
@@ -321,11 +328,19 @@ final class TerminalSurfaceCoordinator {
         surface?.setFocus(false)
         // juancode patch (juancode-o9h2): the drain above is bounded now, so it can
         // return while a write is still wedged inside libghostty. Freeing the surface
-        // under that live C call would be a use-after-free, so leak it instead. This
-        // only happens on the pathological path — one surface per wedge, versus the
-        // permanent main-thread freeze the unbounded drain used to cause.
+        // under that live C call would be a use-after-free.
+        //
+        // Skipping `surface.free()` is NOT enough on its own, which the 10 Aug SIGSEGV
+        // in apprt.embedded.Surface.deinit taught us: the surface stays registered with
+        // the ghostty app, and `TerminalController.deinit` -> `ghostty_app_free` runs
+        // microseconds later in this very dealloc chain, tearing it down anyway. So
+        // quarantine the controller too — holding it forever keeps `ghostty_app_free`
+        // from ever running, which is what actually keeps the wedged write's memory
+        // alive. Costs one leaked ghostty app per wedge; that beats a segfault, and it
+        // only happens on the pathological path.
         if configuration.inMemorySession?.hasStalledOperations == true {
-            TerminalDebugLog.log(.lifecycle, "leaking surface: a wedged operation may still touch it")
+            NSLog("juancode: quarantining a wedged ghostty surface and its controller — leaked deliberately")
+            if let controller { Self.quarantine.append(controller) }
         } else {
             surface?.free()
         }

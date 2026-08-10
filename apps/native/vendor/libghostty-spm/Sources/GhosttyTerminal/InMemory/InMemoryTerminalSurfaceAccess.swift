@@ -174,10 +174,10 @@ final class InMemoryTerminalSurfaceAccess: @unchecked Sendable {
             // NSCondition.wait(until:) returns false once the deadline passes.
             guard condition.wait(until: deadline) else {
                 stalledOperations = true
-                TerminalDebugLog.log(
-                    .lifecycle,
-                    "drain timed out with \(activeOperations) wedged operation(s) — leaking the surface"
-                )
+                // NSLog, not TerminalDebugLog: that logger is off by default and prints
+                // to stdout, so the two freezes this patch exists for left no record of
+                // whether the drain expired. This has to show up unconditionally.
+                NSLog("juancode: libghostty drain timed out with \(activeOperations) wedged operation(s) — quarantining the surface")
                 return
             }
         }
