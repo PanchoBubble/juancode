@@ -103,6 +103,8 @@ struct BottomTerminalPanel: View {
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture { model.selectTerminalTab(cwd: cwd, tab: tab.id) }
+        // Wheel button closes the tab without aiming for its ✕, as in a browser.
+        .onMiddleClick { model.closeTerminalTab(cwd: cwd, tab: tab.id) }
     }
 
     @ViewBuilder

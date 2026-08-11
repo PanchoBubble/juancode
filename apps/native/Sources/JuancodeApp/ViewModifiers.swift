@@ -19,6 +19,13 @@ extension View {
         background(PopoverFirstClickFix())
     }
 
+    /// Browser-tab-style middle click (the wheel button) on a row or tab chip. See
+    /// `MiddleClickCatcher` for why this needs AppKit. `enabled: false` leaves the
+    /// wheel button inert without changing the view's type.
+    func onMiddleClick(enabled: Bool = true, perform action: @escaping () -> Void) -> some View {
+        overlay(MiddleClickCatcher(action: enabled ? action : nil))
+    }
+
     /// Pointing-hand cursor only (no highlight) — for larger custom hit areas where
     /// a background chip would look wrong (e.g. the terminal-drop zone).
     ///
@@ -73,6 +80,61 @@ private struct ClickCursorModifier: ViewModifier {
             .onHover { hovering = $0 }
             .pointerCursor()
             .animation(.easeOut(duration: 0.10), value: hovering)
+    }
+}
+
+// MARK: - Middle click (wheel button)
+
+/// Transparent AppKit overlay that turns a middle click into a closure call.
+///
+/// SwiftUI has no gesture for the wheel button — `onTapGesture` and friends only ever
+/// see the primary button — so the event has to be caught in AppKit. The catcher takes
+/// part in hit-testing **only** while the event being routed is an other-mouse one, so
+/// left clicks, drags, hovers and the row's context menu all keep falling straight
+/// through to the SwiftUI content underneath (an unconditional overlay would swallow
+/// the row's own tap-to-select).
+///
+/// Fires on mouse *up* inside the view, the way a browser tab does: press the wheel
+/// button, drag off the row, release, and nothing happens.
+private struct MiddleClickCatcher: NSViewRepresentable {
+    /// Nil disables the catcher entirely — it then never claims a hit test, so a row
+    /// with nothing to close behaves exactly as it did before.
+    let action: (() -> Void)?
+
+    func makeNSView(context: Context) -> NSView { CatcherView(action: action) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? CatcherView)?.action = action
+    }
+
+    private final class CatcherView: NSView {
+        var action: (() -> Void)?
+
+        init(action: (() -> Void)?) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not used from a nib") }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard action != nil, NSApp.currentEvent?.type == .otherMouseDown else { return nil }
+            return super.hitTest(point)
+        }
+
+        /// Claiming the down event (by not passing it up the responder chain) is what
+        /// makes AppKit deliver the matching up event here — mouse-up isn't hit-tested,
+        /// it goes to whichever view took the down.
+        override func otherMouseDown(with event: NSEvent) {
+            guard event.buttonNumber == 2 else { super.otherMouseDown(with: event); return }
+        }
+
+        override func otherMouseUp(with event: NSEvent) {
+            guard event.buttonNumber == 2 else { super.otherMouseUp(with: event); return }
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            action?()
+        }
     }
 }
 

@@ -1386,6 +1386,13 @@ private struct SessionRowHost: View {
                    onCloseRequested: external ? nil : confirmClose,
                    selected: selected,
                    activating: model.isActivating(meta.id))
+            // Wheel button = stop this row's agent, browser-tab style. Deliberately the
+            // menu's "Kill Agent" and not the ✕'s delete: a stray middle click then
+            // costs a resume, never the session, its scrollback or its worktree. Inert
+            // on a dead or external row — there's no agent of ours to stop.
+            .onMiddleClick(enabled: !external && model.isLive(meta.id)) {
+                model.killSession(meta.id)
+            }
     }
 }
 
