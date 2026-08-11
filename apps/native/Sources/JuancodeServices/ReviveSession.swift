@@ -68,6 +68,14 @@ public func resumeNeedsFreshStart(_ meta: SessionMeta, roots: RecoverRoots = Rec
 ///
 /// Returns the already-live session unchanged when one exists, so callers can
 /// treat "make this session deliverable" as a single idempotent step.
+///
+/// `cols`/`rows` are for callers that have a real viewport (a remote client's
+/// `reactivate`). Leave them nil — the common case here, where the revive is driven
+/// by a delivered message rather than a viewer — and the grid comes from
+/// `resumeGrid(for:)`, the size the session's own surface last measured. A fixed
+/// default was booting every message-driven revive at 120x32, and the CLI's
+/// transcript reprint stayed wrapped for that grid in scrollback.
+///
 /// `recoverId` and `needsFreshStart` are seams for tests; they default to the
 /// real transcript scans.
 @discardableResult
@@ -75,8 +83,8 @@ public func reviveSession(
     _ id: String,
     registry: SessionRegistry,
     store: PersistentStore,
-    cols: Int = 120,
-    rows: Int = 32,
+    cols: Int? = nil,
+    rows: Int? = nil,
     recoverId: @escaping @Sendable (
         _ provider: ProviderId, _ cwd: String, _ createdAtMs: Int, _ excludeIds: Set<String>
     ) async -> String? = { await recoverCliSessionId($0, cwd: $1, createdAtMs: $2, excludeIds: $3) },
@@ -107,9 +115,11 @@ public func reviveSession(
         logFailure(.unresumable, project: meta.cwd)
         return .failure(.unresumable)
     }
+    let fallback = resumeGrid(for: meta)
+    let g = (cols: cols ?? fallback.cols, rows: rows ?? fallback.rows)
     if needsFreshStart(meta) {
         do {
-            return .success(.startedFresh(try registry.restartFresh(meta, cols: cols, rows: rows)))
+            return .success(.startedFresh(try registry.restartFresh(meta, cols: g.cols, rows: g.rows)))
         } catch {
             logFailure(.resumeFailed("\(error)"), project: meta.cwd)
             return .failure(.resumeFailed("\(error)"))
@@ -120,7 +130,7 @@ public func reviveSession(
     let prior = store.getScrollback(id) ?? []
     let seed: [UInt8] = prior.isEmpty ? [] : prior + Array(sessionResumedDivider.utf8)
     do {
-        return .success(.resumed(try registry.resume(meta, cols: cols, rows: rows, priorScrollback: seed)))
+        return .success(.resumed(try registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)))
     } catch {
         logFailure(.resumeFailed("\(error)"), project: meta.cwd)
         return .failure(.resumeFailed("\(error)"))

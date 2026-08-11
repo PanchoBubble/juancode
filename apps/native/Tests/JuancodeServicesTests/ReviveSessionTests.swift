@@ -119,6 +119,27 @@ final class ReviveSessionTests: XCTestCase {
         XCTAssertTrue(scroll.contains("── session resumed ──"))
     }
 
+    /// A revive with no caller viewport (a Telegram reply, a queued message) boots at
+    /// the grid the session's own surface last measured, not a fixed default: the
+    /// resumed CLI reprints its transcript at the boot grid and that reprint stays
+    /// wrapped for it in scrollback — the "reopened session is narrow and short" bug.
+    func testViewportlessReviveBootsAtTheSurfaceGrid() async {
+        let store = InMemorySessionStore()
+        let registry = makeRegistry(store: store)
+        let meta = exitedMeta(cliSessionId: "conv-grid")
+        store.insert(meta)
+
+        let result = await reviveSession(meta.id, registry: registry, store: store,
+                                         recoverId: noRecovery, needsFreshStart: neverNeedsFresh)
+        guard case let .success(.resumed(session)) = result else {
+            return XCTFail("expected resumed success, got \(result)")
+        }
+        defer { session.kill() }
+        let expected = resumeGrid(for: meta)
+        XCTAssertEqual(session.appliedGrid()?.cols, expected.cols)
+        XCTAssertEqual(session.appliedGrid()?.rows, expected.rows)
+    }
+
     func testAlreadyLiveSessionIsReturnedUntouched() async throws {
         let store = InMemorySessionStore()
         let registry = makeRegistry(store: store)

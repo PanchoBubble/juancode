@@ -4,10 +4,6 @@ import AppKit
 import JuancodeCore
 import JuancodeServices
 
-/// UserDefaults keys for the dock's last real Ghostty-measured grid (see `dockGrid`).
-private let dockGridColsKey = "oracle.grid.cols"
-private let dockGridRowsKey = "oracle.grid.rows"
-
 /// Drives the global "Oracle" helper (juancode-wjg): bootstraps the control dir,
 /// owns the pinned Oracle agent session, keeps `state.json` fresh, tails the
 /// dispatch mailbox to spawn agents into projects, and exposes the global bd
@@ -410,10 +406,11 @@ final class OracleModel {
     /// agent spawn boots at exactly that size — no reflow, no garbled startup banner.
     /// The CLI emits its (normal-screen) startup output at the spawn grid; if that
     /// mismatches the render grid it wraps wrong and lands mis-wrapped in scrollback.
+    /// Shared with the server-side revive paths via `OracleDockGrid` — a session
+    /// revived by a delivered message (Telegram reply, queued input) has no surface
+    /// to measure, and must still boot at the drawer's size.
     func rememberDockGrid(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0 else { return }
-        UserDefaults.standard.set(cols, forKey: dockGridColsKey)
-        UserDefaults.standard.set(rows, forKey: dockGridRowsKey)
+        OracleDockGrid.remember(cols: cols, rows: rows)
     }
 
     /// The grid the agent CLI boots into. Prefer the real grid Ghostty last measured
@@ -422,9 +419,7 @@ final class OracleModel {
     /// Cell metrics (~9.85×18pt) are SwiftTerm's defaults — a rough seed for the very
     /// first spawn; the live Ghostty view then measures the true grid and remembers it.
     private var dockGrid: (cols: Int, rows: Int) {
-        let storedCols = UserDefaults.standard.integer(forKey: dockGridColsKey)
-        let storedRows = UserDefaults.standard.integer(forKey: dockGridRowsKey)
-        if storedCols > 0, storedRows > 0 { return (storedCols, storedRows) }
+        if let stored = OracleDockGrid.stored() { return stored }
         let w = max(460, (UserDefaults.standard.object(forKey: "oracle.panel.width") as? Double) ?? 600)
         let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
         let winH = Double(window?.contentView?.bounds.height ?? 820)
