@@ -40,6 +40,7 @@ import Testing
         func setTitle(_ id: String, title: String) { backing.setTitle(id, title: title) }
         func setArchived(_ id: String, archived: Bool) { backing.setArchived(id, archived: archived) }
         func getScrollback(_ id: String) -> [UInt8]? { backing.getScrollback(id) }
+        func setMidTurn(_ id: String, _ midTurn: Bool) { backing.setMidTurn(id, midTurn) }
 
         var counts: (full: Int, meta: Int, scroll: Int) {
             lock.withLock { (fullUpdates, metaUpdates, scrollbackFlushes) }

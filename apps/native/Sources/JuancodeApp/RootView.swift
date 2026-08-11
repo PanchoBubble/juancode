@@ -2859,11 +2859,21 @@ struct SessionContainer: View {
     /// badge instead of overlapping it.
     @ViewBuilder
     private var sessionRestoredBadge: some View {
-        if let phase = model.restoredBannerPhase(meta.id) {
-            SessionRestoredOverlay(phase: phase) { model.dismissRestoredBanner(meta.id) }
-                .id(meta.id)
-                .padding(10)
+        VStack(alignment: .leading, spacing: 6) {
+            if let phase = model.restoredBannerPhase(meta.id) {
+                SessionRestoredOverlay(phase: phase) { model.dismissRestoredBanner(meta.id) }
+                    .id(meta.id)
+            }
+            // Stacked under the banner rather than replacing it: the banner explains the
+            // replayed wall of output and auto-dismisses, while this offer waits for a
+            // click (juancode restore).
+            if model.offersContinue(meta.id) {
+                SessionContinueOverlay(onContinue: { model.continueRestoredSession(meta.id) },
+                                       onDismiss: { model.dismissContinueOffer(meta.id) })
+                    .id(meta.id)
+            }
         }
+        .padding(10)
     }
 
     /// Review nudge over the terminal once the agent settles a turn with unreviewed

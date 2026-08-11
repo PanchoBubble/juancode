@@ -141,6 +141,29 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.markOrphansDormant(), [])
     }
 
+    /// The durable "was mid-turn" marker behind the restored pane's Continue offer:
+    /// written on the busy edge, consumed exactly once at boot.
+    func testMidTurnMarkerRoundTripsAndIsConsumedOnce() {
+        store.insert(meta("busy"))
+        store.insert(meta("idle"))
+        XCTAssertEqual(store.takeMidTurnIds(), [])
+
+        store.setMidTurn("busy", true)
+        // A marker must not disturb recency ordering — it isn't a content change.
+        let before = store.get("busy")?.updatedAt
+        store.setMidTurn("busy", true)
+        XCTAssertEqual(store.get("busy")?.updatedAt, before)
+
+        XCTAssertEqual(store.takeMidTurnIds(), ["busy"])
+        // Consumed: the next boot sees nothing, so a stale marker can't re-offer.
+        XCTAssertEqual(store.takeMidTurnIds(), [])
+
+        // Clearing on the turn's end edge leaves nothing to take.
+        store.setMidTurn("idle", true)
+        store.setMidTurn("idle", false)
+        XCTAssertEqual(store.takeMidTurnIds(), [])
+    }
+
     // MARK: - rename + archive (juancode-211)
 
     func testSetTitlePersistsAndSyncsFts() {

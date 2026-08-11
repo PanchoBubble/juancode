@@ -30,6 +30,13 @@ public protocol SessionStore: AnyObject, Sendable {
     /// Persisted scrollback for `id`, used to seed a resumed pty so history
     /// carries forward across reactivation.
     func getScrollback(_ id: String) -> [UInt8]?
+    /// Record whether `id` is mid-turn right now, so a crash leaves a durable
+    /// "this agent was working" mark the next launch can read (`takeMidTurnIds`).
+    /// Written only on the busy edge — twice per turn, one column, no scrollback —
+    /// so it stays off the hot output path. Deliberately NOT part of `SessionMeta`:
+    /// it must not ride the meta writes (or the wire) that every keystroke can
+    /// trigger.
+    func setMidTurn(_ id: String, _ midTurn: Bool)
 }
 
 /// The full persistence surface the HTTP/WS server needs: the `SessionStore`
@@ -50,6 +57,11 @@ public protocol PersistentStore: SessionStore {
     /// "sleeping" tile instead of a dead one). Returns the affected ids so the
     /// launch can keep these crash orphans visible in the sidebar.
     @discardableResult func markOrphansDormant() -> [String]
+    /// Read AND clear every session flagged mid-turn by `setMidTurn` — the sessions
+    /// whose agent was working when the previous process died. Called once at boot:
+    /// clearing in the same transaction means a marker is consumed exactly once, so
+    /// a session that was busy two crashes ago can't keep offering to continue.
+    @discardableResult func takeMidTurnIds() -> Set<String>
 
     // inline diff comments
     func addComment(_ c: DiffComment)
@@ -70,6 +82,7 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
     private var scrollbacks: [String: [UInt8]] = [:]
     private var comments: [String: [DiffComment]] = [:]
     private var reviews: [String: ReviewResult] = [:]
+    private var midTurn: Set<String> = []
 
     public init() {}
 
@@ -133,6 +146,12 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         lock.withLock { scrollbacks[id] }
     }
 
+    public func setMidTurn(_ id: String, _ midTurn: Bool) {
+        lock.withLock {
+            if midTurn { self.midTurn.insert(id) } else { self.midTurn.remove(id) }
+        }
+    }
+
     // MARK: - PersistentStore: read / admin
 
     public func get(_ id: String) -> SessionMeta? {
@@ -187,6 +206,15 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
                 metas[id] = m
                 ids.append(id)
             }
+            return ids
+        }
+    }
+
+    @discardableResult
+    public func takeMidTurnIds() -> Set<String> {
+        lock.withLock {
+            let ids = midTurn
+            midTurn.removeAll()
             return ids
         }
     }

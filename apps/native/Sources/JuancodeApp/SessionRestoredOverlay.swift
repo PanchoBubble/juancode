@@ -59,3 +59,41 @@ struct SessionRestoredOverlay: View {
 
     private var tint: Color { isResuming ? .cyan : .yellow }
 }
+
+/// "Was mid-task — Continue?" chip, shown under the restored badge on a pane whose
+/// agent was working when the app died (juancode restore). Deliberately an offer, not
+/// an action: resuming a conversation is safe, but re-running whatever tool call the
+/// crash interrupted is the user's call. Nothing is typed until Continue is clicked,
+/// and the X retires the chip for good.
+struct SessionContinueOverlay: View {
+    let onContinue: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "play.circle")
+                .font(.system(size: 11, weight: .semibold))
+            Text("Was mid-task when it stopped")
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+            Button("Continue", action: onContinue)
+                .font(.system(size: 11, weight: .bold))
+                .buttonStyle(.plain)
+                .clickCursor()
+                .help("Send \"\(SessionContinueOffer.prompt)\" to pick the turn back up")
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(3)
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.black.opacity(0.55), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.orange.opacity(0.5), lineWidth: 1))
+        .foregroundStyle(Color.orange)
+    }
+}

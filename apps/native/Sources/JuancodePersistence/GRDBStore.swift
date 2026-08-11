@@ -63,6 +63,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     usage            TEXT,
                     archived         INTEGER NOT NULL DEFAULT 0,
                     dormant          INTEGER NOT NULL DEFAULT 0,
+                    mid_turn         INTEGER NOT NULL DEFAULT 0,
                     dispatch_id      TEXT,
                     created_at       INTEGER NOT NULL,
                     updated_at       INTEGER NOT NULL
@@ -92,6 +93,9 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             }
             if !cols.contains("dispatch_id") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dispatch_id TEXT")
+            }
+            if !cols.contains("mid_turn") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN mid_turn INTEGER NOT NULL DEFAULT 0")
             }
 
             try db.execute(sql: """
@@ -368,6 +372,18 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         }
     }
 
+    /// One-column write on the busy edge (twice per turn). Deliberately leaves
+    /// `updated_at` alone: this is a liveness marker for the next launch, not a
+    /// content change, and bumping it would reshuffle every recency-ordered list.
+    public func setMidTurn(_ id: String, _ midTurn: Bool) {
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET mid_turn = ? WHERE id = ?",
+                arguments: [midTurn ? 1 : 0, id]
+            )
+        }
+    }
+
     public func getScrollback(_ id: String) -> [UInt8]? {
         try? dbQueue.read { db -> [UInt8]? in
             guard let text = try String.fetchOne(db, sql: "SELECT scrollback FROM sessions WHERE id = ?", arguments: [id])
@@ -480,6 +496,16 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(
                 sql: "UPDATE sessions SET status = 'exited', dormant = 1 WHERE status = 'running'")
             return ids
+        }) ?? []
+    }
+
+    @discardableResult
+    public func takeMidTurnIds() -> Set<String> {
+        (try? dbQueue.write { db -> Set<String> in
+            let ids = try String.fetchAll(db, sql: "SELECT id FROM sessions WHERE mid_turn = 1")
+            guard !ids.isEmpty else { return [] }
+            try db.execute(sql: "UPDATE sessions SET mid_turn = 0 WHERE mid_turn = 1")
+            return Set(ids)
         }) ?? []
     }
 

@@ -32,6 +32,12 @@ public final class AppState: @unchecked Sendable {
     /// revived.
     public let crashOrphanIds: Set<String>
 
+    /// Of `crashOrphanIds`, the sessions whose agent was mid-turn when the previous
+    /// process died — read (and cleared) from the store's durable busy markers at
+    /// boot. Drives the optional "Continue" offer on a restored pane; a session that
+    /// was merely idle or waiting on you gets no nudge.
+    public let midTurnOrphanIds: Set<String>
+
     /// UserDefaults key holding the ids of sessions that were live at the last
     /// graceful quit. Written by `shutdownGracefully`, consumed (and cleared) at
     /// the next boot so those sessions get the same "sleeping, kept visible"
@@ -67,7 +73,12 @@ public final class AppState: @unchecked Sendable {
         let quitSlept = Set(UserDefaults.standard.stringArray(forKey: Self.sleptOnQuitKey) ?? [])
         UserDefaults.standard.removeObject(forKey: Self.sleptOnQuitKey)
         let known = Set(store.list().filter(\.dormant).map(\.id))
-        crashOrphanIds = Set(store.markOrphansDormant()).union(quitSlept.intersection(known))
+        let orphans = Set(store.markOrphansDormant()).union(quitSlept.intersection(known))
+        crashOrphanIds = orphans
+        // Consume the busy markers in the same breath: they're only meaningful for
+        // sessions being restored right now, and taking them clears the column so a
+        // stale marker can't offer to continue two launches later.
+        midTurnOrphanIds = store.takeMidTurnIds().intersection(orphans)
         // Enforce the per-project retention cap on the persisted history (juancode-477).
         // Nothing is live this early, so no ids need protecting.
         store.enforceSessionCap()

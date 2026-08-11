@@ -197,6 +197,9 @@ public final class Session: @unchecked Sendable {
     /// into idle — a turn boundary is when search wants the latest scrollback.
     /// Guarded by `lock`.
     private var prevPersistActivity: SessionActivity?
+    /// Last value written by `maybePersistMidTurn`, so only a real busy edge spends a
+    /// write. Guarded by `lock`.
+    private var persistedMidTurn = false
 
     private let titlePollMs = 4000
     private var titleTimer: DispatchSourceTimer?
@@ -537,6 +540,25 @@ public final class Session: @unchecked Sendable {
         for l in lock.withLock({ Array(activityListeners.values) }) { l(state, notify) }
         maybeFlushQueueOnEdge(state)
         maybePersistOnIdleEdge(state)
+        maybePersistMidTurn(state)
+    }
+
+    /// Keep the store's durable "this agent was working" marker in step with the
+    /// busy edge, so a crash (where nothing gets to run) still leaves the next
+    /// launch enough to offer a Continue. Only real edges write — the detector
+    /// re-evaluates on every keystroke echo — and the write rides the shared persist
+    /// queue so the emit path never blocks on sqlite.
+    private func maybePersistMidTurn(_ state: SessionActivity) {
+        guard persistEnabled else { return }
+        let busy = state == .busy
+        let changed = lock.withLock { () -> Bool in
+            guard persistedMidTurn != busy else { return false }
+            persistedMidTurn = busy
+            return true
+        }
+        guard changed else { return }
+        let (store, id) = lock.withLock { (env.store, _meta.id) }
+        Self.persistQueue.async { store.setMidTurn(id, busy) }
     }
 
     /// On the edge into idle (a turn boundary), do a full flush so search picks up the

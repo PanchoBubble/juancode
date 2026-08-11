@@ -19,6 +19,7 @@ import Testing
         private let lock = NSLock()
         private var scrollbackLabels: [String] = []
         private var fullLabels: [String] = []
+        private var midTurnLabels: [String] = []
 
         func insert(_ meta: SessionMeta) { backing.insert(meta) }
         func update(_ meta: SessionMeta, scrollback: [UInt8]) {
@@ -38,8 +39,13 @@ import Testing
         func setTitle(_ id: String, title: String) { backing.setTitle(id, title: title) }
         func setArchived(_ id: String, archived: Bool) { backing.setArchived(id, archived: archived) }
         func getScrollback(_ id: String) -> [UInt8]? { backing.getScrollback(id) }
+        func setMidTurn(_ id: String, _ midTurn: Bool) {
+            lock.withLock { midTurnLabels.append(Self.currentQueueLabel()) }
+            backing.setMidTurn(id, midTurn)
+        }
 
         var scrollback: [String] { lock.withLock { scrollbackLabels } }
+        var midTurn: [String] { lock.withLock { midTurnLabels } }
         var full: [String] { lock.withLock { fullLabels } }
 
         private static func currentQueueLabel() -> String {

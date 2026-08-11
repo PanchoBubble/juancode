@@ -41,6 +41,13 @@ private let worktreeByProjectKey = "juancode.worktreeByProject"
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
 
+/// UserDefaults key for the last selected session id, so a relaunch lands back on the
+/// pane you were in instead of an empty one. Written on every selection change (one
+/// small plist write per click, off every hot path) and read once at launch. Losing it
+/// to a crash is harmless: `SessionRestorePlan` falls back to the most recently updated
+/// session that was live.
+private let lastFocusedSessionKey = "juancode.lastFocusedSession"
+
 /// UserDefaults keys for the estimated-cost budget (juancode-qoc): a USD ceiling
 /// (`0` = off) and the percent-of-budget at which the total turns amber.
 private let costBudgetUsdKey = "juancode.costBudgetUsd"
@@ -117,6 +124,11 @@ final class AppModel {
             // "Go to session", search hits) dismisses the GitHub overlay — every
             // landing path routes through this setter (juancode-2t6).
             showingGitHub = false
+            // Remember the pane for the next launch to land on. A click-rate plist
+            // write, and only when it actually changed.
+            if let sel = selection, sel != oldValue {
+                UserDefaults.standard.set(sel, forKey: lastFocusedSessionKey)
+            }
         }
     }
     var showingNewSession = false
@@ -459,6 +471,15 @@ final class AppModel {
     /// them with old dead sessions. Emptied per-id as sessions come back live.
     private(set) var pendingCrashOrphans: Set<String>
 
+    /// The launch restore plan (juancode restore): which previously-live sessions come
+    /// back as restored rows, which single one gets focus (and therefore a pty), and
+    /// which were mid-turn. Computed once in `init`, before anything revives.
+    @ObservationIgnored private let restorePlan: SessionRestorePlan
+
+    /// Restored sessions whose "Continue" offer has been taken or dismissed, so the
+    /// chip never returns for the same restore.
+    private var handledContinueOffers: Set<String> = []
+
     /// Whether `id` is a still-unrevived crash orphan (drives the sidebar sort).
     func isCrashOrphan(_ id: String) -> Bool { pendingCrashOrphans.contains(id) }
 
@@ -478,6 +499,11 @@ final class AppModel {
         self.launchRecency = Dictionary(persistedAtLaunch.map { ($0.id, $0.updatedAt) },
                                         uniquingKeysWith: { a, _ in a })
         self.pendingCrashOrphans = appState.crashOrphanIds
+        self.restorePlan = SessionRestorePlan.make(
+            previouslyLive: appState.crashOrphanIds,
+            metas: persistedAtLaunch,
+            lastFocused: UserDefaults.standard.string(forKey: lastFocusedSessionKey),
+            midTurnIds: appState.midTurnOrphanIds)
         appState.registry.onCreate { [weak self] s in
             Task { @MainActor in
                 guard let self else { return }
@@ -491,6 +517,7 @@ final class AppModel {
         }
         for s in appState.registry.all() { watch(s) }
         refresh()
+        restoreLaunchSelection() // land back on the pane you were in (juancode restore)
         // Route a clicked agent notification back to its session (juancode-bao):
         // activate the app and select that pane (or open the Oracle dock for its
         // sidebar-hidden sessions). Same landing path as the ⌘K jump palette.
@@ -1484,7 +1511,16 @@ final class AppModel {
             showingNewSession = true
             return
         }
-        createInFolder(provider: meta.provider, cwd: meta.cwd)
+        // The worktree default is keyed by project root (the sidebar toggle writes
+        // `group.cwd`), while `meta.cwd` is where the pty runs — the worktree dir for an
+        // isolated session. Resolve the root before looking the flag up, else ⌘N off a
+        // worktree session misses it and lands in that checkout. Cutting the new worktree
+        // also has to start from the main checkout: `createWorktree` takes git's
+        // `--show-toplevel`, which from inside a worktree would nest a
+        // `<repo>-worktrees/<name>-worktrees/…` sibling.
+        let root = repoRoot(forSession: meta)
+        let worktree = worktreeDefault(forProject: root)
+        createInFolder(provider: meta.provider, cwd: worktree ? root : meta.cwd, isolateWorktree: worktree)
     }
 
     /// Open the user's editor (`JUANCODE_EDITOR`, default nvim) as a session rooted
@@ -2517,7 +2553,10 @@ final class AppModel {
             let prior = appState.store.getScrollback(id) ?? []
             let seed: [UInt8] = (prior.isEmpty || !seedPrior)
                 ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
-            let g = grid ?? TerminalGrid.spawn
+            // No caller grid (the sidebar's open-persisted-pane path): resume at the
+            // size this session's own surface last measured — the dock's for an
+            // Oracle, a main pane's for everything else. See `resumeGrid(for:)`.
+            let g = grid ?? resumeGrid(for: meta)
             let session = try appState.registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)
             refresh()
             return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior)
@@ -2627,6 +2666,45 @@ final class AppModel {
     /// Dismiss the restored banner for `id` (the overlay's X — the only way to clear
     /// the replay-only `.unresumable` case).
     func dismissRestoredBanner(_ id: String) { applyRestoredBannerEvent(id, .dismissed) }
+
+    // MARK: - Launch restore (juancode restore)
+
+    /// Select the pane the last run ended on, so a crash-restart puts you back where
+    /// you were. Only the selection is restored — mounting that one pane is what
+    /// revives it (`openPersistedPane` from `SessionContainer`), so exactly one CLI
+    /// spawns at launch no matter how many sessions were open. The rest of
+    /// `restorePlan.reopen` stay surfaced as sleeping rows and revive when opened.
+    ///
+    /// No-op when the user is already somewhere (a deep link that beat us here) or the
+    /// planned session vanished between the plan and now.
+    private func restoreLaunchSelection() {
+        guard selection == nil, let focus = restorePlan.focus,
+              sessions.contains(where: { $0.id == focus }) else { return }
+        selection = focus
+    }
+
+    /// Whether `id`'s restored pane should offer to continue the turn it died in.
+    /// Reads live activity, so a resume that picked the work back up on its own shows
+    /// nothing (see `SessionContinueOffer`).
+    func offersContinue(_ id: String) -> Bool {
+        SessionContinueOffer.shouldOffer(wasMidTurn: restorePlan.midTurn.contains(id),
+                                        isLive: isLive(id),
+                                        activity: activities[id],
+                                        handled: handledContinueOffers.contains(id))
+    }
+
+    /// Take the Continue offer: submit the nudge into the revived CLI and retire the
+    /// chip. Goes through `Session.submit`, the same insert-then-Enter path the prompt
+    /// palette uses, so a busy composer or a slow TUI is handled for us.
+    func continueRestoredSession(_ id: String) {
+        handledContinueOffers.insert(id)
+        guard let session = liveSession(id) else { return }
+        session.submit(SessionContinueOffer.prompt)
+        terminalFocusToken += 1
+    }
+
+    /// Dismiss the Continue offer without sending anything.
+    func dismissContinueOffer(_ id: String) { handledContinueOffers.insert(id) }
 
     /// Fold an event through the pure banner machine and reflect the result: a nil
     /// phase clears the entry and tears down any pending live-output watch.
