@@ -462,6 +462,13 @@ final class AppModel {
         launchRecency[meta.id] ?? meta.createdAt
     }
 
+    /// Sessions with a `--resume` in flight right now, so the launch sweep and a click
+    /// on the same row can't spawn two ptys for one session. See `reactivate`.
+    @ObservationIgnored private var revivingIds: Set<String> = []
+
+    /// The launch sweep that brings every previously-open session back (`reviveLaunchPlan`).
+    @ObservationIgnored private var launchReviveTask: Task<Void, Never>?
+
     /// Restore candidates already revived once this run, so re-opening one within the
     /// same run (after it exits again, say) doesn't re-announce a restore.
     private var revivedRestoresThisRun: Set<String> = []
@@ -518,6 +525,7 @@ final class AppModel {
         for s in appState.registry.all() { watch(s) }
         refresh()
         restoreLaunchSelection() // land back on the pane you were in (juancode restore)
+        reviveLaunchPlan()       // ...and bring every other open session back with it
         // Route a clicked agent notification back to its session (juancode-bao):
         // activate the app and select that pane (or open the Oracle dock for its
         // sidebar-hidden sessions). Same landing path as the ⌘K jump palette.
@@ -2523,8 +2531,18 @@ final class AppModel {
     /// never costs the stored history.
     @discardableResult
     func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil,
-                    seedPrior: Bool = true) async -> Bool {
+                    seedPrior: Bool = true, quiet: Bool = false) async -> Bool {
         if isLive(id) { return true }
+        // Someone else is already spawning this pty — the launch sweep and a click on
+        // the same row, most often. Wait that revive out instead of racing it: both
+        // callers reach `registry.resume` before either sees `isLive`, and two
+        // `--resume` processes for one session is a duplicated agent, not a faster one.
+        if revivingIds.contains(id) {
+            while revivingIds.contains(id) { await Nap.ms(100) }
+            return isLive(id)
+        }
+        revivingIds.insert(id)
+        defer { revivingIds.remove(id) }
         // The db row can be gone if the retention cap pruned it after this pane was
         // opened; fall back to the run-lifetime meta cache and re-insert so opening
         // an old session revives it instead of failing with "not found" (juancode).
@@ -2539,7 +2557,9 @@ final class AppModel {
             }
         }
         guard meta.cliSessionId != nil else {
-            errorMessage = "No prior CLI conversation could be found to resume this session."
+            if !quiet {
+                errorMessage = "No prior CLI conversation could be found to resume this session."
+            }
             appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
                                      fields: ["reason": "unresumable"])
             return false
@@ -2561,7 +2581,7 @@ final class AppModel {
             refresh()
             return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior)
         } catch {
-            errorMessage = "Failed to resume: \(error)"
+            if !quiet { errorMessage = "Failed to resume: \(error)" }
             appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
                                      fields: ["reason": "\(error)"])
             return false
@@ -2681,6 +2701,53 @@ final class AppModel {
         guard selection == nil, let focus = restorePlan.focus,
               sessions.contains(where: { $0.id == focus }) else { return }
         selection = focus
+    }
+
+    /// Pacing for the launch sweep.
+    private enum LaunchRevive {
+        /// Gap between one session's resume finishing and the next one starting. The
+        /// sweep is already serial — `reactivate` waits out each pty's resume grace
+        /// before returning — so this is only breathing room, not the real throttle.
+        static let gapMs = 400
+    }
+
+    /// Bring back every session that was open when the last run ended, not just the one
+    /// you were looking at.
+    ///
+    /// `restorePlan.reopen` is that list: sessions whose pty was alive at the last exit,
+    /// whether the app crashed (`markOrphansDormant` sweeps rows left `running`) or quit
+    /// cleanly (`shutdownGracefully` sleeps them and records the ids). A session you
+    /// killed yourself isn't running at that point, so it stays out — open sessions come
+    /// back, killed ones stay dead, with no second list to keep in step.
+    ///
+    /// Strictly serial, focused pane first. Each resume is a real `claude --resume`
+    /// process, so firing ~20 at once is the RAM spike and pty burst that the one-pane
+    /// restore was written to avoid; doing them one at a time keeps the peak at one
+    /// spawn while still ending up with everything live. `reactivate(quiet:)` keeps a
+    /// session that can't be resumed from flashing an error banner per row — it just
+    /// stays a sleeping row and resumes properly when clicked.
+    private func reviveLaunchPlan() {
+        let focus = restorePlan.focus
+        let ordered = (focus.map { [$0] } ?? []) + restorePlan.reopen.filter { $0 != focus }
+        guard !ordered.isEmpty else { return }
+        launchReviveTask = Task { @MainActor [weak self] in
+            for id in ordered {
+                guard !Task.isCancelled, let self else { return }
+                guard let meta = self.sessions.first(where: { $0.id == id }),
+                      !self.isLive(id) else { continue }
+                let revived = await self.reactivate(id, quiet: true)
+                self.appState.activityLog.log("launchRevive", sessionId: id, project: meta.cwd,
+                                              fields: ["revived": "\(revived)"])
+                await Nap.ms(LaunchRevive.gapMs)
+            }
+        }
+    }
+
+    /// Stop the launch sweep — nothing half-revived should keep spawning ptys once the
+    /// app is on its way out.
+    func cancelLaunchRevive() {
+        launchReviveTask?.cancel()
+        launchReviveTask = nil
     }
 
     /// Whether `id`'s restored pane should offer to continue the turn it died in.

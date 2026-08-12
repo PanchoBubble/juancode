@@ -205,6 +205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let state = AppEnv.state, !terminating else { return .terminateNow }
         terminating = true
+        // Stop the launch sweep first: it spawns a `--resume` every few hundred ms, and
+        // one that lands during the drain below is a pty nothing is left to reap.
+        AppEnv.model?.cancelLaunchRevive()
         DispatchQueue.global(qos: .userInitiated).async {
             state.shutdownGracefully(timeout: 3.0)
             DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
