@@ -272,6 +272,75 @@ final class GitTests: XCTestCase {
         XCTAssertFalse(after.contains(where: { resolvePath($0.path) == resolvePath(wt.path) }))
     }
 
+    // MARK: - createWorktree(checkingOut:) — the PR-tracker's worktree (juancode-4bpz)
+
+    /// The ordinary case: the PR's branch exists locally and nothing else has it
+    /// checked out, so the worktree gets it attached and the agent can just push.
+    func testCreateWorktreeChecksOutAnExistingBranch() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try runGit(["branch", "feature/pr-99"])
+
+        let wt = try await createWorktree(dir, "pr-99", checkingOut: "feature/pr-99")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+
+        XCTAssertEqual(wt.branch, "feature/pr-99")
+        let trees = await listWorktrees(dir)
+        let found = trees.first(where: { resolvePath($0.path) == resolvePath(wt.path) })
+        XCTAssertEqual(found?.branch, "feature/pr-99")
+    }
+
+    /// One branch, one worktree — git's rule. A PR branch you already have open
+    /// elsewhere (commonly your main checkout) must fall back to a detached HEAD at
+    /// that branch's head rather than failing the track.
+    func testCreateWorktreeFallsBackToDetachedWhenBranchIsCheckedOutElsewhere() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        // Check the branch out in the main worktree, so it is genuinely taken.
+        try runGit(["checkout", "-q", "-b", "feature/taken"])
+        let head = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let wt = try await createWorktree(dir, "pr-1", checkingOut: "feature/taken")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+
+        XCTAssertNil(wt.branch, "a branch checked out elsewhere can only be detached")
+        // Detached, but sitting on exactly that branch's commit.
+        let at = try runGit(["rev-parse", "HEAD"], cwd: wt.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(at, head)
+    }
+
+    /// A second track of the same PR (or a leftover directory from an earlier one)
+    /// must not collide: `git worktree add` refuses an existing path.
+    func testCreateWorktreeAvoidsAnExistingDirectory() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try runGit(["branch", "feature/pr-7"])
+        try runGit(["branch", "feature/pr-7-b"])
+
+        let first = try await createWorktree(dir, "pr-7", checkingOut: "feature/pr-7")
+        defer { rmrf((first.path as NSString).deletingLastPathComponent) }
+        let second = try await createWorktree(dir, "pr-7", checkingOut: "feature/pr-7-b")
+
+        XCTAssertNotEqual(resolvePath(first.path), resolvePath(second.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+    }
+
+    /// No such branch anywhere and no remote to fetch it from — a clean GitError, not
+    /// a half-made worktree.
+    func testCreateWorktreeThrowsForAnUnknownBranch() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+
+        do {
+            let wt = try await createWorktree(dir, "pr-404", checkingOut: "nope/missing")
+            rmrf((wt.path as NSString).deletingLastPathComponent)
+            XCTFail("expected a GitError for a branch that doesn't exist")
+        } catch let e as GitError {
+            XCTAssertTrue(e.message.contains("nope/missing"), e.message)
+        }
+    }
+
     func testRemoveWorktreeForceRemovesWithUncommittedChanges() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
         _ = try await commitAll(dir, "init")

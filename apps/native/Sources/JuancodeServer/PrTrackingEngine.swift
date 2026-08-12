@@ -150,14 +150,27 @@ public actor PrTrackingEngine {
     /// it renders in (the "fresh session opens short" fix); the default is the
     /// roomy background size used when no view is driving the spawn.
     @discardableResult
-    public func track(_ pr: PullRequest, cwd: String, cols: Int = 120, rows: Int = 32) -> TrackedPr? {
+    public func track(_ pr: PullRequest, cwd: String, cols: Int = 120, rows: Int = 32) async -> TrackedPr? {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard tracked[key] == nil else { return nil }
-        let seed = trackSeedPrompt(number: pr.number, title: pr.title, branch: pr.branch, url: pr.url)
+        // The agent works the PR on its own worktree, checked out on the PR's branch,
+        // so it never touches your main checkout and several tracked PRs can run at
+        // once (juancode-4bpz). The entry stays keyed by the REPO cwd — that's the
+        // identity every surface looks tracking up by — while the session runs in the
+        // worktree. A repo git can't give us a worktree for (no remote, offline with
+        // an unknown branch) still gets tracked in the repo root rather than not at all.
+        let worktree = try? await createWorktree(cwd, "pr-\(pr.number)", checkingOut: pr.branch)
+        let seed = trackSeedPrompt(number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
+                                   worktree: worktree)
         guard let session = try? registry.create(
-            provider: .claude, cwd: cwd, cols: cols, rows: rows,
-            opts: SpawnOptions(skipPermissions: true, model: "opus")
+            provider: .claude, cwd: worktree?.path ?? cwd, cols: cols, rows: rows,
+            opts: SpawnOptions(skipPermissions: true, model: "opus"),
+            worktreePath: worktree?.path
         ) else { return nil }
+        activityLog.log("trackWorktree", sessionId: session.id, project: cwd,
+                        fields: ["pr": "\(pr.number)", "branch": pr.branch,
+                                 "worktree": worktree?.path ?? "none",
+                                 "detached": "\(worktree != nil && worktree?.branch == nil)"])
         if !seed.isEmpty { session.autoSubmit(seed) }
         let entry = TrackedPr(
             number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,

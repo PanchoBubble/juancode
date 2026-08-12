@@ -426,6 +426,79 @@ public func createWorktree(_ repoCwd: String, _ name: String) async throws -> Cr
     return CreatedWorktree(path: dir, branch: branch)
 }
 
+/// A worktree created for a branch that already exists (see
+/// `createWorktree(_:_:checkingOut:)`).
+public struct BranchWorktree: Sendable, Equatable {
+    /// Absolute path to the new worktree's root (the session's cwd).
+    public let path: String
+    /// The branch checked out in it, or nil when git would only give us a detached
+    /// HEAD — which happens when that branch is already checked out somewhere else.
+    public let branch: String?
+
+    public init(path: String, branch: String?) {
+        self.path = path
+        self.branch = branch
+    }
+}
+
+/// Create a linked worktree off `repoCwd` with an **existing** branch checked out,
+/// for working a branch someone else pushed — a PR's head branch (juancode-4bpz).
+///
+/// Unlike `createWorktree`, which starts a new `juancode/<name>` branch, this one
+/// has to cope with a branch that may not be local yet and may already be checked
+/// out. In order: fetch it if it's unknown, check it out normally, fall back to
+/// tracking `origin/<branch>`, and finally fall back to a **detached** checkout at
+/// its head — git allows one worktree per branch, so a branch you already have open
+/// elsewhere can only be read from a detached HEAD. `branch` in the result is nil in
+/// that last case, so the caller can tell the agent it has no branch to commit onto.
+public func createWorktree(_ repoCwd: String, _ name: String,
+                           checkingOut branch: String) async throws -> BranchWorktree {
+    let root: String
+    do {
+        let inside = try await git(repoCwd, ["rev-parse", "--is-inside-work-tree"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if inside != "true" { throw GitError("not a work tree") }
+        root = try await git(repoCwd, ["rev-parse", "--show-toplevel"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    } catch {
+        throw GitError("Not a git repository — can't isolate this session in a worktree.")
+    }
+    let rootURL = URL(fileURLWithPath: root)
+    let worktreesDir = rootURL.deletingLastPathComponent()
+        .appendingPathComponent("\(rootURL.lastPathComponent)-worktrees")
+    try? FileManager.default.createDirectory(at: worktreesDir, withIntermediateDirectories: true)
+    // A previous tracking run may have left `<name>` behind (worktrees outlive the
+    // session that made them), and `git worktree add` refuses an existing directory.
+    var dir = worktreesDir.appendingPathComponent(name).path
+    var suffix = 2
+    while FileManager.default.fileExists(atPath: dir) {
+        dir = worktreesDir.appendingPathComponent("\(name)-\(suffix)").path
+        suffix += 1
+    }
+    // A PR branch pushed by someone else may not exist locally at all; fetch before
+    // deciding how to check it out. Best-effort — being offline shouldn't stop us
+    // making the worktree, the detached fallback still has the local remote-tracking ref.
+    let haveLocal = (try? await git(repoCwd, ["rev-parse", "--verify", "--quiet",
+                                             "refs/heads/\(branch)"])) != nil
+    if !haveLocal { _ = try? await git(repoCwd, ["fetch", "origin", branch]) }
+
+    if haveLocal, (try? await gitStrict(repoCwd, ["worktree", "add", dir, branch])) != nil {
+        return BranchWorktree(path: dir, branch: branch)
+    }
+    if !haveLocal, (try? await gitStrict(
+        repoCwd, ["worktree", "add", "--track", "-b", branch, dir, "origin/\(branch)"])) != nil {
+        return BranchWorktree(path: dir, branch: branch)
+    }
+    // Already checked out elsewhere (or the branch resolves but can't be attached):
+    // detached at whichever ref we can resolve.
+    for ref in [branch, "origin/\(branch)"] {
+        if (try? await gitStrict(repoCwd, ["worktree", "add", "--detach", dir, ref])) != nil {
+            return BranchWorktree(path: dir, branch: nil)
+        }
+    }
+    throw GitError("Couldn't create a worktree for branch \(branch).")
+}
+
 /// Remove a session-owned worktree (created by `createWorktree`) and its
 /// directory. Runs the removal from the repo's main worktree — git refuses to
 /// remove the worktree you're standing in — and `--force`s past any uncommitted

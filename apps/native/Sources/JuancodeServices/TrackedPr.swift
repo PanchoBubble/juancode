@@ -224,10 +224,37 @@ public func deriveTrackState(checks: PrChecks, hasOpenDecision: Bool) -> TrackSt
 
 /// The seed prompt handed to the tracking session when the user clicks "Track".
 /// Establishes the PR context and the auto-fix-vs-escalate contract once, up front.
-public func trackSeedPrompt(number: Int, title: String, branch: String, url: String) -> String {
-    """
+public func trackSeedPrompt(number: Int, title: String, branch: String, url: String,
+                            worktree: BranchWorktree? = nil) -> String {
+    // Say where the agent is standing. On its own worktree the branch is already
+    // checked out, so "commit and push to `branch`" just works; detached (the branch
+    // was open in another worktree) it has to make its own branch before it can push,
+    // and being told that beats discovering it halfway through a fix.
+    let place: String
+    switch (worktree, worktree?.branch) {
+    case (nil, _):
+        place = ""
+    case let (.some(wt), .some(b)):
+        place = """
+
+
+        You're on a dedicated worktree for this PR at `\(wt.path)`, with `\(b)` \
+        checked out — it's yours, so commit and push here freely without touching the \
+        main checkout.
+        """
+    case let (.some(wt), .none):
+        place = """
+
+
+        You're on a dedicated worktree for this PR at `\(wt.path)`. `\(branch)` is \
+        already checked out elsewhere, so this one is on a DETACHED HEAD at that \
+        branch's head: to push a fix, create your own branch here first and open it \
+        against `\(branch)`, or tell me and I'll free the branch up.
+        """
+    }
+    return """
     [juancode PR-tracker] You are now tracking pull request #\(number) "\(title)" \
-    (branch `\(branch)`): \(url)
+    (branch `\(branch)`): \(url)\(place)
 
     I'll periodically tell you when there's new activity on this PR — new review \
     comments or a change in CI status. When I do:
