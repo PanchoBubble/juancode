@@ -209,7 +209,7 @@ public actor PrTrackingEngine {
         pollLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: self?.pollInterval ?? .seconds(60))
+                await Nap.duration(self?.pollInterval ?? .seconds(60))
             }
         }
     }
@@ -297,7 +297,7 @@ public actor PrTrackingEngine {
         // A refresh is already pending for this PR — the new event folds into it.
         guard pendingRefresh[id] == nil else { return }
         pendingRefresh[id] = Task { [weak self, delay = webhookDebounce] in
-            try? await Task.sleep(for: delay)
+            await Nap.duration(delay)
             guard !Task.isCancelled else { return }
             await self?.runPendingRefresh(id)
         }

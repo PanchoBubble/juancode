@@ -756,7 +756,7 @@ public final class Session: @unchecked Sendable {
         // 3) Submit, then confirm it went through (agent busy, or the box cleared).
         // Let the paste-end sequence settle before the CR so the CLI is out of
         // paste mode and reads the Enter as submit, not a literal newline.
-        try? await Task.sleep(for: .milliseconds(Seed.submitSettleMs))
+        await Nap.duration(.milliseconds(Seed.submitSettleMs))
         for attempt in 0..<Seed.maxAttempts {
             guard isRunning else { return .failed(reason: "session exited before the prompt was submitted") }
             logEvent("seedEnter", ["attempt": "\(attempt + 1)"])
@@ -811,7 +811,7 @@ public final class Session: @unchecked Sendable {
         var elapsed = 0
         var prev = terminalModel.visibleText()
         while elapsed < maxMs {
-            try? await Task.sleep(for: .milliseconds(pollMs))
+            await Nap.duration(.milliseconds(pollMs))
             elapsed += pollMs
             let cur = terminalModel.visibleText()
             if !cur.isEmpty && cur == prev { return true }
@@ -826,7 +826,7 @@ public final class Session: @unchecked Sendable {
         if cond() { return true }
         var elapsed = 0
         while elapsed < maxMs {
-            try? await Task.sleep(for: .milliseconds(pollMs))
+            await Nap.duration(.milliseconds(pollMs))
             elapsed += pollMs
             if cond() { return true }
         }
@@ -1016,7 +1016,7 @@ public final class Session: @unchecked Sendable {
         }
         if activity == .busy { return true }
         guard landed, isRunning else { return false }
-        try? await Task.sleep(for: .milliseconds(Seed.submitSettleMs))
+        await Nap.duration(.milliseconds(Seed.submitSettleMs))
         for _ in 0..<Seed.maxAttempts {
             guard isRunning else { return false }
             write("\r")

@@ -932,7 +932,7 @@ final class AppModel {
         // replay) while the hidden keep-alive panes stay mounted untouched.
         if let sel = selection { livePanes.bumpRefresh(sel, to: terminalRefreshToken) }
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(600))
+            await Nap.duration(.milliseconds(600))
             self?.terminalResyncToken &+= 1
         }
     }
@@ -973,7 +973,7 @@ final class AppModel {
             // kill() escalates SIGTERM→SIGKILL itself, so a wedged CLI still exits.
             var waitedMs = 0
             while isLive(id), waitedMs < 6000 {
-                try? await Task.sleep(for: .milliseconds(100))
+                await Nap.duration(.milliseconds(100))
                 waitedMs += 100
             }
         }
@@ -1606,7 +1606,7 @@ final class AppModel {
         resumableSessions = []
         Task {
             // Debounce keystrokes in the directory field before touching disk.
-            try? await Task.sleep(for: .milliseconds(300))
+            await Nap.duration(.milliseconds(300))
             guard resumableCwd == target else { return }
             let used = appState.store.usedCliSessionIds()
             let rows = await Task.detached(priority: .utility) { () -> [ResumableSession] in
@@ -1784,7 +1784,7 @@ final class AppModel {
         // Remember the active scope so a firehose reload re-applies it in one pass.
         prsBackfillIntent[cwd] = qualifiers
         prsBackfillTasks[cwd] = Task { [qualifiers] in
-            try? await Task.sleep(for: .milliseconds(300))
+            await Nap.duration(.milliseconds(300))
             if Task.isCancelled { return }
             let found = await Task.detached(priority: .utility) {
                 await searchOpenPrs(cwd, search: qualifiers)
@@ -2459,7 +2459,7 @@ final class AppModel {
         trackLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollTrackedIssuesOnce()
-                try? await Task.sleep(for: self?.trackPollInterval ?? .seconds(20))
+                await Nap.duration(self?.trackPollInterval ?? .seconds(20))
             }
         }
     }
@@ -2584,7 +2584,7 @@ final class AppModel {
                 invalidateFailedResume(sessionId, priorScrollback: priorScrollback)
                 return false
             }
-            try? await Task.sleep(for: .milliseconds(pollMs))
+            await Nap.duration(.milliseconds(pollMs))
             elapsed += pollMs
         }
         return session.isRunning
@@ -2737,7 +2737,7 @@ final class AppModel {
     /// fold the banner away after the grace window regardless.
     private func scheduleRestoreGrace(_ id: String) {
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(SessionRestoredBanner.resumeGraceSeconds))
+            await Nap.duration(.seconds(SessionRestoredBanner.resumeGraceSeconds))
             self?.applyRestoredBannerEvent(id, .graceElapsed)
         }
     }
@@ -3059,7 +3059,7 @@ final class AppModel {
         scheduleLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.fireDueRecurringTasksOnce()
-                try? await Task.sleep(for: self?.scheduleTickInterval ?? .seconds(30))
+                await Nap.duration(self?.scheduleTickInterval ?? .seconds(30))
             }
         }
     }
@@ -3119,7 +3119,7 @@ final class AppModel {
         healthLoop = Task { [weak self] in
             while !Task.isCancelled {
                 self?.runHealthCheckOnce()
-                try? await Task.sleep(for: self?.healthTickInterval ?? .seconds(30))
+                await Nap.duration(self?.healthTickInterval ?? .seconds(30))
             }
         }
     }
@@ -4457,13 +4457,13 @@ final class AppModel {
         workAtRiskLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.scanWorkAtRiskOnce()
-                try? await Task.sleep(for: self?.workAtRiskSweepInterval ?? .seconds(600))
+                await Nap.duration(self?.workAtRiskSweepInterval ?? .seconds(600))
             }
         }
         guard workAtRiskNudgeLoop == nil else { return }
         workAtRiskNudgeLoop = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: self?.workAtRiskNudgeInterval ?? .seconds(60))
+                await Nap.duration(self?.workAtRiskNudgeInterval ?? .seconds(60))
                 self?.evaluateWorkAtRiskNudges()
             }
         }
@@ -4571,7 +4571,7 @@ final class AppModel {
             guard workAtRiskCooling.insert(root).inserted else { return }
             let wait = workAtRiskProbeCooldownMs - (nowMs() - last)
             Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(wait))
+                await Nap.duration(.milliseconds(wait))
                 guard let self else { return }
                 self.workAtRiskCooling.remove(root)
                 // The folder may have stopped being ours while we waited.
@@ -4598,7 +4598,7 @@ final class AppModel {
                 self.workAtRiskQueued.remove(root)
                 self.workAtRiskLastProbeMs[root] = nowMs()
                 await self.runWorkAtRiskProbe(root)
-                try? await Task.sleep(for: .milliseconds(gap))
+                await Nap.duration(.milliseconds(gap))
             }
             self?.workAtRiskDrain = nil
         }
@@ -4633,7 +4633,7 @@ final class AppModel {
         guard !workAtRiskNudgeEvalPending else { return }
         workAtRiskNudgeEvalPending = true
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(1))
+            await Nap.duration(.seconds(1))
             guard let self else { return }
             self.workAtRiskNudgeEvalPending = false
             self.evaluateWorkAtRiskNudges()

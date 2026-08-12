@@ -326,7 +326,7 @@ public actor SessionReaper {
         guard loop == nil else { return }
         loop = Task { [weak self, sweepInterval] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: sweepInterval)
+                await Nap.duration(sweepInterval)
                 guard let self else { return }
                 await self.sweepOnce()
             }

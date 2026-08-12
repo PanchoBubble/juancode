@@ -47,7 +47,7 @@ struct RemoteDriveOverlay: View {
         .animation(.easeInOut(duration: 0.15), value: expanded)
         .onHover { hovering = $0 }
         .task {
-            try? await Task.sleep(for: .seconds(RemoteDriveBadge.collapseAfterSeconds))
+            await Nap.duration(.seconds(RemoteDriveBadge.collapseAfterSeconds))
             collapsed = true
         }
         .help("A remote viewer (web / phone) owns this terminal's grid (client \(owner))")

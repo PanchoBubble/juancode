@@ -1,4 +1,5 @@
 import SwiftUI
+import JuancodeCore
 import AppKit
 import JuancodeServices
 
@@ -54,7 +55,7 @@ struct HeavyQueuePanel: View {
         // Poll: the queue is other processes' state, so there's nothing to observe.
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                await Nap.duration(.seconds(2))
                 now = Date()
                 model.refreshHeavyQueue()
             }

@@ -372,7 +372,7 @@ final class GitHubModel {
     private func flashQueued(_ itemId: String) {
         queuedFlash.insert(itemId)
         Task {
-            try? await Task.sleep(for: .seconds(2.5))
+            await Nap.duration(.seconds(2.5))
             queuedFlash.remove(itemId)
         }
     }
@@ -629,7 +629,7 @@ struct GitHubView: View {
     private func scheduleBackfill() {
         backfillTask?.cancel()
         backfillTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
+            await Nap.duration(.milliseconds(350))
             guard !Task.isCancelled else { return }
             model.github.applyFilters(model: model)
         }
@@ -1489,7 +1489,7 @@ private struct GitHubPrDetail: View {
         while !Task.isCancelled {
             model.github.refreshIfStale(cwd: cwd, pr: pr, includeDiff: tab == .diff,
                                         focused: NSApp.isActive)
-            try? await Task.sleep(for: .seconds(5))
+            await Nap.duration(.seconds(5))
         }
     }
 
@@ -1693,7 +1693,7 @@ private struct PrFreshnessStamp: View {
         }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
+                await Nap.duration(.seconds(15))
                 now = Date()
             }
         }

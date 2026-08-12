@@ -483,7 +483,7 @@ final class OracleModel {
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.tick()
-                try? await Task.sleep(for: .milliseconds(1500))
+                await Nap.duration(.milliseconds(1500))
             }
         }
     }
