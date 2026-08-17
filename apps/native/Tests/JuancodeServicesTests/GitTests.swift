@@ -341,6 +341,57 @@ final class GitTests: XCTestCase {
         }
     }
 
+    /// A new worktree should be runnable without an install: every `node_modules` the
+    /// source checkout has — root and per-package — is linked into the same relative
+    /// spot, and a package that doesn't exist on the branch is left alone.
+    func testCreateWorktreeLinksNodeModules() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        writeFile(join(dir, ".gitignore"), "node_modules\n")
+        _ = try await commitAll(dir, "init")
+        let pkg = join(join(dir, "apps"), "oracle")
+        try FileManager.default.createDirectory(atPath: join(pkg, "node_modules"),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: join(dir, "node_modules"),
+                                                withIntermediateDirectories: true)
+        writeFile(join(join(dir, "node_modules"), "marker.txt"), "root\n")
+        // Tracked, so `apps/oracle` exists in the worktree for its link to land in.
+        writeFile(join(pkg, "index.ts"), "export {}\n")
+        _ = try await commitAll(dir, "pkg")
+
+        let wt = try await createWorktree(dir, "deps")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+
+        for rel in ["node_modules", "apps/oracle/node_modules"] {
+            let link = join(wt.path, rel)
+            let target = try FileManager.default.destinationOfSymbolicLink(atPath: link)
+            XCTAssertEqual(resolvePath(target), resolvePath(join(dir, rel)), rel)
+        }
+        // Resolves through the link to the real contents.
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: join(join(wt.path, "node_modules"), "marker.txt")))
+    }
+
+    /// Removing a worktree must unlink the `node_modules` symlink, never delete through
+    /// it — otherwise tearing down one session wipes the main checkout's dependencies.
+    func testRemoveWorktreeLeavesTheSourceNodeModulesIntact() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try FileManager.default.createDirectory(atPath: join(dir, "node_modules"),
+                                                withIntermediateDirectories: true)
+        let marker = join(join(dir, "node_modules"), "marker.txt")
+        writeFile(marker, "root\n")
+
+        let wt = try await createWorktree(dir, "depsrm")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(
+            atPath: join(wt.path, "node_modules")))
+
+        try await removeWorktree(wt.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wt.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker),
+                      "the source checkout's node_modules must survive")
+    }
+
     func testRemoveWorktreeForceRemovesWithUncommittedChanges() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
         _ = try await commitAll(dir, "init")

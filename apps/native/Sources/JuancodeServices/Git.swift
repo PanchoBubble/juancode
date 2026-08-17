@@ -423,6 +423,7 @@ public func createWorktree(_ repoCwd: String, _ name: String) async throws -> Cr
     } catch {
         throw GitError(gitErr(error, "Failed to create worktree"))
     }
+    linkNodeModules(from: root, to: dir)
     return CreatedWorktree(path: dir, branch: branch)
 }
 
@@ -483,16 +484,19 @@ public func createWorktree(_ repoCwd: String, _ name: String,
     if !haveLocal { _ = try? await git(repoCwd, ["fetch", "origin", branch]) }
 
     if haveLocal, (try? await gitStrict(repoCwd, ["worktree", "add", dir, branch])) != nil {
+        linkNodeModules(from: root, to: dir)
         return BranchWorktree(path: dir, branch: branch)
     }
     if !haveLocal, (try? await gitStrict(
         repoCwd, ["worktree", "add", "--track", "-b", branch, dir, "origin/\(branch)"])) != nil {
+        linkNodeModules(from: root, to: dir)
         return BranchWorktree(path: dir, branch: branch)
     }
     // Already checked out elsewhere (or the branch resolves but can't be attached):
     // detached at whichever ref we can resolve.
     for ref in [branch, "origin/\(branch)"] {
         if (try? await gitStrict(repoCwd, ["worktree", "add", "--detach", dir, ref])) != nil {
+            linkNodeModules(from: root, to: dir)
             return BranchWorktree(path: dir, branch: nil)
         }
     }
