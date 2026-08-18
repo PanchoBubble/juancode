@@ -1,8 +1,8 @@
 import Foundation
 import JuancodeCore
 
-/// A CLI conversation found on disk that juancode didn't create — e.g. a claude or
-/// codex session you started in your terminal. Surfaced (opt-in) in the sidebar so
+/// A CLI conversation found on disk that juancode didn't create — e.g. a claude,
+/// codex or opencode session you started in your terminal. Surfaced (opt-in) in the sidebar so
 /// you can resume it inside juancode. `id` is the CLI's own resumable session id.
 public struct ExternalSession: Sendable, Equatable, Identifiable {
     public let id: String
@@ -45,6 +45,23 @@ public func discoverExternalSessions(
         guard let mtime = mtimeMs(path) else { continue }
         candidates.append(Candidate(path: path, provider: .codex, mtime: mtime, claudeId: nil))
     }
+    // opencode keeps conversations in SQLite, so its candidates come back already
+    // resolved. Taking `limit + |excluding|` rows guarantees enough survive the
+    // exclusion filter to fill the page.
+    for row in OpencodeStore.recentSessions(
+        limit: limit + excluding.count, db: roots.opencodeDb ?? OpencodeStore.defaultPath
+    ) {
+        if excluding.contains(row.id) { continue }
+        let folder = (row.directory as NSString).lastPathComponent
+        let title = OpencodeStore.isPlaceholderTitle(row.title)
+            ? nil : tidy(row.title)
+        candidates.append(Candidate(
+            path: "", provider: .opencode, mtime: row.updatedMs, claudeId: nil,
+            resolved: ExternalSession(
+                id: row.id, provider: .opencode, cwd: row.directory,
+                title: title ?? (folder.isEmpty ? row.directory : folder),
+                lastActiveMs: row.updatedMs)))
+    }
     candidates.sort { $0.mtime > $1.mtime }
 
     var sessions: [ExternalSession] = []
@@ -62,6 +79,19 @@ private struct Candidate {
     let provider: ProviderId
     let mtime: Int
     let claudeId: String?
+    /// Set when the candidate needs no content read at all: opencode's row already
+    /// carries its id, directory and title, so it's resolved at scan time and just
+    /// takes its place in the recency ordering.
+    let resolved: ExternalSession?
+
+    init(path: String, provider: ProviderId, mtime: Int, claudeId: String?,
+         resolved: ExternalSession? = nil) {
+        self.path = path
+        self.provider = provider
+        self.mtime = mtime
+        self.claudeId = claudeId
+        self.resolved = resolved
+    }
 }
 
 private func mtimeMs(_ path: String) -> Int? {
@@ -73,7 +103,8 @@ private func mtimeMs(_ path: String) -> Int? {
 /// Read one candidate's content into an `ExternalSession` (nil if unreadable or, for
 /// codex, already owned — its id isn't known until we read `session_meta`).
 private func readExternal(_ cand: Candidate, _ excluding: Set<String>) async -> ExternalSession? {
-    cand.provider == .claude
+    if let resolved = cand.resolved { return resolved }
+    return cand.provider == .claude
         ? await readClaude(cand)
         : await readCodex(cand, excluding)
 }

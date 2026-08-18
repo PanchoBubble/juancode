@@ -35,7 +35,7 @@ final class ReviveSessionTests: XCTestCase {
         SessionRegistry(env: SessionEnvironment(
             resolver: FakeResolver(path: makeScript(script)),
             store: store,
-            discoverCodexId: { _, _ in nil } // never block in tests
+            discoverCliSessionId: { _, _, _ in nil } // never block in tests
         ))
     }
 

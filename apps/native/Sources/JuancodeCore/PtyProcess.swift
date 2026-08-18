@@ -49,6 +49,7 @@ public final class PtyProcess: @unchecked Sendable {
         cwd: String,
         cols: Int,
         rows: Int,
+        envOverrides: [String: String] = [:],
         queue: DispatchQueue = DispatchQueue(label: "juancode.pty"),
         onData: @escaping @Sendable ([UInt8]) -> Void,
         onExit: @escaping @Sendable (Int32) -> Void
@@ -68,6 +69,26 @@ public final class PtyProcess: @unchecked Sendable {
         argv[argvStrings.count] = nil
         let cExecutable = strdup(executable)
         let cCwd: UnsafeMutablePointer<CChar>? = cwd.isEmpty ? nil : strdup(cwd)
+        // Env fidelity by default: with no overrides we build no envp at all and the
+        // child inherits `environ` verbatim through execvp, exactly as before. An
+        // overlay (only opencode's opt-in bypass today) means copying the inherited
+        // environment plus those entries into an envp HERE in the parent, so the child
+        // still touches nothing but pre-built buffers.
+        let envp: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        let envCount: Int
+        if envOverrides.isEmpty {
+            envp = nil
+            envCount = 0
+        } else {
+            var merged = ProcessInfo.processInfo.environment
+            for (k, v) in envOverrides { merged[k] = v }
+            let entries = merged.map { "\($0.key)=\($0.value)" }
+            let buf = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: entries.count + 1)
+            for (i, s) in entries.enumerated() { buf[i] = strdup(s) }
+            buf[entries.count] = nil
+            envp = buf
+            envCount = entries.count
+        }
         // Upper bound of the fd table, read in the PARENT so the child touches only
         // async-signal-safe `close()` (see the fd-hygiene note below, juancode-1qf).
         let maxFd = getdtablesize()
@@ -93,6 +114,11 @@ public final class PtyProcess: @unchecked Sendable {
             var fd: Int32 = 3
             while fd < maxFd { close(fd); fd += 1 }
             if let cCwd { _ = chdir(cCwd) }
+            // With an envp, exec through it (execve takes a path, which is what the
+            // resolver hands us). Falling through to execvp keeps a bare-name
+            // executable working — it loses the overlay, but a session that starts
+            // beats one that doesn't.
+            if let envp { execve(cExecutable, argv, envp) }
             execvp(cExecutable, argv)
             _exit(127)
         }
@@ -103,6 +129,10 @@ public final class PtyProcess: @unchecked Sendable {
         argv.deallocate()
         free(cExecutable)
         if let cCwd { free(cCwd) }
+        if let envp {
+            for i in 0..<envCount { free(envp[i]) }
+            envp.deallocate()
+        }
 
         self.masterFd = master
         self.pid = childPid

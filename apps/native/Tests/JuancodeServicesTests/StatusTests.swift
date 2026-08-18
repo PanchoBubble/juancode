@@ -73,6 +73,50 @@ final class ParseCodexListTests: XCTestCase {
     }
 }
 
+/// `opencode mcp list` has no --json: it prints a coloured tree, one bullet line per
+/// server plus an indented detail line. This is its real output, escapes included.
+final class ParseOpencodeListTests: XCTestCase {
+    func testParsesBulletLinesWithTheirDetailAndHealth() {
+        let out = [
+            "\u{1B}[0m",
+            "\u{1B}[36m┌\u{1B}[0m  MCP Servers",
+            "│",
+            "●  ✓ linear \u{1B}[90mconnected",
+            "│      \u{1B}[90mhttps://mcp.linear.app/mcp",
+            "│",
+            "●  ✗ pencil \u{1B}[90mfailed to connect",
+            "│      \u{1B}[90m/Applications/Pen.app/out/mcp-server --app desktop",
+            "│",
+            "└  2 server(s)",
+        ].joined(separator: "\n")
+
+        let servers = parseOpencodeList(out)
+        XCTAssertEqual(servers.count, 2)
+
+        XCTAssertEqual(servers[0].name, "linear")
+        XCTAssertEqual(servers[0].detail, "https://mcp.linear.app/mcp")
+        XCTAssertEqual(servers[0].transport, "http")
+        XCTAssertEqual(servers[0].health, .connected)
+        XCTAssertEqual(servers[0].statusLabel, "connected")
+
+        XCTAssertEqual(servers[1].name, "pencil")
+        XCTAssertEqual(servers[1].detail, "/Applications/Pen.app/out/mcp-server --app desktop")
+        XCTAssertEqual(servers[1].transport, "stdio")
+        XCTAssertEqual(servers[1].health, .failed)
+    }
+
+    func testTheSummaryLineIsNotMistakenForADetail() {
+        let servers = parseOpencodeList("●  ✓ linear connected\n└  1 server(s)")
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertEqual(servers[0].detail, "")
+    }
+
+    func testAnEmptyOrUnexpectedOutputYieldsNoServers() {
+        XCTAssertEqual(parseOpencodeList(""), [])
+        XCTAssertEqual(parseOpencodeList("No MCP servers configured"), [])
+    }
+}
+
 /// Drives `getAllStatus` end-to-end against fake `claude`/`codex` scripts. The
 /// resolver returns absolute script paths (≈ the `JUANCODE_*_BIN` overrides the
 /// TS honours), so no real CLI is needed.
@@ -119,8 +163,9 @@ final class GetAllStatusTests: XCTestCase {
         let resolver = FakeResolver(paths: [.claude: claude, .codex: codex])
         let all = await getAllStatus(resolver: resolver)
 
-        // Order preserved (ProviderId.allCases: claude, then codex).
-        XCTAssertEqual(all.map { $0.id }, [.claude, .codex])
+        // Order preserved (ProviderId.allCases: claude, codex, opencode). opencode has
+        // no fake script here, so it reports unavailable — the point is the ordering.
+        XCTAssertEqual(all.map { $0.id }, [.claude, .codex, .opencode])
 
         let c = all[0]
         XCTAssertEqual(c.id, .claude)

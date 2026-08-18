@@ -391,8 +391,8 @@ const ORACLE_SYSTEM =
   "into projects through the sidecar: " +
   "`curl -sS -X POST http://127.0.0.1:4281/api/dispatch -H 'content-type: application/json' " +
   '-d \'{"project":"<abs path>","prompt":"<instruction>"}\'` (optional fields: ' +
-  '"provider":"codex", "worktree":true, and "telegramChatId":<id> when told the ' +
-  "request came from a Telegram chat). The reply carries the real outcome — dispatchId " +
+  '"provider":"codex"|"opencode", "worktree":true, and "telegramChatId":<id> when told ' +
+  "the request came from a Telegram chat). The reply carries the real outcome — dispatchId " +
   "plus sessionId, queued, or the actual error — so report it instead of assuming success. " +
   "DISPATCH BY DEFAULT: you are an orchestrator, not a worker. Any task that touches " +
   "a project's code, files, tests, or git you dispatch to an agent in that project — " +

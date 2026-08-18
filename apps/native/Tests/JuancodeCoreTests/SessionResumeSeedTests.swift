@@ -37,7 +37,7 @@ import Testing
         SessionEnvironment(
             resolver: FakeResolver(path: script),
             store: InMemorySessionStore(),
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         )
     }
 

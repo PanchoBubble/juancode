@@ -157,7 +157,7 @@ private final class RecordingLog: SessionActivityLogging, @unchecked Sendable {
         let env = SessionEnvironment(
             resolver: FakeResolver(path: makeScript("printf 'working... esc to interrupt\\n'\ncat\n")),
             store: InMemorySessionStore(),
-            discoverCodexId: { _, _ in nil },
+            discoverCliSessionId: { _, _, _ in nil },
             log: recorder
         )
         let cwd = FileManager.default.temporaryDirectory.path

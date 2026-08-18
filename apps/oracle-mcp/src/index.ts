@@ -143,7 +143,7 @@ function buildServer(): McpServer {
       inputSchema: {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
-        provider: z.enum(["claude", "codex"]).optional().describe("Default: claude"),
+        provider: z.enum(["claude", "codex", "opencode"]).optional().describe("Default: claude"),
         worktree: z
           .boolean()
           .optional()

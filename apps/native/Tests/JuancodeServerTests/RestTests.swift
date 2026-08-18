@@ -55,7 +55,7 @@ final class RestTests: XCTestCase {
             try await client.execute(uri: "/api/providers", method: .get) { res in
                 XCTAssertEqual(res.status, .ok)
                 let ids = (Self.json(res) as? [[String: Any]])?.compactMap { $0["id"] as? String }
-                XCTAssertEqual(ids, ["claude", "codex"])
+                XCTAssertEqual(ids, ["claude", "codex", "opencode"])
             }
         }
     }

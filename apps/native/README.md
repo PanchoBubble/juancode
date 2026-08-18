@@ -1,8 +1,8 @@
 # juancode native (Swift)
 
 Native macOS port of juancode where **the app is the server** (epic `juancode-u34`).
-A single in-process registry owns the real ptys (claude/codex via `forkpty`, env
-untouched), fanning pty output out to N subscribers: the local SwiftUI view AND
+A single in-process registry owns the real ptys (claude/codex/opencode via `forkpty`,
+env untouched), fanning pty output out to N subscribers: the local SwiftUI view AND
 remote browser/phone clients over an embedded WS server.
 
 ## `JuancodeCore` — the node-pty replacement (`juancode-u34.2`)
@@ -27,7 +27,15 @@ core has no UI/server deps.
 
 - **Env fidelity by construction.** `PtyProcess` spawns via `forkpty` + `execvp`,
   inheriting `environ` verbatim — no shadow HOME/CODEX_HOME, no envp built. The
-  prime directive holds with no careful copying.
+  prime directive holds with no careful copying. The single exception is an explicit
+  per-spawn overlay (`ProviderSpec.spawnEnv`), used only for a knob a CLI exposes
+  solely as an env var: opencode's opt-in `OPENCODE_PERMISSION` bypass, which has no
+  TUI flag. With an overlay the child execs via `execve` on a merged copy of the
+  parent's environment; with none (claude, codex, every non-bypass session) it takes
+  the untouched `execvp` path.
+- **A missing CLI is refused, not spawned.** `locateBin` reports when no probe found
+  the binary, so `Session.create` throws `cliNotFound` naming the provider instead of
+  handing back a session whose child already died in `execvp` (juancode-meqj).
 - **fork() safety.** All C strings are built in the parent _before_ `forkpty`; the
   child calls only async-signal-safe `chdir`/`execvp`/`_exit`. (fork in a
   multithreaded process can't safely `malloc`.)
@@ -79,10 +87,21 @@ the prime directive).
 | `SessionTitle` / `SessionUsage`    | `sessionTitle.ts` / `sessionUsage.ts`           |
 | `RecoverSession`                   | `recoverSession.ts` (recover an old CLI id)     |
 | `EphemeralPty`                     | `editor.ts` + `terminal.ts` (editor/shell ptys) |
+| `OpencodeStore`                    | no TS analogue — reads opencode's own SQLite db  |
+| `OpencodeActivityTail`             | `structuredTranscript.ts`, over `part` rows     |
 | `SessionEnvironment.live(store:)`  | the title/usage poll seam wired into `Session`  |
 
 Title/usage polling is injected into `Session` via `SessionEnvironment` (the core
 stays dependency-free); use `SessionEnvironment.live(store:)` for the real seams.
+
+opencode is the one provider whose history isn't JSONL on disk: its sessions, titles,
+token/cost totals and message parts all live in `~/.local/share/opencode/opencode.db`,
+which `OpencodeStore` reads **read-only** (per-call connection, so a live opencode's WAL
+writes are always visible). Two consequences worth knowing: its resumable id only exists
+once the first message is sent (not at TUI boot), so discovery polls for 15 minutes to
+match `recoverCliSessionId`'s window; and its cost figure is opencode's own accounting
+rather than our per-model estimate. Point `JUANCODE_OPENCODE_DB` at a fixture to test
+against one.
 
 ## `JuancodeServer` — embedded WS+HTTP server (`juancode-u34.3`)
 

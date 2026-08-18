@@ -29,7 +29,7 @@ export interface DispatchRequest {
   project: string;
   /** The seed instruction sent to the agent once its TUI is up. */
   prompt: string;
-  provider?: "claude" | "codex";
+  provider?: "claude" | "codex" | "opencode";
   /** Isolate the agent in a fresh git worktree off `project`. */
   worktree?: boolean;
   /** The Telegram chat the dispatch originated from, when it did. Recorded in the

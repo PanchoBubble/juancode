@@ -575,7 +575,7 @@ export const consoleHtml = /* html */ `<!doctype html>
           <textarea id="d-prompt" placeholder="What should the agent do?"></textarea>
           <div class="grid2">
             <div><label>Provider</label>
-              <select id="d-prov"><option>claude</option><option>codex</option></select></div>
+              <select id="d-prov"><option>claude</option><option>codex</option><option>opencode</option></select></div>
             <div><label>Worktree</label>
               <select id="d-wt"><option value="false">No</option><option value="true">Yes</option></select></div>
           </div>

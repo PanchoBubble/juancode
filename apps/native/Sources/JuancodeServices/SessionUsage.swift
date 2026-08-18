@@ -12,6 +12,8 @@ import JuancodeCore
 ///     summing. Cost is summed per message using that message's model.
 ///   - Codex emits a running `token_count` event whose `info.total_token_usage`
 ///     is cumulative — we just take the last one.
+///   - opencode tallies tokens *and* cost onto its session row as it goes, so
+///     `OpencodeStore` just reads them (its cost is the CLI's own, not our estimate).
 ///
 /// Cost is a best-effort *estimate* from published per-MTok rates (below). For a
 /// model we don't have a price for — or Codex, which doesn't expose a per-token
@@ -25,9 +27,14 @@ import JuancodeCore
 public struct UsageRoots {
     public var claudeProjects: String?
     public var codexSessions: String?
-    public init(claudeProjects: String? = nil, codexSessions: String? = nil) {
+    /// opencode's database file (it keeps no per-session transcript); nil uses
+    /// `OpencodeStore.defaultPath`.
+    public var opencodeDb: String?
+    public init(claudeProjects: String? = nil, codexSessions: String? = nil,
+                opencodeDb: String? = nil) {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
+        self.opencodeDb = opencodeDb
     }
 }
 
@@ -310,9 +317,14 @@ public func deriveSessionUsage(
     _ cliSessionId: String,
     _ roots: UsageRoots = UsageRoots()
 ) async -> SessionUsage? {
-    if provider == .claude {
+    switch provider {
+    case .claude:
         return await deriveClaudeUsage(cliSessionId, roots.claudeProjects ?? CLAUDE_PROJECTS)
-    } else {
+    case .codex:
         return await deriveCodexUsage(cliSessionId, roots.codexSessions ?? CODEX_SESSIONS)
+    case .opencode:
+        // opencode keeps running totals — and its own cost figure — on the session row,
+        // so there is nothing to accumulate or dedup here.
+        return OpencodeStore.usage(cliSessionId, db: roots.opencodeDb ?? OpencodeStore.defaultPath)
     }
 }

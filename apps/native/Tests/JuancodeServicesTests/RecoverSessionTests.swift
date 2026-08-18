@@ -76,7 +76,7 @@ final class RecoverSessionTests: XCTestCase {
             cwd: CWD,
             createdAtMs: createdAt ?? T0,
             excludeIds: Set(excludeIds),
-            roots: RecoverRoots(claudeProjects: root)
+            roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)
         )
     }
 
@@ -129,7 +129,7 @@ final class RecoverSessionTests: XCTestCase {
     private func exists(_ root: String, _ id: String, cwd: String? = nil) -> Bool {
         claudeConversationExists(
             cliSessionId: id, cwd: cwd ?? CWD,
-            roots: RecoverRoots(claudeProjects: root)
+            roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)
         )
     }
 
@@ -164,26 +164,26 @@ final class RecoverSessionTests: XCTestCase {
     func testNeedsFreshStartWhenPinnedIdHasNoTranscript() {
         let root = claudeRoot("fresh-needed", [(id: "abc", cwd: CWD, startMs: T0)])
         let m = meta(provider: .claude, cliSessionId: "never-had-a-turn")
-        XCTAssertTrue(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+        XCTAssertTrue(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)))
     }
 
     func testNoFreshStartWhenTranscriptExists() {
         let root = claudeRoot("resumable", [(id: "abc", cwd: CWD, startMs: T0)])
         let m = meta(provider: .claude, cliSessionId: "abc")
-        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)))
     }
 
     func testNoFreshStartWithoutAPinnedId() {
         // Nil id is the `.unresumable` path, not the fresh-start one.
         let root = claudeRoot("no-id", [])
         let m = meta(provider: .claude, cliSessionId: nil)
-        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)))
     }
 
     func testNoFreshStartForDiscoveredIdProviders() {
         // Codex ids are discovered from transcripts that exist, so never doomed.
         let root = claudeRoot("codex", [])
         let m = meta(provider: .codex, cliSessionId: "rollout-1")
-        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root)))
+        XCTAssertFalse(resumeNeedsFreshStart(m, roots: RecoverRoots(claudeProjects: root, opencodeDb: NO_OPENCODE_DB)))
     }
 }

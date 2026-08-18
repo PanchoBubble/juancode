@@ -37,19 +37,27 @@ public struct ProviderSpec: Sendable {
     public let bracketedPaste: Bool
     public let startArgs: @Sendable (_ juancodeId: String, _ opts: SpawnOptions) -> [String]
     public let resumeArgs: @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String]
+    /// Environment entries to overlay on the inherited environment for this spawn,
+    /// for a knob a CLI exposes ONLY as an env var (opencode's bypass). Empty for
+    /// every provider that has a flag — the prime directive still holds: we never
+    /// inject a shadow HOME/CODEX_HOME/config path, and an empty overlay means the
+    /// child inherits `environ` verbatim.
+    public let spawnEnv: @Sendable (_ opts: SpawnOptions) -> [String: String]
 
     public init(id: ProviderId,
                 label: String,
                 pinsSessionId: Bool,
                 bracketedPaste: Bool = true,
                 startArgs: @escaping @Sendable (_ juancodeId: String, _ opts: SpawnOptions) -> [String],
-                resumeArgs: @escaping @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String]) {
+                resumeArgs: @escaping @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String],
+                spawnEnv: @escaping @Sendable (_ opts: SpawnOptions) -> [String: String] = { _ in [:] }) {
         self.id = id
         self.label = label
         self.pinsSessionId = pinsSessionId
         self.bracketedPaste = bracketedPaste
         self.startArgs = startArgs
         self.resumeArgs = resumeArgs
+        self.spawnEnv = spawnEnv
     }
 }
 
@@ -113,12 +121,42 @@ public enum Providers {
         }
     )
 
-    public static let all: [ProviderId: ProviderSpec] = [.claude: claude, .codex: codex]
+    /// opencode takes `-m provider/model` (e.g. "anthropic/claude-opus-4-6"), a
+    /// different naming scheme again from Claude's and Codex's — forwarded as given.
+    static func opencodeModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
+    public static let opencode = ProviderSpec(
+        id: .opencode,
+        label: "opencode",
+        pinsSessionId: false,
+        // `--session <id>` continues an EXISTING conversation only — there's no flag
+        // to pin a new one — so a fresh session starts clean and we read the id it
+        // created out of opencode's own database (see `OpencodeStore`).
+        startArgs: { _, opts in opencodeModelArgs(opts.model) },
+        resumeArgs: { cliSessionId, opts in
+            ["--session", cliSessionId] + opencodeModelArgs(opts.model)
+        },
+        // opencode's TUI has no `--dangerously-skip-permissions` (only `opencode run`
+        // does), so bypass rides on the env var its config layer reads. Set ONLY when
+        // the session opted in; otherwise the overlay is empty and the child inherits
+        // the environment untouched.
+        spawnEnv: { opts in
+            guard opts.skipPermissions else { return [:] }
+            return ["OPENCODE_PERMISSION": #"{"edit":"allow","bash":"allow","webfetch":"allow"}"#]
+        }
+    )
+
+    public static let all: [ProviderId: ProviderSpec] =
+        [.claude: claude, .codex: codex, .opencode: opencode]
 
     public static func spec(for id: ProviderId) -> ProviderSpec {
         switch id {
         case .claude: return claude
         case .codex: return codex
+        case .opencode: return opencode
         }
     }
 }
@@ -134,6 +172,18 @@ public func isProviderId(_ value: String) -> Bool {
 /// claude/codex installed.
 public protocol BinaryResolver: Sendable {
     func command(for provider: ProviderId) -> String
+    /// The absolute path when the CLI really exists, nil when every probe came up
+    /// empty. `command(for:)` still answers with the bare name in that case (execvp
+    /// may yet resolve it in the child), but a caller that would rather refuse the
+    /// spawn than hand the user a dead pane asks this instead (juancode-meqj).
+    ///
+    /// Defaulted so a test's fake resolver — which points at a path it knows exists —
+    /// stays valid without implementing it.
+    func resolved(for provider: ProviderId) -> String?
+}
+
+public extension BinaryResolver {
+    func resolved(for provider: ProviderId) -> String? { command(for: provider) }
 }
 
 /// Resolve a CLI to the SAME absolute path the user's interactive terminal would.
@@ -142,6 +192,14 @@ public protocol BinaryResolver: Sendable {
 /// login shell, so we ask the login shell to resolve the command. Faithful
 /// environment is the whole point — we never inject a shadow HOME/PATH.
 public func resolveBin(_ cmd: String, override: String?) -> String {
+    locateBin(cmd, override: override) ?? cmd
+}
+
+/// The same resolution as `resolveBin`, but honest about failure: nil when no probe
+/// found `cmd` anywhere. Callers that can't do anything useful with a bare name
+/// (spawning an agent CLI) use this to fail fast with a real message instead of
+/// letting `execvp` die inside a fresh pty (juancode-meqj).
+public func locateBin(_ cmd: String, override: String?) -> String? {
     // An explicit override short-circuits before the cache, so a test can still
     // point a binary at a stub via its env var (`JUANCODE_*_BIN`) on any call.
     if let override, !override.isEmpty { return override }
@@ -152,10 +210,10 @@ public func resolveBin(_ cmd: String, override: String?) -> String {
     // -PATH launch pays the blocking shell probes below on every call, which starves
     // the concurrency pool when several spawns fan out at once.
     if let cached = resolveBinCache.get(cmd) { return cached }
-    // A recent probe already came up empty. Skip straight to the bare name rather
-    // than re-paying the shell round-trips; the cooldown expires so a binary
-    // installed (or a shell that got faster) while the app runs still resolves.
-    if resolveBinCache.inMissCooldown(cmd) { return cmd }
+    // A recent probe already came up empty. Report the miss again rather than
+    // re-paying the shell round-trips; the cooldown expires so a binary installed
+    // (or a shell that got faster) while the app runs still resolves.
+    if resolveBinCache.inMissCooldown(cmd) { return nil }
 
     // Probes, cheapest first — each one alone is enough on some setup:
     //  1. the inherited PATH, no subprocess. A terminal-launched juancode already
@@ -176,12 +234,13 @@ public func resolveBin(_ cmd: String, override: String?) -> String {
         resolveBinCache.set(cmd, hit)
         return hit
     }
-    // Nothing found. Fall back to the bare name (execvp still resolves it via PATH
-    // in the child) but do NOT cache that as the answer: a probe can come up empty
-    // for reasons that have nothing to do with the binary — a slow rc, a transient
-    // spawn failure — and caching it would wedge every later call until restart.
+    // Nothing found. Remember the miss only for the cooldown window: a probe can come
+    // up empty for reasons that have nothing to do with the binary — a slow rc, a
+    // transient spawn failure — and caching it for good would wedge every later call
+    // until restart. `resolveBin` still degrades to the bare name so execvp gets a
+    // last chance; `locateBin`'s nil is what lets a caller refuse the spawn instead.
     resolveBinCache.noteMiss(cmd)
-    return cmd
+    return nil
 }
 
 /// Process-lifetime memo of `resolveBin`'s no-override results, keyed by command.
@@ -234,6 +293,8 @@ let wellKnownBinDirs: [String] = {
         "\(home)/.local/bin",                       // pipx, uv, hand-rolled
         "\(home)/.bun/bin", "\(home)/.cargo/bin", "\(home)/go/bin",
         "\(home)/.volta/bin", "\(home)/.npm-global/bin",
+        "\(home)/.opencode/bin",                    // opencode's own installer
+
         "/opt/local/bin",                           // MacPorts
     ]
 }()
@@ -305,14 +366,28 @@ public func resolveEditorCommand(_ raw: String = Config.editor) -> (executable: 
     return (resolveBin(cmd, override: nil), Array(parts.dropFirst()))
 }
 
-/// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN`.
+/// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` /
+/// `JUANCODE_OPENCODE_BIN`.
 public struct DefaultBinaryResolver: BinaryResolver {
     public init() {}
-    public func command(for provider: ProviderId) -> String {
+
+    /// The bare command name and its env override, per provider.
+    private func spawnTarget(_ provider: ProviderId) -> (cmd: String, override: String?) {
         let env = ProcessInfo.processInfo.environment
         switch provider {
-        case .claude: return resolveBin("claude", override: env["JUANCODE_CLAUDE_BIN"])
-        case .codex: return resolveBin("codex", override: env["JUANCODE_CODEX_BIN"])
+        case .claude: return ("claude", env["JUANCODE_CLAUDE_BIN"])
+        case .codex: return ("codex", env["JUANCODE_CODEX_BIN"])
+        case .opencode: return ("opencode", env["JUANCODE_OPENCODE_BIN"])
         }
+    }
+
+    public func command(for provider: ProviderId) -> String {
+        let t = spawnTarget(provider)
+        return resolveBin(t.cmd, override: t.override)
+    }
+
+    public func resolved(for provider: ProviderId) -> String? {
+        let t = spawnTarget(provider)
+        return locateBin(t.cmd, override: t.override)
     }
 }

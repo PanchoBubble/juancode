@@ -1,9 +1,25 @@
 import Foundation
 
-public enum SessionError: Error {
+public enum SessionError: Error, CustomStringConvertible {
     case spawnFailed
     case notResumable
     case notRunning
+    /// The provider's CLI couldn't be found anywhere (PATH, login shell, the usual
+    /// install dirs). Refused before forkpty so the user gets this instead of a pane
+    /// whose child died in `execvp` (juancode-meqj).
+    case cliNotFound(provider: ProviderId, command: String)
+
+    public var description: String {
+        switch self {
+        case .spawnFailed: return "the pty couldn't be spawned"
+        case .notResumable: return "the session has no resumable CLI conversation"
+        case .notRunning: return "the session isn't running"
+        case let .cliNotFound(provider, command):
+            return "the \(Providers.spec(for: provider).label) CLI isn't installed — "
+                + "`\(command)` isn't on PATH, in your login shell, or in the usual install dirs. "
+                + "Install it, or point JUANCODE_\(provider.rawValue.uppercased())_BIN at it."
+        }
+    }
 }
 
 /// The result of seeding a fresh session with an initial prompt (`Session.autoSubmit`).
@@ -25,9 +41,13 @@ public struct SessionEnvironment: Sendable {
     /// persisted one so the queue survives reconnects / restarts.
     public var messageQueue: MessageQueue
     public var scrollbackLimit: Int
-    /// Discover a Codex CLI session id post-spawn. Defaults to the real scanner;
-    /// tests override it. `(cwd, sinceMs) -> id?`.
-    public var discoverCodexId: @Sendable (_ cwd: String, _ sinceMs: Int) async -> String?
+    /// Discover a CLI session id post-spawn, for the providers that can't have one
+    /// pinned (Codex, opencode). Defaults to the real Codex scanner — opencode's lives
+    /// in JuancodeServices, so the live environment injects the full version; tests
+    /// override it. `(provider, cwd, sinceMs) -> id?`.
+    public var discoverCliSessionId: @Sendable (
+        _ provider: ProviderId, _ cwd: String, _ sinceMs: Int
+    ) async -> String?
     /// Read the CLI's generated title from its transcript. Injected from
     /// `JuancodeServices` (`deriveSessionTitle`) so the core stays dependency-free;
     /// defaults to nil (no title polling). `(provider, cliSessionId) -> title?`.
@@ -57,8 +77,10 @@ public struct SessionEnvironment: Sendable {
         store: SessionStore = InMemorySessionStore(),
         messageQueue: MessageQueue = MessageQueue(),
         scrollbackLimit: Int = 256 * 1024,
-        discoverCodexId: @escaping @Sendable (String, Int) async -> String? = {
-            await CodexSessionDiscovery.capture(cwd: $0, sinceMs: $1)
+        discoverCliSessionId: @escaping @Sendable (ProviderId, String, Int) async -> String? = {
+            provider, cwd, sinceMs in
+            guard provider == .codex else { return nil }
+            return await CodexSessionDiscovery.capture(cwd: cwd, sinceMs: sinceMs)
         },
         deriveTitle: @escaping @Sendable (ProviderId, String) async -> String? = { _, _ in nil },
         deriveUsage: @escaping @Sendable (ProviderId, String) async -> SessionUsage? = { _, _ in nil },
@@ -73,7 +95,7 @@ public struct SessionEnvironment: Sendable {
         self.store = store
         self.messageQueue = messageQueue
         self.scrollbackLimit = scrollbackLimit
-        self.discoverCodexId = discoverCodexId
+        self.discoverCliSessionId = discoverCliSessionId
         self.deriveTitle = deriveTitle
         self.deriveUsage = deriveUsage
         self.startActivityTail = startActivityTail
@@ -411,13 +433,34 @@ public final class Session: @unchecked Sendable {
             self?.emitActivity(state, notify)
         }
 
-        let command = executableOverride ?? env.resolver.command(for: meta.provider)
+        // An agent session is only worth spawning if its CLI actually exists: without
+        // this, an uninstalled provider costs the caller the full resolver probe (up to
+        // an interactive-shell round trip) and then hands back a live-looking session
+        // whose child already `_exit(127)`ed — a black pane with no explanation
+        // (juancode-meqj). An editor session brings its own executable, so it keeps the
+        // permissive path.
+        let command: String
+        if let executableOverride {
+            command = executableOverride
+        } else if let found = env.resolver.resolved(for: meta.provider) {
+            command = found
+        } else {
+            let bare = env.resolver.command(for: meta.provider)
+            env.log.log("cliNotFound", sessionId: meta.id, project: meta.cwd,
+                        fields: ["provider": meta.provider.rawValue, "command": bare])
+            throw SessionError.cliNotFound(provider: meta.provider, command: bare)
+        }
         guard let proc = PtyProcess(
             executable: command,
             args: args,
             cwd: meta.cwd,
             cols: cols,
             rows: rows,
+            // Only ever non-empty for a knob a CLI exposes solely as an env var
+            // (opencode's opt-in bypass); every other spawn inherits `environ` verbatim.
+            envOverrides: meta.kind == .agent
+                ? spec.spawnEnv(SpawnOptions(skipPermissions: meta.skipPermissions))
+                : [:],
             queue: workQueue,
             onData: { [weak self] bytes in self?.handleData(bytes) },
             onExit: { [weak self] code in self?.handleExit(code) }
@@ -442,7 +485,8 @@ public final class Session: @unchecked Sendable {
         // polling, structured activity tail) only makes sense for a real agent CLI.
         // An editor session has no transcript, so it skips all of it.
         if meta.kind == .agent {
-            // For Codex we can't pin the session id, so discover it from the rollout file.
+            // Codex and opencode have no flag to pin a session id, so discover the one
+            // the CLI just created (its rollout file / its own database).
             if !spec.pinsSessionId && meta.cliSessionId == nil {
                 captureCliSessionId()
             }
@@ -1375,15 +1419,16 @@ public final class Session: @unchecked Sendable {
         if changed { persistMeta(titleChanged: false) }
     }
 
-    // MARK: - codex id discovery + persistence
+    // MARK: - post-spawn cli id discovery + persistence
 
     private func captureCliSessionId() {
         let since = nowMs()
         let cwd = lock.withLock { _meta.cwd }
         let id = lock.withLock { _meta.id }
+        let provider = lock.withLock { _meta.provider }
         Task { [weak self] in
             guard let self else { return }
-            let captured = await self.env.discoverCodexId(cwd, since)
+            let captured = await self.env.discoverCliSessionId(provider, cwd, since)
             guard let captured else { return }
             let shouldSet = self.lock.withLock { () -> Bool in
                 // Don't clobber a value set by a later resume.

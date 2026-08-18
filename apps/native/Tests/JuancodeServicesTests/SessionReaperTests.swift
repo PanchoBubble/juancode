@@ -232,7 +232,7 @@ final class SessionReaperTests: XCTestCase {
             resolver: FakeResolver(path: makeScript()),
             store: store,
             messageQueue: queue,
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         ))
         let session = try registry.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
@@ -289,7 +289,7 @@ final class SessionReaperTests: XCTestCase {
             resolver: FakeResolver(path: makeScript()),
             store: store,
             messageQueue: queue,
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         ))
         let session = try registry.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
@@ -320,7 +320,7 @@ final class SessionReaperTests: XCTestCase {
             resolver: FakeResolver(path: makeScript()),
             store: store,
             messageQueue: queue,
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         ))
         let session = try registry.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
@@ -347,7 +347,7 @@ final class SessionReaperTests: XCTestCase {
             resolver: FakeResolver(path: makeScript()),
             store: store,
             messageQueue: queue,
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         ))
         let session = try registry.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
@@ -382,7 +382,7 @@ final class SessionReaperTests: XCTestCase {
             resolver: FakeResolver(path: makeScript()),
             store: store,
             messageQueue: queue,
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         ))
         let session = try registry.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)

@@ -59,7 +59,7 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     public var project: String
     /// The seed instruction sent to the agent once its TUI is up.
     public var prompt: String
-    /// `"claude"` (default) or `"codex"`.
+    /// `"claude"` (default), `"codex"` or `"opencode"`.
     public var provider: String?
     /// Isolate the dispatched agent in a fresh git worktree off `project`.
     public var worktree: Bool?
@@ -533,12 +533,12 @@ juancode session in that project:
 ```
 
 Fields: `project` (absolute path from the `projects` list, required), `prompt`
-(required), `provider` (`"claude"` or `"codex"`, default claude), `worktree`
+(required), `provider` (`"claude"`, `"codex"` or `"opencode"`, default claude), `worktree`
 (default false — set true to isolate the agent in a fresh git worktree off the
 project so parallel agents don't collide), `model` (optional — a model override
 passed to the provider CLI, e.g. `"opus"`, `"sonnet"`, or a full model id; omit
 to use the provider's default. Model names differ per provider — Claude takes
-`"opus"`/`"sonnet"`, codex takes its own ids). Append with your file tools, e.g.:
+`"opus"`/`"sonnet"`, codex takes its own ids, opencode takes `provider/model`). Append with your file tools, e.g.:
 
 ```sh
 echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl

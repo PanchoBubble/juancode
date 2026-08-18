@@ -33,10 +33,15 @@ private let MAX_GAP_MS = 15 * 60_000
 public struct RecoverRoots {
     public var claudeProjects: String?
     public var codexSessions: String?
+    /// opencode's database file (it records conversations in SQLite, not per-session
+    /// transcripts); nil uses `OpencodeStore.defaultPath`.
+    public var opencodeDb: String?
 
-    public init(claudeProjects: String? = nil, codexSessions: String? = nil) {
+    public init(claudeProjects: String? = nil, codexSessions: String? = nil,
+                opencodeDb: String? = nil) {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
+        self.opencodeDb = opencodeDb
     }
 }
 
@@ -183,6 +188,14 @@ private func codexCandidates(_ root: String, _ cwd: String) -> [Candidate] {
     return candidates
 }
 
+/// Every opencode conversation recorded for `cwd`. Its database already stores the
+/// directory and creation time per session, so there are no headers to parse — the
+/// rows *are* the candidates.
+private func opencodeCandidates(_ db: String, _ cwd: String) -> [Candidate] {
+    OpencodeStore.sessions(directory: cwd, db: db)
+        .map { Candidate(id: $0.id, startMs: $0.createdMs) }
+}
+
 /// Pick the candidate that began nearest to (and not well before) `createdAtMs`.
 private func chooseNearest(_ cands: [Candidate], _ createdAtMs: Int, _ exclude: Set<String>) -> String? {
     var best: (id: String, gap: Int)?
@@ -206,9 +219,15 @@ public func recoverCliSessionId(
     excludeIds: Set<String>,
     roots: RecoverRoots = RecoverRoots()
 ) async -> String? {
-    let cands = provider == .claude
-        ? claudeCandidates(roots.claudeProjects ?? RECOVER_CLAUDE_PROJECTS, cwd)
-        : codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
+    let cands: [Candidate]
+    switch provider {
+    case .claude:
+        cands = claudeCandidates(roots.claudeProjects ?? RECOVER_CLAUDE_PROJECTS, cwd)
+    case .codex:
+        cands = codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
+    case .opencode:
+        cands = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
+    }
     return chooseNearest(cands, createdAtMs, excludeIds)
 }
 
@@ -235,9 +254,10 @@ public func claudeConversationExists(
 /// reads each transcript's content to derive a display title for the global
 /// "discover" list; this one is a cheap, cwd-scoped, header-only lookup.
 public struct ResumableCliSession: Sendable, Equatable {
-    /// The CLI that owns this transcript (`claude` or `codex`).
+    /// The CLI that owns this conversation (`claude`, `codex` or `opencode`).
     public let provider: ProviderId
-    /// The id to resume with (`claude --resume <id>` / a Codex rollout id).
+    /// The id to resume with (`claude --resume <id>`, a Codex rollout id, or the id
+    /// `opencode --session <id>` takes).
     public let cliSessionId: String
     /// When the conversation began, ms since epoch.
     public let startMs: Int
@@ -249,7 +269,7 @@ public struct ResumableCliSession: Sendable, Equatable {
     }
 }
 
-/// List every resumable CLI conversation (Claude + Codex) whose transcript ran in
+/// List every resumable CLI conversation (Claude + Codex + opencode) that ran in
 /// `cwd`, newest first. Reuses the same header parsing as `recoverCliSessionId`
 /// (Claude: basename = id, cwd+timestamp on the first matching line; Codex:
 /// `session_meta` payload id+cwd) but applies no time window and no exclusion —
@@ -264,5 +284,7 @@ public func listExternalSessions(
         .map { ResumableCliSession(provider: .claude, cliSessionId: $0.id, startMs: $0.startMs) }
     let codex = codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
         .map { ResumableCliSession(provider: .codex, cliSessionId: $0.id, startMs: $0.startMs) }
-    return (claude + codex).sorted { $0.startMs > $1.startMs }
+    let opencode = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
+        .map { ResumableCliSession(provider: .opencode, cliSessionId: $0.id, startMs: $0.startMs) }
+    return (claude + codex + opencode).sorted { $0.startMs > $1.startMs }
 }

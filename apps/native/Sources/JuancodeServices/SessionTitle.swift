@@ -8,6 +8,8 @@ import JuancodeCore
 ///     `~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`. We take the latest.
 ///   - Codex has no generated title, so we fall back to the first `user_message`
 ///     payload in its rollout file (the user's opening prompt).
+///   - opencode stores a generated title on the session row of its own SQLite
+///     database, which `OpencodeStore` reads directly.
 ///
 /// Returns nil when nothing is available yet (e.g. before the first turn), in
 /// which case the caller keeps the existing placeholder title.
@@ -25,9 +27,14 @@ private let MAX_TITLE_LEN = 80
 public struct TitleRoots {
     public var claudeProjects: String?
     public var codexSessions: String?
-    public init(claudeProjects: String? = nil, codexSessions: String? = nil) {
+    /// opencode's database file rather than a transcript directory (it has no
+    /// per-session files); nil uses `OpencodeStore.defaultPath`.
+    public var opencodeDb: String?
+    public init(claudeProjects: String? = nil, codexSessions: String? = nil,
+                opencodeDb: String? = nil) {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
+        self.opencodeDb = opencodeDb
     }
 }
 
@@ -222,9 +229,14 @@ public func deriveSessionTitle(
     _ cliSessionId: String,
     _ roots: TitleRoots = TitleRoots()
 ) async -> String? {
-    if provider == .claude {
+    switch provider {
+    case .claude:
         return await deriveClaudeTitle(cliSessionId, roots.claudeProjects ?? CLAUDE_PROJECTS)
-    } else {
+    case .codex:
         return await deriveCodexTitle(cliSessionId, roots.codexSessions ?? CODEX_SESSIONS)
+    case .opencode:
+        // opencode keeps its own generated title on the session row — no transcript
+        // scan, no caching needed (see OpencodeStore).
+        return OpencodeStore.title(cliSessionId, db: roots.opencodeDb ?? OpencodeStore.defaultPath)
     }
 }

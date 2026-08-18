@@ -7,6 +7,7 @@ import Foundation
 public enum ProviderId: String, Codable, Sendable, CaseIterable {
     case claude
     case codex
+    case opencode
 }
 
 /// Inferred live activity of a running session. Derived from the pty stream

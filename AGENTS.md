@@ -2,14 +2,17 @@
 
 ## What juancode is
 
-A **native macOS harness** for running the real `claude` (Claude Code) and `codex` CLIs,
-with a Node **Telegram/phone sidecar** for remote steering. Unlike t3code, it does **not**
-reimplement the agents or their MCP plumbing — it spawns the genuine CLI binaries in a
-pseudo-terminal with the user's environment inherited untouched. That means user-scope MCP
-servers (`~/.claude.json`), account connectors, `~/.codex/config.toml`, and project
-`.mcp.json` all load exactly as they do in a normal terminal. Preserving that faithfulness
-is the core value of this project — never inject a shadow `HOME`/`CODEX_HOME` or override
-`mcpServers`.
+A **native macOS harness** for running the real `claude` (Claude Code), `codex` and
+`opencode` CLIs, with a Node **Telegram/phone sidecar** for remote steering. Unlike
+t3code, it does **not** reimplement the agents or their MCP plumbing — it spawns the
+genuine CLI binaries in a pseudo-terminal with the user's environment inherited
+untouched. That means user-scope MCP servers (`~/.claude.json`), account connectors,
+`~/.codex/config.toml`, `~/.config/opencode/opencode.json`, and project `.mcp.json` all
+load exactly as they do in a normal terminal. Preserving that faithfulness is the core
+value of this project — never inject a shadow `HOME`/`CODEX_HOME` or override
+`mcpServers`. The one sanctioned exception is a per-spawn env entry a CLI offers no flag
+for (opencode's opt-in `OPENCODE_PERMISSION` bypass), set only when that session asked
+for it.
 
 ## Stack
 
@@ -64,8 +67,8 @@ applies to dispatched/background agent sessions.
 
 - Native app: `cd apps/native && swift run juancode-app` (embedded server on `:4280`).
 - Sidecar: `pnpm dev:oracle` (or `pnpm dev` for every `apps/*` Node package).
-- Requires `claude` and/or `codex` on PATH and authenticated. Override binary paths with
-  `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` if needed.
+- Requires `claude`, `codex` and/or `opencode` on PATH and authenticated. Override binary
+  paths with `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN` if needed.
 
 <!-- BEGIN BEADS INTEGRATION -->
 

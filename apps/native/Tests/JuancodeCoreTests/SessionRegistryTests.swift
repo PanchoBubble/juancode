@@ -30,7 +30,7 @@ import Testing
             resolver: FakeResolver(path: script),
             store: store,
             scrollbackLimit: 256 * 1024,
-            discoverCodexId: { _, _ in nil } // never block in tests
+            discoverCliSessionId: { _, _, _ in nil } // never block in tests
         )
     }
 

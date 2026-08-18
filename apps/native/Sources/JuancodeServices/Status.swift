@@ -2,8 +2,9 @@ import Foundation
 import JuancodeCore
 
 /// Port of `apps/server/src/status.ts`. Gathers auth/MCP status for every
-/// provider by shelling out to `claude mcp list` / `codex mcp list` and parsing
-/// their (very different) outputs into one unified shape.
+/// provider by shelling out to `claude mcp list` / `codex mcp list --json` /
+/// `opencode mcp list` and parsing their (very different) outputs into one unified
+/// shape.
 
 /// `claude mcp list` health-checks every server, so give it room before timing
 /// out. (TS `LIST_TIMEOUT_MS = 20_000`, in seconds here.)
@@ -208,6 +209,68 @@ public func parseCodexList(_ stdout: String) -> [McpServerStatus] {
     }
 }
 
+// MARK: - opencode parsing
+
+/// Map opencode's status word to a normalized health value.
+func opencodeHealth(_ label: String) -> McpHealth {
+    let l = label.lowercased()
+    if l.contains("connected") { return .connected }
+    if l.contains("auth") { return .needsAuth }
+    if l.contains("connecting") || l.contains("pending") { return .pending }
+    if l.contains("failed") || l.contains("error") { return .failed }
+    if l.contains("disabled") { return .disabled }
+    if l.isEmpty { return .unknown }
+    return .unknown
+}
+
+/// Parse `opencode mcp list`. It prints one bullet line per server followed by an
+/// indented detail line:
+///
+///     ●  ✓ linear connected
+///            https://mcp.linear.app/mcp
+///
+/// so a server is a bullet line (name + status) plus the next non-empty indented line
+/// (its URL or command). The output is coloured and drawn with box characters, both of
+/// which are stripped before matching.
+public func parseOpencodeList(_ stdout: String) -> [McpServerStatus] {
+    var servers: [(name: String, status: String)] = []
+    var details: [Int: String] = [:]  // index into `servers` → detail line
+    for rawLine in stripAnsi(stdout).components(separatedBy: "\n") {
+        // Drop the tree gutter (`│`, `┌`, `└`) and surrounding whitespace.
+        let line = rawLine
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t│┌└├─"))
+            .trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        if line.hasPrefix("●") {
+            // `● ✓ name status words…` — the glyph is decoration, the first remaining
+            // word is the name, the rest is the status.
+            let words = line
+                .trimmingCharacters(in: CharacterSet(charactersIn: "● \t✓✗×!⚠"))
+                .split(separator: " ", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard let name = words.first else { continue }
+            servers.append((name, words.dropFirst().joined(separator: " ")))
+            continue
+        }
+        // A trailing summary line ("4 server(s)") is not a detail.
+        if line.range(of: "^[0-9]+ server", options: .regularExpression) != nil { continue }
+        if !servers.isEmpty, details[servers.count - 1] == nil {
+            details[servers.count - 1] = line
+        }
+    }
+    return servers.enumerated().map { index, server in
+        let detail = details[index] ?? ""
+        return McpServerStatus(
+            name: server.name,
+            detail: detail,
+            // No explicit marker: a URL is http, anything else is a command line.
+            transport: detail.hasPrefix("http") ? "http" : "stdio",
+            health: opencodeHealth(server.status),
+            statusLabel: server.status,
+            auth: nil)
+    }
+}
+
 // MARK: - per-provider aggregation
 
 /// `<command> --version` → first non-empty line, or nil on any failure. Mirrors
@@ -249,6 +312,12 @@ private func getProviderStatus(_ id: ProviderId, resolver: BinaryResolver) async
             let r = try await ProcessRunner.run(command, ["mcp", "list", "--json"],
                                                 timeout: listTimeoutSec, maxBytes: statusMaxBuffer)
             mcpServers = parseCodexList(r.stdout)
+        } else if id == .opencode {
+            // opencode has no --json for this; it prints a decorated (and coloured)
+            // tree, health-checking each server as it goes.
+            let r = try await ProcessRunner.run(command, ["mcp", "list"],
+                                                timeout: listTimeoutSec, maxBytes: statusMaxBuffer)
+            mcpServers = parseOpencodeList(r.stdout)
         } else {
             let r = try await ProcessRunner.run(command, ["mcp", "list"],
                                                 timeout: listTimeoutSec, maxBytes: statusMaxBuffer)

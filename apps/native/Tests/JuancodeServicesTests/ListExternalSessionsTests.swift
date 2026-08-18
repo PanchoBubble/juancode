@@ -3,7 +3,7 @@ import JuancodeCore
 @testable import JuancodeServices
 
 /// Tests for `listExternalSessions` (juancode-723): list every resumable Claude +
-/// Codex conversation for a cwd, newest first, with no time window and no
+/// Codex + opencode conversation for a cwd, newest first, with no time window and no
 /// exclusion. Mirrors the fixture style of `RecoverSessionTests`.
 final class ListExternalSessionsTests: XCTestCase {
     private var tmp: String!
@@ -89,7 +89,7 @@ final class ListExternalSessionsTests: XCTestCase {
             (id: "codex-a", cwd: CWD),
             (id: "codex-other", cwd: OTHER),
         ])
-        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: codex))
+        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: codex, opencodeDb: NO_OPENCODE_DB))
         let ids = Set(got.map(\.cliSessionId))
         XCTAssertEqual(ids, ["claude-a", "codex-a"])
         XCTAssertEqual(got.first(where: { $0.cliSessionId == "claude-a" })?.provider, .claude)
@@ -103,7 +103,7 @@ final class ListExternalSessionsTests: XCTestCase {
             (id: "early", cwd: CWD, startMs: T0 - 60 * 60_000),
             (id: "late", cwd: CWD, startMs: T0 + 60 * 60_000),
         ])
-        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such"))
+        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such", opencodeDb: NO_OPENCODE_DB))
         XCTAssertEqual(Set(got.map(\.cliSessionId)), ["early", "late"])
     }
 
@@ -113,14 +113,37 @@ final class ListExternalSessionsTests: XCTestCase {
             (id: "newest", cwd: CWD, startMs: T0 + 5 * 60_000),
             (id: "middle", cwd: CWD, startMs: T0 + 60_000),
         ])
-        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such"))
+        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such", opencodeDb: NO_OPENCODE_DB))
         XCTAssertEqual(got.map(\.cliSessionId), ["newest", "middle", "oldest"])
         XCTAssertEqual(got.first?.startMs, T0 + 5 * 60_000)
     }
 
+    func testIncludesOpencodeConversationsFromItsDatabase() {
+        let claude = claudeRoot("c", [(id: "claude-a", cwd: CWD, startMs: T0)])
+        let db = (tmp as NSString).appendingPathComponent("opencode.db")
+        OpencodeSqlite.exec(db, """
+            CREATE TABLE session (
+              id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL,
+              time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER,
+              cost REAL DEFAULT 0 NOT NULL, tokens_input INTEGER DEFAULT 0 NOT NULL,
+              tokens_output INTEGER DEFAULT 0 NOT NULL, tokens_reasoning INTEGER DEFAULT 0 NOT NULL,
+              tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+              tokens_cache_write INTEGER DEFAULT 0 NOT NULL);
+            INSERT INTO session (id, parent_id, directory, title, time_created, time_updated)
+              VALUES ('ses_here', NULL, '\(CWD)', 'in this folder', \(T0 + 60_000), \(T0 + 60_000)),
+                     ('ses_there', NULL, '\(OTHER)', 'elsewhere', \(T0), \(T0));
+            """)
+
+        let got = listExternalSessions(
+            cwd: CWD,
+            roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such", opencodeDb: db))
+        XCTAssertEqual(got.map(\.cliSessionId), ["ses_here", "claude-a"])
+        XCTAssertEqual(got.first?.provider, .opencode)
+    }
+
     func testEmptyWhenNoTranscriptsMatch() {
         let claude = claudeRoot("c", [(id: "x", cwd: OTHER, startMs: T0)])
-        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such"))
+        let got = listExternalSessions(cwd: CWD, roots: RecoverRoots(claudeProjects: claude, codexSessions: "/no/such", opencodeDb: NO_OPENCODE_DB))
         XCTAssertTrue(got.isEmpty)
     }
 }

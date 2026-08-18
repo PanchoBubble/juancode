@@ -35,7 +35,7 @@ import Testing
         let env = SessionEnvironment(
             resolver: FakeResolver(path: script),
             store: InMemorySessionStore(),
-            discoverCodexId: { _, _ in nil },
+            discoverCliSessionId: { _, _, _ in nil },
             deriveTitle: { _, _ in "Transcript title" }
         )
         // .claude pins the CLI session id, so the transcript poll is live too —
@@ -52,7 +52,7 @@ import Testing
         let env = SessionEnvironment(
             resolver: FakeResolver(path: script),
             store: InMemorySessionStore(),
-            discoverCodexId: { _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil }
         )
         let s = try Session.create(provider: .codex, cwd: cwd, cols: 80, rows: 24, env: env)
         defer { s.kill() }

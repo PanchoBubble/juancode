@@ -40,7 +40,8 @@ final class ExternalDiscoveryTests: XCTestCase {
     private func discover(_ root: String) async -> [ExternalSession] {
         await discoverExternalSessions(
             limit: 50, excluding: [],
-            roots: TitleRoots(claudeProjects: root, codexSessions: "/nonexistent")
+            roots: TitleRoots(claudeProjects: root, codexSessions: "/nonexistent",
+                              opencodeDb: "/nonexistent/opencode.db")
         ).sessions
     }
 
