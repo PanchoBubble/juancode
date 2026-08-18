@@ -469,6 +469,10 @@ final class AppModel {
     /// The launch sweep that brings every previously-open session back (`reviveLaunchPlan`).
     @ObservationIgnored private var launchReviveTask: Task<Void, Never>?
 
+    /// The sweep's parallel lanes. Unstructured, so `cancelLaunchRevive` has to cancel
+    /// them itself — cancelling `launchReviveTask` alone wouldn't reach them.
+    @ObservationIgnored private var launchReviveLanes: [Task<Void, Never>] = []
+
     /// Restore candidates already revived once this run, so re-opening one within the
     /// same run (after it exits again, say) doesn't re-announce a restore.
     private var revivedRestoresThisRun: Set<String> = []
@@ -2529,9 +2533,13 @@ final class AppModel {
     /// reprint becomes the pane's whole content. The pre-resume scrollback is
     /// still captured for `invalidateFailedResume`'s rollback, so a failed resume
     /// never costs the stored history.
+    /// `settleMs` shortens how long this call waits before reporting success — the
+    /// launch sweep uses it to move on to the next session early while the full
+    /// grace keeps watching in the background (see `confirmResumeSucceeded`).
     @discardableResult
     func reactivate(_ id: String, grid: (cols: Int, rows: Int)? = nil,
-                    seedPrior: Bool = true, quiet: Bool = false) async -> Bool {
+                    seedPrior: Bool = true, quiet: Bool = false,
+                    settleMs: Int = ResumeGrace.fullMs) async -> Bool {
         if isLive(id) { return true }
         // Someone else is already spawning this pty — the launch sweep and a click on
         // the same row, most often. Wait that revive out instead of racing it: both
@@ -2579,13 +2587,24 @@ final class AppModel {
             let g = grid ?? resumeGrid(for: meta)
             let session = try appState.registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)
             refresh()
-            return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior)
+            return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior,
+                                                settleMs: settleMs)
         } catch {
             if !quiet { errorMessage = "Failed to resume: \(error)" }
             appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
                                      fields: ["reason": "\(error)"])
             return false
         }
+    }
+
+    /// How long a resumed pty is watched for a fast exit, and how often.
+    enum ResumeGrace {
+        /// The full window a `--resume` gets to prove it stayed up.
+        static let fullMs = 5000
+        /// Long enough that a stale `--resume` (which quits near-instantly) has already
+        /// died, short enough that the launch sweep isn't mostly sleeping.
+        static let settleMs = 1200
+        static let pollMs = 150
     }
 
     /// Verify a just-resumed pty actually attached to its prior conversation. A
@@ -2595,19 +2614,42 @@ final class AppModel {
     /// a fast exit as a failed resume and `invalidateFailedResume` — otherwise the
     /// banner + the CLI's "No conversation found" error get persisted into scrollback
     /// and re-seeded on every load, stacking "── session resumed ──" copies forever.
+    ///
+    /// `settleMs` below the full grace reports success as soon as the pty has survived
+    /// that much — the launch sweep's lever for not spending 5s of pure waiting per
+    /// session. The watch itself still runs to the full grace, detached, so a resume
+    /// that dies in second four is invalidated exactly as before; the caller just
+    /// isn't held up for it.
     private func confirmResumeSucceeded(_ session: Session, sessionId: String,
-                                        priorScrollback: [UInt8]) async -> Bool {
-        let graceMs = 5000, pollMs = 150
+                                        priorScrollback: [UInt8],
+                                        settleMs: Int = ResumeGrace.fullMs) async -> Bool {
+        let settle = min(settleMs, ResumeGrace.fullMs)
+        guard await watchResume(session, sessionId: sessionId, priorScrollback: priorScrollback,
+                                untilMs: settle) else { return false }
+        guard settle < ResumeGrace.fullMs else { return session.isRunning }
+        Task { @MainActor [weak self] in
+            _ = await self?.watchResume(session, sessionId: sessionId,
+                                        priorScrollback: priorScrollback,
+                                        untilMs: ResumeGrace.fullMs - settle)
+        }
+        return session.isRunning
+    }
+
+    /// Poll a resumed pty for `untilMs`, invalidating (and reporting false) the moment
+    /// it exits. True means it was still alive the whole window.
+    @discardableResult
+    private func watchResume(_ session: Session, sessionId: String,
+                             priorScrollback: [UInt8], untilMs: Int) async -> Bool {
         var elapsed = 0
-        while elapsed < graceMs {
+        while elapsed < untilMs {
             if !session.isRunning {
                 invalidateFailedResume(sessionId, priorScrollback: priorScrollback)
                 return false
             }
-            await Nap.duration(.milliseconds(pollMs))
-            elapsed += pollMs
+            await Nap.duration(.milliseconds(ResumeGrace.pollMs))
+            elapsed += ResumeGrace.pollMs
         }
-        return session.isRunning
+        return true
     }
 
     /// Mark a session whose resume died fast as unresumable: drop the stale
@@ -2705,10 +2747,13 @@ final class AppModel {
 
     /// Pacing for the launch sweep.
     private enum LaunchRevive {
-        /// Gap between one session's resume finishing and the next one starting. The
-        /// sweep is already serial — `reactivate` waits out each pty's resume grace
-        /// before returning — so this is only breathing room, not the real throttle.
-        static let gapMs = 400
+        /// How many resumes may be in flight at once. Each one is a real CLI process,
+        /// so this is what bounds the launch RAM/pty burst; a single lane bounded it
+        /// too, but at ~1.5s per session that put the last of ~40 sessions minutes out.
+        static let lanes = 4
+        /// Gap between one session's resume settling and the next one starting in the
+        /// same lane — breathing room, not the throttle (`lanes` is).
+        static let gapMs = 150
     }
 
     /// Bring back every session that was open when the last run ended, not just the one
@@ -2720,27 +2765,51 @@ final class AppModel {
     /// killed yourself isn't running at that point, so it stays out — open sessions come
     /// back, killed ones stay dead, with no second list to keep in step.
     ///
-    /// Strictly serial, focused pane first. Each resume is a real `claude --resume`
-    /// process, so firing ~20 at once is the RAM spike and pty burst that the one-pane
-    /// restore was written to avoid; doing them one at a time keeps the peak at one
-    /// spawn while still ending up with everything live. `reactivate(quiet:)` keeps a
-    /// session that can't be resumed from flashing an error banner per row — it just
-    /// stays a sleeping row and resumes properly when clicked.
+    /// The focused pane goes first and alone, then the rest come back over a few
+    /// bounded lanes. Each resume is a real `claude --resume` process, so firing ~40 at
+    /// once is the RAM spike and pty burst the one-pane restore was written to avoid —
+    /// but a single lane is the other extreme: at ~1.5s of settle apiece the last row
+    /// of a big restore was still dead a minute in, which reads as nothing having
+    /// persisted. `LaunchRevive.lanes` keeps the peak to a handful of concurrent spawns
+    /// while everything lands in seconds. `reactivate(quiet:)` keeps a session that
+    /// can't be resumed from flashing an error banner per row — it just stays a sleeping
+    /// row and resumes properly when clicked.
     private func reviveLaunchPlan() {
         let focus = restorePlan.focus
         let ordered = (focus.map { [$0] } ?? []) + restorePlan.reopen.filter { $0 != focus }
         guard !ordered.isEmpty else { return }
         launchReviveTask = Task { @MainActor [weak self] in
-            for id in ordered {
-                guard !Task.isCancelled, let self else { return }
-                guard let meta = self.sessions.first(where: { $0.id == id }),
-                      !self.isLive(id) else { continue }
-                let revived = await self.reactivate(id, quiet: true)
-                self.appState.activityLog.log("launchRevive", sessionId: id, project: meta.cwd,
-                                              fields: ["revived": "\(revived)"])
-                await Nap.ms(LaunchRevive.gapMs)
+            guard let self else { return }
+            // The pane you're looking at gets the first slot to itself, so it's live
+            // before the other lanes start competing for CPU.
+            await self.reviveAtLaunch(ordered[0])
+            let rest = Array(ordered.dropFirst())
+            guard !rest.isEmpty, !Task.isCancelled else { return }
+            var lanes: [[String]] = Array(repeating: [], count: min(LaunchRevive.lanes, rest.count))
+            for (i, id) in rest.enumerated() { lanes[i % lanes.count].append(id) }
+            // Unstructured tasks (a task group can't express a @MainActor child here),
+            // so they're tracked and cancelled explicitly by `cancelLaunchRevive`.
+            self.launchReviveLanes = lanes.map { lane in
+                Task { @MainActor [weak self] in
+                    for id in lane {
+                        guard !Task.isCancelled, let self else { return }
+                        await self.reviveAtLaunch(id)
+                        await Nap.ms(LaunchRevive.gapMs)
+                    }
+                }
             }
+            for lane in self.launchReviveLanes { await lane.value }
+            self.launchReviveLanes = []
         }
+    }
+
+    /// Resume one session for the launch sweep: quiet (no per-row error banners) and on
+    /// the short settle, so the lane moves on as soon as this pty has proven it stayed up.
+    private func reviveAtLaunch(_ id: String) async {
+        guard let meta = sessions.first(where: { $0.id == id }), !isLive(id) else { return }
+        let revived = await reactivate(id, quiet: true, settleMs: ResumeGrace.settleMs)
+        appState.activityLog.log("launchRevive", sessionId: id, project: meta.cwd,
+                                 fields: ["revived": "\(revived)"])
     }
 
     /// Stop the launch sweep — nothing half-revived should keep spawning ptys once the
@@ -2748,6 +2817,8 @@ final class AppModel {
     func cancelLaunchRevive() {
         launchReviveTask?.cancel()
         launchReviveTask = nil
+        for lane in launchReviveLanes { lane.cancel() }
+        launchReviveLanes = []
     }
 
     /// Whether `id`'s restored pane should offer to continue the turn it died in.
