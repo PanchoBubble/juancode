@@ -136,6 +136,15 @@ public enum Config {
         reapIdleMinutesOverride ?? 30
     }
 
+    /// Ceiling on simultaneously live CLI sessions (`JUANCODE_MAX_LIVE_SESSIONS`,
+    /// default 12; `0` disables). Past it the reaper sleeps the least-recently-active
+    /// sessions that are safe to sleep, regardless of the idle window — the window
+    /// alone doesn't bound memory, since a session touched every few minutes never
+    /// serves a full window yet still holds a ~300MB process tree.
+    public static var maxLiveSessions: Int {
+        env["JUANCODE_MAX_LIVE_SESSIONS"].flatMap(Int.init) ?? 12
+    }
+
     /// The editor an "open editor" session launches, rooted in the source
     /// session's working directory (`JUANCODE_EDITOR`, default `nvim`). May carry
     /// leading args (e.g. `"code -w"`); the launcher splits on whitespace and

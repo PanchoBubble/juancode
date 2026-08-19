@@ -123,6 +123,20 @@ public enum JuancodeServer {
             try meta(ctx, store)
         }
 
+        // Put a session to sleep: kill the CLI process tree to free its RAM (a
+        // ~300MB phys_footprint each) but keep the row, its scrollback and its
+        // resume id, so the tile comes back on demand. The same thing the idle
+        // reaper does, on request rather than on a timer.
+        router.post("/api/sessions/:id/sleep") { _, ctx in
+            let id = try param(ctx, "id")
+            guard let session = state.registry.get(id), session.isRunning else {
+                throw APIError(.notFound, "no live session")
+            }
+            session.markDormant()
+            session.kill()
+            return Response(status: .noContent)
+        }
+
         // Permanently delete a session: kill its pty, drop from sqlite, remove
         // its auto-created worktree (best-effort).
         router.delete("/api/sessions/:id") { _, ctx in

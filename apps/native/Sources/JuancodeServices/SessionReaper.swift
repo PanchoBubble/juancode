@@ -16,7 +16,7 @@ import JuancodeCore
 /// real work — so any single disturbed signal restarts the streak.
 ///
 /// The decision rule itself (`SessionReapPolicy`) is pure; the OS probes (process
-/// tree, CPU, transcript mtime) are injected seams so tests pin them.
+/// tree, CPU, transcript size) are injected seams so tests pin them.
 
 // MARK: - pure eligibility policy
 
@@ -41,13 +41,16 @@ public struct ReapSample: Sendable, Equatable {
     /// MCP servers). Compared against the count captured at idle-entry: any change
     /// means the tree is (or was) doing something.
     public var descendantCount: Int
-    /// Cumulative CPU time of the whole process tree, ms. A delta above the
-    /// epsilon since idle-entry means work the detector didn't see.
+    /// Cumulative CPU time of the whole process tree, ms. Compared as a *rate*
+    /// against the previous sweep, not as an absolute total since idle-entry: an
+    /// idle CLI is not a quiet process (see `defaultCpuBusyPermille`).
     public var cpuTimeMs: Int
-    /// mtime (ms-since-epoch) of the session's CLI transcript, nil when the file
-    /// can't be located — treated as "no evidence of activity"; the process-tree
-    /// and CPU signals still guard.
-    public var transcriptMtimeMs: Int?
+    /// Size in bytes of the session's CLI transcript, nil when the file can't be
+    /// located — treated as "no evidence of activity"; the process-tree and CPU
+    /// signals still guard. Size rather than mtime: the transcript is append-only,
+    /// so growth is the thing that means the agent produced something, while the
+    /// mtime also moves on flushes that add no records.
+    public var transcriptSizeBytes: Int?
     /// Externally protected (e.g. the focused pane). Never reaped.
     public var isProtected: Bool
 
@@ -58,7 +61,7 @@ public struct ReapSample: Sendable, Equatable {
         lastInputMs: Int,
         descendantCount: Int,
         cpuTimeMs: Int,
-        transcriptMtimeMs: Int?,
+        transcriptSizeBytes: Int?,
         isProtected: Bool = false
     ) {
         self.activity = activity
@@ -67,7 +70,7 @@ public struct ReapSample: Sendable, Equatable {
         self.lastInputMs = lastInputMs
         self.descendantCount = descendantCount
         self.cpuTimeMs = cpuTimeMs
-        self.transcriptMtimeMs = transcriptMtimeMs
+        self.transcriptSizeBytes = transcriptSizeBytes
         self.isProtected = isProtected
     }
 }
@@ -82,11 +85,29 @@ public enum SessionReapPolicy {
         public var idleSinceMs: Int
         public var descendantCount: Int
         public var cpuTimeMs: Int
+        /// Transcript size at idle-entry; growth past it means the agent produced
+        /// records. Nil when the transcript couldn't be located.
+        public var transcriptSizeBytes: Int?
+        /// When the *previous* sweep sampled, and the tree CPU it saw. The CPU
+        /// signal is a rate between consecutive sweeps, so it needs the last
+        /// sample rather than only the idle-entry anchor.
+        public var lastSampleMs: Int
+        public var lastSampleCpuMs: Int
 
-        public init(idleSinceMs: Int, descendantCount: Int, cpuTimeMs: Int) {
+        public init(
+            idleSinceMs: Int,
+            descendantCount: Int,
+            cpuTimeMs: Int,
+            transcriptSizeBytes: Int? = nil,
+            lastSampleMs: Int? = nil,
+            lastSampleCpuMs: Int? = nil
+        ) {
             self.idleSinceMs = idleSinceMs
             self.descendantCount = descendantCount
             self.cpuTimeMs = cpuTimeMs
+            self.transcriptSizeBytes = transcriptSizeBytes
+            self.lastSampleMs = lastSampleMs ?? idleSinceMs
+            self.lastSampleCpuMs = lastSampleCpuMs ?? cpuTimeMs
         }
     }
 
@@ -103,11 +124,22 @@ public enum SessionReapPolicy {
         case eligible
     }
 
-    /// How much cumulative process-tree CPU may accrue over the window before the
-    /// streak is considered disturbed. Idle claude/codex trees (node + MCP
-    /// servers parked in epoll) burn near zero; 5s across a 30-min window is
-    /// generous enough not to trip on heartbeats yet catches real work.
-    public static let defaultCpuEpsilonMs = 5_000
+    /// How fast the process tree may burn CPU between two sweeps before the streak
+    /// is considered disturbed, in permille of one core. An idle CLI is NOT a quiet
+    /// process: it keeps repainting its TUI, measured here at a median 5.8% of a
+    /// core (p90 7.0%, max 10.9%) across 51 idle sessions over 5 minutes. The
+    /// original rule — an absolute 5s of CPU accrued since idle-entry — was
+    /// therefore unmeetable: 40 of those 51 blew past 5s within a *single* 90s
+    /// sweep and 47 of 51 within any 60-min window, so the baseline re-anchored
+    /// every sweep and no session ever became eligible. 400‰ (40% of a core)
+    /// leaves ~4x headroom over idle repainting while still catching real local
+    /// compute the detector missed.
+    public static let defaultCpuBusyPermille = 400
+
+    /// Floor under the rate check: a CPU delta this small is never "work",
+    /// whatever the interval. Guards a sweep pair that lands milliseconds apart,
+    /// where the rate divisor is tiny and any jitter would read as busy.
+    public static let defaultCpuFloorMs = 2_000
 
     /// Evaluate one session against its tracked streak. `baseline` is what the
     /// previous sweep returned in `.holding` (nil when untracked).
@@ -116,7 +148,8 @@ public enum SessionReapPolicy {
         baseline: Baseline?,
         nowMs: Int,
         windowMs: Int,
-        cpuEpsilonMs: Int = defaultCpuEpsilonMs
+        cpuBusyPermille: Int = defaultCpuBusyPermille,
+        cpuFloorMs: Int = defaultCpuFloorMs
     ) -> Verdict {
         guard windowMs > 0 else { return .notIdle } // reaping disabled
         // Hard resets: the detector says work (or a prompt) is pending, a queued
@@ -128,15 +161,30 @@ public enum SessionReapPolicy {
         let fresh = Baseline(
             idleSinceMs: nowMs,
             descendantCount: sample.descendantCount,
-            cpuTimeMs: sample.cpuTimeMs
+            cpuTimeMs: sample.cpuTimeMs,
+            transcriptSizeBytes: sample.transcriptSizeBytes,
+            lastSampleMs: nowMs,
+            lastSampleCpuMs: sample.cpuTimeMs
         )
         guard let base = baseline else { return .holding(fresh) } // idle-entry
 
         // OS ground truth the detector can't fake. Any disturbance restarts the
         // streak from now, with the current tree shape / CPU as the new baseline.
         let treeChanged = sample.descendantCount != base.descendantCount
-        let cpuMoved = sample.cpuTimeMs > base.cpuTimeMs + cpuEpsilonMs
-        let transcriptGrew = (sample.transcriptMtimeMs ?? .min) > base.idleSinceMs
+        // CPU as a rate since the previous sweep, not a total since idle-entry:
+        // idle CLIs burn a steady few percent of a core forever, so any absolute
+        // budget is spent by simply waiting. See `defaultCpuBusyPermille`.
+        let intervalMs = max(1, nowMs - base.lastSampleMs)
+        let cpuDelta = sample.cpuTimeMs - base.lastSampleCpuMs
+        let cpuMoved = cpuDelta >= cpuFloorMs && cpuDelta * 1_000 > intervalMs * cpuBusyPermille
+        // Append-only transcript: growth means the agent produced records. A bare
+        // mtime bump does not — the file is also touched on flushes that add none.
+        let transcriptGrew: Bool
+        if let now = sample.transcriptSizeBytes, let then = base.transcriptSizeBytes {
+            transcriptGrew = now > then
+        } else {
+            transcriptGrew = false
+        }
         let typedSinceIdle = sample.lastInputMs > base.idleSinceMs
         if treeChanged || cpuMoved || transcriptGrew || typedSinceIdle {
             return .holding(fresh)
@@ -144,11 +192,57 @@ public enum SessionReapPolicy {
 
         // Streak intact: reap only once the whole window has been served, the
         // last keystroke is older than the window, and a resume is possible.
+        // The sample point advances even while holding, so the next sweep's rate
+        // is measured against this sweep rather than against idle-entry.
+        var held = base
+        held.lastSampleMs = nowMs
+        held.lastSampleCpuMs = sample.cpuTimeMs
         guard nowMs - base.idleSinceMs >= windowMs,
               nowMs - sample.lastInputMs >= windowMs,
               sample.resumable
-        else { return .holding(base) }
+        else { return .holding(held) }
         return .eligible
+    }
+}
+
+/// The live-session cap (juancode: LRU sleep). The idle window alone doesn't bound
+/// memory — a machine can accumulate dozens of sessions that are each *recently*
+/// active and so never serve a full idle window, while every one of them holds a
+/// full CLI process tree. Measured here: 47 concurrent `claude` sessions at a
+/// median 290MB phys_footprint each — 12.4GB, with the machine 20GB into swap.
+///
+/// So past a ceiling the reaper also sleeps the least-recently-active sessions,
+/// regardless of how long they've been idle. Only sessions that are safe to reap
+/// anyway are candidates; busy ones count toward the total (they're holding the
+/// RAM) but are never chosen.
+public enum SessionCapPolicy {
+    /// One live session's state for the cap decision.
+    public struct Candidate: Sendable, Equatable {
+        public var id: String
+        /// Recency for the LRU order: the later of last output and last input.
+        public var lastActiveMs: Int
+        /// Safe to sleep right now — idle, resumable, nothing queued, unprotected.
+        public var sleepable: Bool
+
+        public init(id: String, lastActiveMs: Int, sleepable: Bool) {
+            self.id = id
+            self.lastActiveMs = lastActiveMs
+            self.sleepable = sleepable
+        }
+    }
+
+    /// Ids to sleep so at most `maxLive` sessions stay live, least-recently-active
+    /// first. `maxLive <= 0` disables the cap. Never returns more than the number
+    /// of sleepable candidates — an over-cap machine full of busy sessions simply
+    /// stays over cap rather than killing work.
+    public static func surplus(_ candidates: [Candidate], maxLive: Int) -> [String] {
+        guard maxLive > 0, candidates.count > maxLive else { return [] }
+        let overBy = candidates.count - maxLive
+        return candidates
+            .filter(\.sleepable)
+            .sorted { ($0.lastActiveMs, $0.id) < ($1.lastActiveMs, $1.id) }
+            .prefix(overBy)
+            .map(\.id)
     }
 }
 
@@ -213,15 +307,15 @@ public enum ProcessTree {
 }
 
 /// The reaper's injected seams: the clock, the process-tree probes, the transcript
-/// mtime lookup, and the external protection check. `live()` wires the real OS.
+/// size lookup, and the external protection check. `live()` wires the real OS.
 public struct SessionReaperProbes: Sendable {
     public var nowMs: @Sendable () -> Int
     /// `(childPid) -> live descendant count` of the session's pty child.
     public var descendantCount: @Sendable (pid_t) -> Int
     /// `(childPid) -> cumulative CPU ms` of the whole process tree.
     public var treeCpuTimeMs: @Sendable (pid_t) -> Int
-    /// `(provider, cliSessionId) -> transcript mtime ms`, nil when not found.
-    public var transcriptMtimeMs: @Sendable (ProviderId, String) async -> Int?
+    /// `(provider, cliSessionId) -> transcript size in bytes`, nil when not found.
+    public var transcriptSizeBytes: @Sendable (ProviderId, String) async -> Int?
     /// `(sessionId) -> never reap right now` (e.g. the focused pane). Defaults to
     /// never-protected; the last-keystroke window covers actively used sessions.
     public var isProtected: @Sendable (String) -> Bool
@@ -230,13 +324,13 @@ public struct SessionReaperProbes: Sendable {
         nowMs: @escaping @Sendable () -> Int = { JuancodeCore.nowMs() },
         descendantCount: @escaping @Sendable (pid_t) -> Int,
         treeCpuTimeMs: @escaping @Sendable (pid_t) -> Int,
-        transcriptMtimeMs: @escaping @Sendable (ProviderId, String) async -> Int?,
+        transcriptSizeBytes: @escaping @Sendable (ProviderId, String) async -> Int?,
         isProtected: @escaping @Sendable (String) -> Bool = { _ in false }
     ) {
         self.nowMs = nowMs
         self.descendantCount = descendantCount
         self.treeCpuTimeMs = treeCpuTimeMs
-        self.transcriptMtimeMs = transcriptMtimeMs
+        self.transcriptSizeBytes = transcriptSizeBytes
         self.isProtected = isProtected
     }
 
@@ -247,11 +341,11 @@ public struct SessionReaperProbes: Sendable {
         return SessionReaperProbes(
             descendantCount: { ProcessTree.descendants(of: $0).count },
             treeCpuTimeMs: { ProcessTree.treeCpuTimeMs(of: $0) },
-            transcriptMtimeMs: { provider, cliSessionId in
+            transcriptSizeBytes: { provider, cliSessionId in
                 guard let file = await paths.resolve(provider, cliSessionId) else { return nil }
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: file),
-                      let mtime = attrs[.modificationDate] as? Date else { return nil }
-                return Int(mtime.timeIntervalSince1970 * 1000)
+                      let size = attrs[.size] as? NSNumber else { return nil }
+                return size.intValue
             }
         )
     }
@@ -287,7 +381,8 @@ public actor SessionReaper {
     private let messageQueue: MessageQueue
     private let probes: SessionReaperProbes
     private var windowMs: Int
-    private let cpuEpsilonMs: Int
+    private var maxLive: Int
+    private let cpuBusyPermille: Int
     private let sweepInterval: Duration
 
     /// Tracked idle streaks by session id; entries drop whenever a session stops
@@ -300,14 +395,16 @@ public actor SessionReaper {
         messageQueue: MessageQueue,
         probes: SessionReaperProbes = .live(),
         windowMs: Int = Config.reapIdleMinutes * 60_000,
-        cpuEpsilonMs: Int = SessionReapPolicy.defaultCpuEpsilonMs,
+        maxLive: Int = Config.maxLiveSessions,
+        cpuBusyPermille: Int = SessionReapPolicy.defaultCpuBusyPermille,
         sweepInterval: Duration = .seconds(90)
     ) {
         self.registry = registry
         self.messageQueue = messageQueue
         self.probes = probes
         self.windowMs = windowMs
-        self.cpuEpsilonMs = cpuEpsilonMs
+        self.maxLive = maxLive
+        self.cpuBusyPermille = cpuBusyPermille
         self.sweepInterval = sweepInterval
     }
 
@@ -317,6 +414,11 @@ public actor SessionReaper {
     /// off a stale baseline.
     public func setIdleWindow(minutes: Int) {
         windowMs = minutes * 60_000
+    }
+
+    /// Change the live-session ceiling at runtime. `<= 0` disables the cap.
+    public func setMaxLive(_ count: Int) {
+        maxLive = count
     }
 
     /// Start the periodic sweep. No-op when already running. Runs even while the
@@ -344,7 +446,9 @@ public actor SessionReaper {
     public func sweepOnce() async -> [String] {
         guard windowMs > 0 else {
             baselines = [:]
-            return []
+            // The cap is a separate guarantee from the idle window: turning
+            // auto-sleep off must not let the machine accumulate without bound.
+            return sleepSurplus(nowMs: probes.nowMs())
         }
         let now = probes.nowMs()
         var reaped: [String] = []
@@ -353,9 +457,9 @@ public actor SessionReaper {
             let meta = session.meta
             // No live child pid (already exiting) — nothing to reap.
             guard let pid = session.childPid else { continue }
-            var mtime: Int?
+            var transcriptSize: Int?
             if let cliSessionId = meta.cliSessionId {
-                mtime = await probes.transcriptMtimeMs(meta.provider, cliSessionId)
+                transcriptSize = await probes.transcriptSizeBytes(meta.provider, cliSessionId)
             }
             let sample = ReapSample(
                 activity: session.activity,
@@ -364,12 +468,12 @@ public actor SessionReaper {
                 lastInputMs: session.lastInputMs,
                 descendantCount: probes.descendantCount(pid),
                 cpuTimeMs: probes.treeCpuTimeMs(pid),
-                transcriptMtimeMs: mtime,
+                transcriptSizeBytes: transcriptSize,
                 isProtected: probes.isProtected(meta.id)
             )
             switch SessionReapPolicy.evaluate(
                 sample, baseline: baselines[meta.id],
-                nowMs: now, windowMs: windowMs, cpuEpsilonMs: cpuEpsilonMs
+                nowMs: now, windowMs: windowMs, cpuBusyPermille: cpuBusyPermille
             ) {
             case .notIdle:
                 break // streak dropped
@@ -384,6 +488,35 @@ public actor SessionReaper {
             }
         }
         baselines = next
+        reaped.append(contentsOf: sleepSurplus(nowMs: now, alreadyReaped: Set(reaped)))
         return reaped
+    }
+
+    /// Enforce the live-session ceiling: sleep the least-recently-active sessions
+    /// that are safe to sleep until at most `maxLive` remain. Independent of the
+    /// idle streak — a session that keeps getting touched never serves a full
+    /// window, but still holds a whole CLI process tree.
+    private func sleepSurplus(nowMs: Int, alreadyReaped: Set<String> = []) -> [String] {
+        guard maxLive > 0 else { return [] }
+        let live = registry.all().filter { $0.isRunning && !alreadyReaped.contains($0.meta.id) }
+        let candidates = live.map { session -> SessionCapPolicy.Candidate in
+            let meta = session.meta
+            let sleepable = session.activity == .idle
+                && meta.cliSessionId != nil
+                && messageQueue.peek(meta.id) == nil
+                && !probes.isProtected(meta.id)
+            return .init(id: meta.id,
+                         lastActiveMs: max(meta.updatedAt, session.lastInputMs),
+                         sleepable: sleepable)
+        }
+        let surplus = Set(SessionCapPolicy.surplus(candidates, maxLive: maxLive))
+        guard !surplus.isEmpty else { return [] }
+        for session in live where surplus.contains(session.meta.id) {
+            session.markDormant()
+            session.kill()
+        }
+        // Their streaks are meaningless now the pty is gone.
+        for id in surplus { baselines[id] = nil }
+        return Array(surplus)
     }
 }

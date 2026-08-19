@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Captured result of a finished child process.
 public struct ProcessResult: Sendable {
@@ -74,6 +75,11 @@ public enum ProcessRunner {
         }
         return result
     }
+
+    /// How long a timed-out child gets to honour SIGTERM before SIGKILL. Short:
+    /// the caller has already been told the run timed out, so this only decides
+    /// how long the process lingers.
+    static let terminateGraceSeconds: TimeInterval = 2
 
     // MARK: - core
 
@@ -185,6 +191,14 @@ public enum ProcessRunner {
             ioQueue.asyncAfter(deadline: .now() + timeout) {
                 guard !state.isFinished else { return }
                 proc.terminate()
+                // Escalate, and keep `proc` alive until it does die (juancode-gwy1).
+                // `terminate()` is only SIGTERM, and plenty of CLIs trap it; once we
+                // resolve the completion below, `proc` is the last strong reference
+                // holding Foundation's exit monitoring, so a survivor is left
+                // unreaped as a permanent zombie under the app.
+                ioQueue.asyncAfter(deadline: .now() + terminateGraceSeconds) {
+                    if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                }
                 handles.finish(true)
                 handles.finish(false)
                 state.finishOnce {

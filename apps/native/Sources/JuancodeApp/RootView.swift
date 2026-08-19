@@ -1297,6 +1297,14 @@ struct SidebarView: View {
             } else {
                 Button("Archive") { model.setArchived(meta.id, true) }
             }
+            // Free the ~300MB its CLI tree holds without waiting out the idle
+            // window; the row stays and resumes on demand.
+            if model.isLive(meta.id) {
+                Button("Sleep") { model.sleepSession(meta.id) }
+                Button("Sleep Idle in This Project") {
+                    model.sleepIdleSessions(inProject: meta.cwd)
+                }
+            }
             // The log is shared JSONL — grep the session id to follow one row's
             // spawn/seed/activity/exit trail.
             Button("Open Activity Log") { model.revealActivityLog() }
