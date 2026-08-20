@@ -363,6 +363,16 @@ public actor PrTrackingEngine {
         }
         entry.notifications.append(contentsOf: newNotifications)
 
+        // Red CI must always have a live agent on it (juancode-kmwa). The classifier
+        // is edge-triggered, so a session that died while CI was already failing
+        // would otherwise leave the PR red and unattended forever — the poll keeps
+        // ticking and keeps finding nothing to do.
+        if let stalled = stalledCiFixReason(checks: entry.snapshot.checks,
+                                            sessionLive: registry.get(entry.sessionId) != nil,
+                                            hasPendingFixes: !fixReasons.isEmpty) {
+            fixReasons.append(stalled)
+        }
+
         if !fixReasons.isEmpty {
             let prompt = autoFixPrompt(number: number, branch: entry.branch, reasons: fixReasons)
             if let session = registry.get(entry.sessionId) {
@@ -374,18 +384,11 @@ public actor PrTrackingEngine {
                                         log: activityLog)
                 if let session = registry.get(entry.sessionId) {
                     session.autoSubmit(prompt)
-                } else if let fresh = try? registry.create(
-                    provider: .claude, cwd: entry.cwd, cols: 120, rows: 32,
-                    opts: SpawnOptions(skipPermissions: true, model: "opus")
-                ) {
+                } else if let fresh = await respawn(entry, prompt: prompt) {
                     // The original conversation couldn't be resumed (e.g. nothing
                     // recoverable). Rather than stall, open a fresh session seeded
                     // with the PR context, rebind tracking to it, and queue the fix.
                     // Future polls target the new session.
-                    let seed = trackSeedPrompt(number: number, title: entry.title,
-                                               branch: entry.branch, url: entry.url)
-                    if !seed.isEmpty { fresh.autoSubmit(seed) }
-                    fresh.autoSubmit(prompt)
                     entry.sessionId = fresh.id
                 } else {
                     // Even a fresh spawn failed — surface it so the tracked-PR UI
@@ -405,6 +408,43 @@ public actor PrTrackingEngine {
 
         tracked[key] = entry
         for n in newNotifications { broadcastNotification(trackedId: key, prNumber: number, n) }
+    }
+
+    /// Open a replacement agent for a tracked PR whose session can't be revived,
+    /// seeded with the PR context and then the pending fix. It lands on the PR's
+    /// worktree, not the repo root (juancode-pavb): `track()` isolates every tracked
+    /// PR's agent on its own worktree with the PR branch checked out, and a
+    /// respawn in the main checkout would work whatever branch happens to be
+    /// there — and would be told nothing about where it stands. Nil when the spawn
+    /// itself fails.
+    private func respawn(_ entry: TrackedPr, prompt: String) async -> Session? {
+        let worktree = await respawnWorktree(entry)
+        guard let fresh = try? registry.create(
+            provider: .claude, cwd: worktree?.path ?? entry.cwd, cols: 120, rows: 32,
+            opts: SpawnOptions(skipPermissions: true, model: "opus"),
+            worktreePath: worktree?.path
+        ) else { return nil }
+        activityLog.log("trackRespawn", sessionId: fresh.id, project: entry.cwd,
+                        fields: ["pr": "\(entry.number)", "branch": entry.branch,
+                                 "worktree": worktree?.path ?? "none",
+                                 "replaces": entry.sessionId])
+        let seed = trackSeedPrompt(number: entry.number, title: entry.title,
+                                   branch: entry.branch, url: entry.url, worktree: worktree)
+        if !seed.isEmpty { fresh.autoSubmit(seed) }
+        fresh.autoSubmit(prompt)
+        return fresh
+    }
+
+    /// Where a replacement agent should stand: the worktree its dead predecessor
+    /// recorded when that directory is still a usable work tree (worktrees outlive
+    /// their session, so this reuses the PR's existing checkout rather than piling
+    /// up `pr-N-2`, `pr-N-3`), else a freshly created one, else nil — the caller
+    /// falls back to the repo root rather than dropping the fix.
+    private func respawnWorktree(_ entry: TrackedPr) async -> BranchWorktree? {
+        if let path = store.get(entry.sessionId)?.worktreePath,
+           let adopted = await adoptWorktree(path) { return adopted }
+        return try? await createWorktree(entry.cwd, "pr-\(entry.number)",
+                                        checkingOut: entry.branch)
     }
 
     // MARK: - persistence (SQLite `tracked_prs` via TrackedPrStore)

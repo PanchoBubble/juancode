@@ -193,6 +193,24 @@ public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity,
     return PrClassification(snapshot: next, events: events)
 }
 
+/// Level-triggered recovery for a tracked PR whose CI is red with nobody on it.
+///
+/// `classifyPrActivity` is edge-triggered: it reports failing CI only on the
+/// transition *into* `.failing`. That's right for "CI just broke", but it means a
+/// PR whose driving session dies while CI is already red — an app restart SIGTERMs
+/// it, or the reaper sleeps it once idle — is never worked again: every later poll
+/// sees failing → failing, emits no event, and the revive/respawn ladder never
+/// runs. So each poll also asks this: red CI must always have a live agent on it.
+///
+/// Yields nothing when the session is live (an agent already working the PR must
+/// not be re-prompted every tick) or when the poll already produced fix work (that
+/// prompt revives the session by itself).
+public func stalledCiFixReason(checks: PrChecks, sessionLive: Bool,
+                               hasPendingFixes: Bool) -> String? {
+    guard checks == .failing, !sessionLive, !hasPendingFixes else { return nil }
+    return "CI is still failing and the session that was working this PR is gone"
+}
+
 /// True when a comment/review body is Codex reporting it couldn't review the PR
 /// because it hit its usage limits — the signal for Claude to review it instead.
 func isCodexReviewLimitNotice(_ body: String) -> Bool {

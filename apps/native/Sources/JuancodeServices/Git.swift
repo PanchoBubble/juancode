@@ -442,6 +442,21 @@ public struct BranchWorktree: Sendable, Equatable {
     }
 }
 
+/// Adopt an existing worktree directory, reporting the branch checked out in it
+/// (nil on a detached HEAD, matching `createWorktree(_:_:checkingOut:)`). Worktrees
+/// outlive the session that made them, so a replacement agent for the same job can
+/// stand in the one its predecessor used instead of creating a second copy. Nil
+/// when `path` isn't a usable work tree, so callers fall back to creating one.
+public func adoptWorktree(_ path: String) async -> BranchWorktree? {
+    guard FileManager.default.fileExists(atPath: path),
+          let inside = try? await git(path, ["rev-parse", "--is-inside-work-tree"]),
+          inside.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else { return nil }
+    let head = (try? await git(path, ["rev-parse", "--abbrev-ref", "HEAD"]))?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let branch = (head == nil || head!.isEmpty || head == "HEAD") ? nil : head
+    return BranchWorktree(path: path, branch: branch)
+}
+
 /// Create a linked worktree off `repoCwd` with an **existing** branch checked out,
 /// for working a branch someone else pushed — a PR's head branch (juancode-4bpz).
 ///

@@ -252,3 +252,33 @@ final class TrackPromptTests: XCTestCase {
         XCTAssertEqual(t.state, .needsDecision)
     }
 }
+
+// MARK: - level-triggered CI recovery
+
+/// `stalledCiFixReason` (juancode-kmwa): the classifier is edge-triggered, so red
+/// CI with no live agent has to be recovered on a level check instead.
+final class StalledCiRecoveryTests: XCTestCase {
+
+    func testStalledCiFiresWhenRedAndSessionGone() throws {
+        let r = stalledCiFixReason(checks: .failing, sessionLive: false, hasPendingFixes: false)
+        XCTAssertNotNil(r)
+        XCTAssertTrue(try XCTUnwrap(r).contains("still failing"))
+    }
+
+    func testStalledCiSilentWhenSessionIsLive() {
+        // An agent already working the PR must not be re-prompted every poll.
+        XCTAssertNil(stalledCiFixReason(checks: .failing, sessionLive: true, hasPendingFixes: false))
+    }
+
+    func testStalledCiSilentWhenThePollAlreadyProducedFixWork() {
+        // That prompt revives the session by itself; two reasons would double-poke.
+        XCTAssertNil(stalledCiFixReason(checks: .failing, sessionLive: false, hasPendingFixes: true))
+    }
+
+    func testStalledCiSilentWhenCiIsNotRed() {
+        for checks in [PrChecks.passing, .pending, .none] {
+            XCTAssertNil(stalledCiFixReason(checks: checks, sessionLive: false, hasPendingFixes: false),
+                         "\(checks) should not trigger recovery")
+        }
+    }
+}
