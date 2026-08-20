@@ -99,10 +99,10 @@ import Testing
 
     private func manualKey(
         _ id: String, attention: SessionAttention = .idle,
-        slot: Int? = nil, created: Int = 0, updated: Int = 0
+        slot: Int? = nil, created: Int = 0, updated: Int = 0, pinned: Bool = false
     ) -> ManualSortKey {
         ManualSortKey(key: key(attention, updated: updated, created: created),
-                      manualIndex: slot, id: id)
+                      manualIndex: slot, id: id, pinned: pinned)
     }
 
     private func sortedIds(_ keys: [ManualSortKey]) -> [String] {
@@ -117,6 +117,26 @@ import Testing
             manualKey("b", attention: .working, slot: 1, created: 500),
         ])
         #expect(out == ["a", "b", "c"])
+    }
+
+    @Test func pinnedSessionsSortAboveEverythingElse() {
+        let out = sortedIds([
+            manualKey("a", attention: .waitingInput, slot: 0),
+            manualKey("b", attention: .idle, slot: 1, pinned: true),
+            manualKey("c", attention: .exited, slot: 2),
+        ])
+        // The pin outranks the waiting bubble, which still outranks the manual order.
+        #expect(out == ["b", "a", "c"])
+    }
+
+    @Test func pinnedSessionsKeepTheirRelativeOrder() {
+        let out = sortedIds([
+            manualKey("a", slot: 2, pinned: true),
+            manualKey("b", attention: .waitingInput, slot: 3, pinned: true),
+            manualKey("c", slot: 0),
+        ])
+        // Within the pinned tier the usual bubble-then-resting rules apply.
+        #expect(out == ["b", "a", "c"])
     }
 
     @Test func waitingForInputBubblesAboveTheManualOrder() {

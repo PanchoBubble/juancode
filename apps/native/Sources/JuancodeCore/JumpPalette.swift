@@ -143,11 +143,16 @@ public struct ManualSortKey: Sendable, Equatable {
     public var key: SessionSortKey
     public var manualIndex: Int?
     public var id: String
+    /// The user pinned this session to the top of its project. Like the attention
+    /// bubble it is a display-only hoist — the persisted manual order is untouched,
+    /// so unpinning drops the row back into its old slot.
+    public var pinned: Bool
 
-    public init(key: SessionSortKey, manualIndex: Int?, id: String) {
+    public init(key: SessionSortKey, manualIndex: Int?, id: String, pinned: Bool = false) {
         self.key = key
         self.manualIndex = manualIndex
         self.id = id
+        self.pinned = pinned
     }
 }
 
@@ -181,12 +186,16 @@ public func manualRestingPrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Boo
 }
 
 /// Strict-weak ordering blending a user's manual drag order with attention
-/// bubbling: sessions waiting on a reply float above everything (in their resting
-/// order, so two waiting sessions keep their relative slots), and the rest sit in
-/// the resting order. So a waiting session bubbles up, then drops back to its
+/// bubbling: pinned sessions float above everything, then sessions waiting on a
+/// reply (in their resting order, so two waiting sessions keep their relative
+/// slots), and the rest sit in the resting order. So a waiting session bubbles up, then drops back to its
 /// manual slot once the user has answered — the persisted order is never
 /// rewritten by the bubble.
 public func manualWithBubblePrecedes(_ a: ManualSortKey, _ b: ManualSortKey) -> Bool {
+    // Pinning outranks the attention bubble: a pinned row is where the user parked
+    // it on purpose, so a question elsewhere in the project must not push it down.
+    // Two pinned rows keep their relative bubble/resting order.
+    if a.pinned != b.pinned { return a.pinned }
     let aBubble = attentionBubblesAboveManualOrder(a.key.attention)
     let bBubble = attentionBubblesAboveManualOrder(b.key.attention)
     if aBubble != bBubble { return aBubble }

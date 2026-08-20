@@ -699,7 +699,8 @@ struct SidebarView: View {
             key: SessionSortKey(attention: attention(meta),
                                 updatedAt: model.restingRecency(meta), createdAt: meta.createdAt),
             manualIndex: slots[meta.id],
-            id: meta.id)
+            id: meta.id,
+            pinned: model.isPinned(meta.id))
     }
 
     /// Collapse any folder we haven't seen before, so projects are minimized by
@@ -750,8 +751,11 @@ struct SidebarView: View {
                                       manualSortKey($1, slots: slots))
             }
             .map(\.id)
+        // Pinned rows are hoisted the same way bubbled ones are, so they're excluded
+        // from the predecessor search too — a drop just under a pinned row means
+        // "top of the resting order", not "after the pinned session".
         let bubbled = Set(group.sessions
-            .filter { attentionBubblesAboveManualOrder(attention($0)) }
+            .filter { attentionBubblesAboveManualOrder(attention($0)) || model.isPinned($0.id) }
             .map(\.id))
         let order = manualOrderAfterMove(
             displayed: displayedAfterMove, resting: resting, bubbled: bubbled, moved: id)
@@ -1292,6 +1296,9 @@ struct SidebarView: View {
             if meta.kind != .editor {
                 Button("Open in Editor") { model.openEditorSession(meta.id) }
             }
+            Button(model.isPinned(meta.id) ? "Unpin" : "Pin to Top") {
+                model.togglePinned(meta.id)
+            }
             if meta.archived {
                 Button("Unarchive") { model.setArchived(meta.id, false) }
             } else {
@@ -1392,6 +1399,8 @@ private struct SessionRowHost: View {
                    onOpenBranchPr: external ? nil : { model.openGitHubForSession(meta) },
                    menuContent: external ? nil : menu,
                    onCloseRequested: external ? nil : confirmClose,
+                   pinned: !external && model.isPinned(meta.id),
+                   onTogglePin: external ? nil : { model.togglePinned(meta.id) },
                    selected: selected,
                    activating: model.isActivating(meta.id),
                    asleep: model.isAsleep(meta.id))
@@ -2247,6 +2256,11 @@ struct SessionRow: View {
     /// Ask to close (kill + delete) this session — the hover ✕. The caller owns the
     /// confirmation alert; nil for external rows.
     var onCloseRequested: (() -> Void)? = nil
+    /// The user pinned this session to the top of its project — shows a pin ornament
+    /// at rest and a filled pin in the hover chip.
+    var pinned: Bool = false
+    /// Pin/unpin this session — the hover chip's pin. Nil for external rows.
+    var onTogglePin: (() -> Void)? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2326,6 +2340,16 @@ struct SessionRow: View {
     /// badge line, so the trailing edge stays quiet (juancode-341).
     @ViewBuilder
     private var trailingOrnament: some View {
+        // Pinned rows say so at rest — the hover chip's pin is hidden the other 99%
+        // of the time, and a row sitting on top for no visible reason reads as a bug.
+        // Hidden while hovering: the chip covers this spot and carries the state there.
+        if pinned, !hovering {
+            Image(systemName: "pin.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .help("Pinned to the top of this project")
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+        }
         // At-risk warning only on worktree rows: an isolated worktree's uncommitted
         // work can be orphaned/forgotten, so it's worth flagging. Main-checkout
         // sessions all share one checkout — the dirty state is just the current
@@ -2353,9 +2377,11 @@ struct SessionRow: View {
     /// row's trailing edge.
     @ViewBuilder
     private var hoverActions: some View {
-        if !external, hovering, menuContent != nil || onCloseRequested != nil {
+        if !external, hovering, menuContent != nil || onCloseRequested != nil || onTogglePin != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
+                            onTogglePin: onTogglePin,
+                            pinned: pinned,
                             onCloseRequested: onCloseRequested,
                             closeHelp: "Close session (asks to confirm)")
         }

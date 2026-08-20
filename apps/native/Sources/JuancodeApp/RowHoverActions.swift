@@ -19,6 +19,10 @@ struct RowHoverActions: View {
     /// Items for the ellipsis menu; nil hides the menu.
     let menuContent: (() -> AnyView)?
     let menuHelp: String
+    /// Pin/unpin this row (sticks it to the top of its group); nil hides the pin.
+    var onTogglePin: (() -> Void)? = nil
+    /// Whether the row is currently pinned — drives the filled glyph and the tooltip.
+    var pinned: Bool = false
     /// Nil hides the ✕.
     let onCloseRequested: (() -> Void)?
     let closeHelp: String
@@ -28,6 +32,15 @@ struct RowHoverActions: View {
 
     var body: some View {
         HStack(spacing: 1) {
+            if let onTogglePin {
+                Button(action: onTogglePin) {
+                    Image(systemName: pinned ? "pin.fill" : "pin")
+                        .font(.system(size: glyphSize - 1, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help(pinned ? "Unpin — let this session sort normally" : "Pin to top of this project")
+                .clickCursor()
+            }
             if let menuContent {
                 Menu { menuContent() } label: {
                     Image(systemName: "ellipsis")

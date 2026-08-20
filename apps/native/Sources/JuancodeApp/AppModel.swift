@@ -33,6 +33,10 @@ private let projectOrderKey = "juancode.projectOrder"
 /// project cwd → ordered session ids (a plist-safe [String: [String]]).
 private let sessionOrderKey = "juancode.sessionOrder"
 
+/// UserDefaults key for the sessions the user pinned to the top of their project
+/// (a plist-safe [String] of session ids).
+private let pinnedSessionsKey = "juancode.pinnedSessions"
+
 /// UserDefaults key for the per-project "new sessions land on a fresh worktree"
 /// toggle: project cwd → Bool (a plist-safe [String: Bool]).
 private let worktreeByProjectKey = "juancode.worktreeByProject"
@@ -1289,6 +1293,30 @@ final class AppModel {
         didSet { UserDefaults.standard.set(sessionOrder, forKey: sessionOrderKey) }
     }
 
+    /// Sessions the user pinned to the top of their project's list. A pinned row
+    /// sorts above everything else in its folder (including one waiting on a reply)
+    /// without touching `sessionOrder`, so unpinning drops it back where it was.
+    /// Persisted.
+    var pinnedSessions: Set<String> = Set(
+        (UserDefaults.standard.array(forKey: pinnedSessionsKey) as? [String]) ?? []
+    ) {
+        didSet { UserDefaults.standard.set(Array(pinnedSessions), forKey: pinnedSessionsKey) }
+    }
+
+    func isPinned(_ id: String) -> Bool { pinnedSessions.contains(id) }
+
+    /// Pin/unpin one session. Animated so the row slides to (or back from) the top
+    /// instead of teleporting.
+    func togglePinned(_ id: String) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            if pinnedSessions.contains(id) {
+                pinnedSessions.remove(id)
+            } else {
+                pinnedSessions.insert(id)
+            }
+        }
+    }
+
     /// Per-project default for the folder "+" button: when a project's cwd is
     /// mapped to `true`, a new session started from its header lands on a fresh
     /// git worktree instead of the project checkout. Keyed by project cwd, same
@@ -1317,6 +1345,8 @@ final class AppModel {
         next[cwd] = ids
         let valid = Set((sessions + externalSessions).map(\.id))
         sessionOrder = prunedSessionOrder(next, keeping: valid)
+        let livePins = pinnedSessions.intersection(valid)
+        if livePins != pinnedSessions { pinnedSessions = livePins }
     }
 
     /// Custom dev ports the user saved in the Kill Port utility, added on top of the
@@ -4420,6 +4450,7 @@ final class AppModel {
             agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
             stoppedPanes.remove(id)
+            pinnedSessions.remove(id)
             if selection == id {
                 selection = editorParent.flatMap { idSet.contains($0) ? nil : $0 } ?? fallback
             }
