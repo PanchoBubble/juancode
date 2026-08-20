@@ -460,14 +460,17 @@ struct OracleGlobalRail: View {
         let number: Int
         let live: Bool
         let activity: SessionActivity?
+        /// The user pinned this Oracle — it sorts above every tier and is never
+        /// folded away with the idle ones.
+        let pinned: Bool
         var id: String { meta.id }
     }
 
     /// Every Oracle paired with its stable spawn-order number (oldest = 1), filtered
-    /// by `query` and ordered "who needs me first": waiting for a reply, then working,
-    /// then live-idle, then stopped — recency breaking ties within each tier.
-    /// Numbering happens BEFORE filtering so "Oracle 12" keeps its number no matter
-    /// what the filter hides.
+    /// by `query` and ordered "who needs me first": pinned, then waiting for a reply,
+    /// then working, then live-idle, then stopped — recency breaking ties within each
+    /// tier. Numbering happens BEFORE filtering so "Oracle 12" keeps its number no
+    /// matter what the filter hides.
     private func entries() -> [Entry] {
         let all = sessions
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -477,7 +480,8 @@ struct OracleGlobalRail: View {
                 || meta.title.lowercased().contains(q)
                 || "oracle \(number)".contains(q) else { return nil }
             return (idx, Entry(meta: meta, number: number,
-                               live: model.isLive(meta.id), activity: model.activity(meta.id)))
+                               live: model.isLive(meta.id), activity: model.activity(meta.id),
+                               pinned: model.isPinned(meta.id)))
         }
         // Decorated with the source index because `sorted` isn't stable: without it,
         // same-tier rows would shuffle between body evals as activity flips.
@@ -489,8 +493,11 @@ struct OracleGlobalRail: View {
             .map(\.1)
     }
 
-    /// Attention tier — lower sorts first.
+    /// Attention tier — lower sorts first. Pinning outranks the whole ladder, same
+    /// as it does in the sidebar: an Oracle you parked on purpose shouldn't be pushed
+    /// down by another one asking a question.
     private func rank(_ e: Entry) -> Int {
+        if e.pinned { return -1 }
         guard e.live else { return 3 }
         switch e.activity {
         case .waitingInput: return 0
@@ -502,15 +509,18 @@ struct OracleGlobalRail: View {
     var body: some View {
         let all = entries()
         let active = all.filter(\.live)
+        // Rows that are never folded away: the live ones, plus anything pinned — a
+        // pin is a promise the row stays put, so an idle pinned Oracle must not
+        // disappear behind "Show N more".
+        let kept = all.filter { $0.live || $0.pinned }
         // Never fewer than 3 rows, even mid-launch before the height is measured.
         let fitted = max(3, Int(listHeight / Self.rowHeight))
-        // Active rows are never folded away, so the budget floors at their count.
-        let budget = max(fitted, active.count) + revealed
+        let budget = max(fitted, kept.count) + revealed
         let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
         // While filtering, every match shows — the user asked for exactly these.
         // Otherwise resting rows only join the pool once idle is revealed (or when
-        // nothing is live, so the rail is never pointlessly empty).
-        let pool = (searching || showIdle || active.isEmpty) ? all : active
+        // nothing is kept, so the rail is never pointlessly empty).
+        let pool = (searching || showIdle || kept.isEmpty) ? all : kept
         let shown = searching ? pool : Array(pool.prefix(budget))
         let hidden = all.count - shown.count
         return VStack(spacing: 0) {
@@ -591,25 +601,26 @@ struct OracleGlobalRail: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        let activeShown = shown.filter(\.live)
-                        let restingShown = shown.filter { !$0.live }
-                        // Only label the groups when both are on screen — with one
-                        // kind showing, a header is noise.
-                        if !activeShown.isEmpty, !restingShown.isEmpty {
-                            groupLabel("Active")
+                        // Pinned rows get their own band above Active — an idle
+                        // Oracle sitting over the working ones needs to say why.
+                        let groups = [
+                            ("Pinned", shown.filter(\.pinned)),
+                            ("Active", shown.filter { $0.live && !$0.pinned }),
+                            ("Idle", shown.filter { !$0.live && !$0.pinned }),
+                        ].filter { !$0.1.isEmpty }
+                        // Only label the bands when more than one is on screen — with
+                        // a single kind showing, a header is noise.
+                        ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
+                            if groups.count > 1 { groupLabel(group.0) }
+                            ForEach(group.1) { row($0) }
                         }
-                        ForEach(activeShown) { row($0) }
-                        if !restingShown.isEmpty, !activeShown.isEmpty {
-                            groupLabel("Idle")
-                        }
-                        ForEach(restingShown) { row($0) }
                         if hidden > 0 {
                             footerButton("Show \(hidden) more") {
                                 showIdle = true
                                 revealed += fitted
                             }
                         }
-                        if shown.count > max(fitted, active.count) {
+                        if shown.count > max(fitted, kept.count) {
                             footerButton("Show less") {
                                 showIdle = false
                                 revealed = 0
@@ -671,6 +682,8 @@ struct OracleGlobalRail: View {
             unread: model.unreadSessions.contains(meta.id),
             unseenDone: model.unseenCompletions.contains(meta.id),
             asleep: model.isAsleep(meta.id),
+            pinned: entry.pinned,
+            onTogglePin: { model.togglePinned(meta.id) },
             // Reveal first: tapping a row with the drawer closed slides the chat in
             // from this edge; with it open, it just switches the active Oracle.
             onSelect: { oracle.reveal(); oracle.selectOracle(meta.id) },
@@ -721,6 +734,10 @@ private struct OracleRailRow: View {
     /// Auto-slept while idle to free memory (`AppModel.isAsleep`) — purple moon, and
     /// the card only steps back instead of fading like an exited one.
     let asleep: Bool
+    /// Pinned to the top of the rail — a pin ornament at rest, and the hover chip's
+    /// pin flips to "unpin".
+    let pinned: Bool
+    let onTogglePin: () -> Void
     let onSelect: () -> Void
     /// Stop the running agent but keep the conversation in the rail (kill ≠ delete);
     /// nil when the session isn't live.
@@ -746,6 +763,16 @@ private struct OracleRailRow: View {
                 Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
+            // A pinned row says so at rest — the hover chip carries the state the
+            // rest of the time, and a row sitting on top for no visible reason
+            // reads as a bug.
+            if pinned, !hovering {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 3)
+                    .help("Pinned to the top of the rail")
+            }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -796,6 +823,8 @@ private struct OracleRailRow: View {
         if hovering {
             RowHoverActions(menuContent: { AnyView(menuItems) },
                             menuHelp: "Oracle actions",
+                            onTogglePin: onTogglePin,
+                            pinned: pinned,
                             onCloseRequested: onDeleteRequested,
                             closeHelp: "Delete this Oracle (asks to confirm)",
                             glyphSize: 11)
@@ -804,6 +833,7 @@ private struct OracleRailRow: View {
 
     @ViewBuilder private var menuItems: some View {
         Button("Rename…", action: onRename)
+        Button(pinned ? "Unpin" : "Pin to Top", action: onTogglePin)
         if let onKill {
             // Stop a stuck/looping Oracle without discarding its conversation —
             // it stays in the rail and can be resumed by selecting it.

@@ -397,6 +397,12 @@ struct JuancodeApp: App {
                     performShortcut(.openEditor, model: model, oracle: oracle)
                 }
                 .appShortcut(.openEditor, shortcuts)
+                // ⇧⌃P pins the row you're looking at to the top of its list — the
+                // active Oracle when the dock is open, else the sidebar selection.
+                Button(pinCommandTitle(model: model, oracle: oracle)) {
+                    performShortcut(.togglePin, model: model, oracle: oracle)
+                }
+                .appShortcut(.togglePin, shortcuts)
                 // Global Oracle + issues access (juancode-6sw). ⌃Space toggles the
                 // Oracle panel from anywhere; ⌘⇧I jumps straight to global issues.
                 Button("Oracle") {

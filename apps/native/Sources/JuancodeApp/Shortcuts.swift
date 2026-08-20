@@ -25,6 +25,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case recalcGeometry
     case toggleTerminal
     case openEditor
+    case togglePin
     case oracle
     case globalIssues
     case focusSessionSearch
@@ -57,6 +58,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .recalcGeometry: return "Recalculate Terminal Geometry"
         case .toggleTerminal: return "Toggle Terminal"
         case .openEditor: return "Open Editor for Session"
+        case .togglePin: return "Pin Session to Top"
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
         case .focusSessionSearch: return "Find Sessions"
@@ -92,6 +94,10 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
         // ⌘E opens the selected session's worktree in $EDITOR (nvim) as a session.
         case .openEditor: return KeyBinding(key: "e", command: true)
+        // ⇧⌃P pins/unpins whatever list you're looking at (the Oracle rail when the
+        // dock is open, else the sidebar selection). Shift+control so it never eats
+        // a TUI's own ⌃P (nvim completion, readline history).
+        case .togglePin: return KeyBinding(key: "p", shift: true, control: true)
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
         case .focusSessionSearch: return KeyBinding(key: "f", control: true)
@@ -282,6 +288,8 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .recalcGeometry: model.resyncTerminalGeometry()
     case .toggleTerminal: model.toggleBottomTerminal()
     case .openEditor: model.openEditorForSelection()
+    case .togglePin:
+        if let id = pinShortcutTarget(model: model, oracle: oracle) { model.togglePinned(id) }
     case .oracle: oracle.toggleChatFocused()
     case .globalIssues: oracle.open(tab: .issues)
     case .focusSessionSearch: model.focusSessionSearch()
@@ -305,6 +313,22 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         if !dismissTopOverlay(model: model, oracle: oracle) { model.goBack() }
     case .navigateForward: model.goForward()
     }
+}
+
+/// The session ⇧⌃P acts on: the Oracle showing in the dock when it's open, else the
+/// sidebar's selected session. Shared by the shortcut and its menu item so the title
+/// always names what the key will actually do.
+@MainActor
+func pinShortcutTarget(model: AppModel, oracle: OracleModel) -> String? {
+    if oracle.expanded, let id = oracle.oracleSessionId { return id }
+    return model.selection
+}
+
+/// Menu title for the pin command, flipped to "Unpin" once its target is pinned.
+@MainActor
+func pinCommandTitle(model: AppModel, oracle: OracleModel) -> String {
+    let pinned = pinShortcutTarget(model: model, oracle: oracle).map(model.isPinned) ?? false
+    return pinned ? "Unpin Session" : "Pin Session to Top"
 }
 
 /// Close the topmost thing layered over the visible session, innermost first, and

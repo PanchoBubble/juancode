@@ -21,7 +21,7 @@ struct RowHoverActions: View {
     let menuHelp: String
     /// Pin/unpin this row (sticks it to the top of its group); nil hides the pin.
     var onTogglePin: (() -> Void)? = nil
-    /// Whether the row is currently pinned — drives the filled glyph and the tooltip.
+    /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
     var pinned: Bool = false
     /// Nil hides the ✕.
     let onCloseRequested: (() -> Void)?
@@ -34,8 +34,13 @@ struct RowHoverActions: View {
         HStack(spacing: 1) {
             if let onTogglePin {
                 Button(action: onTogglePin) {
-                    Image(systemName: pinned ? "pin.fill" : "pin")
+                    // The chip is a button, so it shows the ACTION, not the state: a
+                    // pinned row offers "unpin" (struck-through pin, tinted so the
+                    // pill also answers "is this one pinned?" at a glance), an
+                    // unpinned one the plain pin.
+                    Image(systemName: pinned ? "pin.slash.fill" : "pin")
                         .font(.system(size: glyphSize - 1, weight: .semibold))
+                        .foregroundStyle(pinned ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
                 }
                 .buttonStyle(.borderless)
                 .help(pinned ? "Unpin — let this session sort normally" : "Pin to top of this project")
