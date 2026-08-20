@@ -1258,6 +1258,36 @@ public final class Session: @unchecked Sendable {
         return { deferred.cancel() }
     }
 
+    /// Hand `onBytes` a repaint of the headless model's current screen, in stream
+    /// order (juancode-8llo). The encode happens on the session `workQueue`, the same
+    /// serial queue `handleData` feeds the model and fans bytes out on, so the repaint
+    /// can never interleave with a chunk: the caller sees every byte before it, then
+    /// the repaint, then every byte after it.
+    ///
+    /// Used by a live pane once a resize settles. The model is always at the pty's
+    /// grid (both move together in `resize`), so its rows are the frame the CLI
+    /// actually drew — unlike the surface's, which reflowed a layout tick early and
+    /// laid the CLI's in-flight bytes out at the wrong width. Carries no scrollback
+    /// history (`screenRepaintBytes`), so repainting can't duplicate what the pane
+    /// already has.
+    ///
+    /// `matching` is the grid the caller's surface is at. The repaint paints rows at
+    /// absolute positions, so painting a model that sits at a *different* grid would
+    /// itself mis-place them — when the dims don't match we skip instead, and the
+    /// pending resize that caused the mismatch brings the CLI's own repaint anyway.
+    /// The check runs on the workQueue next to the encode, so no resize can slip
+    /// between the two. Pass nil to repaint unconditionally.
+    public func repaintFromModel(matching grid: (cols: Int, rows: Int)? = nil,
+                                 _ onBytes: @escaping OutputListener) {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            if let grid, self.terminalModel.cols != grid.cols || self.terminalModel.rows != grid.rows {
+                return
+            }
+            onBytes(self.terminalModel.screenRepaintBytes())
+        }
+    }
+
     @discardableResult
     public func onExit(_ listener: @escaping ExitListener) -> Cancel {
         let token = lock.withLock { () -> Int in

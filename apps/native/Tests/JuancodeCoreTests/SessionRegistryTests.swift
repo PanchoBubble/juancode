@@ -269,6 +269,32 @@ import Testing
         #expect(mirror.visibleText().contains("echoback"))
     }
 
+    /// juancode-8llo: `repaintFromModel` replaces a stale/mis-wrapped screen with the
+    /// model's parsed rows — the settled-resize heal. Gated on the grid matching, so a
+    /// repaint is never painted into a surface of a different size.
+    @Test func repaintFromModelReplacesStaleScreen() async throws {
+        let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
+        let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
+        defer { s.kill() }
+        await poll { s.terminalModel.visibleText().contains("READY") }
+
+        // A surface that got the resize wrong: it holds text the model never had.
+        let surface = SessionTerminalModel(cols: 80, rows: 24, scrollbackLines: 100)
+        surface.feed(Array("GARBLE".utf8))
+        #expect(surface.visibleText().contains("GARBLE"))
+
+        s.repaintFromModel(matching: (cols: 80, rows: 24)) { surface.feed($0) }
+        await poll { surface.visibleText().contains("READY") }
+        #expect(surface.visibleText().contains("READY"))
+        #expect(!surface.visibleText().contains("GARBLE"))
+
+        // A repaint for a grid the model isn't at is dropped, not mis-painted.
+        surface.feed(Array("STALE".utf8))
+        s.repaintFromModel(matching: (cols: 40, rows: 12)) { surface.feed($0) }
+        await poll(0.4) { false }
+        #expect(surface.visibleText().contains("STALE"))
+    }
+
     @Test func onCreateFiresForNewSessions() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'hi\\n'\ncat\n")))
         let seen = ByteSink()

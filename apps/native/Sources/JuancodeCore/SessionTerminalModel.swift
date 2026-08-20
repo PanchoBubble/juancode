@@ -335,6 +335,22 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         }
     }
 
+    /// A repaint of the model's CURRENT screen for a view that is already streaming
+    /// (juancode-8llo). Identical to `seedBytes()` except that no scrollback history
+    /// is flowed in: the receiving view already holds that history, and flowing it
+    /// again would append a second copy into its scrollback.
+    ///
+    /// This is the durable heal for resize garble. The model's grid only ever changes
+    /// inside `Session.resize`, i.e. in the same call that sets the pty's winsize — so
+    /// the model parses every byte at exactly the width the CLI emitted it for and can
+    /// never mis-wrap. A live surface, by contrast, reflows on its own layout tick,
+    /// before the pty hears anything, so bytes for the old grid land at the new one.
+    /// Painting the model's parsed rows over that surface replaces the mis-rendered
+    /// frame with the one the CLI actually drew.
+    public func screenRepaintBytes() -> [UInt8] {
+        seedBytes(maxScrollbackRows: 0)
+    }
+
     /// The number of scrollback history rows the model currently retains above the
     /// visible screen (0 while the alternate buffer is active — it keeps none).
     public var scrollbackRows: Int {

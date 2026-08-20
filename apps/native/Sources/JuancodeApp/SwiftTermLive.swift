@@ -864,6 +864,16 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// The grid the attach-time model seed was rendered at, so the post-settle
         /// check can tell whether the seed is still exact (see `attach`).
         private var seedGrid: (cols: Int, rows: Int)?
+        /// Post-resize heal (juancode-8llo), shared with the Ghostty backend: once the
+        /// CLI's output goes quiet after a grid apply, repaint the view from the
+        /// headless model. SwiftTerm reflows and SIGWINCHes in the same step
+        /// (`flushPendingSize`), so the mis-wrap window is narrower here than on
+        /// Ghostty — but a burst that straddles the apply still lands laid out for the
+        /// old width, and the CLI won't redraw rows it believes are already right.
+        /// Built in `attach` once the view and its coalescer exist; its callback holds
+        /// only Sendable values, never `self` (this coordinator can't be `@MainActor` —
+        /// `TerminalViewDelegate` is a nonisolated protocol).
+        private var heal: TerminalResizeHeal?
         /// Observers that re-assert the grid when the app/window comes back to the front
         /// (activation / de-miniaturize) — a fullscreen / display / Space change can
         /// re-lay-out the window without routing a frame change through `sizeChanged`.
@@ -910,6 +920,15 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                 SwiftTermParse.locked { tv?.feed(byteArray: bytes[...]) }
             }
             feedCoalescer = coalescer
+            // Post-resize heal (juancode-8llo). Fires on the main queue once the CLI
+            // has been quiet for the delay; `noteOutput` below feeds it from the pty
+            // side (the heal is thread-safe for exactly that).
+            let heal = TerminalResizeHeal(quietMs: 250) { [weak tv, weak coalescer, session] action in
+                MainActor.assumeIsolated {
+                    Self.fireHeal(action, tv: tv, session: session, coalescer: coalescer)
+                }
+            }
+            self.heal = heal
             if Config.useModelSeed {
                 // The seed is synthesized at the MODEL's grid (== the pty's). Record
                 // it so the settle check below can tell whether the seed is still
@@ -923,10 +942,12 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                 // to the main thread in order (seed first, then live chunks).
                 cancel = session.subscribeFromModelSeed { bytes in
                     coalescer.append(bytes)
+                    heal.noteOutput()
                 }
             } else {
                 cancel = session.subscribeOutput(replay: true) { bytes in
                     coalescer.append(bytes)
+                    heal.noteOutput()
                 }
             }
             let session = self.session
@@ -982,6 +1003,44 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             }
             replayRepaintWork = repaint
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: repaint)
+        }
+
+        /// The CLI's output settled after a grid apply. Repaint the view from the
+        /// headless model — the model's grid only ever moves inside `Session.resize`, so
+        /// it parsed every byte at the width the CLI emitted it for and its rows are the
+        /// frame the CLI actually drew (juancode-8llo). If the CLI was streaming through
+        /// the resize, first force one genuine SIGWINCH so it re-lays-out too, and delay
+        /// the repaint past `nudgeResize`'s flap so the model is back at the real grid
+        /// when the repaint is encoded. Static with Sendable-only captures so the heal's
+        /// callback never has to hold this coordinator.
+        @MainActor private static func fireHeal(_ action: ResizeHealAction,
+                                                tv: TerminalView?,
+                                                session: Session,
+                                                coalescer: TerminalFeedCoalescer?) {
+            guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
+            let g = (cols: t.cols, rows: t.rows)
+            if action.sigwinch {
+                nudgeResize(tv, session)
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(140)) {
+                    MainActor.assumeIsolated {
+                        repaintFromModel(session: session, matching: g, coalescer: coalescer)
+                    }
+                }
+            } else if action.repaint {
+                repaintFromModel(session: session, matching: g, coalescer: coalescer)
+            }
+        }
+
+        /// Feed a clean repaint of the model's current screen into the view, in stream
+        /// order — routed through the same coalescer as live output, and skipped when
+        /// the model isn't at the view's grid (checked next to the encode, on the
+        /// session workQueue). Carries no scrollback history, so it can't duplicate
+        /// what the view already holds.
+        @MainActor private static func repaintFromModel(session: Session,
+                                                        matching grid: (cols: Int, rows: Int),
+                                                        coalescer: TerminalFeedCoalescer?) {
+            guard Config.useModelSeed, let coalescer else { return }
+            session.repaintFromModel(matching: grid) { bytes in coalescer.append(bytes) }
         }
 
         /// Verify-then-repair: resize the pty to the view's grid only when the pty's
@@ -1052,6 +1111,13 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // dedup swallow every retry at the same grid, leaving the CLI stuck at
             // its stale size until something else jiggles the layout.
             lastSent = session.resizeLocal(cols: cols, rows: rows) ? (cols, rows) : nil
+            // A genuine SIGWINCH went out: arm the heal (juancode-8llo). A burst that
+            // straddled this apply is now laid out for the old width, and the CLI won't
+            // redraw rows it believes are already right — `fireHeal` repaints from the
+            // model once the output quiets. Armed here rather than in `gridChanged` so a
+            // layout pass that only re-reports the current grid (`reportStale`, deduped
+            // above) doesn't schedule a repaint for nothing.
+            heal?.arm()
         }
 
         func detach() {
@@ -1064,6 +1130,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             if let z = zoomObserver { NotificationCenter.default.removeObserver(z); zoomObserver = nil }
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }; activeObservers.removeAll()
             replayRepaintWork?.cancel(); replayRepaintWork = nil
+            heal?.disarm(); heal = nil
             cancel?()
             cancel = nil
         }

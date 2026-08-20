@@ -340,22 +340,21 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// before we assert the settled grid (juancode-1th.2). Longer than any gap
         /// between the transition's own layout passes, shorter than feels laggy.
         private let transitionSettleDelay = DispatchTimeInterval.milliseconds(150)
-        /// How long the CLI's *output* must stay quiet after a plain (non-transition)
-        /// resize before we heal it. A window-edge / divider drag pushes SIGWINCHes
-        /// straight into a streaming CLI, so bytes it emitted for the pre-resize grid
-        /// land mis-wrapped; the drag path has no settle pass of its own (unlike a
-        /// layout transition). Once the stream quiets we force one genuine SIGWINCH so
-        /// the CLI fully re-lays-out at the settled grid. Keyed on output quiet, not
-        /// layout quiet, because a drag can end while the CLI is still streaming.
-        private let resizeHealQuietDelay = DispatchTimeInterval.milliseconds(250)
-        /// A plain resize is waiting to heal once the CLI's output settles.
-        private var resizeHealArmed = false
-        /// Output actually arrived while the heal was armed — i.e. the CLI was
-        /// streaming through/after the resize, so its render is the corruptible case
-        /// worth nudging. An idle resize already repaints cleanly via the CLI's own
-        /// SIGWINCH handling, so we skip the extra flap there.
-        private var sawStreamDuringHeal = false
-        private var healWork: DispatchWorkItem?
+        /// How long `nudge`'s rows-1 → rows flap takes to complete, plus a beat — how
+        /// long a repaint waits so it is encoded at the real grid, not the flap's.
+        private let nudgeSettleMs = 140
+        /// Post-resize heal (`TerminalResizeHeal`, shared with the SwiftTerm backend).
+        /// A window-edge / divider drag pushes SIGWINCHes straight into a streaming
+        /// CLI, so bytes it emitted for the pre-resize grid land mis-wrapped, and the
+        /// drag path has no settle pass of its own (unlike a layout transition). Once
+        /// the CLI's *output* stays quiet for the delay, `fireResizeHeal` repaints from
+        /// the headless model and, if it was streaming, forces one genuine SIGWINCH.
+        /// Keyed on output quiet, not layout quiet, because a drag can end while the
+        /// CLI is still streaming.
+        private lazy var heal = TerminalResizeHeal(quietMs: 250) { [weak self] action in
+            // `onQuiet` fires on the main queue (see `TerminalResizeHeal`).
+            MainActor.assumeIsolated { self?.fireResizeHeal(action) }
+        }
         /// Observers that verify the grid when the app/window comes back to the
         /// front — a fullscreen / Space / display change while we were away can
         /// re-lay-out the window without the surface hearing a frame change.
@@ -438,23 +437,35 @@ private struct GhosttyRepresentable: NSViewRepresentable {
 
         // MARK: TerminalSurfaceLifecycleDelegate
 
-        /// Surface is live — now it's safe to replay scrollback + stream live output.
+        /// Surface is live — now it's safe to seed history + stream live output.
         func terminalDidAttachSurface(_: TerminalSurface) {
             guard !streaming else { return }
             streaming = true
-            // Replay scrollback then stream live output, pushed into the surface.
+            // Seed from the shared headless model, then stream live output into the
+            // surface. The seed is a clean VT repaint synthesized from PARSED state
+            // (`SessionTerminalModel.seedBytes()`), encoded at the model's grid — so
+            // unlike a raw byte replay it can't land mis-wrapped when the pane's width
+            // has moved since those bytes were written, and it carries no partial
+            // escapes or stale alt-screen frames (juancode-a2h.2 / juancode-8llo).
             // The pty callback is on a background queue; surface writes must be on main.
             // Coalesce bursts into one receive() per runloop turn (juancode-kdn) so N
             // mounted, streaming sessions don't each reflow per chunk on main.
             let coalescer = TerminalFeedCoalescer { [weak self, weak gsession] bytes in
                 gsession?.receive(Data(bytes))
-                self?.noteOutputForHeal()
+                self?.heal.noteOutput()
             }
             feedCoalescer = coalescer
-            cancel = session.subscribeOutput(replay: true) { bytes in
-                coalescer.append(bytes)
+            if Config.useModelSeed {
+                // Seed and subscribe atomically on the session workQueue: the clean
+                // seed and the live stream partition with no gap, so a brand-new
+                // session's boot burst can't be dropped between the two.
+                cancel = session.subscribeFromModelSeed { bytes in coalescer.append(bytes) }
+            } else {
+                cancel = session.subscribeOutput(replay: true) { bytes in
+                    coalescer.append(bytes)
+                }
             }
-            // Freshly-replayed history doesn't schedule a frame on its own, so on a
+            // Freshly-seeded history doesn't schedule a frame on its own, so on a
             // session switch it sits un-drawn until a user event forces a tick — the
             // "blank until you select all the text" bug. Nudge one redraw right after
             // the replay lands, and again after layout has certainly settled (the
@@ -526,9 +537,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // cut mid-stream.
             suspendStreaming()
             resizeWork?.cancel(); resizeWork = nil
-            healWork?.cancel(); healWork = nil
-            resizeHealArmed = false
-            sawStreamDuringHeal = false
+            heal.disarm()
             // A hidden pane must not keep swallowing keystrokes.
             if host.window?.firstResponder === host.terminal {
                 host.window?.makeFirstResponder(nil)
@@ -570,7 +579,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             streaming = true
             let coalescer = TerminalFeedCoalescer { [weak self, weak gsession] bytes in
                 gsession?.receive(Data(bytes))
-                self?.noteOutputForHeal()
+                self?.heal.noteOutput()
             }
             feedCoalescer = coalescer
             cancel = session.subscribeFromModelSeed { bytes in coalescer.append(bytes) }
@@ -620,8 +629,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             activeObservers.forEach { NotificationCenter.default.removeObserver($0) }
             activeObservers.removeAll()
             resizeWork?.cancel(); resizeWork = nil
-            healWork?.cancel(); healWork = nil
-            resizeHealArmed = false
+            heal.disarm()
             cancel?(); cancel = nil
             cancelGrid?(); cancelGrid = nil
             streaming = false
@@ -679,9 +687,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 return
             }
             // A plain drag has no layout-transition settle pass; arm the output-quiet
-            // heal so a resize that lands mid-stream gets one clean re-lay-out once the
-            // CLI stops emitting (see `resizeHealQuietDelay`).
-            armResizeHeal()
+            // heal so a resize that lands mid-stream gets one clean repaint (and, if the
+            // CLI was streaming, one re-lay-out) once it stops emitting — see `heal`.
+            heal.arm()
             let now = DispatchTime.now()
             let earliest = lastResizeAt.map { $0 + resizeThrottle } ?? now
             if earliest <= now {
@@ -693,41 +701,47 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             }
         }
 
-        /// Arm (or push out) the post-resize heal timer. Fires `fireResizeHeal` once the
-        /// CLI's output has been quiet for `resizeHealQuietDelay`. Re-arming while
-        /// already armed just reschedules — it never re-clears `sawStreamDuringHeal`, so
-        /// the streaming signal accumulated across the whole gesture survives.
-        private func armResizeHeal() {
-            if !resizeHealArmed {
-                resizeHealArmed = true
-                sawStreamDuringHeal = false
-            }
-            healWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.fireResizeHeal() }
-            healWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + resizeHealQuietDelay, execute: work)
-        }
-
-        /// Output landed. If a heal is armed, the CLI was streaming through the resize
-        /// (the corruptible case) — record it and push the quiet timer out so we only
-        /// nudge once the stream actually stops.
-        private func noteOutputForHeal() {
-            guard resizeHealArmed else { return }
-            sawStreamDuringHeal = true
-            armResizeHeal()
-        }
-
-        /// The CLI's output has settled after a resize. If it was streaming through the
-        /// resize, force one genuine SIGWINCH so it fully re-lays-out at the settled
-        /// grid, clearing the mid-stream mis-wrap. Disarm *before* nudging so the redraw
-        /// bytes the nudge provokes don't re-arm the heal into a loop.
-        private func fireResizeHeal() {
-            resizeHealArmed = false
-            healWork = nil
-            guard sawStreamDuringHeal else { return }
-            sawStreamDuringHeal = false
+        /// The CLI's output has settled after a resize. Repaint the surface from the
+        /// headless model — the model parsed every byte at the pty's own grid, so its
+        /// rows are the frame the CLI actually drew, where the surface may be holding
+        /// bytes it reflowed a layout tick early. If the CLI was streaming through the
+        /// resize, also force one genuine SIGWINCH so it re-lays-out at the settled
+        /// grid. The policy disarms *before* we act, so the redraw bytes this provokes
+        /// don't re-arm the heal into a loop.
+        private func fireResizeHeal(_ action: ResizeHealAction) {
             guard let g = lastSurfaceGrid, g.cols > 0, g.rows > 0 else { return }
-            nudge(cols: g.cols, rows: g.rows)
+            if action.sigwinch {
+                // The CLI streamed through the resize: make it re-lay-out, then repaint
+                // once the flap has landed — the nudge walks the grid through `rows-1`,
+                // and a repaint encoded at that transient size would be skipped by the
+                // grid check for nothing.
+                nudge(cols: g.cols, rows: g.rows)
+                scheduleRepaint(matching: g, afterMs: nudgeSettleMs)
+            } else if action.repaint {
+                // Idle resize: the CLI has nothing to redraw, so no SIGWINCH — but a
+                // stale frame can still be on screen. The model's rows are the truth.
+                repaintFromModel(matching: g)
+            }
+        }
+
+        /// Push a clean repaint of the model's current screen into the surface, in
+        /// stream order (juancode-8llo). Routed through the same coalescer as live
+        /// output so it can never land between the halves of a chunk, and skipped for a
+        /// pool-hidden pane — that surface is occluded and re-seeds on reveal anyway.
+        /// `matching` is the surface's grid: the model is only painted when it agrees
+        /// (checked next to the encode, on the session workQueue).
+        private func repaintFromModel(matching grid: (cols: Int, rows: Int)) {
+            guard Config.useModelSeed, streaming, !sizingFrozen else { return }
+            guard let coalescer = feedCoalescer else { return }
+            session.repaintFromModel(matching: grid) { bytes in coalescer.append(bytes) }
+        }
+
+        /// Repaint after the grid work has certainly landed — longer than `nudge`'s
+        /// flap so the model is back at the real grid by the time we encode.
+        private func scheduleRepaint(matching grid: (cols: Int, rows: Int), afterMs: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(afterMs)) { [weak self] in
+                self?.repaintFromModel(matching: grid)
+            }
         }
 
         /// True when a resize actually reached the pty during the current layout
@@ -758,13 +772,27 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             view?.fitToSize()
             let delivered = sentDuringTransition
             sentDuringTransition = false
+            // Whichever branch runs, finish by repainting from the headless model
+            // (juancode-8llo). A transition reflows the surface *before* the pty hears
+            // the new grid, so whatever the CLI printed mid-animation is laid out at
+            // the wrong width — the interleaved stale rows a rail/drawer toggle leaves
+            // behind. The model's grid only ever moves inside `Session.resize`, so it
+            // parsed those same bytes at the pty's own width: its rows are the frame the
+            // CLI actually drew. A SIGWINCH makes the CLI redraw its own regions, but
+            // not rows it believes are already correct — this is what clears those.
             if let last = lastSent, last.cols == g.cols, last.rows == g.rows {
-                if delivered { return }
+                if delivered {
+                    // Settled grid already delivered mid-transition: no size change is
+                    // coming, so the model is at `g` now and can be painted right away.
+                    repaintFromModel(matching: g)
+                    return
+                }
                 lastResizeAt = .now()
                 nudge(cols: g.cols, rows: g.rows)
             } else {
                 sendResize(cols: g.cols, rows: g.rows)
             }
+            scheduleRepaint(matching: g, afterMs: nudgeSettleMs)
         }
 
         /// Push the *latest* surface grid to the pty. Reads `lastSurfaceGrid` at fire
