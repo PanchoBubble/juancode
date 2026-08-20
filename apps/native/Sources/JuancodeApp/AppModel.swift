@@ -494,6 +494,20 @@ final class AppModel {
     /// Whether `id` is a still-unrevived crash orphan (drives the sidebar sort).
     func isCrashOrphan(_ id: String) -> Bool { pendingCrashOrphans.contains(id) }
 
+    /// Whether `id` is asleep in the one sense worth its own glyph: the reaper put it
+    /// down while it was idle, this run, and it hasn't been woken since.
+    ///
+    /// `meta.dormant` alone is too broad — a graceful quit flags every open session
+    /// with it so the next boot keeps those rows surfaced. Those rows aren't "asleep",
+    /// they're being restored: the launch sweep resumes each one, so they read grey →
+    /// spinner → live within seconds, and a moon there would just be a flicker that
+    /// says the wrong thing. Excluding the boot orphans leaves the moon meaning
+    /// exactly one thing: auto-slept to free memory, open it to carry on.
+    func isAsleep(_ id: String) -> Bool {
+        guard !isLive(id), !isCrashOrphan(id) else { return false }
+        return sessions.first(where: { $0.id == id })?.dormant ?? false
+    }
+
     /// Live-output subscription cancels for restored panes awaiting their first live
     /// byte — the auto-dismiss hook for the `.resuming` banner.
     private var restoreOutputCancels: [String: () -> Void] = [:]
@@ -802,12 +816,16 @@ final class AppModel {
     /// (`refresh`), activity edges, unread/unseen clears, and external discovery.
     private func syncSidebarOrder() {
         let live = Set(appState.registry.all().map(\.id))
+        // Auto-slept rows rest where they were rather than sinking into the dead
+        // pile — they're "open but closed" (see `restingAttention`).
+        let dormantIds = Set(sessions.filter(\.dormant).map(\.id))
         var next: [String: SessionAttention] = [:]
         next.reserveCapacity(sessions.count + externalSessions.count)
         func project(_ id: String) {
             next[id] = sidebarOrderAttention(live: live.contains(id), activity: activities[id],
                                              unseenDone: unseenCompletions.contains(id),
-                                             crashOrphan: pendingCrashOrphans.contains(id))
+                                             crashOrphan: pendingCrashOrphans.contains(id),
+                                             dormant: dormantIds.contains(id))
         }
         for meta in sessions { project(meta.id) }
         for meta in externalSessions where next[meta.id] == nil { project(meta.id) }

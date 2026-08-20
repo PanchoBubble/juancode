@@ -413,6 +413,32 @@ import Testing
                                       unseenDone: true, crashOrphan: false) == .idle)
     }
 
+    @Test func autoSleptRestsInPlaceInsteadOfSinking() {
+        // "Open but closed": the reaper freed its RAM, the conversation is intact and
+        // one click brings it back, so it must not sink into the dead pile where a
+        // folder's "Load more" hides it.
+        #expect(restingAttention(.exited, crashOrphan: false, dormant: true) == .idle)
+        #expect(restingAttention(.exited, crashOrphan: false, dormant: false) == .exited)
+        #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
+                                      crashOrphan: false, dormant: true) == .idle)
+        // A genuinely exited session still sinks — grey means finished.
+        #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
+                                      crashOrphan: false, dormant: false) == .exited)
+
+        // Ordering: an auto-slept row outranks both a manually placed dead row and a
+        // plain dead one, exactly like a crash orphan.
+        let asleep = ManualSortKey(
+            key: SessionSortKey(attention: restingAttention(.exited, crashOrphan: false,
+                                                           dormant: true),
+                                updatedAt: 10, createdAt: 10),
+            manualIndex: nil, id: "asleep")
+        let placed = ManualSortKey(
+            key: SessionSortKey(attention: .exited, updatedAt: 99, createdAt: 99),
+            manualIndex: 0, id: "placed")
+        #expect(manualRestingPrecedes(asleep, placed))
+        #expect(!manualRestingPrecedes(placed, asleep))
+    }
+
     @Test func sidebarOrderKeepsTheBucketsThatMoveRows() {
         // The one bubbling state and the dead-sink still come through, and a crash
         // orphan still rests instead of sinking.

@@ -1305,6 +1305,14 @@ struct SidebarView: View {
                     model.sleepIdleSessions(inProject: meta.cwd)
                 }
             }
+            // Free the ~300MB its CLI tree holds without waiting out the idle
+            // window; the row stays and resumes on demand.
+            if model.isLive(meta.id) {
+                Button("Sleep") { model.sleepSession(meta.id) }
+                Button("Sleep Idle in This Project") {
+                    model.sleepIdleSessions(inProject: meta.cwd)
+                }
+            }
             // The log is shared JSONL — grep the session id to follow one row's
             // spawn/seed/activity/exit trail.
             Button("Open Activity Log") { model.revealActivityLog() }
@@ -1393,7 +1401,8 @@ private struct SessionRowHost: View {
                    menuContent: external ? nil : menu,
                    onCloseRequested: external ? nil : confirmClose,
                    selected: selected,
-                   activating: model.isActivating(meta.id))
+                   activating: model.isActivating(meta.id),
+                   asleep: model.isAsleep(meta.id))
             // Wheel button = stop this row's agent, browser-tab style. Deliberately the
             // menu's "Kill Agent" and not the ✕'s delete: a stray middle click then
             // costs a resume, never the session, its scrollback or its worktree. Inert
@@ -2252,6 +2261,9 @@ struct SessionRow: View {
     /// The session's exited pane is being resumed right now (juancode click-to-open
     /// feedback) — swaps the status glyph for a spinner until the pty is back.
     var activating: Bool = false
+    /// Auto-slept while idle to free memory (`AppModel.isAsleep`): purple moon, and
+    /// the row rests in place instead of sinking or fading like an exited one.
+    var asleep: Bool = false
 
     @State private var hovering = false
 
@@ -2303,17 +2315,19 @@ struct SessionRow: View {
             Spacer(minLength: 6)
             trailingOrnament
         }
-        // A sleeping (reaped) row dims as a whole so it reads as resting, not
-        // failed — the moon glyph carries the "why".
-        .opacity(sleeping ? 0.55 : 1)
+        // A sleeping (reaped) row reads as resting, not failed — the purple moon
+        // carries the "why", so the row only steps back a little. It used to fade to
+        // 0.55, which made work you still consider open look discarded.
+        .opacity(sleeping ? 0.85 : 1)
         .padding(.vertical, 3)
         // Floated, not laid out: see `hoverActions`.
         .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
     }
 
-    /// The reaper put this session to sleep and it hasn't been revived yet.
-    private var sleeping: Bool { !live && meta.dormant }
+    /// The reaper put this session to sleep and it hasn't been revived yet. Not the
+    /// same as `meta.dormant` — see `AppModel.isAsleep`.
+    private var sleeping: Bool { !live && asleep }
 
     /// The at-risk warning plus (for external rows) a hover-revealed resume button.
     /// Usage moved into the subtitle and the tracking capsule moved to the leading
@@ -2496,15 +2510,17 @@ struct SessionRow: View {
     /// Status glyph in the leading slot — the shared agent-state vocabulary.
     private var statusIndicator: some View {
         SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                          unread: unread, activating: activating, dormant: meta.dormant)
+                          unread: unread, activating: activating, dormant: sleeping)
     }
 }
 
 /// The agent-state vocabulary (juancode-t9p), one glyph per state so a session
 /// list answers "who's working / who needs me / who finished" at a glance:
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
-/// green check (only until the session is viewed), idle/exited = quiet grey dot,
-/// sleeping (auto-slept by the reaper) = muted moon.
+/// green check (only until the session is viewed), live-but-idle = blue dot,
+/// actually exited = quiet grey dot, asleep (auto-slept by the reaper, resumable
+/// and still resting in place) = purple moon. Three tiers, deliberately: open,
+/// open-but-closed, and finished.
 /// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
 /// the two surfaces never drift into different vocabularies.
 struct SessionStateGlyph: View {
@@ -2560,10 +2576,15 @@ struct SessionStateGlyph: View {
                     .foregroundStyle(.green)
                     .help("Finished since you last looked — click to view")
             case .sleeping:
+                // A status colour, not a dimmer grey: "asleep on purpose, one click
+                // from live" has to be legible against BOTH the live dots and the
+                // faint grey of a session that actually exited. Purple is the only
+                // slot left in the vocabulary (orange working, amber waiting, green
+                // done-unseen, blue live-idle, grey exited).
                 Image(systemName: "moon.zzz.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary.opacity(0.7))
-                    .help("Sleeping — auto-slept after idle. Open it to wake it up.")
+                    .foregroundStyle(.purple)
+                    .help("Asleep — auto-slept while idle to free memory. Open it to pick up where you left off.")
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
                     .frame(width: 8, height: 8)

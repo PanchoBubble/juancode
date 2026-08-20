@@ -96,13 +96,22 @@ public func sinkDownPrecedes(_ a: SinkSortKey, _ b: SinkSortKey) -> Bool {
     return a.id < b.id
 }
 
-/// Resting attention for the sidebar sort: a crash orphan (still "running" when
-/// the previous process died, not yet revived this run) rests like an idle live
-/// session instead of sinking with old dead ones — otherwise a crash/relaunch
-/// buries yesterday's active work under manually-placed rows and behind the
-/// folder's "Load more". Glyphs are untouched; this only affects ordering.
-public func restingAttention(_ attention: SessionAttention, crashOrphan: Bool) -> SessionAttention {
-    (crashOrphan && attention == .exited) ? .idle : attention
+/// Resting attention for the sidebar sort: a session that is *asleep rather than
+/// finished* rests like an idle live session instead of sinking with old dead
+/// ones. Two kinds qualify:
+///
+/// - a crash orphan (still "running" when the previous process died, not yet
+///   revived this run) — otherwise a crash/relaunch buries yesterday's active work
+///   under manually-placed rows and behind the folder's "Load more";
+/// - a session the reaper auto-slept while idle (`meta.dormant`) — it is one click
+///   from live and its conversation is intact, so sinking it into the dead pile
+///   hides work you still consider open. "Open but closed", not exited.
+///
+/// Glyphs are untouched; this only affects ordering.
+public func restingAttention(
+    _ attention: SessionAttention, crashOrphan: Bool, dormant: Bool = false
+) -> SessionAttention {
+    ((crashOrphan || dormant) && attention == .exited) ? .idle : attention
 }
 
 /// The sidebar's *order* bucket for one session: `restingAttention` with `.working`
@@ -117,11 +126,12 @@ public func restingAttention(_ attention: SessionAttention, crashOrphan: Bool) -
 /// finished turn can't either. Row glyphs keep reading the real activity, so the
 /// green check still appears — the row just doesn't move to show it.
 public func sidebarOrderAttention(
-    live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool
+    live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool,
+    dormant: Bool = false
 ) -> SessionAttention {
     let resting = restingAttention(
         sessionAttention(live: live, activity: activity, unseenDone: unseenDone),
-        crashOrphan: crashOrphan)
+        crashOrphan: crashOrphan, dormant: dormant)
     return (resting == .working || resting == .doneUnseen) ? .idle : resting
 }
 

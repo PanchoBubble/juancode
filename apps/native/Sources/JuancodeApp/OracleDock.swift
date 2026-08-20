@@ -670,6 +670,7 @@ struct OracleGlobalRail: View {
             activity: entry.activity,
             unread: model.unreadSessions.contains(meta.id),
             unseenDone: model.unseenCompletions.contains(meta.id),
+            asleep: model.isAsleep(meta.id),
             // Reveal first: tapping a row with the drawer closed slides the chat in
             // from this edge; with it open, it just switches the active Oracle.
             onSelect: { oracle.reveal(); oracle.selectOracle(meta.id) },
@@ -717,6 +718,9 @@ private struct OracleRailRow: View {
     let unread: Bool
     /// It finished a turn while you were looking elsewhere — green check until viewed.
     let unseenDone: Bool
+    /// Auto-slept while idle to free memory (`AppModel.isAsleep`) — purple moon, and
+    /// the card only steps back instead of fading like an exited one.
+    let asleep: Bool
     let onSelect: () -> Void
     /// Stop the running agent but keep the conversation in the rail (kill ≠ delete);
     /// nil when the session isn't live.
@@ -733,7 +737,7 @@ private struct OracleRailRow: View {
             // pulses, one waiting on a reply shows the amber "?", one that finished
             // while you were elsewhere keeps a green check until you look.
             SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                              unread: unread, dormant: meta.dormant)
+                              unread: unread, dormant: asleep)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(placeholder ? "Oracle \(number)" : meta.title)
@@ -758,11 +762,17 @@ private struct OracleRailRow: View {
         }
         .overlay(RoundedRectangle(cornerRadius: 7)
             .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1))
-        // A resting Oracle dims as a whole so live ones carry the eye.
-        .opacity(live ? 1 : 0.62)
+        // A resting Oracle dims as a whole so live ones carry the eye — but one that
+        // is merely asleep (purple moon, resumable) only steps back a little; it is
+        // work still in play, not history.
+        .opacity(live ? 1 : (asleep ? 0.85 : 0.62))
         .padding(.horizontal, 6).padding(.vertical, 1.5)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        // Wheel button = stop this Oracle's agent, same as the sidebar rows
+        // (browser-tab style). The kill, never the delete: a stray middle click
+        // costs a resume, not the session or its history. Inert with no live agent.
+        .onMiddleClick(enabled: onKill != nil) { onKill?() }
         .onHover { hovering = $0 }
         .contextMenu { menuItems }
         .help(meta.title)
