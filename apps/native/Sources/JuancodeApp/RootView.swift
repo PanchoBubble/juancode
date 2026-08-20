@@ -2537,7 +2537,8 @@ struct SessionRow: View {
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
 /// green check (only until the session is viewed), live-but-idle = blue dot,
 /// actually exited = quiet grey dot, asleep (auto-slept by the reaper, resumable
-/// and still resting in place) = purple moon. Three tiers, deliberately: open,
+/// and still resting in place) = purple moon, teal while the unread dot is up so
+/// the two don't merge. Three tiers, deliberately: open,
 /// open-but-closed, and finished.
 /// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
 /// the two surfaces never drift into different vocabularies.
@@ -2599,9 +2600,15 @@ struct SessionStateGlyph: View {
                 // faint grey of a session that actually exited. Purple is the only
                 // slot left in the vocabulary (orange working, amber waiting, green
                 // done-unseen, blue live-idle, grey exited).
+                //
+                // Except when the unread dot is up: purple against that saturated red
+                // is two dark tones touching, and the moon's shape stops reading. Teal
+                // is red's complement, so the pair separates at a glance — and it only
+                // appears while the dot is there, so "purple = asleep" stays the resting
+                // colour you learn.
                 Image(systemName: "moon.zzz.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(unread ? Color.teal : Color.purple)
                     .help("Asleep — auto-slept while idle to free memory. Open it to pick up where you left off.")
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
