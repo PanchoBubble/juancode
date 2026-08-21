@@ -509,6 +509,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "juancoded-cordis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "juancoded-core",
+ "juancoded-vt",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "juancoded-core"
 version = "0.1.0"
 dependencies = [

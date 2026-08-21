@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/juancoded",
+    "crates/juancoded-cordis",
     "crates/juancoded-core",
     "crates/juancoded-persistence",
     "crates/juancoded-plugins",
@@ -16,6 +17,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+juancoded-cordis = { path = "crates/juancoded-cordis" }
 juancoded-core = { path = "crates/juancoded-core" }
 juancoded-persistence = { path = "crates/juancoded-persistence" }
 juancoded-plugins = { path = "crates/juancoded-plugins" }
