@@ -47,6 +47,13 @@ public actor PrTrackingEngine {
 
     private var nextObserverToken = 0
     private var observers: [Int: @Sendable (Change) -> Void] = [:]
+    /// The watch list as observers last heard it. A `.tracked` change carries the
+    /// whole set, so re-announcing an identical set says nothing, and a poll pass
+    /// that found nothing is the common case rather than the rare one, since the
+    /// poller runs whether or not GitHub moved. Worse than noise: the redundant
+    /// announcement races whatever the client asked for next, so an untrack can be
+    /// answered by a snapshot that still lists the PR as watched.
+    private var announced: [TrackedPr]?
 
     /// Debounce window for webhook-triggered refreshes: a single push fires
     /// several GitHub events within moments, and each should NOT cost its own
@@ -112,7 +119,9 @@ public actor PrTrackingEngine {
         let token = nextObserverToken
         nextObserverToken += 1
         observers[token] = onChange
-        onChange(.tracked(snapshot()))
+        let snap = snapshot()
+        announced = snap
+        onChange(.tracked(snap))
         return { [weak self] in
             guard let self else { return }
             Task { await self.removeObserver(token) }
@@ -132,6 +141,8 @@ public actor PrTrackingEngine {
 
     private func broadcastTracked() {
         let snap = snapshot()
+        guard snap != announced else { return }
+        announced = snap
         for o in observers.values { o(.tracked(snap)) }
     }
 

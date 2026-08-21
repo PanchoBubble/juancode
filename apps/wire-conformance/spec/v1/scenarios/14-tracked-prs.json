@@ -1,7 +1,7 @@
 {
   "id": "tracked-prs",
   "title": "tracked-PR fan-out",
-  "asserts": "subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, and untracking pushes the list back \u2014 always the complete set, replaced wholesale.",
+  "asserts": "subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, a refresh that moved nothing pushes nothing, and untracking pushes the list back \u2014 always the complete set, replaced wholesale.",
   "requires": [
     "pty",
     "git"
@@ -84,6 +84,13 @@
       },
       "timeoutMs": 30000,
       "note": "state is snake_cased on the wire (needs_decision), unlike the Swift enum"
+    },
+    {
+      "expectNone": {
+        "type": "trackedPrs"
+      },
+      "withinMs": 1500,
+      "note": "tracking starts the poll loop, whose first pass runs immediately and finds nothing (gh is stubbed to fail): a list that did not change is not re-announced, so no second frame arrives before the untrack"
     },
     {
       "send": {

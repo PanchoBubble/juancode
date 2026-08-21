@@ -41,6 +41,14 @@ export interface StatusFile {
   scenarios: Record<string, ScenarioStatus>;
 }
 
+/** What a core is called in a checklist header. A re-measure rewrites the status
+ *  file wholesale, so the readable name has to live here or every measurement
+ *  quietly replaces it with the short one. */
+const CORE_LABELS: Record<string, string> = {
+  swift: "apps/native (JuancodeServer), the Swift core",
+  rust: "apps/juancoded, the Rust core",
+};
+
 export function toStatusFile(report: RunReport, measuredAt: string): StatusFile {
   const scenarios: Record<string, ScenarioStatus> = {};
   for (const o of report.outcomes) {
@@ -53,7 +61,7 @@ export function toStatusFile(report: RunReport, measuredAt: string): StatusFile 
   }
   return {
     core: report.core,
-    coreLabel: report.core,
+    coreLabel: CORE_LABELS[report.core] ?? report.core,
     source: "measured",
     measuredAt,
     specRevision: report.specRevision,

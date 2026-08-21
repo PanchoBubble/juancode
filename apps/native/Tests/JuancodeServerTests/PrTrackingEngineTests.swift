@@ -210,4 +210,25 @@ final class PrTrackingEngineTests: XCTestCase {
         XCTAssertEqual(Array(store.loadTrackedPrPayloads().keys), [pr.id])
         XCTAssertNil(defaults.data(forKey: Self.legacyKey))
     }
+
+    func testAPollPassThatChangedNothingDoesNotReAnnounceTheList() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let pr = Self.samplePr(11, cwd: Self.ghostCwd())
+        try Self.seed(store, [pr])
+        let engine = try makeEngine(store: store)
+        let announcements = Counter()
+        let off = await engine.subscribe { change in
+            if case .tracked = change { announcements.increment() }
+        }
+        XCTAssertEqual(announcements.value, 1, "a new subscriber is handed the snapshot")
+        // The poll's `gh` spawns fail on a cwd that cannot exist, so the pass moves
+        // nothing. A list that did not change is not news, and announcing it anyway
+        // races whatever the client asked for next: an untrack answered by a
+        // snapshot that still lists the PR as watched.
+        await engine.pollOnce()
+        XCTAssertEqual(announcements.value, 1)
+        await engine.untrack(pr.id)
+        XCTAssertEqual(announcements.value, 2)
+        off()
+    }
 }

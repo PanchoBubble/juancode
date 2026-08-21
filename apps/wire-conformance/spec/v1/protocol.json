@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.1.0",
+  "specRevision": "1.2.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift",
   "transport": {
@@ -402,7 +402,8 @@
         "tracked"
       ],
       "optional": [],
-      "capability": "trackedPrs"
+      "capability": "trackedPrs",
+      "notes": "The whole watch list, replaced wholesale. Sent once in answer to subscribeTrackedPrs and after that only when the list changed. See TRACKED_PRS_ARE_CHANGES."
     },
     "trackNotification": {
       "required": [
@@ -462,6 +463,7 @@
     "Malformed JSON gets one error frame and the connection stays open.",
     "A client feature-detects off serverInfo.capabilities and must refuse a core whose protocolVersion it does not implement.",
     "SERVER_INFO_ORDERING: serverInfo is frame 0. Nothing may precede it: not a reply frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs), and not an unsolicited activity broadcast either. A core must queue the handshake before it starts the activity fan-out, so a connection opened while other sessions are already live still reads serverInfo first and their activity after it.",
+    "TRACKED_PRS_ARE_CHANGES: a trackedPrs frame is the whole watch list, replaced wholesale, and it is a change notification. A core sends one snapshot in answer to subscribeTrackedPrs, and after that only when the list it would send differs from the one that connection was last sent. A poll pass that found nothing, or any other internal refresh that moved nothing, sends no frame at all: an identical list carries no information, and a redundant one races whatever the client asks for next, so a client that untracks a PR is answered by a snapshot that still lists it as watched.",
     "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage.",
     "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means."
   ],
