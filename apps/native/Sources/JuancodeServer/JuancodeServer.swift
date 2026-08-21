@@ -50,7 +50,8 @@ public enum JuancodeServer {
     static func openConnection(state: AppState, gate: WSSendGate) -> WebSocketConnection {
         let conn = WebSocketConnection(state: state, gate: gate)
         conn.send(.serverInfo(protocolVersion: WireProtocol.version,
-                              capabilities: WireProtocol.capabilities))
+                              capabilities: WireProtocol.capabilities,
+                              clientId: conn.clientId))
         conn.start()
         return conn
     }

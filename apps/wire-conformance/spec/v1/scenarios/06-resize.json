@@ -2,9 +2,18 @@
   "id": "resize",
   "title": "resize acks: applied, denied, and unknown session",
   "asserts": "a sequenced resize is always acked, and the ack distinguishes three outcomes a client must handle differently: applied (the grid reached the pty), denied (another client owns the shared grid, so retrying is futile), and neither (nothing to resize, so re-assert).",
-  "requires": ["pty"],
-  "capabilities": ["resizeAck"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "resizeAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

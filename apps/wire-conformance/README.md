@@ -112,6 +112,7 @@ one command per line off the pty and prints exactly what was asked for:
 | `ALT` / `MAIN`     | enter / leave the alternate screen buffer                     |
 | `HIDE` / `SHOW`    | hide / show the cursor                                        |
 | `MOVE <row> <col>` | position the cursor                                           |
+| `TITLE <text>`     | set an OSC 2 window title, the way a CLI names its session    |
 | `EXIT <code>`      | exit with that status                                         |
 
 **How a real provider differs.** Everything the suite asserts about the wire is
@@ -156,11 +157,17 @@ it buys a client, the capabilities and environment it needs, and steps.
 }
 ```
 
-Steps: `open` (a second connection), `send`, `raw` (a non-JSON frame), `expect`,
+Steps: `open` (a second connection), `close` (drop one, which is how a core's
+disconnect behaviour gets driven), `send`, `raw` (a non-JSON frame), `expect`,
 `expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`. `expect` consumes
 frames with a cursor, so consecutive expects assert **order**; a frame that is
 neither the match nor in `ignore` fails the step. `bind` reads a value out of a
 matched frame (`{"session": "session.id"}`) for later `$session` references.
+
+`open` normally swallows the handshake and the connect-time broadcasts; `{"open":
+"b", "keep": true}` keeps them, for a transcript that asserts what a client is
+told the moment it arrives. Each connection's own `serverInfo.clientId` is bound
+as `$clientA` / `$clientB`, so a step can assert **which** client owns a grid.
 
 Matchers are partial on objects and exact on arrays, with explicit operators for
 anything looser: `$absent`, `$present`, `$type`, `$oneOf`, `$regex`, `$contains`,

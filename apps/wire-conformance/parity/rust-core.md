@@ -7,9 +7,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-21
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal
-- Unmet scenarios: 4 of 18
+- Unmet scenarios: 6 of 20
 
-## What is not satisfied yet (4)
+## What is not satisfied yet (6)
 
 ### queue
 
@@ -39,6 +39,20 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Why: step 5: [a] unexpected frame before attached {"sessionId":"5b8fd642-c8c4-42a7-a7bc-22e2332798e8","session":{"id":"5b8fd642-c8c4-42a7-a7bc-22e2332798e8","skipPermissions":true,"status":"running"}}
 - Asserts: changing a live session's permission mode restarts the CLI in place and re-attaches the client to the same session id with the new mode on its meta, so the client never has to re-find the session.
 
+### session-meta
+
+- Status: never measured
+- Needs: sessionMeta, pty
+- Why: never measured
+- Asserts: a session's metadata reaches every connection as it changes, so a title the CLI derives for itself surfaces without re-attaching, and a client that never attached to the session still sees the new row. Without this a sidebar row is frozen at whatever meta the client happened to attach with.
+
+### grid-owner
+
+- Status: never measured
+- Needs: gridOwner, resizeAck, pty
+- Why: never measured
+- Asserts: every client learns who controls a session's pty grid, not just whether its own resize was refused: the owner is named on the ack and broadcast on every change, a connection that arrives while the grid is claimed is told so on arrival, and a release is broadcast when the owner disconnects. Without this a viewer cannot render a pane read-only, and can never tell that the grid is free again.
+
 ## Full scenario list
 
 - handshake: yes - Capability handshake
@@ -59,3 +73,5 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - adopt-external: yes - adopting an external conversation
 - dispatch-correlation: yes - dispatch correlation and dedup
 - skip-permissions: NO - flipping skip-permissions
+- session-meta: never measured - meta edits are broadcast, not only snapshotted on attach
+- grid-owner: never measured - who owns the shared grid, and when it is let go

@@ -2,8 +2,15 @@
   "id": "unresumable",
   "title": "unresumable reactivate",
   "asserts": "reactivating a dead session whose CLI conversation id was never captured is answered with `unresumable` and a human-readable reason, not an error and not a silent nothing.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

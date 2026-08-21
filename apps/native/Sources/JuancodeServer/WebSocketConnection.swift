@@ -45,8 +45,10 @@ final class WebSocketConnection: @unchecked Sendable {
 
     /// Stable id for this connection, used as its grid-ownership token so a
     /// session's shared pty grid has a single controlling client instead of
-    /// flapping last-write-wins between viewers (juancode-1th.1).
-    private let clientId = UUID().uuidString
+    /// flapping last-write-wins between viewers (juancode-1th.1). Handed to the
+    /// client in `serverInfo` so it can recognise itself in a `gridChange` /
+    /// `resizeAck` owner instead of only seeing that somebody owns the grid.
+    let clientId = UUID().uuidString
 
     private let lock = NSLock()
     private var subscriptions: [String: () -> Void] = [:]
@@ -70,6 +72,10 @@ final class WebSocketConnection: @unchecked Sendable {
     /// out to git before sending, so every send awaits its predecessor to keep
     /// per-session activity ordering intact on the wire.
     private var activityChains: [String: Task<Void, Never>] = [:]
+    /// Meta-change fan-out, one per session (juancode-0ckr).
+    private var metaWatchers: [() -> Void] = []
+    /// Grid-ownership fan-out, one per session (juancode-0ckr).
+    private var gridWatchers: [() -> Void] = []
 
     init(state: AppState, gate: WSSendGate) {
         self.state = state
@@ -90,21 +96,31 @@ final class WebSocketConnection: @unchecked Sendable {
 
     // MARK: - lifecycle
 
-    /// Begin broadcasting activity for every live session (and future ones), so
-    /// the sidebar shows a status icon per session — independent of output subs.
+    /// Begin broadcasting activity, meta edits and grid ownership for every live
+    /// session (and future ones), so the sidebar shows a status icon and an
+    /// up-to-date row per session — independent of output subs.
     func start() {
-        for s in state.registry.all() { watchActivity(s) }
-        let off = state.registry.onCreate { [weak self] s in self?.watchActivity(s) }
+        for s in state.registry.all() { watchSession(s) }
+        let off = state.registry.onCreate { [weak self] s in self?.watchSession(s) }
         lock.withLock { activityWatchers.append(off) }
+    }
+
+    private func watchSession(_ s: Session) {
+        watchActivity(s)
+        watchMeta(s)
+        watchGrid(s)
     }
 
     func close() {
         let (subs, watchers, queues, screens, eds, terms, prsUnsub):
             ([() -> Void], [() -> Void], [() -> Void], [() -> Void], Set<String>, Set<String>, (@Sendable () -> Void)?) =
             lock.withLock {
-                let r = (Array(subscriptions.values), activityWatchers, Array(queueWatchers.values),
+                let r = (Array(subscriptions.values),
+                         activityWatchers + metaWatchers + gridWatchers,
+                         Array(queueWatchers.values),
                          Array(screenStreams.values), openedEditors, openedTerminals, trackedPrsUnsub)
                 subscriptions.removeAll(); activityWatchers.removeAll(); queueWatchers.removeAll()
+                metaWatchers.removeAll(); gridWatchers.removeAll()
                 screenStreams.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
                 trackedPrsUnsub = nil
@@ -165,6 +181,41 @@ final class WebSocketConnection: @unchecked Sendable {
                                      dispatchId: dispatchId))
             }
         }
+    }
+
+    /// Push a session's persisted meta on every out-of-band edit: a CLI-derived or
+    /// OSC window title landing, a rename, an archive or dormant flip. All of them
+    /// funnel through `Session.persistMeta`, so one listener covers the lot and no
+    /// new edge had to be invented. `created`/`attached` stay the snapshot; this is
+    /// the delta a remote client's sidebar row needs to stop being frozen at
+    /// whatever meta it attached with (juancode-0ckr).
+    ///
+    /// Editor sessions are included, unlike `activity`: a meta edit is not a turn,
+    /// so it can't ping the Telegram bridge for a turn that never happened.
+    private func watchMeta(_ s: Session) {
+        let off = s.onMetaChange { [weak self] meta in
+            self?.send(.sessionMeta(sessionId: meta.id, session: meta))
+        }
+        lock.withLock { metaWatchers.append(off) }
+    }
+
+    /// Push who owns a session's arbitrated grid: a snapshot now if it is already
+    /// claimed, then every grant and every release. `resizeAck` only ever reaches
+    /// the client that sent the seq, so without this a second viewer cannot tell
+    /// that someone else is driving (render the pane read-only) nor that the grid
+    /// was let go (juancode-0ckr).
+    ///
+    /// The snapshot is skipped for an unclaimed grid and for a session with no live
+    /// pty: a client starts out assuming the grid is free, so silence already says
+    /// the right thing, and there is no honest grid to report for a dead pty.
+    private func watchGrid(_ s: Session) {
+        if let owner = s.gridOwner(), let grid = s.appliedGrid() {
+            send(.gridChange(sessionId: s.id, owner: owner, cols: grid.cols, rows: grid.rows))
+        }
+        let off = s.onGridChange { [weak self] owner, cols, rows in
+            self?.send(.gridChange(sessionId: s.id, owner: owner, cols: cols, rows: rows))
+        }
+        lock.withLock { gridWatchers.append(off) }
     }
 
     private func resolvePty(_ id: String) -> PtyLike? {
@@ -445,14 +496,19 @@ final class WebSocketConnection: @unchecked Sendable {
             // denied), so a sequenced client re-asserts it (juancode-uz6).
             let applied: Bool
             var denied = false
+            // Who holds the grid after the arbitration, so a denied client learns
+            // who to wait for and an owner can confirm it is still itself. Nil for
+            // an ephemeral pty: those are tab-scoped and unarbitrated.
+            var owner: String?
             if let session = state.registry.get(sessionId) {
                 (applied, denied) = session.resizeGrid(owner: clientId, cols: cols, rows: rows)
+                owner = session.gridOwner()
             } else {
                 applied = state.ephemeral.get(sessionId)?.resize(cols: cols, rows: rows) ?? false
             }
             if let seq {
                 send(.resizeAck(sessionId: sessionId, seq: seq, cols: cols, rows: rows,
-                                applied: applied, denied: denied))
+                                applied: applied, denied: denied, owner: owner))
             }
 
         case let .kill(sessionId):

@@ -2,8 +2,14 @@
   "id": "activity-notify",
   "title": "activity transitions and the notify flag",
   "asserts": "the core reports a session as busy, idle or waiting_input, and `notify` marks exactly the edges a human should be pinged on: a finished turn and a prompt that needs an answer, never entering busy and never a prompt that cleared itself.",
-  "requires": ["pty"],
-  "ignore": ["output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {
@@ -22,7 +28,12 @@
         "session": "session.id"
       },
       "timeoutMs": 20000,
-      "ignore": ["activity", "output"],
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ],
       "note": "the first activity broadcast can precede `created`; see the ambiguity notes"
     },
     {
@@ -30,7 +41,12 @@
         "type": "attached",
         "sessionId": "$session"
       },
-      "ignore": ["activity", "output"]
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
     },
     {
       "send": {

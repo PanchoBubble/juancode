@@ -1,0 +1,97 @@
+{
+  "id": "session-meta",
+  "title": "meta edits are broadcast, not only snapshotted on attach",
+  "asserts": "a session's metadata reaches every connection as it changes, so a title the CLI derives for itself surfaces without re-attaching, and a client that never attached to the session still sees the new row. Without this a sidebar row is frozen at whatever meta the client happened to attach with.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "sessionMeta"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE conformance-title-one\r"
+      },
+      "note": "the CLI sets its own OSC 2 window title; nobody asked the core to rename anything"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "title": "conformance-title-one",
+          "cwd": "$cwd",
+          "status": "running"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the whole row, so a client can replace wholesale instead of patching fields"
+    },
+    {
+      "open": "b"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE conformance-title-two\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "title": "conformance-title-two"
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000,
+      "note": "b never created or attached to this session: meta is a broadcast, not a reply"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "session": {
+          "title": "conformance-title-two"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "and the acting connection is told too, not just the observer"
+    }
+  ]
+}

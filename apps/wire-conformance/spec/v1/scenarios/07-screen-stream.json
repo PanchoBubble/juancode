@@ -2,9 +2,19 @@
   "id": "screen-stream",
   "title": "rendered-screen stream",
   "asserts": "subscribeScreen replies with a full snapshot, then sends only changed rows, forces a full repaint whenever the geometry or the alt buffer flips, reports cursor visibility, and stops entirely on unsubscribe.",
-  "requires": ["pty"],
-  "capabilities": ["screen"],
-  "ignore": ["activity", "output", "screen"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "screen"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "screen",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

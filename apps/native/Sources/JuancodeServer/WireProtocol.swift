@@ -194,14 +194,18 @@ extension ClientMessage: Decodable {
 /// via `serverInfo` rather than assuming parity.
 public enum WireProtocol {
     public static let version = 1
-    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal", "inputAck", "resizeAck", "screen"]
+    public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
+                                      "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner"]
 }
 
 public enum ServerMessage: Sendable {
     /// Sent once, immediately on connect, before any other message: the server's
     /// wire-protocol version + implemented capabilities, for client feature
-    /// detection (juancode-tgc).
-    case serverInfo(protocolVersion: Int, capabilities: [String])
+    /// detection (juancode-tgc). `clientId` is this connection's grid-ownership
+    /// token, the value that comes back as the `owner` of `gridChange` and
+    /// `resizeAck` when this connection holds the grid: without it a client can
+    /// see who is driving but not whether that is itself.
+    case serverInfo(protocolVersion: Int, capabilities: [String], clientId: String)
     case created(session: SessionMeta)
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
@@ -225,8 +229,21 @@ public enum ServerMessage: Sendable {
     /// another client owns the session's shared grid (juancode-1th.1): the resize
     /// was intentionally NOT applied and re-sending it is futile, so the client
     /// stops retrying and renders the pty's actual grid as-is. Only sent when the
-    /// resize carried a seq.
-    case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool, denied: Bool)
+    /// resize carried a seq. `owner` is who holds the session's shared grid after
+    /// the arbitration, so a denied client learns who to wait for rather than only
+    /// that it lost; null for an unclaimed grid and for the unarbitrated ephemeral
+    /// editor/terminal ptys.
+    case resizeAck(sessionId: String, seq: Int, cols: Int, rows: Int, applied: Bool, denied: Bool,
+                   owner: String?)
+    /// The arbitrated grid changed hands (juancode-0ckr): a resize was granted, or
+    /// an owner let go (its pane was torn down, its connection closed). Broadcast
+    /// to every connection, unlike `resizeAck`, which only ever reaches the client
+    /// that sent the seq — so a viewer can render "someone else is driving" and
+    /// take the pane read-only, and can tell when the grid is free again. `owner`
+    /// is null for a release. Also sent once per already-owned session when a
+    /// connection opens, so a client that attaches mid-flight starts from the truth
+    /// instead of assuming the grid is unclaimed.
+    case gridChange(sessionId: String, owner: String?, cols: Int, rows: Int)
     case exit(sessionId: String, exitCode: Int?)
     /// `changes` rides along only on the settle edge that computed it (a turn
     /// finishing over a dirty tree — the same moment the desktop change badge
@@ -236,6 +253,13 @@ public enum ServerMessage: Sendable {
     /// chat off it; omitted otherwise so old clients ignore it.
     case activity(sessionId: String, state: SessionActivity, notify: Bool, changes: ChangeStat?,
                   dispatchId: String?)
+    /// A session's persisted metadata changed out of band (juancode-0ckr): a title
+    /// landed from the CLI-title poll or an OSC window title, the session was
+    /// renamed, archived, or flagged dormant. Carries the whole `SessionMeta` —
+    /// replace the row wholesale rather than patching fields. `created` and
+    /// `attached` remain the snapshot; this is the delta, so a remote client's
+    /// sidebar row is not frozen at whatever meta it attached with.
+    case sessionMeta(sessionId: String, session: SessionMeta)
     /// A session's current pending message queue (oracle-cj3 / juancode-r82) — sent
     /// on `subscribeQueue` and after every change (queued, delivered, cancelled).
     /// Always the complete ordered list; replace wholesale.
@@ -300,12 +324,14 @@ extension ServerMessage: Encodable {
     private enum K: String, CodingKey {
         case type, session, sessionId, scrollback, data, exitCode, state, notify
         case editorId, terminalId, requestId, reason, message
-        // Version/capability handshake (juancode-tgc).
-        case protocolVersion, capabilities
+        // Version/capability handshake (juancode-tgc) + the connection's own
+        // grid-ownership token.
+        case protocolVersion, capabilities, clientId
         // Input acknowledgement (juancode-1u3).
         case seq
-        // Resize acknowledgement (juancode-uz6) + grid-ownership deny (juancode-1th.1).
-        case cols, rows, applied, denied
+        // Resize acknowledgement (juancode-uz6) + grid-ownership deny (juancode-1th.1)
+        // and the arbitrated owner behind both (juancode-0ckr).
+        case cols, rows, applied, denied, owner
         // Tracked-PR registry (juancode-bt2).
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
@@ -319,10 +345,11 @@ extension ServerMessage: Encodable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: K.self)
         switch self {
-        case let .serverInfo(protocolVersion, capabilities):
+        case let .serverInfo(protocolVersion, capabilities, clientId):
             try c.encode("serverInfo", forKey: .type)
             try c.encode(protocolVersion, forKey: .protocolVersion)
             try c.encode(capabilities, forKey: .capabilities)
+            try c.encode(clientId, forKey: .clientId)
         case let .created(session):
             try c.encode("created", forKey: .type)
             try c.encode(session, forKey: .session)
@@ -350,7 +377,7 @@ extension ServerMessage: Encodable {
             try c.encode("inputAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(seq, forKey: .seq)
-        case let .resizeAck(sessionId, seq, cols, rows, applied, denied):
+        case let .resizeAck(sessionId, seq, cols, rows, applied, denied, owner):
             try c.encode("resizeAck", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(seq, forKey: .seq)
@@ -358,6 +385,15 @@ extension ServerMessage: Encodable {
             try c.encode(rows, forKey: .rows)
             try c.encode(applied, forKey: .applied)
             try c.encode(denied, forKey: .denied)
+            // `owner: string | null` is always present, like `exit.exitCode`: an
+            // omitted key and an unclaimed grid must not read the same.
+            try c.encode(owner, forKey: .owner)
+        case let .gridChange(sessionId, owner, cols, rows):
+            try c.encode("gridChange", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(owner, forKey: .owner)
+            try c.encode(cols, forKey: .cols)
+            try c.encode(rows, forKey: .rows)
         case let .exit(sessionId, exitCode):
             try c.encode("exit", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
@@ -371,6 +407,10 @@ extension ServerMessage: Encodable {
             try c.encode(notify, forKey: .notify)
             try c.encodeIfPresent(changes.map(ChangeStatWire.init), forKey: .changes)
             try c.encodeIfPresent(dispatchId, forKey: .dispatchId)
+        case let .sessionMeta(sessionId, session):
+            try c.encode("sessionMeta", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(session, forKey: .session)
         case let .queue(sessionId, items):
             try c.encode("queue", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)

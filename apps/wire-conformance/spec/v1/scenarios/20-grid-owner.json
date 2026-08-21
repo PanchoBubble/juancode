@@ -1,0 +1,181 @@
+{
+  "id": "grid-owner",
+  "title": "who owns the shared grid, and when it is let go",
+  "asserts": "every client learns who controls a session's pty grid, not just whether its own resize was refused: the owner is named on the ack and broadcast on every change, a connection that arrives while the grid is claimed is told so on arrival, and a release is broadcast when the owner disconnects. Without this a viewer cannot render a pane read-only, and can never tell that the grid is free again.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "gridOwner",
+    "resizeAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "serverInfo",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "owner": "$clientA",
+        "cols": 80,
+        "rows": 24
+      },
+      "bind": {
+        "session": "sessionId"
+      },
+      "timeoutMs": 20000,
+      "note": "the creating client owns the grid it spawned the session at, and is told so by the broadcast rather than having to infer it"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "id": "$session"
+        }
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 100,
+        "rows": 30,
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientA",
+        "cols": 100,
+        "rows": 30
+      },
+      "note": "a granted resize is public: the arbitrated state changed, so everyone hears it"
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 1,
+        "applied": true,
+        "denied": false,
+        "owner": "$clientA"
+      },
+      "note": "and the private ack names the owner too, so an owner can confirm it is still itself"
+    },
+    {
+      "open": "b",
+      "keep": true,
+      "note": "keep what b is told on arrival: the point of the connect-time snapshot"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientA",
+        "cols": 100,
+        "rows": 30
+      },
+      "on": "b",
+      "timeoutMs": 10000,
+      "note": "b arrived after the grant and is still told who drives, instead of assuming the grid is free"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 70,
+        "rows": 20,
+        "seq": 9
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 9,
+        "applied": false,
+        "denied": true,
+        "owner": "$clientA"
+      },
+      "on": "b",
+      "note": "a denied client is told who to wait for, not just that it lost"
+    },
+    {
+      "expectNone": {
+        "type": "gridChange"
+      },
+      "withinMs": 800,
+      "on": "b",
+      "note": "a refused resize did not change the arbitrated state, so there is nothing to broadcast"
+    },
+    {
+      "close": "a",
+      "note": "the owner disconnects; nothing else can produce a release edge over the wire today"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": null
+      },
+      "on": "b",
+      "timeoutMs": 10000,
+      "note": "a null owner is the release: b folds its read-only state away and may claim the grid"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 90,
+        "rows": 28,
+        "seq": 10
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientB",
+        "cols": 90,
+        "rows": 28
+      },
+      "on": "b",
+      "timeoutMs": 10000,
+      "note": "the release was real: b now owns the grid it was refused a moment ago"
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 10,
+        "applied": true,
+        "denied": false,
+        "owner": "$clientB"
+      },
+      "on": "b"
+    }
+  ]
+}

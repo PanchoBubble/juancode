@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.0.0",
+  "specRevision": "1.1.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift",
   "transport": {
@@ -11,7 +11,11 @@
     "firstServerFrame": "serverInfo, ahead of every reply; unsolicited activity broadcasts for sessions that already existed may precede it"
   },
   "capabilities": {
-    "required": ["inputAck", "resizeAck", "screen"],
+    "required": [
+      "inputAck",
+      "resizeAck",
+      "screen"
+    ],
     "known": [
       "queue",
       "trackedPrs",
@@ -20,10 +24,18 @@
       "adoptExternal",
       "inputAck",
       "resizeAck",
-      "screen"
+      "screen",
+      "sessionMeta",
+      "gridOwner"
     ],
     "gates": {
-      "queue": ["subscribeQueue", "unsubscribeQueue", "queueMessage", "dequeueMessage", "queue"],
+      "queue": [
+        "subscribeQueue",
+        "unsubscribeQueue",
+        "queueMessage",
+        "dequeueMessage",
+        "queue"
+      ],
       "trackedPrs": [
         "subscribeTrackedPrs",
         "trackPr",
@@ -32,17 +44,42 @@
         "trackedPrs",
         "trackNotification"
       ],
-      "editor": ["openEditor", "editorReady"],
-      "terminal": ["openTerminal", "terminalReady"],
-      "adoptExternal": ["adoptExternal"],
-      "inputAck": ["inputAck"],
-      "resizeAck": ["resizeAck"],
-      "screen": ["subscribeScreen", "unsubscribeScreen", "screen"]
+      "editor": [
+        "openEditor",
+        "editorReady"
+      ],
+      "terminal": [
+        "openTerminal",
+        "terminalReady"
+      ],
+      "adoptExternal": [
+        "adoptExternal"
+      ],
+      "inputAck": [
+        "inputAck"
+      ],
+      "resizeAck": [
+        "resizeAck"
+      ],
+      "screen": [
+        "subscribeScreen",
+        "unsubscribeScreen",
+        "screen"
+      ],
+      "sessionMeta": [
+        "sessionMeta"
+      ],
+      "gridOwner": [
+        "gridChange"
+      ]
     }
   },
   "clientMessages": {
     "create": {
-      "required": ["provider", "cwd"],
+      "required": [
+        "provider",
+        "cwd"
+      ],
       "optional": [
         "cols",
         "rows",
@@ -54,73 +91,130 @@
       "notes": "cols/rows omitted means the core picks its own spawn grid. Replies created + attached, or error."
     },
     "attach": {
-      "required": ["sessionId", "cols", "rows"],
+      "required": [
+        "sessionId",
+        "cols",
+        "rows"
+      ],
       "optional": []
     },
     "reactivate": {
-      "required": ["sessionId", "cols", "rows"],
+      "required": [
+        "sessionId",
+        "cols",
+        "rows"
+      ],
       "optional": []
     },
     "adoptExternal": {
-      "required": ["provider", "cliSessionId", "cwd", "startMs", "cols", "rows"],
+      "required": [
+        "provider",
+        "cliSessionId",
+        "cwd",
+        "startMs",
+        "cols",
+        "rows"
+      ],
       "optional": [],
       "capability": "adoptExternal"
     },
     "setSkipPermissions": {
-      "required": ["sessionId", "skipPermissions", "cols", "rows"],
+      "required": [
+        "sessionId",
+        "skipPermissions",
+        "cols",
+        "rows"
+      ],
       "optional": []
     },
     "input": {
-      "required": ["sessionId", "data"],
-      "optional": ["seq"],
+      "required": [
+        "sessionId",
+        "data"
+      ],
+      "optional": [
+        "seq"
+      ],
       "notes": "seq present means the core must reply with a matching inputAck; absent means no ack."
     },
     "resize": {
-      "required": ["sessionId", "cols", "rows"],
-      "optional": ["seq"],
+      "required": [
+        "sessionId",
+        "cols",
+        "rows"
+      ],
+      "optional": [
+        "seq"
+      ],
       "notes": "seq present means the core must reply with a matching resizeAck."
     },
     "kill": {
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "optional": []
     },
     "subscribeQueue": {
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "optional": [],
       "capability": "queue"
     },
     "unsubscribeQueue": {
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "optional": [],
       "capability": "queue"
     },
     "queueMessage": {
-      "required": ["sessionId", "text"],
+      "required": [
+        "sessionId",
+        "text"
+      ],
       "optional": [],
       "capability": "queue"
     },
     "dequeueMessage": {
-      "required": ["sessionId", "messageId"],
+      "required": [
+        "sessionId",
+        "messageId"
+      ],
       "optional": [],
       "capability": "queue"
     },
     "subscribeScreen": {
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "optional": [],
       "capability": "screen"
     },
     "unsubscribeScreen": {
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "optional": [],
       "capability": "screen"
     },
     "openEditor": {
-      "required": ["cwd", "file", "cols", "rows"],
+      "required": [
+        "cwd",
+        "file",
+        "cols",
+        "rows"
+      ],
       "optional": [],
       "capability": "editor"
     },
     "openTerminal": {
-      "required": ["cwd", "cols", "rows", "requestId"],
+      "required": [
+        "cwd",
+        "cols",
+        "rows",
+        "requestId"
+      ],
       "optional": [],
       "capability": "terminal"
     },
@@ -130,38 +224,60 @@
       "capability": "trackedPrs"
     },
     "trackPr": {
-      "required": ["cwd", "pr"],
+      "required": [
+        "cwd",
+        "pr"
+      ],
       "optional": [],
       "capability": "trackedPrs"
     },
     "untrackPr": {
-      "required": ["trackedId"],
+      "required": [
+        "trackedId"
+      ],
       "optional": [],
       "capability": "trackedPrs"
     },
     "resolveTrackNotification": {
-      "required": ["trackedId", "notificationId"],
+      "required": [
+        "trackedId",
+        "notificationId"
+      ],
       "optional": [],
       "capability": "trackedPrs"
     }
   },
   "serverMessages": {
     "serverInfo": {
-      "required": ["protocolVersion", "capabilities"],
-      "optional": [],
-      "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule."
+      "required": [
+        "protocolVersion",
+        "capabilities"
+      ],
+      "optional": [
+        "clientId"
+      ],
+      "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule. clientId is this connection's grid-ownership token, present on a core that advertises gridOwner: it is the value that comes back as the owner of gridChange and resizeAck when this connection holds the grid, and without it a client can see who drives the grid but not whether that is itself."
     },
     "created": {
-      "required": ["session"],
+      "required": [
+        "session"
+      ],
       "optional": []
     },
     "attached": {
-      "required": ["sessionId", "scrollback", "session"],
+      "required": [
+        "sessionId",
+        "scrollback",
+        "session"
+      ],
       "optional": [],
       "notes": "Also re-sent as a repaint when a stalled connection's output buffer overflowed."
     },
     "output": {
-      "required": ["sessionId", "data"],
+      "required": [
+        "sessionId",
+        "data"
+      ],
       "optional": []
     },
     "screen": {
@@ -181,65 +297,142 @@
       "notes": "reset: true carries every row; reset: false only the changed rows. Geometry or alt-buffer flips force a reset."
     },
     "inputAck": {
-      "required": ["sessionId", "seq"],
+      "required": [
+        "sessionId",
+        "seq"
+      ],
       "optional": [],
       "capability": "inputAck"
     },
     "resizeAck": {
-      "required": ["sessionId", "seq", "cols", "rows", "applied", "denied"],
-      "optional": [],
+      "required": [
+        "sessionId",
+        "seq",
+        "cols",
+        "rows",
+        "applied",
+        "denied"
+      ],
+      "optional": [
+        "owner"
+      ],
       "capability": "resizeAck",
-      "notes": "applied: the grid reached a live pty. denied: another client owns the shared grid, so re-sending is futile."
+      "notes": "applied: the grid reached a live pty. denied: another client owns the shared grid, so re-sending is futile. owner (gridOwner cores): who holds the grid after the arbitration, so a denied client learns who to wait for; string | null, always present as a key, null for an unclaimed grid and for the unarbitrated ephemeral editor/terminal ptys."
+    },
+    "gridChange": {
+      "required": [
+        "sessionId",
+        "owner",
+        "cols",
+        "rows"
+      ],
+      "optional": [],
+      "capability": "gridOwner",
+      "notes": "Broadcast to every connection whenever the arbitrated grid changes hands: a resize granted, or an owner letting go (its pane torn down, its connection closed). owner is string | null and is always present as a key; null means the grid is unclaimed again. Also sent once per already-owned session when a connection opens, so a client arriving mid-flight starts from the truth rather than assuming the grid is free. NOT sent for an unclaimed grid on connect: silence already means nobody is driving. resizeAck is the private answer to one client's request; this is the shared state."
     },
     "exit": {
-      "required": ["sessionId", "exitCode"],
+      "required": [
+        "sessionId",
+        "exitCode"
+      ],
       "optional": [],
       "notes": "exitCode is number | null and is always present as a key."
     },
     "activity": {
-      "required": ["sessionId", "state", "notify"],
-      "optional": ["changes", "dispatchId"],
+      "required": [
+        "sessionId",
+        "state",
+        "notify"
+      ],
+      "optional": [
+        "changes",
+        "dispatchId"
+      ],
       "notes": "state is busy | idle | waiting_input. changes rides only the settle edge; both optionals are omitted, not null."
     },
+    "sessionMeta": {
+      "required": [
+        "sessionId",
+        "session"
+      ],
+      "optional": [],
+      "capability": "sessionMeta",
+      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta \u2014 replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
+    },
     "queue": {
-      "required": ["sessionId", "items"],
+      "required": [
+        "sessionId",
+        "items"
+      ],
       "optional": [],
       "capability": "queue"
     },
     "editorReady": {
-      "required": ["editorId"],
+      "required": [
+        "editorId"
+      ],
       "optional": [],
       "capability": "editor"
     },
     "terminalReady": {
-      "required": ["terminalId", "requestId"],
+      "required": [
+        "terminalId",
+        "requestId"
+      ],
       "optional": [],
       "capability": "terminal"
     },
     "unresumable": {
-      "required": ["sessionId", "reason"],
+      "required": [
+        "sessionId",
+        "reason"
+      ],
       "optional": []
     },
     "error": {
-      "required": ["message"],
-      "optional": ["sessionId"]
+      "required": [
+        "message"
+      ],
+      "optional": [
+        "sessionId"
+      ]
     },
     "trackedPrs": {
-      "required": ["tracked"],
+      "required": [
+        "tracked"
+      ],
       "optional": [],
       "capability": "trackedPrs"
     },
     "trackNotification": {
-      "required": ["trackedId", "prNumber", "notification"],
+      "required": [
+        "trackedId",
+        "prNumber",
+        "notification"
+      ],
       "optional": [],
       "capability": "trackedPrs"
     }
   },
   "enums": {
-    "activityState": ["busy", "idle", "waiting_input"],
-    "sessionStatus": ["running", "exited"],
-    "sessionKind": ["agent", "editor"],
-    "trackedPrState": ["watching", "fixing", "needs_decision"]
+    "activityState": [
+      "busy",
+      "idle",
+      "waiting_input"
+    ],
+    "sessionStatus": [
+      "running",
+      "exited"
+    ],
+    "sessionKind": [
+      "agent",
+      "editor"
+    ],
+    "trackedPrState": [
+      "watching",
+      "fixing",
+      "needs_decision"
+    ]
   },
   "sessionMeta": {
     "required": [
@@ -269,6 +462,14 @@
     "Malformed JSON gets one error frame and the connection stays open.",
     "A client feature-detects off serverInfo.capabilities and must refuse a core whose protocolVersion it does not implement.",
     "SERVER_INFO_ORDERING: serverInfo is frame 0. Nothing may precede it: not a reply frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs), and not an unsolicited activity broadcast either. A core must queue the handshake before it starts the activity fan-out, so a connection opened while other sessions are already live still reads serverInfo first and their activity after it.",
-    "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage."
-  ]
+    "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage.",
+    "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means."
+  ],
+  "decisions": {
+    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
+    "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
+    "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
+    "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",
+    "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here."
+  }
 }

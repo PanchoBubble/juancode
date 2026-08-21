@@ -2,8 +2,15 @@
   "id": "attach-scrollback",
   "title": "attach replays scrollback",
   "asserts": "a second connection attaching to a live session receives the bytes it missed in `attached.scrollback`, not just the live tail.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

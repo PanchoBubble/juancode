@@ -2,8 +2,15 @@
   "id": "activity-changes",
   "title": "settle-edge change rollup",
   "asserts": "the activity frame that ends a turn over a dirty git tree carries the whole-tree change rollup, so a remote client can badge \"finished, N files changed\" without its own git access.",
-  "requires": ["pty", "git"],
-  "ignore": ["output"],
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "ignore": [
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {
@@ -22,14 +29,24 @@
         "session": "session.id"
       },
       "timeoutMs": 20000,
-      "ignore": ["activity", "output"]
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
     },
     {
       "expect": {
         "type": "attached",
         "sessionId": "$session"
       },
-      "ignore": ["activity", "output"]
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
     },
     {
       "send": {

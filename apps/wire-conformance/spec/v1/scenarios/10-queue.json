@@ -2,9 +2,18 @@
   "id": "queue",
   "title": "queue snapshots",
   "asserts": "the queue is pushed as a complete ordered list on subscribe and after every change, is replaced wholesale rather than patched, and stops being pushed after unsubscribe.",
-  "requires": ["pty"],
-  "capabilities": ["queue"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "queue"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

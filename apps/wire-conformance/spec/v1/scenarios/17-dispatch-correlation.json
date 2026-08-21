@@ -2,8 +2,14 @@
   "id": "dispatch-correlation",
   "title": "dispatch correlation and dedup",
   "asserts": "a create carrying a dispatch id claims that id, stamps it on every activity broadcast for the session's whole life so lifecycle events route back to the caller, and rejects a second create for the same dispatch.",
-  "requires": ["pty"],
-  "ignore": ["output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {
@@ -26,7 +32,12 @@
         "session": "session.id"
       },
       "timeoutMs": 20000,
-      "ignore": ["activity", "output"]
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
     },
     {
       "send": {
@@ -44,7 +55,12 @@
         "dispatchId": "$dispatchId"
       },
       "timeoutMs": 15000,
-      "ignore": ["output", "attached"]
+      "ignore": [
+        "output",
+        "attached",
+        "sessionMeta",
+        "gridChange"
+      ]
     },
     {
       "send": {
@@ -66,7 +82,12 @@
           "$contains": "already processed"
         }
       },
-      "ignore": ["activity", "output"]
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
     }
   ]
 }

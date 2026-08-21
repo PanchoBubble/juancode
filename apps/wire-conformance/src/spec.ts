@@ -39,6 +39,9 @@ export interface ProtocolSpec {
   enums: Record<string, string[]>;
   sessionMeta: { required: string[]; optional: string[] };
   rules: string[];
+  /** Operations deliberately NOT given a frame, and why. Here so the next person
+   *  to hit the gap reads the decision instead of rediscovering the question. */
+  decisions?: Record<string, string>;
 }
 
 /** A frame matcher plus what to bind out of it (see match.ts). */
@@ -53,7 +56,13 @@ export interface ExpectStep {
 }
 
 export type Step =
-  | { open: string; note?: string }
+  /** Open a connection. `keep: true` leaves its handshake and connect-time
+   *  broadcasts in the stream, for a transcript that asserts what a client sees
+   *  the moment it arrives. */
+  | { open: string; keep?: boolean; note?: string }
+  /** Close a connection mid-scenario. The only way to drive a core's
+   *  disconnect-side behaviour (releasing the grids that client owned). */
+  | { close: string; note?: string }
   | { send: Record<string, unknown>; on?: string; note?: string }
   | { raw: string; on?: string; note?: string }
   | ExpectStep

@@ -2,8 +2,15 @@
   "id": "handshake",
   "title": "Capability handshake",
   "asserts": "serverInfo is frame 0 on every connection, carrying the protocol version and an honest capability list, so feature detection happens before the client interprets any other frame, including the activity broadcasts for sessions that were already live.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "expectHandshake": {

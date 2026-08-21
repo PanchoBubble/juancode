@@ -2,8 +2,15 @@
   "id": "create-guards",
   "title": "create guards and the no-grid create",
   "asserts": "a bad provider or a missing cwd is one `error` frame with no session, and a client with no viewport of its own may omit cols/rows and let the core pick the spawn grid.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

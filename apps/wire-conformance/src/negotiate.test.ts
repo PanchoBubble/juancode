@@ -16,6 +16,8 @@ const swiftCore = {
     "inputAck",
     "resizeAck",
     "screen",
+    "sessionMeta",
+    "gridOwner",
   ],
 };
 
@@ -38,7 +40,14 @@ describe("negotiate", () => {
     const verdict = negotiate(rustCore, SUITE_REQUIREMENTS);
     expect(verdict.ok).toBe(true);
     if (!verdict.ok) return;
-    expect(verdict.disabled.sort()).toEqual(["editor", "queue", "terminal", "trackedPrs"]);
+    expect(verdict.disabled.sort()).toEqual([
+      "editor",
+      "gridOwner",
+      "queue",
+      "sessionMeta",
+      "terminal",
+      "trackedPrs",
+    ]);
   });
 
   it("refuses a core whose protocol version it does not speak", () => {

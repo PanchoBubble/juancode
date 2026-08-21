@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { clientVar } from "./runner.ts";
 import { expectedTypes, loadProtocol, loadScenarios, sentTypes } from "./spec.ts";
 
 const spec = loadProtocol();
@@ -106,6 +107,12 @@ describe("scenarios", () => {
           open.add(step.open);
           continue;
         }
+        if ("close" in step) {
+          expect(open, `${s.id} closes connection ${step.close} before opening it`).toContain(
+            step.close,
+          );
+          continue;
+        }
         const on = "on" in step ? step.on : undefined;
         if (on) expect(open, `${s.id} addresses connection ${on} before opening it`).toContain(on);
       }
@@ -114,8 +121,20 @@ describe("scenarios", () => {
 
   it("bind a variable before referencing it", () => {
     for (const s of scenarios) {
-      const bound = new Set(["cwd", "gitCwd", "missingCwd", "file", "dispatchId", "requestId"]);
+      // `$clientA` and friends are bound by the runner out of each connection's own
+      // handshake, so a connection's own grid-ownership token counts as bound the
+      // moment it is opened.
+      const bound = new Set([
+        "cwd",
+        "gitCwd",
+        "missingCwd",
+        "file",
+        "dispatchId",
+        "requestId",
+        clientVar("a"),
+      ]);
       for (const step of s.steps) {
+        if ("open" in step) bound.add(clientVar(step.open));
         for (const name of variableRefs(step)) {
           expect(bound, `${s.id} references $${name} before binding it`).toContain(name);
         }

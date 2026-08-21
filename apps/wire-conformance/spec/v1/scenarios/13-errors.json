@@ -2,8 +2,15 @@
   "id": "errors",
   "title": "error frames and tolerated junk",
   "asserts": "an addressable failure gets one `error` frame naming its session, malformed JSON gets one sessionless `error` and does NOT close the connection, and an unrecognised message type is ignored entirely so a newer client cannot be killed by an older core.",
-  "capabilities": ["screen"],
-  "ignore": ["activity", "output"],
+  "capabilities": [
+    "screen"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

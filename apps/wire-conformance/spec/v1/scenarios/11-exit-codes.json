@@ -2,8 +2,15 @@
   "id": "exit-codes",
   "title": "exit codes and the dead-session attach",
   "asserts": "a child's own exit status reaches the client verbatim, a killed session still reports an exit rather than going quiet, and attaching to a dead session replays its scrollback and then re-states the exit instead of leaving the client waiting.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {
@@ -118,7 +125,10 @@
         "type": "exit",
         "sessionId": "$killed",
         "exitCode": {
-          "$oneOf": [0, -1]
+          "$oneOf": [
+            0,
+            -1
+          ]
         }
       },
       "timeoutMs": 15000,

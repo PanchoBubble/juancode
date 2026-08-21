@@ -2,9 +2,20 @@
   "id": "editor-terminal",
   "title": "editor and terminal ptys",
   "asserts": "an editor or shell pty is addressable over the same input/resize/kill/output messages as a session, and terminalReady echoes the client's requestId so a client with several pending opens can tell them apart.",
-  "requires": ["pty"],
-  "capabilities": ["editor", "terminal", "resizeAck"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "editor",
+    "terminal",
+    "resizeAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

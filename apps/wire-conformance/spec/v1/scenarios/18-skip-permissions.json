@@ -2,8 +2,16 @@
   "id": "skip-permissions",
   "title": "flipping skip-permissions",
   "asserts": "changing a live session's permission mode restarts the CLI in place and re-attaches the client to the same session id with the new mode on its meta, so the client never has to re-find the session.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output", "exit"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "exit",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

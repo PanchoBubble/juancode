@@ -2,9 +2,22 @@
   "id": "tracked-prs",
   "title": "tracked-PR fan-out",
   "asserts": "subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, and untracking pushes the list back \u2014 always the complete set, replaced wholesale.",
-  "requires": ["pty", "git"],
-  "capabilities": ["trackedPrs"],
-  "ignore": ["activity", "output", "created", "attached", "error"],
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "capabilities": [
+    "trackedPrs"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "created",
+    "attached",
+    "error",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {
@@ -55,7 +68,12 @@
             },
             "state": "watching",
             "checks": {
-              "$oneOf": ["passing", "failing", "pending", "none"]
+              "$oneOf": [
+                "passing",
+                "failing",
+                "pending",
+                "none"
+              ]
             },
             "notifications": []
           }

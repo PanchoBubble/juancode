@@ -2,9 +2,18 @@
   "id": "input-ack",
   "title": "input and inputAck ordering",
   "asserts": "every sequenced input is acked exactly once, in the order it was sent, and an input without a seq is never acked \u2014 which is what lets a client buffer unacked keystrokes and resend them after a reconnect.",
-  "requires": ["pty"],
-  "capabilities": ["inputAck"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "inputAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

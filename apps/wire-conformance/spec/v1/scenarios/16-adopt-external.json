@@ -2,9 +2,18 @@
   "id": "adopt-external",
   "title": "adopting an external conversation",
   "asserts": "a conversation started outside juancode can be adopted by its own CLI id, becomes an ordinary session at the age it really started, and adopting it twice is a no-op rather than a duplicate.",
-  "requires": ["pty"],
-  "capabilities": ["adoptExternal"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "adoptExternal"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

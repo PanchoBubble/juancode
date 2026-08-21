@@ -94,6 +94,11 @@ export function skipReason(scenario: Scenario, ctx: RunContext): string | null {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Variable a connection's own `serverInfo.clientId` is bound under: `a` → `$clientA`. */
+export function clientVar(name: string): string {
+  return `client${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+}
+
 /** Drive one scenario. Throws on the first assertion that fails. */
 export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<void> {
   const ignore = scenario.ignore ?? [];
@@ -107,7 +112,7 @@ export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<
     requestId: `req-${scenario.id}`,
   };
 
-  const open = async (name: string): Promise<WireClient> => {
+  const open = async (name: string, keep = false): Promise<WireClient> => {
     const client = await WireClient.connect(ctx.wsUrl, name);
     clients.set(name, client);
     // Every connection starts with the handshake; consume it here so scenarios
@@ -115,9 +120,14 @@ export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<
     const info = readServerInfo((await client.handshake()).frame);
     const verdict = negotiate(info, SUITE_REQUIREMENTS);
     if (!verdict.ok) throw new WireProtocolError(`connection ${name}: ${verdict.reason}`);
+    // The connection's own grid-ownership token, as `$clientA` / `$clientB`, so a
+    // transcript can assert WHICH client owns a grid rather than only that someone
+    // does. The core mints it, so there is no other way for a scenario to know it.
+    if (info.clientId !== undefined) vars[clientVar(name)] = info.clientId;
     // Past the handshake (and past the activity broadcasts a connection gets for
-    // sessions that already existed): the transcript starts from here.
-    client.drain();
+    // sessions that already existed): the transcript starts from here. A scenario
+    // that asserts what a connection is told on arrival keeps them instead.
+    if (!keep) client.drain();
     return client;
   };
 
@@ -149,12 +159,16 @@ interface StepContext {
   vars: Vars;
   ignore: string[];
   clientFor: (name?: string) => WireClient;
-  open: (name: string) => Promise<WireClient>;
+  open: (name: string, keep?: boolean) => Promise<WireClient>;
 }
 
 async function runStep(step: Step, s: StepContext): Promise<void> {
   if ("open" in step) {
-    await s.open(step.open);
+    await s.open(step.open, step.keep === true);
+    return;
+  }
+  if ("close" in step) {
+    s.clientFor(step.close).close();
     return;
   }
   if ("sleep" in step) {
@@ -231,8 +245,10 @@ async function cleanup(clients: Map<string, WireClient>): Promise<void> {
       }
     }
   }
-  const first = [...clients.values()][0];
-  if (first && !first.isClosed) {
+  // A scenario may have closed one connection deliberately; kill through whichever
+  // is still open, or the sessions it created outlive the run.
+  const first = [...clients.values()].find((c) => !c.isClosed);
+  if (first) {
     for (const id of sessionIds) first.send({ type: "kill", sessionId: id });
     // Give the core a moment to reap the ptys before the socket goes away.
     await sleep(sessionIds.size ? 400 : 0);

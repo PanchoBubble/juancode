@@ -60,5 +60,13 @@ export function negotiate(info: ServerInfo, want: ClientRequirements): Negotiati
 export const SUITE_REQUIREMENTS: ClientRequirements = {
   protocolVersions: [1],
   required: ["inputAck", "resizeAck", "screen"],
-  optional: ["queue", "trackedPrs", "editor", "terminal", "adoptExternal"],
+  optional: [
+    "queue",
+    "trackedPrs",
+    "editor",
+    "terminal",
+    "adoptExternal",
+    "sessionMeta",
+    "gridOwner",
+  ],
 };

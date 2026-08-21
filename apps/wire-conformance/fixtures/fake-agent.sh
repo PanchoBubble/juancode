@@ -17,6 +17,7 @@
 #   MAIN             switch back to the main buffer
 #   HIDE / SHOW      hide / show the cursor
 #   MOVE <row> <col> position the cursor (1-based)
+#   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
 #   EXIT <code>      exit with that status
 #
 # Provider args (--session-id, --resume, --model, permission flags) are ignored on
@@ -63,6 +64,11 @@ while IFS= read -r line; do
     row=${arg%% *}
     col=${arg#* }
     printf '\033[%s;%sH' "${row:-1}" "${col:-1}"
+    ;;
+  TITLE)
+    # A CLI naming its own session. The core adopts this as the session title and
+    # broadcasts the new meta, without anyone having asked it to.
+    printf '\033]2;%s\007' "$arg"
     ;;
   EXIT)
     exit "${arg:-0}"

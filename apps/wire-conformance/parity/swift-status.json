@@ -3,7 +3,7 @@
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
   "measuredAt": "2026-08-21",
-  "specRevision": "1.0.0",
+  "specRevision": "1.1.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -13,7 +13,9 @@
     "adoptExternal",
     "inputAck",
     "resizeAck",
-    "screen"
+    "screen",
+    "sessionMeta",
+    "gridOwner"
   ],
   "scenarios": {
     "handshake": {
@@ -68,6 +70,12 @@
       "status": "passed"
     },
     "skip-permissions": {
+      "status": "passed"
+    },
+    "session-meta": {
+      "status": "passed"
+    },
+    "grid-owner": {
       "status": "passed"
     }
   }

@@ -92,11 +92,13 @@ final class WireProtocolTests: XCTestCase {
 
     func testEncodesServerInfo() throws {
         let msg = ServerMessage.serverInfo(protocolVersion: WireProtocol.version,
-                                           capabilities: WireProtocol.capabilities)
+                                           capabilities: WireProtocol.capabilities,
+                                           clientId: "conn-1")
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "serverInfo")
         XCTAssertEqual(obj?["protocolVersion"] as? Int, WireProtocol.version)
         XCTAssertEqual(obj?["capabilities"] as? [String], WireProtocol.capabilities)
+        XCTAssertEqual(obj?["clientId"] as? String, "conn-1")
     }
 
     // ── Input acknowledgement + resend (juancode-1u3) ────────────────────────────
@@ -164,7 +166,7 @@ final class WireProtocolTests: XCTestCase {
 
     func testEncodesResizeAck() throws {
         let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30,
-                                          applied: false, denied: false)
+                                          applied: false, denied: false, owner: nil)
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "resizeAck")
         XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
@@ -173,20 +175,70 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(obj?["rows"] as? Int, 30)
         XCTAssertEqual(obj?["applied"] as? Bool, false)
         XCTAssertEqual(obj?["denied"] as? Bool, false)
+        // An unclaimed grid is an explicit null, not a missing key: a client must be
+        // able to tell "nobody owns it" from "this core does not report owners".
+        XCTAssertTrue(obj?["owner"] is NSNull)
     }
 
     func testEncodesResizeAckDenied() throws {
         // A resize denied because another client owns the shared grid
         // (juancode-1th.1): the client reads `denied` to stop retrying.
         let msg = ServerMessage.resizeAck(sessionId: "s-1", seq: 9, cols: 100, rows: 30,
-                                          applied: false, denied: true)
+                                          applied: false, denied: true, owner: "other-client")
         let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
         XCTAssertEqual(obj?["applied"] as? Bool, false)
         XCTAssertEqual(obj?["denied"] as? Bool, true)
+        // Who to wait for, not just that we lost.
+        XCTAssertEqual(obj?["owner"] as? String, "other-client")
     }
 
     func testResizeAckCapabilityIsAdvertised() {
         XCTAssertTrue(WireProtocol.capabilities.contains("resizeAck"))
+    }
+
+    // ── Grid ownership + meta deltas (juancode-0ckr) ──────────────────────────────
+
+    func testEncodesGridChange() throws {
+        let msg = ServerMessage.gridChange(sessionId: "s-1", owner: "client-7",
+                                           cols: 120, rows: 40)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "gridChange")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        XCTAssertEqual(obj?["owner"] as? String, "client-7")
+        XCTAssertEqual(obj?["cols"] as? Int, 120)
+        XCTAssertEqual(obj?["rows"] as? Int, 40)
+    }
+
+    func testEncodesGridChangeRelease() throws {
+        // A release is the same frame with a null owner — the client folds its
+        // "remote is driving" badge away and may claim the grid again.
+        let msg = ServerMessage.gridChange(sessionId: "s-1", owner: nil, cols: 120, rows: 40)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "gridChange")
+        XCTAssertTrue(obj?["owner"] is NSNull)
+    }
+
+    func testEncodesSessionMeta() throws {
+        let meta = SessionMeta(
+            id: "s-1", provider: .claude, cwd: "/tmp", title: "derived title",
+            status: .running, exitCode: nil, createdAt: 1, updatedAt: 2, cliSessionId: nil,
+            skipPermissions: false, worktreePath: nil, usage: nil, archived: true)
+        let msg = ServerMessage.sessionMeta(sessionId: "s-1", session: meta)
+        let obj = try JSONSerialization.jsonObject(with: Data(msg.jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "sessionMeta")
+        XCTAssertEqual(obj?["sessionId"] as? String, "s-1")
+        let session = obj?["session"] as? [String: Any]
+        XCTAssertEqual(session?["id"] as? String, "s-1")
+        XCTAssertEqual(session?["title"] as? String, "derived title")
+        XCTAssertEqual(session?["archived"] as? Bool, true)
+    }
+
+    func testGridOwnerAndSessionMetaCapabilitiesAreAdvertised() {
+        // Both frames are unsolicited broadcasts, so the capability list is the only
+        // way a client can know whether this core will ever send them — and whether
+        // it has to fall back to re-attaching for fresh meta.
+        XCTAssertTrue(WireProtocol.capabilities.contains("gridOwner"))
+        XCTAssertTrue(WireProtocol.capabilities.contains("sessionMeta"))
     }
 
     // ── Per-session message queue (oracle-cj3 / juancode-r82) ────────────────────

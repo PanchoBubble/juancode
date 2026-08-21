@@ -2,8 +2,15 @@
   "id": "create",
   "title": "create replies created then attached",
   "asserts": "a create spawns a session, the client learns its identity from `created`, and the immediately following `attached` has empty scrollback because there is nothing to replay yet.",
-  "requires": ["pty"],
-  "ignore": ["activity", "output"],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
   "steps": [
     {
       "send": {

@@ -220,6 +220,9 @@ export const SOLICITED_TYPES = [
 export interface ServerInfo {
   protocolVersion: number;
   capabilities: string[];
+  /** This connection's grid-ownership token, when the core reports one. Absent on
+   *  a core without the `gridOwner` capability, where owners are never named. */
+  clientId?: string;
 }
 
 export function readServerInfo(frame: Frame | undefined): ServerInfo {
@@ -235,5 +238,6 @@ export function readServerInfo(frame: Frame | undefined): ServerInfo {
   return {
     protocolVersion: f.protocolVersion as number,
     capabilities: f.capabilities as string[],
+    clientId: typeof f.clientId === "string" ? f.clientId : undefined,
   };
 }
