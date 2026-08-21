@@ -69,7 +69,29 @@ import Testing
         return text.split(separator: "\n").map(String.init)
     }
 
-    private func poll(_ timeout: TimeInterval = 20.0, _ cond: @escaping () -> Bool) async {
+    private func count(_ event: String, in log: String) -> Int {
+        lines(of: log).filter { $0 == event }.count
+    }
+
+    /// Wait until the fake CLI has *recorded* the Enter instead of reading its log at
+    /// whatever instant `autoSubmit` reports back. Nothing orders those two events:
+    /// the submit check can be satisfied by the screen alone (a tall seed's signature
+    /// has already scrolled out of the input box before the CR is even written), so
+    /// the outcome can land while the CR is still sitting in the tty buffer.
+    ///
+    /// Waiting on the log is also what makes the paste count trustworthy: the child
+    /// reads its input in order, so every paste it received is already written by the
+    /// time the Enter line appears.
+    private func awaitEnter(in log: String) async {
+        await poll { self.count("enter", in: log) > 0 }
+    }
+
+    /// The default wait is derived from the delivery machine's own budget rather
+    /// than from a guess about how fast the machine is: `Session.Seed` allows up to
+    /// 45s to settle, 24s of re-pasting and 3 x 4s of submit retries, so a shorter
+    /// wait here reports "no Enter was sent" for a delivery that is still legitimately
+    /// in progress. Waiting past the whole budget can only ever be slow, never wrong.
+    private func poll(_ timeout: TimeInterval = 90.0, _ cond: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }
@@ -105,13 +127,13 @@ import Testing
 
         #expect(box.outcome == .submitted)
 
-        let events = lines(of: log)
+        await awaitEnter(in: log)
         // Pasted exactly once: the seed is on screen after the first attempt, so the
         // loop must not stack duplicate copies while hunting for it.
-        #expect(events.filter { $0 == "paste" }.count == 1)
+        #expect(count("paste", in: log) == 1)
         // And the Enter really went out — a "submitted" outcome with no Enter is the
         // false success this test exists for.
-        #expect(events.filter { $0 == "enter" }.count == 1)
+        #expect(count("enter", in: log) == 1)
 
         // The seed is on screen, but *not* in the footer the old land check read:
         // the paste is taller than the input box, so the signature sits above it.
@@ -138,8 +160,8 @@ import Testing
         await poll { box.outcome != nil }
 
         #expect(box.outcome == .submitted)
-        let events = lines(of: log)
-        #expect(events.filter { $0 == "paste" }.count == 1)
-        #expect(events.filter { $0 == "enter" }.count == 1)
+        await awaitEnter(in: log)
+        #expect(count("paste", in: log) == 1)
+        #expect(count("enter", in: log) == 1)
     }
 }

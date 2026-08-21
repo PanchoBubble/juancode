@@ -2,9 +2,10 @@ import Foundation
 import Testing
 @testable import JuancodeCore
 
-/// Mirrors apps/server/src/activityDetector.test.ts. The TS suite uses fake
-/// timers; we use a short real `settleMs` and poll, since the Swift detector is
-/// queue/clock-driven.
+/// Mirrors apps/server/src/activityDetector.test.ts. Most cases use a short real
+/// `settleMs` and poll; the ones that assert a turn has *not* settled yet drive a
+/// `ManualActivityClock` instead, since an assertion about a window that has not
+/// elapsed cannot be made against wall clock on a loaded machine.
 ///
 /// The detector reads a headless `TerminalScreen`, so a turn ends when the CLI
 /// *erases* the working footer from the screen (CLIs paint it once and then only
@@ -133,13 +134,15 @@ import Testing
 
     // ── Structured stream-json signal (juancode-1c9 / doq) ────────────────────
 
-    @Test func goesBusyOnAgentStructuredEventWithNoFooter() async {
+    @Test func goesBusyOnAgentStructuredEventWithNoFooter() {
         // No "esc to interrupt" text anywhere — the screen path can't see this; the
         // structured pulse is what makes us busy. This is the robustness win.
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         det.feedStructured([.assistant])
-        await poll { c.snapshot.contains { $0.0 == .busy } }
+        det.drain()
+        clock.advance(59) // still inside the settle window: nothing may end the turn
         #expect(c.states == [.busy])
     }
 
@@ -210,15 +213,18 @@ import Testing
         #expect(c.snapshot.last?.0 == .idle)
     }
 
-    @Test func structuredPulseReArmsSettleWindow() async {
+    @Test func structuredPulseReArmsSettleWindow() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 120) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 120, clock: clock) { c.record($0, $1) }
         det.feedStructured([.toolUse])
-        await sleepMs(60)                 // under settleMs
+        det.drain()
+        clock.advance(60)                 // under settleMs
         det.feedStructured([.toolResult]) // re-arms before settle fires
-        await sleepMs(60)
+        det.drain()
+        clock.advance(60)                 // the first window's deadline, now stale
         #expect(c.states == [.busy])      // never settled early
-        await poll { c.snapshot.last?.0 == .idle }
+        clock.advance(120)                // past the re-armed window
         #expect(c.snapshot.last?.0 == .idle)
     }
 
@@ -274,14 +280,18 @@ import Testing
     }
 
     /// A crashed tool never writes its tool_result; past the cap the hold releases
-    /// and normal settle classification demotes.
-    @Test func holdCapAllowsDemotionAfterExpiry() async {
+    /// and normal settle classification demotes. The cap is short here, so the
+    /// "still inside it" half only means anything on a clock the test controls.
+    @Test func holdCapAllowsDemotionAfterExpiry() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, toolHoldCapMs: 200) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(
+            settleMs: 40, watchdogMs: 100, toolHoldCapMs: 200, clock: clock) { c.record($0, $1) }
         det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
-        await sleepMs(120) // inside the cap — still held
+        det.drain()
+        clock.advance(120) // inside the cap — every settle re-arms the hold
         #expect(c.states == [.busy])
-        await poll(2.0) { c.snapshot.last?.0 == .idle }
+        clock.advance(200) // past the cap — the hold is dropped and settle demotes
         #expect(c.snapshot.last?.0 == .idle)
     }
 

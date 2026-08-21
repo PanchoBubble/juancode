@@ -43,6 +43,32 @@ public struct StructuredEventBatch: Sendable {
     }
 }
 
+/// Where `ActivityDetector`'s deadlines come from. Production uses the real
+/// dispatch clock; a test substitutes a manual one so the settle and watchdog
+/// windows are driven by advancing virtual time instead of racing wall clock on a
+/// machine that may be busy.
+///
+/// It is a fieldless existential stored in a `let`, so the default configuration
+/// costs one witness-table call on each of the deadline arms that already
+/// happen — nothing is decoded, allocated or converted per chunk.
+public protocol ActivityClock: Sendable {
+    /// Now, as the detector measures the `toolHoldCapMs` cap.
+    func now() -> Date
+    /// Run `work` on `queue` once `ms` of this clock's time has passed.
+    func schedule(after ms: Int, on queue: DispatchQueue, _ work: @escaping @Sendable () -> Void)
+}
+
+/// The production clock: real time, deadlines on the detector's own serial queue.
+public struct DispatchActivityClock: ActivityClock {
+    public init() {}
+    public func now() -> Date { Date() }
+    public func schedule(
+        after ms: Int, on queue: DispatchQueue, _ work: @escaping @Sendable () -> Void
+    ) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(ms), execute: work)
+    }
+}
+
 /// Infers whether an agent session is working, finished a turn, or is waiting for
 /// the user, fusing two signals (mirrors `apps/server/src/activityDetector.ts`):
 ///
@@ -90,6 +116,9 @@ public final class ActivityDetector: @unchecked Sendable {
     private let toolHoldCapMs: Int
 
     private let queue: DispatchQueue
+    /// The clock the settle/watchdog deadlines and the tool-hold cap are measured
+    /// against. Real by default; injected only by tests.
+    private let clock: ActivityClock
     private let onChange: ChangeListener
     /// Fired when the stuck-busy watchdog (not the ordinary settle) is what ends a
     /// busy turn — the footer went silent past `watchdogMs`. A diagnostics hook
@@ -136,6 +165,7 @@ public final class ActivityDetector: @unchecked Sendable {
         watchdogMs: Int = 8000,
         toolHoldCapMs: Int = 30 * 60 * 1000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
+        clock: ActivityClock = DispatchActivityClock(),
         onWatchdogSettle: (@Sendable () -> Void)? = nil,
         onChange: @escaping ChangeListener
     ) {
@@ -143,6 +173,7 @@ public final class ActivityDetector: @unchecked Sendable {
         self.watchdogMs = watchdogMs
         self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
+        self.clock = clock
         self.onWatchdogSettle = onWatchdogSettle
         self.onChange = onChange
         self.screen = SessionTerminalModel(cols: cols, rows: rows, scrollbackLines: 0)
@@ -159,6 +190,7 @@ public final class ActivityDetector: @unchecked Sendable {
         watchdogMs: Int = 8000,
         toolHoldCapMs: Int = 30 * 60 * 1000,
         queue: DispatchQueue = DispatchQueue(label: "juancode.activity"),
+        clock: ActivityClock = DispatchActivityClock(),
         onWatchdogSettle: (@Sendable () -> Void)? = nil,
         onChange: @escaping ChangeListener
     ) {
@@ -166,6 +198,7 @@ public final class ActivityDetector: @unchecked Sendable {
         self.watchdogMs = watchdogMs
         self.toolHoldCapMs = toolHoldCapMs
         self.queue = queue
+        self.clock = clock
         self.onWatchdogSettle = onWatchdogSettle
         self.onChange = onChange
         self.screen = model
@@ -268,7 +301,7 @@ public final class ActivityDetector: @unchecked Sendable {
         pendingToolUseIds.formUnion(batch.openedToolUseIds)
         pendingToolUseIds.subtract(batch.resolvedToolUseIds)
         guard batchHasAgentActivity(batch.kinds) else { return }
-        lastStructuredAt = Date()
+        lastStructuredAt = clock.now()
         // A structured pulse is authoritative for this turn, whether it starts the
         // turn or upgrades one the screen path already opened (so settle no longer
         // waits on the footer being erased).
@@ -282,7 +315,7 @@ public final class ActivityDetector: @unchecked Sendable {
     /// so classification returns to normal.
     private func holdsOpenToolUse() -> Bool {
         guard !pendingToolUseIds.isEmpty else { return false }
-        if Date().timeIntervalSince(lastStructuredAt) * 1000 >= Double(toolHoldCapMs) {
+        if clock.now().timeIntervalSince(lastStructuredAt) * 1000 >= Double(toolHoldCapMs) {
             pendingToolUseIds.removeAll()
             return false
         }
@@ -294,11 +327,11 @@ public final class ActivityDetector: @unchecked Sendable {
     private func armTimers() {
         generation += 1
         let gen = generation
-        queue.asyncAfter(deadline: .now() + .milliseconds(settleMs)) { [weak self] in
+        clock.schedule(after: settleMs, on: queue) { [weak self] in
             guard let self, gen == self.generation else { return }
             self.settle(demoteStaleFooter: false)
         }
-        queue.asyncAfter(deadline: .now() + .milliseconds(watchdogMs)) { [weak self] in
+        clock.schedule(after: watchdogMs, on: queue) { [weak self] in
             guard let self, gen == self.generation else { return }
             self.settle(demoteStaleFooter: true)
         }
@@ -310,7 +343,7 @@ public final class ActivityDetector: @unchecked Sendable {
     private func armPromptTimer() {
         generation += 1
         let gen = generation
-        queue.asyncAfter(deadline: .now() + .milliseconds(settleMs)) { [weak self] in
+        clock.schedule(after: settleMs, on: queue) { [weak self] in
             guard let self, gen == self.generation else { return }
             self.settlePrompt()
         }
