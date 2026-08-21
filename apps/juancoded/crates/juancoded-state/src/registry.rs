@@ -653,13 +653,8 @@ impl SessionRegistry {
             meta.skip_permissions = skip;
             meta.updated_at = now_ms();
         }
-        // Kill first: the epoch bump inside `respawn` is what stops the dying pty's
-        // exit from being reported as the session's.
-        let _ = self.inner.pty.kill(id);
-        {
-            let mut slot = live.pty.lock().unwrap_or_else(|e| e.into_inner());
-            *slot = None;
-        }
+        // `respawn` retires the old pty, and retiring is what stops its exit from
+        // being reported as the session's.
         self.respawn(
             id,
             &live,
@@ -820,6 +815,26 @@ impl SessionRegistry {
         Ok((program, args))
     }
 
+    /// Give up the pty a session is holding, ahead of the one that replaces it.
+    ///
+    /// The epoch moves *before* the kill, and it moves under the meta lock — the same
+    /// lock [`Self::on_exit`] re-reads it under. Both halves are load bearing. Killing
+    /// first leaves a window in which the dying child's exit still matches its pump's
+    /// epoch, and that exit would mark a live session dead, drop the replacement's
+    /// handle and reap the replacement itself. Bumping without the lock only narrows
+    /// the window: a pump that read the epoch a moment earlier is already past the
+    /// check. Under the lock the two orders are the only two, and both end with the
+    /// session running.
+    fn retire_pty(&self, id: &str, live: &Arc<LiveSession>) {
+        {
+            let _serialised = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            live.epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        let _ = self.inner.pty.kill(id);
+        let mut slot = live.pty.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+    }
+
     /// Spawn a pty for a session that has none, and start its pump.
     fn spawn_into(
         &self,
@@ -874,9 +889,9 @@ impl SessionRegistry {
         } = revival;
         let opts = live.opts.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (program, args) = self.program_for(provider, id, &opts, resume.as_deref())?;
-        // Reap any pty entry the dead child left behind, or the spawn below refuses
-        // the session key as already taken.
-        let _ = self.inner.pty.kill(id);
+        // Retire whatever pty the session is still holding, or the spawn below
+        // refuses the session key as already taken.
+        self.retire_pty(id, live);
         // The old grid held a dead session's replay; the CLI is about to repaint from
         // scratch, so start it clean at the grid the reviving client asked for.
         self.inner.terminal.close(id);
@@ -925,12 +940,11 @@ impl SessionRegistry {
                         registry.on_output(&id, &live, bytes);
                     }
                     Ok(PtyEvent::Exit(code)) => {
-                        if live.epoch.load(Ordering::SeqCst) != epoch {
-                            // A respawn replaced this pty; its death is not the
-                            // session's, and reporting it would exit a live session.
-                            break;
-                        }
-                        registry.on_exit(&id, &live, code).await;
+                        // A respawn replaced this pty; its death is not the session's,
+                        // and reporting it would exit a live session. `on_exit` reads
+                        // the epoch again under the meta lock, which is what makes the
+                        // decision a decision rather than a guess.
+                        registry.on_exit(&id, &live, code, epoch).await;
                         break;
                     }
                     // Lagged means *our* backlog was dropped, not the grid's: the
@@ -1043,13 +1057,27 @@ impl SessionRegistry {
         });
     }
 
-    async fn on_exit(&self, id: &str, live: &Arc<LiveSession>, code: Option<i32>) {
-        let cwd = {
+    /// Record a pty's death as the session's, unless that pty has been retired.
+    ///
+    /// `epoch` is the pump's. It is compared under the meta lock because that is the
+    /// lock [`Self::retire_pty`] moves the epoch under: a stale exit must not reach
+    /// any of what follows, least of all the `pty.kill` that would reap the
+    /// replacement child.
+    async fn on_exit(&self, id: &str, live: &Arc<LiveSession>, code: Option<i32>, epoch: u64) {
+        // The check and the write are one critical section: splitting them would put
+        // the window straight back.
+        let Some(cwd) = ({
             let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
-            meta.status = SessionStatus::Exited;
-            meta.exit_code = code;
-            meta.updated_at = now_ms();
-            meta.cwd.clone()
+            if live.epoch.load(Ordering::SeqCst) != epoch {
+                None
+            } else {
+                meta.status = SessionStatus::Exited;
+                meta.exit_code = code;
+                meta.updated_at = now_ms();
+                Some(meta.cwd.clone())
+            }
+        }) else {
+            return;
         };
         {
             let mut slot = live.pty.lock().unwrap_or_else(|e| e.into_inner());

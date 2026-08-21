@@ -130,11 +130,27 @@ Measured against `apps/wire-conformance` (18 golden scenarios, protocol v1) by
 pointing the suite at a hand-booted daemon on its own port, its own data dir and the
 suite's fake agent. **15 of 18 passing** (2026-08-21).
 
-The three that are not are capability-gated and report as skipped rather than failed,
+The ones that are not are capability-gated and report as skipped rather than failed,
 because the core does not advertise what it cannot do: `queue`, `trackedPrs`,
 `editor`/`terminal`. Their tables exist in the schema; their wire surfaces do not.
 See the package README in `apps/wire-conformance` for how to point the suite at a
 core by URL.
+
+### Measure it on a clean slate, or the number is not the core's
+
+**One daemon and one data dir per run.** Two scenarios address fixed identifiers —
+`adopt-external` adopts the CLI session id `conformance-adopted-0001`, and
+`dispatch-correlation` claims the dispatch id `conformance-dispatch-correlation`. This
+core dedups both for the lifetime of its store, which is the behaviour those scenarios
+are asserting: the second adopt of a conversation we already own is silence, and the
+second create for a claimed dispatch is an error. Point a second run at the same
+daemon and both scenarios fail on the first step, every time, because the run before
+already claimed those ids. Measured: run 1 of a reused daemon scores as a fresh one
+and runs 2 through 5 lose exactly those two scenarios, five times out of five.
+
+That is not flakiness and there is nothing to fix in the core; it is a measurement that
+was taken against a daemon that still remembered the previous one. A repeatable score
+means a fresh `JUANCODED_DATA_DIR` and a fresh process for each run.
 
 ## Run it
 

@@ -202,6 +202,51 @@ async fn flipping_the_permission_mode_restarts_the_cli_under_the_same_session_id
     ));
 }
 
+// Multi-threaded on purpose: the daemon's runtime is, and on a current-thread
+// runtime the retired pump cannot run while the restart is in progress, so the race
+// this test exists for is not expressible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_permission_flip_never_reports_the_retired_ptys_exit_as_the_sessions() {
+    let harness = Harness::new("skip-perms-retire");
+    let id = harness.create("/tmp", 80, 24, 1);
+    let mut events = harness.sessions.subscribe();
+
+    // The dying child's exit and its replacement's spawn are two tasks, so one flip
+    // can win the race by luck. Flipping repeatedly, and settling after each one so
+    // the retired pump has time to reach its exit and be turned away, is what makes
+    // losing it once visible.
+    for round in 0..24 {
+        let attached = harness
+            .sessions
+            .set_skip_permissions(&id, round % 2 == 0, 1, 80, 24)
+            .unwrap_or_else(|e| panic!("round {round}: the session was already gone: {e}"));
+        assert_eq!(
+            attached.meta.status,
+            SessionStatus::Running,
+            "round {round}"
+        );
+        assert!(attached.replay_exit.is_none(), "round {round}");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            harness.sessions.is_running(&id),
+            "round {round}: the replacement pty was reaped along with the retired one"
+        );
+        assert_eq!(
+            harness.sessions.meta(&id).expect("meta").status,
+            SessionStatus::Running,
+            "round {round}"
+        );
+    }
+
+    // And not one of those restarts may reach a client as this session ending.
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(&event, SessionEvent::Exit { session_id, .. } if session_id == &id),
+            "a retired pty's exit was published as the session's: {event:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_exit_code_survives_to_a_client_that_attaches_afterwards() {
     let harness = Harness::new("exit-replay");
