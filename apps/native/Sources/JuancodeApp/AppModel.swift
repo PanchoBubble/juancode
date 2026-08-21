@@ -175,7 +175,7 @@ final class AppModel {
     /// Watch a newly-live session for its first output byte. A resumed session is
     /// seeded with its prior scrollback, so it counts as painted immediately — only a
     /// genuinely blank pty waits.
-    private func watchFirstPaneOutput(_ s: Session) {
+    private func watchFirstPaneOutput(_ s: any LiveSession) {
         firstOutputCancels.removeValue(forKey: s.id)?()
         if !s.getScrollback().isEmpty {
             drawnPanes.insert(s.id)
@@ -282,7 +282,7 @@ final class AppModel {
     /// scrollback — the root of the replay-garble bug class. Capped small: each
     /// mounted pane holds a Metal surface. Evicted panes fall back to
     /// teardown+replay. Rendered by `SessionContainer.terminal` (Ghostty only).
-    var livePanes = LivePanePool<Session>(cap: 5)
+    var livePanes = LivePanePool<AnyObject>(cap: 5)
     /// While true (sidebar is being keyboard-navigated) a freshly-shown terminal must
     /// not auto-grab focus on appear, or each j/k would yank focus back into the pty.
     var suppressTerminalAutoFocus = false
@@ -677,7 +677,7 @@ final class AppModel {
         // Every registry change routes through here (create / exit / swap), so this
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
-        livePanes.prune { [core] in core.liveSession($0) }
+        livePanes.prune { [core] in core.pooledSession($0) }
         pruneDrawnPanes(live: Set(liveSessions.map(\.id)))
         refreshWorktreeMap()
         // Every create/exit/adopt lands here, so this is where the at-risk watch set
@@ -844,7 +844,7 @@ final class AppModel {
 
     func isLive(_ id: String) -> Bool { core.liveSession(id) != nil }
 
-    func liveSession(_ id: String) -> Session? { core.liveSession(id) }
+    func liveSession(_ id: String) -> (any LiveSession)? { core.liveSession(id) }
 
     /// Whether `id` is an in-app editor pane (nvim etc.), across live + cached metas.
     func isEditorSession(_ id: String) -> Bool {
@@ -1027,7 +1027,7 @@ final class AppModel {
     /// `Session` behind the same id.
     func noteLivePaneVisible(_ id: String) {
         livePanes.noteVisible(id, refresh: terminalRefreshToken) { [core] in
-            core.liveSession($0)
+            core.pooledSession($0)
         }
     }
 
@@ -1070,7 +1070,7 @@ final class AppModel {
         core.liveSession(id)?.getScrollback() ?? core.storedScrollback(id) ?? []
     }
 
-    private func watch(_ s: Session) {
+    private func watch(_ s: any LiveSession) {
         setActivity(s.id, s.activity)
         // Every session reaches here exactly once per pty (registry `onCreate`, plus a
         // sweep at init), which is also the right moment to start waiting for its
@@ -1489,7 +1489,7 @@ final class AppModel {
 
     /// The most recently-created live session rooted in `cwd`, if any. Used to find
     /// the pinned Oracle agent session by its unique control-dir cwd.
-    func liveSession(inCwd cwd: String) -> Session? {
+    func liveSession(inCwd cwd: String) -> (any LiveSession)? {
         core.liveSessions()
             .filter { $0.meta.cwd == cwd }
             .max { $0.meta.createdAt < $1.meta.createdAt }
@@ -1505,7 +1505,7 @@ final class AppModel {
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
-                worktreeName: String? = nil, dispatchId: String? = nil) async -> Session? {
+                worktreeName: String? = nil, dispatchId: String? = nil) async -> (any LiveSession)? {
         do {
             var workCwd = cwd
             var worktreePath: String? = nil
@@ -1571,11 +1571,11 @@ final class AppModel {
     /// first success. Returns the sessions that started (possibly fewer than `count`).
     @discardableResult
     func createFanOut(provider: ProviderId, cwd: String, skipPermissions: Bool,
-                      count: Int, initialInput: String?) async -> [Session] {
+                      count: Int, initialInput: String?) async -> [any LiveSession] {
         let letters = FanOut.letters(count: count)
         let branchStem = String(UUID().uuidString.prefix(6)).lowercased()
         let titleStem = FanOut.titleStem(for: initialInput ?? "")
-        var created: [Session] = []
+        var created: [any LiveSession] = []
         for (i, letter) in letters.enumerated() {
             let s = await create(
                 provider: provider, cwd: cwd, skipPermissions: skipPermissions,
@@ -2245,7 +2245,7 @@ final class AppModel {
     /// The live session to inject an issue into for `cwd`: the current selection if
     /// it's live and rooted in `cwd`, else the most recently-created live session
     /// in that folder. `nil` when the folder has no live session.
-    private func focusedLiveSession(in cwd: String) -> Session? {
+    private func focusedLiveSession(in cwd: String) -> (any LiveSession)? {
         if let sel = selection, let s = liveSession(sel), s.meta.cwd == cwd { return s }
         return core.liveSessions()
             .filter { $0.meta.cwd == cwd }
@@ -2715,7 +2715,7 @@ final class AppModel {
     /// session. The watch itself still runs to the full grace, detached, so a resume
     /// that dies in second four is invalidated exactly as before; the caller just
     /// isn't held up for it.
-    private func confirmResumeSucceeded(_ session: Session, sessionId: String,
+    private func confirmResumeSucceeded(_ session: any LiveSession, sessionId: String,
                                         priorScrollback: [UInt8],
                                         settleMs: Int = ResumeGrace.fullMs) async -> Bool {
         let settle = min(settleMs, ResumeGrace.fullMs)
@@ -2733,7 +2733,7 @@ final class AppModel {
     /// Poll a resumed pty for `untilMs`, invalidating (and reporting false) the moment
     /// it exits. True means it was still alive the whole window.
     @discardableResult
-    private func watchResume(_ session: Session, sessionId: String,
+    private func watchResume(_ session: any LiveSession, sessionId: String,
                              priorScrollback: [UInt8], untilMs: Int) async -> Bool {
         var elapsed = 0
         while elapsed < untilMs {

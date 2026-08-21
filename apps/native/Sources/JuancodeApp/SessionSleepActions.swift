@@ -1,4 +1,5 @@
 import Foundation
+import JuancodeClient
 import JuancodeCore
 
 /// Sleeping a session on demand: kill the CLI process tree to free its RAM while

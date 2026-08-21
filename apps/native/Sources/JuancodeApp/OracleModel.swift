@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import AppKit
+import JuancodeClient
 import JuancodeCore
 import JuancodeServices
 
@@ -74,7 +75,7 @@ final class OracleModel {
     var controlDir: String { OraclePaths.controlDir }
 
     /// The live Oracle agent session currently shown in the chat, if running.
-    var session: Session? { oracleSessionId.flatMap { app.liveSession($0) } }
+    var session: (any LiveSession)? { oracleSessionId.flatMap { app.liveSession($0) } }
 
     /// Every Oracle agent session — they all live in the control dir — most-recent
     /// first. Drives the dock's session rail so you can switch between (and spin up)

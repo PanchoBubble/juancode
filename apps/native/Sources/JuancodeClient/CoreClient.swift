@@ -19,11 +19,11 @@ import JuancodeServices
 /// contract to keep in sync. Each section below names the wire messages it
 /// covers.
 ///
-/// One deliberate hole: the members marked "in-process handle" hand back a live
-/// `Session`, the object the terminal surfaces subscribe to for bytes, grid
-/// changes and activity. A core in another process cannot vend one, so those are
-/// the residual coupling; everything else here is already implementable over
-/// the wire.
+/// Nothing here hands back a core object. The live-session members return `any
+/// LiveSession`, the per-session protocol the terminal surfaces subscribe to for
+/// bytes, grid changes and activity, so a core in another process can answer them
+/// from wire frames instead. `LiveSession` names the three members that still have
+/// no frame behind them.
 public protocol CoreClient: AnyObject, Sendable {
 
     // MARK: - Handshake (wire: serverInfo)
@@ -38,45 +38,47 @@ public protocol CoreClient: AnyObject, Sendable {
     /// through a login shell and forkpty()s, so callers keep it off the main actor.
     @discardableResult
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
-                opts: SpawnOptions, worktreePath: String?, dispatchId: String?) throws -> Session
+                opts: SpawnOptions, worktreePath: String?,
+                dispatchId: String?) throws -> any LiveSession
 
     /// Spawn an editor session rooted in `parent`'s effective working directory.
     /// The in-app twin of the wire `openEditor`, which spawns an ephemeral pty
     /// instead of a session pane (see `openEditorPty`).
     @discardableResult
     func createEditorSession(parent: SessionMeta, file: String?, line: Int?,
-                             cols: Int, rows: Int) throws -> Session
+                             cols: Int, rows: Int) throws -> any LiveSession
 
     /// Revive an exited session by resuming its prior CLI conversation
     /// (wire `reactivate`, and the tail of `adoptExternal`).
     @discardableResult
-    func resume(_ meta: SessionMeta, cols: Int, rows: Int, priorScrollback: [UInt8]) throws -> Session
+    func resume(_ meta: SessionMeta, cols: Int, rows: Int,
+                priorScrollback: [UInt8]) throws -> any LiveSession
 
     /// Restart an exited session as a fresh conversation under the same id, for
     /// sessions with no transcript to resume.
     @discardableResult
-    func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> Session
+    func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> any LiveSession
 
     /// Flip "accept all" on a live session (wire `setSkipPermissions`): the pty is
     /// replaced and the same conversation resumed at the new level.
     func setSkipPermissions(_ sessionId: String, skipPermissions: Bool,
-                            cols: Int, rows: Int) async throws -> Session
+                            cols: Int, rows: Int) async throws -> any LiveSession
 
     /// Terminate one session's pty (wire `kill`). No-op when it isn't live.
     func kill(_ sessionId: String)
 
-    // MARK: - Live sessions (in-process handle)
+    // MARK: - Live sessions (wire: created; per-session surface in `LiveSession`)
 
     /// The live handle for `id`, or nil when no pty is running for it.
-    func liveSession(_ id: String) -> Session?
+    func liveSession(_ id: String) -> (any LiveSession)?
 
     /// Every session with a live pty right now.
-    func liveSessions() -> [Session]
+    func liveSessions() -> [any LiveSession]
 
     /// Notify when any session goes live, whether created, resumed or restarted
     /// (wire `created`). Returns a cancel handle.
     @discardableResult
-    func onSessionCreated(_ listener: @escaping (Session) -> Void) -> () -> Void
+    func onSessionCreated(_ listener: @escaping (any LiveSession) -> Void) -> () -> Void
 
     // MARK: - Persisted sessions (REST: /api/sessions, /api/search)
 

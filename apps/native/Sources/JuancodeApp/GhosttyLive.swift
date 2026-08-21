@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Observation
 import GhosttyTerminal
+import JuancodeClient
 import JuancodeCore
 import JuancodeServices
 
@@ -74,7 +75,7 @@ private let juancodeGhosttyTheme = TerminalTheme(
 )
 
 struct GhosttyLive: View {
-    let session: Session
+    let session: any LiveSession
     var remembersSize: Bool = true
     var focusToken: Int = 0
     /// A change vs. the coordinator's last triggers a manual geometry recalc — see
@@ -240,7 +241,7 @@ private func applyGhosttyZoom(view: TerminalView?, applied: Int) -> Int {
 }
 
 private struct GhosttyRepresentable: NSViewRepresentable {
-    let session: Session
+    let session: any LiveSession
     var targetSize: CGSize
     var remembersSize: Bool
     var focusToken: Int = 0
@@ -307,7 +308,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, TerminalSurfaceGridResizeDelegate, TerminalSurfaceBellDelegate,
                              TerminalSurfaceLifecycleDelegate {
-        private let session: Session
+        private let session: any LiveSession
         private weak var view: TerminalView?
         private var gsession: InMemoryTerminalSession?
         private var cancel: (() -> Void)?
@@ -374,7 +375,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// Surface-specific grid sink (see `GhosttyLive.onGrid`).
         var onGrid: ((Int, Int) -> Void)?
 
-        init(session: Session, remembersSize: Bool) {
+        init(session: any LiveSession, remembersSize: Bool) {
             self.session = session
             self.remembersSize = remembersSize
         }

@@ -71,31 +71,31 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                        opts: SpawnOptions, worktreePath: String?,
-                       dispatchId: String?) throws -> Session {
+                       dispatchId: String?) throws -> any LiveSession {
         try state.registry.create(provider: provider, cwd: cwd, cols: cols, rows: rows,
                                  opts: opts, worktreePath: worktreePath, dispatchId: dispatchId)
     }
 
     @discardableResult
     public func createEditorSession(parent: SessionMeta, file: String?, line: Int?,
-                                    cols: Int, rows: Int) throws -> Session {
+                                    cols: Int, rows: Int) throws -> any LiveSession {
         try state.registry.createEditor(parent: parent, file: file, line: line,
                                         cols: cols, rows: rows)
     }
 
     @discardableResult
     public func resume(_ meta: SessionMeta, cols: Int, rows: Int,
-                       priorScrollback: [UInt8]) throws -> Session {
+                       priorScrollback: [UInt8]) throws -> any LiveSession {
         try state.registry.resume(meta, cols: cols, rows: rows, priorScrollback: priorScrollback)
     }
 
     @discardableResult
-    public func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> Session {
+    public func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> any LiveSession {
         try state.registry.restartFresh(meta, cols: cols, rows: rows)
     }
 
     public func setSkipPermissions(_ sessionId: String, skipPermissions: Bool,
-                                   cols: Int, rows: Int) async throws -> Session {
+                                   cols: Int, rows: Int) async throws -> any LiveSession {
         try await state.registry.setSkipPermissions(sessionId, skipPermissions: skipPermissions,
                                                     cols: cols, rows: rows)
     }
@@ -106,13 +106,13 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
 
     // MARK: - Live sessions
 
-    public func liveSession(_ id: String) -> Session? { state.registry.get(id) }
+    public func liveSession(_ id: String) -> (any LiveSession)? { state.registry.get(id) }
 
-    public func liveSessions() -> [Session] { state.registry.all() }
+    public func liveSessions() -> [any LiveSession] { state.registry.all() }
 
     @discardableResult
-    public func onSessionCreated(_ listener: @escaping (Session) -> Void) -> () -> Void {
-        state.registry.onCreate(listener)
+    public func onSessionCreated(_ listener: @escaping (any LiveSession) -> Void) -> () -> Void {
+        state.registry.onCreate { listener($0) }
     }
 
     // MARK: - Persisted sessions

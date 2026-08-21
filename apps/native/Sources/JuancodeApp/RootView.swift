@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import JuancodeClient
 import JuancodeCore
 import JuancodeServices
 
@@ -3003,14 +3004,17 @@ struct SessionContainer: View {
             ZStack {
                 ForEach(model.livePanes.entries) { entry in
                     let visible = entry.session === current
-                    GhosttyLive(session: entry.session,
-                                focusToken: model.terminalFocusToken,
-                                resyncToken: model.terminalResyncToken,
-                                autoFocusOnAppear: !model.suppressTerminalAutoFocus,
-                                hidden: !visible,
-                                topHitInset: terminalTopHitInset)
-                        .opacity(visible ? 1 : 0)
-                        .allowsHitTesting(visible)
+                    // `entry.live` re-types the pooled handle (see `LivePanePool.Entry.live`).
+                    if let session = entry.live {
+                        GhosttyLive(session: session,
+                                    focusToken: model.terminalFocusToken,
+                                    resyncToken: model.terminalResyncToken,
+                                    autoFocusOnAppear: !model.suppressTerminalAutoFocus,
+                                    hidden: !visible,
+                                    topHitInset: terminalTopHitInset)
+                            .opacity(visible ? 1 : 0)
+                            .allowsHitTesting(visible)
+                    }
                 }
                 if current == nil { nonLivePane }
             }

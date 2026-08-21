@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import SwiftTerm
+import JuancodeClient
 import JuancodeCore
 import os
 
@@ -15,7 +16,7 @@ private let resizeDebugLog = Logger(subsystem: "dev.juancode.app", category: "re
 struct TerminalIdentity: Hashable {
     let session: ObjectIdentifier
     let refresh: Int
-    init(session: Session, refresh: Int) {
+    init(session: any LiveSession, refresh: Int) {
         self.session = ObjectIdentifier(session)
         self.refresh = refresh
     }
@@ -220,7 +221,7 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
 /// monitor sits ahead of the terminal surface (which would otherwise swallow the key);
 /// it only fires for the pane that is actually first responder, so each terminal routes
 /// to its own session and typing elsewhere is untouched.
-func installShiftEnterNewline(view: NSView, session: Session) -> Any? {
+func installShiftEnterNewline(view: NSView, session: any LiveSession) -> Any? {
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak view] keyCode, mods in
         // Return (36) or keypad Enter (76), with Shift the only modifier held.
         guard keyCode == 36 || keyCode == 76,
@@ -718,7 +719,7 @@ func applySwiftTermZoom(view: TerminalView?, basePoints: Double) {
 /// never resized) while the grid raced the new-session sheet dismiss. Feeding the
 /// exact laid-out size in as a value makes `updateNSView` fire with it deterministically.
 struct SwiftTermLive: View {
-    let session: Session
+    let session: any LiveSession
     /// Whether this terminal's size should be remembered as the spawn size for the
     /// next session. True for the main session view; false for the Oracle dock (its
     /// narrower grid must not shrink the size new main-window sessions boot at).
@@ -762,7 +763,7 @@ struct SwiftTermLive: View {
 /// attach), routing keystrokes/resize straight back to the pty — no WebSocket hop.
 /// Mirrors what the React `Terminal` component does over WS.
 private struct SwiftTermRepresentable: NSViewRepresentable {
-    let session: Session
+    let session: any LiveSession
     /// The exact size SwiftUI laid this view out at (from the wrapping GeometryReader).
     var targetSize: CGSize
     var remembersSize: Bool
@@ -842,7 +843,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
-        private let session: Session
+        private let session: any LiveSession
         /// Routes a file-path link (OSC-8 / detected) to the in-app editor. Web URLs
         /// still open in the browser (see `requestOpenLink`).
         var onOpenPath: ((String, Int?) -> Void)?
@@ -889,7 +890,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         private var baseFontPoints: Double = 0
         private var zoomObserver: Any?
 
-        init(session: Session, remembersSize: Bool) {
+        init(session: any LiveSession, remembersSize: Bool) {
             self.session = session
             self.remembersSize = remembersSize
         }
@@ -1015,7 +1016,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// callback never has to hold this coordinator.
         @MainActor private static func fireHeal(_ action: ResizeHealAction,
                                                 tv: TerminalView?,
-                                                session: Session,
+                                                session: any LiveSession,
                                                 coalescer: TerminalFeedCoalescer?) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             let g = (cols: t.cols, rows: t.rows)
@@ -1036,7 +1037,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// the model isn't at the view's grid (checked next to the encode, on the
         /// session workQueue). Carries no scrollback history, so it can't duplicate
         /// what the view already holds.
-        @MainActor private static func repaintFromModel(session: Session,
+        @MainActor private static func repaintFromModel(session: any LiveSession,
                                                         matching grid: (cols: Int, rows: Int),
                                                         coalescer: TerminalFeedCoalescer?) {
             guard Config.useModelSeed, let coalescer else { return }
@@ -1048,7 +1049,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// is a plain resize — a real size change from the CLI's point of view, so it
         /// re-lays-out — never a flap. Static with Sendable-only captures so it's
         /// safe to call from `@Sendable` notification closures.
-        @MainActor private static func resyncIfDrifted(_ tv: TerminalView?, _ session: Session) {
+        @MainActor private static func resyncIfDrifted(_ tv: TerminalView?, _ session: any LiveSession) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             guard let applied = session.appliedGrid(),
                   applied.cols != t.cols || applied.rows != t.rows else { return }
@@ -1063,7 +1064,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// right but the rendered screen is stale", used by the manual resync (⌃⇧R) and
         /// the attach settle. Static with Sendable-only captures so it's safe to call
         /// from `@Sendable` closures.
-        @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: Session) {
+        @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: any LiveSession) {
             guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
             let cols = t.cols, rows = t.rows
             resizeDebugLog.log("nudgeResize FLAP cols=\(cols) rows=\(rows) alt=\(t.isCurrentBufferAlternate)")
