@@ -1,0 +1,239 @@
+// The conformance client: one WebSocket to the core under test, every frame
+// recorded in arrival order.
+//
+// Same client shape the Oracle sidecar uses (`apps/oracle-mcp/src/native-events.ts`):
+// the `ws` package, JSON text frames, lenient parsing. The difference is that
+// nothing here is lenient about ORDER — a transcript is asserted against the
+// recorded stream with a cursor, so "created before attached" is a real assertion
+// rather than a hope.
+
+import { WebSocket } from "ws";
+
+import { matchValue, type MatchResult, type Vars } from "./match.ts";
+
+export type Frame = Record<string, unknown>;
+
+export interface WaitOptions {
+  vars?: Vars;
+  timeoutMs?: number;
+  /** Frame types this assertion does not constrain. "*" tolerates anything. */
+  ignore?: string[];
+}
+
+export class WireProtocolError extends Error {}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export class WireClient {
+  readonly name: string;
+  readonly url: string;
+  readonly frames: Frame[] = [];
+  /** Text frames that were not JSON at all — a core bug if it ever happens. */
+  readonly undecodable: string[] = [];
+
+  private socket: WebSocket;
+  private cursor = 0;
+  private closed = false;
+
+  private constructor(name: string, url: string, socket: WebSocket) {
+    this.name = name;
+    this.url = url;
+    this.socket = socket;
+    socket.on("message", (data) => {
+      const text = data.toString();
+      try {
+        this.frames.push(JSON.parse(text) as Frame);
+      } catch {
+        this.undecodable.push(text);
+      }
+    });
+    socket.on("close", () => {
+      this.closed = true;
+    });
+  }
+
+  static async connect(url: string, name = "a", timeoutMs = 10_000): Promise<WireClient> {
+    const socket = new WebSocket(url);
+    const client = new WireClient(name, url, socket);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`connect to ${url} timed out`)), timeoutMs);
+      socket.once("open", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      socket.once("error", (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+    return client;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  send(msg: Frame): void {
+    this.socket.send(JSON.stringify(msg));
+  }
+
+  /** Send a raw text frame — how the malformed-JSON rule gets tested. */
+  sendRaw(text: string): void {
+    this.socket.send(text);
+  }
+
+  /** The frame at an absolute index (0 = the first frame the core ever sent). */
+  frameAt(index: number): Frame | undefined {
+    return this.frames[index];
+  }
+
+  /** Advance the cursor past everything already received (used between phases). */
+  drain(): void {
+    this.cursor = this.frames.length;
+  }
+
+  /** The handshake frame, plus anything that arrived before it.
+   *
+   *  Deliberately NOT "frame 0": the Swift core starts its activity fan-out before
+   *  it queues `serverInfo`, so a connection opened while other sessions are live
+   *  sees `activity` first. What the wire actually guarantees — and what a client
+   *  can rely on — is that no REPLY precedes the handshake. */
+  async handshake(timeoutMs = 10_000): Promise<{ frame: Frame; before: Frame[] }> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const index = this.frames.findIndex((f) => f.type === "serverInfo");
+      if (index >= 0) {
+        const before = this.frames.slice(0, index);
+        const early = before.find((f) => SOLICITED_TYPES.includes(String(f.type)));
+        if (early) {
+          throw new WireProtocolError(
+            `[${this.name}] ${String(early.type)} arrived before the serverInfo handshake`,
+          );
+        }
+        return { frame: this.frames[index] as Frame, before };
+      }
+      if (Date.now() > deadline) {
+        throw new WireProtocolError(
+          `[${this.name}] no serverInfo within ${timeoutMs}ms (frames: ` +
+            `${this.frames.map((f) => String(f.type)).join(", ") || "none"})`,
+        );
+      }
+      await sleep(10);
+    }
+  }
+
+  /** Consume frames until one matches, failing on any non-ignored frame in between.
+   *  The cursor advances past the match, so consecutive waits assert ordering. */
+  async waitFor(matcher: Frame, opts: WaitOptions = {}): Promise<Frame> {
+    const { vars = {}, timeoutMs = 8_000, ignore = [] } = opts;
+    const deadline = Date.now() + timeoutMs;
+    const skipAll = ignore.includes("*");
+    for (;;) {
+      while (this.cursor < this.frames.length) {
+        const frame = this.frames[this.cursor] as Frame;
+        this.cursor += 1;
+        const result = matchValue(frame, matcher, vars);
+        if (result.ok) return frame;
+        const type = typeof frame.type === "string" ? frame.type : "<untyped>";
+        if (skipAll || ignore.includes(type)) continue;
+        throw new WireProtocolError(
+          `[${this.name}] unexpected frame before ${describe(matcher)}\n` +
+            `  got: ${JSON.stringify(frame).slice(0, 400)}\n` +
+            `  mismatch: ${result.why}`,
+        );
+      }
+      if (Date.now() > deadline) {
+        throw new WireProtocolError(
+          `[${this.name}] timed out after ${timeoutMs}ms waiting for ${describe(matcher)}\n` +
+            `  frames seen: ${this.frames.map((f) => String(f.type)).join(", ") || "none"}`,
+        );
+      }
+      if (this.closed) {
+        throw new WireProtocolError(
+          `[${this.name}] socket closed while waiting for ${describe(matcher)}`,
+        );
+      }
+      await sleep(10);
+    }
+  }
+
+  /** Assert nothing matching arrives within a window. Non-matching frames are
+   *  consumed, so a negative assertion never swallows the next positive one. */
+  async expectNone(matcher: Frame, opts: WaitOptions & { withinMs?: number } = {}): Promise<void> {
+    const { vars = {}, withinMs = 600 } = opts;
+    const deadline = Date.now() + withinMs;
+    for (;;) {
+      while (this.cursor < this.frames.length) {
+        const frame = this.frames[this.cursor] as Frame;
+        const result = matchValue(frame, matcher, vars);
+        if (result.ok) {
+          throw new WireProtocolError(
+            `[${this.name}] expected NO frame matching ${describe(matcher)}, got ` +
+              JSON.stringify(frame).slice(0, 400),
+          );
+        }
+        this.cursor += 1;
+      }
+      if (Date.now() > deadline) return;
+      await sleep(10);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    try {
+      this.socket.close();
+    } catch {
+      // Already gone; nothing to do.
+    }
+  }
+}
+
+function describe(matcher: Frame): string {
+  const type = typeof matcher.type === "string" ? matcher.type : "?";
+  const rest = Object.entries(matcher).filter(([k]) => k !== "type");
+  return rest.length ? `${type} ${JSON.stringify(Object.fromEntries(rest))}` : type;
+}
+
+/** Frames that only ever exist as a reply to something the client sent. None of
+ *  these may precede the handshake: a client must know the version and capability
+ *  list before it can interpret an answer. Unsolicited broadcasts (`activity` for
+ *  sessions that already existed) are a different case — see SERVER_INFO_ORDERING
+ *  in the spec rules. */
+export const SOLICITED_TYPES = [
+  "created",
+  "attached",
+  "output",
+  "screen",
+  "inputAck",
+  "resizeAck",
+  "exit",
+  "queue",
+  "editorReady",
+  "terminalReady",
+  "unresumable",
+  "error",
+  "trackedPrs",
+];
+
+/** Convenience for the negotiation tests: the handshake, as a typed value. */
+export interface ServerInfo {
+  protocolVersion: number;
+  capabilities: string[];
+}
+
+export function readServerInfo(frame: Frame | undefined): ServerInfo {
+  const result: MatchResult = matchValue(frame, {
+    type: "serverInfo",
+    protocolVersion: { $type: "number" },
+    capabilities: { $type: "array" },
+  });
+  if (!result.ok) {
+    throw new WireProtocolError(`not a valid serverInfo frame: ${result.why}`);
+  }
+  const f = frame as Frame;
+  return {
+    protocolVersion: f.protocolVersion as number,
+    capabilities: f.capabilities as string[],
+  };
+}

@@ -1,0 +1,72 @@
+{
+  "id": "dispatch-correlation",
+  "title": "dispatch correlation and dedup",
+  "asserts": "a create carrying a dispatch id claims that id, stamps it on every activity broadcast for the session's whole life so lifecycle events route back to the caller, and rejects a second create for the same dispatch.",
+  "requires": ["pty"],
+  "ignore": ["output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "dispatchId": "$dispatchId"
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "dispatchId": "$dispatchId"
+        }
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000,
+      "ignore": ["activity", "output"]
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      },
+      "note": "provoke a fresh activity edge: the create's own broadcast can land before `created`"
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "busy",
+        "dispatchId": "$dispatchId"
+      },
+      "timeoutMs": 15000,
+      "ignore": ["output", "attached"]
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "dispatchId": "$dispatchId"
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": {
+          "$absent": true
+        },
+        "message": {
+          "$contains": "already processed"
+        }
+      },
+      "ignore": ["activity", "output"]
+    }
+  ]
+}

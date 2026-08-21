@@ -1,0 +1,83 @@
+{
+  "core": "rust",
+  "coreLabel": "juancoded (apps/juancoded), the Rust core",
+  "source": "source-read",
+  "measuredAt": "2026-08-21",
+  "specRevision": "1.0.0",
+  "protocolVersion": 1,
+  "capabilities": ["inputAck", "resizeAck", "screen", "adoptExternal"],
+  "scenarios": {
+    "handshake": {
+      "status": "unknown",
+      "note": "wire.rs sends serverInfo first with PROTOCOL_VERSION 1 and the three required capabilities, so this should pass; never measured against the suite."
+    },
+    "create": {
+      "status": "failed",
+      "note": "conn.rs sends `created` but no following `attached`, so a client learns the session exists without ever being told it is attached and gets no scrollback baseline."
+    },
+    "create-guards": {
+      "status": "failed",
+      "note": "the unknown-provider error reads \"unknown provider: x\" (lowercase) and there is no is-a-directory guard on cwd, so a doomed spawn replaces the clear error."
+    },
+    "attach-scrollback": {
+      "status": "unknown",
+      "note": "attach replays registry scrollback; the meta and status fields on `attached.session` are unverified."
+    },
+    "input-ack": {
+      "status": "unknown",
+      "note": "input/inputAck with seq is implemented; ordering under load and the no-seq-no-ack rule are unverified."
+    },
+    "resize": {
+      "status": "failed",
+      "note": "no grid arbitration: resizeAck always reports denied:false, so a second viewer silently fights the first for the pty grid."
+    },
+    "screen-stream": {
+      "status": "unknown",
+      "note": "screen streaming exists (alacritty_terminal + screen.rs); reset-on-alt-flip, cursor visibility and stop-on-unsubscribe are unverified."
+    },
+    "activity-notify": {
+      "status": "failed",
+      "note": "conn.rs derives notify as `state == Idle`, so a waiting_input prompt never notifies and a prompt that cleared itself notifies again. The Swift core notifies on the turn boundary AND on a prompt, and stays quiet when a prompt clears."
+    },
+    "activity-changes": {
+      "status": "failed",
+      "note": "no settle-edge change rollup: the activity frame carries no `changes`, so a remote client cannot badge \"finished, N files changed\"."
+    },
+    "queue": {
+      "status": "failed",
+      "note": "no `queue` capability: subscribeQueue / queueMessage / dequeueMessage decode to Unknown and are ignored."
+    },
+    "exit-codes": {
+      "status": "unknown",
+      "note": "exit is emitted; the -1-on-signal convention and the attach-then-exit replay for a dead session are unverified."
+    },
+    "unresumable": {
+      "status": "failed",
+      "note": "`reactivate` is decoded as `attach`, so reviving a dead session cannot report unresumable; and an unknown session id answers `unresumable` where the Swift core answers `error: Session not found`."
+    },
+    "errors": {
+      "status": "failed",
+      "note": "attach of an unknown session answers `unresumable` rather than `error`, and setSkipPermissions / subscribeScreen error texts do not exist yet."
+    },
+    "tracked-prs": {
+      "status": "failed",
+      "note": "no `trackedPrs` capability: the tracked-PR registry, its poll loop and its fan-out are not ported."
+    },
+    "editor-terminal": {
+      "status": "failed",
+      "note": "no `editor` / `terminal` capability: there are no ephemeral ptys, so openEditor / openTerminal are ignored."
+    },
+    "adopt-external": {
+      "status": "failed",
+      "note": "the capability list advertises `adoptExternal` but ClientMessage has no AdoptExternal variant, so the frame decodes to Unknown and is silently dropped. Advertising a capability the core does not implement is worse than omitting it: feature detection is exactly what clients trust."
+    },
+    "dispatch-correlation": {
+      "status": "failed",
+      "note": "create accepts dispatchId but activity frames hard-code dispatch_id: None, and there is no dispatch ledger, so a repeat dispatch is started twice instead of rejected."
+    },
+    "skip-permissions": {
+      "status": "failed",
+      "note": "setSkipPermissions is not decoded, so the permission mode of a live session cannot be changed."
+    }
+  }
+}

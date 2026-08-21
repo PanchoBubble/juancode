@@ -1,0 +1,77 @@
+{
+  "id": "attach-scrollback",
+  "title": "attach replays scrollback",
+  "asserts": "a second connection attaching to a live session receives the bytes it missed in `attached.scrollback`, not just the live tail.",
+  "requires": ["pty"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "scrollback": ""
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO conformance-marker\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "conformance-marker"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "open": "b"
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "scrollback": {
+          "$contains": "conformance-marker"
+        },
+        "session": {
+          "id": "$session",
+          "status": "running"
+        }
+      },
+      "on": "b"
+    }
+  ]
+}

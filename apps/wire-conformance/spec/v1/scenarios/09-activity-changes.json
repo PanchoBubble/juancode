@@ -1,0 +1,77 @@
+{
+  "id": "activity-changes",
+  "title": "settle-edge change rollup",
+  "asserts": "the activity frame that ends a turn over a dirty git tree carries the whole-tree change rollup, so a remote client can badge \"finished, N files changed\" without its own git access.",
+  "requires": ["pty", "git"],
+  "ignore": ["output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000,
+      "ignore": ["activity", "output"]
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      },
+      "ignore": ["activity", "output"]
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "busy"
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "CLEAR\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "idle",
+        "notify": true,
+        "changes": {
+          "files": {
+            "$gte": 1
+          },
+          "additions": {
+            "$type": "number"
+          },
+          "deletions": {
+            "$type": "number"
+          }
+        }
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

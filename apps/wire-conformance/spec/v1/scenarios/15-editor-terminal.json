@@ -1,0 +1,101 @@
+{
+  "id": "editor-terminal",
+  "title": "editor and terminal ptys",
+  "asserts": "an editor or shell pty is addressable over the same input/resize/kill/output messages as a session, and terminalReady echoes the client's requestId so a client with several pending opens can tell them apart.",
+  "requires": ["pty"],
+  "capabilities": ["editor", "terminal", "resizeAck"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "openTerminal",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "requestId": "$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "terminalReady",
+        "terminalId": {
+          "$type": "string"
+        },
+        "requestId": "$requestId"
+      },
+      "bind": {
+        "terminalId": "terminalId"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "send": {
+        "type": "openEditor",
+        "cwd": "$cwd",
+        "file": "$file",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "editorReady",
+        "editorId": {
+          "$type": "string"
+        }
+      },
+      "bind": {
+        "editorId": "editorId"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$editorId",
+        "data": {
+          "$contains": "fake-editor"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "an ephemeral pty streams output under its own id"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$editorId",
+        "cols": 100,
+        "rows": 30,
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$editorId",
+        "seq": 1,
+        "cols": 100,
+        "rows": 30,
+        "applied": true,
+        "denied": false
+      },
+      "note": "an ephemeral pty is tab-scoped, so it resizes unarbitrated"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$editorId"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$editorId",
+        "exitCode": {
+          "$type": "number"
+        }
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "id": "tracked-prs",
+  "title": "tracked-PR fan-out",
+  "asserts": "subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, and untracking pushes the list back \u2014 always the complete set, replaced wholesale.",
+  "requires": ["pty", "git"],
+  "capabilities": ["trackedPrs"],
+  "ignore": ["activity", "output", "created", "attached", "error"],
+  "steps": [
+    {
+      "send": {
+        "type": "subscribeTrackedPrs"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      }
+    },
+    {
+      "send": {
+        "type": "trackPr",
+        "cwd": "$gitCwd",
+        "pr": {
+          "number": 4242,
+          "title": "conformance fixture PR",
+          "url": "https://example.invalid/pr/4242",
+          "branch": "main",
+          "draft": false,
+          "checks": "none",
+          "checkCount": 0,
+          "passedCount": 0,
+          "unresolvedComments": 0,
+          "author": "nobody",
+          "assignees": [],
+          "reviewRequests": []
+        }
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "number": 4242,
+            "title": "conformance fixture PR",
+            "branch": "main",
+            "url": "https://example.invalid/pr/4242",
+            "cwd": "$gitCwd",
+            "sessionId": {
+              "$type": "string"
+            },
+            "state": "watching",
+            "checks": {
+              "$oneOf": ["passing", "failing", "pending", "none"]
+            },
+            "notifications": []
+          }
+        ]
+      },
+      "bind": {
+        "trackedId": "tracked.0.id"
+      },
+      "timeoutMs": 30000,
+      "note": "state is snake_cased on the wire (needs_decision), unlike the Swift enum"
+    },
+    {
+      "send": {
+        "type": "untrackPr",
+        "trackedId": "$trackedId"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

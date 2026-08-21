@@ -1,0 +1,274 @@
+{
+  "specRevision": "1.0.0",
+  "protocolVersion": 1,
+  "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift",
+  "transport": {
+    "path": "/ws",
+    "encoding": "json-text-frames",
+    "discriminator": "type",
+    "shape": "flat: every field sits alongside `type`, no envelope",
+    "maxFrameBytes": 1048576,
+    "firstServerFrame": "serverInfo, ahead of every reply; unsolicited activity broadcasts for sessions that already existed may precede it"
+  },
+  "capabilities": {
+    "required": ["inputAck", "resizeAck", "screen"],
+    "known": [
+      "queue",
+      "trackedPrs",
+      "editor",
+      "terminal",
+      "adoptExternal",
+      "inputAck",
+      "resizeAck",
+      "screen"
+    ],
+    "gates": {
+      "queue": ["subscribeQueue", "unsubscribeQueue", "queueMessage", "dequeueMessage", "queue"],
+      "trackedPrs": [
+        "subscribeTrackedPrs",
+        "trackPr",
+        "untrackPr",
+        "resolveTrackNotification",
+        "trackedPrs",
+        "trackNotification"
+      ],
+      "editor": ["openEditor", "editorReady"],
+      "terminal": ["openTerminal", "terminalReady"],
+      "adoptExternal": ["adoptExternal"],
+      "inputAck": ["inputAck"],
+      "resizeAck": ["resizeAck"],
+      "screen": ["subscribeScreen", "unsubscribeScreen", "screen"]
+    }
+  },
+  "clientMessages": {
+    "create": {
+      "required": ["provider", "cwd"],
+      "optional": [
+        "cols",
+        "rows",
+        "initialInput",
+        "skipPermissions",
+        "isolateWorktree",
+        "dispatchId"
+      ],
+      "notes": "cols/rows omitted means the core picks its own spawn grid. Replies created + attached, or error."
+    },
+    "attach": {
+      "required": ["sessionId", "cols", "rows"],
+      "optional": []
+    },
+    "reactivate": {
+      "required": ["sessionId", "cols", "rows"],
+      "optional": []
+    },
+    "adoptExternal": {
+      "required": ["provider", "cliSessionId", "cwd", "startMs", "cols", "rows"],
+      "optional": [],
+      "capability": "adoptExternal"
+    },
+    "setSkipPermissions": {
+      "required": ["sessionId", "skipPermissions", "cols", "rows"],
+      "optional": []
+    },
+    "input": {
+      "required": ["sessionId", "data"],
+      "optional": ["seq"],
+      "notes": "seq present means the core must reply with a matching inputAck; absent means no ack."
+    },
+    "resize": {
+      "required": ["sessionId", "cols", "rows"],
+      "optional": ["seq"],
+      "notes": "seq present means the core must reply with a matching resizeAck."
+    },
+    "kill": {
+      "required": ["sessionId"],
+      "optional": []
+    },
+    "subscribeQueue": {
+      "required": ["sessionId"],
+      "optional": [],
+      "capability": "queue"
+    },
+    "unsubscribeQueue": {
+      "required": ["sessionId"],
+      "optional": [],
+      "capability": "queue"
+    },
+    "queueMessage": {
+      "required": ["sessionId", "text"],
+      "optional": [],
+      "capability": "queue"
+    },
+    "dequeueMessage": {
+      "required": ["sessionId", "messageId"],
+      "optional": [],
+      "capability": "queue"
+    },
+    "subscribeScreen": {
+      "required": ["sessionId"],
+      "optional": [],
+      "capability": "screen"
+    },
+    "unsubscribeScreen": {
+      "required": ["sessionId"],
+      "optional": [],
+      "capability": "screen"
+    },
+    "openEditor": {
+      "required": ["cwd", "file", "cols", "rows"],
+      "optional": [],
+      "capability": "editor"
+    },
+    "openTerminal": {
+      "required": ["cwd", "cols", "rows", "requestId"],
+      "optional": [],
+      "capability": "terminal"
+    },
+    "subscribeTrackedPrs": {
+      "required": [],
+      "optional": [],
+      "capability": "trackedPrs"
+    },
+    "trackPr": {
+      "required": ["cwd", "pr"],
+      "optional": [],
+      "capability": "trackedPrs"
+    },
+    "untrackPr": {
+      "required": ["trackedId"],
+      "optional": [],
+      "capability": "trackedPrs"
+    },
+    "resolveTrackNotification": {
+      "required": ["trackedId", "notificationId"],
+      "optional": [],
+      "capability": "trackedPrs"
+    }
+  },
+  "serverMessages": {
+    "serverInfo": {
+      "required": ["protocolVersion", "capabilities"],
+      "optional": [],
+      "notes": "Sent on connect. No reply frame may precede it, but it is not guaranteed to be frame 0 - see the SERVER_INFO_ORDERING rule."
+    },
+    "created": {
+      "required": ["session"],
+      "optional": []
+    },
+    "attached": {
+      "required": ["sessionId", "scrollback", "session"],
+      "optional": [],
+      "notes": "Also re-sent as a repaint when a stalled connection's output buffer overflowed."
+    },
+    "output": {
+      "required": ["sessionId", "data"],
+      "optional": []
+    },
+    "screen": {
+      "required": [
+        "sessionId",
+        "reset",
+        "cols",
+        "rows",
+        "cursorX",
+        "cursorY",
+        "cursorVisible",
+        "alt",
+        "lines"
+      ],
+      "optional": [],
+      "capability": "screen",
+      "notes": "reset: true carries every row; reset: false only the changed rows. Geometry or alt-buffer flips force a reset."
+    },
+    "inputAck": {
+      "required": ["sessionId", "seq"],
+      "optional": [],
+      "capability": "inputAck"
+    },
+    "resizeAck": {
+      "required": ["sessionId", "seq", "cols", "rows", "applied", "denied"],
+      "optional": [],
+      "capability": "resizeAck",
+      "notes": "applied: the grid reached a live pty. denied: another client owns the shared grid, so re-sending is futile."
+    },
+    "exit": {
+      "required": ["sessionId", "exitCode"],
+      "optional": [],
+      "notes": "exitCode is number | null and is always present as a key."
+    },
+    "activity": {
+      "required": ["sessionId", "state", "notify"],
+      "optional": ["changes", "dispatchId"],
+      "notes": "state is busy | idle | waiting_input. changes rides only the settle edge; both optionals are omitted, not null."
+    },
+    "queue": {
+      "required": ["sessionId", "items"],
+      "optional": [],
+      "capability": "queue"
+    },
+    "editorReady": {
+      "required": ["editorId"],
+      "optional": [],
+      "capability": "editor"
+    },
+    "terminalReady": {
+      "required": ["terminalId", "requestId"],
+      "optional": [],
+      "capability": "terminal"
+    },
+    "unresumable": {
+      "required": ["sessionId", "reason"],
+      "optional": []
+    },
+    "error": {
+      "required": ["message"],
+      "optional": ["sessionId"]
+    },
+    "trackedPrs": {
+      "required": ["tracked"],
+      "optional": [],
+      "capability": "trackedPrs"
+    },
+    "trackNotification": {
+      "required": ["trackedId", "prNumber", "notification"],
+      "optional": [],
+      "capability": "trackedPrs"
+    }
+  },
+  "enums": {
+    "activityState": ["busy", "idle", "waiting_input"],
+    "sessionStatus": ["running", "exited"],
+    "sessionKind": ["agent", "editor"],
+    "trackedPrState": ["watching", "fixing", "needs_decision"]
+  },
+  "sessionMeta": {
+    "required": [
+      "id",
+      "provider",
+      "cwd",
+      "title",
+      "status",
+      "createdAt",
+      "updatedAt",
+      "skipPermissions"
+    ],
+    "optional": [
+      "exitCode",
+      "cliSessionId",
+      "worktreePath",
+      "usage",
+      "archived",
+      "dormant",
+      "kind",
+      "parentSessionId",
+      "dispatchId"
+    ]
+  },
+  "rules": [
+    "An unrecognised client `type` is ignored, never fatal: a newer client must not be able to kill the connection.",
+    "Malformed JSON gets one error frame and the connection stays open.",
+    "A client feature-detects off serverInfo.capabilities and must refuse a core whose protocolVersion it does not implement.",
+    "SERVER_INFO_ORDERING: serverInfo is sent on connect and no REPLY frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs) may precede it. It is NOT guaranteed to be frame 0: the Swift core starts its activity fan-out before queueing the handshake, so a connection opened while other sessions are live sees activity first.",
+    "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage."
+  ]
+}

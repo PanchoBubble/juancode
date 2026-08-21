@@ -1,0 +1,131 @@
+{
+  "id": "resize",
+  "title": "resize acks: applied, denied, and unknown session",
+  "asserts": "a sequenced resize is always acked, and the ack distinguishes three outcomes a client must handle differently: applied (the grid reached the pty), denied (another client owns the shared grid, so retrying is futile), and neither (nothing to resize, so re-assert).",
+  "requires": ["pty"],
+  "capabilities": ["resizeAck"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 100,
+        "rows": 30,
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 1,
+        "cols": 100,
+        "rows": 30,
+        "applied": true,
+        "denied": false
+      },
+      "note": "the creating client owns the grid it spawned the session at"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 90,
+        "rows": 28
+      }
+    },
+    {
+      "expectNone": {
+        "type": "resizeAck"
+      },
+      "withinMs": 800,
+      "note": "no seq, no ack"
+    },
+    {
+      "open": "b"
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      },
+      "on": "b"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 70,
+        "rows": 20,
+        "seq": 9
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 9,
+        "cols": 70,
+        "rows": 20,
+        "applied": false,
+        "denied": true
+      },
+      "on": "b",
+      "note": "a secondary viewer must not flap the TUI between two sizes"
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "conformance-no-such-session",
+        "cols": 80,
+        "rows": 24,
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "conformance-no-such-session",
+        "seq": 2,
+        "applied": false,
+        "denied": false
+      },
+      "note": "not denied: the client should re-assert once the pty exists"
+    }
+  ]
+}

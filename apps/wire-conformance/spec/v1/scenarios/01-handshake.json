@@ -1,0 +1,38 @@
+{
+  "id": "handshake",
+  "title": "Capability handshake",
+  "asserts": "serverInfo carries the protocol version and an honest capability list, and reaches the client before any reply to anything it sent, so feature detection happens before the first decision.",
+  "steps": [
+    {
+      "expectHandshake": {
+        "type": "serverInfo",
+        "protocolVersion": 1,
+        "capabilities": {
+          "$type": "array"
+        }
+      },
+      "note": "no reply frame may precede the handshake; unsolicited activity broadcasts may"
+    },
+    {
+      "expectHandshake": {
+        "capabilities": {
+          "$contains": "inputAck"
+        }
+      }
+    },
+    {
+      "expectHandshake": {
+        "capabilities": {
+          "$contains": "resizeAck"
+        }
+      }
+    },
+    {
+      "expectHandshake": {
+        "capabilities": {
+          "$contains": "screen"
+        }
+      }
+    }
+  ]
+}

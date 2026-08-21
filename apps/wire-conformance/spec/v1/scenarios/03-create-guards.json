@@ -1,0 +1,67 @@
+{
+  "id": "create-guards",
+  "title": "create guards and the no-grid create",
+  "asserts": "a bad provider or a missing cwd is one `error` frame with no session, and a client with no viewport of its own may omit cols/rows and let the core pick the spawn grid.",
+  "requires": ["pty"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "nope",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": {
+          "$absent": true
+        },
+        "message": {
+          "$contains": "Unknown provider"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$missingCwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": {
+          "$absent": true
+        },
+        "message": {
+          "$contains": "is not an existing directory"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd"
+      },
+      "note": "the Oracle dispatch path: no grid of its own"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "cwd": "$cwd",
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "id": "activity-notify",
+  "title": "activity transitions and the notify flag",
+  "asserts": "the core reports a session as busy, idle or waiting_input, and `notify` marks exactly the edges a human should be pinged on: a finished turn and a prompt that needs an answer, never entering busy and never a prompt that cleared itself.",
+  "requires": ["pty"],
+  "ignore": ["output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000,
+      "ignore": ["activity", "output"],
+      "note": "the first activity broadcast can precede `created`; see the ambiguity notes"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      },
+      "ignore": ["activity", "output"]
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "busy",
+        "notify": false
+      },
+      "timeoutMs": 15000,
+      "note": "entering a turn is never a notification"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "CLEAR\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "idle",
+        "notify": true,
+        "changes": {
+          "$absent": true
+        }
+      },
+      "note": "a turn boundary notifies; no changes rollup outside a git worktree"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "PROMPT\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "waiting_input",
+        "notify": true
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "CLEAR\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "idle",
+        "notify": false
+      },
+      "note": "a prompt answered away is not a new notification"
+    }
+  ]
+}

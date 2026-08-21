@@ -1,0 +1,93 @@
+{
+  "id": "input-ack",
+  "title": "input and inputAck ordering",
+  "asserts": "every sequenced input is acked exactly once, in the order it was sent, and an input without a seq is never acked \u2014 which is what lets a client buffer unacked keystrokes and resend them after a reconnect.",
+  "requires": ["pty"],
+  "capabilities": ["inputAck"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO one\r",
+        "seq": 1
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO two\r",
+        "seq": 2
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO three\r",
+        "seq": 3
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 3
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO four\r"
+      },
+      "note": "no seq: a fire-and-forget write"
+    },
+    {
+      "expectNone": {
+        "type": "inputAck"
+      },
+      "withinMs": 800
+    }
+  ]
+}

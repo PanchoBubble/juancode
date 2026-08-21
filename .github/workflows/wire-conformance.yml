@@ -1,0 +1,79 @@
+name: wire-conformance
+
+# The wire protocol is the contract between the Swift core, the Rust core
+# (apps/juancoded) and every client. This workflow runs the executable spec:
+# the fast checks everywhere, and the live conformance suite against a real
+# Swift core booted in the runner.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: wire-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      # The checklist is generated, so a stale one in the tree is a real error.
+      - name: Parity checklist is up to date
+        run: |
+          pnpm --filter @juancode/wire-conformance parity
+          git diff --exit-code -- apps/wire-conformance/parity
+
+  conformance:
+    name: conformance vs the Swift core
+    runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Toolchain
+        run: swift --version
+
+      # Cold, this is the long step. The suite would build it itself, but doing it
+      # here keeps the build failure separate from a conformance failure.
+      - name: Build the headless Swift core
+        working-directory: apps/native
+        run: swift build --product juancode-serve
+
+      - name: Run the conformance suite
+        env:
+          # Already built above; and never 4280/4281, which are a developer's app.
+          JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
+          JUANCODE_CONFORMANCE_PORT: "4295"
+          JUANCODE_CONFORMANCE_LABEL: swift
+          JUANCODE_CONFORMANCE_REPORT: conformance-swift.md
+        run: pnpm --filter @juancode/wire-conformance test:conformance
+
+      - name: Upload the run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-conformance-swift
+          path: conformance-swift.md
+          if-no-files-found: warn

@@ -1,0 +1,175 @@
+{
+  "id": "screen-stream",
+  "title": "rendered-screen stream",
+  "asserts": "subscribeScreen replies with a full snapshot, then sends only changed rows, forces a full repaint whenever the geometry or the alt buffer flips, reports cursor visibility, and stops entirely on unsubscribe.",
+  "requires": ["pty"],
+  "capabilities": ["screen"],
+  "ignore": ["activity", "output", "screen"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "subscribeScreen",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "screen",
+        "sessionId": "$session",
+        "reset": true,
+        "cols": 80,
+        "rows": 24,
+        "alt": false,
+        "cursorVisible": true,
+        "cursorX": {
+          "$type": "number"
+        },
+        "cursorY": {
+          "$type": "number"
+        },
+        "lines": {
+          "$length": 24
+        }
+      },
+      "note": "a reset frame carries every row of the grid"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO screen-marker\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "screen",
+        "sessionId": "$session",
+        "reset": false,
+        "lines": {
+          "$some": {
+            "segs": {
+              "$some": {
+                "text": {
+                  "$contains": "screen-marker"
+                }
+              }
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "incremental frames carry only the rows that changed"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ALT\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "screen",
+        "sessionId": "$session",
+        "reset": true,
+        "alt": true
+      },
+      "note": "a buffer flip invalidates row indices, so it must repaint wholesale"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "MAIN\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "screen",
+        "sessionId": "$session",
+        "reset": true,
+        "alt": false
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "HIDE\r"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO cursor-hidden\r"
+      },
+      "note": "cursor visibility rides the next damage frame; it is not a frame of its own"
+    },
+    {
+      "expect": {
+        "type": "screen",
+        "sessionId": "$session",
+        "cursorVisible": false,
+        "lines": {
+          "$some": {
+            "segs": {
+              "$some": {
+                "text": {
+                  "$contains": "cursor-hidden"
+                }
+              }
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "unsubscribeScreen",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "sleep": 200
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO after-unsubscribe\r"
+      }
+    },
+    {
+      "expectNone": {
+        "type": "screen"
+      },
+      "withinMs": 900
+    }
+  ]
+}

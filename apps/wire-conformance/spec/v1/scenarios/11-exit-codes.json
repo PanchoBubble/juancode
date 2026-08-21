@@ -1,0 +1,128 @@
+{
+  "id": "exit-codes",
+  "title": "exit codes and the dead-session attach",
+  "asserts": "a child's own exit status reaches the client verbatim, a killed session still reports an exit rather than going quiet, and attaching to a dead session replays its scrollback and then re-states the exit instead of leaving the client waiting.",
+  "requires": ["pty"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "EXIT 7\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": 7
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "sleep": 700,
+      "note": "let the exit persist before a fresh connection reads it back"
+    },
+    {
+      "open": "b"
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "scrollback": {
+          "$contains": "fake-agent ready"
+        },
+        "session": {
+          "id": "$session",
+          "status": "exited"
+        }
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": 7
+      },
+      "on": "b",
+      "note": "the exit is re-stated for a client that missed it"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "killed": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$killed"
+      }
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$killed"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$killed",
+        "exitCode": {
+          "$oneOf": [0, -1]
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the code depends on how the child dies: -1 when a signal killed it, its own status when it exits cleanly on the pty closing"
+    }
+  ]
+}

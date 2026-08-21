@@ -1,0 +1,99 @@
+{
+  "id": "errors",
+  "title": "error frames and tolerated junk",
+  "asserts": "an addressable failure gets one `error` frame naming its session, malformed JSON gets one sessionless `error` and does NOT close the connection, and an unrecognised message type is ignored entirely so a newer client cannot be killed by an older core.",
+  "capabilities": ["screen"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "conformance-missing",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": "Session not found"
+      }
+    },
+    {
+      "send": {
+        "type": "subscribeScreen",
+        "sessionId": "conformance-missing"
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": {
+          "$contains": "not running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "setSkipPermissions",
+        "sessionId": "conformance-missing",
+        "skipPermissions": true,
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": {
+          "$contains": "not running"
+        }
+      }
+    },
+    {
+      "raw": "{ this is not json",
+      "note": "a malformed frame"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": {
+          "$absent": true
+        },
+        "message": "Invalid JSON"
+      }
+    },
+    {
+      "send": {
+        "type": "someFutureMessage",
+        "sessionId": "conformance-missing"
+      },
+      "note": "a type this core does not implement"
+    },
+    {
+      "expectNone": {
+        "type": "error"
+      },
+      "withinMs": 800
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "conformance-missing",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": "Session not found"
+      },
+      "note": "the connection survived both the junk and the unknown type"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "id": "adopt-external",
+  "title": "adopting an external conversation",
+  "asserts": "a conversation started outside juancode can be adopted by its own CLI id, becomes an ordinary session at the age it really started, and adopting it twice is a no-op rather than a duplicate.",
+  "requires": ["pty"],
+  "capabilities": ["adoptExternal"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "adoptExternal",
+        "provider": "claude",
+        "cliSessionId": "conformance-adopted-0001",
+        "cwd": "$cwd",
+        "startMs": 1700000000000,
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude",
+          "cwd": "$cwd",
+          "status": "running",
+          "cliSessionId": "conformance-adopted-0001",
+          "createdAt": 1700000000000
+        }
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000,
+      "note": "createdAt is when the conversation began, not when it was adopted"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "adoptExternal",
+        "provider": "claude",
+        "cliSessionId": "conformance-adopted-0001",
+        "cwd": "$cwd",
+        "startMs": 1700000000000,
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expectNone": {
+        "type": "created"
+      },
+      "withinMs": 1000,
+      "note": "we already own this conversation"
+    }
+  ]
+}

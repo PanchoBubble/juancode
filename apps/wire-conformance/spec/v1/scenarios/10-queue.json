@@ -1,0 +1,175 @@
+{
+  "id": "queue",
+  "title": "queue snapshots",
+  "asserts": "the queue is pushed as a complete ordered list on subscribe and after every change, is replaced wholesale rather than patched, and stops being pushed after unsubscribe.",
+  "requires": ["pty"],
+  "capabilities": ["queue"],
+  "ignore": ["activity", "output"],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      },
+      "note": "hold the session busy so nothing is delivered out from under the snapshots"
+    },
+    {
+      "sleep": 500
+    },
+    {
+      "send": {
+        "type": "subscribeQueue",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": []
+      }
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "first"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "text": "first",
+            "createdAt": {
+              "$type": "number"
+            }
+          }
+        ]
+      },
+      "bind": {
+        "firstId": "items.0.id"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "second"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "text": "first"
+          },
+          {
+            "text": "second"
+          }
+        ]
+      },
+      "note": "insertion order is delivery order"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "   "
+      }
+    },
+    {
+      "expectNone": {
+        "type": "queue"
+      },
+      "withinMs": 600,
+      "note": "a whitespace-only message is not queued at all"
+    },
+    {
+      "send": {
+        "type": "dequeueMessage",
+        "sessionId": "$session",
+        "messageId": "$firstId"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "text": "second"
+          }
+        ]
+      }
+    },
+    {
+      "send": {
+        "type": "unsubscribeQueue",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "sleep": 200
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "third"
+      }
+    },
+    {
+      "expectNone": {
+        "type": "queue"
+      },
+      "withinMs": 800
+    }
+  ]
+}

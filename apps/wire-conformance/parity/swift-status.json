@@ -1,0 +1,74 @@
+{
+  "core": "swift",
+  "coreLabel": "apps/native (JuancodeServer), the Swift core",
+  "source": "measured",
+  "measuredAt": "2026-08-21",
+  "specRevision": "1.0.0",
+  "protocolVersion": 1,
+  "capabilities": [
+    "queue",
+    "trackedPrs",
+    "editor",
+    "terminal",
+    "adoptExternal",
+    "inputAck",
+    "resizeAck",
+    "screen"
+  ],
+  "scenarios": {
+    "handshake": {
+      "status": "passed"
+    },
+    "create": {
+      "status": "passed"
+    },
+    "create-guards": {
+      "status": "passed"
+    },
+    "attach-scrollback": {
+      "status": "passed"
+    },
+    "input-ack": {
+      "status": "passed"
+    },
+    "resize": {
+      "status": "passed"
+    },
+    "screen-stream": {
+      "status": "passed"
+    },
+    "activity-notify": {
+      "status": "passed"
+    },
+    "activity-changes": {
+      "status": "passed"
+    },
+    "queue": {
+      "status": "passed"
+    },
+    "exit-codes": {
+      "status": "passed"
+    },
+    "unresumable": {
+      "status": "passed"
+    },
+    "errors": {
+      "status": "passed"
+    },
+    "tracked-prs": {
+      "status": "passed"
+    },
+    "editor-terminal": {
+      "status": "passed"
+    },
+    "adopt-external": {
+      "status": "passed"
+    },
+    "dispatch-correlation": {
+      "status": "passed"
+    },
+    "skip-permissions": {
+      "status": "passed"
+    }
+  }
+}
