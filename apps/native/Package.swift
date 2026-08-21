@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "JuancodePersistence", targets: ["JuancodePersistence"]),
         .library(name: "JuancodeServices", targets: ["JuancodeServices"]),
         .library(name: "JuancodeServer", targets: ["JuancodeServer"]),
+        .library(name: "JuancodeClient", targets: ["JuancodeClient"]),
         .executable(name: "juancode-smoke", targets: ["Smoke"]),
         // Headless server runner — boots the embedded WS+HTTP server without the
         // GUI, so apps/web can drive the native backend (u34.3 verification).
@@ -93,6 +94,14 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
+        // The seam the SwiftUI app talks to a core through: `CoreClient` (modelled
+        // on the wire message set) plus `SwiftCoreClient`, which fronts the
+        // in-process registry/store/services. Its own target so the boundary is
+        // compiler-enforced, so `JuancodeApp` cannot reach past it into `AppState`.
+        .target(
+            name: "JuancodeClient",
+            dependencies: ["JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer"]
+        ),
         // Headless dev smoke: spawns the REAL claude/codex through the core to
         // prove the whole stack (registry → session → forkpty) end-to-end.
         .executableTarget(
@@ -105,11 +114,12 @@ let package = Package(
         ),
         // SwiftUI shell (juancode-u34.4): NavigationSplitView sidebar + SwiftTerm
         // session view (an in-process subscriber to the registry — no WS hop) +
-        // new-session flow. Embeds JuancodeServer so remote clients still work.
+        // new-session flow. Reaches the core only through JuancodeClient, which also
+        // boots the embedded server so remote clients still work.
         .executableTarget(
             name: "JuancodeApp",
             dependencies: [
-                "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer",
+                "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeClient",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 // SPIKE: GhosttyKit (libghostty) GPU-rendered terminal, the default
                 // live surface; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm for
@@ -129,6 +139,10 @@ let package = Package(
         .testTarget(
             name: "JuancodeServicesTests",
             dependencies: ["JuancodeServices"]
+        ),
+        .testTarget(
+            name: "JuancodeClientTests",
+            dependencies: ["JuancodeClient", "JuancodePersistence"]
         ),
         .testTarget(
             name: "JuancodeServerTests",

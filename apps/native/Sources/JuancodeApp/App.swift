@@ -1,9 +1,8 @@
 import SwiftUI
 import AppKit
 import Darwin
+import JuancodeClient
 import JuancodeCore
-import JuancodePersistence
-import JuancodeServer
 
 /// A bare SPM executable launches with background (accessory) activation, so its
 /// window never appears and it isn't in the Dock. Promote it to a regular
@@ -15,7 +14,7 @@ import JuancodeServer
 /// main actor, so confine the static there rather than guard it.
 @MainActor
 enum AppEnv {
-    static var state: AppState?
+    static var core: (any CoreClient)?
     /// The app model, for delegate paths that need UI state — the quit-time
     /// work-at-risk summary reads its last scan (juancode-rxu).
     static var model: AppModel?
@@ -203,27 +202,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// actor when done or after a hard deadline. `applicationWillTerminate` still runs
     /// after we reply and force-kills any straggler, so a wedged CLI can't hang quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let state = AppEnv.state, !terminating else { return .terminateNow }
+        guard let core = AppEnv.core, !terminating else { return .terminateNow }
         terminating = true
         // Stop the launch sweep first: it spawns a `--resume` every few hundred ms, and
         // one that lands during the drain below is a pty nothing is left to reap.
         AppEnv.model?.cancelLaunchRevive()
         DispatchQueue.global(qos: .userInitiated).async {
-            state.shutdownGracefully(timeout: 3.0)
+            core.shutdownGracefully(timeout: 3.0)
             DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
         }
         return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        AppEnv.state?.shutdown() // force-kill any straggler pty on quit
+        AppEnv.core?.shutdown() // force-kill any straggler pty on quit
     }
 }
 
 /// The native juancode app (juancode-u34.4): the local SwiftUI shell AND the host
 /// of the embedded WS+HTTP server. The local view and remote browser/phone
-/// clients are both subscribers to the one in-process `SessionRegistry` — the
-/// pty always runs here on the Mac (the u34 prime directive). Run: `swift run juancode`.
+/// clients are both subscribers to the one core this launch chose (see
+/// `CoreClient`), and the pty always runs here on the Mac (the u34 prime
+/// directive). Run: `swift run juancode`.
 @main
 struct JuancodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -236,45 +236,23 @@ struct JuancodeApp: App {
         // ptys), so a low inherited limit can't make forkpty fail with EMFILE.
         configureFileDescriptorLimit()
 
-        // Open the on-disk store. If that fails (corrupt file, locked, unwritable
-        // data dir) don't crash — fall back to an ephemeral in-memory store so the
-        // app still runs this launch, and carry the reason so RootView can surface
-        // a recovery sheet offering to reset the on-disk DB (juancode-4zk). Only a
-        // failure to open even an in-memory database is truly fatal.
-        let dbPath = GRDBStore.defaultPath()
-        let state: AppState
-        var degradedReason: String? = nil
-        do {
-            state = try AppState()
-        } catch {
-            NSLog("juancode: on-disk database failed to open (\(dbPath)): \(error)")
-            do {
-                state = AppState(store: try GRDBStore(inMemory: true))
-                degradedReason = String(describing: error)
-            } catch {
-                fatalError("Failed to open even an in-memory database: \(error)")
-            }
-        }
-        let appModel = AppModel(appState: state, degradedReason: degradedReason,
+        // Pick the core this launch talks to. The only place that names a concrete
+        // implementation: everything above the seam holds a `CoreClient`. The local
+        // core degrades to an in-memory store when the on-disk DB won't open, and
+        // carries the reason so RootView can offer to reset the file.
+        let (core, degradedReason, dbPath) = SwiftCoreClient.local()
+        let appModel = AppModel(core: core, degradedReason: degradedReason,
                                 corruptDbPath: degradedReason != nil ? dbPath : nil)
         _model = State(wrappedValue: appModel)
         _oracle = State(wrappedValue: OracleModel(app: appModel))
-        AppEnv.state = state
+        AppEnv.core = core
         AppEnv.model = appModel
 
         // Boot the embedded server so remote clients can attach to the same
         // registry. Best-effort: if the port is taken (e.g. a dev server is
-        // running) the local shell still works fully. `handleSignals: false` so
-        // the server doesn't swallow the terminal's Ctrl-C — the app owns its
-        // lifecycle (Cmd-Q, or Ctrl-C terminates the process).
+        // running) the local shell still works fully.
         let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
-        Task.detached {
-            do {
-                try await JuancodeServer.run(state: state, host: host, port: Config.port, handleSignals: false)
-            } catch {
-                NSLog("juancode: embedded server did not start: \(error)")
-            }
-        }
+        core.startEmbeddedServer(host: host, port: Config.port)
     }
 
     var body: some Scene {

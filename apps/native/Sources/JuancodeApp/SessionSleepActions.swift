@@ -14,7 +14,7 @@ import JuancodeCore
 extension AppModel {
     /// Put one session to sleep. No-op when it isn't live.
     func sleepSession(_ id: String) {
-        guard let session = appState.registry.get(id), session.isRunning else { return }
+        guard let session = core.liveSession(id), session.isRunning else { return }
         session.markDormant()
         killSession(id)
     }
@@ -27,7 +27,7 @@ extension AppModel {
         let targets = sessions.filter { meta in
             guard cwd == nil || meta.cwd == cwd else { return false }
             guard meta.id != selection, isLive(meta.id) else { return false }
-            return appState.registry.get(meta.id)?.activity == .idle
+            return core.liveSession(meta.id)?.activity == .idle
         }
         for meta in targets { sleepSession(meta.id) }
         return targets.count

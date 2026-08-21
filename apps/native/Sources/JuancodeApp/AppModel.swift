@@ -5,8 +5,7 @@ import SwiftUI
 import OSLog
 import JuancodeCore
 import JuancodeServices
-import JuancodePersistence
-import JuancodeServer
+import JuancodeClient
 
 /// Launch-time database compaction (juancode-hv06) — rare, so it reports to the
 /// system log rather than the per-session activity trail.
@@ -86,13 +85,14 @@ final class SessionActivityBox {
     init(_ activity: SessionActivity?) { self.activity = activity }
 }
 
-/// Observable view-model bridging the SwiftUI shell to the shared `AppState`. The
-/// local UI is an in-process subscriber to the same `SessionRegistry` the
-/// embedded server drives — there is no WS hop for the local view.
+/// Observable view-model bridging the SwiftUI shell to a harness core. Every
+/// call goes through `CoreClient`; with the in-process Swift core that makes the
+/// local UI a direct subscriber to the same registry the embedded server drives,
+/// with no WS hop for the local view.
 @MainActor
 @Observable
 final class AppModel {
-    let appState: AppState
+    let core: any CoreClient
 
     /// Set when the on-disk database failed to open and the app fell back to an
     /// ephemeral in-memory store (juancode-4zk). Non-nil = degraded: nothing this
@@ -520,24 +520,24 @@ final class AppModel {
     /// byte — the auto-dismiss hook for the `.resuming` banner.
     private var restoreOutputCancels: [String: () -> Void] = [:]
 
-    init(appState: AppState, degradedReason: String? = nil, corruptDbPath: String? = nil) {
-        self.appState = appState
+    init(core: any CoreClient, degradedReason: String? = nil, corruptDbPath: String? = nil) {
+        self.core = core
         self.degradedReason = degradedReason
         self.corruptDbPath = corruptDbPath
         // Snapshot the disk-restore candidates before anything revives: persisted
         // sessions not already live in the (post-restart, usually empty) registry.
-        let persistedAtLaunch = appState.store.list()
-        let liveAtLaunch = Set(appState.registry.all().map(\.id))
+        let persistedAtLaunch = core.sessions()
+        let liveAtLaunch = Set(core.liveSessions().map(\.id))
         self.launchRestoredIds = Set(persistedAtLaunch.map(\.id)).subtracting(liveAtLaunch)
         self.launchRecency = Dictionary(persistedAtLaunch.map { ($0.id, $0.updatedAt) },
                                         uniquingKeysWith: { a, _ in a })
-        self.pendingCrashOrphans = appState.crashOrphanIds
+        self.pendingCrashOrphans = core.crashOrphanIds
         self.restorePlan = SessionRestorePlan.make(
-            previouslyLive: appState.crashOrphanIds,
+            previouslyLive: core.crashOrphanIds,
             metas: persistedAtLaunch,
             lastFocused: UserDefaults.standard.string(forKey: lastFocusedSessionKey),
-            midTurnIds: appState.midTurnOrphanIds)
-        appState.registry.onCreate { [weak self] s in
+            midTurnIds: core.midTurnOrphanIds)
+        core.onSessionCreated { [weak self] s in
             Task { @MainActor in
                 guard let self else { return }
                 // Once a crash orphan is live again it's an ordinary session; let
@@ -548,7 +548,7 @@ final class AppModel {
                 self.refresh()
             }
         }
-        for s in appState.registry.all() { watch(s) }
+        for s in core.liveSessions() { watch(s) }
         refresh()
         restoreLaunchSelection() // land back on the pane you were in (juancode restore)
         reviveLaunchPlan()       // ...and bring every other open session back with it
@@ -576,7 +576,7 @@ final class AppModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.appState.markDesktopActive()
+                self.core.markDesktopActive()
                 if let sel = self.selection { self.clearUnread(sel) }
             }
         }
@@ -585,13 +585,13 @@ final class AppModel {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.appState.markDesktopActive() }
+            MainActor.assumeIsolated { self?.core.markDesktopActive() }
         }
         // Seed presence at launch when the app starts frontmost (the usual case: the
         // AppDelegate promotes to a regular foreground app and activates). `NSApp` is
         // still nil this early in `App.main()`, so chain optionally — if it's not up
         // yet the didBecomeActive observer above stamps presence the moment it is.
-        if NSApp?.isActive == true { appState.markDesktopActive() }
+        if NSApp?.isActive == true { core.markDesktopActive() }
     }
 
     // MARK: - Turn-end notifications (Dock bounce + unread badge)
@@ -654,8 +654,8 @@ final class AppModel {
     /// Persisted sessions (incl. exited), with live registry meta preferred for
     /// running ones so status/title/usage reflect the live pty.
     func refresh() {
-        let persisted = appState.store.list()
-        let liveSessions = appState.registry.all()
+        let persisted = core.sessions()
+        let liveSessions = core.liveSessions()
         let live = Dictionary(liveSessions.map { ($0.id, $0.meta) }, uniquingKeysWith: { a, _ in a })
         var merged = persisted.map { live[$0.id] ?? $0 }
         // Live sessions the store doesn't hold — editor sessions aren't persisted
@@ -677,7 +677,7 @@ final class AppModel {
         // Every registry change routes through here (create / exit / swap), so this
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
-        livePanes.prune { [appState] in appState.registry.get($0) }
+        livePanes.prune { [core] in core.liveSession($0) }
         pruneDrawnPanes(live: Set(liveSessions.map(\.id)))
         refreshWorktreeMap()
         // Every create/exit/adopt lands here, so this is where the at-risk watch set
@@ -715,10 +715,10 @@ final class AppModel {
     /// takes a write lock for seconds on a large file, so nothing waits on it, and a
     /// failure is logged rather than surfaced (a db that won't vacuum still works).
     private func runStoreMaintenance() {
-        let store = appState.store
+        let core = core
         Task.detached(priority: .utility) {
             do {
-                let report = try store.performMaintenance()
+                let report = try core.performMaintenance()
                 storeMaintenanceLog.info(
                     """
                     db maintenance: freelist \(report.freelistPagesBefore, privacy: .public) pages before, \
@@ -739,11 +739,11 @@ final class AppModel {
     /// currently selected, or one whose pane is mid-resume — so an exited session you
     /// have open can't be deleted out from under its pane.
     private func pruneSessionsPerProject() {
-        var keep = Set(appState.registry.all().map(\.id))
+        var keep = Set(core.liveSessions().map(\.id))
         if let sel = selection { keep.insert(sel) }
         keep.formUnion(activatingSessions)
         let repoRoots = worktreeRepoRoots
-        appState.store.enforceSessionCap(
+        core.enforceSessionCap(
             projectKey: { repoRoots[$0] ?? projectCwd(for: $0) },
             keepIds: keep
         )
@@ -823,7 +823,7 @@ final class AppModel {
     /// change. Called from each path that can move a row: registry create/exit
     /// (`refresh`), activity edges, unread/unseen clears, and external discovery.
     private func syncSidebarOrder() {
-        let live = Set(appState.registry.all().map(\.id))
+        let live = Set(core.liveSessions().map(\.id))
         // Auto-slept rows rest where they were rather than sinking into the dead
         // pile — they're "open but closed" (see `restingAttention`). Unless the user
         // dismissed one: that's them closing it, so it sinks like any exited row.
@@ -842,9 +842,9 @@ final class AppModel {
         if next != sidebarOrder { sidebarOrder = next }
     }
 
-    func isLive(_ id: String) -> Bool { appState.registry.get(id) != nil }
+    func isLive(_ id: String) -> Bool { core.liveSession(id) != nil }
 
-    func liveSession(_ id: String) -> Session? { appState.registry.get(id) }
+    func liveSession(_ id: String) -> Session? { core.liveSession(id) }
 
     /// Whether `id` is an in-app editor pane (nvim etc.), across live + cached metas.
     func isEditorSession(_ id: String) -> Bool {
@@ -999,7 +999,7 @@ final class AppModel {
     /// conversation and genuinely lose the pane's content).
     @discardableResult
     func deepRefresh(_ id: String, grid: (cols: Int, rows: Int)? = nil) async -> Bool {
-        guard let meta = appState.store.get(id) ?? metaCache[id],
+        guard let meta = core.session(id) ?? metaCache[id],
               meta.cliSessionId != nil, !resumeNeedsFreshStart(meta) else {
             if selection == id { refreshTerminal() }
             return false
@@ -1026,8 +1026,8 @@ final class AppModel {
     /// detail view once a reactivation or a permissions flip mints a new live
     /// `Session` behind the same id.
     func noteLivePaneVisible(_ id: String) {
-        livePanes.noteVisible(id, refresh: terminalRefreshToken) { [appState] in
-            appState.registry.get($0)
+        livePanes.noteVisible(id, refresh: terminalRefreshToken) { [core] in
+            core.liveSession($0)
         }
     }
 
@@ -1067,7 +1067,7 @@ final class AppModel {
     }
 
     func scrollback(_ id: String) -> [UInt8] {
-        appState.registry.get(id)?.getScrollback() ?? appState.store.getScrollback(id) ?? []
+        core.liveSession(id)?.getScrollback() ?? core.storedScrollback(id) ?? []
     }
 
     private func watch(_ s: Session) {
@@ -1263,7 +1263,7 @@ final class AppModel {
     /// Settings value rules, including `0` = disabled.
     private func applyReaperWindow() {
         let minutes = Config.reapIdleMinutesOverride ?? autoCloseIdleMinutes
-        Task { [appState] in await appState.sessionReaper.setIdleWindow(minutes: minutes) }
+        Task { [core] in await core.setReaperIdleWindow(minutes: minutes) }
     }
 
     /// Estimated-cost budget in USD (juancode-qoc). `0` = off. When set, the sidebar
@@ -1490,7 +1490,7 @@ final class AppModel {
     /// The most recently-created live session rooted in `cwd`, if any. Used to find
     /// the pinned Oracle agent session by its unique control-dir cwd.
     func liveSession(inCwd cwd: String) -> Session? {
-        appState.registry.all()
+        core.liveSessions()
             .filter { $0.meta.cwd == cwd }
             .max { $0.meta.createdAt < $1.meta.createdAt }
     }
@@ -1498,7 +1498,7 @@ final class AppModel {
     /// All persisted (incl. exited) sessions rooted in `cwd`. Used to find/clean up
     /// the pinned Oracle agent's prior sessions.
     func persistedSessions(inCwd cwd: String) -> [SessionMeta] {
-        appState.store.list().filter { $0.cwd == cwd }
+        core.sessions().filter { $0.cwd == cwd }
     }
 
     @discardableResult
@@ -1517,7 +1517,7 @@ final class AppModel {
             }
             // Spawn off the main actor: this resolves the CLI via a login shell and
             // forkpty()s — work that must never block the UI run loop.
-            let state = appState
+            let core = core
             let cwdToUse = workCwd
             let wt = worktreePath
             // Spawn at the given size, else the last on-screen terminal size, so the
@@ -1526,7 +1526,7 @@ final class AppModel {
             // size explicitly since the dock is narrower than the main window.
             let grid: (cols: Int, rows: Int) = (cols != nil && rows != nil) ? (cols!, rows!) : TerminalGrid.spawn
             let s = try await Task.detached(priority: .userInitiated) {
-                try state.registry.create(
+                try core.create(
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
                     opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt,
                     dispatchId: dispatchId)
@@ -1637,15 +1637,16 @@ final class AppModel {
     /// selects the new pane. No-op if the source session is unknown or is itself an
     /// editor.
     func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
-        guard let parent = appState.registry.get(sessionId)?.meta
+        guard let parent = core.liveSession(sessionId)?.meta
                 ?? sessions.first(where: { $0.id == sessionId }),
               parent.kind != .editor else { return }
         let grid = TerminalGrid.spawn
-        let state = appState
+        let core = core
         Task {
             do {
                 let s = try await Task.detached(priority: .userInitiated) {
-                    try state.registry.createEditor(parent: parent, file: file, line: line, cols: grid.cols, rows: grid.rows)
+                    try core.createEditorSession(parent: parent, file: file, line: line,
+                                                 cols: grid.cols, rows: grid.rows)
                 }.value
                 refresh()
                 selection = s.id
@@ -1714,7 +1715,7 @@ final class AppModel {
             // Debounce keystrokes in the directory field before touching disk.
             await Nap.duration(.milliseconds(300))
             guard resumableCwd == target else { return }
-            let used = appState.store.usedCliSessionIds()
+            let used = core.usedCliSessionIds()
             let rows = await Task.detached(priority: .utility) { () -> [ResumableSession] in
                 let hits = listExternalSessions(cwd: target)
                     .filter { !used.contains($0.cliSessionId) }
@@ -1761,7 +1762,7 @@ final class AppModel {
     private func fetchExternal() {
         guard !externalLoading else { return }
         externalLoading = true
-        let used = appState.store.usedCliSessionIds()
+        let used = core.usedCliSessionIds()
         let limit = externalLimit
         Task {
             let result = await Task.detached(priority: .utility) {
@@ -1792,7 +1793,7 @@ final class AppModel {
         guard let ext = externalSessions.first(where: { $0.id == id }) else { return }
         var meta = ext
         meta.id = UUID().uuidString // our own key; `cliSessionId` still points at the conversation
-        appState.store.insert(meta)
+        core.insertSession(meta)
         externalSessions.removeAll { $0.id == id }
         externalIds.remove(id)
         refresh()
@@ -1800,7 +1801,7 @@ final class AppModel {
         Task {
             do {
                 let grid = TerminalGrid.spawn
-                _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows)
+                _ = try core.resume(meta, cols: grid.cols, rows: grid.rows, priorScrollback: [])
                 refresh()
             } catch {
                 errorMessage = "Couldn't resume terminal session: \(error)"
@@ -1819,16 +1820,16 @@ final class AppModel {
     @discardableResult
     func adoptExternal(provider: ProviderId, cliSessionId: String, cwd: String, startMs: Int,
                        select: Bool = true) -> SessionMeta? {
-        guard !appState.store.usedCliSessionIds().contains(cliSessionId) else { return nil }
+        guard !core.usedCliSessionIds().contains(cliSessionId) else { return nil }
         let meta = SessionMeta.adopting(provider: provider, cliSessionId: cliSessionId,
                                         cwd: cwd, startMs: startMs)
-        appState.store.insert(meta)
+        core.insertSession(meta)
         refresh()
         if select { selection = meta.id }
         Task {
             do {
                 let grid = TerminalGrid.spawn
-                _ = try appState.registry.resume(meta, cols: grid.cols, rows: grid.rows)
+                _ = try core.resume(meta, cols: grid.cols, rows: grid.rows, priorScrollback: [])
                 refresh()
             } catch {
                 errorMessage = "Couldn't resume terminal session: \(error)"
@@ -1949,7 +1950,7 @@ final class AppModel {
     /// PRs for what you're actually working on lead the list.
     var activeProjectFolder: String? {
         guard let id = selection,
-              let meta = liveSession(id)?.meta ?? appState.store.get(id) else { return nil }
+              let meta = liveSession(id)?.meta ?? core.session(id) else { return nil }
         return repoRoot(forSession: meta)
     }
 
@@ -2145,10 +2146,10 @@ final class AppModel {
         searchToken += 1
         let token = searchToken
         searching = true
-        let store = appState.store
+        let core = core
         Task {
             let hits = await Task.detached(priority: .userInitiated) {
-                store.search(q, limit: 50)
+                core.searchSessions(q, limit: 50)
             }.value
             guard token == self.searchToken else { return }
             self.searchResults = hits
@@ -2246,7 +2247,7 @@ final class AppModel {
     /// in that folder. `nil` when the folder has no live session.
     private func focusedLiveSession(in cwd: String) -> Session? {
         if let sel = selection, let s = liveSession(sel), s.meta.cwd == cwd { return s }
-        return appState.registry.all()
+        return core.liveSessions()
             .filter { $0.meta.cwd == cwd }
             .max { $0.meta.createdAt < $1.meta.createdAt }
     }
@@ -2315,7 +2316,7 @@ final class AppModel {
     func trackPr(_ pr: PullRequest, cwd: String) {
         let grid = TerminalGrid.spawn
         Task {
-            guard let entry = await appState.prTracking.track(
+            guard let entry = await core.trackPr(
                 pr, cwd: cwd, cols: grid.cols, rows: grid.rows) else { return }
             selection = entry.sessionId
             focusTerminal()
@@ -2325,7 +2326,7 @@ final class AppModel {
     /// Stop tracking a PR (forwarded to the engine). Leaves its agent session
     /// alone (the user may still want it); just drops it from the watch list.
     func untrackPr(_ id: String) {
-        Task { await appState.prTracking.untrack(id) }
+        Task { await core.untrackPr(id) }
     }
 
     /// Queue a prompt into a session's message queue and kick it — the same
@@ -2333,7 +2334,7 @@ final class AppModel {
     /// interrupts the agent mid-turn. Safe when the session isn't live: the
     /// queue holds the message and the next revival flushes it.
     func queuePrompt(sessionId: String, text: String) {
-        appState.messageQueue.add(sessionId, text: text)
+        core.queueMessage(sessionId, text: text)
         liveSession(sessionId)?.kickQueue()
     }
 
@@ -2345,7 +2346,7 @@ final class AppModel {
     /// (spawn failure) and nothing was queued.
     func trackPrAndQueue(_ pr: PullRequest, cwd: String, prompt: String) async -> Bool {
         let grid = TerminalGrid.spawn
-        if let entry = await appState.prTracking.track(pr, cwd: cwd, cols: grid.cols, rows: grid.rows) {
+        if let entry = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows) {
             queuePrompt(sessionId: entry.sessionId, text: prompt)
             return true
         }
@@ -2363,15 +2364,15 @@ final class AppModel {
     /// seeds itself at launch (including a restored watch list). Needs-decision
     /// escalations ride the same subscription and surface as OS notifications.
     private func subscribeTrackedMirror() {
-        let engine = appState.prTracking
+        let core = core
         Task {
-            _ = await engine.subscribe { [weak self] change in
+            _ = await core.subscribeTrackedPrs { [weak self] event in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    switch change {
-                    case .tracked(let list):
+                    switch event {
+                    case .trackedPrs(let list):
                         self.applyTrackedMirror(list)
-                    case let .notification(trackedId, prNumber, notification):
+                    case let .trackNotification(trackedId, prNumber, notification):
                         self.notifyTrackedPrDecision(
                             trackedId: trackedId, prNumber: prNumber, notification: notification)
                     }
@@ -2450,7 +2451,7 @@ final class AppModel {
     /// Dismiss a surfaced decision once the user has dealt with it (forwarded to
     /// the engine; the mirror updates via the subscription).
     func resolveNotification(prId: String, notificationId: String) {
-        Task { await appState.prTracking.resolveNotification(trackedId: prId, notificationId: notificationId) }
+        Task { await core.resolveTrackNotification(trackedId: prId, notificationId: notificationId) }
     }
 
     /// Start tracking a Linear issue: fetch it (for title/url + an initial baseline so
@@ -2637,7 +2638,7 @@ final class AppModel {
         if isLive(id) { return true }
         // Someone else is already spawning this pty — the launch sweep and a click on
         // the same row, most often. Wait that revive out instead of racing it: both
-        // callers reach `registry.resume` before either sees `isLive`, and two
+        // callers reach `core.resume` before either sees `isLive`, and two
         // `--resume` processes for one session is a duplicated agent, not a faster one.
         if revivingIds.contains(id) {
             while revivingIds.contains(id) { await Nap.ms(100) }
@@ -2648,13 +2649,13 @@ final class AppModel {
         // The db row can be gone if the retention cap pruned it after this pane was
         // opened; fall back to the run-lifetime meta cache and re-insert so opening
         // an old session revives it instead of failing with "not found" (juancode).
-        guard var meta = appState.store.get(id) ?? metaCache[id] else { return false }
-        if appState.store.get(id) == nil { appState.store.insert(meta) }
+        guard var meta = core.session(id) ?? metaCache[id] else { return false }
+        if core.session(id) == nil { core.insertSession(meta) }
         if meta.cliSessionId == nil {
             if let recovered = await recoverCliSessionId(
                 meta.provider, cwd: meta.cwd, createdAtMs: meta.createdAt,
-                excludeIds: appState.store.usedCliSessionIds()) {
-                appState.store.setCliSessionId(id, cliSessionId: recovered)
+                excludeIds: core.usedCliSessionIds()) {
+                core.setCliSessionId(id, cliSessionId: recovered)
                 meta.cliSessionId = recovered
             }
         }
@@ -2662,8 +2663,8 @@ final class AppModel {
             if !quiet {
                 errorMessage = "No prior CLI conversation could be found to resume this session."
             }
-            appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
-                                     fields: ["reason": "unresumable"])
+            core.logSessionEvent("reviveFailed", sessionId: id, project: meta.cwd,
+                                 fields: ["reason": "unresumable"])
             return false
         }
         // A pinned-id session that booted but never got a turn has no transcript to
@@ -2672,21 +2673,21 @@ final class AppModel {
         // callers boot a fresh session in place instead.
         if resumeNeedsFreshStart(meta) { return false }
         do {
-            let prior = appState.store.getScrollback(id) ?? []
+            let prior = core.storedScrollback(id) ?? []
             let seed: [UInt8] = (prior.isEmpty || !seedPrior)
                 ? [] : prior + Array("\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n".utf8)
             // No caller grid (the sidebar's open-persisted-pane path): resume at the
             // size this session's own surface last measured — the dock's for an
             // Oracle, a main pane's for everything else. See `resumeGrid(for:)`.
             let g = grid ?? resumeGrid(for: meta)
-            let session = try appState.registry.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)
+            let session = try core.resume(meta, cols: g.cols, rows: g.rows, priorScrollback: seed)
             refresh()
             return await confirmResumeSucceeded(session, sessionId: id, priorScrollback: prior,
                                                 settleMs: settleMs)
         } catch {
             if !quiet { errorMessage = "Failed to resume: \(error)" }
-            appState.activityLog.log("reviveFailed", sessionId: id, project: meta.cwd,
-                                     fields: ["reason": "\(error)"])
+            core.logSessionEvent("reviveFailed", sessionId: id, project: meta.cwd,
+                                 fields: ["reason": "\(error)"])
             return false
         }
     }
@@ -2752,11 +2753,11 @@ final class AppModel {
     /// (dropping the `── session resumed ──` banner + the CLI's failure output, so
     /// nothing stacks across reloads).
     private func invalidateFailedResume(_ sessionId: String, priorScrollback: [UInt8]) {
-        guard var meta = appState.store.get(sessionId) else { return }
-        appState.activityLog.log("resumeInvalidated", sessionId: sessionId, project: meta.cwd)
+        guard var meta = core.session(sessionId) else { return }
+        core.logSessionEvent("resumeInvalidated", sessionId: sessionId, project: meta.cwd)
         meta.cliSessionId = nil
         meta.status = .exited
-        appState.store.update(meta, scrollback: priorScrollback)
+        core.updateSession(meta, scrollback: priorScrollback)
         refresh()
     }
 
@@ -2807,15 +2808,15 @@ final class AppModel {
     }
 
     /// Boot a fresh CLI conversation for an exited session that couldn't be resumed,
-    /// keeping its juancode id and pane (see `SessionRegistry.restartFresh`). No-op
+    /// keeping its juancode id and pane (see `CoreClient.restartFresh`). No-op
     /// if it's already live or its meta is gone.
     private func startFreshInPlace(_ id: String) async {
         guard !isLive(id) else { return }
-        guard let meta = appState.store.get(id) ?? metaCache[id] else { return }
-        if appState.store.get(id) == nil { appState.store.insert(meta) }
+        guard let meta = core.session(id) ?? metaCache[id] else { return }
+        if core.session(id) == nil { core.insertSession(meta) }
         do {
-            _ = try appState.registry.restartFresh(meta, cols: TerminalGrid.spawn.cols,
-                                                   rows: TerminalGrid.spawn.rows)
+            _ = try core.restartFresh(meta, cols: TerminalGrid.spawn.cols,
+                                      rows: TerminalGrid.spawn.rows)
             refresh()
         } catch {
             errorMessage = "Couldn't start a fresh session: \(error)"
@@ -2905,8 +2906,8 @@ final class AppModel {
     private func reviveAtLaunch(_ id: String) async {
         guard let meta = sessions.first(where: { $0.id == id }), !isLive(id) else { return }
         let revived = await reactivate(id, quiet: true, settleMs: ResumeGrace.settleMs)
-        appState.activityLog.log("launchRevive", sessionId: id, project: meta.cwd,
-                                 fields: ["revived": "\(revived)"])
+        core.logSessionEvent("launchRevive", sessionId: id, project: meta.cwd,
+                             fields: ["revived": "\(revived)"])
     }
 
     /// Stop the launch sweep — nothing half-revived should keep spawning ptys once the
@@ -2983,10 +2984,10 @@ final class AppModel {
     func rename(_ id: String, to title: String) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if let s = appState.registry.get(id) {
+        if let s = core.liveSession(id) {
             s.setTitle(trimmed)
         } else {
-            appState.store.setTitle(id, title: trimmed)
+            core.setTitle(id, title: trimmed)
         }
         refresh()
     }
@@ -2994,10 +2995,10 @@ final class AppModel {
     /// Archive or unarchive a session. Persists the flag (via the live session
     /// when running) and clears the selection when hiding the selected one.
     func setArchived(_ id: String, _ archived: Bool) {
-        if let s = appState.registry.get(id) {
+        if let s = core.liveSession(id) {
             s.setArchived(archived)
         } else {
-            appState.store.setArchived(id, archived: archived)
+            core.setArchived(id, archived: archived)
         }
         if archived, selection == id { selection = nil }
         refresh()
@@ -3378,9 +3379,9 @@ final class AppModel {
         let reports = SessionHealth.sweep(inputs, nowMs: now)
         // Durable trail: log each report once per state change, not on every sweep.
         for r in reports where loggedHealthStates[r.id] != r.state {
-            appState.activityLog.log("health", sessionId: r.id,
-                                     project: sessions.first { $0.id == r.id }?.cwd ?? "",
-                                     fields: ["state": r.state.rawValue])
+            core.logSessionEvent("health", sessionId: r.id,
+                                 project: sessions.first { $0.id == r.id }?.cwd ?? "",
+                                 fields: ["state": r.state.rawValue])
         }
         loggedHealthStates = Dictionary(uniqueKeysWithValues: reports.map { ($0.id, $0.state) })
         // Keep dismissals only for sessions that are still unhealthy; a recovered one
@@ -3519,7 +3520,7 @@ final class AppModel {
 
     /// The cwd a session's changes panel operates on (its own working directory).
     private func cwd(of id: String) -> String? {
-        liveSession(id)?.meta.cwd ?? appState.store.get(id)?.cwd
+        liveSession(id)?.meta.cwd ?? core.session(id)?.cwd
     }
 
     /// The working folder of a session — for the ChangesPanel's PR picker and CI
@@ -3582,7 +3583,7 @@ final class AppModel {
     /// The effective working directory an agent edits in — its linked worktree when
     /// it runs in one, else its cwd. What the change badge measures.
     private func effectiveCwd(of id: String) -> String? {
-        liveSession(id)?.meta.effectiveCwd ?? appState.store.get(id)?.effectiveCwd
+        liveSession(id)?.meta.effectiveCwd ?? core.session(id)?.effectiveCwd
     }
 
     /// The review badge for a session: the latest change summary, but only while it
@@ -3871,7 +3872,7 @@ final class AppModel {
             return nil
         }
         do {
-            return try appState.ephemeral.openEditor(cwd: cwd, file: file, cols: cols, rows: rows)
+            return try core.openEditorPty(cwd: cwd, file: file, cols: cols, rows: rows)
         } catch {
             let text: String
             switch error {
@@ -4001,7 +4002,7 @@ final class AppModel {
     /// Spawn a shell pty for `pane` in `cwd`; returns false (and notes nothing) if
     /// the spawn fails so the caller can skip persisting the pane.
     private func spawnShell(for pane: TerminalPaneID, cwd: String) -> Bool {
-        guard let pty = try? appState.ephemeral.openTerminal(cwd: cwd, cols: 80, rows: 24) else {
+        guard let pty = try? core.openTerminalPty(cwd: cwd, cols: 80, rows: 24) else {
             return false
         }
         shellPtys[pane] = pty
@@ -4070,7 +4071,7 @@ final class AppModel {
         let staged = comments(id)
         let prompt = composeReviewFeedback(staged)
         guard !prompt.isEmpty else { return }
-        appState.messageQueue.add(id, text: prompt)
+        core.queueMessage(id, text: prompt)
         session.kickQueue()
         // Archive instead of dropping, so a sent review stays retrievable.
         if !staged.isEmpty { archivedCommentsBySession[id, default: []].append(contentsOf: staged) }
@@ -4212,7 +4213,7 @@ final class AppModel {
             gitNoteBySession[id] = GitNote(
                 ok: true, text: r.created ? "Pull request created." : "A PR already exists for this branch.")
             loadChanges(id)
-            if let cwd = liveSession(id)?.meta.cwd ?? appState.store.get(id)?.cwd { loadPrs(cwd) }
+            if let cwd = liveSession(id)?.meta.cwd ?? core.session(id)?.cwd { loadPrs(cwd) }
             return r
         } catch {
             gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
@@ -4339,7 +4340,7 @@ final class AppModel {
     /// True if a live session is rooted in `path` — a worktree that's still in use
     /// (removing it would pull the rug from under a running agent).
     func worktreeInUse(_ path: String) -> Bool {
-        appState.registry.all().contains { $0.meta.cwd == path || $0.meta.worktreePath == path }
+        core.liveSessions().contains { $0.meta.cwd == path || $0.meta.worktreePath == path }
     }
 
     /// Remove a worktree (and its directory) and refresh the list. Off the main actor.
@@ -4396,13 +4397,13 @@ final class AppModel {
     func delete(_ id: String) {
         // Editor panes aren't persisted, so their parent link lives only on the live
         // meta — read it before the kill so closing one lands back on its parent.
-        let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
+        let editorParent = core.liveSession(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
         // Resolved before teardown: navOrder still contains the dying row.
         let neighbor = neighborInNavOrder(of: id, excluding: [id])
-        let meta = appState.store.get(id)
-        appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
-        appState.registry.get(id)?.kill()
-        appState.store.delete(id)
+        let meta = core.session(id)
+        core.logSessionEvent("close", sessionId: id, project: meta?.cwd ?? "")
+        core.kill(id)
+        core.deleteSession(id)
         activityCancels[id]?(); activityCancels[id] = nil
         gridCancels[id]?(); gridCancels[id] = nil
         metaCancels[id]?(); metaCancels[id] = nil
@@ -4433,7 +4434,7 @@ final class AppModel {
     /// nothing else running the selection stays and the pane shows an explicit
     /// stopped card instead (`isStoppedPane`).
     func killSession(_ id: String) {
-        guard let session = appState.registry.get(id) else { return }
+        guard let session = core.liveSession(id) else { return }
         // Resolved BEFORE the kill: liveness is read off the registry, so after the
         // kill the dying row would look like every other dead row.
         let landing = selection == id ? landingAfterKill(id) : nil
@@ -4467,8 +4468,7 @@ final class AppModel {
     /// spawn/seed/activity/exit events (grep by session id to follow one session).
     /// Falls back to the logs folder before the first event has been written.
     func revealActivityLog() {
-        appState.activityLog.flush()
-        let path = appState.activityLog.logPath
+        let path = core.flushSessionLog()
         let target = FileManager.default.fileExists(atPath: path)
             ? path : (path as NSString).deletingLastPathComponent
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: target)])
@@ -4487,12 +4487,12 @@ final class AppModel {
         }
         var worktrees: [String] = []
         for id in ids {
-            let editorParent = appState.registry.get(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
-            let meta = appState.store.get(id)
+            let editorParent = core.liveSession(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
+            let meta = core.session(id)
             if let wt = meta?.worktreePath { worktrees.append(wt) }
-            appState.activityLog.log("close", sessionId: id, project: meta?.cwd ?? "")
-            appState.registry.get(id)?.kill()
-            appState.store.delete(id)
+            core.logSessionEvent("close", sessionId: id, project: meta?.cwd ?? "")
+            core.kill(id)
+            core.deleteSession(id)
             activityCancels[id]?(); activityCancels[id] = nil
             gridCancels[id]?(); gridCancels[id] = nil
             stopWatchingChanges(id)
@@ -4734,7 +4734,7 @@ final class AppModel {
     /// nobody is working in it, so watching it earns nothing.
     private func reconcileWorkAtRiskWatches() {
         var wanted: Set<String> = []
-        for s in appState.registry.all() {
+        for s in core.liveSessions() {
             let meta = s.meta
             guard meta.cwd != OraclePaths.controlDir else { continue }
             wanted.insert(WorkAtRiskScan.normalize(meta.cwd))
@@ -4965,7 +4965,7 @@ final class AppModel {
 
         // Nudge pass. Read live last-output straight from the registry — the
         // published `sessions` snapshot's `updatedAt` can lag (see health loop).
-        let liveMeta = Dictionary(appState.registry.all().map { ($0.id, $0.meta) },
+        let liveMeta = Dictionary(core.liveSessions().map { ($0.id, $0.meta) },
                                   uniquingKeysWith: { a, _ in a })
         let inputs: [WorkAtRiskScan.NudgeInput] = sessions
             .filter { $0.cwd != OraclePaths.controlDir }
