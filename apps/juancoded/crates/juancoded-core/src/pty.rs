@@ -9,11 +9,25 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use tokio::sync::broadcast;
+
+/// How long a CLI gets to write its own state out after being asked to stop.
+///
+/// `claude` traps SIGTERM to flush its transcript, and hard-killing before that flush
+/// lost the last few prompts of every session: they were in our scrollback but not in
+/// the transcript, and a `--resume` repaints from the transcript (juancode-6cqj). The
+/// Swift core waits the same 3 seconds for the same reason.
+pub const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// How often the grace wait re-checks. Short enough that the common case (a CLI that
+/// exits at once) costs a millisecond, not the whole grace.
+const REAP_POLL: Duration = Duration::from_millis(10);
 
 /// What a live pty emits. `Output` carries raw bytes exactly as read; the wire
 /// layer decides how to frame them.
@@ -34,8 +48,8 @@ pub struct SpawnSpec {
     pub env_overlay: HashMap<String, String>,
 }
 
-/// A running pty. Cloneable handle; dropping every clone does not kill the child
-/// (the registry owns the lifetime and calls `kill` explicitly).
+/// A running pty. Cloneable handle; dropping every clone does not end the child
+/// (the registry owns the lifetime and calls `stop` explicitly).
 #[derive(Clone)]
 pub struct PtyHandle {
     inner: Arc<Inner>,
@@ -48,6 +62,14 @@ struct Inner {
     events: broadcast::Sender<PtyEvent>,
     /// The grid the pty currently believes it has.
     size: Mutex<(u16, u16)>,
+    /// Set by the reader thread once the child is reaped, just before it publishes
+    /// the exit. The stop ladder waits on this rather than on `child`, which the
+    /// reader thread is itself blocked in `wait()` on.
+    exited: AtomicBool,
+    /// Read once at spawn. Asking the child for it later would mean taking the lock
+    /// the reader thread holds while it waits, and the signal path must not be able
+    /// to block on the thread whose exit it is waiting for.
+    pid: Option<u32>,
 }
 
 impl PtyHandle {
@@ -78,6 +100,7 @@ impl PtyHandle {
         }
 
         let child = pair.slave.spawn_command(cmd).context("spawn failed")?;
+        let pid = child.process_id();
         // Drop the slave immediately: holding it open means the master read never
         // sees EOF when the child exits, and the session would hang "running".
         drop(pair.slave);
@@ -95,6 +118,8 @@ impl PtyHandle {
             child: Mutex::new(child),
             events: events.clone(),
             size: Mutex::new((spec.cols, spec.rows)),
+            exited: AtomicBool::new(false),
+            pid,
         });
 
         let pump_inner = Arc::clone(&inner);
@@ -132,6 +157,7 @@ impl PtyHandle {
                             status.exit_code() as i32
                         }
                     });
+                pump_inner.exited.store(true, Ordering::SeqCst);
                 let _ = pump_inner.events.send(PtyEvent::Exit(code));
             })
             .context("failed to start pty reader thread")?;
@@ -185,6 +211,64 @@ impl PtyHandle {
         self.inner.size.lock().map(|s| *s).unwrap_or((0, 0))
     }
 
+    /// Whether the child has been reaped and its exit published.
+    pub fn has_exited(&self) -> bool {
+        self.inner.exited.load(Ordering::SeqCst)
+    }
+
+    /// The child's pid, as it was at spawn.
+    pub fn pid(&self) -> Option<u32> {
+        self.inner.pid
+    }
+
+    /// Ask the child to stop, and do not wait. SIGTERM is the request a CLI can act
+    /// on; see [`STOP_GRACE`] for why asking first matters.
+    ///
+    /// Returns false when there was nothing to ask (already gone, or no pid).
+    pub fn request_stop(&self) -> bool {
+        if self.has_exited() {
+            return false;
+        }
+        match self.pid() {
+            #[cfg(unix)]
+            Some(pid) => {
+                // SAFETY: `kill` with a pid we own and a valid signal number. A pid
+                // that has already been reaped answers ESRCH, which we ignore.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                true
+            }
+            #[cfg(not(unix))]
+            Some(_) => false,
+            None => false,
+        }
+    }
+
+    /// End the child: ask, wait out its flush grace, then insist.
+    ///
+    /// The wait is bounded and polls a flag, so a CLI that ignores SIGTERM costs the
+    /// grace once rather than hanging the caller.
+    pub fn stop(&self) -> Result<()> {
+        self.stop_within(STOP_GRACE)
+    }
+
+    pub fn stop_within(&self, grace: Duration) -> Result<()> {
+        if self.request_stop() {
+            let deadline = Instant::now() + grace;
+            while Instant::now() < deadline {
+                if self.has_exited() {
+                    return Ok(());
+                }
+                std::thread::sleep(REAP_POLL);
+            }
+        }
+        if self.has_exited() {
+            return Ok(());
+        }
+        self.kill()
+    }
+
+    /// Take the child out now, with no grace. The last rung of [`stop`](Self::stop),
+    /// and the right call only when the flush has already had its chance.
     pub fn kill(&self) -> Result<()> {
         let mut child = self
             .inner
@@ -253,28 +337,69 @@ mod tests {
         assert!(saw_output, "never saw the child's output");
     }
 
-    /// The prime directive, asserted rather than assumed: the child's environment
-    /// is ours. No shadow HOME, no CODEX_HOME, nothing added — so user-scope MCP
-    /// config, connectors and project `.mcp.json` resolve exactly as in a terminal.
-    #[test]
-    fn the_child_environment_is_inherited_untouched() {
-        let out = run_and_collect(spec("/usr/bin/env", &[]));
-        let child: std::collections::HashMap<&str, &str> = out
-            .lines()
-            .filter_map(|l| l.split_once('='))
-            .map(|(k, v)| (k, v.trim_end_matches('\r')))
-            .collect();
+    /// A key whose value cannot be read back out of a line-oriented `env` dump, or
+    /// whose survival is not ours to promise.
+    ///
+    /// `DYLD_*` is the second kind: macOS strips it when exec'ing a system binary, so
+    /// `/usr/bin/env` never sees the one `cargo` puts in a test binary's environment.
+    /// A CLI that needs it would not get it from a terminal either.
+    fn undiffable(key: &str, value: &str) -> bool {
+        key.starts_with("DYLD_") || value.contains('\n') || key.contains('\n')
+    }
 
-        for key in ["HOME", "PATH", "USER"] {
-            if let Ok(ours) = std::env::var(key) {
-                assert_eq!(
-                    child.get(key).map(|s| s.to_string()),
-                    Some(ours),
-                    "{key} differs between parent and child"
-                );
+    fn child_env(out: &str) -> HashMap<String, String> {
+        out.lines()
+            .filter_map(|line| line.trim_end_matches('\r').split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The prime directive, asserted as a two-way diff rather than a spot check: the
+    /// child's environment IS ours, entry for entry. Nothing added, nothing dropped,
+    /// no value rewritten. That is what makes user-scope MCP config (`~/.claude.json`),
+    /// account connectors, `~/.codex/config.toml` and a project `.mcp.json` resolve for
+    /// the spawned CLI exactly as they do in a terminal.
+    ///
+    /// `examples/env_diff.rs` is the same comparison as a command, for checking a real
+    /// launch by hand.
+    #[test]
+    fn the_child_environment_is_our_environment_entry_for_entry() {
+        let out = run_and_collect(spec("/usr/bin/env", &[]));
+        let child = child_env(&out);
+        let ours: HashMap<String, String> = std::env::vars().collect();
+
+        let added: Vec<&String> = child
+            .iter()
+            .filter(|(k, v)| !ours.contains_key(*k) && !undiffable(k, v))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            added.is_empty(),
+            "the child was given entries we never had: {added:?}"
+        );
+
+        let mut dropped = Vec::new();
+        let mut rewritten = Vec::new();
+        for (key, value) in &ours {
+            if undiffable(key, value) {
+                continue;
+            }
+            match child.get(key) {
+                None => dropped.push(key.clone()),
+                Some(theirs) if theirs != value => {
+                    rewritten.push(format!("{key}: ours={value:?} child={theirs:?}"))
+                }
+                _ => {}
             }
         }
-        // Nothing we did invented these.
+        assert!(
+            dropped.is_empty(),
+            "entries lost on the way in: {dropped:?}"
+        );
+        assert!(rewritten.is_empty(), "entries rewritten: {rewritten:?}");
+
+        // And the specific shadows the directive names, in case one of them is set
+        // for real in the parent and so would not show as "added".
         for forbidden in [
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
@@ -289,18 +414,104 @@ mod tests {
         }
     }
 
+    /// The one sanctioned exception, held to exactly one entry: opencode's opt-in
+    /// bypass, which that CLI exposes only as an env var.
     #[test]
-    fn an_env_overlay_adds_only_what_it_names() {
+    fn an_env_overlay_adds_only_what_it_names_and_changes_nothing_else() {
         let mut s = spec("/usr/bin/env", &[]);
         s.env_overlay
-            .insert("JUANCODED_SPIKE_MARKER".into(), "on".into());
+            .insert("OPENCODE_PERMISSION".into(), "{\"edit\":\"allow\"}".into());
         let out = run_and_collect(s);
-        assert!(out.contains("JUANCODED_SPIKE_MARKER=on"));
-        if let Ok(home) = std::env::var("HOME") {
-            assert!(
-                out.contains(&format!("HOME={home}")),
-                "overlay disturbed HOME"
-            );
+        let child = child_env(&out);
+        let ours: HashMap<String, String> = std::env::vars().collect();
+
+        assert_eq!(
+            child.get("OPENCODE_PERMISSION").map(String::as_str),
+            Some("{\"edit\":\"allow\"}")
+        );
+        let extra: Vec<&String> = child
+            .iter()
+            .filter(|(k, v)| {
+                k.as_str() != "OPENCODE_PERMISSION" && !ours.contains_key(*k) && !undiffable(k, v)
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert!(extra.is_empty(), "the overlay brought friends: {extra:?}");
+        for (key, value) in &ours {
+            if undiffable(key, value) || key == "OPENCODE_PERMISSION" {
+                continue;
+            }
+            assert_eq!(child.get(key), Some(value), "the overlay disturbed {key}");
+        }
+    }
+
+    /// The ladder's first rung, which is the whole point of it: a CLI that traps
+    /// SIGTERM gets to run its handler. `claude` writes its transcript there, and a
+    /// SIGKILL first meant a `--resume` repainted a conversation missing its last
+    /// few prompts (juancode-6cqj).
+    #[test]
+    fn a_child_that_traps_sigterm_gets_to_flush_before_it_goes() {
+        let pty = PtyHandle::spawn(
+            spec(
+                "/bin/sh",
+                &["-c", "trap 'printf FLUSHED; exit 0' TERM; read ignored"],
+            ),
+            256,
+        )
+        .expect("spawn");
+        let mut rx = pty.subscribe();
+        // Let the shell install its handler before the signal arrives.
+        std::thread::sleep(Duration::from_millis(250));
+        pty.stop().expect("stop");
+
+        let mut seen = String::new();
+        let mut code = None;
+        while let Ok(event) = rx.blocking_recv() {
+            match event {
+                PtyEvent::Output(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                PtyEvent::Exit(c) => {
+                    code = Some(c);
+                    break;
+                }
+            }
+        }
+        assert!(
+            seen.contains("FLUSHED"),
+            "the handler never ran; output was {seen:?}"
+        );
+        assert_eq!(
+            code,
+            Some(Some(0)),
+            "an exit of its own, not a signal that took it"
+        );
+    }
+
+    /// And the last rung: a child that ignores the request still goes, and the grace
+    /// is spent once rather than waited on forever.
+    #[test]
+    fn a_child_that_ignores_sigterm_is_taken_out_when_the_grace_runs_down() {
+        let pty = PtyHandle::spawn(spec("/bin/sh", &["-c", "trap '' TERM; read ignored"]), 256)
+            .expect("spawn");
+        let mut rx = pty.subscribe();
+        std::thread::sleep(Duration::from_millis(250));
+
+        let started = Instant::now();
+        pty.stop_within(Duration::from_millis(300)).expect("stop");
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_secs(2),
+            "the grace was not bounded: waited {waited:?}"
+        );
+
+        loop {
+            match rx.blocking_recv() {
+                Ok(PtyEvent::Exit(code)) => {
+                    assert_eq!(code, Some(-1), "a signal took it, and that is reported");
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("the stream ended without an exit: {e}"),
+            }
         }
     }
 

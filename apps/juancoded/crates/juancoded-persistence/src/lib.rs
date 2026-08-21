@@ -21,6 +21,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use juancoded_core::model::{ProviderId, SessionKind, SessionMeta, SessionStatus, SessionUsage};
 
+pub mod discovery;
 pub mod schema;
 
 /// Scrollback bytes plus the grid they were parsed at. Never one without the other.

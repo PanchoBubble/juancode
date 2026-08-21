@@ -151,7 +151,7 @@ async fn a_dead_session_with_no_conversation_id_is_unresumable_and_says_so() {
 #[tokio::test]
 async fn reactivating_a_live_session_is_a_no_op_rather_than_a_restart() {
     let harness = Harness::new("already-live");
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
     harness.sessions.input(&id, b"before\r\n").expect("input");
     wait_for_screen(&harness.sessions, &id, "before", 20).await;
 
@@ -173,7 +173,7 @@ async fn reactivating_a_live_session_is_a_no_op_rather_than_a_restart() {
 #[tokio::test]
 async fn flipping_the_permission_mode_restarts_the_cli_under_the_same_session_id() {
     let harness = Harness::new("skip-perms");
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
     assert!(!harness.sessions.meta(&id).unwrap().skip_permissions);
 
     let attached = harness
@@ -208,7 +208,7 @@ async fn flipping_the_permission_mode_restarts_the_cli_under_the_same_session_id
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_permission_flip_never_reports_the_retired_ptys_exit_as_the_sessions() {
     let harness = Harness::new("skip-perms-retire");
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
     let mut events = harness.sessions.subscribe();
 
     // The dying child's exit and its replacement's spawn are two tasks, so one flip
@@ -252,7 +252,7 @@ async fn an_exit_code_survives_to_a_client_that_attaches_afterwards() {
     let harness = Harness::new("exit-replay");
     let mut events = harness.sessions.subscribe();
     // `sh -c "exit 7"` is the smallest child with an exit status of its own.
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
     harness
         .sessions
         .input(&id, b"before the end\r\n")
@@ -302,12 +302,12 @@ async fn the_retention_cap_is_per_project_and_only_takes_finished_sessions() {
     let mut ids = Vec::new();
     for _ in 0..4 {
         let mut events = harness.sessions.subscribe();
-        let id = harness.create(&a, 80, 24, 1);
+        let id = harness.create(&a, 80, 24, 1).await;
         harness.sessions.kill(&id).expect("kill");
         wait_for_exit(&mut events, &id).await;
         ids.push(id);
     }
-    let live_in_b = harness.create(&b, 80, 24, 1);
+    let live_in_b = harness.create(&b, 80, 24, 1).await;
 
     assert_eq!(store.prune_project(&a, 2).expect("prune").len(), 2);
     assert!(store.get(&ids[0]).expect("get").is_none());
@@ -321,7 +321,7 @@ async fn the_retention_cap_is_per_project_and_only_takes_finished_sessions() {
 async fn the_activity_machine_notifies_on_a_turn_boundary_and_on_a_prompt_only() {
     let harness = Harness::new("activity");
     let mut events = harness.sessions.subscribe();
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
 
     async fn next_activity(
         events: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
@@ -409,11 +409,15 @@ async fn a_settled_turn_over_a_dirty_worktree_carries_the_change_rollup() {
     std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
 
     let mut events = harness.sessions.subscribe();
-    let id = harness.create(repo.to_str().unwrap(), 80, 24, 1);
+    let id = harness.create(repo.to_str().unwrap(), 80, 24, 1).await;
     harness
         .sessions
         .input(&id, b"working... esc to interrupt\r\n")
         .expect("input");
+    // Wait for the turn to be visible before ending it. Written back to back, both
+    // writes can come back in one pty read, and a screen that shows the footer and
+    // the clear at once was never busy, so there is no settle edge to wait for.
+    wait_for_screen(&harness.sessions, &id, "esc to interrupt", 20).await;
     harness
         .sessions
         .input(&id, b"\x1b[2J\x1b[H\r\n")
@@ -447,11 +451,15 @@ async fn a_turn_that_ends_outside_a_worktree_carries_no_rollup() {
     let plain = harness.dir.join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let mut events = harness.sessions.subscribe();
-    let id = harness.create(plain.to_str().unwrap(), 80, 24, 1);
+    let id = harness.create(plain.to_str().unwrap(), 80, 24, 1).await;
     harness
         .sessions
         .input(&id, b"working... esc to interrupt\r\n")
         .expect("input");
+    // Wait for the turn to be visible before ending it. Written back to back, both
+    // writes can come back in one pty read, and a screen that shows the footer and
+    // the clear at once was never busy, so there is no settle edge to wait for.
+    wait_for_screen(&harness.sessions, &id, "esc to interrupt", 20).await;
     harness
         .sessions
         .input(&id, b"\x1b[2J\x1b[H\r\n")

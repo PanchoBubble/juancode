@@ -16,5 +16,8 @@ pub mod pty;
 pub use activity::{ActivityDetector, Armed, ScreenText, Step, Transition};
 pub use changes::ChangeStat;
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
-pub use provider::{resolve_bin, ProviderSpec, Providers, SpawnOptions};
+pub use provider::{
+    bin_override, resolve_bin, resolve_provider_bin, IdSource, ProviderSpec, Providers,
+    SpawnOptions,
+};
 pub use pty::{PtyEvent, PtyHandle, SpawnSpec};

@@ -3,7 +3,7 @@
   "coreLabel": "rust",
   "source": "measured",
   "measuredAt": "2026-08-21",
-  "specRevision": "1.0.0",
+  "specRevision": "1.1.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -67,8 +67,15 @@
       "status": "passed"
     },
     "skip-permissions": {
-      "status": "failed",
-      "note": "step 5: [a] unexpected frame before attached {\"sessionId\":\"5b8fd642-c8c4-42a7-a7bc-22e2332798e8\",\"session\":{\"id\":\"5b8fd642-c8c4-42a7-a7bc-22e2332798e8\",\"skipPermissions\":true,\"status\":\"running\"}}"
+      "status": "passed"
+    },
+    "session-meta": {
+      "status": "skipped",
+      "note": "core does not advertise the \"sessionMeta\" capability"
+    },
+    "grid-owner": {
+      "status": "skipped",
+      "note": "core does not advertise the \"gridOwner\" capability"
     }
   }
 }

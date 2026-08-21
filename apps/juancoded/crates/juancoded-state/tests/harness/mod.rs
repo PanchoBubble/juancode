@@ -5,10 +5,13 @@
 //! standing in for a provider CLI. It reads a line and prints it back, so a test can
 //! paint any screen it needs, escape sequences included.
 //!
-//! It turns the tty's own echo off first, and that matters: with echo on, every write
-//! reaches the grid twice — once from the line discipline and once from the child —
-//! and the two copies can interleave with a *later* write. A test asserting on screen
-//! state would then be asserting on a race it created itself.
+//! It turns the tty's own echo off first, and it says so before a test may write, and
+//! both halves matter. With echo on, every write reaches the grid twice, once from
+//! the line discipline and once from the child, and the two copies can interleave with
+//! a later write or land either side of a screen assertion. Turning echo off is not
+//! enough on its own, because the child needs a moment to do it: `create` waits for the
+//! stand-in's ready marker, so a test asserting on screen state is never asserting on a
+//! race it created itself.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -21,9 +24,14 @@ use juancoded_state::registry::{CreateRequest, SessionEvent};
 use juancoded_state::SessionsApi;
 use tokio::sync::broadcast::Receiver;
 
-/// The stand-in CLI: echo off, then one line in, one line out.
-const ECHO_LOOP: &str =
-    "stty -echo 2>/dev/null; while IFS= read -r line; do printf '%s\r\n' \"$line\"; done";
+/// The stand-in CLI: echo off, say so, then one line in, one line out.
+const ECHO_LOOP: &str = "stty -echo 2>/dev/null; printf '\\033]777;juancoded-ready\\007'; \
+                         while IFS= read -r line; do printf '%s\r\n' \"$line\"; done";
+
+/// How the stand-in says echo is off. An OSC number nobody implements, so it reaches
+/// the scrollback and leaves the grid untouched: a test asserting on a screen must not
+/// have to account for the handshake that got it there.
+const READY: &str = "juancoded-ready";
 
 /// A booted tree plus the store file it is using, so a test can drop it and boot a
 /// second tree over the same file.
@@ -80,8 +88,17 @@ impl Harness {
         Self::reopen(dir, store)
     }
 
-    pub fn create(&self, cwd: &str, cols: u16, rows: u16, owner: u64) -> String {
-        self.sessions
+    /// Create a session and wait until its stand-in has turned echo off.
+    ///
+    /// The wait is the point. With echo on, a write is reflected by the line
+    /// discipline *and* printed by the child, and the second copy can land after a
+    /// screen assertion has already read the first, which shows up much later as a
+    /// replay that holds everything twice.
+    pub async fn create(&self, cwd: &str, cols: u16, rows: u16, owner: u64) -> String {
+        // Subscribed before the spawn, or the marker can be gone before we listen.
+        let mut rx = self.sessions.subscribe();
+        let id = self
+            .sessions
             .create(CreateRequest {
                 provider: ProviderId::Claude,
                 cwd: cwd.into(),
@@ -93,7 +110,25 @@ impl Harness {
                 owner,
             })
             .expect("create")
-            .id
+            .id;
+        // Read the marker off the raw stream rather than the grid: it is an OSC the
+        // grid deliberately does not render, and a chunk boundary can fall inside it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        loop {
+            let event = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("the stand-in CLI never signalled that echo was off")
+                .expect("the session bus closed");
+            if let SessionEvent::Output { session_id, bytes } = event {
+                if session_id == id {
+                    seen.push_str(&String::from_utf8_lossy(&bytes));
+                    if seen.contains(READY) {
+                        return id;
+                    }
+                }
+            }
+        }
     }
 }
 

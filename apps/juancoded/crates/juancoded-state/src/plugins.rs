@@ -84,6 +84,9 @@ impl Plugin for SessionRegistryPlugin {
                 })
                 .unwrap_or_default();
             config.program_override = Some((program.to_string(), args));
+            // A stand-in program means there is no real CLI here, so nothing will
+            // ever write a rollout file or a session row for this session to find.
+            config.discover_id = None;
         }
 
         let registry = SessionRegistry::new(pty, terminal, store, ctx.bus().clone(), config);

@@ -22,7 +22,7 @@ const WRAPPING_LINE: &str = "0123456789abcdefghij0123456789ABCDEFGHIJ0123456789k
 async fn a_session_survives_a_restart_with_its_scrollback_at_its_own_width() {
     let harness = Harness::new("restart");
     let mut events = harness.sessions.subscribe();
-    let id = harness.create("/tmp", 40, 10, 1);
+    let id = harness.create("/tmp", 40, 10, 1).await;
 
     harness
         .sessions
@@ -83,7 +83,7 @@ async fn a_session_survives_a_restart_with_its_scrollback_at_its_own_width() {
 async fn the_width_is_what_makes_the_replay_right_and_it_is_not_guessed() {
     let harness = Harness::new("width");
     let mut events = harness.sessions.subscribe();
-    let id = harness.create("/tmp", 40, 10, 1);
+    let id = harness.create("/tmp", 40, 10, 1).await;
 
     harness
         .sessions
@@ -129,7 +129,7 @@ async fn the_width_is_what_makes_the_replay_right_and_it_is_not_guessed() {
 #[tokio::test]
 async fn a_restarted_session_is_exited_rather_than_claiming_to_be_running() {
     let harness = Harness::new("restart-status");
-    let id = harness.create("/tmp", 60, 12, 1);
+    let id = harness.create("/tmp", 60, 12, 1).await;
     assert!(harness.sessions.is_running(&id));
     // Deliberately no kill: this is the hard-restart case, where the pty died with
     // the daemon and nobody got to write an exit.

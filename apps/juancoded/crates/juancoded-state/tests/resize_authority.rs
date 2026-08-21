@@ -32,7 +32,7 @@ fn assert_one_grid(sessions: &std::sync::Arc<dyn SessionsApi>, id: &str, at: &st
 #[tokio::test]
 async fn a_second_viewer_is_denied_rather_than_flapping_the_grid() {
     let harness = Harness::new("arbitrate");
-    let id = harness.create("/tmp", 80, 24, DESKTOP);
+    let id = harness.create("/tmp", 80, 24, DESKTOP).await;
 
     // The creating client owns the grid it spawned the session at.
     let owned = harness.sessions.resize(&id, DESKTOP, 100, 30);
@@ -65,7 +65,7 @@ async fn a_second_viewer_is_denied_rather_than_flapping_the_grid() {
 #[tokio::test]
 async fn the_grid_passes_to_the_next_client_when_its_owner_disconnects() {
     let harness = Harness::new("handover");
-    let id = harness.create("/tmp", 80, 24, DESKTOP);
+    let id = harness.create("/tmp", 80, 24, DESKTOP).await;
     assert!(harness.sessions.resize(&id, DESKTOP, 90, 26).applied);
     assert!(harness.sessions.resize(&id, PHONE, 70, 20).denied);
 
@@ -94,7 +94,7 @@ async fn the_po1_matrix_ends_at_the_right_grid_with_no_step_out_of_step() {
     let mut events = harness.sessions.subscribe();
     // Spawn small and resize immediately: the spawn-race leg of the matrix, where a
     // CLI that installs its SIGWINCH handler late can miss the first resize.
-    let id = harness.create("/tmp", 80, 24, DESKTOP);
+    let id = harness.create("/tmp", 80, 24, DESKTOP).await;
     assert!(harness.sessions.resize(&id, DESKTOP, 132, 43).applied);
     assert_one_grid(&harness.sessions, &id, "an immediate post-spawn resize");
 
@@ -155,7 +155,7 @@ async fn the_po1_matrix_ends_at_the_right_grid_with_no_step_out_of_step() {
 #[tokio::test]
 async fn a_resize_that_raced_the_spawn_is_re_asserted_once_the_screen_settles() {
     let harness = Harness::new("reapply");
-    let id = harness.create("/tmp", 80, 24, DESKTOP);
+    let id = harness.create("/tmp", 80, 24, DESKTOP).await;
     harness.sessions.kill(&id).expect("kill");
     let mut events = harness.sessions.subscribe();
     let _ = harness::wait_for(&mut events, 20, |e| {

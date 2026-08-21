@@ -31,7 +31,7 @@ const HYPERLINK: &str = "\x1b]8;;https://example.invalid/one\x1b\\link one\x1b]8
 #[tokio::test]
 async fn a_flood_of_hyperlinks_read_from_every_side_at_once_stays_consistent() {
     let harness = Harness::new("hyperlinks");
-    let id = harness.create("/tmp", 100, 30, 1);
+    let id = harness.create("/tmp", 100, 30, 1).await;
 
     // Readers on other tasks, hammering the projection while the pump feeds it. In
     // the two-parser world the readers were parsers too, and this is the shape that
@@ -79,7 +79,7 @@ async fn a_flood_of_hyperlinks_read_from_every_side_at_once_stays_consistent() {
 #[tokio::test]
 async fn a_client_that_never_reads_cannot_stall_the_grid_or_the_pty() {
     let harness = Harness::new("wedged");
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
 
     // A subscriber standing in for a wedged UI surface: subscribed, never drained.
     // Its backlog is 4096 frames, so this flood is comfortably past it.
@@ -116,7 +116,7 @@ async fn a_client_that_never_reads_cannot_stall_the_grid_or_the_pty() {
 #[tokio::test]
 async fn the_registry_keeps_serving_while_a_reader_holds_a_snapshot() {
     let harness = Harness::new("snapshot-hold");
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
     harness.sessions.input(&id, b"first\r\n").expect("input");
     wait_for_screen(&harness.sessions, &id, "first", 20).await;
 
@@ -140,7 +140,7 @@ async fn the_registry_keeps_serving_while_a_reader_holds_a_snapshot() {
 async fn output_events_and_the_grid_never_diverge() {
     let harness = Harness::new("no-divergence");
     let mut events = harness.sessions.subscribe();
-    let id = harness.create("/tmp", 80, 24, 1);
+    let id = harness.create("/tmp", 80, 24, 1).await;
 
     harness
         .sessions

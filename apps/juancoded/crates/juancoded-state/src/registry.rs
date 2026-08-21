@@ -40,9 +40,9 @@ use juancoded_core::activity::{
 };
 use juancoded_core::changes::{self, ChangeStat};
 use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
-use juancoded_core::provider::{resolve_bin, Providers, SpawnOptions};
+use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
-use juancoded_persistence::{Scrollback, SessionStore};
+use juancoded_persistence::{discovery, Scrollback, SessionStore};
 use juancoded_vt::Snapshot;
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
@@ -146,6 +146,12 @@ impl std::error::Error for StateError {}
 pub const UNRESUMABLE_REASON: &str =
     "No prior CLI conversation could be found to resume this session.";
 
+/// One pass of post-spawn conversation-id discovery: `(source, cwd, since_ms)`.
+///
+/// A function rather than a service key because it is a pure lookup into somebody
+/// else's files, with no state and nothing to unmount.
+pub type IdScanner = Arc<dyn Fn(IdSource, &str, i64) -> Option<String> + Send + Sync>;
+
 /// Knobs the daemon sets once at boot.
 pub struct RegistryConfig {
     /// Bytes of scrollback kept per session, in memory and in the DB.
@@ -158,6 +164,12 @@ pub struct RegistryConfig {
     /// Stand in a program for every provider. Tests point this at `/bin/cat` so they
     /// need no CLI installed; production leaves it `None` and resolves from PATH.
     pub program_override: Option<(String, Vec<String>)>,
+    /// How the registry learns the conversation id of a CLI that mints its own.
+    /// `None` means it does not go looking, which is what a tree with a stand-in
+    /// program wants: there is no real CLI writing a rollout file or a session row.
+    pub discover_id: Option<IdScanner>,
+    /// How long to keep asking, and how often, per source.
+    pub discovery_window: fn(IdSource) -> (Duration, Duration),
 }
 
 impl Default for RegistryConfig {
@@ -170,6 +182,8 @@ impl Default for RegistryConfig {
             retention: juancoded_persistence::sessions_per_project(),
             default_grid: (120, 40),
             program_override: None,
+            discover_id: Some(Arc::new(discovery::scan_once)),
+            discovery_window: discovery::window,
         }
     }
 }
@@ -435,7 +449,7 @@ impl SessionRegistry {
         );
         // Claude pins its conversation id to ours, so the session is resumable at
         // once; the others have to be discovered from their own state later.
-        if spec.pins_session_id {
+        if spec.pins_session_id() {
             meta.cli_session_id = Some(id.clone());
         }
         meta.dispatch_id = req.dispatch_id.clone();
@@ -475,7 +489,10 @@ impl SessionRegistry {
             rows: req.rows,
         };
         match self.spawn_into(&id, &live, plan) {
-            Ok(()) => Ok(meta),
+            Ok(()) => {
+                self.start_id_discovery(&id, &live, req.provider);
+                Ok(meta)
+            }
             Err(e) => {
                 self.lock_sessions().remove(&id);
                 self.inner.terminal.close(&id);
@@ -767,7 +784,7 @@ impl SessionRegistry {
         }
         self.inner
             .pty
-            .kill(id)
+            .stop(id)
             .map_err(|e| StateError::Spawn(e.to_string()))
     }
 
@@ -799,20 +816,90 @@ impl SessionRegistry {
         if let Some((program, override_args)) = &self.inner.config.program_override {
             return Ok((program.clone(), override_args.clone()));
         }
-        let env_key = match provider {
-            ProviderId::Claude => "JUANCODE_CLAUDE_BIN",
-            ProviderId::Codex => "JUANCODE_CODEX_BIN",
-            ProviderId::Opencode => "JUANCODE_OPENCODE_BIN",
-        };
-        let override_path = std::env::var(env_key).ok();
-        let program =
-            resolve_bin(provider.as_str(), override_path.as_deref()).ok_or_else(|| {
-                StateError::Spawn(format!(
-                    "Failed to start {}: not on PATH",
-                    provider.as_str()
-                ))
-            })?;
+        let program = resolve_provider_bin(provider.as_str()).ok_or_else(|| {
+            StateError::Spawn(format!(
+                "Failed to start {}: not on PATH",
+                provider.as_str()
+            ))
+        })?;
         Ok((program, args))
+    }
+
+    /// Learn a CLI's own conversation id once it writes one down.
+    ///
+    /// Claude took our id at spawn, so there is nothing to look for. Codex writes a
+    /// rollout file while it boots and opencode a `session` row on its first message,
+    /// so for those two the session starts unresumable and becomes resumable later,
+    /// which is why this is a task and not a step.
+    ///
+    /// A client learns the id on its next `attach`. There is no wire message for a
+    /// meta change in this core yet, and inventing one here would be a protocol
+    /// change with no scenario behind it.
+    fn start_id_discovery(&self, id: &str, live: &Arc<LiveSession>, provider: ProviderId) {
+        let source = Providers::spec(provider).id_source;
+        if source == IdSource::Pinned {
+            return;
+        }
+        let Some(scan) = self.inner.config.discover_id.clone() else {
+            return;
+        };
+        let (timeout, interval) = (self.inner.config.discovery_window)(source);
+        let cwd = live
+            .meta
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .effective_cwd()
+            .to_string();
+        let since_ms = now_ms();
+        let (registry, live, id) = (self.clone(), Arc::clone(live), id.to_string());
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                {
+                    let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+                    // An id we already have is the session's identity, and a session
+                    // that has ended is not going to write one.
+                    if meta.cli_session_id.is_some() || meta.status != SessionStatus::Running {
+                        return;
+                    }
+                }
+                let pass = {
+                    let (scan, cwd) = (Arc::clone(&scan), cwd.clone());
+                    // A directory walk and a SQLite read are blocking work; keeping
+                    // them off the runtime's worker threads is the difference between
+                    // a slow scan and a stalled pty pump.
+                    tokio::task::spawn_blocking(move || scan(source, &cwd, since_ms))
+                        .await
+                        .unwrap_or(None)
+                };
+                if let Some(cli_session_id) = pass {
+                    registry.adopt_discovered_id(&id, &live, cli_session_id);
+                    return;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    debug!(session = id, ?source, "no conversation id ever appeared");
+                    return;
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    /// Record a discovered conversation id. Only ever fills a blank: an id we pinned
+    /// or already learned is what `--resume` will be given, so it does not move.
+    fn adopt_discovered_id(&self, id: &str, live: &Arc<LiveSession>, cli_session_id: String) {
+        let meta = {
+            let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            if meta.cli_session_id.is_some() {
+                return;
+            }
+            meta.cli_session_id = Some(cli_session_id);
+            meta.updated_at = now_ms();
+            meta.clone()
+        };
+        if let Err(e) = self.inner.store.upsert(&meta) {
+            warn!(session = id, error = %e, "could not persist the discovered conversation id");
+        }
     }
 
     /// Give up the pty a session is holding, ahead of the one that replaces it.
@@ -830,7 +917,7 @@ impl SessionRegistry {
             let _serialised = live.meta.lock().unwrap_or_else(|e| e.into_inner());
             live.epoch.fetch_add(1, Ordering::SeqCst);
         }
-        let _ = self.inner.pty.kill(id);
+        let _ = self.inner.pty.stop(id);
         let mut slot = live.pty.lock().unwrap_or_else(|e| e.into_inner());
         *slot = None;
     }
@@ -917,6 +1004,12 @@ impl SessionRegistry {
                 rows,
             },
         )?;
+        // Nothing to resume from means the CLI just started a NEW conversation, so its
+        // id is once again something to go and find. This is the permission-mode flip
+        // on a codex/opencode session whose id had not landed yet.
+        if resume.is_none() {
+            self.start_id_discovery(id, live, provider);
+        }
         let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.inner
             .store
@@ -1085,7 +1178,7 @@ impl SessionRegistry {
         }
         // Reap the pty service's entry for a child that ended on its own, so the
         // input guard starts refusing writes and a later revive can reuse the key.
-        let _ = self.inner.pty.kill(id);
+        let _ = self.inner.pty.stop(id);
         // Persist before the grid goes: the bytes and the grid they were written at
         // have to land together or the replay has to guess.
         self.flush_scrollback(id, live, true);

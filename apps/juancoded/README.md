@@ -11,9 +11,9 @@ risks and beat the Swift path on every number below; the composition core
    `CommandBuilder::new` seeds from `std::env::vars_os()`, so the child gets our
    whole environment and nothing else. The only entry we ever add is a provider's
    `spawn_env` overlay — opencode's opt-in bypass, which that CLI exposes only as an
-   env var. `pty::tests::the_child_environment_is_inherited_untouched` runs
-   `/usr/bin/env` in a real pty and diffs it against our own environ, and asserts no
-   `CODEX_HOME` / `CLAUDE_CONFIG_DIR` appeared. Live confirmation: the spawned
+   env var. `pty::tests::the_child_environment_is_our_environment_entry_for_entry` runs
+   `/usr/bin/env` in a real pty and diffs it both ways against our own environ, and
+   asserts no `CODEX_HOME` / `CLAUDE_CONFIG_DIR` appeared. Live confirmation: the spawned
    `claude` printed `Opus 5 (1M context) · Claude Team · Fanvue` and
    `1 MCP server needs authentication · run /mcp` — the real account and the real
    user-scope MCP config, loaded exactly as in a terminal.
@@ -74,10 +74,10 @@ cargo run --release -p juancoded-server --example uds_rtt -- /tmp/juancoded-spik
 | Crate | What it owns | Swift counterpart |
 | --- | --- | --- |
 | `juancoded-vt` | The grid (`alacritty_terminal`), `Snapshot`, `screen` frame encoding | `SessionTerminalModel.swift`, `ScreenWire.swift` |
-| `juancoded-core` | Wire model types, provider specs + `resolve_bin`, the pty host, activity inference, the change rollup | `Protocol.swift`, `Providers.swift`, `PtyProcess.swift`, `ActivityDetector.swift`, `ChangeBadge.swift` |
+| `juancoded-core` | Wire model types, provider specs + `resolve_provider_bin`, the pty host, activity inference, the change rollup | `Protocol.swift`, `Providers.swift`, `PtyProcess.swift`, `ActivityDetector.swift`, `ChangeBadge.swift` |
 | `juancoded-cordis` | The composition core: keyed services, RAII effect guards, the entry list, the typed bus, `dump-config` | none — this is the point of the move |
 | `juancoded-state` | The session registry, the grid authority, the `sessions` and `store` services | `SessionRegistry.swift`, `Session.swift`, `GridArbiter.swift` |
-| `juancoded-persistence` | SQLite: sessions, scrollback (with its grid), queue, tracked PRs, the dispatch ledger | `JuancodePersistence` |
+| `juancoded-persistence` | SQLite: sessions, scrollback (with its grid), queue, tracked PRs, the dispatch ledger, and the read-only scanners for the CLIs' own stores | `JuancodePersistence` |
 | `juancoded-server` | The wire protocol, WS connection loop, screen streamer, listeners | `WireProtocol.swift`, `WebSocketConnection.swift`, `ScreenStreamer.swift` |
 | `juancoded` | The daemon binary: apply the entry list, serve the `sessions` service | — |
 | `juancoded-plugins` | The original standalone `EffectRegistry` spike, superseded by `juancoded-cordis` and wired into nothing (juancode-yuce) | — |
@@ -111,6 +111,51 @@ Pty feeds are deliberately **not** coalesced. Measured parse cost is 0.0769 ms p
 16 KB here and parse was never the lag source (juancode-kdn), so batching would trade
 a real latency floor for an imaginary saving.
 
+## Provider parity
+
+The three CLIs are spawned the same way and differ in exactly three places. Every one
+of those is a fact about the CLI, not a preference of ours.
+
+| | claude | codex | opencode |
+| --- | --- | --- | --- |
+| Resumable id | `--session-id <ours>`, known at spawn | its own, read from `~/.codex/sessions/**/rollout-*.jsonl` | its own, read from opencode's SQLite |
+| When the id lands | immediately | while it boots | on the FIRST message, so possibly minutes later |
+| Bypass | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `OPENCODE_PERMISSION`, because its TUI has no flag |
+| Env overlay | none | none | that one entry, only for a session that asked |
+
+**The environment is inherited, entry for entry.** `CommandBuilder::new` seeds from
+`std::env::vars_os()`, and the only entry ever added is a provider's `spawn_env`
+overlay. That is asserted as a two-way diff rather than a spot check, at both levels:
+`pty::tests::the_child_environment_is_our_environment_entry_for_entry` diffs a real pty
+child's `/usr/bin/env` against our own environ, and
+`juancoded-state/tests/provider_parity.rs` does the same through the registry for all
+three providers with bypass on and off. Measured here: 0 unexplained differences across
+109 entries, with the overlay accounting for exactly one added key in the opencode
+bypass case. `cargo run --example env_diff -p juancoded-core` runs that comparison by
+hand and prints what each provider would resolve to.
+
+The one difference the diff excludes is `DYLD_*`, which macOS strips when exec'ing a
+system binary. A CLI would not get it from a terminal either, so it is not ours to
+promise.
+
+**Binary resolution has one answer.** `resolve_provider_bin(provider)` folds the
+`JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN` override into the
+lookup, so the override is part of the answer rather than an argument a call site has to
+remember; the registry and the `provider.resolveBin` chain both go through it and cannot
+disagree. Under the override the ladder is the Swift one, cheapest rung first: inherited
+PATH, `$SHELL -lc`, the well-known install dirs, then `$SHELL -lic`. That last one
+being the rung that costs a plugin-heavy `.zshrc` six seconds, which is why it is last
+and why both shell probes are timeout-bounded. Results are memoized for the process,
+misses for a minute (juancode-8fp), and an override short-circuits ahead of the cache so
+a test's stub is honoured on every call.
+
+**Shutdown asks before it insists.** `PtyHandle::stop` sends SIGTERM, waits out a
+bounded 3-second grace, then SIGKILL. `claude` traps SIGTERM to flush its transcript,
+and killing first meant a `--resume` repainted a conversation missing its last few
+prompts, since the CLI repaints from its transcript and not from our scrollback
+(juancode-6cqj). Unmounting the `pty` service asks every child at once and waits for
+the set, so N sessions cost one grace rather than N.
+
 ## Where the data lives
 
 `$JUANCODED_DATA_DIR/juancoded-rust.db`, falling back to `$JUANCODE_DATA_DIR` and then
@@ -126,13 +171,15 @@ guessing a width, and a wrong guess garbles every hard wrap in the history.
 
 ## Conformance
 
-Measured against `apps/wire-conformance` (18 golden scenarios, protocol v1) by
+Measured against `apps/wire-conformance` (20 golden scenarios, protocol v1) by
 pointing the suite at a hand-booted daemon on its own port, its own data dir and the
-suite's fake agent. **15 of 18 passing** (2026-08-21).
+suite's fake agent. **15 of 20 passing, five skipped, none failing**, five runs out
+of five, release build, 2026-08-21.
 
-The ones that are not are capability-gated and report as skipped rather than failed,
+The five that are not are capability-gated and report as skipped rather than failed,
 because the core does not advertise what it cannot do: `queue`, `trackedPrs`,
-`editor`/`terminal`. Their tables exist in the schema; their wire surfaces do not.
+`editor`/`terminal`, `sessionMeta` and `gridOwner`. The first three have their tables
+in the schema; none of the five has its wire surface.
 See the package README in `apps/wire-conformance` for how to point the suite at a
 core by URL.
 
@@ -186,11 +233,13 @@ passed straight through and the spawned CLI turns transcript saving off.
 ## Deliberately not here
 
 No `queue` / `trackedPrs` / `editor` / `terminal` wire surfaces (the first three have
-their tables, none has its messages), no structured-transcript activity signal — the
-detector reads the rendered screen only, where the Swift one also fuses the CLI's
-stream-json transcript (juancode-52e8.12) — and no codex/opencode session-id
-discovery, so those two providers resume only once their id has been captured some
-other way (juancode-52e8.7). Each of those is a named child of the epic.
+their tables, none has its messages), and no structured-transcript activity signal:
+the detector reads the rendered screen only, where the Swift one also fuses the CLI's
+stream-json transcript (juancode-52e8.12). Each of those is a named child of the epic.
+
+There is also no wire message for a session's meta changing, which is why a discovered
+conversation id reaches a client on its next `attach` rather than as an event. Adding
+one is a protocol change and belongs to whoever adds the scenario for it.
 
 Nothing in `apps/native` was modified, and nothing here runs unless started by hand:
 the daemon binds no port until launched, and mounting the tree spawns no child until a

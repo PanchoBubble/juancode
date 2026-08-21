@@ -146,7 +146,7 @@ async fn the_booted_tree_carries_real_pty_bytes_into_a_real_grid() {
     assert_eq!(pty.live(), ["s1"]);
 
     // Exit fans out, and the grid is released by the listener that owns it.
-    pty.kill("s1").expect("kill /bin/cat");
+    pty.stop("s1").expect("stop /bin/cat");
     loader
         .bus()
         .parallel::<SessionExit>(ExitInfo {

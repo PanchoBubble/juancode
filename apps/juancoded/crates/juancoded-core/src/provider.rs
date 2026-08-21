@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::model::ProviderId;
 
@@ -21,15 +23,30 @@ pub struct SpawnOptions {
     pub model: Option<String>,
 }
 
+/// Where a provider's resumable conversation id comes from.
+///
+/// Only Claude lets us name it, so only Claude is resumable the moment it starts.
+/// The other two write theirs into their own state and we go and read it, which is
+/// why the variants name the file rather than just saying "later".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdSource {
+    /// `--session-id <ours>`: the CLI adopts our UUID, so there is nothing to find.
+    Pinned,
+    /// Codex writes `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` at startup, and
+    /// its first line carries the id and the cwd.
+    CodexRollout,
+    /// opencode writes a `session` row into its own SQLite, on the first message and
+    /// not at spawn, so this one can be minutes away.
+    OpencodeDb,
+}
+
 /// Pure description of how to launch/resume a provider. No binary resolution here
-/// (that's `resolve_bin`) so specs stay cheap and testable.
+/// (that's `resolve_provider_bin`) so specs stay cheap and testable.
 pub struct ProviderSpec {
     pub id: ProviderId,
     pub label: &'static str,
-    /// True when `start_args` pins the CLI session id to our own UUID (Claude), so
-    /// the resumable id is known immediately. False when it must be discovered
-    /// from the CLI's own state after spawn (Codex, opencode).
-    pub pins_session_id: bool,
+    /// Where the resumable id comes from, and therefore when it is known.
+    pub id_source: IdSource,
     /// Whether the program reads bracketed-paste markers.
     pub bracketed_paste: bool,
     pub start_args: fn(&str, &SpawnOptions) -> Vec<String>,
@@ -38,6 +55,14 @@ pub struct ProviderSpec {
     /// that has a flag — an empty overlay means the child inherits `environ`
     /// verbatim, which is the point.
     pub spawn_env: fn(&SpawnOptions) -> HashMap<String, String>,
+}
+
+impl ProviderSpec {
+    /// True when the CLI adopts our session id at spawn, so the session is
+    /// resumable immediately and there is no discovery to run.
+    pub fn pins_session_id(&self) -> bool {
+        self.id_source == IdSource::Pinned
+    }
 }
 
 fn claude_perm_args(skip: bool) -> Vec<String> {
@@ -65,7 +90,7 @@ fn no_env(_: &SpawnOptions) -> HashMap<String, String> {
 pub const CLAUDE: ProviderSpec = ProviderSpec {
     id: ProviderId::Claude,
     label: "Claude Code",
-    pins_session_id: true,
+    id_source: IdSource::Pinned,
     bracketed_paste: true,
     // Pin the CLI session id to our own UUID so `--resume` revives this exact
     // conversation with no discovery step.
@@ -87,7 +112,7 @@ pub const CLAUDE: ProviderSpec = ProviderSpec {
 pub const CODEX: ProviderSpec = ProviderSpec {
     id: ProviderId::Codex,
     label: "Codex",
-    pins_session_id: false,
+    id_source: IdSource::CodexRollout,
     bracketed_paste: true,
     // Codex has no flag to pin a session id, so it starts clean; the id is
     // discovered from its rollout file and resumed with `codex resume <id>`.
@@ -114,7 +139,7 @@ pub const CODEX: ProviderSpec = ProviderSpec {
 pub const OPENCODE: ProviderSpec = ProviderSpec {
     id: ProviderId::Opencode,
     label: "opencode",
-    pins_session_id: false,
+    id_source: IdSource::OpencodeDb,
     bracketed_paste: true,
     // `--session <id>` continues an EXISTING conversation only — there is no flag
     // to pin a new one — so a fresh session starts clean and the id is read out of
@@ -152,7 +177,34 @@ impl Providers {
     }
 }
 
-/// Resolve a CLI to the SAME absolute path the user's interactive terminal would.
+/// The env var that says where a provider's CLI lives, for the three that have one.
+fn bin_override_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "claude" => Some("JUANCODE_CLAUDE_BIN"),
+        "codex" => Some("JUANCODE_CODEX_BIN"),
+        "opencode" => Some("JUANCODE_OPENCODE_BIN"),
+        _ => None,
+    }
+}
+
+/// What `JUANCODE_<PROVIDER>_BIN` says, if it says anything.
+pub fn bin_override(provider: &str) -> Option<String> {
+    bin_override_key(provider)
+        .and_then(|key| std::env::var(key).ok())
+        .filter(|value| !value.is_empty())
+}
+
+/// Where a provider's CLI is, override included. **The one answer to that question.**
+///
+/// Both callers go through here rather than through `resolve_bin` with an override
+/// they each remember to pass: one of them used to forget, and a forgotten override
+/// means the conformance suite's fake agent is quietly ignored in favour of the real
+/// `claude`. Folding the override into the lookup makes forgetting it unwritable.
+pub fn resolve_provider_bin(provider: &str) -> Option<String> {
+    resolve_bin(provider, bin_override(provider).as_deref())
+}
+
+/// Resolve a command to the SAME absolute path the user's interactive terminal would.
 ///
 /// A GUI/daemon process often has a different (or stripped) PATH than the login
 /// shell, so we ask the login shell to resolve the command. Faithful environment is
@@ -160,40 +212,211 @@ impl Providers {
 ///
 /// Returns `None` when every probe came up empty, so a caller can refuse the spawn
 /// instead of handing the user a dead pane.
+///
+/// Prefer [`resolve_provider_bin`] for a provider CLI; this is the lower level, for
+/// a command that has no override of its own.
 pub fn resolve_bin(cmd: &str, override_path: Option<&str>) -> Option<String> {
-    if let Some(path) = override_path {
-        if !path.is_empty() && Path::new(path).exists() {
-            return Some(path.to_string());
+    // An explicit override short-circuits before the cache, so a test can point a
+    // binary at a stub on any call. It is taken as given rather than verified: a
+    // typo'd override that silently resolved to the real CLI instead would be a
+    // far worse answer than a spawn that fails and says which path it tried.
+    if let Some(path) = override_path.filter(|p| !p.is_empty()) {
+        return Some(path.to_string());
+    }
+    // Already a path: there is nothing to search.
+    if cmd.contains('/') {
+        return Some(cmd.to_string());
+    }
+    if let Some(hit) = cache().hit(cmd) {
+        return Some(hit);
+    }
+    // A recent probe already came up empty. Report the miss again rather than paying
+    // the shell round-trips; the cooldown expires, so a CLI installed while the
+    // daemon runs still resolves.
+    if cache().in_miss_cooldown(cmd) {
+        return None;
+    }
+
+    // Probes, cheapest first. Each one alone is enough on some setup:
+    //  1. the inherited PATH, no subprocess. A terminal-launched daemon already has
+    //     the user's full PATH, so this hits instantly.
+    //  2. `$SHELL -lc`: login but not interactive, so /etc/zprofile (path_helper,
+    //     /etc/paths.d, where Homebrew registers itself) and .zprofile/.zshenv
+    //     apply. Milliseconds on a normal setup.
+    //  3. the well-known install dirs, no subprocess. Covers a Homebrew or local
+    //     install even when the shell probes are unavailable or slow.
+    //  4. `$SHELL -lic`: interactive, the only shell that sees a PATH built in
+    //     .zshrc. Last because it pays for the user's whole interactive rc, 6s+ with
+    //     a plugin-heavy zsh, which is what used to wedge the Swift path (juancode-z0c6).
+    let found = lookup_in_path(cmd)
+        .or_else(|| lookup_via_shell(cmd, false, Duration::from_secs(5)))
+        .or_else(|| lookup_in_well_known_dirs(cmd))
+        .or_else(|| lookup_via_shell(cmd, true, Duration::from_secs(20)));
+    match found {
+        Some(hit) => {
+            cache().remember(cmd, &hit);
+            Some(hit)
+        }
+        None => {
+            // Remember the miss only for the cooldown: a probe comes up empty for
+            // reasons that have nothing to do with the binary, and caching that for
+            // good would wedge every later call until restart.
+            cache().note_miss(cmd);
+            None
         }
     }
-    if cmd.contains('/') {
-        return Path::new(cmd).exists().then(|| cmd.to_string());
-    }
-    if let Some(found) = which_via_login_shell(cmd) {
-        return Some(found);
-    }
-    // Last resort: the usual install roots, in the order a login shell would hit
-    // them. Keep this list in step with the Swift `locateBin` probes.
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        format!("{home}/.local/bin/{cmd}"),
-        format!("{home}/.bun/bin/{cmd}"),
-        format!("{home}/.volta/bin/{cmd}"),
-        format!("/opt/homebrew/bin/{cmd}"),
-        format!("/usr/local/bin/{cmd}"),
-        format!("/usr/bin/{cmd}"),
-    ];
-    candidates.into_iter().find(|p| Path::new(p).exists())
 }
 
-fn which_via_login_shell(cmd: &str) -> Option<String> {
+/// Where a Mac keeps user-installed CLIs, in the order a login shell puts them on
+/// PATH. Kept in step with `wellKnownBinDirs` in Providers.swift.
+fn well_known_bin_dirs() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    vec![
+        "/opt/homebrew/bin".into(),
+        "/opt/homebrew/sbin".into(),
+        "/usr/local/bin".into(),
+        format!("{home}/.local/bin"),
+        format!("{home}/.bun/bin"),
+        format!("{home}/.cargo/bin"),
+        format!("{home}/go/bin"),
+        format!("{home}/.volta/bin"),
+        format!("{home}/.npm-global/bin"),
+        format!("{home}/.opencode/bin"),
+        "/opt/local/bin".into(),
+    ]
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn lookup_in_dirs(cmd: &str, dirs: impl IntoIterator<Item = String>) -> Option<String> {
+    dirs.into_iter()
+        .map(|dir| format!("{dir}/{cmd}"))
+        .find(|full| is_executable(Path::new(full)))
+}
+
+fn lookup_in_path(cmd: &str) -> Option<String> {
+    let path = std::env::var("PATH").ok()?;
+    lookup_in_dirs(
+        cmd,
+        path.split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn lookup_in_well_known_dirs(cmd: &str) -> Option<String> {
+    lookup_in_dirs(cmd, well_known_bin_dirs())
+}
+
+/// Ask the user's shell where `cmd` is, bounded by `timeout`. `interactive` adds
+/// `-i`, which is what makes a PATH built in `.zshrc` visible, and what makes the
+/// probe cost the user's whole interactive rc, so callers try the plain form first.
+fn lookup_via_shell(cmd: &str, interactive: bool, timeout: Duration) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = Command::new(&shell)
-        .args(["-l", "-i", "-c", &format!("command -v {cmd}")])
-        .output()
+    let flag = if interactive { "-lic" } else { "-lc" };
+    let mut child = Command::new(&shell)
+        .args([flag, &format!("command -v {cmd} 2>/dev/null")])
+        // A non-tty stdin, so an interactive shell does not start its line editor
+        // and reach for the terminal.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!path.is_empty() && Path::new(&path).exists()).then_some(path)
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_EVERY),
+            // Out of time, or the wait itself failed: this probe is over, and the
+            // ladder has cheaper rungs left.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .filter(|l| l.starts_with('/'))
+        .map(str::to_string)
+}
+
+const POLL_EVERY: Duration = Duration::from_millis(25);
+/// How long a failed lookup is remembered. Long enough to stop a fan-out of spawns
+/// each paying the shell probes, short enough that installing the CLI while the
+/// daemon runs is noticed.
+const MISS_TTL: Duration = Duration::from_secs(60);
+
+/// Process-lifetime memo of the no-override resolutions (juancode-8fp).
+///
+/// Hits are kept for good, since PATH and the login shell do not change under us, and
+/// misses only for [`MISS_TTL`]. The Swift original needs a guard against a
+/// backwards clock jump pinning the cooldown on forever; `Instant` is monotonic, so
+/// here that bug cannot be written.
+#[derive(Default)]
+struct BinCache {
+    inner: Mutex<CacheState>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    hits: HashMap<String, String>,
+    misses: HashMap<String, Instant>,
+}
+
+impl BinCache {
+    fn state(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn hit(&self, cmd: &str) -> Option<String> {
+        self.state().hits.get(cmd).cloned()
+    }
+
+    fn remember(&self, cmd: &str, path: &str) {
+        let mut state = self.state();
+        state.hits.insert(cmd.to_string(), path.to_string());
+        state.misses.remove(cmd);
+    }
+
+    fn note_miss(&self, cmd: &str) {
+        self.state().misses.insert(cmd.to_string(), Instant::now());
+    }
+
+    fn in_miss_cooldown(&self, cmd: &str) -> bool {
+        let mut state = self.state();
+        match state.misses.get(cmd) {
+            Some(at) if at.elapsed() < MISS_TTL => true,
+            Some(_) => {
+                state.misses.remove(cmd);
+                false
+            }
+            None => false,
+        }
+    }
+}
+
+fn cache() -> &'static BinCache {
+    static CACHE: OnceLock<BinCache> = OnceLock::new();
+    CACHE.get_or_init(BinCache::default)
 }
 
 #[cfg(test)]
@@ -267,15 +490,69 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bin_honours_an_existing_override_and_rejects_a_bogus_one() {
+    fn an_override_wins_outright_and_is_not_second_guessed() {
         assert_eq!(
             resolve_bin("claude", Some("/bin/echo")).as_deref(),
             Some("/bin/echo")
         );
-        // A bogus override falls through to real resolution rather than being trusted.
-        assert_ne!(
-            resolve_bin("sh", Some("/nope/does-not-exist")).as_deref(),
+        // Even one that does not exist: the spawn then fails naming the path that was
+        // asked for, which is a better answer than silently running the real CLI.
+        assert_eq!(
+            resolve_bin("claude", Some("/nope/does-not-exist")).as_deref(),
             Some("/nope/does-not-exist")
         );
+        // An empty override counts as unset, so an exported-but-blank var cannot
+        // shadow a working resolution.
+        assert_eq!(resolve_bin("sh", Some("")), resolve_bin("sh", None));
+    }
+
+    #[test]
+    fn a_command_resolves_off_the_inherited_path_without_a_shell() {
+        // `sh` is on PATH everywhere this builds, so the first rung answers and the
+        // expensive shell probes are never reached.
+        let found = resolve_bin("sh", None).expect("sh is somewhere");
+        assert!(found.starts_with('/'), "{found} is not absolute");
+        assert!(found.ends_with("/sh"), "{found} is not sh");
+    }
+
+    #[test]
+    fn a_resolution_is_memoized_and_a_miss_is_only_remembered_for_a_while() {
+        let cache = BinCache::default();
+        assert!(cache.hit("claude").is_none());
+        cache.remember("claude", "/opt/homebrew/bin/claude");
+        assert_eq!(
+            cache.hit("claude").as_deref(),
+            Some("/opt/homebrew/bin/claude")
+        );
+
+        cache.note_miss("codex");
+        assert!(cache.in_miss_cooldown("codex"));
+        // A hit clears the miss, so a CLI installed mid-run stops being reported
+        // absent the moment it is found.
+        cache.remember("codex", "/usr/local/bin/codex");
+        assert!(!cache.in_miss_cooldown("codex"));
+    }
+
+    #[test]
+    fn the_provider_override_env_vars_are_the_swift_ones() {
+        for (provider, key) in [
+            ("claude", "JUANCODE_CLAUDE_BIN"),
+            ("codex", "JUANCODE_CODEX_BIN"),
+            ("opencode", "JUANCODE_OPENCODE_BIN"),
+        ] {
+            assert_eq!(bin_override_key(provider), Some(key));
+        }
+        // Anything else has no override, so a bare command name never picks one up
+        // from a provider's variable by accident.
+        assert_eq!(bin_override_key("gh"), None);
+    }
+
+    #[test]
+    fn only_claude_is_resumable_the_moment_it_starts() {
+        assert!(CLAUDE.pins_session_id());
+        assert!(!CODEX.pins_session_id());
+        assert!(!OPENCODE.pins_session_id());
+        assert_eq!(CODEX.id_source, IdSource::CodexRollout);
+        assert_eq!(OPENCODE.id_source, IdSource::OpencodeDb);
     }
 }

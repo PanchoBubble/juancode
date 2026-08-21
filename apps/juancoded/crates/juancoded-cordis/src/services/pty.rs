@@ -7,9 +7,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use juancoded_core::pty::{PtyHandle, SpawnSpec};
+use juancoded_core::pty::{PtyHandle, SpawnSpec, STOP_GRACE};
 
 use crate::service::Service;
 
@@ -18,7 +19,9 @@ pub trait PtySpawnApi: Send + Sync {
     fn spawn(&self, session: &str, spec: SpawnSpec) -> Result<PtyHandle>;
     fn handle(&self, session: &str) -> Option<PtyHandle>;
     fn write(&self, session: &str, bytes: &[u8]) -> Result<()>;
-    fn kill(&self, session: &str) -> Result<()>;
+    /// End a session's child: ask it to stop, let it flush, then insist. The session
+    /// key is free again the moment this returns, so a respawn can reuse it.
+    fn stop(&self, session: &str) -> Result<()>;
     fn live(&self) -> Vec<String>;
 }
 
@@ -75,9 +78,9 @@ impl PtySpawnApi for PtyHost {
             .write(bytes)
     }
 
-    fn kill(&self, session: &str) -> Result<()> {
+    fn stop(&self, session: &str) -> Result<()> {
         match self.live_map().remove(session) {
-            Some(handle) => handle.kill(),
+            Some(handle) => handle.stop(),
             None => Err(anyhow!("no pty for session `{session}`")),
         }
     }
@@ -92,8 +95,22 @@ impl Drop for PtyHost {
         // The service owning a child means the service is responsible for it: an
         // unmount that left `claude` processes behind would be a worse leak than any
         // registration this crate protects against.
-        for (_, handle) in self.live_map().iter() {
-            let _ = handle.kill();
+        //
+        // Every child is asked first and waited for together, not one after another:
+        // a CLI needs its grace to flush its transcript (juancode-6cqj), and N
+        // sessions serialised would cost N graces on the way out of the process.
+        let handles: Vec<PtyHandle> = self.live_map().values().cloned().collect();
+        for handle in &handles {
+            handle.request_stop();
+        }
+        let deadline = Instant::now() + STOP_GRACE;
+        while Instant::now() < deadline && handles.iter().any(|h| !h.has_exited()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for handle in &handles {
+            if !handle.has_exited() {
+                let _ = handle.kill();
+            }
         }
     }
 }
