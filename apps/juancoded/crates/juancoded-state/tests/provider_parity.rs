@@ -20,7 +20,9 @@ use juancoded_cordis::Bus;
 use juancoded_core::model::{ProviderId, SessionStatus};
 use juancoded_core::provider::IdSource;
 use juancoded_persistence::{SessionStore, SqliteStore};
-use juancoded_state::registry::{AdoptRequest, CreateRequest, IdScanner, RegistryConfig};
+use juancoded_state::registry::{
+    AdoptRequest, CreateRequest, IdScanner, RegistryConfig, SessionEvent,
+};
 use juancoded_state::SessionRegistry;
 
 /// What the fake scanner was asked for: the source, and the directory.
@@ -237,6 +239,46 @@ async fn an_adopted_conversation_is_not_gone_looking_for() {
     );
 }
 
+/// The id a CLI mints for itself lands after the spawn, so a client already holding
+/// the session's row has to be told: that row says the session cannot be resumed, and
+/// that stops being true without the client asking for anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_id_discovered_after_the_spawn_is_broadcast_not_only_stored() {
+    let rig = rig(
+        "/bin/sh",
+        &["-c", ECHO_LOOP],
+        Some("codex-conversation-late"),
+    );
+    // Subscribed before the spawn, or the discovery can beat the subscription.
+    let mut events = rig.registry.subscribe();
+    let meta = rig
+        .registry
+        .create(request(ProviderId::Codex, "/tmp"))
+        .expect("create");
+    assert!(meta.cli_session_id.is_none());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("the discovered id never reached the bus")
+            .expect("the session bus closed");
+        if let SessionEvent::Meta {
+            session_id,
+            meta: row,
+        } = event
+        {
+            assert_eq!(session_id, meta.id);
+            assert_eq!(
+                row.cli_session_id.as_deref(),
+                Some("codex-conversation-late"),
+                "the broadcast carries the whole row, not a patch"
+            );
+            return;
+        }
+    }
+}
+
 /// Every provider's child gets OUR environment, entry for entry, and the permission
 /// mode reaches each CLI the way that CLI expresses it: a flag for the two that have
 /// one, and for opencode the single sanctioned env entry, set only for a session that
@@ -260,13 +302,25 @@ async fn every_provider_inherits_our_environment_and_only_opencode_bypass_adds_t
         let mut req = request(provider, "/tmp");
         req.skip_permissions = skip;
         let meta = rig.registry.create(req).expect("create");
+        // The dump is complete when the child is gone, not when `PATH=` shows up.
+        // `/usr/bin/env` prints its environment and exits, and the pty reader
+        // publishes every byte it read before it publishes the exit, so an exited
+        // session's scrollback holds the whole environment. Waiting for a substring
+        // waits for something that appears mid-write, and on a loaded machine the
+        // rest of the dump is still in flight when it lands.
         let dump = wait_until(10, || {
-            rig.registry
-                .scrollback(&meta.id)
-                .filter(|s| s.contains("PATH="))
+            let exited = rig
+                .registry
+                .meta(&meta.id)
+                .is_some_and(|m| m.status == SessionStatus::Exited);
+            exited.then(|| rig.registry.scrollback(&meta.id)).flatten()
         })
         .await;
         let child = parse_env(&dump);
+        assert!(
+            child.contains_key("PATH"),
+            "{provider:?}: the child never dumped its environment at all"
+        );
         let case = format!("{provider:?} with skip_permissions={skip}");
 
         for key in &overlay {
