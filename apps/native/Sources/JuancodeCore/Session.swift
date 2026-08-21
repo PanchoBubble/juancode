@@ -178,6 +178,10 @@ public final class Session: @unchecked Sendable {
     /// True while `flushQueue` is mid-delivery, so overlapping edges don't double
     /// up a paste. Guarded by `lock`.
     private var flushingQueue = false
+    /// Id of the queued message we already pasted into the input box but couldn't
+    /// confirm submitted. The next attempt for that same message re-sends the Enter
+    /// instead of the paste, so a retry can't stack a second copy. Guarded by `lock`.
+    private var pastedQueuedId: String?
 
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
@@ -1035,7 +1039,7 @@ public final class Session: @unchecked Sendable {
             guard let item = env.messageQueue.peek(id) else { break }
             // Drop the message only once it verifiably submitted; otherwise leave it
             // queued and stop, so a stalled delivery is retried on the next idle / kick.
-            let delivered = await deliverQueued(item.text)
+            let delivered = await deliverQueued(item)
             logEvent("queuedResult", ["delivered": "\(delivered)", "chars": "\(item.text.count)"])
             if delivered {
                 env.messageQueue.remove(id, item.id)
@@ -1051,26 +1055,104 @@ public final class Session: @unchecked Sendable {
     /// message sits in the box unsent and the queue's retry stacks a duplicate on
     /// the next idle edge. Returns whether the message went through (agent busy,
     /// or the prompt left the box).
-    private func deliverQueued(_ text: String) async -> Bool {
-        let signature = InitialPromptDelivery.signature(for: text)
-        paste(text)
-        let landed = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
-            self.activity == .busy || !self.isRunning
-                || self.inputBoxContains(signature) || self.inputBoxShowsCollapsedPaste()
+    ///
+    /// Unlike the seed, the land check stays scoped to the input-box footer. This
+    /// runs mid-session against a screen full of transcript where the message text
+    /// may already be visible — the user typed it earlier, the agent quoted it back,
+    /// a previous failed delivery left it in the history — so a whole-screen match
+    /// would report landed off that stale text. What the footer scope costs is the
+    /// head signature (a paste taller than those rows pushes its first line above
+    /// them), so we match the payload's tail too, which is exactly what the footer
+    /// holds, and require the footer to have changed since before the paste.
+    private func deliverQueued(_ item: QueuedMessage) async -> Bool {
+        let head = InitialPromptDelivery.signature(for: item.text)
+        let tail = Self.tailSignature(for: item.text)
+
+        // Sampled *before* the paste, never after: pasting a long message makes the
+        // CLI repaint its working footer, and reading that churn as "the agent took
+        // the turn" is what skipped the Enter and left the message unsent. A session
+        // that is genuinely working isn't ours to paste into either, so leave the
+        // message queued for the next idle edge.
+        guard activity != .busy else { return false }
+
+        // A retry for a message that is already sitting in the box sends the Enter
+        // again instead of re-pasting; re-pasting is what stacked duplicate copies.
+        if lock.withLock({ pastedQueuedId }) != item.id {
+            let before = footerSnapshot()
+            logEvent("queuedPaste", ["chars": "\(item.text.count)"])
+            paste(item.text)
+            _ = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
+                !self.isRunning || self.queuedLanded(head: head, tail: tail, before: before)
+            }
+            guard isRunning, queuedLanded(head: head, tail: tail, before: before) else { return false }
+            lock.withLock { pastedQueuedId = item.id }
         }
-        if activity == .busy { return true }
-        guard landed, isRunning else { return false }
+
         await Nap.duration(.milliseconds(Seed.submitSettleMs))
-        for _ in 0..<Seed.maxAttempts {
+        for attempt in 0..<Seed.maxAttempts {
             guard isRunning else { return false }
+            logEvent("queuedEnter", ["attempt": "\(attempt + 1)"])
             write("\r")
             let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
                 self.activity == .busy
-                    || (!self.inputBoxContains(signature) && !self.inputBoxShowsCollapsedPaste())
+                    || !self.footerHoldsQueued(self.footerSnapshot().text, head: head, tail: tail)
             }
-            if submitted { return true }
+            if submitted {
+                lock.withLock { pastedQueuedId = nil }
+                return true
+            }
         }
         return false
+    }
+
+    /// The input-box footer as the queued land check compares it: its normalized text
+    /// plus the grid it was rendered at. `bottomText` is a window on the bottom rows,
+    /// so a resize re-frames that window and every row in it appears to change — the
+    /// boot-time grid nudge on its own would otherwise read as "the paste landed".
+    private struct FooterSnapshot {
+        let text: String
+        let cols: Int
+        let rows: Int
+    }
+
+    private func footerSnapshot() -> FooterSnapshot {
+        FooterSnapshot(text: InitialPromptDelivery.normalize(terminalModel.bottomText(Seed.inputRows)),
+                       cols: terminalModel.cols, rows: terminalModel.rows)
+    }
+
+    /// Whether `footer` shows the queued payload at all: its head or tail signature,
+    /// or the collapsed-paste chip Claude renders instead of the literal text. Used
+    /// bare to confirm submission ("the message left the box").
+    private func footerHoldsQueued(_ footer: String, head: String, tail: String) -> Bool {
+        InitialPromptDelivery.region(footer, contains: head)
+            || InitialPromptDelivery.region(footer, contains: tail)
+            || InitialPromptDelivery.regionShowsCollapsedPaste(footer)
+    }
+
+    /// Whether the footer shows the payload *because of the paste we just sent*: it
+    /// must hold a signature and also differ from `before`, the pre-paste snapshot.
+    /// Text that was already on those rows — an earlier copy of the message in the
+    /// transcript, the user's own typing, a previous failed delivery — otherwise
+    /// passes for this delivery, and the Enter then goes into a box the paste never
+    /// reached. A grid change makes the two snapshots incomparable, so we wait for
+    /// the grid to come back rather than call the re-framing a landing.
+    private func queuedLanded(head: String, tail: String, before: FooterSnapshot) -> Bool {
+        let now = footerSnapshot()
+        guard now.cols == before.cols, now.rows == before.rows, now.text != before.text
+        else { return false }
+        return footerHoldsQueued(now.text, head: head, tail: tail)
+    }
+
+    /// `InitialPromptDelivery.signature(for:)` taken from the *end* of the payload.
+    /// A tall paste pushes its first line above the input-box footer while its last
+    /// line is exactly what those bottom rows hold, so the tail is the signature that
+    /// survives a footer-scoped land check.
+    static func tailSignature(for text: String, maxLen: Int = 24) -> String {
+        let lastLine = text
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard let lastLine else { return "" }
+        return String(InitialPromptDelivery.normalize(String(lastLine)).prefix(maxLen))
     }
 
     /// Resize the pty grid. Returns whether the grid reached the live pty (false
