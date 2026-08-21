@@ -1,15 +1,17 @@
 {
   "core": "rust",
-  "coreLabel": "rust",
+  "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-08-21",
-  "specRevision": "1.1.0",
+  "specRevision": "1.2.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
     "resizeAck",
     "screen",
-    "adoptExternal"
+    "adoptExternal",
+    "sessionMeta",
+    "gridOwner"
   ],
   "scenarios": {
     "handshake": {
@@ -70,12 +72,10 @@
       "status": "passed"
     },
     "session-meta": {
-      "status": "skipped",
-      "note": "core does not advertise the \"sessionMeta\" capability"
+      "status": "passed"
     },
     "grid-owner": {
-      "status": "skipped",
-      "note": "core does not advertise the \"gridOwner\" capability"
+      "status": "passed"
     }
   }
 }

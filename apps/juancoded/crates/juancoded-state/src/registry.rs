@@ -71,6 +71,22 @@ pub enum SessionEvent {
         session_id: String,
         exit_code: Option<i32>,
     },
+    /// A session's persisted row changed out of band: a title the CLI set for
+    /// itself, a discovered conversation id, a permission-mode flip. Carries the
+    /// whole row, so a consumer replaces it wholesale instead of patching fields.
+    Meta {
+        session_id: String,
+        meta: SessionMeta,
+    },
+    /// The arbitrated grid changed hands: a request was granted, or an owner let go.
+    /// `owner` is `None` for a release. Every consumer hears it, unlike a resize
+    /// outcome, which only ever reaches the client that asked.
+    GridChange {
+        session_id: String,
+        owner: Option<ClientId>,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -491,6 +507,9 @@ impl SessionRegistry {
         match self.spawn_into(&id, &live, plan) {
             Ok(()) => {
                 self.start_id_discovery(&id, &live, req.provider);
+                // The claim the spawn was made under is public from the start, so a
+                // second viewer never has to infer who is driving.
+                self.broadcast_grid(&id, Some(req.owner), req.cols, req.rows);
                 Ok(meta)
             }
             Err(e) => {
@@ -568,7 +587,10 @@ impl SessionRegistry {
             rows: req.rows,
         };
         match self.spawn_into(&id, &live, plan) {
-            Ok(()) => Ok(Some(meta)),
+            Ok(()) => {
+                self.broadcast_grid(&id, Some(req.owner), req.cols, req.rows);
+                Ok(Some(meta))
+            }
             Err(e) => {
                 self.lock_sessions().remove(&id);
                 self.inner.terminal.close(&id);
@@ -665,11 +687,13 @@ impl SessionRegistry {
             let mut opts = live.opts.lock().unwrap_or_else(|e| e.into_inner());
             opts.skip_permissions = skip;
         }
-        {
-            let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+        self.edit_meta(id, &live, |meta| {
+            if meta.skip_permissions == skip {
+                return false;
+            }
             meta.skip_permissions = skip;
-            meta.updated_at = now_ms();
-        }
+            true
+        });
         // `respawn` retires the old pty, and retiring is what stops its exit from
         // being reported as the session's.
         self.respawn(
@@ -714,8 +738,9 @@ impl SessionRegistry {
         };
         let pty = live.pty.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grid = live.grid.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = grid.owner();
         if !grid.request(owner) {
-            return ResizeOutcome::DENIED;
+            return ResizeOutcome::denied(holder);
         }
         let applied = match &pty {
             Some(handle) => handle.resize(cols, rows).unwrap_or(false),
@@ -723,6 +748,7 @@ impl SessionRegistry {
         };
         let changed = (grid.cols, grid.rows) != (cols, rows);
         grid.set(cols, rows, pty.is_some());
+        let (held_cols, held_rows) = (grid.cols, grid.rows);
         drop(grid);
 
         if pty.is_some() {
@@ -736,10 +762,11 @@ impl SessionRegistry {
             // drawn at it.
             self.rebuild_replay_grid(id, &live, cols, rows);
         }
-        ResizeOutcome {
-            applied,
-            denied: false,
-        }
+        // A granted request is the arbitrated state changing, even when the geometry
+        // is what it already was: the client that now holds the grid is news to
+        // everyone else. A zero dimension was ignored, so report what the grid holds.
+        self.broadcast_grid(id, Some(owner), held_cols, held_rows);
+        ResizeOutcome::granted(owner, applied)
     }
 
     /// Re-assert the owner's grid once the TUI is up. A CLI that installs its SIGWINCH
@@ -769,12 +796,64 @@ impl SessionRegistry {
 
     /// A connection went away: drop its grid claims so the next client can take over.
     pub fn release_client(&self, owner: ClientId) {
-        for live in self.lock_sessions().values() {
-            live.grid
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .release(owner);
+        let released: Vec<(String, u16, u16)> = self
+            .lock_sessions()
+            .iter()
+            .filter_map(|(id, live)| {
+                let mut grid = live.grid.lock().unwrap_or_else(|e| e.into_inner());
+                grid.release(owner)
+                    .then(|| (id.clone(), grid.cols, grid.rows))
+            })
+            .collect();
+        // Announced outside the sessions lock: a broadcast wakes whoever is reading
+        // it, and holding the registry's map across that is how an inversion starts.
+        for (id, cols, rows) in released {
+            self.broadcast_grid(&id, None, cols, rows);
         }
+    }
+
+    /// Announce who drives a session's grid now. A resize outcome only ever reaches
+    /// the client that asked, so without this fan-out a second viewer cannot tell
+    /// that someone else is driving, nor that the grid was let go.
+    fn broadcast_grid(&self, id: &str, owner: Option<ClientId>, cols: u16, rows: u16) {
+        let _ = self.inner.events.send(SessionEvent::GridChange {
+            session_id: id.to_string(),
+            owner,
+            cols,
+            rows,
+        });
+    }
+
+    /// The one edge a meta edit crosses. `edit` moves the row under its own lock and
+    /// answers whether anything actually moved; a move is persisted and broadcast, so
+    /// no call site can change a session's row without a client hearing about it.
+    /// This is the Swift core's `persistMeta` and its `onMetaChange` listener in one
+    /// place, and the reason a new meta field needs no new emit.
+    ///
+    /// The snapshot edits — `created`, `attached` — stay out of it: they carry the
+    /// whole row already, and an exit has `exit` to announce itself with.
+    fn edit_meta(
+        &self,
+        id: &str,
+        live: &Arc<LiveSession>,
+        edit: impl FnOnce(&mut SessionMeta) -> bool,
+    ) -> bool {
+        let meta = {
+            let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            if !edit(&mut meta) {
+                return false;
+            }
+            meta.updated_at = now_ms();
+            meta.clone()
+        };
+        if let Err(e) = self.inner.store.upsert(&meta) {
+            warn!(session = id, error = %e, "could not persist a meta edit");
+        }
+        let _ = self.inner.events.send(SessionEvent::Meta {
+            session_id: id.to_string(),
+            meta,
+        });
+        true
     }
 
     pub fn kill(&self, id: &str) -> Result<(), StateError> {
@@ -832,9 +911,9 @@ impl SessionRegistry {
     /// so for those two the session starts unresumable and becomes resumable later,
     /// which is why this is a task and not a step.
     ///
-    /// A client learns the id on its next `attach`. There is no wire message for a
-    /// meta change in this core yet, and inventing one here would be a protocol
-    /// change with no scenario behind it.
+    /// A client hears about the id as it lands, over the meta edge, rather than only
+    /// on its next `attach`: for these two providers a session's resumability is a
+    /// fact that appears after the row a client already has.
     fn start_id_discovery(&self, id: &str, live: &Arc<LiveSession>, provider: ProviderId) {
         let source = Providers::spec(provider).id_source;
         if source == IdSource::Pinned {
@@ -888,18 +967,33 @@ impl SessionRegistry {
     /// Record a discovered conversation id. Only ever fills a blank: an id we pinned
     /// or already learned is what `--resume` will be given, so it does not move.
     fn adopt_discovered_id(&self, id: &str, live: &Arc<LiveSession>, cli_session_id: String) {
-        let meta = {
-            let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+        self.edit_meta(id, live, |meta| {
             if meta.cli_session_id.is_some() {
-                return;
+                return false;
             }
             meta.cli_session_id = Some(cli_session_id);
-            meta.updated_at = now_ms();
-            meta.clone()
+            true
+        });
+    }
+
+    /// Adopt the OSC 0/2 window title a CLI set for itself. A CLI that names its own
+    /// session names it better than the directory basename the row started with, and
+    /// the model parses the escape for free either way.
+    fn adopt_osc_title(&self, id: &str, live: &Arc<LiveSession>) {
+        let Some(raw) = self.inner.terminal.take_title(id) else {
+            return;
         };
-        if let Err(e) = self.inner.store.upsert(&meta) {
-            warn!(session = id, error = %e, "could not persist the discovered conversation id");
+        let title = raw.trim().to_string();
+        if title.is_empty() {
+            return;
         }
+        self.edit_meta(id, live, |meta| {
+            if meta.title == title {
+                return false;
+            }
+            meta.title = title;
+            true
+        });
     }
 
     /// Give up the pty a session is holding, ahead of the one that replaces it.
@@ -1060,6 +1154,8 @@ impl SessionRegistry {
             session: id.to_string(),
             bytes: Arc::clone(&bytes),
         });
+        // The grid has parsed this chunk, so any window title in it is readable now.
+        self.adopt_osc_title(id, live);
         {
             let mut ring = live.scrollback.lock().unwrap_or_else(|e| e.into_inner());
             ring.push(&bytes);

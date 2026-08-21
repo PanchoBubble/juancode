@@ -23,6 +23,10 @@ pub trait TerminalApi: Send + Sync {
     /// owns.
     fn open(&self, session: &str, cols: usize, rows: usize);
     fn feed(&self, session: &str, bytes: &[u8]);
+    /// The OSC 0/2 window title the program set since this was last called, if any.
+    /// Taking rather than reading: the caller adopts a title once, and a TUI repaints
+    /// its own title many times per turn.
+    fn take_title(&self, session: &str) -> Option<String>;
     fn resize(&self, session: &str, cols: usize, rows: usize);
     fn snapshot(&self, session: &str) -> Option<Snapshot>;
     /// The visible screen as text, which is what activity detection and search want.
@@ -82,6 +86,10 @@ impl TerminalApi for VtTerminals {
         }
     }
 
+    fn take_title(&self, session: &str) -> Option<String> {
+        self.grids().get_mut(session).and_then(|m| m.take_title())
+    }
+
     fn resize(&self, session: &str, cols: usize, rows: usize) {
         if let Some(model) = self.grids().get_mut(session) {
             model.resize(cols, rows);
@@ -125,6 +133,22 @@ mod tests {
         terminals.resize("s1", 120, 40);
         let snapshot = terminals.snapshot("s1").expect("grid");
         assert_eq!((snapshot.cols, snapshot.rows), (120, 40));
+    }
+
+    #[test]
+    fn a_window_title_the_program_set_is_readable_per_session() {
+        let terminals = VtTerminals::new(100);
+        terminals.open("s1", 80, 24);
+        terminals.open("s2", 80, 24);
+        terminals.feed("s1", b"\x1b]2;one\x07");
+        assert_eq!(
+            terminals.take_title("s2"),
+            None,
+            "titles do not cross grids"
+        );
+        assert_eq!(terminals.take_title("s1").as_deref(), Some("one"));
+        assert_eq!(terminals.take_title("s1"), None);
+        assert_eq!(terminals.take_title("nope"), None, "no grid, no title");
     }
 
     #[test]

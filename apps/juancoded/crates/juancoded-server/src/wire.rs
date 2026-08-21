@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
+use juancoded_state::ClientId;
 use juancoded_vt::wire::RowUpdate;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -20,7 +21,22 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// the Swift core's list: no `queue`, no `trackedPrs`, no `editor`/`terminal`.
 /// Clients feature-detect off this, so a name here that the core does not answer is
 /// worse than an omission — it turns a hidden button into a broken one.
-pub const CAPABILITIES: &[&str] = &["inputAck", "resizeAck", "screen", "adoptExternal"];
+pub const CAPABILITIES: &[&str] = &[
+    "inputAck",
+    "resizeAck",
+    "screen",
+    "adoptExternal",
+    "sessionMeta",
+    "gridOwner",
+];
+
+/// How a connection's arbitration id is spelled on the wire. A client only ever
+/// compares it: to the `clientId` its own handshake gave it, so it can tell "somebody
+/// drives this grid" from "I do". The number behind it is the registry's own token,
+/// and it means nothing outside one daemon's lifetime.
+pub fn client_token(client: ClientId) -> String {
+    format!("client-{client}")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
@@ -203,7 +219,9 @@ impl From<&str> for ClientMessage {
 /// visible at the call site instead of hiding in attributes.
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
-    ServerInfo,
+    ServerInfo {
+        client_id: ClientId,
+    },
     Created {
         session: SessionMeta,
     },
@@ -238,6 +256,9 @@ pub enum ServerMessage {
         rows: u16,
         applied: bool,
         denied: bool,
+        /// Who holds the grid after the arbitration, so a denied client learns who to
+        /// wait for rather than only that it lost. `None` is an unclaimed grid.
+        owner: Option<ClientId>,
     },
     Exit {
         session_id: String,
@@ -252,6 +273,28 @@ pub enum ServerMessage {
         changes: Option<ChangeStat>,
         dispatch_id: Option<String>,
     },
+    /// A session's persisted row changed out of band: a title the CLI set for itself,
+    /// a conversation id discovered after the spawn, a permission-mode flip. Carries
+    /// the whole row — replace wholesale rather than patching fields. `created` and
+    /// `attached` stay the snapshot; this is the delta, so a client's session row is
+    /// not frozen at whatever meta it arrived with.
+    SessionMeta {
+        session_id: String,
+        session: SessionMeta,
+    },
+    /// The arbitrated grid changed hands: a request was granted, or an owner let go
+    /// (its connection closed). Broadcast to every connection, unlike `resizeAck`,
+    /// which only ever reaches the client that sent the seq — so a viewer can render
+    /// "someone else is driving" and take the pane read-only, and can tell when the
+    /// grid is free again. `owner` is null for a release. Also sent once per
+    /// already-claimed session when a connection opens, so a client that arrives
+    /// mid-flight starts from the truth instead of assuming the grid is unclaimed.
+    GridChange {
+        session_id: String,
+        owner: Option<ClientId>,
+        cols: u16,
+        rows: u16,
+    },
     Unresumable {
         session_id: String,
         reason: String,
@@ -265,10 +308,14 @@ pub enum ServerMessage {
 impl ServerMessage {
     pub fn to_value(&self) -> Value {
         match self {
-            Self::ServerInfo => json!({
+            Self::ServerInfo { client_id } => json!({
                 "type": "serverInfo",
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": CAPABILITIES,
+                // Without it the `owner` fields are unreadable: a client could see
+                // that somebody drives a grid but not whether that somebody is
+                // itself, since the token is minted server-side per connection.
+                "clientId": client_token(*client_id),
             }),
             Self::Created { session } => json!({ "type": "created", "session": session }),
             Self::Attached {
@@ -316,6 +363,7 @@ impl ServerMessage {
                 rows,
                 applied,
                 denied,
+                owner,
             } => json!({
                 "type": "resizeAck",
                 "sessionId": session_id,
@@ -324,6 +372,9 @@ impl ServerMessage {
                 "rows": rows,
                 "applied": applied,
                 "denied": denied,
+                // `owner: string | null` is always present, like `exit.exitCode`: an
+                // omitted key and an unclaimed grid must not read the same.
+                "owner": owner.map(client_token),
             }),
             // `exitCode: number | null` is always present in the TS — emit null
             // rather than omitting the key.
@@ -358,6 +409,24 @@ impl ServerMessage {
                 }
                 v
             }
+            Self::SessionMeta {
+                session_id,
+                session,
+            } => json!({
+                "type": "sessionMeta", "sessionId": session_id, "session": session,
+            }),
+            Self::GridChange {
+                session_id,
+                owner,
+                cols,
+                rows,
+            } => json!({
+                "type": "gridChange",
+                "sessionId": session_id,
+                "owner": owner.map(client_token),
+                "cols": cols,
+                "rows": rows,
+            }),
             Self::Unresumable { session_id, reason } => json!({
                 "type": "unresumable", "sessionId": session_id, "reason": reason,
             }),
@@ -487,7 +556,15 @@ mod tests {
         assert!(CAPABILITIES.contains(&"adoptExternal"));
         for advertised in CAPABILITIES {
             assert!(
-                ["inputAck", "resizeAck", "screen", "adoptExternal"].contains(advertised),
+                [
+                    "inputAck",
+                    "resizeAck",
+                    "screen",
+                    "adoptExternal",
+                    "sessionMeta",
+                    "gridOwner",
+                ]
+                .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
             );
         }
@@ -513,9 +590,11 @@ mod tests {
 
     #[test]
     fn server_info_leads_with_the_version_and_an_honest_capability_list() {
-        let v = ServerMessage::ServerInfo.to_value();
+        let v = ServerMessage::ServerInfo { client_id: 7 }.to_value();
         assert_eq!(v["type"], "serverInfo");
         assert_eq!(v["protocolVersion"], 1);
+        // The token a client recognises itself by in an `owner` field.
+        assert_eq!(v["clientId"], client_token(7));
         let caps: Vec<String> = v["capabilities"]
             .as_array()
             .unwrap()
@@ -614,10 +693,67 @@ mod tests {
             rows: 30,
             applied: false,
             denied: true,
+            owner: Some(4),
         }
         .to_value();
         assert_eq!(v["applied"], false);
         assert_eq!(v["denied"], true);
         assert_eq!(v["cols"], 100);
+        // A denied client is told who to wait for, not only that it lost.
+        assert_eq!(v["owner"], client_token(4));
+    }
+
+    #[test]
+    fn an_unclaimed_grid_emits_a_null_owner_rather_than_omitting_the_key() {
+        let v = ServerMessage::ResizeAck {
+            session_id: "s".into(),
+            seq: 1,
+            cols: 80,
+            rows: 24,
+            applied: false,
+            denied: false,
+            owner: None,
+        }
+        .to_value();
+        assert!(v.get("owner").is_some());
+        assert!(v["owner"].is_null());
+        let v = ServerMessage::GridChange {
+            session_id: "s".into(),
+            owner: None,
+            cols: 80,
+            rows: 24,
+        }
+        .to_value();
+        assert!(v.get("owner").is_some(), "a release is a null owner");
+        assert!(v["owner"].is_null());
+    }
+
+    #[test]
+    fn session_meta_carries_the_whole_row_so_a_client_replaces_it_wholesale() {
+        let v = ServerMessage::SessionMeta {
+            session_id: "s1".into(),
+            session: meta(),
+        }
+        .to_value();
+        assert_eq!(v["type"], "sessionMeta");
+        assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["session"]["id"], "s1");
+        assert_eq!(v["session"]["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn a_grid_change_names_the_owner_and_the_grid_it_holds() {
+        let v = ServerMessage::GridChange {
+            session_id: "s1".into(),
+            owner: Some(2),
+            cols: 100,
+            rows: 30,
+        }
+        .to_value();
+        assert_eq!(v["type"], "gridChange");
+        assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["owner"], client_token(2));
+        assert_eq!(v["cols"], 100);
+        assert_eq!(v["rows"], 30);
     }
 }

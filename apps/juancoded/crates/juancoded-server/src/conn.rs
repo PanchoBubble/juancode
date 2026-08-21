@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tracing::{debug, warn};
 
 use juancoded_core::model::ProviderId;
@@ -28,6 +28,14 @@ use juancoded_state::{ClientId, SessionsApi};
 use crate::screen::ScreenStreamer;
 use crate::utf8::Utf8Stream;
 use crate::wire::{ClientMessage, ServerMessage};
+
+/// Per-connection state the event fan-out reads: which sessions this client is
+/// attached to, and the UTF-8 carry per session so a split code point is never cut in
+/// half across two frames.
+struct Fanout {
+    attached: HashSet<String>,
+    carries: HashMap<String, Utf8Stream>,
+}
 
 /// Screen-diff cadence: at most one frame per tick, matching the Swift streamer.
 const SCREEN_TICK: Duration = Duration::from_millis(80);
@@ -45,17 +53,35 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
 
     // Always first on the wire, before anything else can be sent.
     if tx
-        .send(Message::Text(ServerMessage::ServerInfo.to_json().into()))
+        .send(Message::Text(
+            ServerMessage::ServerInfo { client_id: client }
+                .to_json()
+                .into(),
+        ))
         .await
         .is_err()
     {
         sessions.release_client(client);
         return;
     }
+    // Then who already drives which grid, so a client that arrives mid-flight starts
+    // from the truth rather than assuming every grid is free.
+    for frame in grid_snapshot(&sessions) {
+        if tx
+            .send(Message::Text(frame.to_json().into()))
+            .await
+            .is_err()
+        {
+            sessions.release_client(client);
+            return;
+        }
+    }
 
-    let mut attached: HashSet<String> = HashSet::new();
+    let mut fanout = Fanout {
+        attached: HashSet::new(),
+        carries: HashMap::new(),
+    };
     let mut screens: HashMap<String, ScreenStreamer> = HashMap::new();
-    let mut carries: HashMap<String, Utf8Stream> = HashMap::new();
     let mut ticker = tokio::time::interval(SCREEN_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -67,21 +93,34 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
                 let Some(Ok(frame)) = incoming else { break };
                 match frame {
                     Message::Text(text) => {
+                        let mut reply: Vec<ServerMessage> = Vec::new();
                         match ClientMessage::decode(&text) {
                             Ok(msg) => handle_client_message(
-                                msg, &sessions, client, &mut attached, &mut screens, &mut outbound,
+                                msg, &sessions, client, &mut fanout.attached, &mut screens,
+                                &mut reply,
                             ),
                             Err(e) => {
                                 // One sessionless error, and the connection lives: a
                                 // client that can be killed by one bad frame cannot
                                 // be upgraded independently of the core.
                                 warn!(error = %e, "undecodable frame");
-                                outbound.push(ServerMessage::Error {
+                                reply.push(ServerMessage::Error {
                                     session_id: None,
                                     message: "Invalid JSON".into(),
                                 });
                             }
                         }
+                        // A handler that moved the arbitrated grid has already put the
+                        // broadcast on the bus. Fold that in ahead of the handler's own
+                        // reply, so the grant is public before the `created` or the
+                        // `resizeAck` it belongs to — the order the Swift core gets for
+                        // free by emitting from inside the state change. Bytes and
+                        // lifecycle keep their place behind the reply, so `attached`
+                        // stays the replay baseline it promises to be.
+                        let mut behind: Vec<ServerMessage> = Vec::new();
+                        drain_bus(&mut events, &mut fanout, &mut outbound, &mut behind);
+                        outbound.extend(reply);
+                        outbound.extend(behind);
                     }
                     Message::Close(_) => break,
                     // A client that speaks binary is not a thing today; ignore
@@ -91,23 +130,7 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
             }
             event = events.recv() => {
                 match event {
-                    Ok(SessionEvent::Output { session_id, bytes }) => {
-                        if attached.contains(&session_id) {
-                            let carry = carries.entry(session_id.clone()).or_default();
-                            let data = carry.push(&bytes);
-                            if !data.is_empty() {
-                                outbound.push(ServerMessage::Output { session_id, data });
-                            }
-                        }
-                    }
-                    Ok(SessionEvent::Activity { session_id, state, notify, changes, dispatch_id }) => {
-                        outbound.push(ServerMessage::Activity {
-                            session_id, state, notify, changes, dispatch_id,
-                        });
-                    }
-                    Ok(SessionEvent::Exit { session_id, exit_code }) => {
-                        outbound.push(ServerMessage::Exit { session_id, exit_code });
-                    }
+                    Ok(event) => push_event(event, &mut fanout, &mut outbound),
                     Err(RecvError::Lagged(n)) => {
                         debug!(dropped = n, "connection lagged behind the session bus");
                     }
@@ -135,6 +158,116 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
     // The socket is gone: drop this client's grid claims so the next viewer's resize
     // is applied rather than denied by a connection nobody is holding.
     sessions.release_client(client);
+}
+
+/// Turn one bus event into the frames this connection owes for it. Output is gated on
+/// an attachment because it is a byte stream a client opted into; the session-level
+/// broadcasts are not, because a sidebar row and a grid owner are facts about a
+/// session a client may never have attached to.
+fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<ServerMessage>) {
+    match event {
+        SessionEvent::Output { session_id, bytes } => {
+            if fanout.attached.contains(&session_id) {
+                let carry = fanout.carries.entry(session_id.clone()).or_default();
+                let data = carry.push(&bytes);
+                if !data.is_empty() {
+                    outbound.push(ServerMessage::Output { session_id, data });
+                }
+            }
+        }
+        SessionEvent::Activity {
+            session_id,
+            state,
+            notify,
+            changes,
+            dispatch_id,
+        } => outbound.push(ServerMessage::Activity {
+            session_id,
+            state,
+            notify,
+            changes,
+            dispatch_id,
+        }),
+        SessionEvent::Exit {
+            session_id,
+            exit_code,
+        } => outbound.push(ServerMessage::Exit {
+            session_id,
+            exit_code,
+        }),
+        SessionEvent::Meta { session_id, meta } => outbound.push(ServerMessage::SessionMeta {
+            session_id,
+            session: meta,
+        }),
+        SessionEvent::GridChange {
+            session_id,
+            owner,
+            cols,
+            rows,
+        } => outbound.push(ServerMessage::GridChange {
+            session_id,
+            owner,
+            cols,
+            rows,
+        }),
+    }
+}
+
+/// Fold every event already queued on the bus into frames, splitting them by whether
+/// they may overtake the reply the handler is about to send: a grid change describes
+/// the state the reply is about, so it goes ahead of it; everything else follows.
+///
+/// A closed bus is not handled here — the `recv` arm of the loop sees it on the next
+/// pass and ends the connection there, so there is one place that decides to stop.
+fn drain_bus(
+    events: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
+    fanout: &mut Fanout,
+    ahead: &mut Vec<ServerMessage>,
+    behind: &mut Vec<ServerMessage>,
+) {
+    loop {
+        match events.try_recv() {
+            Ok(event) => {
+                let bucket = if matches!(event, SessionEvent::GridChange { .. }) {
+                    &mut *ahead
+                } else {
+                    &mut *behind
+                };
+                push_event(event, fanout, bucket);
+            }
+            Err(TryRecvError::Lagged(n)) => {
+                debug!(dropped = n, "connection lagged behind the session bus");
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return,
+        }
+    }
+}
+
+/// Who already drives which session's grid, for a connection that just arrived.
+///
+/// Only a claimed grid on a live session: a client starts out assuming the grid is
+/// free, so silence already says the right thing for an unclaimed one, and a dead pty
+/// has no honest grid to report.
+fn grid_snapshot(sessions: &Arc<dyn SessionsApi>) -> Vec<ServerMessage> {
+    let mut frames = Vec::new();
+    for session_id in sessions.ids() {
+        if !sessions.is_running(&session_id) {
+            continue;
+        }
+        let Some(owner) = sessions.grid_owner(&session_id) else {
+            continue;
+        };
+        let Some((cols, rows)) = sessions.grid(&session_id) else {
+            continue;
+        };
+        frames.push(ServerMessage::GridChange {
+            session_id,
+            owner: Some(owner),
+            cols,
+            rows,
+        });
+    }
+    frames
 }
 
 /// `created` then `attached`, in that order: a client learns the identity first and
@@ -351,6 +484,7 @@ fn handle_client_message(
                     rows,
                     applied: outcome.applied,
                     denied: outcome.denied,
+                    owner: outcome.owner,
                 });
             }
         }

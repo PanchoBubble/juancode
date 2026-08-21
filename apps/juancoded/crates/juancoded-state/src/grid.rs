@@ -32,22 +32,36 @@ pub struct GridState {
 pub struct ResizeOutcome {
     pub applied: bool,
     pub denied: bool,
+    /// Who drives the grid after the arbitration. A denied client learns who to wait
+    /// for rather than only that it lost; `None` is an unclaimed grid.
+    pub owner: Option<ClientId>,
 }
 
 impl ResizeOutcome {
-    pub const APPLIED: Self = Self {
-        applied: true,
-        denied: false,
-    };
-    pub const DENIED: Self = Self {
-        applied: false,
-        denied: true,
-    };
     /// Nothing to resize: no session, or no live pty behind it.
     pub const NOTHING: Self = Self {
         applied: false,
         denied: false,
+        owner: None,
     };
+
+    /// The grid belongs to somebody else, so retrying is futile.
+    pub fn denied(owner: Option<ClientId>) -> Self {
+        Self {
+            applied: false,
+            denied: true,
+            owner,
+        }
+    }
+
+    /// The request was granted to `owner`; `applied` says whether it reached a pty.
+    pub fn granted(owner: ClientId, applied: bool) -> Self {
+        Self {
+            applied,
+            denied: false,
+            owner: Some(owner),
+        }
+    }
 }
 
 impl GridState {

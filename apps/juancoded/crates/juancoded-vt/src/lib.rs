@@ -11,7 +11,9 @@
 //! "two things parse the same stream on different threads" bug class (juancode-9goj,
 //! grnu, 1th) is not expressible.
 
-use alacritty_terminal::event::VoidListener;
+use std::sync::{Arc, Mutex};
+
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
@@ -125,13 +127,38 @@ impl Dimensions for Size {
     }
 }
 
+/// Catches the OSC 0/2 window titles the parser reports, so a session can adopt the
+/// name a CLI gives itself instead of keeping the directory basename it started with.
+///
+/// The parser hands a title to the listener from inside `advance`, and a listener only
+/// ever sees `&self`, so the slot is a mutex even though exactly one thread feeds a
+/// model. `ResetTitle` is dropped: a reset is the absence of a name, and there is
+/// nothing there to adopt.
+#[derive(Clone, Default)]
+struct TitleSink(Arc<Mutex<Option<String>>>);
+
+impl TitleSink {
+    fn take(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl EventListener for TitleSink {
+    fn send_event(&self, event: Event) {
+        if let Event::Title(title) = event {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(title);
+        }
+    }
+}
+
 /// The headless terminal model for one session: the parser plus the grid it owns.
 ///
 /// Single-threaded by construction — hold it behind the session's own lock and
 /// there is exactly one writer, which is the whole point.
 pub struct TerminalModel {
-    term: Term<VoidListener>,
+    term: Term<TitleSink>,
     parser: Processor,
+    titles: TitleSink,
     cols: usize,
     rows: usize,
     history: usize,
@@ -148,9 +175,11 @@ impl TerminalModel {
             scrolling_history: history,
             ..Default::default()
         };
+        let titles = TitleSink::default();
         Self {
-            term: Term::new(config, &size, VoidListener),
+            term: Term::new(config, &size, titles.clone()),
             parser: Processor::new(),
+            titles,
             cols,
             rows,
             history,
@@ -160,6 +189,14 @@ impl TerminalModel {
     /// Feed pty bytes. The only mutation path into the grid.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// The newest OSC 0/2 window title the program set since the last take, if any.
+    /// Taking rather than reading, because the caller adopts a title once: a TUI
+    /// repaints its window title many times per turn and every repaint would
+    /// otherwise read as a fresh fact.
+    pub fn take_title(&mut self) -> Option<String> {
+        self.titles.take()
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -314,5 +351,23 @@ mod tests {
         assert_eq!(snap.bottom_text(2), "\nfooter");
         assert_eq!(snap.bottom_text(99).lines().count(), 5);
         assert_eq!(snap.text(), "top\n\n\n\nfooter");
+    }
+
+    #[test]
+    fn an_osc_window_title_is_taken_once_and_leaves_the_grid_alone() {
+        let mut m = TerminalModel::new(20, 3, 100);
+        assert_eq!(m.take_title(), None, "nothing was set yet");
+        m.feed(b"\x1b]2;named by the cli\x07visible text");
+        assert_eq!(m.take_title().as_deref(), Some("named by the cli"));
+        assert_eq!(m.take_title(), None, "a title is a fact to adopt once");
+        // The escape sequence is consumed by the parser, not painted.
+        assert_eq!(m.snapshot().lines[0].text, "visible text");
+    }
+
+    #[test]
+    fn the_newest_title_wins_within_one_feed() {
+        let mut m = TerminalModel::new(20, 3, 100);
+        m.feed(b"\x1b]0;first\x07\x1b]2;second\x07");
+        assert_eq!(m.take_title().as_deref(), Some("second"));
     }
 }

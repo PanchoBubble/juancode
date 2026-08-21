@@ -31,6 +31,9 @@ pub trait SessionsApi: Send + Sync {
     fn activity(&self, id: &str) -> Option<SessionActivity>;
     fn snapshot(&self, id: &str) -> Option<Snapshot>;
     fn grid(&self, id: &str) -> Option<(u16, u16)>;
+    /// Which client drives the session's grid, or `None` when it is unclaimed. The
+    /// wire layer needs it to tell an arriving connection what it missed.
+    fn grid_owner(&self, id: &str) -> Option<ClientId>;
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError>;
     fn adopt_external(&self, req: AdoptRequest) -> Result<Option<SessionMeta>, StateError>;
@@ -107,6 +110,10 @@ impl SessionsApi for SessionRegistry {
 
     fn grid(&self, id: &str) -> Option<(u16, u16)> {
         SessionRegistry::grid(self, id)
+    }
+
+    fn grid_owner(&self, id: &str) -> Option<ClientId> {
+        SessionRegistry::grid_owner(self, id)
     }
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError> {
