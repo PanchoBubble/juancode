@@ -49,7 +49,10 @@ fn the_daemons_tree_has_the_state_layer_in_it_as_ordinary_rows() {
         report.diagnostics(),
         ["activity-log (activity-log) is PENDING: no service claims transcripts"]
     );
-    assert!(sessions.ids().is_empty(), "mounting must not create sessions");
+    assert!(
+        sessions.ids().is_empty(),
+        "mounting must not create sessions"
+    );
 
     // Both keys resolve against their contracts, and neither consumer names an
     // implementation to get there.
