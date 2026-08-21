@@ -7,12 +7,14 @@
 //! terminal. See `provider::ProviderSpec::spawn_env` for the single sanctioned
 //! exception (opencode's opt-in bypass, which has no flag).
 
+pub mod activity;
+pub mod changes;
 pub mod model;
 pub mod provider;
 pub mod pty;
-pub mod registry;
 
+pub use activity::{ActivityDetector, Armed, ScreenText, Step, Transition};
+pub use changes::ChangeStat;
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
 pub use provider::{resolve_bin, ProviderSpec, Providers, SpawnOptions};
-pub use pty::{PtyEvent, PtyHandle};
-pub use registry::{CreateRequest, Registry, SessionEvent};
+pub use pty::{PtyEvent, PtyHandle, SpawnSpec};

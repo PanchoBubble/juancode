@@ -2,31 +2,30 @@
 //! the session bus, with a child (`/bin/cat`) that echoes instantly so the number
 //! is the harness's cost and not a CLI's repaint.
 //!
-//! Run: cargo run --release -p juancoded-core --example echo_latency
+//! Run: cargo run --release -p juancoded-state --example echo_latency
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use juancoded_core::model::ProviderId;
-use juancoded_core::registry::{CreateRequest, Registry, SessionEvent};
+use juancoded_state::registry::{CreateRequest, SessionEvent};
 
 #[tokio::main]
 async fn main() {
-    let reg = Arc::new(Registry::new());
+    let (_loader, _report, reg) =
+        juancoded_state::boot_with(&juancoded_state::test_entries("/bin/cat", &[]))
+            .expect("mount the tree");
     let mut rx = reg.subscribe();
     let meta = reg
-        .create(
-            CreateRequest {
-                provider: ProviderId::Claude,
-                cwd: "/tmp".into(),
-                cols: 120,
-                rows: 40,
-                skip_permissions: false,
-                model: None,
-                dispatch_id: None,
-            },
-            Some(("/bin/cat".into(), vec![])),
-        )
+        .create(CreateRequest {
+            provider: ProviderId::Claude,
+            cwd: "/tmp".into(),
+            cols: 120,
+            rows: 40,
+            skip_permissions: false,
+            model: None,
+            dispatch_id: None,
+            owner: 1,
+        })
         .expect("spawn cat");
 
     // Let the pty settle before timing anything.

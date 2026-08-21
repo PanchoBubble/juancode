@@ -1,35 +1,34 @@
 //! Throughput of a heavy dump: `cat` a large file through a session and measure
 //! the bytes that reach the session bus, with the grid being fed the whole way.
 //!
-//! Run: cargo run --release -p juancoded-core --example throughput [path]
+//! Run: cargo run --release -p juancoded-state --example throughput [path]
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use juancoded_core::model::ProviderId;
-use juancoded_core::registry::{CreateRequest, Registry, SessionEvent};
+use juancoded_state::registry::{CreateRequest, SessionEvent};
 
 #[tokio::main]
 async fn main() {
     let path = std::env::args().nth(1).expect("usage: throughput <file>");
     let size = std::fs::metadata(&path).expect("stat").len();
 
-    let reg = Arc::new(Registry::new());
+    let (_loader, _report, reg) =
+        juancoded_state::boot_with(&juancoded_state::test_entries("/bin/cat", &[&path]))
+            .expect("mount the tree");
     let mut rx = reg.subscribe();
     let start = Instant::now();
     let meta = reg
-        .create(
-            CreateRequest {
-                provider: ProviderId::Claude,
-                cwd: "/tmp".into(),
-                cols: 120,
-                rows: 40,
-                skip_permissions: false,
-                model: None,
-                dispatch_id: None,
-            },
-            Some(("/bin/cat".into(), vec![path.clone()])),
-        )
+        .create(CreateRequest {
+            provider: ProviderId::Claude,
+            cwd: "/tmp".into(),
+            cols: 120,
+            rows: 40,
+            skip_permissions: false,
+            model: None,
+            dispatch_id: None,
+            owner: 1,
+        })
         .expect("spawn cat");
 
     // A slow subscriber lags rather than stalling the grid: the pump is a separate

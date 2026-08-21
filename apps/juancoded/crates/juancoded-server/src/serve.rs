@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::Router;
 use tracing::info;
 
-use juancoded_core::registry::Registry;
+use juancoded_state::SessionsApi;
 
 use crate::conn;
 
@@ -51,23 +51,27 @@ async fn is_live(path: &std::path::Path) -> bool {
     tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
-fn router(registry: Arc<Registry>) -> Router {
+fn router(sessions: Arc<dyn SessionsApi>) -> Router {
     Router::new()
+        // Both spellings, on purpose: the Swift core serves `/api/health` and remote
+        // clients probe it, so a core that only answered `/health` would look down to
+        // everything that already exists.
         .route("/health", get(|| async { "ok" }))
+        .route("/api/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
-        .with_state(registry)
+        .with_state(sessions)
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(registry): State<Arc<Registry>>,
+    State(sessions): State<Arc<dyn SessionsApi>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| conn::handle(socket, registry))
+    ws.on_upgrade(move |socket| conn::handle(socket, sessions))
 }
 
 /// Serve on both listeners until one of them fails.
-pub async fn serve(registry: Arc<Registry>, config: ServeConfig) -> Result<()> {
-    let app = router(Arc::clone(&registry));
+pub async fn serve(sessions: Arc<dyn SessionsApi>, config: ServeConfig) -> Result<()> {
+    let app = router(sessions);
 
     if let Some(dir) = config.socket.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
@@ -133,11 +137,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("live.sock");
 
-        let first = Arc::new(Registry::new());
         let held = tokio::net::UnixListener::bind(&socket).unwrap();
 
         let err = serve(
-            first,
+            crate::testing::sessions(),
             ServeConfig {
                 port: 0,
                 socket: socket.clone(),

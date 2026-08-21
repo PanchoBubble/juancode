@@ -7,6 +7,7 @@ members = [
     "crates/juancoded-persistence",
     "crates/juancoded-plugins",
     "crates/juancoded-server",
+    "crates/juancoded-state",
     "crates/juancoded-vt",
 ]
 
@@ -22,6 +23,7 @@ juancoded-core = { path = "crates/juancoded-core" }
 juancoded-persistence = { path = "crates/juancoded-persistence" }
 juancoded-plugins = { path = "crates/juancoded-plugins" }
 juancoded-server = { path = "crates/juancoded-server" }
+juancoded-state = { path = "crates/juancoded-state" }
 juancoded-vt = { path = "crates/juancoded-vt" }
 
 alacritty_terminal = "0.26"
@@ -30,6 +32,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 futures = "0.3"
 portable-pty = "0.9"
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }

@@ -12,5 +12,8 @@ pub mod serve;
 pub mod utf8;
 pub mod wire;
 
+#[cfg(test)]
+mod testing;
+
 pub use serve::{serve, ServeConfig};
 pub use wire::{ClientMessage, ServerMessage, CAPABILITIES, PROTOCOL_VERSION};

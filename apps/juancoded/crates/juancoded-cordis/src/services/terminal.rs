@@ -14,7 +14,13 @@ use crate::service::Service;
 
 /// What consumers of the `terminal` key may do.
 pub trait TerminalApi: Send + Sync {
-    /// Open a grid for `session`. Opening one that exists resizes it instead.
+    /// Open a grid for `session` at that geometry, or leave the existing one alone.
+    ///
+    /// Create-if-absent, deliberately: `open` is called from the output path, whose
+    /// caller does not know the session's real grid, and a second authority over
+    /// cols/rows is the whole bug class this daemon exists to retire. Changing an
+    /// existing grid goes through [`TerminalApi::resize`], which the session registry
+    /// owns.
     fn open(&self, session: &str, cols: usize, rows: usize);
     fn feed(&self, session: &str, bytes: &[u8]);
     fn resize(&self, session: &str, cols: usize, rows: usize);
@@ -61,15 +67,13 @@ impl Default for VtTerminals {
 impl TerminalApi for VtTerminals {
     fn open(&self, session: &str, cols: usize, rows: usize) {
         let mut grids = self.grids();
-        match grids.get_mut(session) {
-            Some(model) => model.resize(cols, rows),
-            None => {
-                grids.insert(
-                    session.to_string(),
-                    TerminalModel::new(cols, rows, self.history),
-                );
-            }
+        if grids.contains_key(session) {
+            return;
         }
+        grids.insert(
+            session.to_string(),
+            TerminalModel::new(cols, rows, self.history),
+        );
     }
 
     fn feed(&self, session: &str, bytes: &[u8]) {
@@ -98,5 +102,39 @@ impl TerminalApi for VtTerminals {
 
     fn open_sessions(&self) -> Vec<String> {
         self.grids().keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_an_existing_grid_leaves_its_geometry_alone() {
+        let terminals = VtTerminals::new(100);
+        terminals.open("s1", 80, 24);
+        terminals.feed("s1", b"hello");
+        // The output path re-opens on every frame at whatever default it was
+        // configured with; that must never move a grid the registry sized.
+        terminals.open("s1", 120, 40);
+        let snapshot = terminals.snapshot("s1").expect("grid");
+        assert_eq!((snapshot.cols, snapshot.rows), (80, 24));
+        assert!(terminals.text("s1").unwrap().contains("hello"));
+
+        // The one authority that does move it.
+        terminals.resize("s1", 120, 40);
+        let snapshot = terminals.snapshot("s1").expect("grid");
+        assert_eq!((snapshot.cols, snapshot.rows), (120, 40));
+    }
+
+    #[test]
+    fn closing_forgets_the_grid_so_a_reopen_starts_clean() {
+        let terminals = VtTerminals::new(100);
+        terminals.open("s1", 40, 10);
+        terminals.feed("s1", b"stale");
+        terminals.close("s1");
+        assert!(terminals.snapshot("s1").is_none());
+        terminals.open("s1", 40, 10);
+        assert_eq!(terminals.text("s1").unwrap().trim(), "");
     }
 }

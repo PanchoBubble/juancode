@@ -77,6 +77,18 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The bottom `rows` rows as text, blanks and all. The footer / input / dialog
+    /// region: prompt markers are only trusted here, so the same words scrolled up
+    /// in conversation history cannot masquerade as a live prompt.
+    pub fn bottom_text(&self, rows: usize) -> String {
+        let start = self.lines.len().saturating_sub(rows);
+        self.lines[start..]
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The visible screen as text: rows joined by newlines, trailing blank rows
     /// dropped. Mirrors `TerminalSnapshot.text`.
     pub fn text(&self) -> String {
@@ -286,4 +298,21 @@ fn map_style(flags: Flags) -> u8 {
         st |= style::CROSSED_OUT;
     }
     st
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bottom_text_keeps_the_blank_rows_the_footer_region_needs() {
+        let mut m = TerminalModel::new(20, 5, 100);
+        m.feed(b"top\r\n\x1b[5;1Hfooter");
+        let snap = m.snapshot();
+        // Trailing blanks are trimmed from `text` but the footer band is positional:
+        // taking the last two rows must still land on the last two rows.
+        assert_eq!(snap.bottom_text(2), "\nfooter");
+        assert_eq!(snap.bottom_text(99).lines().count(), 5);
+        assert_eq!(snap.text(), "top\n\n\n\nfooter");
+    }
 }

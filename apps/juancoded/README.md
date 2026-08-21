@@ -1,13 +1,11 @@
-# juancoded — the harness core in Rust (spike: juancode-52e8.3)
+# juancoded — the harness core in Rust
 
-Go/no-go spike for epic `juancode-52e8`: move the non-UI half of juancode into a
-portable Rust daemon behind a switchable backend.
+Epic `juancode-52e8`: move the non-UI half of juancode into a portable Rust daemon
+behind a switchable backend. The go/no-go spike (juancode-52e8.3) cleared all three
+risks and beat the Swift path on every number below; the composition core
+(juancode-52e8.4) and the state layer (juancode-52e8.6) landed on top of it.
 
-**Verdict: GO.** All three risks cleared, all three numbers below beat the Swift
-path, and the Swift UI renders a session the Rust core owns with no FFI and no new
-protocol.
-
-## What it proves
+## What the spike proved
 
 1. **Env fidelity, by construction and by test.** `portable-pty`'s
    `CommandBuilder::new` seeds from `std::env::vars_os()`, so the child gets our
@@ -66,8 +64,8 @@ Reproduce:
 
 ```sh
 cargo run --release -p juancoded-vt   --example parse_cost
-cargo run --release -p juancoded-core --example echo_latency
-cargo run --release -p juancoded-core --example throughput <big-file>
+cargo run --release -p juancoded-state --example echo_latency
+cargo run --release -p juancoded-state --example throughput <big-file>
 cargo run --release -p juancoded-server --example uds_rtt -- /tmp/juancoded-spike.sock
 ```
 
@@ -76,23 +74,78 @@ cargo run --release -p juancoded-server --example uds_rtt -- /tmp/juancoded-spik
 | Crate | What it owns | Swift counterpart |
 | --- | --- | --- |
 | `juancoded-vt` | The grid (`alacritty_terminal`), `Snapshot`, `screen` frame encoding | `SessionTerminalModel.swift`, `ScreenWire.swift` |
-| `juancoded-core` | Wire model types, provider specs + `resolve_bin`, pty host, session registry | `Protocol.swift`, `Providers.swift`, `PtyProcess.swift`, `SessionRegistry.swift` |
+| `juancoded-core` | Wire model types, provider specs + `resolve_bin`, the pty host, activity inference, the change rollup | `Protocol.swift`, `Providers.swift`, `PtyProcess.swift`, `ActivityDetector.swift`, `ChangeBadge.swift` |
+| `juancoded-cordis` | The composition core: keyed services, RAII effect guards, the entry list, the typed bus, `dump-config` | none — this is the point of the move |
+| `juancoded-state` | The session registry, the grid authority, the `sessions` and `store` services | `SessionRegistry.swift`, `Session.swift`, `GridArbiter.swift` |
+| `juancoded-persistence` | SQLite: sessions, scrollback (with its grid), queue, tracked PRs, the dispatch ledger | `JuancodePersistence` |
 | `juancoded-server` | The wire protocol, WS connection loop, screen streamer, listeners | `WireProtocol.swift`, `WebSocketConnection.swift`, `ScreenStreamer.swift` |
-| `juancoded-persistence` | The per-core DB seam (in-memory for now) | `JuancodePersistence` |
-| `juancoded-plugins` | `EffectRegistry` + `EffectGuard`: a registration that unregisters on `Drop` | none — this is the point of the move |
-| `juancoded` | The daemon binary | — |
+| `juancoded` | The daemon binary: apply the entry list, serve the `sessions` service | — |
+| `juancoded-plugins` | The original standalone `EffectRegistry` spike, superseded by `juancoded-cordis` and wired into nothing (juancode-yuce) | — |
 
-`juancoded-plugins` is the smallest crate and the one carrying the epic's fourth
-argument: cordis's "registrations are reversible effects" is just a value whose
-`Drop` unregisters. It is proven by test and wired into nothing yet — juancode-52e8.4
-builds the real registry on top.
+## The state layer, and where it lives
+
+It **mounts into** the cordis tree; it does not sit beside it. `sessions` and `store`
+are ordinary keyed services, the registry resolves `pty`, `terminal` and `store` by
+key like any other consumer, and the wire layer holds an `Arc<dyn SessionsApi>`
+without knowing that a registry, a SQLite file or an `alacritty_terminal` grid exist.
+Input travels the `session.input` around chain (so the live-pty guard, and later a
+steering queue's claim boundary, can refuse a write), output the `session.output`
+observe chain (whose one listener feeds the grid), and an exit the `session.exit`
+fan-out. `juancoded --dump-config` prints the whole thing, and
+`crates/juancoded-state/tests/mounted_tree.rs` asserts that output — so "the state
+layer is in the tree" is a test, not a claim.
+
+There is exactly one composition mechanism in this daemon, and it is the one
+juancode-52e8.4 built.
+
+## Four bugs that are now unwritable
+
+| Was | Why it cannot happen here | Test |
+| --- | --- | --- |
+| juancode-1th / 8llo: last-write-wins resize, two viewers flapping the TUI | One authority arbitrates, and the pty and the grid move from the same call with the same numbers | `tests/resize_authority.rs` (including the juancode-po1 matrix) |
+| juancode-grnu: scrollback replayed at a guessed width | The grid is stored beside the bytes, and the replay is rebuilt at that grid — the same code path after an exit and after a restart | `tests/restart_scrollback_width.rs` |
+| juancode-9goj: two parsers, one stream, a corrupted global | One grid behind one lock, fed from one task; readers get value snapshots | `tests/one_grid_owner.rs` |
+| juancode-d89 / o9h2 / jpvj: the daemon blocking on a wedged UI surface | Output is published on a bounded broadcast that drops a slow receiver's backlog; the producer never waits and never buffers on its behalf | `tests/one_grid_owner.rs` |
+
+Pty feeds are deliberately **not** coalesced. Measured parse cost is 0.0769 ms per
+16 KB here and parse was never the lag source (juancode-kdn), so batching would trade
+a real latency floor for an imaginary saving.
+
+## Where the data lives
+
+`$JUANCODED_DATA_DIR/juancoded-rust.db`, falling back to `$JUANCODE_DATA_DIR` and then
+to `~/.juancode/rust-core/`. Never `~/.juancode/data/juancode.db`, which is the Swift
+core's: one DB file per core is what makes flipping cores a restart rather than a
+migration, and the file name says which core wrote it even if someone points both at
+one directory.
+
+Schema (`crates/juancoded-persistence/src/schema.rs`): `sessions`, `scrollback`
+(`session_id`, **`cols`**, **`rows`**, `bytes`), `queue`, `tracked_prs`, `dispatches`.
+`cols`/`rows` are not metadata — without them the bytes can only be replayed by
+guessing a width, and a wrong guess garbles every hard wrap in the history.
+
+## Conformance
+
+Measured against `apps/wire-conformance` (18 golden scenarios, protocol v1) by
+pointing the suite at a hand-booted daemon on its own port, its own data dir and the
+suite's fake agent. **15 of 18 passing** (2026-08-21).
+
+The three that are not are capability-gated and report as skipped rather than failed,
+because the core does not advertise what it cannot do: `queue`, `trackedPrs`,
+`editor`/`terminal`. Their tables exist in the schema; their wire surfaces do not.
+See the package README in `apps/wire-conformance` for how to point the suite at a
+core by URL.
 
 ## Run it
 
 ```sh
 cargo build --release
 JUANCODED_SOCKET=/tmp/juancoded.sock JUANCODED_PORT=4290 ./target/release/juancoded
+./target/release/juancoded --dump-config   # print the tree and exit, binding nothing
 ```
+
+The Unix socket path has to be short: `sun_path` is 104 bytes on macOS, so a socket
+under a deep scratch directory fails to bind.
 
 Ports: **4290 by default, never 4280 or 4281.** The Swift app owns 4280 and the
 oracle sidecar owns 4281, so running all three at once is never a port fight.
@@ -116,9 +169,13 @@ passed straight through and the spawned CLI turns transcript saving off.
 
 ## Deliberately not here
 
-No persistence beyond an in-memory store, no queue / tracked-PR / editor / terminal
-messages, no activity detection worth the name (a 700 ms quiet debounce stands in for
-`ActivityDetector`), no grid arbitration between competing clients, no session
-resume, no codex/opencode session-id discovery. Each of those is a named child of the
-epic. Nothing in `apps/native` was modified by this spike, and nothing here runs
-unless started by hand.
+No `queue` / `trackedPrs` / `editor` / `terminal` wire surfaces (the first three have
+their tables, none has its messages), no structured-transcript activity signal — the
+detector reads the rendered screen only, where the Swift one also fuses the CLI's
+stream-json transcript (juancode-52e8.12) — and no codex/opencode session-id
+discovery, so those two providers resume only once their id has been captured some
+other way (juancode-52e8.7). Each of those is a named child of the epic.
+
+Nothing in `apps/native` was modified, and nothing here runs unless started by hand:
+the daemon binds no port until launched, and mounting the tree spawns no child until a
+client asks for a session.

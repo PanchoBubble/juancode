@@ -10,14 +10,16 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_vt::wire::RowUpdate;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// What the Rust core implements today. Deliberately shorter than the Swift core's
-/// list: no `queue`, no `trackedPrs`, no `editor`/`terminal` yet. Clients that need
-/// those refuse or hide them rather than sending into a void.
+/// What the Rust core implements today, and nothing more. Deliberately shorter than
+/// the Swift core's list: no `queue`, no `trackedPrs`, no `editor`/`terminal`.
+/// Clients feature-detect off this, so a name here that the core does not answer is
+/// worse than an omission — it turns a hidden button into a broken one.
 pub const CAPABILITIES: &[&str] = &["inputAck", "resizeAck", "screen", "adoptExternal"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +35,29 @@ pub enum ClientMessage {
     },
     Attach {
         session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Revive a session whose pty is gone. Distinct from `attach`, which only ever
+    /// reads: only a reactivate can answer `unresumable`.
+    Reactivate {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Take over a conversation started outside juancode, by its own CLI id.
+    AdoptExternal {
+        provider: String,
+        cli_session_id: String,
+        cwd: String,
+        start_ms: i64,
+        cols: u16,
+        rows: u16,
+    },
+    /// Change a live session's permission mode, restarting the CLI in place.
+    SetSkipPermissions {
+        session_id: String,
+        skip_permissions: bool,
         cols: u16,
         rows: u16,
     },
@@ -79,6 +104,10 @@ struct RawClient {
     initial_input: Option<String>,
     #[serde(rename = "skipPermissions", default)]
     skip_permissions: Option<bool>,
+    #[serde(rename = "cliSessionId", default)]
+    cli_session_id: Option<String>,
+    #[serde(rename = "startMs", default)]
+    start_ms: Option<i64>,
     #[serde(rename = "dispatchId", default)]
     dispatch_id: Option<String>,
     #[serde(rename = "sessionId", default)]
@@ -110,10 +139,29 @@ impl ClientMessage {
                 skip_permissions: raw.skip_permissions,
                 dispatch_id: raw.dispatch_id,
             }),
-            "attach" | "reactivate" => Ok(Self::Attach {
+            "attach" => Ok(Self::Attach {
                 session_id: need_session()?,
                 cols: raw.cols.ok_or("missing cols")?,
                 rows: raw.rows.ok_or("missing rows")?,
+            }),
+            "reactivate" => Ok(Self::Reactivate {
+                session_id: need_session()?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+            }),
+            "adoptExternal" => Ok(Self::AdoptExternal {
+                provider: raw.provider.ok_or("missing provider")?,
+                cli_session_id: raw.cli_session_id.ok_or("missing cliSessionId")?,
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                start_ms: raw.start_ms.ok_or("missing startMs")?,
+                cols: raw.cols.unwrap_or(0),
+                rows: raw.rows.unwrap_or(0),
+            }),
+            "setSkipPermissions" => Ok(Self::SetSkipPermissions {
+                session_id: need_session()?,
+                skip_permissions: raw.skip_permissions.unwrap_or(false),
+                cols: raw.cols.unwrap_or(0),
+                rows: raw.rows.unwrap_or(0),
             }),
             "input" => Ok(Self::Input {
                 session_id: need_session()?,
@@ -199,6 +247,9 @@ pub enum ServerMessage {
         session_id: String,
         state: SessionActivity,
         notify: bool,
+        /// Rides along only on the settle edge that computed it, so a client can
+        /// badge "finished, N files changed" without git access of its own.
+        changes: Option<ChangeStat>,
         dispatch_id: Option<String>,
     },
     Unresumable {
@@ -286,6 +337,7 @@ impl ServerMessage {
                 session_id,
                 state,
                 notify,
+                changes,
                 dispatch_id,
             } => {
                 let mut v = json!({
@@ -294,6 +346,13 @@ impl ServerMessage {
                     "state": state,
                     "notify": notify,
                 });
+                if let Some(c) = changes {
+                    v["changes"] = json!({
+                        "files": c.files,
+                        "additions": c.additions,
+                        "deletions": c.deletions,
+                    });
+                }
                 if let Some(d) = dispatch_id {
                     v["dispatchId"] = json!(d);
                 }
@@ -389,14 +448,63 @@ mod tests {
     }
 
     #[test]
-    fn reactivate_is_handled_as_an_attach() {
+    fn reactivate_is_its_own_message_not_an_attach() {
+        // Decoding it as `attach` made `unresumable` unreachable: attach only reads,
+        // and only a reactivate can be told there is nothing left to resume.
         let msg =
             ClientMessage::decode(r#"{"type":"reactivate","sessionId":"s","cols":80,"rows":24}"#)
                 .unwrap();
         assert_eq!(
             msg,
-            ClientMessage::Attach {
+            ClientMessage::Reactivate {
                 session_id: "s".into(),
+                cols: 80,
+                rows: 24
+            }
+        );
+    }
+
+    #[test]
+    fn every_advertised_capability_has_a_message_that_decodes() {
+        // The lie this guards against: advertising a capability whose frame falls
+        // through to `Unknown` and is silently dropped.
+        let adopt = ClientMessage::decode(
+            r#"{"type":"adoptExternal","provider":"claude","cliSessionId":"c-1",
+                "cwd":"/tmp","startMs":1700000000000,"cols":80,"rows":24}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            adopt,
+            ClientMessage::AdoptExternal {
+                provider: "claude".into(),
+                cli_session_id: "c-1".into(),
+                cwd: "/tmp".into(),
+                start_ms: 1_700_000_000_000,
+                cols: 80,
+                rows: 24,
+            }
+        );
+        assert!(CAPABILITIES.contains(&"adoptExternal"));
+        for advertised in CAPABILITIES {
+            assert!(
+                ["inputAck", "resizeAck", "screen", "adoptExternal"].contains(advertised),
+                "unimplemented capability advertised: {advertised}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_skip_permissions_decodes_with_the_grid_to_restart_at() {
+        let msg = ClientMessage::decode(
+            r#"{"type":"setSkipPermissions","sessionId":"s","skipPermissions":true,
+                "cols":80,"rows":24}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::SetSkipPermissions {
+                session_id: "s".into(),
+                skip_permissions: true,
                 cols: 80,
                 rows: 24
             }
@@ -453,11 +561,36 @@ mod tests {
             session_id: "s".into(),
             state: SessionActivity::WaitingInput,
             notify: true,
+            changes: None,
             dispatch_id: None,
         }
         .to_value();
         assert_eq!(v["state"], "waiting_input");
         assert!(v.get("dispatchId").is_none());
+        assert!(v.get("changes").is_none(), "no rollup means no key");
+    }
+
+    #[test]
+    fn activity_carries_the_change_rollup_when_one_was_computed() {
+        let v = ServerMessage::Activity {
+            session_id: "s".into(),
+            state: SessionActivity::Idle,
+            notify: true,
+            changes: Some(ChangeStat {
+                files: 3,
+                additions: 120,
+                deletions: 44,
+                signature: "ignored on the wire".into(),
+            }),
+            dispatch_id: Some("d-1".into()),
+        }
+        .to_value();
+        assert_eq!(v["changes"]["files"], 3);
+        assert_eq!(v["changes"]["additions"], 120);
+        assert_eq!(v["changes"]["deletions"], 44);
+        assert_eq!(v["dispatchId"], "d-1");
+        // The debounce signature is ours, not the client's.
+        assert!(v["changes"].get("signature").is_none());
     }
 
     #[test]

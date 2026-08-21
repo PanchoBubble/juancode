@@ -116,12 +116,22 @@ impl PtyHandle {
                         Err(_) => break,
                     }
                 }
+                // A child killed by a signal has no exit status of its own, and
+                // portable-pty reports 1 for it — indistinguishable from a real
+                // failure. -1 is the convention the wire already uses for "a signal
+                // took it", so clients can tell a kill from a crash.
                 let code = pump_inner
                     .child
                     .lock()
                     .ok()
                     .and_then(|mut c| c.wait().ok())
-                    .map(|status| status.exit_code() as i32);
+                    .map(|status| {
+                        if status.signal().is_some() {
+                            -1
+                        } else {
+                            status.exit_code() as i32
+                        }
+                    });
                 let _ = pump_inner.events.send(PtyEvent::Exit(code));
             })
             .context("failed to start pty reader thread")?;
