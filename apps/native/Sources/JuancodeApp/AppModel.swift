@@ -37,6 +37,10 @@ private let sessionOrderKey = "juancode.sessionOrder"
 /// (a plist-safe [String] of session ids).
 private let pinnedSessionsKey = "juancode.pinnedSessions"
 
+/// UserDefaults key for the auto-slept sessions the user dismissed from their
+/// project's folded preview (a plist-safe [String] of session ids).
+private let dismissedSessionsKey = "juancode.dismissedSessions"
+
 /// UserDefaults key for the per-project "new sessions land on a fresh worktree"
 /// toggle: project cwd → Bool (a plist-safe [String: Bool]).
 private let worktreeByProjectKey = "juancode.worktreeByProject"
@@ -821,8 +825,10 @@ final class AppModel {
     private func syncSidebarOrder() {
         let live = Set(appState.registry.all().map(\.id))
         // Auto-slept rows rest where they were rather than sinking into the dead
-        // pile — they're "open but closed" (see `restingAttention`).
+        // pile — they're "open but closed" (see `restingAttention`). Unless the user
+        // dismissed one: that's them closing it, so it sinks like any exited row.
         let dormantIds = Set(sessions.filter(\.dormant).map(\.id))
+            .subtracting(dismissedSessions)
         var next: [String: SessionAttention] = [:]
         next.reserveCapacity(sessions.count + externalSessions.count)
         func project(_ id: String) {
@@ -1317,6 +1323,44 @@ final class AppModel {
         }
     }
 
+    /// Sleeping sessions the user has explicitly waved off. A session the reaper
+    /// (or the Sleep action) closed while idle stays surfaced — resting in place and
+    /// never folded behind "Load more" — because *we* closed it, not the user. This
+    /// set is them saying "done with that one": it sinks with the exited rows again
+    /// and the fold may swallow it. Persisted; cleared when the session is woken, so
+    /// the next sleep starts over.
+    var dismissedSessions: Set<String> = Set(
+        (UserDefaults.standard.array(forKey: dismissedSessionsKey) as? [String]) ?? []
+    ) {
+        didSet { UserDefaults.standard.set(Array(dismissedSessions), forKey: dismissedSessionsKey) }
+    }
+
+    func isDismissed(_ id: String) -> Bool { dismissedSessions.contains(id) }
+
+    /// Dismiss/undismiss one sleeping session — the row's hover chevron and its wheel
+    /// click. Animated so the row slides down into (or back out of) the fold, and the
+    /// order projection is re-swept because dismissing drops the row's rest-in-place
+    /// exemption (see `syncSidebarOrder`).
+    func toggleDismissed(_ id: String) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            if dismissedSessions.contains(id) {
+                dismissedSessions.remove(id)
+            } else {
+                dismissedSessions.insert(id)
+            }
+            syncSidebarOrder()
+        }
+    }
+
+    /// Forget `id`'s dismissal, so waking a session leaves it surfaced again the next
+    /// time it goes to sleep. No-op (and no re-sweep) when it wasn't dismissed, which
+    /// is the common case.
+    func clearDismissal(_ id: String) {
+        guard dismissedSessions.contains(id) else { return }
+        dismissedSessions.remove(id)
+        syncSidebarOrder()
+    }
+
     /// Per-project default for the folder "+" button: when a project's cwd is
     /// mapped to `true`, a new session started from its header lands on a fresh
     /// git worktree instead of the project checkout. Keyed by project cwd, same
@@ -1347,6 +1391,8 @@ final class AppModel {
         sessionOrder = prunedSessionOrder(next, keeping: valid)
         let livePins = pinnedSessions.intersection(valid)
         if livePins != pinnedSessions { pinnedSessions = livePins }
+        let liveDismissals = dismissedSessions.intersection(valid)
+        if liveDismissals != dismissedSessions { dismissedSessions = liveDismissals }
     }
 
     /// Custom dev ports the user saved in the Kill Port utility, added on top of the
@@ -2730,6 +2776,9 @@ final class AppModel {
         // Reopening a killed pane resumes it, so its stopped card has served its
         // purpose — drop the flag now so the revived pty renders, not the card.
         stoppedPanes.remove(id)
+        // Waking it also retires any dismissal: the row is back in play, so when it
+        // next falls asleep it earns its place in the preview again.
+        clearDismissal(id)
         // Drive a per-row spinner while the (async, up to ~5s) resume is in flight, so
         // clicking an exited session gives immediate "working on it" feedback.
         activatingSessions.insert(id)
@@ -4451,6 +4500,7 @@ final class AppModel {
             remoteGridOwners.removeValue(forKey: id)
             stoppedPanes.remove(id)
             pinnedSessions.remove(id)
+            dismissedSessions.remove(id)
             if selection == id {
                 selection = editorParent.flatMap { idSet.contains($0) ? nil : $0 } ?? fallback
             }

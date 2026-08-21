@@ -135,6 +135,26 @@ public func sidebarOrderAttention(
     return (resting == .working || resting == .doneUnseen) ? .idle : resting
 }
 
+/// Whether a folded folder keeps showing the row at `index` instead of hiding it
+/// behind "Load more".
+///
+/// The fold is a preview of the first `limit` rows, but two kinds of row must never
+/// disappear into it:
+///
+/// - a live session, wherever it sorts — a manual drag order can park dead rows in
+///   the preview slots, and an active agent (least of all one that just auto-started)
+///   has to stay visible;
+/// - a session that was slept while idle and not yet dismissed — the reaper closed
+///   it, the user didn't, and it is one click from live with its conversation intact.
+///   Folding it away on the app's own initiative loses work the user still considers
+///   open. It leaves only when they say so (the row's dismiss chip or a wheel click),
+///   which is also what lets it sink in the resting order.
+public func foldedPreviewKeeps(
+    index: Int, limit: Int, live: Bool, sleepingUndismissed: Bool
+) -> Bool {
+    index < limit || live || sleepingUndismissed
+}
+
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
 /// sort: its smart-sort key, its slot in the user's persisted drag order
 /// (`nil` when the user hasn't placed it yet), and its id as the stable

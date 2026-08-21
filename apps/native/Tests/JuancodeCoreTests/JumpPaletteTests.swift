@@ -459,6 +459,25 @@ import Testing
         #expect(!manualRestingPrecedes(placed, asleep))
     }
 
+    @Test func foldKeepsLiveAndUndismissedSleepingRows() {
+        let limit = 5
+        // Inside the preview window: everything shows, whatever its state.
+        #expect(foldedPreviewKeeps(index: 0, limit: limit, live: false,
+                                   sleepingUndismissed: false))
+        // Past it, a dead row folds away…
+        #expect(!foldedPreviewKeeps(index: 7, limit: limit, live: false,
+                                    sleepingUndismissed: false))
+        // …but a live one never does…
+        #expect(foldedPreviewKeeps(index: 7, limit: limit, live: true,
+                                   sleepingUndismissed: false))
+        // …and neither does one we auto-slept while the user still had it open.
+        #expect(foldedPreviewKeeps(index: 7, limit: limit, live: false,
+                                   sleepingUndismissed: true))
+        // Once they dismiss it, the fold takes it like any other closed row.
+        #expect(!foldedPreviewKeeps(index: 7, limit: limit, live: false,
+                                    sleepingUndismissed: false))
+    }
+
     @Test func sidebarOrderKeepsTheBucketsThatMoveRows() {
         // The one bubbling state and the dead-sink still come through, and a crash
         // orphan still rests instead of sinking.

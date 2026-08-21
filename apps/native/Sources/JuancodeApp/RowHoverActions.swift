@@ -23,6 +23,12 @@ struct RowHoverActions: View {
     var onTogglePin: (() -> Void)? = nil
     /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
     var pinned: Bool = false
+    /// Dismiss/restore this row — folds a sleeping session away (or brings it back);
+    /// nil hides the chevron.
+    var onToggleDismissed: (() -> Void)? = nil
+    /// Whether the row is currently dismissed — flips the chevron to the undo.
+    var dismissed: Bool = false
+    var dismissHelp: String = ""
     /// Nil hides the ✕.
     let onCloseRequested: (() -> Void)?
     let closeHelp: String
@@ -62,6 +68,18 @@ struct RowHoverActions: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help(menuHelp)
+                .clickCursor()
+            }
+            if let onToggleDismissed {
+                Button(action: onToggleDismissed) {
+                    // Same chevron the fold's own "Load more" button wears, pointed the
+                    // way the row is about to travel: down into the fold, or back up
+                    // out of it.
+                    Image(systemName: dismissed ? "chevron.up.circle" : "chevron.down.circle")
+                        .font(.system(size: glyphSize - 1, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help(dismissHelp)
                 .clickCursor()
             }
             if let onCloseRequested {

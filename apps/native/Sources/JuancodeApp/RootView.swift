@@ -785,14 +785,23 @@ struct SidebarView: View {
     }
 
     /// The rows a folder shows while folded: the first `folderPreviewCount`, plus any
-    /// live session sorting below them. Live rows usually float to the top, but a manual
-    /// drag order can park dead ones in the preview slots — and an active session must
-    /// never be hidden behind "Load more", least of all one that just auto-started.
+    /// live session sorting below them, plus any session we auto-slept that the user
+    /// hasn't dismissed. Live rows usually float to the top, but a manual drag order
+    /// can park dead ones in the preview slots — and an active session must never be
+    /// hidden behind "Load more", least of all one that just auto-started. The
+    /// sleeping ones stay for a different reason: the reaper closed them, not the
+    /// user, so the fold only takes them once the user waves them off
+    /// (see `foldedPreviewKeeps`).
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
         let s = group.sessions
         guard s.count > folderPreviewCount else { return s }
         return s.enumerated()
-            .filter { $0.offset < folderPreviewCount || model.isLive($0.element.id) }
+            .filter {
+                foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
+                                   live: model.isLive($0.element.id),
+                                   sleepingUndismissed: model.isAsleep($0.element.id)
+                                       && !model.isDismissed($0.element.id))
+            }
             .map(\.element)
     }
 
@@ -1403,13 +1412,22 @@ private struct SessionRowHost: View {
                    onTogglePin: external ? nil : { model.togglePinned(meta.id) },
                    selected: selected,
                    activating: model.isActivating(meta.id),
-                   asleep: model.isAsleep(meta.id))
-            // Wheel button = stop this row's agent, browser-tab style. Deliberately the
-            // menu's "Kill Agent" and not the ✕'s delete: a stray middle click then
-            // costs a resume, never the session, its scrollback or its worktree. Inert
-            // on a dead or external row — there's no agent of ours to stop.
-            .onMiddleClick(enabled: !external && model.isLive(meta.id)) {
-                model.killSession(meta.id)
+                   asleep: model.isAsleep(meta.id),
+                   dismissed: !external && model.isDismissed(meta.id),
+                   onToggleDismissed: external || !model.isAsleep(meta.id)
+                       ? nil : { model.toggleDismissed(meta.id) })
+            // Wheel button, browser-tab style — what it closes depends on the row:
+            // a live one has its agent stopped (deliberately the menu's "Kill Agent"
+            // and not the ✕'s delete, so a stray click costs a resume, never the
+            // session, its scrollback or its worktree); a sleeping one, which we
+            // closed rather than the user, is dismissed into the fold. Inert on an
+            // external row, and on a dead one — nothing left to close.
+            .onMiddleClick(enabled: !external && (model.isLive(meta.id) || model.isAsleep(meta.id))) {
+                if model.isLive(meta.id) {
+                    model.killSession(meta.id)
+                } else {
+                    model.toggleDismissed(meta.id)
+                }
             }
     }
 }
@@ -2270,6 +2288,13 @@ struct SessionRow: View {
     /// Auto-slept while idle to free memory (`AppModel.isAsleep`): purple moon, and
     /// the row rests in place instead of sinking or fading like an exited one.
     var asleep: Bool = false
+    /// The user dismissed this sleeping row (`AppModel.isDismissed`) — it sinks and
+    /// the fold may hide it. Drives the hover chip's glyph, which then offers the
+    /// undo ("keep surfaced") rather than the dismiss.
+    var dismissed: Bool = false
+    /// Dismiss/restore this sleeping row — the hover chip's chevron, also on a wheel
+    /// click. Nil for rows that aren't asleep (there's nothing to keep surfaced).
+    var onToggleDismissed: (() -> Void)? = nil
 
     @State private var hovering = false
 
@@ -2377,11 +2402,18 @@ struct SessionRow: View {
     /// row's trailing edge.
     @ViewBuilder
     private var hoverActions: some View {
-        if !external, hovering, menuContent != nil || onCloseRequested != nil || onTogglePin != nil {
+        if !external, hovering,
+           menuContent != nil || onCloseRequested != nil || onTogglePin != nil
+               || onToggleDismissed != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
                             onTogglePin: onTogglePin,
                             pinned: pinned,
+                            onToggleDismissed: onToggleDismissed,
+                            dismissed: dismissed,
+                            dismissHelp: dismissed
+                                ? "Keep this sleeping session surfaced in the list"
+                                : "Dismiss — let this sleeping session fold away (wheel click)",
                             onCloseRequested: onCloseRequested,
                             closeHelp: "Close session (asks to confirm)")
         }
