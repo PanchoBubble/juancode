@@ -70,7 +70,13 @@ import Testing
         let heal = TerminalResizeHeal(quietMs: 60) { action in seen.set(action) }
         heal.arm()
         heal.noteOutput()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Wait for the fire, not for a window the fire usually fits in: the timer
+        // needs 60ms of quiet plus a main-queue hop, and under a loaded suite that
+        // hop is what overruns a fixed sleep.
+        let deadline = Date().addingTimeInterval(10)
+        while seen.value == nil, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         #expect(seen.value == ResizeHealAction(repaint: true, sigwinch: true))
     }
 

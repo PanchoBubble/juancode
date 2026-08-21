@@ -22,13 +22,18 @@ import Foundation
         #expect(g.active == false)
     }
 
-    @Test func laterBeginNeverShortensTheWindow() async throws {
+    @Test func laterBeginNeverShortensTheWindow() {
         let g = LayoutTransitionGate()
         g.begin(for: .milliseconds(400))
+        let long = g.windowEnd
         // A nested shorter transition (e.g. a divider commit during a fullscreen
-        // animation) must not cut the longer window short.
+        // animation) must not cut the longer window short. Asserted on the window
+        // itself: sleeping past the short one and checking `active` measured the
+        // right thing only while the sleep stayed inside the long window, and under
+        // a loaded suite a 60ms sleep can outrun 400ms, so the gate had legitimately
+        // expired and the test failed for the machine, not for the gate.
         g.begin(for: .milliseconds(10))
-        try await Task.sleep(for: .milliseconds(60))
+        #expect(g.windowEnd == long)
         #expect(g.active == true)
     }
 }

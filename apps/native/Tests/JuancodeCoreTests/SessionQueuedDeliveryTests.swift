@@ -92,8 +92,15 @@ import Testing
 
     /// Wait for `cond`, polling rather than sleeping a fixed window, so a loaded
     /// machine costs latency and not a failure. Returns whether it came true.
+    ///
+    /// The default is derived from what the delivery machine is allowed to spend, not
+    /// from a guess about machine speed: one `deliverQueued` pass allows 4s to confirm
+    /// the paste landed plus 3 x 4s of Enter retries, and a pass that gives up leaves
+    /// the message queued for the next idle edge to retry. 30s covered barely two
+    /// passes and reported "never delivered" for a delivery still legitimately in
+    /// flight; 90s covers five.
     @discardableResult
-    private func poll(_ timeout: TimeInterval = 30.0, _ cond: @escaping () -> Bool) async -> Bool {
+    private func poll(_ timeout: TimeInterval = 90.0, _ cond: @escaping () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return true }

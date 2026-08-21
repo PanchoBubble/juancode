@@ -29,8 +29,19 @@ import Testing
             onData: { box.add($0) },
             onExit: { _ in box.finish() })
         #expect(proc != nil)
-        let deadline = Date().addingTimeInterval(5)
-        while !box.isDone, Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+        // Wait for the child to have exited *and* for its dump to be in hand. Exit
+        // alone is not enough: `onExit` comes off the waitpid thread and can beat the
+        // last read, so the caller would parse a partial environment. The bound is
+        // only here so a broken spawn fails instead of hanging — `/usr/bin/env sh -c
+        // printf` answers in milliseconds on an idle machine — so it is generous:
+        // under a full parallel suite a 5s bound handed these assertions an empty
+        // string, which reads as "the overlay is broken" rather than "the child had
+        // not run yet".
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, !(box.isDone && !box.text.isEmpty) {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(box.isDone, "the child never exited")
         return box.text
     }
 

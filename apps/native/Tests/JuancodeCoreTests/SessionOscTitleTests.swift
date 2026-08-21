@@ -20,7 +20,11 @@ import Testing
         return url.path
     }
 
-    private func poll(_ timeout: TimeInterval = 3.0, _ cond: @escaping () -> Bool) async {
+    /// The wait is for a real child's OSC sequence to reach us, so the bound only
+    /// decides how long a broken spawn takes to report. 3s was short enough that a
+    /// loaded suite let the transcript poll's title stand in for the CLI's, which
+    /// reads as "the OSC title lost" when in truth it had not arrived yet.
+    private func poll(_ timeout: TimeInterval = 60.0, _ cond: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }

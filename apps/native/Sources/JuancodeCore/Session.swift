@@ -171,6 +171,8 @@ public final class Session: @unchecked Sendable {
     /// (juancode-1th.3). Guarded by `lock`.
     private var desiredCols = 0
     private var desiredRows = 0
+    /// Backing store for `bootGridSettled`. Guarded by `lock`.
+    private var _bootGridSettled = false
 
     /// Previous activity, tracked to fire the queue flush on the edge into idle
     /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
@@ -1242,27 +1244,45 @@ public final class Session: @unchecked Sendable {
         for _ in 0..<GridReapply.attempts {
             let settled = await waitForStableScreen(maxMs: GridReapply.settleMaxMs,
                                                     pollMs: GridReapply.settlePollMs)
-            guard isRunning else { return }
+            guard isRunning else { break }
             if settled {
-                nudgeReapply()
+                nudgeReapply(then: { [weak self] in self?.markBootGridSettled() })
                 return
             }
         }
+        markBootGridSettled()
     }
 
     /// Push the desired grid to the pty as a `rows-1` → `rows` pair: a genuine size
     /// change forces a SIGWINCH the settled CLI can't miss, where re-sending the
     /// same size can be a no-op. No-op until a desired grid is known / the pty is
-    /// live.
-    private func nudgeReapply() {
+    /// live. `then` runs once the pair is fully written (or was skipped), on the
+    /// work queue that wrote it.
+    private func nudgeReapply(then: (@Sendable () -> Void)? = nil) {
         let (cols, rows) = lock.withLock { (desiredCols, desiredRows) }
-        guard isRunning, cols > 0, rows > 0 else { return }
+        guard isRunning, cols > 0, rows > 0 else { then?(); return }
         _ = resize(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
         let workQueue = self.workQueue
         workQueue.asyncAfter(deadline: .now() + .milliseconds(GridReapply.nudgeMs)) { [weak self] in
+            defer { then?() }
             guard let self, self.isRunning else { return }
             _ = self.resize(cols: cols, rows: rows)
         }
+    }
+
+    /// True once the boot grid re-apply is over: either its nudge has written both
+    /// halves of the `rows-1` → `rows` pair, or the screen never settled and no
+    /// nudge will fire. A caller that has to reason about the model's grid can wait
+    /// on this instead of guessing how long boot takes — mid-nudge the grid is one
+    /// row off what anyone asked for, and the `matching:` guard in
+    /// `repaintFromModel` correctly refuses to paint into it. Only the tests read
+    /// it; production panes resize with the surface they own. Note an `autoSubmit`
+    /// seed nudges once more at its own settle point, so this is the boot re-apply
+    /// being done, not a promise that the grid is frozen for good.
+    var bootGridSettled: Bool { lock.withLock { _bootGridSettled } }
+
+    private func markBootGridSettled() {
+        lock.withLock { _bootGridSettled = true }
     }
 
     public func kill() {
@@ -1361,12 +1381,26 @@ public final class Session: @unchecked Sendable {
     /// between the two. Pass nil to repaint unconditionally.
     public func repaintFromModel(matching grid: (cols: Int, rows: Int)? = nil,
                                  _ onBytes: @escaping OutputListener) {
+        repaintFromModel(matching: grid, onBytes, decided: nil)
+    }
+
+    /// The repaint above, plus a report of what the grid guard decided — painted or
+    /// skipped — delivered on the work queue right after the decision. A test can
+    /// then assert on the decision itself instead of waiting out a duration long
+    /// enough that the paint has "probably" arrived, or (for a skip) long enough
+    /// that it has "probably" not. Production passes nil, so the whole cost is one
+    /// optional call on a path that already hops queues.
+    func repaintFromModel(matching grid: (cols: Int, rows: Int)?,
+                          _ onBytes: @escaping OutputListener,
+                          decided: (@Sendable (Bool) -> Void)?) {
         workQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self else { decided?(false); return }
             if let grid, self.terminalModel.cols != grid.cols || self.terminalModel.rows != grid.rows {
+                decided?(false)
                 return
             }
             onBytes(self.terminalModel.screenRepaintBytes())
+            decided?(true)
         }
     }
 

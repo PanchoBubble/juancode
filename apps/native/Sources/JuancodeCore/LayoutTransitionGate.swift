@@ -42,4 +42,9 @@ public final class LayoutTransitionGate: @unchecked Sendable {
 
     /// Whether a transition is in flight right now.
     public var active: Bool { lock.withLock { DispatchTime.now() < deadline } }
+
+    /// When the current window ends. `active` is this compared against now, which a
+    /// test cannot assert on without racing the clock it is trying to describe; the
+    /// window itself is the thing `begin` is specified in terms of.
+    var windowEnd: DispatchTime { lock.withLock { deadline } }
 }

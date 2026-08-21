@@ -34,12 +34,34 @@ import Testing
         )
     }
 
-    private func poll(_ timeout: TimeInterval = 3.0, _ cond: @escaping () -> Bool) async {
+    /// Every wait in this file is for something a real child process does — a frame
+    /// on the pty, an exit, a persisted row — so this timeout is a "the spawn is
+    /// broken" bound, not a schedule, and it can only ever be too short. It has to
+    /// clear the worst case of the full parallel suite, which is much worse than the
+    /// machine being busy: 40 sessions spawned at once at load 65 all painted their
+    /// first frame inside 270ms, yet inside a full run a single session has been
+    /// measured taking 24s, and 60s+ alongside a concurrent cargo build, before its
+    /// first byte arrived. 120s doubles the worst stall measured, and every caller
+    /// re-asserts the condition afterwards, so overshooting only ever costs time.
+    private func poll(_ timeout: TimeInterval = 120.0, _ cond: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+
+    /// Wait for `cond` and, if it never came true, say whether the session is even
+    /// alive. The suite's other load failure is a child that produces no first frame
+    /// at all — measured at 24s, and past 60s beside a concurrent cargo build — and
+    /// "expected READY, got empty" does not distinguish a starved child from one that
+    /// died on spawn. Whoever reads the next occurrence needs that in the message.
+    private func expectEventually(_ s: Session, _ what: String,
+                                  _ cond: @escaping () -> Bool) async {
+        await poll { cond() }
+        let why = "\(what) never arrived: running=\(s.isRunning) status=\(s.meta.status) "
+            + "exit=\(String(describing: s.meta.exitCode))"
+        #expect(cond(), Comment(rawValue: why))
     }
 
     private var cwd: String { FileManager.default.temporaryDirectory.path }
@@ -63,7 +85,7 @@ import Testing
         let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
         defer { s.kill() }
 
-        await poll { s.getScrollback().count > 0 }
+        await expectEventually(s, "the first frame") { s.getScrollback().count > 0 }
         let late = ByteSink()
         s.subscribeOutput(replay: true) { late.add($0) }
         // Replay is synchronous on subscribe, so it's already here.
@@ -238,8 +260,7 @@ import Testing
 
         let sink = ByteSink()
         s.subscribeOutput(replay: true) { sink.add($0) }
-        await poll { sink.text.contains("FRESH") }
-        #expect(sink.text.contains("FRESH"))
+        await expectEventually(s, "FRESH") { sink.text.contains("FRESH") }
     }
 
     /// juancode-a2h.2: `subscribeFromModelSeed` reproduces the session's current
@@ -260,8 +281,9 @@ import Testing
         defer { cancel() }
 
         // The seed lands asynchronously on the workQueue.
-        await poll { mirror.visibleText().contains("READY") }
-        #expect(mirror.visibleText().contains("READY"))
+        await expectEventually(s, "READY on the seeded mirror") {
+            mirror.visibleText().contains("READY")
+        }
 
         // Live output after the subscription still flows (pty echo + cat).
         s.write("echoback\n")
@@ -276,23 +298,46 @@ import Testing
         let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
         let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)
         defer { s.kill() }
-        await poll { s.terminalModel.visibleText().contains("READY") }
+
+        await expectEventually(s, "READY") { s.terminalModel.visibleText().contains("READY") }
+
+        // The boot grid re-apply nudges the pty rows-1 → rows once the screen
+        // settles, so for ~60ms the model sits at a grid nobody asked for and a
+        // `matching:` repaint is correctly dropped. Whether this test overlaps that
+        // window is pure timing — on a busy machine the first frame can arrive right
+        // in it — so wait for the re-apply to be *over* rather than for the overlap
+        // to be unlikely. The latch is also set when the screen never settled and no
+        // nudge will ever fire, so this waits for "the grid has stopped moving"
+        // either way.
+        await poll { s.bootGridSettled }
+        #expect(s.bootGridSettled)
 
         // A surface that got the resize wrong: it holds text the model never had.
         let surface = SessionTerminalModel(cols: 80, rows: 24, scrollbackLines: 100)
         surface.feed(Array("GARBLE".utf8))
         #expect(surface.visibleText().contains("GARBLE"))
 
-        s.repaintFromModel(matching: (cols: 80, rows: 24)) { surface.feed($0) }
-        await poll { surface.visibleText().contains("READY") }
+        #expect(await repaint(s, matching: (cols: 80, rows: 24)) { surface.feed($0) })
         #expect(surface.visibleText().contains("READY"))
         #expect(!surface.visibleText().contains("GARBLE"))
 
         // A repaint for a grid the model isn't at is dropped, not mis-painted.
         surface.feed(Array("STALE".utf8))
-        s.repaintFromModel(matching: (cols: 40, rows: 12)) { surface.feed($0) }
-        await poll(0.4) { false }
+        #expect(await repaint(s, matching: (cols: 40, rows: 12)) { surface.feed($0) } == false)
         #expect(surface.visibleText().contains("STALE"))
+    }
+
+    /// Ask for a repaint and hand back what the grid guard decided, once it has
+    /// decided. `onBytes` has already run on the session's work queue by then, so
+    /// the surface reads straight after with nothing to wait for — where polling for
+    /// the paint can only ever time out into "it didn't happen", and polling for the
+    /// *absence* of a paint is a sleep pretending to be an assertion.
+    private func repaint(_ s: Session,
+                         matching grid: (cols: Int, rows: Int),
+                         _ onBytes: @escaping Session.OutputListener) async -> Bool {
+        await withCheckedContinuation { k in
+            s.repaintFromModel(matching: grid, onBytes, decided: { k.resume(returning: $0) })
+        }
     }
 
     @Test func onCreateFiresForNewSessions() async throws {
