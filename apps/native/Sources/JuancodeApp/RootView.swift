@@ -50,6 +50,9 @@ struct RootView: View {
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                // Which core produced what you are looking at (juancode-52e8.2).
+                // Always visible, including on the default Swift core.
+                CoreBadge()
                 // Slimmed top bar (juancode-v4ep): notifications, the Oracle AI, an
                 // AI-settings prompt, and a Tools popover. Everything else moved —
                 // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP status
@@ -123,6 +126,10 @@ struct RootView: View {
         // On-disk DB failed to open at launch → running in-memory; surface recovery.
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()
+        }
+        // Asked for the rust core, got the swift one: say so before anything else.
+        .sheet(isPresented: $model.coreFallbackPending) {
+            CoreFallbackSheet()
         }
         .onAppear { if model.degradedReason != nil { showDbRecovery = true } }
         .alert("Error", isPresented: Binding(
@@ -1958,12 +1965,15 @@ private struct PrRow: View {
                 if let t = tracked {
                     TrackBadge(state: t.state)
                     Button("Untrack") { model.untrackPr(t.id) }
+                        .disabled(!model.supports(.trackedPrs))
                         .buttonStyle(.borderless)
                         .font(.system(size: 11))
                         .help("Stop watching this PR (keeps the session)")
                         .clickCursor()
                 } else {
                     Button("Track") { model.trackPr(pr, cwd: cwd) }
+                        .disabled(!model.supports(.trackedPrs))
+                        .help(model.unavailable(.trackedPrs) ?? "Track this PR: an agent watches it and answers review comments")
                         .buttonStyle(.borderless)
                         .font(.system(size: 11))
                         .help("Watch this PR — auto-fix review comments & CI, escalate decisions")

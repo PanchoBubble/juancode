@@ -101,6 +101,20 @@ final class AppModel {
     let degradedReason: String?
     let corruptDbPath: String?
 
+    /// Which core this launch asked for, which one it got, and where its database
+    /// is (`CoreBoot`). Read-only for the launch: flipping the Settings picker
+    /// records a choice for the NEXT launch and never migrates live sessions.
+    let coreSelection: CoreSelection
+
+    /// Non-nil while the connection to a remote core is down, carrying the reason.
+    /// A remote core going away has to be visible: the panes it was feeding just
+    /// stop, and a frozen terminal that explains nothing is the worst outcome.
+    var coreConnectionDown: String?
+
+    /// Set once when a launch that asked for the rust core fell back to swift, so
+    /// the offer is made exactly once per launch rather than on every render.
+    var coreFallbackPending = false
+
     var sessions: [SessionMeta] = []
     /// Every SessionMeta seen this run, keyed by id and NOT purged by the retention
     /// cap. Lets `reactivate` revive a session whose db row the cap deleted out from
@@ -520,10 +534,15 @@ final class AppModel {
     /// byte — the auto-dismiss hook for the `.resuming` banner.
     private var restoreOutputCancels: [String: () -> Void] = [:]
 
-    init(core: any CoreClient, degradedReason: String? = nil, corruptDbPath: String? = nil) {
+    init(core: any CoreClient, degradedReason: String? = nil, corruptDbPath: String? = nil,
+         coreSelection: CoreSelection = CoreSelection(
+            requested: .swift, active: .swift, source: .fallbackDefault, unreachableReason: nil,
+            databasePath: Config.databasePath(for: .swift), rustCoreURL: Config.rustCoreBaseURL)) {
         self.core = core
         self.degradedReason = degradedReason
         self.corruptDbPath = corruptDbPath
+        self.coreSelection = coreSelection
+        self.coreFallbackPending = coreSelection.didFallBack
         // Snapshot the disk-restore candidates before anything revives: persisted
         // sessions not already live in the (post-restart, usually empty) registry.
         let persistedAtLaunch = core.sessions()
@@ -549,6 +568,7 @@ final class AppModel {
             }
         }
         for s in core.liveSessions() { watch(s) }
+        watchCoreConnection()
         refresh()
         restoreLaunchSelection() // land back on the pane you were in (juancode restore)
         reviveLaunchPlan()       // ...and bring every other open session back with it
@@ -840,6 +860,34 @@ final class AppModel {
         for meta in sessions { project(meta.id) }
         for meta in externalSessions where next[meta.id] == nil { project(meta.id) }
         if next != sidebarOrder { sidebarOrder = next }
+    }
+
+    /// Whether the active core implements `capability`. The one question every
+    /// gated affordance asks, so a button and its tooltip cannot disagree.
+    func supports(_ capability: CoreCapability) -> Bool { core.supports(capability) }
+
+    /// The sentence to show on an affordance the active core cannot back, or nil
+    /// when it can.
+    func unavailable(_ capability: CoreCapability) -> String? {
+        core.unavailableReason(capability)
+    }
+
+    /// Watch a remote core's connection so the badge can go red and the user is
+    /// told once, rather than staring at panes that quietly stopped moving.
+    func watchCoreConnection() {
+        guard let rust = core as? RustCoreClient else { return }
+        rust.onConnectionChange { [weak self] up, reason in
+            Task { @MainActor in
+                guard let self else { return }
+                let wasDown = self.coreConnectionDown != nil
+                self.coreConnectionDown = up ? nil : (reason ?? "the connection dropped")
+                if !up, !wasDown {
+                    self.errorMessage = "Lost the connection to the rust core at "
+                        + "\(self.coreSelection.rustCoreURL): \(reason ?? "unknown reason"). "
+                        + "Sessions keep running in the daemon; reconnecting."
+                }
+            }
+        }
     }
 
     func isLive(_ id: String) -> Bool { core.liveSession(id) != nil }
@@ -1637,6 +1685,10 @@ final class AppModel {
     /// selects the new pane. No-op if the source session is unknown or is itself an
     /// editor.
     func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
+        if let reason = unavailable(.editor) {
+            errorMessage = "Can't open an editor session. \(reason)"
+            return
+        }
         guard let parent = core.liveSession(sessionId)?.meta
                 ?? sessions.first(where: { $0.id == sessionId }),
               parent.kind != .editor else { return }
@@ -2314,6 +2366,10 @@ final class AppModel {
     /// runs the poll loop; the GUI just selects the spawned session so "Track" is
     /// still an explicit "take me there". The mirror updates via the subscription.
     func trackPr(_ pr: PullRequest, cwd: String) {
+        if let reason = unavailable(.trackedPrs) {
+            errorMessage = "Can't track PR #\(pr.number). \(reason)"
+            return
+        }
         let grid = TerminalGrid.spawn
         Task {
             guard let entry = await core.trackPr(
@@ -2334,6 +2390,13 @@ final class AppModel {
     /// interrupts the agent mid-turn. Safe when the session isn't live: the
     /// queue holds the message and the next revival flushes it.
     func queuePrompt(sessionId: String, text: String) {
+        if let reason = unavailable(.queue) {
+            // One gate for every "send to agent" path: pasting straight into the pty
+            // instead would deliver mid-turn, which is exactly what the queue exists
+            // to avoid.
+            errorMessage = "Can't queue that message. \(reason)"
+            return
+        }
         core.queueMessage(sessionId, text: text)
         liveSession(sessionId)?.kickQueue()
     }
@@ -2345,6 +2408,10 @@ final class AppModel {
     /// and just handed one comment off. Returns false when tracking failed
     /// (spawn failure) and nothing was queued.
     func trackPrAndQueue(_ pr: PullRequest, cwd: String, prompt: String) async -> Bool {
+        if let reason = unavailable(.trackedPrs) {
+            errorMessage = "Can't track PR #\(pr.number). \(reason)"
+            return false
+        }
         let grid = TerminalGrid.spawn
         if let entry = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows) {
             queuePrompt(sessionId: entry.sessionId, text: prompt)
@@ -4002,11 +4069,15 @@ final class AppModel {
     /// Spawn a shell pty for `pane` in `cwd`; returns false (and notes nothing) if
     /// the spawn fails so the caller can skip persisting the pane.
     private func spawnShell(for pane: TerminalPaneID, cwd: String) -> Bool {
-        guard let pty = try? core.openTerminalPty(cwd: cwd, cols: 80, rows: 24) else {
+        do {
+            shellPtys[pane] = try core.openTerminalPty(cwd: cwd, cols: 80, rows: 24)
+            return true
+        } catch {
+            // A core without the `terminal` capability throws here, and a panel that
+            // just never appears would read as a bug in the panel.
+            errorMessage = "Couldn't open a terminal: \(error.localizedDescription)"
             return false
         }
-        shellPtys[pane] = pty
-        return true
     }
 
     private func killShell(_ pane: TerminalPaneID) {
@@ -4066,6 +4137,10 @@ final class AppModel {
     func submitReview(_ id: String) {
         guard let session = liveSession(id) else {
             gitNoteBySession[id] = GitNote(ok: false, text: "Session isn't live — can't send review.")
+            return
+        }
+        if let reason = unavailable(.queue) {
+            gitNoteBySession[id] = GitNote(ok: false, text: reason)
             return
         }
         let staged = comments(id)

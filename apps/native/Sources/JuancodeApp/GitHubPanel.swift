@@ -1094,8 +1094,11 @@ private struct GitHubPrActions: View {
             // `selection`'s didSet closes the GitHub view.
             Button("Go to Session") { model.selection = t.sessionId }
             Button("Untrack") { model.untrackPr(t.id) }
+                .disabled(!model.supports(.trackedPrs))
         } else {
             Button("Track") { model.trackPr(pr, cwd: cwd) }
+                .disabled(!model.supports(.trackedPrs))
+                .help(model.unavailable(.trackedPrs) ?? "Track this PR: an agent watches it and answers review comments")
         }
     }
 }

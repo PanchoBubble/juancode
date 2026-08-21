@@ -28,10 +28,14 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
     /// database won't open keeps the app usable for the launch and carries the
     /// reason, so the UI can offer to reset the file. Only failing to open even an
     /// in-memory database is fatal.
-    public static func local() -> (core: SwiftCoreClient, degradedReason: String?, corruptDbPath: String) {
-        let dbPath = GRDBStore.defaultPath()
+    ///
+    /// `dbPath` defaults to this core's own file. One database per core is the rule
+    /// that makes the backend switch safe (`CoreBoot`): two writers on one SQLite
+    /// file plus two schemas drifting apart is what it exists to prevent.
+    public static func local(dbPath: String = Config.databasePath(for: .swift))
+        -> (core: SwiftCoreClient, degradedReason: String?, corruptDbPath: String) {
         do {
-            return (SwiftCoreClient(state: try AppState()), nil, dbPath)
+            return (SwiftCoreClient(state: try AppState(dbPath: dbPath)), nil, dbPath)
         } catch {
             NSLog("juancode: on-disk database failed to open (\(dbPath)): \(error)")
             do {

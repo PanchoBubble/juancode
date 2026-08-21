@@ -236,23 +236,32 @@ struct JuancodeApp: App {
         // ptys), so a low inherited limit can't make forkpty fail with EMFILE.
         configureFileDescriptorLimit()
 
-        // Pick the core this launch talks to. The only place that names a concrete
-        // implementation: everything above the seam holds a `CoreClient`. The local
-        // core degrades to an in-memory store when the on-disk DB won't open, and
-        // carries the reason so RootView can offer to reset the file.
-        let (core, degradedReason, dbPath) = SwiftCoreClient.local()
-        let appModel = AppModel(core: core, degradedReason: degradedReason,
-                                corruptDbPath: degradedReason != nil ? dbPath : nil)
+        // Pick the core this launch talks to: the in-process Swift core, or the
+        // `juancoded` Rust daemon over the wire (`JUANCODE_CORE`, else the Settings
+        // choice). The only place that names a concrete implementation — everything
+        // above the seam holds a `CoreClient`. One core per launch and one database
+        // per core; a rust core that does not answer its handshake falls back to
+        // swift here and says so through `coreSelection`.
+        let booted = CoreBoot.boot()
+        let appModel = AppModel(core: booted.client, degradedReason: booted.degradedReason,
+                                corruptDbPath: booted.degradedReason != nil ? booted.corruptDbPath : nil,
+                                coreSelection: booted.selection)
         _model = State(wrappedValue: appModel)
         _oracle = State(wrappedValue: OracleModel(app: appModel))
-        AppEnv.core = core
+        AppEnv.core = booted.client
         AppEnv.model = appModel
 
         // Boot the embedded server so remote clients can attach to the same
         // registry. Best-effort: if the port is taken (e.g. a dev server is
         // running) the local shell still works fully.
-        let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
-        core.startEmbeddedServer(host: host, port: Config.port)
+        //
+        // Only the in-process core has a server to embed: with the rust core the
+        // daemon IS the server, on its own port, so the sidecar and any remote
+        // client talk to it directly instead of to this process.
+        if let swiftCore = booted.client as? SwiftCoreClient {
+            let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
+            swiftCore.startEmbeddedServer(host: host, port: Config.port)
+        }
     }
 
     var body: some Scene {
@@ -439,6 +448,9 @@ struct JuancodeApp: App {
                     .tabItem { Label("Sessions", systemImage: "rectangle.stack") }
                 TerminalSettingsView()
                     .tabItem { Label("Terminal", systemImage: "terminal") }
+                CoreSettingsView()
+                    .environment(model)
+                    .tabItem { Label("Core", systemImage: "cpu") }
                 AppearanceSettingsView()
                     .environment(model)
                     .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }

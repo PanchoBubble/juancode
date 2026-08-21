@@ -749,10 +749,11 @@ struct ChangesPanel: View {
             Button("Send to agent (r)") { model.submitReview(sessionId) }
                 .controlSize(.small)
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.liveSession(sessionId) == nil)
-                .help(model.liveSession(sessionId) == nil
-                      ? "Session isn't live — start it to send review feedback"
-                      : "Queue the annotations for the agent (delivers on idle, never mid-turn)")
+                .disabled(model.liveSession(sessionId) == nil || !model.supports(.queue))
+                .help(model.unavailable(.queue)
+                      ?? (model.liveSession(sessionId) == nil
+                          ? "Session isn't live — start it to send review feedback"
+                          : "Queue the annotations for the agent (delivers on idle, never mid-turn)"))
                 .clickCursor()
         }
         .padding(10)
