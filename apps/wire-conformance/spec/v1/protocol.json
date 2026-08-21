@@ -149,7 +149,7 @@
     "serverInfo": {
       "required": ["protocolVersion", "capabilities"],
       "optional": [],
-      "notes": "Sent on connect. No reply frame may precede it, but it is not guaranteed to be frame 0 - see the SERVER_INFO_ORDERING rule."
+      "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule."
     },
     "created": {
       "required": ["session"],
@@ -268,7 +268,7 @@
     "An unrecognised client `type` is ignored, never fatal: a newer client must not be able to kill the connection.",
     "Malformed JSON gets one error frame and the connection stays open.",
     "A client feature-detects off serverInfo.capabilities and must refuse a core whose protocolVersion it does not implement.",
-    "SERVER_INFO_ORDERING: serverInfo is sent on connect and no REPLY frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs) may precede it. It is NOT guaranteed to be frame 0: the Swift core starts its activity fan-out before queueing the handshake, so a connection opened while other sessions are live sees activity first.",
+    "SERVER_INFO_ORDERING: serverInfo is frame 0. Nothing may precede it: not a reply frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs), and not an unsolicited activity broadcast either. A core must queue the handshake before it starts the activity fan-out, so a connection opened while other sessions are already live still reads serverInfo first and their activity after it.",
     "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage."
   ]
 }

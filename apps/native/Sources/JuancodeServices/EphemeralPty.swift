@@ -94,13 +94,13 @@ public enum EphemeralPtyError: Error {
     case outsideWorkingDir
 }
 
-/// Resolve the editor command from `$VISUAL`/`$EDITOR`, defaulting to nvim.
-/// These may carry args (e.g. "code -w"); split naively — good enough for the
-/// common single-binary case and the nvim default. Mirrors `editorCommand()`.
+/// Resolve the editor command for an ephemeral editor pty. Delegates to the core
+/// resolver so the WS `openEditor` path and a core-spawned editor session obey one
+/// precedence (`JUANCODE_EDITOR`, then `$VISUAL`/`$EDITOR`, then nvim) and one
+/// PATH lookup. `env` stays injectable so the precedence is testable.
 func editorCommand(env: [String: String] = ProcessInfo.processInfo.environment) -> (cmd: String, args: [String]) {
-    let raw = (env["VISUAL"] ?? env["EDITOR"] ?? "nvim").trimmingCharacters(in: .whitespaces)
-    let parts = raw.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-    return (parts.first ?? "nvim", Array(parts.dropFirst()))
+    let (executable, args) = resolveEditorCommand(editorCommandString(env: env))
+    return (executable, args)
 }
 
 /// Resolve the interactive shell from `$SHELL`, defaulting to zsh, launched `-i`

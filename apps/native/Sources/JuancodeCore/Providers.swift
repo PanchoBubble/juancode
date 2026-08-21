@@ -355,12 +355,24 @@ private func lookupViaShell(_ cmd: String, interactive: Bool, timeout: TimeInter
     return (resolved?.hasPrefix("/") == true) ? resolved : nil
 }
 
-/// Resolve the configured editor (`Config.editor`, i.e. `JUANCODE_EDITOR`, default
-/// nvim) into an absolute binary plus its leading args. The command string is split
-/// naively on whitespace — enough for the common single-binary case and flags like
-/// `"code -w"` — and the binary is resolved against the login-shell PATH (via
-/// `resolveBin`) so a Finder-launched app still finds it.
-public func resolveEditorCommand(_ raw: String = Config.editor) -> (executable: String, args: [String]) {
+/// The editor command string, from the one precedence every editor path shares:
+/// `JUANCODE_EDITOR` (the knob `Config.editor` documents) wins, then the unix
+/// `$VISUAL`/`$EDITOR` convention, then nvim. Blank values count as unset, so an
+/// exported-but-empty `EDITOR` doesn't shadow the default.
+public func editorCommandString(env: [String: String] = ProcessInfo.processInfo.environment) -> String {
+    for key in ["JUANCODE_EDITOR", "VISUAL", "EDITOR"] {
+        let value = (env[key] ?? "").trimmingCharacters(in: .whitespaces)
+        if !value.isEmpty { return value }
+    }
+    return "nvim"
+}
+
+/// Resolve the editor command (see `editorCommandString`) into an absolute binary
+/// plus its leading args. The command string is split naively on whitespace — enough
+/// for the common single-binary case and flags like `"code -w"` — and the binary is
+/// resolved against the login-shell PATH (via `resolveBin`) so a Finder-launched app
+/// still finds it.
+public func resolveEditorCommand(_ raw: String = editorCommandString()) -> (executable: String, args: [String]) {
     let parts = raw.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
     let cmd = parts.first ?? "nvim"
     return (resolveBin(cmd, override: nil), Array(parts.dropFirst()))

@@ -39,6 +39,22 @@ public enum JuancodeServer {
 
     // MARK: - WebSocket router (/ws)
 
+    /// Build a connection and put the handshake on the wire before anything else.
+    ///
+    /// The order here is the guarantee: `serverInfo` is queued first, then the
+    /// activity fan-out starts. `start()` broadcasts once per already-live session,
+    /// so starting it first made a connection opened while sessions exist read
+    /// `activity` as frame 0 and the handshake second — the opposite of what
+    /// `ServerMessage.serverInfo` documents and of what a client needs to
+    /// feature-detect before it interprets anything.
+    static func openConnection(state: AppState, gate: WSSendGate) -> WebSocketConnection {
+        let conn = WebSocketConnection(state: state, gate: gate)
+        conn.send(.serverInfo(protocolVersion: WireProtocol.version,
+                              capabilities: WireProtocol.capabilities))
+        conn.start()
+        return conn
+    }
+
     static func buildWSRouter(state: AppState) -> Router<BasicWebSocketRequestContext> {
         let wsRouter = Router(context: BasicWebSocketRequestContext.self)
         wsRouter.ws("/ws") { inbound, outbound, _ in
@@ -49,13 +65,7 @@ public enum JuancodeServer {
             // output coalescer can detect a stalled client and stop growing this
             // stream without bound (juancode-5qw.7).
             let gate = WSSendGate(cont: cont)
-            let conn = WebSocketConnection(state: state, gate: gate)
-            conn.start()
-            // Announce version + capabilities first, before any pty output, so
-            // clients can feature-detect (juancode-tgc). Yielded onto the same
-            // stream the writer drains, so it's the first frame on the wire.
-            conn.send(.serverInfo(protocolVersion: WireProtocol.version,
-                                  capabilities: WireProtocol.capabilities))
+            let conn = openConnection(state: state, gate: gate)
             let writer = Task {
                 for await msg in stream {
                     try? await outbound.writeTextMessage(msg.jsonString())

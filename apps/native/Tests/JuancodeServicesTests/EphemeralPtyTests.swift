@@ -2,20 +2,30 @@ import XCTest
 @testable import JuancodeServices
 
 final class EphemeralPtyTests: XCTestCase {
+    /// The command is resolved against PATH, so assert on the binary name rather
+    /// than the absolute path this machine happens to resolve to.
+    private func editorName(_ env: [String: String]) -> String {
+        (editorCommand(env: env).cmd as NSString).lastPathComponent
+    }
+
     func testEditorCommandDefaultsToNvim() {
-        XCTAssertEqual(editorCommand(env: [:]).cmd, "nvim")
+        XCTAssertEqual(editorName([:]), "nvim")
         XCTAssertTrue(editorCommand(env: [:]).args.isEmpty)
     }
 
     func testEditorCommandSplitsArgs() {
         let (cmd, args) = editorCommand(env: ["VISUAL": "code -w"])
-        XCTAssertEqual(cmd, "code")
+        XCTAssertEqual((cmd as NSString).lastPathComponent, "code")
         XCTAssertEqual(args, ["-w"])
     }
 
-    func testEditorCommandPrefersVisualOverEditor() {
-        XCTAssertEqual(editorCommand(env: ["VISUAL": "vim", "EDITOR": "nano"]).cmd, "vim")
-        XCTAssertEqual(editorCommand(env: ["EDITOR": "nano"]).cmd, "nano")
+    /// One precedence for every editor path: the documented JUANCODE_EDITOR knob
+    /// wins, and $VISUAL/$EDITOR remain the fallbacks under it.
+    func testEditorCommandPrecedence() {
+        XCTAssertEqual(editorName(["JUANCODE_EDITOR": "vim", "VISUAL": "nano", "EDITOR": "ed"]), "vim")
+        XCTAssertEqual(editorName(["VISUAL": "vim", "EDITOR": "nano"]), "vim")
+        XCTAssertEqual(editorName(["EDITOR": "nano"]), "nano")
+        XCTAssertEqual(editorName([:]), "nvim")
     }
 
     func testShellCommandDefaultsToZshInteractive() {

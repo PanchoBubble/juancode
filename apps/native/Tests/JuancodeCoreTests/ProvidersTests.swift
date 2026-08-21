@@ -61,4 +61,19 @@ import Testing
         #expect(Providers.claude.pinsSessionId == true)
         #expect(Providers.codex.pinsSessionId == false)
     }
+
+    @Test func editorPrecedencePrefersTheJuancodeKnob() {
+        #expect(editorCommandString(env: ["JUANCODE_EDITOR": "hx",
+                                          "VISUAL": "vim",
+                                          "EDITOR": "nano"]) == "hx")
+        #expect(editorCommandString(env: ["VISUAL": "vim", "EDITOR": "nano"]) == "vim")
+        #expect(editorCommandString(env: ["EDITOR": "nano"]) == "nano")
+        #expect(editorCommandString(env: [:]) == "nvim")
+    }
+
+    @Test func editorPrecedenceTreatsBlankAsUnset() {
+        // An exported-but-empty knob is "unset", not "run the empty string".
+        #expect(editorCommandString(env: ["JUANCODE_EDITOR": "  ", "VISUAL": "vim"]) == "vim")
+        #expect(editorCommandString(env: ["JUANCODE_EDITOR": "", "EDITOR": ""]) == "nvim")
+    }
 }
