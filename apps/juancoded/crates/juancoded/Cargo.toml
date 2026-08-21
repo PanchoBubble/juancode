@@ -1,0 +1,20 @@
+[package]
+name = "juancoded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "juancoded"
+path = "src/main.rs"
+
+[dependencies]
+juancoded-core.workspace = true
+juancoded-persistence.workspace = true
+juancoded-plugins.workspace = true
+juancoded-server.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

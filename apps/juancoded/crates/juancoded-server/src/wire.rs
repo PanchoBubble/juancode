@@ -1,0 +1,490 @@
+//! Client → server and server → client frames, mirroring `WireProtocol.swift`.
+//!
+//! Two rules are load-bearing:
+//!   1. An unrecognised `type` degrades to `Unknown` instead of failing the decode
+//!      (juancode-tgc) — a newer client must not be able to kill the connection.
+//!   2. `serverInfo` goes out first on every connection, and its capability list is
+//!      honest about what this core implements. A narrower core is a supported
+//!      configuration precisely because clients feature-detect off this.
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use juancoded_core::model::{SessionActivity, SessionMeta};
+use juancoded_vt::wire::RowUpdate;
+
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// What the Rust core implements today. Deliberately shorter than the Swift core's
+/// list: no `queue`, no `trackedPrs`, no `editor`/`terminal` yet. Clients that need
+/// those refuse or hide them rather than sending into a void.
+pub const CAPABILITIES: &[&str] = &["inputAck", "resizeAck", "screen", "adoptExternal"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientMessage {
+    Create {
+        provider: String,
+        cwd: String,
+        cols: Option<u16>,
+        rows: Option<u16>,
+        initial_input: Option<String>,
+        skip_permissions: Option<bool>,
+        dispatch_id: Option<String>,
+    },
+    Attach {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    Input {
+        session_id: String,
+        data: String,
+        seq: Option<i64>,
+    },
+    Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+        seq: Option<i64>,
+    },
+    Kill {
+        session_id: String,
+    },
+    SubscribeScreen {
+        session_id: String,
+    },
+    UnsubscribeScreen {
+        session_id: String,
+    },
+    /// A well-formed frame this core doesn't implement. Ignored, not fatal.
+    Unknown {
+        r#type: String,
+    },
+}
+
+#[derive(Deserialize)]
+struct RawClient {
+    r#type: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    rows: Option<u16>,
+    #[serde(default)]
+    initial_input_camel: Option<String>,
+    #[serde(rename = "initialInput", default)]
+    initial_input: Option<String>,
+    #[serde(rename = "skipPermissions", default)]
+    skip_permissions: Option<bool>,
+    #[serde(rename = "dispatchId", default)]
+    dispatch_id: Option<String>,
+    #[serde(rename = "sessionId", default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    seq: Option<i64>,
+}
+
+impl ClientMessage {
+    /// Decode a frame. `Err` is reserved for genuinely malformed JSON or a frame
+    /// missing a field its own type requires; an unknown `type` is `Unknown`.
+    pub fn decode(text: &str) -> Result<Self, String> {
+        let raw: RawClient = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let _ = raw.initial_input_camel;
+        let need_session = || {
+            raw.session_id
+                .clone()
+                .ok_or_else(|| "missing sessionId".to_string())
+        };
+        match raw.r#type.as_str() {
+            "create" => Ok(Self::Create {
+                provider: raw.provider.ok_or("missing provider")?,
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                cols: raw.cols,
+                rows: raw.rows,
+                initial_input: raw.initial_input,
+                skip_permissions: raw.skip_permissions,
+                dispatch_id: raw.dispatch_id,
+            }),
+            "attach" | "reactivate" => Ok(Self::Attach {
+                session_id: need_session()?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+            }),
+            "input" => Ok(Self::Input {
+                session_id: need_session()?,
+                data: raw.data.ok_or("missing data")?,
+                seq: raw.seq,
+            }),
+            "resize" => Ok(Self::Resize {
+                session_id: need_session()?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+                seq: raw.seq,
+            }),
+            "kill" => Ok(Self::Kill {
+                session_id: need_session()?,
+            }),
+            "subscribeScreen" => Ok(Self::SubscribeScreen {
+                session_id: need_session()?,
+            }),
+            "unsubscribeScreen" => Ok(Self::UnsubscribeScreen {
+                session_id: need_session()?,
+            }),
+            other => Ok(Self::Unknown {
+                r#type: other.to_string(),
+            }),
+        }
+    }
+}
+
+impl From<&str> for ClientMessage {
+    fn from(s: &str) -> Self {
+        Self::decode(s).unwrap_or_else(|_| Self::Unknown {
+            r#type: "malformed".into(),
+        })
+    }
+}
+
+/// Server → client frames. Built as `serde_json::Value` rather than a derive so
+/// the omit-when-nil / always-emit-null distinctions the Swift encoder makes stay
+/// visible at the call site instead of hiding in attributes.
+#[derive(Debug, Clone)]
+pub enum ServerMessage {
+    ServerInfo,
+    Created {
+        session: SessionMeta,
+    },
+    Attached {
+        session_id: String,
+        scrollback: String,
+        session: SessionMeta,
+    },
+    Output {
+        session_id: String,
+        data: String,
+    },
+    Screen {
+        session_id: String,
+        reset: bool,
+        cols: usize,
+        rows: usize,
+        cursor_x: usize,
+        cursor_y: usize,
+        cursor_visible: bool,
+        alt: bool,
+        lines: Vec<RowUpdate>,
+    },
+    InputAck {
+        session_id: String,
+        seq: i64,
+    },
+    ResizeAck {
+        session_id: String,
+        seq: i64,
+        cols: u16,
+        rows: u16,
+        applied: bool,
+        denied: bool,
+    },
+    Exit {
+        session_id: String,
+        exit_code: Option<i32>,
+    },
+    Activity {
+        session_id: String,
+        state: SessionActivity,
+        notify: bool,
+        dispatch_id: Option<String>,
+    },
+    Unresumable {
+        session_id: String,
+        reason: String,
+    },
+    Error {
+        session_id: Option<String>,
+        message: String,
+    },
+}
+
+impl ServerMessage {
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::ServerInfo => json!({
+                "type": "serverInfo",
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": CAPABILITIES,
+            }),
+            Self::Created { session } => json!({ "type": "created", "session": session }),
+            Self::Attached {
+                session_id,
+                scrollback,
+                session,
+            } => json!({
+                "type": "attached",
+                "sessionId": session_id,
+                "scrollback": scrollback,
+                "session": session,
+            }),
+            Self::Output { session_id, data } => json!({
+                "type": "output", "sessionId": session_id, "data": data,
+            }),
+            Self::Screen {
+                session_id,
+                reset,
+                cols,
+                rows,
+                cursor_x,
+                cursor_y,
+                cursor_visible,
+                alt,
+                lines,
+            } => json!({
+                "type": "screen",
+                "sessionId": session_id,
+                "reset": reset,
+                "cols": cols,
+                "rows": rows,
+                "cursorX": cursor_x,
+                "cursorY": cursor_y,
+                "cursorVisible": cursor_visible,
+                "alt": alt,
+                "lines": lines,
+            }),
+            Self::InputAck { session_id, seq } => json!({
+                "type": "inputAck", "sessionId": session_id, "seq": seq,
+            }),
+            Self::ResizeAck {
+                session_id,
+                seq,
+                cols,
+                rows,
+                applied,
+                denied,
+            } => json!({
+                "type": "resizeAck",
+                "sessionId": session_id,
+                "seq": seq,
+                "cols": cols,
+                "rows": rows,
+                "applied": applied,
+                "denied": denied,
+            }),
+            // `exitCode: number | null` is always present in the TS — emit null
+            // rather than omitting the key.
+            Self::Exit {
+                session_id,
+                exit_code,
+            } => json!({
+                "type": "exit", "sessionId": session_id, "exitCode": exit_code,
+            }),
+            Self::Activity {
+                session_id,
+                state,
+                notify,
+                dispatch_id,
+            } => {
+                let mut v = json!({
+                    "type": "activity",
+                    "sessionId": session_id,
+                    "state": state,
+                    "notify": notify,
+                });
+                if let Some(d) = dispatch_id {
+                    v["dispatchId"] = json!(d);
+                }
+                v
+            }
+            Self::Unresumable { session_id, reason } => json!({
+                "type": "unresumable", "sessionId": session_id, "reason": reason,
+            }),
+            Self::Error {
+                session_id,
+                message,
+            } => {
+                let mut v = json!({ "type": "error", "message": message });
+                if let Some(id) = session_id {
+                    v["sessionId"] = json!(id);
+                }
+                v
+            }
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self.to_value()).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use juancoded_core::model::{now_ms, ProviderId};
+
+    fn meta() -> SessionMeta {
+        SessionMeta::new(
+            "s1".into(),
+            ProviderId::Claude,
+            "/tmp".into(),
+            "tmp".into(),
+            now_ms(),
+            false,
+        )
+    }
+
+    #[test]
+    fn an_unknown_type_decodes_instead_of_failing() {
+        let msg = ClientMessage::decode(r#"{"type":"steerMessage","sessionId":"x"}"#).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::Unknown {
+                r#type: "steerMessage".into()
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_still_an_error() {
+        assert!(ClientMessage::decode("{not json").is_err());
+    }
+
+    #[test]
+    fn create_takes_an_optional_grid_so_a_headless_client_can_omit_it() {
+        let msg =
+            ClientMessage::decode(r#"{"type":"create","provider":"claude","cwd":"/tmp"}"#).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::Create {
+                provider: "claude".into(),
+                cwd: "/tmp".into(),
+                cols: None,
+                rows: None,
+                initial_input: None,
+                skip_permissions: None,
+                dispatch_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn input_and_resize_carry_an_optional_seq() {
+        let with_seq =
+            ClientMessage::decode(r#"{"type":"input","sessionId":"s","data":"x","seq":7}"#)
+                .unwrap();
+        assert_eq!(
+            with_seq,
+            ClientMessage::Input {
+                session_id: "s".into(),
+                data: "x".into(),
+                seq: Some(7)
+            }
+        );
+        let without =
+            ClientMessage::decode(r#"{"type":"input","sessionId":"s","data":"x"}"#).unwrap();
+        assert!(matches!(without, ClientMessage::Input { seq: None, .. }));
+    }
+
+    #[test]
+    fn reactivate_is_handled_as_an_attach() {
+        let msg =
+            ClientMessage::decode(r#"{"type":"reactivate","sessionId":"s","cols":80,"rows":24}"#)
+                .unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::Attach {
+                session_id: "s".into(),
+                cols: 80,
+                rows: 24
+            }
+        );
+    }
+
+    #[test]
+    fn server_info_leads_with_the_version_and_an_honest_capability_list() {
+        let v = ServerMessage::ServerInfo.to_value();
+        assert_eq!(v["type"], "serverInfo");
+        assert_eq!(v["protocolVersion"], 1);
+        let caps: Vec<String> = v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().into())
+            .collect();
+        assert!(caps.contains(&"screen".to_string()));
+        // Not implemented yet — and the list must not claim otherwise.
+        assert!(!caps.contains(&"queue".to_string()));
+        assert!(!caps.contains(&"trackedPrs".to_string()));
+    }
+
+    #[test]
+    fn exit_emits_a_null_code_rather_than_omitting_the_key() {
+        let v = ServerMessage::Exit {
+            session_id: "s".into(),
+            exit_code: None,
+        }
+        .to_value();
+        assert!(v.get("exitCode").is_some());
+        assert!(v["exitCode"].is_null());
+    }
+
+    #[test]
+    fn error_omits_the_session_id_when_there_is_none() {
+        let v = ServerMessage::Error {
+            session_id: None,
+            message: "boom".into(),
+        }
+        .to_value();
+        assert!(v.get("sessionId").is_none());
+        let v = ServerMessage::Error {
+            session_id: Some("s".into()),
+            message: "boom".into(),
+        }
+        .to_value();
+        assert_eq!(v["sessionId"], "s");
+    }
+
+    #[test]
+    fn activity_snake_cases_waiting_input_and_omits_an_absent_dispatch() {
+        let v = ServerMessage::Activity {
+            session_id: "s".into(),
+            state: SessionActivity::WaitingInput,
+            notify: true,
+            dispatch_id: None,
+        }
+        .to_value();
+        assert_eq!(v["state"], "waiting_input");
+        assert!(v.get("dispatchId").is_none());
+    }
+
+    #[test]
+    fn attached_carries_the_scrollback_and_the_session_row() {
+        let v = ServerMessage::Attached {
+            session_id: "s1".into(),
+            scrollback: "prior output".into(),
+            session: meta(),
+        }
+        .to_value();
+        assert_eq!(v["scrollback"], "prior output");
+        assert_eq!(v["session"]["provider"], "claude");
+    }
+
+    #[test]
+    fn resize_ack_reports_applied_and_denied_separately() {
+        let v = ServerMessage::ResizeAck {
+            session_id: "s".into(),
+            seq: 3,
+            cols: 100,
+            rows: 30,
+            applied: false,
+            denied: true,
+        }
+        .to_value();
+        assert_eq!(v["applied"], false);
+        assert_eq!(v["denied"], true);
+        assert_eq!(v["cols"], 100);
+    }
+}
