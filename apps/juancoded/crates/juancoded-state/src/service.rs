@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use juancoded_cordis::Service;
-use juancoded_persistence::SessionStore;
+use juancoded_persistence::{QueuedMessage, SessionStore};
 use juancoded_vt::Snapshot;
 
 use juancoded_core::model::{SessionActivity, SessionMeta};
@@ -60,6 +60,14 @@ pub trait SessionsApi: Send + Sync {
         rows: u16,
     ) -> Result<Attached, StateError>;
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError>;
+    /// A session's pending steering messages, in delivery order. The whole list, so
+    /// a consumer replaces what it holds instead of patching it.
+    fn queue(&self, id: &str) -> Vec<QueuedMessage>;
+    /// Queue one message. `Ok(None)` is the whitespace-only text that was not a
+    /// message at all.
+    fn queue_message(&self, id: &str, text: &str) -> Result<Option<QueuedMessage>, StateError>;
+    /// Cancel a still-pending message; `false` when it was not in that queue.
+    fn dequeue_message(&self, id: &str, message_id: &str) -> Result<bool, StateError>;
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
@@ -157,6 +165,18 @@ impl SessionsApi for SessionRegistry {
 
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError> {
         SessionRegistry::input(self, id, data)
+    }
+
+    fn queue(&self, id: &str) -> Vec<QueuedMessage> {
+        SessionRegistry::queue(self, id)
+    }
+
+    fn queue_message(&self, id: &str, text: &str) -> Result<Option<QueuedMessage>, StateError> {
+        SessionRegistry::queue_message(self, id, text)
+    }
+
+    fn dequeue_message(&self, id: &str, message_id: &str) -> Result<bool, StateError> {
+        SessionRegistry::dequeue_message(self, id, message_id)
     }
 
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome {

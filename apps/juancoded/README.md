@@ -173,13 +173,15 @@ guessing a width, and a wrong guess garbles every hard wrap in the history.
 
 Measured against `apps/wire-conformance` (20 golden scenarios, protocol v1) by
 pointing the suite at a hand-booted daemon on its own port, its own data dir and the
-suite's fake agent. **15 of 20 passing, five skipped, none failing**, five runs out
-of five, release build, 2026-08-21.
+suite's fake agent. **17 of 20 passing, three skipped, none failing**, five runs out
+of five, 2026-08-22.
 
-The five that are not are capability-gated and report as skipped rather than failed,
-because the core does not advertise what it cannot do: `queue`, `trackedPrs`,
-`editor`/`terminal`, `sessionMeta` and `gridOwner`. The first three have their tables
-in the schema; none of the five has its wire surface.
+The three that are not are capability-gated and report as skipped rather than failed,
+because the core does not advertise what it cannot do: `queue`, `trackedPrs` and
+`editor`/`terminal`. All three have their tables in the schema. `queue` also has its
+whole wire surface now (juancode-1esi): the capability is withheld because nothing
+delivers a queued message into a pty yet, and scenario 10 passes as soon as it is
+switched on. See [docs/queue-delivery-port.md](./docs/queue-delivery-port.md).
 See the package README in `apps/wire-conformance` for how to point the suite at a
 core by URL.
 
@@ -232,14 +234,16 @@ passed straight through and the spawned CLI turns transcript saving off.
 
 ## Deliberately not here
 
-No `queue` / `trackedPrs` / `editor` / `terminal` wire surfaces (the first three have
-their tables, none has its messages), and no structured-transcript activity signal:
-the detector reads the rendered screen only, where the Swift one also fuses the CLI's
-stream-json transcript (juancode-52e8.12). Each of those is a named child of the epic.
+No queue **delivery**: `subscribeQueue` / `unsubscribeQueue` / `queueMessage` /
+`dequeueMessage` and the `queue` snapshot all work, and a queued message then sits
+there, because the paste-then-verified-Enter engine is still Swift-only
+(juancode-52e8.8). The `queue` capability stays withheld until it is not, so no client
+can offer a send button whose messages pile up.
 
-There is also no wire message for a session's meta changing, which is why a discovered
-conversation id reaches a client on its next `attach` rather than as an event. Adding
-one is a protocol change and belongs to whoever adds the scenario for it.
+No `trackedPrs` / `editor` / `terminal` wire surfaces (both have their tables, neither
+has its messages), and no structured-transcript activity signal: the detector reads the
+rendered screen only, where the Swift one also fuses the CLI's stream-json transcript
+(juancode-52e8.12). Each of those is a named child of the epic.
 
 Nothing in `apps/native` was modified, and nothing here runs unless started by hand:
 the daemon binds no port until launched, and mounting the tree spawns no child until a

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
-use juancoded_state::ClientId;
+use juancoded_state::{ClientId, QueuedMessage};
 use juancoded_vt::wire::RowUpdate;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -21,6 +21,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// the Swift core's list: no `queue`, no `trackedPrs`, no `editor`/`terminal`.
 /// Clients feature-detect off this, so a name here that the core does not answer is
 /// worse than an omission — it turns a hidden button into a broken one.
+///
+/// `queue` is the pointed omission. Every queue frame below decodes and every
+/// snapshot goes out, but nothing types a queued message into the pty yet: the
+/// paste-then-verified-Enter engine is still Swift-only. A client that saw `queue`
+/// here would offer a send button whose messages pile up forever, so the capability
+/// stays withheld until delivery lands with it.
 pub const CAPABILITIES: &[&str] = &[
     "inputAck",
     "resizeAck",
@@ -97,6 +103,23 @@ pub enum ClientMessage {
     UnsubscribeScreen {
         session_id: String,
     },
+    /// Watch a session's steering queue: the complete ordered list now, and again
+    /// after every change, until `unsubscribeQueue` or the socket closes.
+    SubscribeQueue {
+        session_id: String,
+    },
+    UnsubscribeQueue {
+        session_id: String,
+    },
+    QueueMessage {
+        session_id: String,
+        text: String,
+    },
+    /// Cancel a still-pending message by the id its snapshot gave it.
+    DequeueMessage {
+        session_id: String,
+        message_id: String,
+    },
     /// A well-formed frame this core doesn't implement. Ignored, not fatal.
     Unknown {
         r#type: String,
@@ -132,6 +155,10 @@ struct RawClient {
     data: Option<String>,
     #[serde(default)]
     seq: Option<i64>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(rename = "messageId", default)]
+    message_id: Option<String>,
 }
 
 impl ClientMessage {
@@ -198,6 +225,20 @@ impl ClientMessage {
             }),
             "unsubscribeScreen" => Ok(Self::UnsubscribeScreen {
                 session_id: need_session()?,
+            }),
+            "subscribeQueue" => Ok(Self::SubscribeQueue {
+                session_id: need_session()?,
+            }),
+            "unsubscribeQueue" => Ok(Self::UnsubscribeQueue {
+                session_id: need_session()?,
+            }),
+            "queueMessage" => Ok(Self::QueueMessage {
+                session_id: need_session()?,
+                text: raw.text.ok_or("missing text")?,
+            }),
+            "dequeueMessage" => Ok(Self::DequeueMessage {
+                session_id: need_session()?,
+                message_id: raw.message_id.ok_or("missing messageId")?,
             }),
             other => Ok(Self::Unknown {
                 r#type: other.to_string(),
@@ -272,6 +313,13 @@ pub enum ServerMessage {
         /// badge "finished, N files changed" without git access of its own.
         changes: Option<ChangeStat>,
         dispatch_id: Option<String>,
+    },
+    /// A session's pending steering queue: the complete ordered list, sent on
+    /// `subscribeQueue` and again after every change. Replace wholesale — it is
+    /// never a patch, and the items carry the ids `dequeueMessage` addresses.
+    Queue {
+        session_id: String,
+        items: Vec<QueuedMessage>,
     },
     /// A session's persisted row changed out of band: a title the CLI set for itself,
     /// a conversation id discovered after the spawn, a permission-mode flip. Carries
@@ -409,6 +457,21 @@ impl ServerMessage {
                 }
                 v
             }
+            Self::Queue { session_id, items } => json!({
+                "type": "queue",
+                "sessionId": session_id,
+                // The item's own session id stays out of it: the frame already says
+                // which session this is, and the Swift core's `QueuedMessage` is
+                // exactly `{ id, text, createdAt }` on the wire.
+                "items": items
+                    .iter()
+                    .map(|i| json!({
+                        "id": i.id,
+                        "text": i.text,
+                        "createdAt": i.created_at,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
             Self::SessionMeta {
                 session_id,
                 session,
@@ -568,6 +631,94 @@ mod tests {
                 "unimplemented capability advertised: {advertised}"
             );
         }
+    }
+
+    #[test]
+    fn the_queue_frames_decode_even_though_the_capability_is_withheld() {
+        // The surface is complete; delivery is not, so `queue` is deliberately absent
+        // from CAPABILITIES. That is the one direction of this mismatch that cannot
+        // mislead a client: it feature-detects the button away and the frames still
+        // work for anything that asks for them by name.
+        assert!(!CAPABILITIES.contains(&"queue"));
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"subscribeQueue","sessionId":"s"}"#).unwrap(),
+            ClientMessage::SubscribeQueue {
+                session_id: "s".into()
+            }
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"unsubscribeQueue","sessionId":"s"}"#).unwrap(),
+            ClientMessage::UnsubscribeQueue {
+                session_id: "s".into()
+            }
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"queueMessage","sessionId":"s","text":"ship it"}"#)
+                .unwrap(),
+            ClientMessage::QueueMessage {
+                session_id: "s".into(),
+                text: "ship it".into()
+            }
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"dequeueMessage","sessionId":"s","messageId":"q-1"}"#)
+                .unwrap(),
+            ClientMessage::DequeueMessage {
+                session_id: "s".into(),
+                message_id: "q-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_queue_frame_missing_its_own_required_field_is_an_error_not_a_silent_drop() {
+        assert!(ClientMessage::decode(r#"{"type":"queueMessage","sessionId":"s"}"#).is_err());
+        assert!(ClientMessage::decode(r#"{"type":"dequeueMessage","sessionId":"s"}"#).is_err());
+        assert!(ClientMessage::decode(r#"{"type":"subscribeQueue"}"#).is_err());
+    }
+
+    #[test]
+    fn a_queue_snapshot_carries_the_ordered_list_and_only_the_wire_fields() {
+        let items = vec![
+            QueuedMessage {
+                id: "q-1".into(),
+                session_id: "s1".into(),
+                text: "first".into(),
+                created_at: 1_700_000_000_000,
+            },
+            QueuedMessage {
+                id: "q-2".into(),
+                session_id: "s1".into(),
+                text: "second".into(),
+                created_at: 1_700_000_000_001,
+            },
+        ];
+        let v = ServerMessage::Queue {
+            session_id: "s1".into(),
+            items,
+        }
+        .to_value();
+        assert_eq!(v["type"], "queue");
+        assert_eq!(v["sessionId"], "s1");
+        let items = v["items"].as_array().unwrap();
+        // Insertion order is delivery order, and the frame is the whole list.
+        assert_eq!(items[0]["text"], "first");
+        assert_eq!(items[1]["text"], "second");
+        assert_eq!(items[0]["id"], "q-1");
+        assert_eq!(items[0]["createdAt"], 1_700_000_000_000i64);
+        // The session is named once, on the frame; the item's own copy is ours.
+        assert!(items[0].get("sessionId").is_none());
+        assert!(items[0].get("session_id").is_none());
+
+        let v = ServerMessage::Queue {
+            session_id: "s1".into(),
+            items: Vec::new(),
+        }
+        .to_value();
+        assert!(
+            v["items"].as_array().unwrap().is_empty(),
+            "an empty queue is an empty list, not a missing key"
+        );
     }
 
     #[test]

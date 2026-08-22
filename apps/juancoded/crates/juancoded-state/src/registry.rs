@@ -42,7 +42,7 @@ use juancoded_core::changes::{self, ChangeStat};
 use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
-use juancoded_persistence::{discovery, Scrollback, SessionStore};
+use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SessionStore};
 use juancoded_vt::Snapshot;
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
@@ -78,6 +78,13 @@ pub enum SessionEvent {
         session_id: String,
         meta: SessionMeta,
     },
+    /// A session's steering queue moved: something was queued or cancelled.
+    ///
+    /// It deliberately carries no items. A consumer reads the ordered list at the
+    /// moment it sends it, so a notification that arrives late cannot put a stale
+    /// snapshot on the wire behind a fresher one, and a consumer that dropped
+    /// notifications while lagging still converges on the truth.
+    QueueChanged { session_id: String },
     /// The arbitrated grid changed hands: a request was granted, or an owner let go.
     /// `owner` is `None` for a release. Every consumer hears it, unlike a resize
     /// outcome, which only ever reaches the client that asked.
@@ -854,6 +861,79 @@ impl SessionRegistry {
             meta,
         });
         true
+    }
+
+    // MARK: - steering queue
+
+    /// A session's pending steering messages, in delivery order.
+    ///
+    /// Insertion order *is* delivery order, and the whole list is the unit: a
+    /// consumer replaces what it holds rather than patching it, so a dropped
+    /// notification costs a repaint and not a phantom row.
+    pub fn queue(&self, id: &str) -> Vec<QueuedMessage> {
+        match self.inner.store.queue(id) {
+            Ok(items) => items,
+            Err(e) => {
+                warn!(session = id, error = %e, "could not read the steering queue");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Queue one message for delivery on the session's next idle.
+    ///
+    /// Whitespace is not a message: an all-blank text is dropped and nothing is
+    /// broadcast for it, so a stray newline from a phone keyboard cannot become a
+    /// pending row nobody can explain. The stored text is the trimmed text, which is
+    /// what would be typed in.
+    ///
+    /// Nothing here delivers. The messages sit in the queue until the paste-then-
+    /// verified-Enter engine exists, and until it does this core does not advertise
+    /// the `queue` capability.
+    pub fn queue_message(&self, id: &str, text: &str) -> Result<Option<QueuedMessage>, StateError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        // A queue row hangs off its session, so a message for a session we never
+        // heard of is refused here rather than as a foreign-key failure two layers
+        // down.
+        if self.get(id).is_none() {
+            return Err(StateError::NotFound);
+        }
+        let item = QueuedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: id.to_string(),
+            text: text.to_string(),
+            created_at: now_ms(),
+        };
+        self.inner
+            .store
+            .enqueue(&item)
+            .map_err(|e| StateError::Store(e.to_string()))?;
+        self.broadcast_queue(id);
+        Ok(Some(item))
+    }
+
+    /// Cancel a still-pending message. `false` when it was not in that session's
+    /// queue: already cancelled, or a message id that was never ours. Nothing is
+    /// broadcast for a change that did not happen.
+    pub fn dequeue_message(&self, id: &str, message_id: &str) -> Result<bool, StateError> {
+        let removed = self
+            .inner
+            .store
+            .dequeue(id, message_id)
+            .map_err(|e| StateError::Store(e.to_string()))?;
+        if removed {
+            self.broadcast_queue(id);
+        }
+        Ok(removed)
+    }
+
+    fn broadcast_queue(&self, id: &str) {
+        let _ = self.inner.events.send(SessionEvent::QueueChanged {
+            session_id: id.to_string(),
+        });
     }
 
     pub fn kill(&self, id: &str) -> Result<(), StateError> {

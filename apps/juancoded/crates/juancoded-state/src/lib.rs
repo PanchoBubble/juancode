@@ -21,6 +21,10 @@ pub use registry::{
 };
 pub use service::{SessionsApi, SessionsService, StoreService};
 
+/// Re-exported so the wire layer can speak about queued messages without taking a
+/// dependency on the store crate that happens to define them.
+pub use juancoded_persistence::QueuedMessage;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};

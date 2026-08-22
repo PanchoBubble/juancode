@@ -99,7 +99,11 @@ pub trait SessionStore: Send + Sync {
     fn scrollback(&self, id: &str) -> Result<Option<Scrollback>>;
 
     fn enqueue(&self, item: &QueuedMessage) -> Result<()>;
-    fn dequeue(&self, message_id: &str) -> Result<()>;
+    /// Drop one queued message from one session's queue. `false` means there was
+    /// nothing to drop, which is what a caller gets for a message already delivered
+    /// or already cancelled — and the reason a watcher is not told about a change
+    /// that did not happen.
+    fn dequeue(&self, session_id: &str, message_id: &str) -> Result<bool>;
     fn queue(&self, session_id: &str) -> Result<Vec<QueuedMessage>>;
 
     fn upsert_tracked_pr(&self, pr: &TrackedPr) -> Result<()>;
@@ -316,10 +320,15 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
-    fn dequeue(&self, message_id: &str) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM queue WHERE id = ?1", params![message_id])?;
-        Ok(())
+    fn dequeue(&self, session_id: &str, message_id: &str) -> Result<bool> {
+        // Scoped to the session on purpose: a message id is only ever handed out
+        // alongside the session it belongs to, so a stale id from another session
+        // must miss rather than delete somebody else's pending message.
+        let removed = self.conn().execute(
+            "DELETE FROM queue WHERE id = ?1 AND session_id = ?2",
+            params![message_id, session_id],
+        )?;
+        Ok(removed > 0)
     }
 
     fn queue(&self, session_id: &str) -> Result<Vec<QueuedMessage>> {
@@ -542,7 +551,10 @@ mod tests {
                     })
                     .unwrap();
             }
-            store.dequeue("q1").unwrap();
+            assert!(store.dequeue("s1", "q1").unwrap());
+            // Neither an id from another session nor one already gone is a deletion.
+            assert!(!store.dequeue("s2", "q0").unwrap());
+            assert!(!store.dequeue("s1", "q1").unwrap());
         }
         let store = SqliteStore::open(&path).unwrap();
         let texts: Vec<String> = store
