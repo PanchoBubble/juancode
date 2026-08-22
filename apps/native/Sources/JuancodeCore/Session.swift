@@ -180,10 +180,21 @@ public final class Session: @unchecked Sendable {
     /// True while `flushQueue` is mid-delivery, so overlapping edges don't double
     /// up a paste. Guarded by `lock`.
     private var flushingQueue = false
-    /// Id of the queued message we already pasted into the input box but couldn't
-    /// confirm submitted. The next attempt for that same message re-sends the Enter
-    /// instead of the paste, so a retry can't stack a second copy. Guarded by `lock`.
+    /// Id of the queued message whose paste we already wrote to the pty. Set on the
+    /// write, not on the confirmation: the bytes are in the child either way, so the
+    /// next attempt for that same message re-sends the Enter instead of the paste and
+    /// a retry can't stack a second copy. Guarded by `lock`.
     private var pastedQueuedId: String?
+    /// The footer as it looked immediately *before* that paste, kept so a retry can
+    /// use the same "changed since the paste" land check the pasting pass used —
+    /// a bare signature match would pass off text the transcript already held.
+    /// Guarded by `lock`.
+    private var pastedQueuedFooter: FooterSnapshot?
+    /// Consecutive failed delivery passes, and the message they belong to, so the
+    /// self-armed retry can't loop forever on a message the child never shows.
+    /// Guarded by `lock`.
+    private var queuedRetryId: String?
+    private var queuedRetries = 0
 
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
@@ -996,6 +1007,11 @@ public final class Session: @unchecked Sendable {
         /// How long to confirm a delivered message took (the agent went busy).
         static let acceptMs = 4_000
         static let pollMs = 120
+        /// Backoff before a failed pass re-kicks itself.
+        static let retryMs = 3_000
+        /// How many self-armed retries one message gets before it falls back to
+        /// waiting for a real idle edge.
+        static let maxRetries = 5
     }
 
     /// Nudge the queue when a message is added while the session is already idle —
@@ -1045,9 +1061,42 @@ public final class Session: @unchecked Sendable {
             logEvent("queuedResult", ["delivered": "\(delivered)", "chars": "\(item.text.count)"])
             if delivered {
                 env.messageQueue.remove(id, item.id)
+            } else if armQueueRetry(for: item.id) {
+                scheduleQueueRetry()
             }
             break
         }
+    }
+
+    /// Whether a failed pass may re-kick itself. "Retried on the next idle edge" is
+    /// only true while edges keep arriving: a session that is already idle and stays
+    /// idle produces none, so a stalled delivery would wait forever. Capped per
+    /// message so an undeliverable one settles back to waiting for a real edge.
+    private func armQueueRetry(for messageId: String) -> Bool {
+        lock.withLock {
+            if queuedRetryId != messageId {
+                queuedRetryId = messageId
+                queuedRetries = 0
+            }
+            guard queuedRetries < Queue.maxRetries else { return false }
+            queuedRetries += 1
+            return true
+        }
+    }
+
+    private func scheduleQueueRetry() {
+        Task.detached(priority: .utility) { [weak self] in
+            await Nap.duration(.milliseconds(Queue.retryMs))
+            self?.kickQueue()
+        }
+    }
+
+    /// Forget the pasted-but-unsubmitted payload. Call under `lock`.
+    private func clearQueuedPasteLocked() {
+        pastedQueuedId = nil
+        pastedQueuedFooter = nil
+        queuedRetryId = nil
+        queuedRetries = 0
     }
 
     /// Paste one queued message and verify it submitted — the seed path's
@@ -1079,16 +1128,27 @@ public final class Session: @unchecked Sendable {
 
         // A retry for a message that is already sitting in the box sends the Enter
         // again instead of re-pasting; re-pasting is what stacked duplicate copies.
-        if lock.withLock({ pastedQueuedId }) != item.id {
-            let before = footerSnapshot()
+        let before: FooterSnapshot
+        if let pasted = lock.withLock({ pastedQueuedId == item.id ? pastedQueuedFooter : nil }) {
+            before = pasted
+        } else {
+            before = footerSnapshot()
             logEvent("queuedPaste", ["chars": "\(item.text.count)"])
             paste(item.text)
-            _ = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
-                !self.isRunning || self.queuedLanded(head: head, tail: tail, before: before)
+            // Recorded here rather than after the land check below, because the write
+            // has already happened: a CLI whose echo is slower than `acceptMs` fails
+            // this pass with the payload sitting in the child's box, and a retry that
+            // did not know it had pasted would send a second copy. An unconfirmed
+            // paste leaves the message queued; it never earns a blind re-paste.
+            lock.withLock {
+                pastedQueuedId = item.id
+                pastedQueuedFooter = before
             }
-            guard isRunning, queuedLanded(head: head, tail: tail, before: before) else { return false }
-            lock.withLock { pastedQueuedId = item.id }
         }
+        _ = await waitUntil(maxMs: Queue.acceptMs, pollMs: Queue.pollMs) {
+            !self.isRunning || self.queuedLanded(head: head, tail: tail, before: before)
+        }
+        guard isRunning, queuedLanded(head: head, tail: tail, before: before) else { return false }
 
         await Nap.duration(.milliseconds(Seed.submitSettleMs))
         for attempt in 0..<Seed.maxAttempts {
@@ -1100,7 +1160,7 @@ public final class Session: @unchecked Sendable {
                     || !self.footerHoldsQueued(self.footerSnapshot().text, head: head, tail: tail)
             }
             if submitted {
-                lock.withLock { pastedQueuedId = nil }
+                lock.withLock { clearQueuedPasteLocked() }
                 return true
             }
         }
@@ -1299,8 +1359,18 @@ public final class Session: @unchecked Sendable {
     /// cleared by `Session.resume`.
     public func markDormant() {
         logEvent("dormant")
-        lock.withLock { _meta.dormant = true }
-        persistMeta(titleChanged: false)
+        let meta = lock.withLock { () -> SessionMeta in
+            _meta.dormant = true
+            _meta.updatedAt = nowMs()
+            return _meta
+        }
+        // Written on the caller's thread rather than the persist queue: the caller
+        // kills the pty the moment this returns, and `handleExit` writes the exited
+        // row from the reader thread. A deferred write would race that, and since the
+        // meta path rewrites the whole row, the loser resurrects `status = .running`
+        // with a nil exit code over a session whose pty is already gone.
+        if persistEnabled { env.store.updateMeta(meta, reindexTitleFts: false) }
+        emitMetaChange(meta)
     }
 
     public func getScrollback() -> [UInt8] {
@@ -1655,15 +1725,21 @@ public final class Session: @unchecked Sendable {
             _meta.updatedAt = nowMs()
             return _meta
         }
-        // The store write goes to `persistQueue` with the snapshot taken here, so the
-        // caller never waits on SQLite. That matters most for a meta edit raised from
+        // The store write goes to `persistQueue`, so the caller never waits on
+        // SQLite. That matters most for a meta edit raised from
         // inside a parse (an OSC window title): a synchronous write there held the
         // model + global parse locks across a disk write, stalling every session's
         // parse and the main thread's own feed (juancode-c438). The listener side stays
         // inline — the sidebar shouldn't wait behind a utility-QoS disk queue.
         if persistEnabled {
             Self.persistQueue.async { [weak self] in
-                self?.env.store.updateMeta(meta, reindexTitleFts: titleChanged)
+                guard let self else { return }
+                // Re-read instead of replaying the snapshot above: `updateMeta` writes
+                // the whole row, so an edit that queued before the session exited and
+                // ran after it would put `status = .running` back on a dead session.
+                // Latest-wins is the only safe rule for a full-row write.
+                self.env.store.updateMeta(self.lock.withLock { self._meta },
+                                          reindexTitleFts: titleChanged)
             }
         }
         emitMetaChange(meta)
