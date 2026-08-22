@@ -254,6 +254,36 @@ export async function deliverReply(sessionId: string, text: string): Promise<voi
   });
 }
 
+/** The capability list off a `serverInfo` frame, or null when this isn't one.
+ *  Every connection is handed one as frame 0 (the server queues it before any
+ *  activity fan-out), so a short-lived socket can feature-detect before it sends
+ *  anything. Which core is on the other end of 4280 is a launch-time choice —
+ *  swift in-process, or the rust daemon behind the app's relay — and the two do
+ *  not implement the same set. */
+export function serverInfoCapabilities(raw: string): string[] | null {
+  let msg: Record<string, unknown>;
+  try {
+    msg = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (msg.type !== "serverInfo") return null;
+  if (!Array.isArray(msg.capabilities)) return [];
+  return msg.capabilities.filter((c): c is string => typeof c === "string");
+}
+
+/** Message for a capability the core on the other end doesn't have. Names what
+ *  was asked for and what the core actually advertises, so the answer isn't
+ *  "it didn't work". */
+export function missingCapabilityMessage(capability: string, advertised: string[]): string {
+  const list = advertised.length > 0 ? advertised.join(", ") : "none";
+  return (
+    `The core serving ${nativeApiBase()} doesn't implement "${capability}" ` +
+    `(its handshake advertises: ${list}). Reply to the session instead, or run the ` +
+    `app on the swift core.`
+  );
+}
+
 /**
  * Queue one or more messages to a live session for in-order delivery on its next
  * idle (juancode-r82). Unlike {@link deliverReply} — which types straight into the
@@ -262,6 +292,10 @@ export async function deliverReply(sessionId: string, text: string): Promise<voi
  * the agent receives them in order even while it's still busy. The native server
  * owns the ordering / idle logic; we just enqueue. Messages are queued in the order
  * given. Throws a clear error if the native app isn't reachable.
+ *
+ * The `queue` capability is checked against the handshake first: the rust core has
+ * no queue and drops the frame silently, and a queue that reports success while
+ * nothing was queued is worse than a refusal.
  */
 export async function queueMessages(sessionId: string, texts: string[]): Promise<void> {
   const items = texts.map((t) => t.trim()).filter((t) => t.length > 0);
@@ -286,7 +320,14 @@ export async function queueMessages(sessionId: string, texts: string[]): Promise
       clearTimeout(timer);
       fail(e);
     });
-    sock.on("open", () => {
+    sock.on("message", (data) => {
+      const capabilities = serverInfoCapabilities(data.toString());
+      if (capabilities === null) return; // not the handshake; ignore the rest
+      if (!capabilities.includes("queue")) {
+        clearTimeout(timer);
+        fail(new Error(missingCapabilityMessage("queue", capabilities)));
+        return;
+      }
       try {
         // Send each queueMessage in order; the native queue preserves insertion
         // order (rowid), so delivery order matches. A short tick lets the writes

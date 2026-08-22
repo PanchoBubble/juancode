@@ -112,6 +112,38 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         for id in orphans { probe(id) }
     }
 
+    /// Serve the address every remote client knows (4280) for a launch on this
+    /// core, so the oracle sidecar is not blind in rust mode.
+    ///
+    /// The daemon already speaks the wire protocol, but it serves only `/health`,
+    /// `/api/health` and `/ws`: the sidecar's `GET /api/sessions`,
+    /// `DELETE /api/sessions/:id` and `POST /api/pr-webhook` have nothing to answer
+    /// them there, and protocol v1 has no frame that would let it list its own
+    /// sessions (juancode-3l2p). So `/ws` is relayed to the daemon verbatim and the
+    /// session reads come off this mirror, which is the only thing on the machine
+    /// that has them.
+    ///
+    /// Best-effort, like the Swift core's embedded server: a taken port leaves the
+    /// local shell fully working.
+    public func startProxyServer(host: String, port: Int) {
+        let source = CoreProxyServer.Source(
+            sessions: { [weak self] in self?.sessions() ?? [] },
+            session: { [weak self] id in self?.session(id) },
+            searchSessions: { [weak self] q, limit in self?.searchSessions(q, limit: limit) ?? [] },
+            kill: { [weak self] id in self?.kill(id) },
+            deleteSession: { [weak self] id in self?.deleteSession(id) },
+            backendName: backendName)
+        let upstream = baseURL
+        Task.detached {
+            do {
+                try await CoreProxyServer.run(source: source, upstreamBaseURL: upstream,
+                                              host: host, port: port)
+            } catch {
+                NSLog("juancode: core proxy server did not start: \(error)")
+            }
+        }
+    }
+
     // MARK: - Handshake
 
     public var info: CoreServerInfo {

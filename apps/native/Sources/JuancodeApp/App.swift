@@ -255,12 +255,16 @@ struct JuancodeApp: App {
         // registry. Best-effort: if the port is taken (e.g. a dev server is
         // running) the local shell still works fully.
         //
-        // Only the in-process core has a server to embed: with the rust core the
-        // daemon IS the server, on its own port, so the sidecar and any remote
-        // client talk to it directly instead of to this process.
+        // Only the in-process core has a whole server to embed. A rust launch gets a
+        // relay on the same port instead: the daemon owns the ptys so `/ws` goes
+        // straight through to it, while the session REST reads, which it does not
+        // serve at all, are answered from this process's mirror. Either way 4280 is
+        // the one address the sidecar and any remote client know.
+        let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
         if let swiftCore = booted.client as? SwiftCoreClient {
-            let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
             swiftCore.startEmbeddedServer(host: host, port: Config.port)
+        } else if let rustCore = booted.client as? RustCoreClient {
+            rustCore.startProxyServer(host: host, port: Config.port)
         }
     }
 

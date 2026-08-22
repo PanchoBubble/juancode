@@ -10,12 +10,17 @@ import { queueMessages } from "./oracle.ts";
 describe("queueMessages", () => {
   let wss: WebSocketServer;
   let received: unknown[];
+  let capabilities: string[];
   const prev = process.env.JUANCODE_API;
 
   beforeEach(async () => {
     received = [];
+    capabilities = ["queue"];
     wss = new WebSocketServer({ host: "127.0.0.1", port: 0, path: "/ws" });
     wss.on("connection", (sock: WsSocket) => {
+      // Frame 0 is the handshake on every real core, and `queueMessages` reads it
+      // to feature-detect before sending, so the fake has to send one too.
+      sock.send(JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities }));
       sock.on("message", (data) => {
         try {
           received.push(JSON.parse(data.toString()));
@@ -69,5 +74,14 @@ describe("queueMessages", () => {
   it("rejects with a clear error when the native app is unreachable", async () => {
     process.env.JUANCODE_API = "http://127.0.0.1:1"; // nothing listening
     await expect(queueMessages("sess-4", ["hi"])).rejects.toThrow();
+  });
+
+  // The rust core has no queue and ignores the frame, so a silent success would
+  // report "queued" over a message nobody will ever deliver.
+  it("refuses, naming the gap, when the core has no queue capability", async () => {
+    capabilities = ["inputAck", "screen"];
+    await expect(queueMessages("sess-5", ["hi"])).rejects.toThrow(/queue/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(received).toEqual([]);
   });
 });

@@ -69,6 +69,32 @@ oracle-mcp  (this sidecar, 127.0.0.1:4281)
   └─ GET 127.0.0.1:4280/api/sessions   (native app's embedded server)
 ```
 
+### What 4280 is, per core
+
+The sidecar always talks to `127.0.0.1:4280` (`JUANCODE_PORT` / `JUANCODE_API`), but
+what answers there depends on which core the desktop launched with:
+
+| Core                  | 4280 is                       | `/ws`                | REST                    |
+| --------------------- | ----------------------------- | -------------------- | ----------------------- |
+| swift (default)       | the app's embedded server     | the in-process core  | the full set            |
+| rust (`JUANCODE_CORE`)| a relay inside the same app   | forwarded to the daemon | sessions + search + delete, everything else 501 |
+
+The `juancoded` daemon on `JUANCODED_PORT` (4290) serves only `/health`,
+`/api/health` and `/ws`, so pointing `JUANCODE_API` straight at it would leave the
+session list, the delete and the PR webhook with nothing to answer them. The relay
+exists so one address behaves the same either way. Its `/api/health` says which
+core is behind it (`{"core":"rust","relayingTo":"http://127.0.0.1:4290"}`).
+
+Two consequences worth knowing:
+
+- **Desktop app down, daemon up.** Nothing answers 4280, so the sidecar is blind
+  even though the daemon is still running ptys: no notifications, no steering, no
+  dispatch. Filed as juancode-eko6.
+- **Capabilities differ.** The daemon has no message queue, so `oracle_session_queue`
+  refuses with the handshake's capability list rather than reporting a queued
+  message nobody will deliver. Reply instead (`oracle_session_reply`), which is a
+  plain `input` frame and works on both cores.
+
 ## 1. Run the sidecar
 
 ```sh
