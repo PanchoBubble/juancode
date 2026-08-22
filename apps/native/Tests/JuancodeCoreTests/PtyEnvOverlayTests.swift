@@ -8,7 +8,8 @@ import Testing
 /// child the inherited environment untouched.
 @Suite struct PtyEnvOverlayTests {
     /// Collects a pty's output until the child exits (or we run out of patience).
-    private func run(_ args: [String], envOverrides: [String: String]) async -> String {
+    private func run(_ args: [String], envOverrides: [String: String],
+                     executable: String = "/usr/bin/env") async -> String {
         final class Box: @unchecked Sendable {
             private let lock = NSLock()
             private var bytes = [UInt8]()
@@ -20,7 +21,7 @@ import Testing
         }
         let box = Box()
         let proc = PtyProcess(
-            executable: "/usr/bin/env",
+            executable: executable,
             args: args,
             cwd: FileManager.default.temporaryDirectory.path,
             cols: 80,
@@ -63,5 +64,24 @@ import Testing
         let out = await run(["sh", "-c", "printf %s \"[$OPENCODE_PERMISSION]\""],
                            envOverrides: [:])
         #expect(out.contains("[]"))
+    }
+
+    /// The pty declares its own terminal type, whatever the app inherited. A
+    /// Finder/Dock launch inherits none at all (launchd's environment has no `TERM`),
+    /// and a CLI with no terminfo to find renders in monochrome — so this must hold
+    /// with an empty overlay, not just alongside one.
+    @Test func theChildAlwaysGetsATerminalType() async {
+        let out = await run(["sh", "-c", #"printf %s "[$TERM][$COLORTERM]""#],
+                           envOverrides: [:])
+        #expect(out.contains("[xterm-256color][truecolor]"))
+    }
+
+    /// A bare command name is PATH-resolved in the parent so it execs through our
+    /// envp; without that resolution it would fall back to `execvp` and lose the
+    /// overlay — the monochrome bug again, for anything spawned by name.
+    @Test func aBareCommandNameStillCarriesTheOverlay() async {
+        let out = await run(["sh", "-c", #"printf %s "[$TERM]""#],
+                           envOverrides: [:], executable: "env")
+        #expect(out.contains("[xterm-256color]"))
     }
 }

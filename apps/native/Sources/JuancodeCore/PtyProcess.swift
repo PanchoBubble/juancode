@@ -6,10 +6,11 @@ import os
 /// spawned via `forkpty` + `execvp`. Promoted from the u34.1 spike and the
 /// node-pty replacement at the heart of u34.2.
 ///
-/// `execvp` inherits the parent process's `environ` verbatim — we never build an
-/// envp, never inject a shadow HOME/CODEX_HOME — so user-scope MCP, connectors
-/// and CLI config resolve exactly as in a normal terminal. Env fidelity is true
-/// by construction. The child `chdir`s into the session's cwd before exec.
+/// The child inherits the parent's `environ` verbatim apart from the entries that
+/// describe the pty we just created (`TERM`/`COLORTERM`) — we never inject a shadow
+/// HOME/CODEX_HOME — so user-scope MCP, connectors and CLI config resolve exactly as
+/// in a normal terminal. Env fidelity is true by construction. The child `chdir`s
+/// into the session's cwd before exec.
 ///
 /// Output bytes are handed to `onData` on a private serial queue; `Session` fans
 /// them out to N subscribers. This is the seam that replaces node-pty's onData.
@@ -43,6 +44,19 @@ public final class PtyProcess: @unchecked Sendable {
     /// even when `queue` is wedged and `exited`/`finish()` haven't run yet.
     private let reaped = OSAllocatedUnfairLock(initialState: false)
 
+    /// The terminal type every juancode pty declares to its child.
+    ///
+    /// This is ours to state, not the launching process's: the emulator on the other
+    /// end of the pty is juancode's own (libghostty, or SwiftTerm behind the toggle),
+    /// so inheriting whatever `TERM` the host terminal happened to export describes
+    /// the wrong terminal — and a Finder/Dock launch inherits none at all, since
+    /// launchd's environment has no `TERM`. That is what made a Dock-launched app
+    /// render every agent in monochrome: with no terminfo to find, the CLIs' color
+    /// libraries fall back to depth 1. Declaring it here makes a session look the
+    /// same however the app was started. `xterm-256color` is present on every macOS
+    /// install; `COLORTERM` opts into the 24-bit path both backends render.
+    static let terminalEnv = ["TERM": "xterm-256color", "COLORTERM": "truecolor"]
+
     public init?(
         executable: String,
         args: [String],
@@ -67,28 +81,22 @@ public final class PtyProcess: @unchecked Sendable {
         let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: argvStrings.count + 1)
         for (i, s) in argvStrings.enumerated() { argv[i] = strdup(s) }
         argv[argvStrings.count] = nil
-        let cExecutable = strdup(executable)
+        // execve wants a path, and the overlay only rides on execve — so a bare
+        // command name gets the PATH search HERE, in the parent, where it is safe to
+        // hit the filesystem. (`execvp` below stays as the last-ditch fallback.)
+        let cExecutable = strdup(Self.onPath(executable) ?? executable)
         let cCwd: UnsafeMutablePointer<CChar>? = cwd.isEmpty ? nil : strdup(cwd)
-        // Env fidelity by default: with no overrides we build no envp at all and the
-        // child inherits `environ` verbatim through execvp, exactly as before. An
-        // overlay (only opencode's opt-in bypass today) means copying the inherited
-        // environment plus those entries into an envp HERE in the parent, so the child
-        // still touches nothing but pre-built buffers.
-        let envp: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
-        let envCount: Int
-        if envOverrides.isEmpty {
-            envp = nil
-            envCount = 0
-        } else {
-            var merged = ProcessInfo.processInfo.environment
-            for (k, v) in envOverrides { merged[k] = v }
-            let entries = merged.map { "\($0.key)=\($0.value)" }
-            let buf = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: entries.count + 1)
-            for (i, s) in entries.enumerated() { buf[i] = strdup(s) }
-            buf[entries.count] = nil
-            envp = buf
-            envCount = entries.count
-        }
+        // The inherited environment, overlaid with the terminal type of the pty we
+        // just created and any per-spawn entry (only opencode's opt-in bypass today).
+        // Built HERE in the parent, so the child touches nothing but pre-built buffers.
+        var merged = ProcessInfo.processInfo.environment
+        for (k, v) in Self.terminalEnv { merged[k] = v }
+        for (k, v) in envOverrides { merged[k] = v }
+        let entries = merged.map { "\($0.key)=\($0.value)" }
+        let envCount = entries.count
+        let envp = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: envCount + 1)
+        for (i, s) in entries.enumerated() { envp[i] = strdup(s) }
+        envp[envCount] = nil
         // Upper bound of the fd table, read in the PARENT so the child touches only
         // async-signal-safe `close()` (see the fd-hygiene note below, juancode-1qf).
         let maxFd = getdtablesize()
@@ -114,11 +122,10 @@ public final class PtyProcess: @unchecked Sendable {
             var fd: Int32 = 3
             while fd < maxFd { close(fd); fd += 1 }
             if let cCwd { _ = chdir(cCwd) }
-            // With an envp, exec through it (execve takes a path, which is what the
-            // resolver hands us). Falling through to execvp keeps a bare-name
-            // executable working — it loses the overlay, but a session that starts
-            // beats one that doesn't.
-            if let envp { execve(cExecutable, argv, envp) }
+            // Exec through our envp. Falling through to execvp keeps a spawn working
+            // when the path search above came up empty — it loses the overlay, but a
+            // session that starts beats one that doesn't.
+            execve(cExecutable, argv, envp)
             execvp(cExecutable, argv)
             _exit(127)
         }
@@ -129,10 +136,8 @@ public final class PtyProcess: @unchecked Sendable {
         argv.deallocate()
         free(cExecutable)
         if let cCwd { free(cCwd) }
-        if let envp {
-            for i in 0..<envCount { free(envp[i]) }
-            envp.deallocate()
-        }
+        for i in 0..<envCount { free(envp[i]) }
+        envp.deallocate()
 
         self.masterFd = master
         self.pid = childPid
@@ -149,6 +154,23 @@ public final class PtyProcess: @unchecked Sendable {
         _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
         startReading()
         startExitWatch()
+    }
+
+    /// The absolute path `execvp` would find for a bare command name, or nil when the
+    /// name is already a path (or nothing on PATH matches). Same rule as execvp: a
+    /// name containing a slash is used as given.
+    private static func onPath(_ command: String) -> String? {
+        guard !command.contains("/") else { return nil }
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for dir in path.split(separator: ":", omittingEmptySubsequences: true) {
+            let candidate = "\(dir)/\(command)"
+            // Executable AND a regular file: an +x directory answers `access` too,
+            // and picking one would fail the exec that the search exists to serve.
+            var st = stat()
+            if access(candidate, X_OK) == 0, stat(candidate, &st) == 0,
+               st.st_mode & S_IFMT == S_IFREG { return candidate }
+        }
+        return nil
     }
 
     /// Disable the terminal's SUSP control char (Ctrl-Z) on the pty's line
