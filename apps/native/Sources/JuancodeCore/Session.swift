@@ -269,6 +269,11 @@ public final class Session: @unchecked Sendable {
     public var id: String { lock.withLock { _meta.id } }
     public var isRunning: Bool { lock.withLock { _meta.status == .running } }
     public var activity: SessionActivity { detector.activity }
+    /// An agent tool call the CLI opened and hasn't resolved (a Bash run, a
+    /// delegated subagent). The idle reaper treats it as "still running something"
+    /// no matter what the classified activity says — see
+    /// `ActivityDetector.hasPendingToolUse`.
+    public var hasPendingToolUse: Bool { detector.hasPendingToolUse }
     public var lastInputMs: Int { lock.withLock { _lastInputMs } }
 
     /// The pty child's pid while the session is running, nil once exited. The

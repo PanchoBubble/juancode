@@ -245,6 +245,10 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
         await state.sessionReaper.setIdleWindow(minutes: minutes)
     }
 
+    public func setReaperProtectedIds(_ ids: Set<String>) async {
+        await state.sessionReaper.setProtectedIds(ids)
+    }
+
     public func shutdown() { state.shutdown() }
 
     public func shutdownGracefully(timeout: TimeInterval) {

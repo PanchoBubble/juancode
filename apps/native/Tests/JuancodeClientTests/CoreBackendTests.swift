@@ -319,6 +319,7 @@ final class FakeCore: CoreClient, @unchecked Sendable {
                          fields: [String: String]) {}
     func flushSessionLog() -> String { "" }
     func setReaperIdleWindow(minutes: Int) async {}
+    func setReaperProtectedIds(_ ids: Set<String>) async {}
     func shutdown() {}
     func shutdownGracefully(timeout: TimeInterval) {}
 }

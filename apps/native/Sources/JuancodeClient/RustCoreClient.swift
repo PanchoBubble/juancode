@@ -389,6 +389,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// configure it. The Settings idle window therefore does not reach the rust core.
     public func setReaperIdleWindow(minutes: Int) async {}
 
+    /// Same reason: the daemon owns its own reaper, so the open pane / active
+    /// Oracle exemptions are pushed to nothing here.
+    public func setReaperProtectedIds(_ ids: Set<String>) async {}
+
     /// Closing the app does NOT kill the daemon's ptys: it is another process, its
     /// sessions outlive this window, and re-adopting them is what the boot probe is
     /// for. All this does is persist what we know and hang up.

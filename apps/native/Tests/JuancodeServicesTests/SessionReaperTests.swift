@@ -22,6 +22,7 @@ final class SessionReaperTests: XCTestCase {
         descendantCount: Int = 3,
         cpuTimeMs: Int = 10_000,
         transcriptSizeBytes: Int? = nil,
+        hasPendingToolUse: Bool = false,
         isProtected: Bool = false
     ) -> ReapSample {
         ReapSample(
@@ -32,6 +33,7 @@ final class SessionReaperTests: XCTestCase {
             descendantCount: descendantCount,
             cpuTimeMs: cpuTimeMs,
             transcriptSizeBytes: transcriptSizeBytes,
+            hasPendingToolUse: hasPendingToolUse,
             isProtected: isProtected
         )
     }
@@ -77,6 +79,14 @@ final class SessionReaperTests: XCTestCase {
     func testNonEmptyQueueIsNeverEligible() {
         XCTAssertEqual(evaluate(idleSample(queueEmpty: false), baseline: baseAtT0, nowMs: t0 + windowMs),
                        .notIdle)
+    }
+
+    func testOpenToolCallIsNeverEligible() {
+        // A delegated subagent past ActivityDetector's 30-min hold cap reads as
+        // .idle while it is still running — the open call is its own veto.
+        XCTAssertEqual(
+            evaluate(idleSample(hasPendingToolUse: true), baseline: baseAtT0, nowMs: t0 + windowMs),
+            .notIdle)
     }
 
     func testProtectedSessionIsNeverEligible() {
@@ -457,6 +467,79 @@ final class SessionReaperTests: XCTestCase {
         reaped = await reaper.sweepOnce()
         XCTAssertEqual(reaped, [session.id])
         XCTAssertEqual(store.get(session.id)?.dormant, true)
+    }
+
+    // MARK: - never-sleep set (the open pane / the active Oracle)
+
+    func testProtectedSessionSurvivesTheIdleWindow() async throws {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCliSessionId: { _, _, _ in nil }
+        ))
+        let session = try registry.create(
+            provider: .claude, cwd: FileManager.default.temporaryDirectory.path, cols: 80, rows: 24)
+        defer { session.kill() }
+        await waitForIdle(session)
+
+        let clock = Clock(nowMs())
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: quietProbes(clock: clock),
+            windowMs: windowMs, maxLive: 0)
+        await reaper.setProtectedIds([session.id])
+
+        // Idle for days: the pane you have open (or the Oracle you are talking to)
+        // is never slept, however long it sits.
+        _ = await reaper.sweepOnce()
+        clock.now += windowMs * 10
+        var reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        XCTAssertTrue(session.isRunning)
+        XCTAssertNotEqual(store.get(session.id)?.dormant, true)
+
+        // Navigate away and it is an ordinary candidate again — from a FRESH window,
+        // not the streak it accrued while protected.
+        await reaper.setProtectedIds([])
+        reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [])
+        clock.now += windowMs
+        reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [session.id])
+        XCTAssertEqual(store.get(session.id)?.dormant, true)
+    }
+
+    func testCapSkipsProtectedSessionAndSleepsTheNextOne() async throws {
+        let store = InMemorySessionStore()
+        let queue = MessageQueue()
+        let registry = SessionRegistry(env: SessionEnvironment(
+            resolver: FakeResolver(path: makeScript()),
+            store: store,
+            messageQueue: queue,
+            discoverCliSessionId: { _, _, _ in nil }
+        ))
+        let cwd = FileManager.default.temporaryDirectory.path
+        let openPane = try registry.create(provider: .claude, cwd: cwd, cols: 80, rows: 24)
+        defer { openPane.kill() }
+        let background = try registry.create(provider: .claude, cwd: cwd, cols: 80, rows: 24)
+        defer { background.kill() }
+        await waitForIdle(openPane)
+        await waitForIdle(background)
+
+        // Window off, cap at one: the LRU rule alone decides. The protected pane is
+        // not a candidate at all — however stale it looks — so the cap reclaims the
+        // background session to get back under the ceiling.
+        let clock = Clock(nowMs())
+        let reaper = SessionReaper(
+            registry: registry, messageQueue: queue, probes: quietProbes(clock: clock),
+            windowMs: 0, maxLive: 1)
+        await reaper.setProtectedIds([openPane.id])
+        let reaped = await reaper.sweepOnce()
+        XCTAssertEqual(reaped, [background.id])
+        XCTAssertTrue(openPane.isRunning)
+        XCTAssertNotEqual(store.get(openPane.id)?.dormant, true)
     }
 
     func testDisablingMidStreakDropsTheBaseline() async throws {

@@ -8,6 +8,11 @@ import JuancodeCore
 /// tile visible as *dormant* — resumable on demand through the existing
 /// `reviveSession` paths (remote attach/input, PR-tracker reactivation).
 ///
+/// Three things are never reaped, whatever the signals say: a session that is
+/// still running something (busy, waiting on a prompt, or holding an unresolved
+/// `tool_use`), the pane the user has open, and the Oracle they are talking to —
+/// the last two pushed in by the app via `setProtectedIds`.
+///
 /// The `ActivityDetector` alone isn't trusted: it reads the screen and the
 /// transcript, both of which can look quiet mid-work (long thinking, delegation
 /// gaps). So eligibility stacks *independent* signals, sampled every sweep, and a
@@ -51,7 +56,13 @@ public struct ReapSample: Sendable, Equatable {
     /// so growth is the thing that means the agent produced something, while the
     /// mtime also moves on flushes that add no records.
     public var transcriptSizeBytes: Int?
-    /// Externally protected (e.g. the focused pane). Never reaped.
+    /// An agent tool call the CLI opened and hasn't resolved. Unlike `activity`,
+    /// this is not capped by `ActivityDetector.toolHoldCapMs`: a delegated subagent
+    /// or a long Bash run goes screen- and transcript-quiet, and past that 30-min
+    /// cap the state falls back to `.idle` while the tool is still running — inside
+    /// the default 60-min reap window. So the open call is its own hard veto.
+    public var hasPendingToolUse: Bool
+    /// Externally protected (the open pane, the active Oracle). Never reaped.
     public var isProtected: Bool
 
     public init(
@@ -62,6 +73,7 @@ public struct ReapSample: Sendable, Equatable {
         descendantCount: Int,
         cpuTimeMs: Int,
         transcriptSizeBytes: Int?,
+        hasPendingToolUse: Bool = false,
         isProtected: Bool = false
     ) {
         self.activity = activity
@@ -71,6 +83,7 @@ public struct ReapSample: Sendable, Equatable {
         self.descendantCount = descendantCount
         self.cpuTimeMs = cpuTimeMs
         self.transcriptSizeBytes = transcriptSizeBytes
+        self.hasPendingToolUse = hasPendingToolUse
         self.isProtected = isProtected
     }
 }
@@ -152,9 +165,12 @@ public enum SessionReapPolicy {
         cpuFloorMs: Int = defaultCpuFloorMs
     ) -> Verdict {
         guard windowMs > 0 else { return .notIdle } // reaping disabled
-        // Hard resets: the detector says work (or a prompt) is pending, a queued
-        // message is about to be delivered, or the session is protected.
-        guard sample.activity == .idle, sample.queueEmpty, !sample.isProtected else {
+        // Hard resets: the detector says work (or a prompt) is pending, a tool call
+        // is still open, a queued message is about to be delivered, or the session
+        // is protected.
+        guard sample.activity == .idle, !sample.hasPendingToolUse,
+              sample.queueEmpty, !sample.isProtected
+        else {
             return .notIdle
         }
 
@@ -316,8 +332,10 @@ public struct SessionReaperProbes: Sendable {
     public var treeCpuTimeMs: @Sendable (pid_t) -> Int
     /// `(provider, cliSessionId) -> transcript size in bytes`, nil when not found.
     public var transcriptSizeBytes: @Sendable (ProviderId, String) async -> Int?
-    /// `(sessionId) -> never reap right now` (e.g. the focused pane). Defaults to
-    /// never-protected; the last-keystroke window covers actively used sessions.
+    /// `(sessionId) -> never reap right now`. Defaults to never-protected: the app
+    /// declares the open pane and the active Oracle through
+    /// `SessionReaper.setProtectedIds` instead, since that state lives on the main
+    /// actor. This seam stays for tests and other embedders.
     public var isProtected: @Sendable (String) -> Bool
 
     public init(
@@ -388,6 +406,10 @@ public actor SessionReaper {
     /// Tracked idle streaks by session id; entries drop whenever a session stops
     /// being idle (or stops existing).
     private var baselines: [String: SessionReapPolicy.Baseline] = [:]
+    /// Sessions the UI declares off-limits right now: the pane you have open and
+    /// the active Oracle. Pushed by the app (`setProtectedIds`) rather than probed,
+    /// because the selection lives on the main actor and the sweep does not.
+    private var protectedIds: Set<String> = []
     private var loop: Task<Void, Never>?
 
     public init(
@@ -419,6 +441,23 @@ public actor SessionReaper {
     /// Change the live-session ceiling at runtime. `<= 0` disables the cap.
     public func setMaxLive(_ count: Int) {
         maxLive = count
+    }
+
+    /// Replace the set of sessions that must never be slept — neither by the idle
+    /// window nor by the live-session cap. The app pushes the pane you have open
+    /// and the active Oracle: sleeping either one is visible work vanishing under
+    /// you, which no amount of freed RAM pays for. Also drops any tracked streak
+    /// for a newly protected session, so unprotecting it later starts a fresh
+    /// window instead of reaping off a stale baseline.
+    public func setProtectedIds(_ ids: Set<String>) {
+        protectedIds = ids
+        for id in ids { baselines[id] = nil }
+    }
+
+    /// Whether `id` is off-limits: the app's pushed set, or the injected probe
+    /// (tests / other embedders).
+    private func protected(_ id: String) -> Bool {
+        protectedIds.contains(id) || probes.isProtected(id)
     }
 
     /// Start the periodic sweep. No-op when already running. Runs even while the
@@ -469,7 +508,8 @@ public actor SessionReaper {
                 descendantCount: probes.descendantCount(pid),
                 cpuTimeMs: probes.treeCpuTimeMs(pid),
                 transcriptSizeBytes: transcriptSize,
-                isProtected: probes.isProtected(meta.id)
+                hasPendingToolUse: session.hasPendingToolUse,
+                isProtected: protected(meta.id)
             )
             switch SessionReapPolicy.evaluate(
                 sample, baseline: baselines[meta.id],
@@ -502,9 +542,10 @@ public actor SessionReaper {
         let candidates = live.map { session -> SessionCapPolicy.Candidate in
             let meta = session.meta
             let sleepable = session.activity == .idle
+                && !session.hasPendingToolUse
                 && meta.cliSessionId != nil
                 && messageQueue.peek(meta.id) == nil
-                && !probes.isProtected(meta.id)
+                && !protected(meta.id)
             return .init(id: meta.id,
                          lastActiveMs: max(meta.updatedAt, session.lastInputMs),
                          sleepable: sleepable)

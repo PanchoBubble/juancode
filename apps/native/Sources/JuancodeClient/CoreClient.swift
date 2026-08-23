@@ -201,6 +201,12 @@ public protocol CoreClient: AnyObject, Sendable {
     /// disables it.
     func setReaperIdleWindow(minutes: Int) async
 
+    /// Sessions the reaper must never sleep, whatever the idle window or the
+    /// live-session cap say: the pane the user has open and the active Oracle.
+    /// Pushed from the UI on every change (and on its periodic tick, so no
+    /// navigation path can leave the set stale).
+    func setReaperProtectedIds(_ ids: Set<String>) async
+
     /// Force-kill every live pty (session + ephemeral).
     func shutdown()
 

@@ -151,6 +151,9 @@ final class AppModel {
             if let sel = selection, sel != oldValue {
                 UserDefaults.standard.set(sel, forKey: lastFocusedSessionKey)
             }
+            // The open pane is never a reap candidate — and the pane you just left
+            // becomes one again.
+            applyReaperProtection()
         }
     }
     var showingNewSession = false
@@ -1312,6 +1315,31 @@ final class AppModel {
     private func applyReaperWindow() {
         let minutes = Config.reapIdleMinutesOverride ?? autoCloseIdleMinutes
         Task { [core] in await core.setReaperIdleWindow(minutes: minutes) }
+    }
+
+    /// The Oracle session showing in the dock's chat, mirrored from
+    /// `OracleModel.oracleSessionId` (which owns it) so the reaper-protection set
+    /// can name it. Oracle sessions are never the sidebar `selection`, so without
+    /// this the one you are talking to is as reapable as any background pane.
+    var activeOracleSessionId: String? {
+        didSet {
+            if activeOracleSessionId != oldValue { applyReaperProtection() }
+        }
+    }
+
+    /// Last set pushed to the reaper, so the periodic re-push is a no-op when
+    /// nothing moved.
+    @ObservationIgnored private var pushedProtectedIds: Set<String>?
+
+    /// Tell the reaper which sessions must never be slept: the pane you have open
+    /// and the active Oracle. Called from every path that can change either (the
+    /// `selection` setter, the Oracle's session switch) and again on the health
+    /// tick, so a navigation path added later can't silently leave the set stale.
+    func applyReaperProtection() {
+        let ids = Set([selection, activeOracleSessionId].compactMap { $0 })
+        guard ids != pushedProtectedIds else { return }
+        pushedProtectedIds = ids
+        Task { [core] in await core.setReaperProtectedIds(ids) }
     }
 
     /// Estimated-cost budget in USD (juancode-qoc). `0` = off. When set, the sidebar
@@ -3433,6 +3461,10 @@ final class AppModel {
     /// the next tick.
     func runHealthCheckOnce() {
         let now = nowMs()
+        // Cheap re-assert of the reaper's never-sleep set (a no-op unless it moved):
+        // the 30s tick is well inside the sweep interval, so even a change path that
+        // forgets to push can't lose the open pane or the active Oracle.
+        applyReaperProtection()
         // Remember anything currently live so we only ever flag sessions we were
         // actually driving — not the backlog of long-dead history.
         for meta in sessions where isLive(meta.id) { everLive.insert(meta.id) }

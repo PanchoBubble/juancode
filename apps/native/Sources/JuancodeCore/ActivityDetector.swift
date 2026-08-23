@@ -147,6 +147,12 @@ public final class ActivityDetector: @unchecked Sendable {
     /// the tool may be waiting on permission. Cleared on any leave-busy and capped by
     /// `toolHoldCapMs` so a crashed tool can't pin busy forever.
     private var pendingToolUseIds: Set<String> = []
+    /// The same opened-but-unresolved `tool_use` ids, kept WITHOUT the cap and
+    /// without the clear-on-leave-busy that `pendingToolUseIds` needs — the raw
+    /// "a call is still open" fact the idle reaper reads (`hasPendingToolUse`).
+    /// Cleared only by a `tool_result`, by a fresh `user` turn (which supersedes
+    /// anything left open before it), and by `reset`.
+    private var openToolUseIds: Set<String> = []
     /// When the last structured agent pulse arrived; anchors the `toolHoldCapMs` cap.
     private var lastStructuredAt = Date.distantPast
     /// Tail of the previous chunk, re-scanned with the next one so a gate token split
@@ -209,6 +215,17 @@ public final class ActivityDetector: @unchecked Sendable {
         queue.sync { state }
     }
 
+    /// True while the transcript has opened a `tool_use` it hasn't resolved — the
+    /// raw fact, deliberately NOT bounded by `toolHoldCapMs`. That cap only limits
+    /// how long an unresolved call may pin the *activity state* busy, so a crashed
+    /// tool can't wedge a session as working forever. The idle reaper needs the
+    /// unbounded truth instead: a delegated subagent legitimately runs past the
+    /// cap, and a false "busy" there only delays freeing RAM while a false "idle"
+    /// kills the run.
+    public var hasPendingToolUse: Bool {
+        queue.sync { !openToolUseIds.isEmpty }
+    }
+
     /// Which `PromptPattern` label last classified a screen as a prompt, for debugging.
     public var lastPromptMatch: String? {
         queue.sync { lastMatchedPrompt }
@@ -250,6 +267,7 @@ public final class ActivityDetector: @unchecked Sendable {
             self.generation += 1
             self.structuredTurn = false
             self.pendingToolUseIds.removeAll()
+            self.openToolUseIds.removeAll()
             self.gateCarry.removeAll()
             self.transition(.idle, notify: false)
         }
@@ -300,6 +318,13 @@ public final class ActivityDetector: @unchecked Sendable {
     private func _feedStructured(_ batch: StructuredEventBatch) {
         pendingToolUseIds.formUnion(batch.openedToolUseIds)
         pendingToolUseIds.subtract(batch.resolvedToolUseIds)
+        // The reaper's uncapped mirror. A `user` record is the user's own prompt
+        // landing (tool results normalize to `.toolResult`, never `.user`), so a new
+        // turn means anything still open belonged to a turn that is over — the one
+        // release path for a call whose `tool_result` never came.
+        if batch.kinds.contains(.user) { openToolUseIds.removeAll() }
+        openToolUseIds.formUnion(batch.openedToolUseIds)
+        openToolUseIds.subtract(batch.resolvedToolUseIds)
         guard batchHasAgentActivity(batch.kinds) else { return }
         lastStructuredAt = clock.now()
         // A structured pulse is authoritative for this turn, whether it starts the

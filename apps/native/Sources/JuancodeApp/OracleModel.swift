@@ -41,7 +41,9 @@ final class OracleModel {
     /// The Oracle agent session currently shown in the chat. You can run several
     /// Oracles in parallel (all live in the control dir); this points at the active
     /// one and the session rail lists them all (see `oracleSessions`).
-    var oracleSessionId: String?
+    var oracleSessionId: String? {
+        didSet { app.activeOracleSessionId = oracleSessionId }
+    }
 
     /// Bumped to ask the chat terminal to grab keyboard focus (⌃Space). The chat
     /// view watches this and makes the terminal first responder on each change.

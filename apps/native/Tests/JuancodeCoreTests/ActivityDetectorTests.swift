@@ -310,6 +310,40 @@ import Testing
         #expect(c.snapshot.last?.0 == .idle)
     }
 
+    /// The reaper's veto is the raw open-call fact, so it must OUTLIVE the hold cap:
+    /// past the cap the state falls back to idle, but a subagent that legitimately
+    /// runs that long is still running and must never be slept.
+    @Test func pendingToolUseOutlivesTheHoldCap() {
+        let c = Collector()
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(
+            settleMs: 40, watchdogMs: 100, toolHoldCapMs: 200, clock: clock) { c.record($0, $1) }
+        #expect(!det.hasPendingToolUse)
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        det.drain()
+        clock.advance(400) // past the cap: activity demotes, the call is still open
+        #expect(c.snapshot.last?.0 == .idle)
+        #expect(det.hasPendingToolUse)
+        det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t1"]))
+        det.drain()
+        #expect(!det.hasPendingToolUse)
+    }
+
+    /// The escape hatch for the uncapped veto: a call whose `tool_result` never
+    /// arrives is released by the next user turn, so a crashed tool can't pin a
+    /// session unreapable forever.
+    @Test func userTurnReleasesTheUnresolvedCall() {
+        let c = Collector()
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, clock: clock) { c.record($0, $1) }
+        det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
+        det.drain()
+        #expect(det.hasPendingToolUse)
+        det.feedStructured([.user]) // a fresh prompt: the old turn is over
+        det.drain()
+        #expect(!det.hasPendingToolUse)
+    }
+
     /// A tool_use is written to the transcript *before* its permission menu is
     /// answered, so a visible prompt must beat the hold — the user needs the ping.
     @Test func promptBeatsOpenToolUseHold() async {
