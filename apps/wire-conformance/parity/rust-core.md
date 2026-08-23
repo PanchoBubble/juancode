@@ -6,17 +6,10 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Spec revision: 1.3.0 (protocol v1)
 - Status source: a real conformance run
 - As of: 2026-08-23
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner
-- Unmet scenarios: 5 of 23
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit
+- Unmet scenarios: 4 of 23
 
-## What is not satisfied yet (5)
-
-### queue
-
-- Status: n/a
-- Needs: queue, pty
-- Why: core does not advertise the "queue" capability
-- Asserts: the queue is pushed as a complete ordered list on subscribe and after every change, is replaced wholesale rather than patched, and stops being pushed after unsubscribe.
+## What is not satisfied yet (4)
 
 ### tracked-prs
 
@@ -57,7 +50,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - screen-stream: yes - rendered-screen stream
 - activity-notify: yes - activity transitions and the notify flag
 - activity-changes: yes - settle-edge change rollup
-- queue: n/a - queue snapshots
+- queue: yes - queue snapshots
 - exit-codes: yes - exit codes and the dead-session attach
 - unresumable: yes - unresumable reactivate
 - errors: yes - error frames and tolerated junk

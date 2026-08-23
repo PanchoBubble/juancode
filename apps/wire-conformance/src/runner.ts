@@ -64,6 +64,58 @@ export function makeWorkspace(): Workspace {
   };
 }
 
+/** A token unique to this suite process.
+ *
+ * Ids a scenario claims inside a core outlive the scenario: the core persists a
+ * dispatch id so a second create for it is rejected, and remembers an adopted CLI
+ * id so adopting it again is a no-op. Both are the features scenario 17 and 16
+ * exist to prove, so an id reused by a later run measures the dedup instead of
+ * the scenario. Stamping the process makes a second run against the same daemon
+ * a fresh claim.
+ *
+ * Overridable so a repeatability measurement can pin it: forcing two runs to share
+ * a token is how you demonstrate that it is the token doing the work. */
+const RUN_TOKEN =
+  process.env.JUANCODE_CONFORMANCE_RUN_TOKEN ??
+  `${Date.now().toString(36)}-${process.pid.toString(36)}`;
+
+/** How many times each scenario has been run in this process. */
+const attempts = new Map<string, number>();
+
+/** The 1-based attempt number for the next run of this scenario.
+ *
+ * Per attempt rather than per process, because one boot has to be able to run the
+ * same scenario more than once: a repeat pass over the whole spec inside a single
+ * core is the point of measuring repeatability at all. */
+export function bumpAttempt(scenarioId: string): number {
+  const next = (attempts.get(scenarioId) ?? 0) + 1;
+  attempts.set(scenarioId, next);
+  return next;
+}
+
+/** Everything a scenario's steps can reference before its first `bind`.
+ *
+ * One place, so `spec.test.ts` can check that no transcript references a variable
+ * nothing seeds without keeping its own copy of the list. */
+export function seedVars(
+  workspace: Omit<Workspace, "dispose">,
+  scenarioId: string,
+  attempt: number,
+): Vars {
+  // Recognisable on purpose: a human reading a session list or a dispatch log
+  // should still be able to tell what made these.
+  const stamp = `${RUN_TOKEN}-${attempt}`;
+  return {
+    cwd: workspace.cwd,
+    gitCwd: workspace.gitCwd,
+    missingCwd: workspace.missingCwd,
+    file: workspace.file,
+    dispatchId: `conformance-${scenarioId}-${stamp}`,
+    requestId: `req-${scenarioId}-${stamp}`,
+    cliSessionId: `conformance-adopted-${scenarioId}-${stamp}`,
+  };
+}
+
 export interface RunContext {
   wsUrl: string;
   workspace: Workspace;
@@ -103,14 +155,7 @@ export function clientVar(name: string): string {
 export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<void> {
   const ignore = scenario.ignore ?? [];
   const clients = new Map<string, WireClient>();
-  const vars: Vars = {
-    cwd: ctx.workspace.cwd,
-    gitCwd: ctx.workspace.gitCwd,
-    missingCwd: ctx.workspace.missingCwd,
-    file: ctx.workspace.file,
-    dispatchId: `conformance-${scenario.id}`,
-    requestId: `req-${scenario.id}`,
-  };
+  const vars: Vars = seedVars(ctx.workspace, scenario.id, bumpAttempt(scenario.id));
 
   const open = async (name: string, keep = false): Promise<WireClient> => {
     const client = await WireClient.connect(ctx.wsUrl, name);

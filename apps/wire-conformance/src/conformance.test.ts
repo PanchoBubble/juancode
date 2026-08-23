@@ -3,6 +3,9 @@
 //   pnpm --filter @juancode/wire-conformance test:conformance
 //     builds and boots the Swift core on its own port and database
 //
+//   JUANCODE_CONFORMANCE_CORE=rust pnpm --filter @juancode/wire-conformance test:conformance
+//     builds and boots the Rust core (`juancoded`) the same way
+//
 //   JUANCODE_CONFORMANCE_URL=ws://127.0.0.1:4300/ws JUANCODE_CONFORMANCE_LABEL=rust \
 //   pnpm --filter @juancode/wire-conformance test:conformance
 //     drives whatever core is at that URL instead
@@ -80,17 +83,19 @@ afterAll(async () => {
   };
   const at = new Date().toISOString().slice(0, 10);
   const summary = renderRunMarkdown(report, at);
-  const target = process.env.JUANCODE_CONFORMANCE_REPORT;
-  if (target) {
+  const write = (target: string, text: string) => {
     const path = resolve(target);
     if (!existsSync(dirname(path))) mkdirSync(dirname(path), { recursive: true });
-    if (path.endsWith(".json")) {
-      writeText(path, `${JSON.stringify(toStatusFile(report, at), null, 2)}\n`);
-    } else {
-      writeText(path, summary);
-    }
+    writeText(path, text);
     console.log(`wire-conformance: wrote ${path}`);
-  }
+  };
+  const status = () => `${JSON.stringify(toStatusFile(report, at), null, 2)}\n`;
+  const target = process.env.JUANCODE_CONFORMANCE_REPORT;
+  if (target) write(target, target.endsWith(".json") ? status() : summary);
+  // Separate from the report on purpose: CI wants BOTH, the prose to upload and
+  // the status to check the committed parity claim against.
+  const statusTarget = process.env.JUANCODE_CONFORMANCE_STATUS;
+  if (statusTarget) write(statusTarget, status());
   console.log(summary);
   workspace?.dispose();
   await core?.stop();

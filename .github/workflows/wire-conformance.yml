@@ -3,7 +3,7 @@ name: wire-conformance
 # The wire protocol is the contract between the Swift core, the Rust core
 # (apps/juancoded) and every client. This workflow runs the executable spec:
 # the fast checks everywhere, and the live conformance suite against a real
-# Swift core booted in the runner.
+# core of each kind, booted in the runner.
 on:
   push:
     branches: [main]
@@ -33,12 +33,15 @@ jobs:
       - run: pnpm test
 
       # The checklist is generated, so a stale one in the tree is a real error.
+      # This catches a hand-edited checklist and nothing else: it regenerates FROM
+      # the status JSON, so a status JSON whose measurement is out of date passes
+      # here. The conformance jobs below are what check the measurement itself.
       - name: Parity checklist is up to date
         run: |
           pnpm --filter @juancode/wire-conformance parity
           git diff --exit-code -- apps/wire-conformance/parity
 
-  conformance:
+  conformance-swift:
     name: conformance vs the Swift core
     runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
     steps:
@@ -64,16 +67,84 @@ jobs:
       - name: Run the conformance suite
         env:
           # Already built above; and never 4280/4281, which are a developer's app.
+          JUANCODE_CONFORMANCE_CORE: swift
           JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
           JUANCODE_CONFORMANCE_PORT: "4295"
           JUANCODE_CONFORMANCE_LABEL: swift
-          JUANCODE_CONFORMANCE_REPORT: conformance-swift.md
+          # Anchored at the workspace: the suite resolves a relative path from
+          # apps/wire-conformance, which is not where the upload step looks.
+          JUANCODE_CONFORMANCE_REPORT: ${{ github.workspace }}/conformance-swift.md
+          JUANCODE_CONFORMANCE_STATUS: ${{ github.workspace }}/conformance-swift-status.json
         run: pnpm --filter @juancode/wire-conformance test:conformance
+
+      # The checked-in parity file is a claim about this core. Comparing it to what
+      # the run just measured is the only thing that keeps it a measurement rather
+      # than a promise, and it is how the queue scenario stayed understated for a
+      # commit. Verdicts and capabilities only: the date and a failure note move
+      # on their own.
+      - name: Committed parity file still describes the core
+        working-directory: apps/wire-conformance
+        run: pnpm exec tsx src/parity-cli.ts --verify ${{ github.workspace }}/conformance-swift-status.json
 
       - name: Upload the run report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wire-conformance-swift
-          path: conformance-swift.md
+          path: |
+            conformance-swift.md
+            conformance-swift-status.json
+          if-no-files-found: warn
+
+  conformance-rust:
+    name: conformance vs the Rust core
+    # Linux, not macos-15: juancoded is cfg(unix) and rusqlite is bundled, so it
+    # needs a C compiler and no Xcode. That keeps this job off the scarce macOS
+    # runners (and off their 10x minute multiplier on a private repo) and out of a
+    # Swift toolchain warm-up it would never use.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Toolchain
+        run: cargo --version && rustc --version
+
+      # Same reason as the Swift job: a build failure has to read differently from
+      # a conformance failure.
+      - name: Build the Rust core
+        working-directory: apps/juancoded
+        run: cargo build --bin juancoded
+
+      - name: Run the conformance suite
+        env:
+          # Its own port, and not the Swift job's 4295 either, so the two jobs stay
+          # independent even on a self-hosted runner that shares a host.
+          JUANCODE_CONFORMANCE_CORE: rust
+          JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
+          JUANCODE_CONFORMANCE_PORT: "4300"
+          JUANCODE_CONFORMANCE_LABEL: rust
+          JUANCODE_CONFORMANCE_REPORT: ${{ github.workspace }}/conformance-rust.md
+          JUANCODE_CONFORMANCE_STATUS: ${{ github.workspace }}/conformance-rust-status.json
+        run: pnpm --filter @juancode/wire-conformance test:conformance
+
+      - name: Committed parity file still describes the core
+        working-directory: apps/wire-conformance
+        run: pnpm exec tsx src/parity-cli.ts --verify ${{ github.workspace }}/conformance-rust-status.json
+
+      - name: Upload the run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-conformance-rust
+          path: |
+            conformance-rust.md
+            conformance-rust-status.json
           if-no-files-found: warn

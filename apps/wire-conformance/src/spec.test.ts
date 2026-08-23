@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clientVar } from "./runner.ts";
+import { clientVar, seedVars } from "./runner.ts";
 import { expectedTypes, loadProtocol, loadScenarios, sentTypes } from "./spec.ts";
 
 const spec = loadProtocol();
@@ -165,12 +165,7 @@ describe("scenarios", () => {
       // handshake, so a connection's own grid-ownership token counts as bound the
       // moment it is opened.
       const bound = new Set([
-        "cwd",
-        "gitCwd",
-        "missingCwd",
-        "file",
-        "dispatchId",
-        "requestId",
+        ...Object.keys(seedVars({ cwd: "", gitCwd: "", missingCwd: "", file: "" }, s.id, 1)),
         clientVar("a"),
       ]);
       for (const step of s.steps) {

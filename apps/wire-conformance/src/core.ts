@@ -1,15 +1,20 @@
 // Booting a core under test.
 //
 // Two modes:
-//   * JUANCODE_CONFORMANCE_URL points at an already-running core (this is how the
-//     Rust core gets measured, and how you drive a core in a container).
-//   * otherwise the Swift core's headless runner (`juancode-serve`) is built and
-//     booted here.
+//   * JUANCODE_CONFORMANCE_URL points at an already-running core (how you drive a
+//     core in a container, or one you have a debugger attached to).
+//   * otherwise the core named by JUANCODE_CONFORMANCE_CORE is built and booted
+//     here: `swift` (the default) builds `juancode-serve`, `rust` builds
+//     `juancoded`.
+//
+// Booting is the mode CI uses for both cores. A core somebody started by hand is
+// a core whose environment nobody can see in the log, and every unrepeatable
+// conformance score this repo has reported came from one.
 //
 // Isolation is the hard requirement: a developer's live app owns :4280 and the
 // sidecar owns :4281, and driving THAT app would create, resize and kill their
 // real sessions. So the boot pins its own port, its own sqlite dir, its own
-// oracle control dir, and fake provider binaries.
+// oracle control dir, its own unix socket, and fake provider binaries.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
@@ -21,8 +26,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(here, "..");
 const REPO_ROOT = join(PKG_ROOT, "..", "..");
 const NATIVE_ROOT = join(REPO_ROOT, "apps", "native");
+const JUANCODED_ROOT = join(REPO_ROOT, "apps", "juancoded");
 
 export const FIXTURES = join(PKG_ROOT, "fixtures");
+
+/** The cores this harness knows how to build and boot itself. */
+export const CORE_NAMES = ["swift", "rust"] as const;
+export type CoreName = (typeof CORE_NAMES)[number];
 
 export interface CoreUnderTest {
   /** Label used in the parity report ("swift", "rust", or whatever was passed in). */
@@ -67,8 +77,9 @@ async function waitHealthy(httpBase: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "never probed";
   while (Date.now() < deadline) {
-    // The Swift core serves /api/health; the Rust core serves /health. Probing
-    // both keeps the harness core-agnostic (the divergence itself is a parity item).
+    // The Swift core serves /api/health; the Rust core serves both /health and
+    // /api/health. Probing both keeps the harness core-agnostic (the divergence
+    // itself is a parity item).
     for (const path of ["/api/health", "/health"]) {
       try {
         const res = await fetch(`${httpBase}${path}`);
@@ -121,15 +132,94 @@ export function coreEnv(port: number, dataDir: string, oracleDir: string): Recor
   };
 }
 
+/** How to build and boot one core. Everything that differs between the Swift and
+ *  the Rust core lives here; the boot itself is shared. */
+interface CoreRecipe {
+  /** Build the product, then hand back the executable to spawn. */
+  resolve(skipBuild: boolean, buildTimeoutMs: number): Promise<string>;
+  /** Environment on top of coreEnv() that this core needs to be isolated. */
+  isolation(port: number, dataDir: string): Record<string, string>;
+}
+
+const RECIPES: Record<CoreName, CoreRecipe> = {
+  swift: {
+    resolve: async (skipBuild, buildTimeoutMs) => {
+      if (!skipBuild) {
+        // A sibling `swift build` holds the same package lock, so this can block
+        // for minutes before it even starts compiling. That is normal, not a hang.
+        await run("swift", ["build", "--product", "juancode-serve"], NATIVE_ROOT, buildTimeoutMs);
+      }
+      const binPath = (
+        await run(
+          "swift",
+          ["build", "--product", "juancode-serve", "--show-bin-path"],
+          NATIVE_ROOT,
+          120_000,
+        )
+      ).trim();
+      return join(binPath.split("\n").pop() ?? binPath, "juancode-serve");
+    },
+    // coreEnv already speaks the Swift core's own variables.
+    isolation: () => ({}),
+  },
+  rust: {
+    resolve: async (skipBuild, buildTimeoutMs) => {
+      if (!skipBuild) {
+        // Same caveat as swift: a sibling cargo holds the target-dir lock.
+        await run("cargo", ["build", "--bin", "juancoded"], JUANCODED_ROOT, buildTimeoutMs);
+      }
+      // Ask cargo where the target dir is rather than assuming ./target: a
+      // CARGO_TARGET_DIR in the environment (CI caching does this) moves it.
+      const meta = JSON.parse(
+        await run(
+          "cargo",
+          ["metadata", "--format-version", "1", "--no-deps"],
+          JUANCODED_ROOT,
+          120_000,
+        ),
+      ) as { target_directory?: string };
+      const targetDir = meta.target_directory ?? join(JUANCODED_ROOT, "target");
+      return join(targetDir, "debug", "juancoded");
+    },
+    isolation: (port, dataDir) => ({
+      // The daemon reads its OWN spellings. coreEnv's JUANCODE_PORT means nothing
+      // to it, so without these it listens on its default 4290 with the
+      // developer's real data dir, which is exactly the isolation the README
+      // promises it has.
+      JUANCODED_PORT: String(port),
+      JUANCODED_DATA_DIR: dataDir,
+      // And it defaults its unix socket to $HOME/.juancode/juancoded.sock, so
+      // unset it would take the developer's socket away from their own daemon.
+      // Short filename on purpose: a unix socket path is capped near 104 bytes
+      // and the temp dir already spends half of that.
+      JUANCODED_SOCKET: join(dataDir, "jd.sock"),
+    }),
+  },
+};
+
+/** Which core a boot should build, from the environment. */
+export function coreName(raw = process.env.JUANCODE_CONFORMANCE_CORE): CoreName {
+  if (raw === undefined || raw === "") return "swift";
+  const found = CORE_NAMES.find((n) => n === raw);
+  if (!found) {
+    throw new Error(
+      `JUANCODE_CONFORMANCE_CORE=${raw} is not a core this suite can boot (${CORE_NAMES.join(", ")})`,
+    );
+  }
+  return found;
+}
+
 export interface StartOptions {
+  /** Which core to build and boot. Defaults to JUANCODE_CONFORMANCE_CORE. */
+  core?: CoreName;
   /** Port for a core we boot ourselves. Never 4280/4281 (a dev machine's app/sidecar). */
   port?: number;
-  /** Skip `swift build` (the binary is already built, e.g. a previous CI step). */
+  /** Skip the build (the binary is already built, e.g. a previous CI step). */
   skipBuild?: boolean;
   buildTimeoutMs?: number;
 }
 
-/** Attach to a running core, or build and boot the Swift one. */
+/** Attach to a running core, or build and boot one. */
 export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest> {
   const external = process.env.JUANCODE_CONFORMANCE_URL;
   if (external) {
@@ -146,6 +236,8 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
     };
   }
 
+  const name = opts.core ?? coreName();
+  const recipe = RECIPES[name];
   const port = opts.port ?? Number(process.env.JUANCODE_CONFORMANCE_PORT ?? 4295);
   if (port === 4280 || port === 4281) {
     throw new Error(`refusing to drive port ${port}: that is a developer's live app / sidecar`);
@@ -153,24 +245,15 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   const skipBuild = opts.skipBuild ?? process.env.JUANCODE_CONFORMANCE_SKIP_BUILD === "1";
   const buildTimeoutMs = opts.buildTimeoutMs ?? 20 * 60_000;
 
-  if (!skipBuild) {
-    // A sibling `swift build` holds the same package lock, so this can block for
-    // minutes before it even starts compiling. That is normal, not a hang.
-    await run("swift", ["build", "--product", "juancode-serve"], NATIVE_ROOT, buildTimeoutMs);
-  }
-  const binPath = (
-    await run(
-      "swift",
-      ["build", "--product", "juancode-serve", "--show-bin-path"],
-      NATIVE_ROOT,
-      120_000,
-    )
-  ).trim();
-  const exe = join(binPath.split("\n").pop() ?? binPath, "juancode-serve");
+  const exe = await recipe.resolve(skipBuild, buildTimeoutMs);
 
   const dataDir = mkdtempSync(join(tmpdir(), "juancode-conformance-data-"));
   const oracleDir = mkdtempSync(join(tmpdir(), "juancode-conformance-oracle-"));
-  const env = { ...process.env, ...coreEnv(port, dataDir, oracleDir) };
+  const env = {
+    ...process.env,
+    ...coreEnv(port, dataDir, oracleDir),
+    ...recipe.isolation(port, dataDir),
+  };
   const child: ChildProcess = spawn(exe, [], {
     cwd: dataDir,
     env,
@@ -198,7 +281,7 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   }
 
   return {
-    label: process.env.JUANCODE_CONFORMANCE_LABEL ?? "swift",
+    label: process.env.JUANCODE_CONFORMANCE_LABEL ?? name,
     wsUrl: `ws://127.0.0.1:${port}/ws`,
     httpBase,
     dataDir,

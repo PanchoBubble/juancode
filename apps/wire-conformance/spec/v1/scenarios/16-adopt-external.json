@@ -19,7 +19,7 @@
       "send": {
         "type": "adoptExternal",
         "provider": "claude",
-        "cliSessionId": "conformance-adopted-0001",
+        "cliSessionId": "$cliSessionId",
         "cwd": "$cwd",
         "startMs": 1700000000000,
         "cols": 80,
@@ -33,7 +33,7 @@
           "provider": "claude",
           "cwd": "$cwd",
           "status": "running",
-          "cliSessionId": "conformance-adopted-0001",
+          "cliSessionId": "$cliSessionId",
           "createdAt": 1700000000000
         }
       },
@@ -53,7 +53,7 @@
       "send": {
         "type": "adoptExternal",
         "provider": "claude",
-        "cliSessionId": "conformance-adopted-0001",
+        "cliSessionId": "$cliSessionId",
         "cwd": "$cwd",
         "startMs": 1700000000000,
         "cols": 80,

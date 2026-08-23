@@ -54,7 +54,14 @@ on its own port and its own sqlite dir):
 pnpm --filter @juancode/wire-conformance test:conformance
 ```
 
-Against any other core, by URL:
+Against the Rust core (builds and boots `juancoded` the same way):
+
+```
+JUANCODE_CONFORMANCE_CORE=rust JUANCODE_CONFORMANCE_PORT=4300 \
+pnpm --filter @juancode/wire-conformance test:conformance
+```
+
+Against a core that is already running, by URL:
 
 ```
 JUANCODE_CONFORMANCE_URL=ws://127.0.0.1:4300/ws \
@@ -66,24 +73,49 @@ Knobs:
 
 | Variable                          | Meaning                                                           |
 | --------------------------------- | ----------------------------------------------------------------- |
+| `JUANCODE_CONFORMANCE_CORE`       | Which core to build and boot: `swift` (default) or `rust`         |
 | `JUANCODE_CONFORMANCE_URL`        | Drive a core that is already running instead of booting one       |
 | `JUANCODE_CONFORMANCE_LABEL`      | Name for that core in the report (`swift`, `rust`, …)             |
 | `JUANCODE_CONFORMANCE_PORT`       | Port for a core we boot (default 4295; never 4280/4281)           |
-| `JUANCODE_CONFORMANCE_SKIP_BUILD` | `1` when `juancode-serve` is already built                        |
+| `JUANCODE_CONFORMANCE_SKIP_BUILD` | `1` when the core binary is already built                         |
 | `JUANCODE_CONFORMANCE_REPORT`     | Write the run report here (`.md` for prose, `.json` for a status) |
+| `JUANCODE_CONFORMANCE_STATUS`     | Also write a status JSON here, whatever the report is             |
 | `JUANCODE_CONFORMANCE_KEEP`       | `1` keeps the booted core's temp data dir for inspection          |
+| `JUANCODE_CONFORMANCE_RUN_TOKEN`  | Pin the per-run id stamp; two runs sharing one collide on purpose |
+
+A relative report or status path is resolved from this package's directory, not
+the repo root, because that is where the suite runs.
 
 **It never drives port 4280 or 4281.** Those are a developer's live app and
 sidecar; driving them would create, resize and kill their real sessions. The
-booted core gets its own port, sqlite dir, oracle control dir and fake provider
-binaries, and `startCore` refuses those two ports outright.
+booted core gets its own port, sqlite dir, oracle control dir, unix socket and
+fake provider binaries, and `startCore` refuses those two ports outright.
+
+The two cores read different variables for the same thing, and `startCore` knows
+it: the Rust daemon takes its port from `JUANCODED_PORT` and its socket from
+`JUANCODED_SOCKET`, so a boot that only set the Swift core's spellings would
+silently land on the default 4290 and take the developer's own socket away from
+their daemon.
+
+## Ids, and why a second run does not collide
+
+A scenario claims ids inside the core that outlive the scenario: a dispatch id it
+must not be able to claim twice (`dispatch-correlation`), and the CLI id of an
+adopted conversation the core must recognise as already adopted
+(`adopt-external`). Reusing those ids on a second run measures the dedup instead
+of the scenario, which is what made a repeat run against one daemon report two
+failures that were not core bugs.
+
+So the runner stamps them: `conformance-<scenario>-<run token>-<attempt>`, unique
+per attempt and identical for every step of one attempt. Per attempt rather than
+per process, because running the whole spec more than once inside a single boot is
+how repeatability gets measured at all.
 
 ## The parity checklist
 
 ```
-JUANCODE_CONFORMANCE_URL=ws://127.0.0.1:4300/ws \
-JUANCODE_CONFORMANCE_LABEL=rust \
-JUANCODE_CONFORMANCE_REPORT=parity/rust-status.json \
+JUANCODE_CONFORMANCE_CORE=rust JUANCODE_CONFORMANCE_PORT=4300 \
+JUANCODE_CONFORMANCE_STATUS=parity/rust-status.json \
 pnpm --filter @juancode/wire-conformance test:conformance
 
 pnpm --filter @juancode/wire-conformance parity rust
@@ -95,6 +127,21 @@ The markdown is generated, never hand-edited, so the checklist cannot drift from
 the scenarios. A status file whose `source` is `source-read` was seeded by
 reading a core's code rather than running the suite, and says so in the output;
 scenarios in it are marked `unknown`, which counts as unmet.
+
+Regenerating the markdown is **not** a freshness check, because it regenerates
+FROM the status file: a status file whose measurement is months old regenerates
+cleanly. That is how the Rust checklist went on claiming the queue scenario was
+skipped for a commit after the core started passing it. The check that catches it
+compares the committed claim against a run that just happened:
+
+```
+pnpm exec tsx src/parity-cli.ts --verify <status file a run just wrote>
+```
+
+It compares verdicts, capabilities, spec revision and protocol version, and
+ignores the measurement date and the wording of a note, so it fails only when the
+claim and the core actually disagree. Both conformance jobs in CI run it, which
+makes the checked-in parity file a measurement rather than a promise.
 
 ## The fake agent
 
@@ -181,6 +228,9 @@ scenario that cannot run in GitHub Actions, with the reason.
 
 ## CI
 
-`.github/workflows/wire-conformance.yml` runs the fast checks on Linux and the
-live suite against a freshly built Swift core on macOS, uploads the run report,
-and fails if a checked-in parity checklist is stale relative to its status file.
+`.github/workflows/wire-conformance.yml` runs the fast checks on Linux, then one
+job per core, each of which builds that core, boots it through this suite, uploads
+the run report and the measured status, and fails if the committed parity file no
+longer describes what it measured. The Swift job needs macOS for the Swift
+toolchain; the Rust job runs on Linux. Neither depends on the other, so a core can
+go red on its own.

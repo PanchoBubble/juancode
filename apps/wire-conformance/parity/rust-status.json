@@ -11,7 +11,9 @@
     "screen",
     "adoptExternal",
     "sessionMeta",
-    "gridOwner"
+    "gridOwner",
+    "queue",
+    "queueEdit"
   ],
   "scenarios": {
     "handshake": {
@@ -42,8 +44,7 @@
       "status": "passed"
     },
     "queue": {
-      "status": "skipped",
-      "note": "core does not advertise the \"queue\" capability"
+      "status": "passed"
     },
     "exit-codes": {
       "status": "passed"

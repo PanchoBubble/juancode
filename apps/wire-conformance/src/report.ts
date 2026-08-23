@@ -71,6 +71,43 @@ export function toStatusFile(report: RunReport, measuredAt: string): StatusFile 
   };
 }
 
+/** Where a checked-in status file and a fresh measurement disagree, as lines a
+ *  human can act on. Empty means the committed file still describes the core.
+ *
+ * Only the CLAIM is compared: the spec revision, the protocol version, the
+ * advertised capabilities and each scenario's verdict. The measurement date moves
+ * every day and a failure note carries a temp path, so comparing those would fail
+ * a run that agrees about everything that matters. */
+export function statusDifferences(committed: StatusFile, measured: StatusFile): string[] {
+  const diffs: string[] = [];
+  if (committed.specRevision !== measured.specRevision) {
+    diffs.push(
+      `spec revision: committed ${committed.specRevision}, measured ${measured.specRevision}`,
+    );
+  }
+  if (committed.protocolVersion !== measured.protocolVersion) {
+    diffs.push(
+      `protocol version: committed ${committed.protocolVersion}, measured ${measured.protocolVersion}`,
+    );
+  }
+  const committedCaps = [...committed.capabilities].sort();
+  const measuredCaps = [...measured.capabilities].sort();
+  if (committedCaps.join(",") !== measuredCaps.join(",")) {
+    diffs.push(
+      `capabilities: committed [${committedCaps.join(", ")}], measured [${measuredCaps.join(", ")}]`,
+    );
+  }
+  const ids = [
+    ...new Set([...Object.keys(committed.scenarios), ...Object.keys(measured.scenarios)]),
+  ].sort();
+  for (const id of ids) {
+    const was = committed.scenarios[id]?.status ?? "absent";
+    const now = measured.scenarios[id]?.status ?? "absent";
+    if (was !== now) diffs.push(`${id}: committed ${was}, measured ${now}`);
+  }
+  return diffs;
+}
+
 function firstLine(text: string): string {
   return (text.split("\n")[0] ?? text).slice(0, 300);
 }
