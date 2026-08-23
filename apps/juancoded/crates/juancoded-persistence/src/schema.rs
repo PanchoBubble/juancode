@@ -93,6 +93,27 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX goals_by_phase ON goals (phase);
     "#,
+    // 3: where each session's transcript reader stopped.
+    //
+    // `cursor` is opaque on purpose: a claude cursor is a byte offset plus the file
+    // identity it belongs to, an opencode one is a row key plus the tool calls still
+    // in flight, and neither is this layer's business. `locator` is, though: a cursor
+    // whose file the session no longer maps to is somebody else's offset, and
+    // resuming from it would skip a whole transcript.
+    //
+    // `next_seq` is durable for the same reason the offset is. Records are promised
+    // append-only per session, and a counter that restarted at zero would hand a
+    // consumer two different records with the same sequence number.
+    r#"
+    CREATE TABLE transcript_cursors (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        source     TEXT NOT NULL,
+        locator    TEXT NOT NULL,
+        cursor     TEXT NOT NULL,
+        next_seq   INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

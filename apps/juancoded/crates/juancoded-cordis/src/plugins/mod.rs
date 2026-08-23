@@ -12,6 +12,8 @@ mod pty_to_grid;
 // Public because the client-discipline half of the queue contract lives under it.
 pub mod queue;
 mod session_chrome;
+mod transcript_claude;
+mod transcript_opencode;
 mod vt_terminal;
 
 pub use activity_log::ActivityLog;
@@ -23,6 +25,8 @@ pub use queue::{
     QueueChanged, SteeringQueue, EDIT_ID as QUEUE_EDIT_ID, REMOVE_ID as QUEUE_REMOVE_ID,
 };
 pub use session_chrome::{SessionChrome, INTERRUPT_ID};
+pub use transcript_claude::TranscriptClaude;
+pub use transcript_opencode::TranscriptOpencode;
 pub use vt_terminal::VtTerminal;
 
 use std::sync::Arc;
@@ -41,7 +45,10 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(ActivityLog))
         .register(Arc::new(SessionChrome))
         .register(Arc::new(SteeringQueue))
-        .register(Arc::new(SessionGoal));
+        .register(Arc::new(SessionGoal))
+        .register(Arc::new(crate::services::transcripts::Transcripts))
+        .register(Arc::new(TranscriptClaude))
+        .register(Arc::new(TranscriptOpencode));
 }
 
 /// The tree the daemon boots by default. `activity-log` is in it and stays PENDING

@@ -9,6 +9,7 @@ members = [
     "crates/juancoded-server",
     "crates/juancoded-state",
     "crates/juancoded-vt",
+    "crates/juancoded-transcripts",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+juancoded-transcripts = { path = "crates/juancoded-transcripts" }
 
 [profile.release]
 lto = "thin"

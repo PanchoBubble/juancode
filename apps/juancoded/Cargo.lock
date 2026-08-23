@@ -576,6 +576,7 @@ dependencies = [
  "futures",
  "juancoded-core",
  "juancoded-persistence",
+ "juancoded-transcripts",
  "juancoded-vt",
  "rusqlite",
  "serde",
@@ -652,6 +653,18 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "juancoded-transcripts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "juancoded-persistence",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ pub mod goal;
 pub mod pty;
 pub mod queue;
 pub mod terminal;
+pub mod transcripts;
 
 pub use goal::{
     Armed, BlockCode, Blocked, Goal, GoalApi, GoalBook, GoalError, GoalJournal, GoalPhase, GoalRef,
@@ -21,3 +22,7 @@ pub use queue::{
     QueueService, QueueSnapshot, SessionQueues,
 };
 pub use terminal::{TerminalApi, TerminalService, VtTerminals};
+pub use transcripts::{
+    SourceTaken, TranscriptAppended, TranscriptBatch, TranscriptHub, Transcripts, TranscriptsApi,
+    TranscriptsService,
+};
