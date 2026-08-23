@@ -60,8 +60,10 @@ pub fn test_entries(program: &str, args: &[&str]) -> EntryList {
 /// The test tree against a store on disk, so a test can drop the whole tree and boot
 /// a second one over the same file — which is what "survives a daemon restart" means.
 pub fn test_entries_at(store: &str, program: &str, args: &[&str]) -> EntryList {
-    let mut entries = plugins::default_entries();
-    entries.set_config("store", serde_json::json!({ "path": store }));
+    // Over `store`, not over the default and then patched: the goal journal and the
+    // transcript cursors are pointed at the store's file by the tree itself, so a test
+    // that only overrode the `store` row would leave those two writing to the real one.
+    let mut entries = plugins::entries_over_store(store);
     entries.set_config(
         "sessions",
         serde_json::json!({

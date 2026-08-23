@@ -68,9 +68,10 @@ impl Harness {
         );
         let (loader, report, sessions) =
             juancoded_state::boot_with(&entries).expect("the tree mounts");
-        // One deliberately pending row (activity-log waits on a transcripts service
-        // nobody provides); anything else pending is a mounting bug.
-        assert_eq!(report.pending.len(), 1, "{:?}", report.diagnostics());
+        // Every row in the daemon's tree has its providers now that `transcripts` is
+        // mounted, so anything pending here is a mounting bug rather than the standing
+        // example it used to be.
+        assert!(report.pending.is_empty(), "{:?}", report.diagnostics());
         Self {
             sessions,
             loader: Some(loader),

@@ -325,8 +325,16 @@ impl Plugin for Transcripts {
         // With no database configured the cursors live for as long as the process,
         // which is the right answer for a test and the wrong one for the daemon: a
         // restart would re-read every transcript from the top.
+        //
+        // `:memory:` is named memory rather than passed through. An unnamed in-memory
+        // database is private to the connection that opened it, so pointing the
+        // cursors at one buys the SQL and none of the sharing the config was asking
+        // for, and the schema would have to be created for a file nobody else sees.
         let cursors: Arc<dyn CursorStore> = match ctx.config().get("db").and_then(|v| v.as_str()) {
-            Some(db) if !db.is_empty() => Arc::new(SqliteCursors::open(db)?),
+            Some(db) if !db.is_empty() && db != ":memory:" => {
+                ensure_cursor_schema(db)?;
+                Arc::new(SqliteCursors::open(db)?)
+            }
             _ => Arc::new(MemoryCursors::new()),
         };
         ctx.provide::<TranscriptsService>(Arc::new(TranscriptHub::with_bus(
@@ -335,6 +343,22 @@ impl Plugin for Transcripts {
         )))?;
         Ok(())
     }
+}
+
+/// Make sure `transcript_cursors` exists in `db` before a cursor store opens over it.
+///
+/// The table arrives with the core's own migrations, and this row can mount before the
+/// one that owns the store: the cursor store reports an unreadable table by warning and
+/// returning nothing, so without this a durable cursor degrades to no cursor at all and
+/// every restart re-reads each transcript from the top. Idempotent, like every other
+/// caller of `migrate`.
+fn ensure_cursor_schema(db: &str) -> anyhow::Result<()> {
+    if let Some(dir) = std::path::Path::new(db).parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+    juancoded_persistence::schema::migrate(&rusqlite::Connection::open(db)?)
 }
 
 /// The half of the hub a source's teardown guard needs, without keeping the hub alive.

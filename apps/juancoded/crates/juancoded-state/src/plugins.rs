@@ -103,19 +103,43 @@ pub fn register(loader: &mut Loader) {
         .register(Arc::new(SessionRegistryPlugin));
 }
 
-/// The daemon's tree: the cordis built-ins plus the state layer.
+/// The daemon's tree: the cordis built-ins plus the state layer, over the store file
+/// this core's environment names.
 ///
 /// `session-registry` is listed **before** the services it needs, on purpose: the
 /// loader settles by dependency rather than by position, and a tree that only works
 /// in one order is a tree whose order someone has to maintain.
 pub fn default_entries() -> EntryList {
+    entries_over_store(&juancoded_persistence::db_path().to_string_lossy())
+}
+
+/// The same tree over one named store file.
+///
+/// Every row that keeps state across a restart is handed **this** path, and that is the
+/// reason the function takes one rather than letting each row default. `session-goal`
+/// with no `path` falls back to a journal that forgets with the process, and
+/// `transcripts` with no `db` to cursors that re-read every transcript from the top; a
+/// tree that named the file in one place and let the others default would boot looking
+/// mounted and lose the two rails that exist to survive a restart.
+pub fn entries_over_store(store: &str) -> EntryList {
+    let at = |key: &str| serde_json::json!({ key: store });
     EntryList::new()
         .push(Entry::new("sessions", "session-registry"))
         .push(Entry::new("terminal", "vt-terminal"))
         .push(Entry::new("pty", "core-pty"))
         .push(Entry::new("input-guard", "input-guard"))
+        // Behind the guard and ahead of the write: a note is a description of a write
+        // that is going to happen, so it must not be stamped onto one the guard has
+        // already refused, and it must be stamped before the chain ends.
+        .push(Entry::new("goal", "session-goal").config(at("path")))
         .push(Entry::new("pty-to-grid", "pty-to-grid"))
-        .push(Entry::new("store", "sqlite-store"))
+        .push(Entry::new("store", "sqlite-store").config(at("path")))
+        // The hub first and its sources after it, for reading rather than for
+        // correctness: both sources declare `transcripts` in `inject`, so the loader
+        // would settle them in any order.
+        .push(Entry::new("transcripts", "transcripts").config(at("db")))
+        .push(Entry::new("transcript-claude", "transcript-claude"))
+        .push(Entry::new("transcript-opencode", "transcript-opencode"))
         .push(Entry::new("activity-log", "activity-log"))
         .push(Entry::new("session-chrome", "session-chrome"))
 }
