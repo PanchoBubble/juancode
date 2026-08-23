@@ -6,6 +6,7 @@
 
 mod activity_log;
 mod core_pty;
+mod goal;
 mod input_guard;
 mod pty_to_grid;
 // Public because the client-discipline half of the queue contract lives under it.
@@ -15,6 +16,7 @@ mod vt_terminal;
 
 pub use activity_log::ActivityLog;
 pub use core_pty::CorePty;
+pub use goal::{SessionGoal, SqliteGoalJournal};
 pub use input_guard::InputGuard;
 pub use pty_to_grid::PtyToGrid;
 pub use queue::{
@@ -38,7 +40,8 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(PtyToGrid))
         .register(Arc::new(ActivityLog))
         .register(Arc::new(SessionChrome))
-        .register(Arc::new(SteeringQueue));
+        .register(Arc::new(SteeringQueue))
+        .register(Arc::new(SessionGoal));
 }
 
 /// The tree the daemon boots by default. `activity-log` is in it and stays PENDING

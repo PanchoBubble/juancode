@@ -70,6 +70,29 @@ const MIGRATIONS: &[&str] = &[
         created_at  INTEGER NOT NULL
     );
     "#,
+    // 2: per-session goals. No `armed` column, and there is not meant to be one:
+    // permission to start another round lives in daemon memory, so a restart always
+    // comes back needing a fresh human authorization.
+    //
+    // No foreign key to `sessions` either. The goal plugin owns its own connection
+    // and may mount before a session row is written, and a rail that refuses to
+    // record a round cap because the session table is not ready yet is a rail that
+    // fails open.
+    r#"
+    CREATE TABLE goals (
+        session_id    TEXT PRIMARY KEY,
+        objective     TEXT NOT NULL,
+        phase         TEXT NOT NULL,
+        revision      INTEGER NOT NULL,
+        round_cap     INTEGER NOT NULL,
+        rounds_used   INTEGER NOT NULL,
+        block_code    TEXT,
+        block_message TEXT,
+        created_at    INTEGER NOT NULL,
+        updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX goals_by_phase ON goals (phase);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

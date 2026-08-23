@@ -6,10 +6,15 @@
 //! `Arc<dyn TerminalApi>`, so replacing the implementation is a change at one mount
 //! site, and a test can stand in a fake without touching a pty.
 
+pub mod goal;
 pub mod pty;
 pub mod queue;
 pub mod terminal;
 
+pub use goal::{
+    Armed, BlockCode, Blocked, Goal, GoalApi, GoalBook, GoalError, GoalJournal, GoalPhase, GoalRef,
+    GoalService, GoalSnapshot, MemoryJournal, RoundOutcome, RoundRefusal, ROUND_CAP_REACHED,
+};
 pub use pty::{PtyHost, PtySpawnApi, PtySpawnService};
 pub use queue::{
     Claim, ClaimRefused, ClaimSink, Content, Delivery, ItemState, Occurrence, QueueApi, QueueError,
