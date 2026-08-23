@@ -21,6 +21,9 @@ export interface MessageSpec {
   optional: string[];
   /** Capability that gates this message; absent means every core must implement it. */
   capability?: string;
+  /** Capabilities that gate single optional FIELDS of an otherwise ungated message
+   *  (`create.model`). A core without one still answers the message, minus the field. */
+  fieldCapabilities?: Record<string, string>;
   notes?: string;
 }
 
@@ -32,7 +35,9 @@ export interface ProtocolSpec {
   capabilities: {
     required: string[];
     known: string[];
+    /** capability -> the message `type`s it gates, or `type.field` for a field gate. */
     gates: Record<string, string[]>;
+    notes?: string;
   };
   clientMessages: Record<string, MessageSpec>;
   serverMessages: Record<string, MessageSpec>;

@@ -19,6 +19,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case screen
     case sessionMeta
     case gridOwner
+    case restartFresh
+    case spawnModel
 
     /// What the user calls this.
     public var title: String {
@@ -33,6 +35,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .screen: return "Rendered-screen stream"
         case .sessionMeta: return "Live meta updates"
         case .gridOwner: return "Grid ownership"
+        case .restartFresh: return "Restart as a fresh conversation"
+        case .spawnModel: return "Pinned model"
         }
     }
 
@@ -60,6 +64,10 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "A session row is frozen at the meta it was created or attached with: a title the CLI derives for itself, or an edit made elsewhere, does not surface until relaunch."
         case .gridOwner:
             return "The app cannot tell who holds a session's pty grid, so a pane cannot render itself read-only when another client is driving."
+        case .restartFresh:
+            return "An exited session with nothing to resume cannot be restarted in place: it stays a replay-only pane, and starting over means a new session with a new id."
+        case .spawnModel:
+            return "The model pin is dropped: every session, including a dispatched one that asked for a specific model, runs on the CLI's own default."
         }
     }
 }

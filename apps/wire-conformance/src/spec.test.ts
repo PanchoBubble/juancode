@@ -36,10 +36,31 @@ describe("protocol catalogue", () => {
   });
 
   it("gates every capability onto messages that exist", () => {
-    const all = new Set([...Object.keys(spec.clientMessages), ...Object.keys(spec.serverMessages)]);
-    for (const [cap, types] of Object.entries(spec.capabilities.gates)) {
+    const all = new Map([
+      ...Object.entries(spec.clientMessages),
+      ...Object.entries(spec.serverMessages),
+    ]);
+    for (const [cap, targets] of Object.entries(spec.capabilities.gates)) {
       expect(spec.capabilities.known, `gate for unknown capability ${cap}`).toContain(cap);
-      for (const type of types) expect(all, `${cap} gates unknown message ${type}`).toContain(type);
+      for (const target of targets) {
+        // A gate is a message type, or `type.field` for a capability that gates one
+        // optional field of an otherwise ungated message.
+        const [type, field] = target.split(".");
+        const msg = all.get(type as string);
+        expect(msg, `${cap} gates unknown message ${type}`).toBeDefined();
+        if (field) expect(msg?.optional, `${cap} gates unknown field ${target}`).toContain(field);
+      }
+    }
+  });
+
+  it("keeps each field capability consistent with the gates", () => {
+    for (const [type, msg] of Object.entries(spec.clientMessages)) {
+      for (const [field, cap] of Object.entries(msg.fieldCapabilities ?? {})) {
+        expect(msg.optional, `${type}.${field} is gated but not optional`).toContain(field);
+        expect(spec.capabilities.gates[cap], `${type}.${field} claims ${cap}`).toContain(
+          `${type}.${field}`,
+        );
+      }
     }
   });
 
@@ -95,6 +116,25 @@ describe("scenarios", () => {
           declared.has(msg.capability),
           `${s.id} touches ${type} but does not declare the ${msg.capability} capability`,
         ).toBe(true);
+      }
+    }
+  });
+
+  it("declare the capabilities the fields they send are gated on", () => {
+    // A gated FIELD is the silent case: a core without the capability answers the
+    // message anyway, so a scenario that does not declare it would read as a pass.
+    for (const s of scenarios) {
+      const declared = new Set(s.capabilities ?? []);
+      for (const step of s.steps) {
+        if (!("send" in step) || typeof step.send.type !== "string") continue;
+        const gates = spec.clientMessages[step.send.type]?.fieldCapabilities ?? {};
+        for (const [field, cap] of Object.entries(gates)) {
+          if (!(field in step.send)) continue;
+          expect(
+            declared.has(cap),
+            `${s.id} sends ${step.send.type}.${field} but does not declare the ${cap} capability`,
+          ).toBe(true);
+        }
       }
     }
   });

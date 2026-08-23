@@ -9,6 +9,7 @@
 #
 # The command vocabulary IS part of the spec (spec/v1/scenarios/*.json drive it):
 #   READY            banner, printed on start without being asked
+#   ARGS             print the argv this process was spawned with
 #   ECHO <text>      print text and a CRLF
 #   BUSY             print the working footer both real CLIs paint while a turn runs
 #   PROMPT           print a yes/no question on the bottom row (a waiting-input screen)
@@ -20,11 +21,15 @@
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
 #   EXIT <code>      exit with that status
 #
-# Provider args (--session-id, --resume, --model, permission flags) are ignored on
-# purpose: the harness asserts the wire, not the argv.
+# Provider args (--session-id, --resume, --model, permission flags) do not change
+# what this prints: the harness asserts the wire, not the argv. The one exception is
+# `ARGS`, which echoes them back, because a create's pinned model and a fresh restart
+# are only visible in the argv the core chose.
 
 # No echo: keystrokes the harness sends must not appear in the golden screen.
 stty -echo 2>/dev/null
+
+ARGV="$*"
 
 printf 'fake-agent ready\r\n'
 
@@ -33,6 +38,9 @@ while IFS= read -r line; do
   arg=${line#"$cmd"}
   arg=${arg# }
   case "$cmd" in
+  ARGS)
+    printf 'argv: %s\r\n' "$ARGV"
+    ;;
   ECHO)
     printf '%s\r\n' "$arg"
     ;;

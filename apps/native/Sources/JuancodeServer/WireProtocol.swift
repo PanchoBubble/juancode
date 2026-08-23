@@ -20,11 +20,23 @@ public enum ClientMessage: Sendable {
     /// `cols`/`rows` are optional: a client with no viewport of its own (the Oracle
     /// dispatch path) omits them and the app boots the CLI at the desktop's real
     /// grid instead of a nominal one it invented.
+    /// `model` pins the CLI to one model for this spawn (the Settings/new-session
+    /// pin, and the `model` a dispatch line asks for). Nil or empty means the CLI's
+    /// own default, which is also what a core without the `spawnModel` capability
+    /// does with it.
     case create(provider: String, cwd: String, cols: Int?, rows: Int?,
                 initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?,
-                dispatchId: String?)
+                model: String?, dispatchId: String?)
     case attach(sessionId: String, cols: Int, rows: Int)
     case reactivate(sessionId: String, cols: Int, rows: Int)
+    /// Restart an exited session as a brand-new CLI conversation under the same
+    /// juancode id, discarding the prior one. Its own message rather than a flag on
+    /// `reactivate`: reactivate promises the prior conversation back (it needs a
+    /// resumable id, answers `unresumable` without one, and carries the persisted
+    /// scrollback forward), and a core that ignored such a flag would resume the
+    /// conversation the client asked to leave behind and answer `attached` either
+    /// way. An unknown `type` is ignored whole, so the silence is legible.
+    case restartFresh(sessionId: String, cols: Int, rows: Int)
     /// Adopt an external CLI conversation (one started in a plain terminal) by its
     /// own resumable id, persisting a juancode session row and resuming it live.
     case adoptExternal(provider: String, cliSessionId: String, cwd: String,
@@ -87,7 +99,7 @@ public enum ClientMessage: Sendable {
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
-        case sessionId, data, file, requestId, cliSessionId, startMs, seq
+        case sessionId, data, file, requestId, cliSessionId, startMs, seq, model
         // Oracle dispatch over WS (juancode-2kz.1).
         case dispatchId
         // Tracked-PR registry (juancode-bt2).
@@ -109,6 +121,7 @@ extension ClientMessage: Decodable {
                 initialInput: try c.decodeIfPresent(String.self, forKey: .initialInput),
                 skipPermissions: try c.decodeIfPresent(Bool.self, forKey: .skipPermissions),
                 isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree),
+                model: try c.decodeIfPresent(String.self, forKey: .model),
                 dispatchId: try c.decodeIfPresent(String.self, forKey: .dispatchId)
             )
         case "attach":
@@ -119,6 +132,10 @@ extension ClientMessage: Decodable {
             self = .reactivate(sessionId: try c.decode(String.self, forKey: .sessionId),
                                cols: try c.decode(Int.self, forKey: .cols),
                                rows: try c.decode(Int.self, forKey: .rows))
+        case "restartFresh":
+            self = .restartFresh(sessionId: try c.decode(String.self, forKey: .sessionId),
+                                 cols: try c.decode(Int.self, forKey: .cols),
+                                 rows: try c.decode(Int.self, forKey: .rows))
         case "adoptExternal":
             self = .adoptExternal(provider: try c.decode(String.self, forKey: .provider),
                                   cliSessionId: try c.decode(String.self, forKey: .cliSessionId),
@@ -195,7 +212,8 @@ extension ClientMessage: Decodable {
 public enum WireProtocol {
     public static let version = 1
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
-                                      "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner"]
+                                      "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
+                                      "restartFresh", "spawnModel"]
 }
 
 public enum ServerMessage: Sendable {

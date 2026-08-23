@@ -1,0 +1,223 @@
+{
+  "id": "restart-fresh",
+  "title": "restarting a session as a fresh conversation",
+  "asserts": "an exited session can be restarted as a brand-new CLI conversation under the same juancode id: the core starts the CLI instead of resuming it, pins a new conversation id, and answers `attached` for the id the client already knows, so the pane it is bound to survives. It serves a session `reactivate` refuses as unresumable, which is why it is a message of its own.",
+  "capabilities": [
+    "restartFresh"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "claude pins its conversation id at spawn, so the restart's new pin is visible"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude",
+          "cliSessionId": {
+            "$type": "string"
+          }
+        }
+      },
+      "bind": {
+        "session": "session.id",
+        "firstConversation": "session.cliSessionId"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "EXIT 0\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": 0
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
+    },
+    {
+      "send": {
+        "type": "restartFresh",
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "status": "running",
+          "cliSessionId": {
+            "$not": {
+              "$var": "firstConversation"
+            }
+          }
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "same juancode id and pane, a different conversation behind it"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "argv:",
+          "$notContains": "--resume"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the CLI was started, not resumed: that is the whole difference from reactivate"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "codex",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "codex cannot pin an id, so a session that never finished a turn has nothing to resume"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "codex",
+          "cliSessionId": {
+            "$absent": true
+          }
+        }
+      },
+      "bind": {
+        "unresumableSession": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$unresumableSession"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$unresumableSession",
+        "data": "EXIT 0\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$unresumableSession",
+        "exitCode": 0
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
+    },
+    {
+      "send": {
+        "type": "reactivate",
+        "sessionId": "$unresumableSession",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "unresumable",
+        "sessionId": "$unresumableSession"
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "restartFresh",
+        "sessionId": "$unresumableSession",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$unresumableSession",
+        "session": {
+          "id": "$unresumableSession",
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "a fresh conversation needs no resumable id, so the session `reactivate` gave up on comes back"
+    },
+    {
+      "send": {
+        "type": "restartFresh",
+        "sessionId": "$unresumableSession",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$unresumableSession",
+        "message": {
+          "$contains": "still running"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "restarting throws a conversation away, so a live session is refused rather than restarted"
+    }
+  ]
+}

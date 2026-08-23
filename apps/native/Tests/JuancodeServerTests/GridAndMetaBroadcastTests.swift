@@ -40,47 +40,10 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         for s in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbPath + s) }
     }
 
-    /// One connection under test: the live object, plus a drain of everything it put
-    /// on the wire. Built through `openConnection` so the handshake and the fan-out
-    /// start in the same order the real socket does.
-    private final class Tap {
-        let conn: WebSocketConnection
-        private let stream: AsyncStream<ServerMessage>
-        private let cont: AsyncStream<ServerMessage>.Continuation
-
-        init(state: AppState) {
-            let (stream, cont) = AsyncStream<ServerMessage>.makeStream()
-            self.stream = stream
-            self.cont = cont
-            conn = JuancodeServer.openConnection(state: state, gate: WSSendGate(cont: cont))
-        }
-
-        /// Close the connection and collect every frame it sent, as JSON objects.
-        /// Closing is part of the contract under test: it releases the grids this
-        /// client owned, which is the only way a release edge ever happens.
-        func drain() async -> [[String: Any]] {
-            conn.stopOutput()
-            conn.close()
-            cont.finish()
-            var out: [[String: Any]] = []
-            for await msg in stream {
-                if let obj = try? JSONSerialization.jsonObject(
-                    with: Data(msg.jsonString().utf8)) as? [String: Any] {
-                    out.append(obj)
-                }
-            }
-            return out
-        }
-    }
-
     private func liveSession(_ state: AppState) throws -> Session {
         try state.registry.create(provider: .claude,
                                   cwd: FileManager.default.temporaryDirectory.path,
                                   cols: 80, rows: 24)
-    }
-
-    private func frames(_ all: [[String: Any]], ofType type: String) -> [[String: Any]] {
-        all.filter { ($0["type"] as? String) == type }
     }
 
     // MARK: - sessionMeta
@@ -92,8 +55,8 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let a = Tap(state: state)
-        let b = Tap(state: state)
+        let a = ConnectionTap(state: state)
+        let b = ConnectionTap(state: state)
 
         session.setTitle("renamed by hand")
         session.setArchived(true)
@@ -115,7 +78,7 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let tap = Tap(state: state)
+        let tap = ConnectionTap(state: state)
 
         session.setTitle("whole row")
 
@@ -138,7 +101,7 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let tap = Tap(state: state)
+        let tap = ConnectionTap(state: state)
 
         session.write("TITLE osc-derived-title\r")
         let deadline = Date().addingTimeInterval(10)
@@ -159,8 +122,8 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let a = Tap(state: state)
-        let b = Tap(state: state)
+        let a = ConnectionTap(state: state)
+        let b = ConnectionTap(state: state)
         let ownerId = a.conn.clientId
 
         await a.conn.handle(.resize(sessionId: session.id, cols: 100, rows: 30, seq: 1))
@@ -186,10 +149,10 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let a = Tap(state: state)
+        let a = ConnectionTap(state: state)
         await a.conn.handle(.resize(sessionId: session.id, cols: 110, rows: 32, seq: 1))
 
-        let late = Tap(state: state)
+        let late = ConnectionTap(state: state)
         let snapshot = frames(await late.drain(), ofType: "gridChange").first
         XCTAssertEqual(snapshot?["owner"] as? String, a.conn.clientId)
         XCTAssertEqual(snapshot?["cols"] as? Int, 110)
@@ -202,7 +165,7 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let tap = Tap(state: state)
+        let tap = ConnectionTap(state: state)
         let sent = frames(await tap.drain(), ofType: "gridChange")
         XCTAssertTrue(sent.isEmpty, "got \(sent)")
     }
@@ -211,8 +174,8 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         let state = try AppState(dbPath: dbPath)
         let session = try liveSession(state)
         defer { session.kill() }
-        let a = Tap(state: state)
-        let b = Tap(state: state)
+        let a = ConnectionTap(state: state)
+        let b = ConnectionTap(state: state)
         await a.conn.handle(.resize(sessionId: session.id, cols: 100, rows: 30, seq: 1))
         await b.conn.handle(.resize(sessionId: session.id, cols: 70, rows: 20, seq: 9))
 
@@ -228,7 +191,7 @@ final class GridAndMetaBroadcastTests: XCTestCase {
         // token, and without it a `gridChange` owner is unreadable: the client can
         // see that somebody drives the grid but not whether that somebody is itself.
         let state = try AppState(dbPath: dbPath)
-        let tap = Tap(state: state)
+        let tap = ConnectionTap(state: state)
         let expected = tap.conn.clientId
         let handshake = await tap.drain().first
         XCTAssertEqual(handshake?["type"] as? String, "serverInfo")

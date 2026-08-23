@@ -34,7 +34,7 @@ final class WireProtocolTests: XCTestCase {
          "dispatchId":"c0ffee-1"}
         """
         guard case let .create(provider, cwd, cols, rows, initialInput,
-                               skipPermissions, isolateWorktree, dispatchId) = try decode(json) else {
+                               skipPermissions, isolateWorktree, _, dispatchId) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(provider, "claude")
@@ -51,16 +51,70 @@ final class WireProtocolTests: XCTestCase {
         // Ordinary interactive creates (desktop/web clients) carry no dispatchId;
         // it must decode to nil, not fail.
         let json = #"{"type":"create","provider":"codex","cwd":"/p","cols":80,"rows":24}"#
-        guard case let .create(provider, cwd, _, _, initialInput, _, _, dispatchId) = try decode(json) else {
+        guard case let .create(provider, cwd, _, _, initialInput, _, _, model, dispatchId) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(provider, "codex")
         XCTAssertEqual(cwd, "/p")
         XCTAssertNil(initialInput)
+        XCTAssertNil(model)
         XCTAssertNil(dispatchId)
     }
 
+    // ── Pinned model on create ───────────────────────────────────────────────────
+
+    func testDecodesCreateWithAModel() throws {
+        let json = #"{"type":"create","provider":"claude","cwd":"/p","cols":80,"rows":24,"model":"opus"}"#
+        guard case let .create(_, _, _, _, _, _, _, model, _) = try decode(json) else {
+            return XCTFail("expected .create")
+        }
+        XCTAssertEqual(model, "opus")
+    }
+
+    func testDecodesCreateWithAnEmptyModel() throws {
+        // A client that always sends the key sends "" for "no pin"; the decoder
+        // keeps it verbatim and the handler is the one place that reads it as nil.
+        let json = #"{"type":"create","provider":"claude","cwd":"/p","cols":80,"rows":24,"model":""}"#
+        guard case let .create(_, _, _, _, _, _, _, model, _) = try decode(json) else {
+            return XCTFail("expected .create")
+        }
+        XCTAssertEqual(model, "")
+    }
+
+    // ── Restart as a fresh conversation ──────────────────────────────────────────
+
+    func testDecodesRestartFresh() throws {
+        let json = #"{"type":"restartFresh","sessionId":"s-1","cols":100,"rows":30}"#
+        guard case let .restartFresh(sessionId, cols, rows) = try decode(json) else {
+            return XCTFail("expected .restartFresh")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(cols, 100)
+        XCTAssertEqual(rows, 30)
+    }
+
+    func testAFlagOnReactivateWouldHaveDecodedAsAPlainResume() throws {
+        // Why this is a message and not a flag. An unknown key on a known type is
+        // dropped in silence and the frame still runs: a core that did not
+        // implement the flag would resume the conversation the client asked to
+        // leave behind, and answer `attached` exactly as if it had obeyed. An
+        // unknown `type` degrades to `.unknown` and is ignored whole instead.
+        guard case let .reactivate(sessionId, _, _) = try decode(
+            #"{"type":"reactivate","sessionId":"s-1","cols":80,"rows":24,"fresh":true}"#) else {
+            return XCTFail("expected .reactivate")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+    }
+
     // ── Version/capability handshake + graceful degrade (juancode-tgc) ───────────
+
+    func testAdvertisesTheNewCapabilities() {
+        // A client cannot feature-detect what is not advertised, and both changes
+        // are invisible in a reply frame: the pin silently falls back to the CLI's
+        // default and the restart is silence.
+        XCTAssertTrue(WireProtocol.capabilities.contains("restartFresh"))
+        XCTAssertTrue(WireProtocol.capabilities.contains("spawnModel"))
+    }
 
     func testUnknownTypeDegradesToUnknown() throws {
         // A well-formed frame with an unrecognised `type` decodes to `.unknown`

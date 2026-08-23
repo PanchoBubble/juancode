@@ -182,15 +182,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                        opts: SpawnOptions, worktreePath: String?,
                        dispatchId: String?) throws -> any LiveSession {
-        if opts.model != nil {
-            // `create` has no model field, and inventing one client-side would be a
-            // second protocol. Said once per launch rather than per session.
+        let pinsModel = supports(.spawnModel)
+        if opts.model != nil, !pinsModel {
+            // The pin is dropped rather than faked: a core that does not advertise
+            // `spawnModel` ignores the field, and the CLI picks its own model.
+            // Said once per launch rather than per session.
             let already = lock.withLock { () -> Bool in
                 defer { loggedDroppedModel = true }
                 return loggedDroppedModel
             }
             if !already {
-                NSLog("juancode: the rust core has no model field on `create`; the CLI's own default is used")
+                NSLog("juancode: the \(backendName) core does not advertise `spawnModel`; the CLI's own default model is used")
             }
         }
         var frame: [String: Any] = [
@@ -206,6 +208,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             "isolateWorktree": false,
         ]
         if let dispatchId { frame["dispatchId"] = dispatchId }
+        if pinsModel, let model = opts.model, !model.isEmpty { frame["model"] = model }
         return try lifecycle(frame, operation: "create", timeout: 60)
     }
 
@@ -224,9 +227,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     @discardableResult
     public func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> any LiveSession {
-        throw CoreOperationUnsupported(
-            operation: "Restart as a fresh conversation", backend: backendName,
-            detail: "protocol v1 has no frame for it — `reactivate` always resumes the prior conversation")
+        guard supports(.restartFresh) else { throw CoreCapabilityError(.restartFresh, backend: backendName) }
+        return try lifecycle(["type": "restartFresh", "sessionId": meta.id, "cols": cols, "rows": rows],
+                             operation: "restartFresh", timeout: 60)
     }
 
     public func setSkipPermissions(_ sessionId: String, skipPermissions: Bool,

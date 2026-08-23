@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.2.0",
+  "specRevision": "1.3.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift",
   "transport": {
@@ -26,7 +26,9 @@
       "resizeAck",
       "screen",
       "sessionMeta",
-      "gridOwner"
+      "gridOwner",
+      "restartFresh",
+      "spawnModel"
     ],
     "gates": {
       "queue": [
@@ -71,8 +73,15 @@
       ],
       "gridOwner": [
         "gridChange"
+      ],
+      "restartFresh": [
+        "restartFresh"
+      ],
+      "spawnModel": [
+        "create.model"
       ]
-    }
+    },
+    "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured."
   },
   "clientMessages": {
     "create": {
@@ -86,9 +95,13 @@
         "initialInput",
         "skipPermissions",
         "isolateWorktree",
+        "model",
         "dispatchId"
       ],
-      "notes": "cols/rows omitted means the core picks its own spawn grid. Replies created + attached, or error."
+      "notes": "cols/rows omitted means the core picks its own spawn grid. `model` pins the CLI to one model for this spawn (the desktop's model setting, and the `model` an Oracle dispatch line asks for); it is gated by `spawnModel`, and omitting it, sending null, or sending an empty string all mean the CLI's own default, which is also what a core without the capability does with it. Replies created + attached, or error.",
+      "fieldCapabilities": {
+        "model": "spawnModel"
+      }
     },
     "attach": {
       "required": [
@@ -104,7 +117,18 @@
         "cols",
         "rows"
       ],
-      "optional": []
+      "optional": [],
+      "notes": "The resume path: answers `attached` when the prior CLI conversation came back, and `unresumable` when there is no conversation id to resume. A core MAY self-heal a pinned id whose transcript never got written by booting fresh instead (the Swift core does), so a client that specifically WANTS a fresh conversation must ask for one with `restartFresh` rather than infer it here."
+    },
+    "restartFresh": {
+      "required": [
+        "sessionId",
+        "cols",
+        "rows"
+      ],
+      "optional": [],
+      "capability": "restartFresh",
+      "notes": "Restart an exited session as a brand-new CLI conversation under the same juancode id, discarding the prior one, and answer `attached` for it. Unlike `reactivate` it needs no resumable conversation id, so it has no `unresumable` leg, and it carries no prior scrollback: the conversation the session is leaving behind is the point. A core that pins its own session ids pins a NEW one, so the restarted session is resumable from its first completed turn. Only defined for a session that is not running: on a live one the core answers `error` rather than throwing the running conversation away. See ADDITIVE_FIELDS for why this is a message and not a flag on reactivate."
     },
     "adoptExternal": {
       "required": [
@@ -465,13 +489,15 @@
     "SERVER_INFO_ORDERING: serverInfo is frame 0. Nothing may precede it: not a reply frame (created, attached, output, screen, inputAck, resizeAck, exit, queue, editorReady, terminalReady, unresumable, error, trackedPrs), and not an unsolicited activity broadcast either. A core must queue the handshake before it starts the activity fan-out, so a connection opened while other sessions are already live still reads serverInfo first and their activity after it.",
     "TRACKED_PRS_ARE_CHANGES: a trackedPrs frame is the whole watch list, replaced wholesale, and it is a change notification. A core sends one snapshot in answer to subscribeTrackedPrs, and after that only when the list it would send differs from the one that connection was last sent. A poll pass that found nothing, or any other internal refresh that moved nothing, sends no frame at all: an identical list carries no information, and a redundant one races whatever the client asks for next, so a client that untracks a PR is answered by a snapshot that still lists it as watched.",
     "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage.",
-    "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means."
+    "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means.",
+    "ADDITIVE_FIELDS: a new OPTIONAL FIELD on an existing frame is additive within a version too, but it fails differently from a new frame type. A core that does not implement the field still runs the frame without it and answers exactly as it would have, so the field may only be added when ignoring it leaves a defensible default (create.model falls back to the CLI's own model), and it carries a capability string so a client can tell \"this core honours it\" from \"this core will drop it\". An operation whose ignored form would be a DIFFERENT operation gets a frame type of its own instead, because an unknown type is ignored whole and the client can see the silence: that is why restarting a session as a fresh conversation is `restartFresh` and not a `fresh` flag on `reactivate`, which an old core would answer by resuming the conversation the client asked to discard."
   ],
   "decisions": {
     "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
     "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
     "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",
-    "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here."
+    "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here.",
+    "restartFresh grid": "restartFresh takes cols/rows like attach and reactivate rather than reusing the grid the session died at: the client that asks for the restart is the one about to render it, and the CLI wraps its first turn at the spawn width forever."
   }
 }

@@ -156,15 +156,18 @@ final class CoreBackendTests: XCTestCase {
     // MARK: - Capability gating
 
     /// What the rust daemon advertises as of 2026-08-21, measured against a booted
-    /// one (`RustCoreLiveTests`): the four it does not advertise are the four
-    /// affordances the UI has to gate. `sessionMeta` and `gridOwner` were in that
-    /// list until juancode-5k3i landed them, which is exactly why the gating reads
-    /// the handshake instead of a hard-coded backend name — this list will keep
-    /// shrinking without any of the call sites changing.
-    func testTheRustDaemonsCapabilitySetGatesFourThings() {
+    /// one (`RustCoreLiveTests`): the ones it does not advertise are the affordances
+    /// the UI has to gate. `sessionMeta` and `gridOwner` were in that list until
+    /// juancode-5k3i landed them, which is exactly why the gating reads the
+    /// handshake instead of a hard-coded backend name: this list will keep
+    /// shrinking without any of the call sites changing. `restartFresh` and
+    /// `spawnModel` join it the other way round: the frames exist in the spec now,
+    /// and the daemon is honestly silent about them until it implements them.
+    func testTheRustDaemonsCapabilitySetGatesTheAffordancesItLacks() {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen", "adoptExternal",
                                            "sessionMeta", "gridOwner"])
-        XCTAssertEqual(core.missingCapabilities, [.queue, .trackedPrs, .editor, .terminal])
+        XCTAssertEqual(core.missingCapabilities,
+                       [.queue, .trackedPrs, .editor, .terminal, .restartFresh, .spawnModel])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -182,7 +185,7 @@ final class CoreBackendTests: XCTestCase {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen"])
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .editor, .terminal, .adoptExternal,
-                        .sessionMeta, .gridOwner])
+                        .sessionMeta, .gridOwner, .restartFresh, .spawnModel])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, so

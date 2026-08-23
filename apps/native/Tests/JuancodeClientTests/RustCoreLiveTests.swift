@@ -70,6 +70,15 @@ final class RustCoreLiveTests: XCTestCase {
                 XCTAssertEqual(($0 as? CoreCapabilityError)?.capability, .terminal)
             }
         }
+        if !core.supports(.restartFresh) {
+            // The frame exists in the spec now, so this is a capability the daemon
+            // has yet to implement rather than an operation with nowhere to go.
+            let dead = SessionMeta.adopting(provider: .claude, cliSessionId: UUID().uuidString,
+                                            cwd: "/tmp", startMs: 0)
+            XCTAssertThrowsError(try core.restartFresh(dead, cols: 80, rows: 24)) {
+                XCTAssertEqual(($0 as? CoreCapabilityError)?.capability, .restartFresh)
+            }
+        }
         if !core.supports(.queue) {
             XCTAssertTrue(core.queuedMessages("anything").isEmpty)
             XCTAssertFalse(core.dequeueMessage("anything", messageId: "m"))

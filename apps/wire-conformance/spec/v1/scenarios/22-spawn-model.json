@@ -1,0 +1,113 @@
+{
+  "id": "spawn-model",
+  "title": "the model a create pins",
+  "asserts": "a create that names a model spawns the CLI pinned to it, and one that does not leaves the CLI on its own default. Without this a client cannot honour a model setting, and an Oracle dispatch line that asks for a model silently runs on whatever the provider defaults to.",
+  "capabilities": [
+    "spawnModel"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "model": "opus"
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude"
+        }
+      },
+      "bind": {
+        "pinned": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$pinned"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$pinned",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$pinned",
+        "data": {
+          "$contains": "--model opus"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the pin has to reach the CLI's argv; a frame the core accepts and drops is the bug this closes"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "no model: the other half of the contract"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude"
+        }
+      },
+      "bind": {
+        "unpinned": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$unpinned"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$unpinned",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$unpinned",
+        "data": {
+          "$contains": "argv:",
+          "$notContains": "--model"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the flag appears because the frame asked for it, not because every spawn gets one"
+    }
+  ]
+}

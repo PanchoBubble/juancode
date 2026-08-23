@@ -309,7 +309,7 @@ final class WebSocketConnection: @unchecked Sendable {
     func handle(_ msg: ClientMessage) async {
         switch msg {
         case let .create(provider, cwd, requestedCols, requestedRows, initialInput,
-                         skipPermissions, isolateWorktree, dispatchId):
+                         skipPermissions, isolateWorktree, model, dispatchId):
             // A client that isn't going to display this session (the Oracle
             // dispatch) sends no grid. Boot at the desktop's real one: whatever the
             // CLI prints during its first turn is wrapped at the spawn width
@@ -356,7 +356,10 @@ final class WebSocketConnection: @unchecked Sendable {
                 }
                 let session = try state.registry.create(
                     provider: pid, cwd: workCwd, cols: cols, rows: rows,
-                    opts: SpawnOptions(skipPermissions: skipPermissions ?? false),
+                    // An empty model reads as no pin, so a client that always sends
+                    // the key gets the CLI's default rather than a `--model ` flag.
+                    opts: SpawnOptions(skipPermissions: skipPermissions ?? false,
+                                       model: (model?.isEmpty ?? true) ? nil : model),
                     worktreePath: worktreePath,
                     dispatchId: dispatchId
                 )
@@ -394,6 +397,11 @@ final class WebSocketConnection: @unchecked Sendable {
 
         case let .reactivate(sessionId, cols, rows):
             if state.registry.get(sessionId) != nil { return } // already live
+            // The revive spawns a NEW Session object under the same id, and
+            // `subscribe` is a no-op while this connection still holds the dead
+            // one's entry, so without this the client is attached to a pty whose
+            // bytes never reach it.
+            unsubscribe(sessionId)
             switch await reviveSession(sessionId, registry: state.registry, store: state.store,
                                        cols: cols, rows: rows, log: state.activityLog) {
             case let .success(revival):
@@ -408,6 +416,34 @@ final class WebSocketConnection: @unchecked Sendable {
                 send(.unresumable(sessionId: sessionId, reason: ReviveFailure.unresumable.message))
             case let .failure(failure):
                 send(.error(sessionId: sessionId, message: failure.message))
+            }
+
+        case let .restartFresh(sessionId, cols, rows):
+            // Refused rather than silently honoured while the pty is up: restarting
+            // fresh throws the running conversation away, and a client that thinks
+            // the session is dead should be told it isn't instead of losing it.
+            guard state.registry.get(sessionId) == nil else {
+                send(.error(sessionId: sessionId,
+                            message: "Session is still running; kill it before restarting fresh"))
+                return
+            }
+            guard let meta = state.store.get(sessionId) else {
+                send(.error(sessionId: sessionId, message: "Session not found")); return
+            }
+            // Same stale-subscription trap as `reactivate`: the restart is a new
+            // Session object under the old id.
+            unsubscribe(sessionId)
+            do {
+                // No prior scrollback and no `unresumable` leg: a fresh conversation
+                // needs neither a resumable id nor the history it is leaving behind.
+                let session = try state.registry.restartFresh(meta, cols: cols, rows: rows)
+                subscribe(session.id)
+                send(.attached(sessionId: session.id,
+                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               session: session.meta))
+            } catch {
+                send(.error(sessionId: sessionId,
+                            message: "Failed to start a fresh session: \(errMsg(error))"))
             }
 
         case let .adoptExternal(provider, cliSessionId, cwd, startMs, cols, rows):
