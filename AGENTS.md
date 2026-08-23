@@ -56,6 +56,37 @@ Run from the repo root:
 (`pnpm check` runs all three.) A Husky pre-commit hook runs eslint + prettier + related
 vitest on staged files.
 
+## Never leave a background process behind
+
+Several tests here only fail on a loaded machine, so measuring them means generating
+load. Do that with a **bounded** workload that ends by itself, typically one real
+`cargo test --workspace` run you wait for. Never with a spin loop.
+
+This rule exists because a spin loop already cost a night of a hot laptop. An agent
+generating load wrote:
+
+```sh
+for i in $(seq 1 12); do (while :; do :; done) & done   # do NOT do this
+...
+kill $(jobs -p) 2>/dev/null                             # never reached them
+```
+
+The shell owning that job table exited before the `kill` ran, the subshells were
+reparented to `launchd`, and 84 of them span for 14 hours at load average 150.
+
+- Do not use `while :` / `while true` as a load source.
+- Anything you background must be torn down by a trap that fires on every exit path,
+  not by a bare `kill` at the end: `trap 'kill 0' EXIT INT TERM`.
+- Before you call a task done, prove you left nothing running:
+
+```sh
+ps -Ao pid,ppid,pcpu,etime,command -r | awk 'NR>1 && $2==1 && $3>3 && /zsh|bash|node|swift|cargo|vitest|python|while/'
+pgrep -fl 'while :|while true'
+```
+
+Both must print nothing. A process whose PPID is 1 has outlived its parent, so nothing
+will ever clean it up but you.
+
 ## Shipping: merge to main, no PRs
 
 For now this repo ships straight to `main` — do NOT open GitHub PRs unless explicitly
