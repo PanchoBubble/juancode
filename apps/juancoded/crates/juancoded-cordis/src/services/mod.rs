@@ -7,7 +7,12 @@
 //! site, and a test can stand in a fake without touching a pty.
 
 pub mod pty;
+pub mod queue;
 pub mod terminal;
 
 pub use pty::{PtyHost, PtySpawnApi, PtySpawnService};
+pub use queue::{
+    Claim, ClaimRefused, ClaimSink, Content, Delivery, ItemState, Occurrence, QueueApi, QueueError,
+    QueueService, QueueSnapshot, SessionQueues,
+};
 pub use terminal::{TerminalApi, TerminalService, VtTerminals};

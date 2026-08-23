@@ -8,6 +8,8 @@ mod activity_log;
 mod core_pty;
 mod input_guard;
 mod pty_to_grid;
+// Public because the client-discipline half of the queue contract lives under it.
+pub mod queue;
 mod session_chrome;
 mod vt_terminal;
 
@@ -15,6 +17,9 @@ pub use activity_log::ActivityLog;
 pub use core_pty::CorePty;
 pub use input_guard::InputGuard;
 pub use pty_to_grid::PtyToGrid;
+pub use queue::{
+    QueueChanged, SteeringQueue, EDIT_ID as QUEUE_EDIT_ID, REMOVE_ID as QUEUE_REMOVE_ID,
+};
 pub use session_chrome::{SessionChrome, INTERRUPT_ID};
 pub use vt_terminal::VtTerminal;
 
@@ -32,7 +37,8 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(InputGuard))
         .register(Arc::new(PtyToGrid))
         .register(Arc::new(ActivityLog))
-        .register(Arc::new(SessionChrome));
+        .register(Arc::new(SessionChrome))
+        .register(Arc::new(SteeringQueue));
 }
 
 /// The tree the daemon boots by default. `activity-log` is in it and stays PENDING
