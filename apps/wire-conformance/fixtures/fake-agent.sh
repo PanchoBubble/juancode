@@ -26,14 +26,26 @@
 # `ARGS`, which echoes them back, because a create's pinned model and a fresh restart
 # are only visible in the argv the core chose.
 
-# No echo: keystrokes the harness sends must not appear in the golden screen.
-stty -echo 2>/dev/null
+# Echo stays ON, unlike an ordinary script's instinct: a real CLI paints what it is
+# sent into its input box, and that painting is the only thing a delivery engine can
+# verify a paste against before it sends the submitting Enter. A stand-in that showed
+# nothing would make a seeded prompt undeliverable by construction. The scenarios
+# assert with $contains / $some, so an echoed command row alongside the answer does
+# not change what any of them mean.
+stty echo 2>/dev/null
+
+ESC=$(printf '\033')
 
 ARGV="$*"
 
 printf 'fake-agent ready\r\n'
 
 while IFS= read -r line; do
+  # Bracketed-paste markers are consumed, not run: a real CLI reads them as "this is
+  # a paste" and keeps the text, so a stand-in that treated ESC[200~ as part of the
+  # command would turn every pasted prompt into an unknown one.
+  line=${line//"${ESC}[200~"/}
+  line=${line//"${ESC}[201~"/}
   cmd=${line%% *}
   arg=${line#"$cmd"}
   arg=${arg# }

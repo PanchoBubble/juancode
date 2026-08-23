@@ -85,6 +85,9 @@
     },
     "spawn-model": {
       "status": "passed"
+    },
+    "seeded-input": {
+      "status": "passed"
     }
   }
 }

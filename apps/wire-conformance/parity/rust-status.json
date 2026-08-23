@@ -2,8 +2,8 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-08-21",
-  "specRevision": "1.2.0",
+  "measuredAt": "2026-08-23",
+  "specRevision": "1.3.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -75,6 +75,17 @@
       "status": "passed"
     },
     "grid-owner": {
+      "status": "passed"
+    },
+    "restart-fresh": {
+      "status": "skipped",
+      "note": "core does not advertise the \"restartFresh\" capability"
+    },
+    "spawn-model": {
+      "status": "skipped",
+      "note": "core does not advertise the \"spawnModel\" capability"
+    },
+    "seeded-input": {
       "status": "passed"
     }
   }

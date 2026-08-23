@@ -7,7 +7,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-23
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel
-- Unmet scenarios: 0 of 22
+- Unmet scenarios: 0 of 23
 
 ## What is not satisfied yet (0)
 
@@ -37,3 +37,4 @@ Nothing: this core passes every scenario in the spec.
 - grid-owner: yes - who owns the shared grid, and when it is let go
 - restart-fresh: yes - restarting a session as a fresh conversation
 - spawn-model: yes - the model a create pins
+- seeded-input: yes - a create's initialInput is delivered and submitted

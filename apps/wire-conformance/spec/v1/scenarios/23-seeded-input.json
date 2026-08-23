@@ -1,0 +1,56 @@
+{
+  "id": "seeded-input",
+  "title": "a create's initialInput is delivered and submitted",
+  "asserts": "a prompt carried on the create is pasted into the session AND submitted, without the client having to append a newline of its own: the stand-in only acts on a line it has been given in full, so the title it sets is proof both that the text arrived and that an Enter followed it. This is the dispatch path — an oracle dispatch is a create with initialInput and nothing else — and a core that writes the prompt without submitting it leaves the agent sitting with it typed, so nothing runs and no activity edge ever fires.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "sessionMeta"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "initialInput": "TITLE seeded-and-submitted"
+      },
+      "note": "no trailing newline, which is what an oracle dispatch sends"
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "title": "seeded-and-submitted"
+        }
+      },
+      "timeoutMs": 40000,
+      "note": "the delivery engine waits for the CLI to be up, confirms the paste landed, then sends the Enter separately, so this is the boot window plus a verified round trip"
+    }
+  ]
+}

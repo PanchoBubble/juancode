@@ -98,7 +98,7 @@
         "model",
         "dispatchId"
       ],
-      "notes": "cols/rows omitted means the core picks its own spawn grid. `model` pins the CLI to one model for this spawn (the desktop's model setting, and the `model` an Oracle dispatch line asks for); it is gated by `spawnModel`, and omitting it, sending null, or sending an empty string all mean the CLI's own default, which is also what a core without the capability does with it. Replies created + attached, or error.",
+      "notes": "cols/rows omitted means the core picks its own spawn grid. `model` pins the CLI to one model for this spawn (the desktop's model setting, and the `model` an Oracle dispatch line asks for); it is gated by `spawnModel`, and omitting it, sending null, or sending an empty string all mean the CLI's own default, which is also what a core without the capability does with it. `initialInput` is a prompt to deliver, not bytes to write: the core pastes it and sends the submitting Enter itself, once it has confirmed the paste landed, so a client never appends a newline of its own. A core that only writes the text leaves the agent with the prompt typed and unsent, and nothing runs. Replies created + attached, or error.",
       "fieldCapabilities": {
         "model": "spawnModel"
       }

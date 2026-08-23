@@ -27,6 +27,7 @@ use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEv
 use juancoded_state::{ClientId, SessionsApi};
 
 use crate::screen::ScreenStreamer;
+use crate::seed::{deliver_seed, log_outcome, SeedOutcome, SeedTiming};
 use crate::serve::CoreHandles;
 use crate::utf8::Utf8Stream;
 use crate::wire::{ClientMessage, ServerMessage};
@@ -45,6 +46,11 @@ struct Fanout {
     /// surface exists.
     contribution_revision: Option<u64>,
     carries: HashMap<String, Utf8Stream>,
+    /// Frames a background task owes this client, out of band from the request that
+    /// started it. Seeded delivery is the only one today: it outlives the create it
+    /// belongs to by the whole of a CLI's boot window, and a delivery that failed has
+    /// to say so on the wire rather than in a log nobody dispatching is reading.
+    oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
 }
 
 /// Screen-diff cadence: at most one frame per tick, matching the Swift streamer.
@@ -91,11 +97,13 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         }
     }
 
+    let (oob_tx, mut oob_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut fanout = Fanout {
         attached: HashSet::new(),
         queue_watchers: HashSet::new(),
         contribution_revision: None,
         carries: HashMap::new(),
+        oob: oob_tx,
     };
     let mut screens: HashMap<String, ScreenStreamer> = HashMap::new();
     let mut ticker = tokio::time::interval(SCREEN_TICK);
@@ -142,6 +150,13 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                     // A client that speaks binary is not a thing today; ignore
                     // rather than tearing the connection down.
                     _ => {}
+                }
+            }
+            frame = oob_rx.recv() => {
+                // The sender lives with this connection, so `None` cannot happen
+                // while this loop is alive.
+                if let Some(frame) = frame {
+                    outbound.push(frame);
                 }
             }
             event = events.recv() => {
@@ -344,6 +359,34 @@ fn push_attached(
     }
 }
 
+/// Run one seeded delivery in the background and report a failure to the client that
+/// asked for the create.
+///
+/// Background because the delivery spans the CLI's whole boot window: a create reply
+/// that waited for it would look like a hung daemon. The failure frame matters as
+/// much as the delivery — the old behaviour was a prompt sitting typed and unsent
+/// with nothing anywhere saying so, which is indistinguishable from an agent that
+/// simply had nothing to say.
+fn spawn_seed(
+    sessions: Arc<dyn SessionsApi>,
+    id: String,
+    text: String,
+    oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
+) {
+    tokio::spawn(async move {
+        let outcome = deliver_seed(sessions, &id, &text, SeedTiming::default()).await;
+        log_outcome(&id, &outcome);
+        if let SeedOutcome::Failed { reason } = outcome {
+            // A closed channel is a client that already left; the log above is then
+            // the whole record, which is the best there is to do for it.
+            let _ = oob.send(ServerMessage::Error {
+                session_id: Some(id),
+                message: format!("the initial prompt was not delivered: {reason}"),
+            });
+        }
+    });
+}
+
 fn handle_client_message(
     msg: ClientMessage,
     sessions: &Arc<dyn SessionsApi>,
@@ -390,9 +433,7 @@ fn handle_client_message(
                         session: meta.clone(),
                     });
                     if let Some(text) = initial_input {
-                        // Seeded input goes in as-is; the paste-then-verified-Enter
-                        // delivery engine is a later ticket, not this one.
-                        let _ = sessions.input(&id, text.as_bytes());
+                        spawn_seed(sessions.clone(), id.clone(), text, fanout.oob.clone());
                     }
                     // Nothing to replay yet, and saying so is the client's baseline
                     // for everything that arrives after.
@@ -675,6 +716,9 @@ mod tests {
             queue_watchers: HashSet::new(),
             contribution_revision: None,
             carries: HashMap::new(),
+            // Nothing in these tests reads the side channel; the receiver is dropped
+            // and a send on it is the no-op a departed client already gets.
+            oob: tokio::sync::mpsc::unbounded_channel().0,
         }
     }
 

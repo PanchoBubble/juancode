@@ -8,6 +8,7 @@
 
 pub mod conn;
 pub mod screen;
+pub mod seed;
 pub mod serve;
 pub mod utf8;
 pub mod wire;
