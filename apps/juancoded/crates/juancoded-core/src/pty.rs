@@ -72,6 +72,25 @@ struct Inner {
     pid: Option<u32>,
 }
 
+/// Signal the child's whole process group, falling back to the child alone.
+///
+/// `portable-pty` puts the child in a session of its own, so it leads a group whose
+/// id is its pid, and every helper the CLI spawns inherits that group. Signalling
+/// only the pid leaves those helpers running after the session is gone; the Swift
+/// core sends `killpg` for exactly this reason. `ESRCH` (already reaped, or never a
+/// group leader) is not a failure worth reporting to a caller who asked for a stop.
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: libc::c_int) {
+    let pid = pid as libc::pid_t;
+    // SAFETY: a pid we spawned and own, and a valid signal number. A pid that no
+    // longer exists answers ESRCH, which is the outcome we wanted anyway.
+    unsafe {
+        if libc::killpg(pid, sig) != 0 {
+            libc::kill(pid, sig);
+        }
+    }
+}
+
 impl PtyHandle {
     /// Spawn the program and start pumping its output onto the event bus.
     ///
@@ -232,9 +251,7 @@ impl PtyHandle {
         match self.pid() {
             #[cfg(unix)]
             Some(pid) => {
-                // SAFETY: `kill` with a pid we own and a valid signal number. A pid
-                // that has already been reaped answers ESRCH, which we ignore.
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                signal_group(pid, libc::SIGTERM);
                 true
             }
             #[cfg(not(unix))]
@@ -270,6 +287,15 @@ impl PtyHandle {
     /// Take the child out now, with no grace. The last rung of [`stop`](Self::stop),
     /// and the right call only when the flush has already had its chance.
     pub fn kill(&self) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid() {
+            // Never through `child`: the reader thread holds that lock for as long as
+            // it is blocked in `wait()`, so a kill routed through it could not run at
+            // the one moment it is needed. Signalling by pid takes no lock, which is
+            // why the Swift core signals off its serial queue too.
+            signal_group(pid, libc::SIGKILL);
+            return Ok(());
+        }
         let mut child = self
             .inner
             .child
@@ -445,6 +471,29 @@ mod tests {
         }
     }
 
+    /// Drain until `marker` appears, or give up. Synchronising on something the child
+    /// actually said beats sleeping: `/bin/sh` needs half a second to reach its first
+    /// command on a loaded machine, and a signal that lands before the child has set
+    /// its handler is answered by the default disposition, not the handler.
+    fn wait_for(rx: &mut broadcast::Receiver<PtyEvent>, marker: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(PtyEvent::Output(bytes)) => {
+                    seen.push_str(&String::from_utf8_lossy(&bytes));
+                    if seen.contains(marker) {
+                        break;
+                    }
+                }
+                Ok(PtyEvent::Exit(_)) => break,
+                Err(broadcast::error::TryRecvError::Empty) => std::thread::sleep(REAP_POLL),
+                Err(_) => break,
+            }
+        }
+        seen
+    }
+
     /// The ladder's first rung, which is the whole point of it: a CLI that traps
     /// SIGTERM gets to run its handler. `claude` writes its transcript there, and a
     /// SIGKILL first meant a `--resume` repainted a conversation missing its last
@@ -454,14 +503,22 @@ mod tests {
         let pty = PtyHandle::spawn(
             spec(
                 "/bin/sh",
-                &["-c", "trap 'printf FLUSHED; exit 0' TERM; read ignored"],
+                &[
+                    "-c",
+                    "trap 'printf FLUSHED; exit 0' TERM; printf READY; read ignored",
+                ],
             ),
             256,
         )
         .expect("spawn");
         let mut rx = pty.subscribe();
-        // Let the shell install its handler before the signal arrives.
-        std::thread::sleep(Duration::from_millis(250));
+        // The marker is printed after the trap, so seeing it means the handler is in
+        // place. A fixed sleep instead asked whether a shell can start in 250ms.
+        let ready = wait_for(&mut rx, "READY", Duration::from_secs(10));
+        assert!(
+            ready.contains("READY"),
+            "the child never got as far as installing its handler; saw {ready:?}"
+        );
         pty.stop().expect("stop");
 
         let mut seen = String::new();
@@ -490,10 +547,22 @@ mod tests {
     /// is spent once rather than waited on forever.
     #[test]
     fn a_child_that_ignores_sigterm_is_taken_out_when_the_grace_runs_down() {
-        let pty = PtyHandle::spawn(spec("/bin/sh", &["-c", "trap '' TERM; read ignored"]), 256)
-            .expect("spawn");
+        let pty = PtyHandle::spawn(
+            spec(
+                "/bin/sh",
+                &["-c", "trap '' TERM; printf READY; read ignored"],
+            ),
+            256,
+        )
+        .expect("spawn");
         let mut rx = pty.subscribe();
-        std::thread::sleep(Duration::from_millis(250));
+        // Same handshake as the rung above: signalling before the child has ignored
+        // TERM would kill it on the first rung and never reach the escalation.
+        let ready = wait_for(&mut rx, "READY", Duration::from_secs(10));
+        assert!(
+            ready.contains("READY"),
+            "the child never started; saw {ready:?}"
+        );
 
         let started = Instant::now();
         pty.stop_within(Duration::from_millis(300)).expect("stop");
@@ -513,6 +582,61 @@ mod tests {
                 Err(e) => panic!("the stream ended without an exit: {e}"),
             }
         }
+    }
+
+    /// The signal goes to the group, and that is what makes the flush reachable at
+    /// all when the CLI is waiting on a helper of its own. A shell blocked on a
+    /// foreground child defers its TERM trap until that child is reaped, so a
+    /// pid-only signal means the handler does not run inside the grace and the
+    /// escalation takes the session out mid-write. `killpg` reaches the helper too,
+    /// the wait returns, and the handler gets its turn. The Swift core signals the
+    /// group for the same reason.
+    #[test]
+    fn a_child_waiting_on_a_helper_of_its_own_still_gets_to_flush() {
+        let pty = PtyHandle::spawn(
+            spec(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "trap 'printf FLUSHED; exit 0' TERM; /bin/sh -c 'printf READY; sleep 30'",
+                ],
+            ),
+            256,
+        )
+        .expect("spawn");
+        let mut rx = pty.subscribe();
+        // READY comes from the helper, so seeing it means the helper is already in the
+        // group and the outer shell is already blocked waiting on it. Announcing from
+        // the outer shell left a window where the signal arrived before the helper
+        // existed, and the deferred trap then waited out the whole `sleep`.
+        let ready = wait_for(&mut rx, "READY", Duration::from_secs(10));
+        assert!(
+            ready.contains("READY"),
+            "the child never started; saw {ready:?}"
+        );
+
+        pty.stop_within(Duration::from_secs(2)).expect("stop");
+
+        let mut seen = String::new();
+        let mut code = None;
+        while let Ok(event) = rx.blocking_recv() {
+            match event {
+                PtyEvent::Output(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                PtyEvent::Exit(c) => {
+                    code = Some(c);
+                    break;
+                }
+            }
+        }
+        assert!(
+            seen.contains("FLUSHED"),
+            "the handler never got its turn; output was {seen:?}"
+        );
+        assert_eq!(
+            code,
+            Some(Some(0)),
+            "an exit of its own, not a signal that took it"
+        );
     }
 
     #[test]
