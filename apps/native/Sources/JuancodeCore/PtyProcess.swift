@@ -152,6 +152,7 @@ public final class PtyProcess: @unchecked Sendable {
         // while reads keep draining so the child can always make progress.
         let flags = fcntl(master, F_GETFL, 0)
         _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
+        PtyStallProbe.register(pid: childPid, fd: master, queue: queue)
         startReading()
         startExitWatch()
     }
@@ -202,6 +203,7 @@ public final class PtyProcess: @unchecked Sendable {
             var buf = [UInt8](repeating: 0, count: 16 * 1024)
             let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
             if n > 0 {
+                PtyStallProbe.noteRead(pid: self.pid, bytes: n)
                 self.onData(Array(buf[0..<n]))
             } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                 // The master is O_NONBLOCK (see init): a spurious readability
@@ -210,6 +212,7 @@ public final class PtyProcess: @unchecked Sendable {
                 // EOF/EIO: nothing more to read. Stop reading (which closes the
                 // fd via the cancel handler). Exit itself is reported by the
                 // waitpid thread, not from here.
+                PtyStallProbe.gone(pid: self.pid, why: "eof n=\(n) errno=\(errno)")
                 self.readSource?.cancel()
             }
         }
@@ -250,6 +253,7 @@ public final class PtyProcess: @unchecked Sendable {
     private func finish(_ status: Int32) {
         guard !exited else { return }
         exited = true
+        PtyStallProbe.gone(pid: pid, why: "exit status=\(status)")
         readSource?.cancel() // closes the master fd via the cancel handler
         let code = WIFEXITED(status) ? WEXITSTATUS(status) : -1
         onExit(code)

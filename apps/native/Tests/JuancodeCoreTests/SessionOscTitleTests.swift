@@ -24,12 +24,13 @@ import Testing
     /// decides how long a broken spawn takes to report. 3s was short enough that a
     /// loaded suite let the transcript poll's title stand in for the CLI's, which
     /// reads as "the OSC title lost" when in truth it had not arrived yet.
-    private func poll(_ timeout: TimeInterval = 60.0, _ cond: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
+    /// Every wait here is for something a real child process does, so the bound is
+    /// `PtySpawn`'s: a quarter-second of every spawn is exec authorization before the
+    /// child runs an instruction, and under this suite's load that stretches to
+    /// seconds.
+    private func poll(_ timeout: TimeInterval = PtySpawn.firstFrameBound,
+                      _ cond: @escaping () -> Bool) async {
+        await PtySpawn.poll(timeout, cond)
     }
 
     private var cwd: String { FileManager.default.temporaryDirectory.path }

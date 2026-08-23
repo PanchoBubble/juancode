@@ -18,7 +18,10 @@ import Testing
         var didExit: Bool { lock.withLock { exitCode != nil } }
     }
 
-    private func poll(_ timeout: TimeInterval = 5.0, _ cond: @escaping () -> Bool) async -> Bool {
+    /// Bounded by `PtySpawn` because these spawn real children: exec alone costs a
+    /// quarter of a second here before the child runs an instruction.
+    private func poll(_ timeout: TimeInterval = PtySpawn.firstFrameBound,
+                      _ cond: @escaping () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if cond() { return true }

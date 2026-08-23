@@ -35,12 +35,13 @@ import Testing
         )
     }
 
-    private func poll(_ timeout: TimeInterval = 3.0, _ cond: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
+    /// Every wait here is for something a real child process does, so the bound is
+    /// `PtySpawn`'s: a quarter-second of every spawn is exec authorization before the
+    /// child runs an instruction, and under this suite's load that stretches to
+    /// seconds.
+    private func poll(_ timeout: TimeInterval = PtySpawn.firstFrameBound,
+                      _ cond: @escaping () -> Bool) async {
+        await PtySpawn.poll(timeout, cond)
     }
 
     private var tmp: String { FileManager.default.temporaryDirectory.path }

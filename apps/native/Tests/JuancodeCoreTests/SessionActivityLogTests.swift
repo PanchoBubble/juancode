@@ -144,12 +144,13 @@ private final class RecordingLog: SessionActivityLogging, @unchecked Sendable {
         return url.path
     }
 
-    private func poll(_ timeout: TimeInterval = 5.0, _ cond: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
+    /// Every wait here is for something a real child process does, so the bound is
+    /// `PtySpawn`'s: a quarter-second of every spawn is exec authorization before the
+    /// child runs an instruction, and under this suite's load that stretches to
+    /// seconds.
+    private func poll(_ timeout: TimeInterval = PtySpawn.firstFrameBound,
+                      _ cond: @escaping () -> Bool) async {
+        await PtySpawn.poll(timeout, cond)
     }
 
     @Test func lifecycleEmitsSpawnActivityKillAndExit() async throws {

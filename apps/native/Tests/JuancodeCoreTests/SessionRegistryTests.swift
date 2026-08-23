@@ -34,34 +34,23 @@ import Testing
         )
     }
 
-    /// Every wait in this file is for something a real child process does — a frame
-    /// on the pty, an exit, a persisted row — so this timeout is a "the spawn is
-    /// broken" bound, not a schedule, and it can only ever be too short. It has to
-    /// clear the worst case of the full parallel suite, which is much worse than the
-    /// machine being busy: 40 sessions spawned at once at load 65 all painted their
-    /// first frame inside 270ms, yet inside a full run a single session has been
-    /// measured taking 24s, and 60s+ alongside a concurrent cargo build, before its
-    /// first byte arrived. 120s doubles the worst stall measured, and every caller
-    /// re-asserts the condition afterwards, so overshooting only ever costs time.
-    private func poll(_ timeout: TimeInterval = 120.0, _ cond: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if cond() { return }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
+    /// Every wait in this file is for something a real child process does, so the
+    /// bound is `PtySpawn`'s. It is a "the spawn is broken" bound, not a schedule:
+    /// a quarter of a second of every spawn on this machine is spent inside `execve`
+    /// before the child runs one instruction, and under this suite's own load that
+    /// stretches into seconds (measured in `PtySpawnBound.swift`).
+    private func poll(_ timeout: TimeInterval = PtySpawn.firstFrameBound,
+                      _ cond: @escaping () -> Bool) async {
+        await PtySpawn.poll(timeout, cond)
     }
 
     /// Wait for `cond` and, if it never came true, say whether the session is even
-    /// alive. The suite's other load failure is a child that produces no first frame
-    /// at all — measured at 24s, and past 60s beside a concurrent cargo build — and
-    /// "expected READY, got empty" does not distinguish a starved child from one that
-    /// died on spawn. Whoever reads the next occurrence needs that in the message.
+    /// alive: "expected READY, got empty" does not distinguish a child still parked
+    /// in `execve` from one that died on spawn.
     private func expectEventually(_ s: Session, _ what: String,
-                                  _ cond: @escaping () -> Bool) async {
-        await poll { cond() }
-        let why = "\(what) never arrived: running=\(s.isRunning) status=\(s.meta.status) "
-            + "exit=\(String(describing: s.meta.exitCode))"
-        #expect(cond(), Comment(rawValue: why))
+                                  _ cond: @escaping () -> Bool,
+                                  sourceLocation: SourceLocation = #_sourceLocation) async {
+        await PtySpawn.expectEventually(s, what, cond, sourceLocation: sourceLocation)
     }
 
     private var cwd: String { FileManager.default.temporaryDirectory.path }

@@ -2,10 +2,12 @@ import Foundation
 import Testing
 @testable import JuancodeCore
 
-/// Mirrors apps/server/src/activityDetector.test.ts. Most cases use a short real
-/// `settleMs` and poll; the ones that assert a turn has *not* settled yet drive a
-/// `ManualActivityClock` instead, since an assertion about a window that has not
-/// elapsed cannot be made against wall clock on a loaded machine.
+/// Mirrors apps/server/src/activityDetector.test.ts. Cases that wait *for* a state
+/// change use a short real `settleMs` and poll, which is load-tolerant. Every case
+/// that asserts something about a window's contents — that a turn has not settled
+/// yet, that nothing was emitted, that busy held across a watchdog — drives a
+/// `ManualActivityClock` instead: those assertions are about elapsed time, and on a
+/// loaded machine wall clock runs the window before the assertion does.
 ///
 /// The detector reads a headless `TerminalScreen`, so a turn ends when the CLI
 /// *erases* the working footer from the screen (CLIs paint it once and then only
@@ -32,10 +34,6 @@ import Testing
         }
     }
 
-    private func sleepMs(_ ms: Int) async {
-        try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
-    }
-
     @Test func goesBusyOnWorkingIndicator() async {
         let c = Collector()
         let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
@@ -47,7 +45,7 @@ import Testing
     /// Real claude positions the footer segments with same-line cursor moves, so the
     /// phrase arrives as e.g. "esc␛[44Gto␛[48Ginterrupt". The grid renders those as
     /// spatial gaps (not glued, not on separate rows), so the footer still matches.
-    @Test func goesBusyOnCursorFragmentedIndicator() async {
+    @Test func goesBusyOnCursorFragmentedIndicator() {
         let variants = [
             "✻ Thinking… (esc\u{1B}[1;44Hto\u{1B}[1;48Hinterrupt)", // same-row CUP
             "✻ Thinking… (esc\u{1B}[44Gto interrupt)",              // CHA then contiguous
@@ -55,9 +53,9 @@ import Testing
         ]
         for v in variants {
             let c = Collector()
-            let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+            let det = ActivityDetector(settleMs: 60, clock: ManualActivityClock()) { c.record($0, $1) }
             det.feed(v)
-            await poll { c.snapshot.contains { $0.0 == .busy } }
+            det.drain()
             #expect(c.snapshot.contains { $0.0 == .busy }, "should go busy on: \(v.debugDescription)")
         }
     }
@@ -82,31 +80,38 @@ import Testing
         #expect(c.snapshot.last?.1 == true)
     }
 
-    @Test func ignoresBannerAndTyping() async {
+    @Test func ignoresBannerAndTyping() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         det.feed("Welcome to Claude Code!\n")
         det.feed("> what is 2 + 2")
-        await sleepMs(200) // past the settle window
+        det.drain()
+        clock.advance(200) // past the settle window
         #expect(c.snapshot.isEmpty)
     }
 
     /// The headline fix: while the footer is still on screen the session stays busy,
     /// even across a long quiet stretch (slow tool call / model latency). The old
     /// quiet-based detector wrongly settled to idle here.
-    @Test func staysBusyWhileFooterVisible() async {
+    @Test func staysBusyWhileFooterVisible() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 80) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 80, clock: clock) { c.record($0, $1) }
         det.feed("✻ Working… (esc to interrupt)\n") // footer on its own line
-        await sleepMs(150)                            // long quiet pause mid-turn
+        det.drain()
+        clock.advance(150)                            // long quiet pause mid-turn
         det.feed("streaming a token…\n")              // output above the footer
-        await sleepMs(150)
+        det.drain()
+        clock.advance(150)
         det.feed("more tokens…\n")
-        await sleepMs(150)
+        det.drain()
+        clock.advance(150)
         #expect(c.states == [.busy]) // never falsely settled
         // Once the footer is erased, it settles.
         det.feed(Self.clear + "Done.\n")
-        await poll { c.snapshot.last?.0 == .idle }
+        det.drain()
+        clock.advance(80)
         #expect(c.snapshot.last?.0 == .idle)
     }
 
@@ -156,11 +161,13 @@ import Testing
         }
     }
 
-    @Test func doesNotGoBusyOnLoneUserEvent() async {
+    @Test func doesNotGoBusyOnLoneUserEvent() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         det.feedStructured([.user]) // the user's own prompt landing — not agent work
-        await sleepMs(200)
+        det.drain()
+        clock.advance(200)
         #expect(c.snapshot.isEmpty)
     }
 
@@ -233,35 +240,43 @@ import Testing
     /// The headline fix: a tool_use with no tool_result yet (slow tool, delegated
     /// subagent) goes transcript- and screen-quiet for minutes; the watchdog must
     /// not demote busy while the call is still in flight.
-    @Test func openToolUseHoldsBusyAcrossWatchdog() async {
+    @Test func openToolUseHoldsBusyAcrossWatchdog() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, clock: clock) { c.record($0, $1) }
         det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
-        await sleepMs(400) // several watchdog windows of total silence
+        det.drain()
+        clock.advance(400) // several watchdog windows of total silence
         #expect(c.states == [.busy]) // never demoted
     }
 
-    @Test func toolResultReleasesHoldAndSettles() async {
+    @Test func toolResultReleasesHoldAndSettles() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, clock: clock) { c.record($0, $1) }
         det.feedStructured(StructuredEventBatch(kinds: [.toolUse], openedToolUseIds: ["t1"]))
-        await sleepMs(250) // held busy past the watchdog
+        det.drain()
+        clock.advance(250) // held busy past the watchdog
         #expect(c.states == [.busy])
         det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t1"]))
-        await poll { c.snapshot.last?.0 == .idle }
+        det.drain()
+        clock.advance(100)
         #expect(c.states == [.busy, .idle])
         #expect(c.snapshot.last?.1 == true)
     }
 
-    @Test func holdWaitsForEveryPendingToolUse() async {
+    @Test func holdWaitsForEveryPendingToolUse() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 40, watchdogMs: 100) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 40, watchdogMs: 100, clock: clock) { c.record($0, $1) }
         det.feedStructured(StructuredEventBatch(kinds: [.toolUse, .toolUse], openedToolUseIds: ["t1", "t2"]))
         det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t1"]))
-        await sleepMs(250) // t2 still open — held
+        det.drain()
+        clock.advance(250) // t2 still open — held
         #expect(c.states == [.busy])
         det.feedStructured(StructuredEventBatch(kinds: [.toolResult], resolvedToolUseIds: ["t2"]))
-        await poll { c.snapshot.last?.0 == .idle }
+        det.drain()
+        clock.advance(100)
         #expect(c.snapshot.last?.0 == .idle)
     }
 
@@ -338,21 +353,25 @@ import Testing
         #expect(det.lastPromptMatch == "yn-paren")
     }
 
-    @Test func ignoresStartupBannerNoPrompt() async {
+    @Test func ignoresStartupBannerNoPrompt() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         det.feed(Self.clear + "✻ Welcome to Claude Code!\n\n  /help for help\n\n> ")
-        await sleepMs(200)
+        det.drain()
+        clock.advance(200)
         #expect(c.snapshot.isEmpty)
         #expect(det.activity == .idle)
     }
 
-    @Test func doesNotTriggerOnScrolledUpDoYouWant() async {
+    @Test func doesNotTriggerOnScrolledUpDoYouWant() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         // Prose at the top; the bottom region (where a live prompt would be) is blank.
         det.feed(Self.clear + "Earlier I asked: Do you want to refactor this?\n" + String(repeating: "\n", count: 35))
-        await sleepMs(200)
+        det.drain()
+        clock.advance(200)
         #expect(c.snapshot.isEmpty)
         #expect(det.activity == .idle)
     }
@@ -369,12 +388,14 @@ import Testing
         #expect(c.snapshot.last?.1 == false)
     }
 
-    @Test func noFlickerDuringOrdinaryStreaming() async {
+    @Test func noFlickerDuringOrdinaryStreaming() {
         let c = Collector()
-        let det = ActivityDetector(settleMs: 60) { c.record($0, $1) }
+        let clock = ManualActivityClock()
+        let det = ActivityDetector(settleMs: 60, clock: clock) { c.record($0, $1) }
         // Idle output that contains a '?' but no prompt in the bottom region.
         det.feed(Self.clear + "The answer to your question is 42.\n" + String(repeating: "\n", count: 35))
-        await sleepMs(200)
+        det.drain()
+        clock.advance(200)
         #expect(c.snapshot.isEmpty)
     }
 
