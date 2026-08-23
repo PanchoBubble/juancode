@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+juancoded-cordis.workspace = true
 juancoded-core.workspace = true
 juancoded-state.workspace = true
 juancoded-vt.workspace = true

@@ -12,9 +12,28 @@ use axum::routing::get;
 use axum::Router;
 use tracing::info;
 
+use juancoded_cordis::ContributionRegistry;
 use juancoded_state::SessionsApi;
 
 use crate::conn;
+
+/// What a connection needs from the booted tree: the sessions it drives, and the
+/// chrome the tree contributes to the built-in surfaces. Both come out of the same
+/// `boot`, so a server can never be serving one tree's sessions and another's chrome.
+#[derive(Clone)]
+pub struct CoreHandles {
+    pub sessions: Arc<dyn SessionsApi>,
+    pub contributions: ContributionRegistry,
+}
+
+impl CoreHandles {
+    pub fn new(sessions: Arc<dyn SessionsApi>, contributions: ContributionRegistry) -> Self {
+        Self {
+            sessions,
+            contributions,
+        }
+    }
+}
 
 pub struct ServeConfig {
     /// TCP port for remote clients and the Node sidecar. Deliberately NOT 4280 by
@@ -51,7 +70,7 @@ async fn is_live(path: &std::path::Path) -> bool {
     tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
-fn router(sessions: Arc<dyn SessionsApi>) -> Router {
+fn router(handles: CoreHandles) -> Router {
     Router::new()
         // Both spellings, on purpose: the Swift core serves `/api/health` and remote
         // clients probe it, so a core that only answered `/health` would look down to
@@ -59,19 +78,16 @@ fn router(sessions: Arc<dyn SessionsApi>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/api/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
-        .with_state(sessions)
+        .with_state(handles)
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(sessions): State<Arc<dyn SessionsApi>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| conn::handle(socket, sessions))
+async fn ws_handler(ws: WebSocketUpgrade, State(handles): State<CoreHandles>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| conn::handle(socket, handles))
 }
 
 /// Serve on both listeners until one of them fails.
-pub async fn serve(sessions: Arc<dyn SessionsApi>, config: ServeConfig) -> Result<()> {
-    let app = router(sessions);
+pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
+    let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
@@ -140,7 +156,7 @@ mod tests {
         let held = tokio::net::UnixListener::bind(&socket).unwrap();
 
         let err = serve(
-            crate::testing::sessions(),
+            crate::testing::handles(),
             ServeConfig {
                 port: 0,
                 socket: socket.clone(),

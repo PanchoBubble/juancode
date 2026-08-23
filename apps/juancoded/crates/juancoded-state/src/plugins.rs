@@ -117,4 +117,5 @@ pub fn default_entries() -> EntryList {
         .push(Entry::new("pty-to-grid", "pty-to-grid"))
         .push(Entry::new("store", "sqlite-store"))
         .push(Entry::new("activity-log", "activity-log"))
+        .push(Entry::new("session-chrome", "session-chrome"))
 }

@@ -12,16 +12,17 @@ use juancoded_cordis::dump_config;
 use juancoded_state::{boot_with, plugins, SessionsService, StoreService};
 
 const DUMP: &str = "\
-juancoded config: 7 entries (6 active, 1 pending, 0 disabled, 0 failed), 4 services, 4 events
+juancoded config: 8 entries (7 active, 1 pending, 0 disabled, 0 failed), 4 services, 4 events, 3 contributions
 
 entries
-├─ [ACTIVE  ] sessions      session-registry  needs=pty,store,terminal  effects=1
-├─ [ACTIVE  ] terminal      vt-terminal       effects=1
-├─ [ACTIVE  ] pty           core-pty          effects=2
-├─ [ACTIVE  ] input-guard   input-guard       needs=pty  effects=1
-├─ [ACTIVE  ] pty-to-grid   pty-to-grid       needs=pty,terminal  effects=3
-├─ [ACTIVE  ] store         sqlite-store      effects=1
-└─ [PENDING ] activity-log  activity-log      needs=transcripts  missing=transcripts
+├─ [ACTIVE  ] sessions        session-registry  needs=pty,store,terminal  effects=1
+├─ [ACTIVE  ] terminal        vt-terminal       effects=1
+├─ [ACTIVE  ] pty             core-pty          effects=2
+├─ [ACTIVE  ] input-guard     input-guard       needs=pty  effects=1
+├─ [ACTIVE  ] pty-to-grid     pty-to-grid       needs=pty,terminal  effects=3
+├─ [ACTIVE  ] store           sqlite-store      effects=1
+├─ [PENDING ] activity-log    activity-log      needs=transcripts  missing=transcripts
+└─ [ACTIVE  ] session-chrome  session-chrome    effects=3
 
 services
 ├─ pty       <- pty
@@ -34,6 +35,11 @@ events
 ├─ session.exit         fan-out  1  terminal.close
 ├─ session.input        around   2  guard.live-session,pty.write
 └─ session.output       observe  1  terminal.feed
+
+contributions
+├─ session.badge.waiting   sessionBadge     <- session-chrome  sort=0  needs=session.activity
+├─ session.menu.interrupt  contextMenuItem  <- session-chrome  sort=0  needs=session.activity
+└─ session.badge.busy      sessionBadge     <- session-chrome  sort=10  needs=session.activity
 ";
 
 #[test]

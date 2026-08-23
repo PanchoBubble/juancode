@@ -12,7 +12,7 @@
 //! at once is never a port fight. Overridable with JUANCODED_PORT / JUANCODED_SOCKET.
 
 use anyhow::Result;
-use juancoded_server::{serve, ServeConfig};
+use juancoded_server::{serve, CoreHandles, ServeConfig};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -42,8 +42,9 @@ async fn main() -> Result<()> {
         "juancoded starting"
     );
 
+    let handles = CoreHandles::new(sessions, loader.contributions().clone());
     tokio::select! {
-        r = serve(sessions, config) => r?,
+        r = serve(handles, config) => r?,
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
     }
     // Dropping the loader unwinds every plugin's effects in reverse mount order,

@@ -20,6 +20,7 @@ pub fn dump_config(loader: &Loader) -> String {
     let fibers = loader.fibers();
     let services = loader.services().rows();
     let events = loader.bus().rows();
+    let contributions = loader.contributions().rows();
 
     let active = fibers.iter().filter(|f| f.state.is_active()).count();
     let pending = fibers.iter().filter(|f| f.state.is_pending()).count();
@@ -35,10 +36,11 @@ pub fn dump_config(loader: &Loader) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "juancoded config: {} entries ({active} active, {pending} pending, {disabled} disabled, {failed} failed), {} services, {} events",
+        "juancoded config: {} entries ({active} active, {pending} pending, {disabled} disabled, {failed} failed), {} services, {} events, {} contributions",
         fibers.len(),
         services.len(),
-        events.len()
+        events.len(),
+        contributions.len()
     );
 
     let id_w = width(fibers.iter().map(|f| f.id()));
@@ -112,6 +114,32 @@ pub fn dump_config(loader: &Loader) -> String {
                 event.listeners.len(),
                 listeners
             );
+        }
+    }
+
+    // Contributions last, because they are the only section that describes what the
+    // client draws rather than what the daemon runs. Same addressing rule as the
+    // entries: the id column is the string an activation names.
+    let _ = writeln!(out, "\ncontributions");
+    if contributions.is_empty() {
+        let _ = writeln!(out, "└─ (none)");
+    } else {
+        let id_w = width(contributions.iter().map(|c| c.id.as_str()));
+        let surface_w = width(contributions.iter().map(|c| c.placement.surface()));
+        for (i, c) in contributions.iter().enumerate() {
+            let mut row = format!(
+                "{} {:<id_w$}  {:<surface_w$}  <- {}  sort={}",
+                branch(i, contributions.len()),
+                c.id,
+                c.placement.surface(),
+                c.owner,
+                c.sort_key
+            );
+            if !c.needs.is_empty() {
+                let needs: Vec<&str> = c.needs.iter().map(|n| n.as_str()).collect();
+                let _ = write!(row, "  needs={}", needs.join(","));
+            }
+            let _ = writeln!(out, "{row}");
         }
     }
     out

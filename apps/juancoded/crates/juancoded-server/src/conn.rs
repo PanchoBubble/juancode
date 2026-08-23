@@ -21,11 +21,13 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tracing::{debug, warn};
 
+use juancoded_cordis::contribution::ContributionRegistry;
 use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionsApi};
 
 use crate::screen::ScreenStreamer;
+use crate::serve::CoreHandles;
 use crate::utf8::Utf8Stream;
 use crate::wire::{ClientMessage, ServerMessage};
 
@@ -38,6 +40,10 @@ struct Fanout {
     /// per-connection, so unsubscribing stops the frames for this client and nobody
     /// else's, and closing the socket drops the watch with the rest of this state.
     queue_watchers: HashSet<String>,
+    /// The contribution revision this connection last saw, once it asked to watch.
+    /// `None` means it is not watching, which is every client that does not know the
+    /// surface exists.
+    contribution_revision: Option<u64>,
     carries: HashMap<String, Utf8Stream>,
 }
 
@@ -50,7 +56,11 @@ const DEFAULT_GRID: (u16, u16) = (120, 40);
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
-pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
+pub async fn handle(socket: WebSocket, handles: CoreHandles) {
+    let CoreHandles {
+        sessions,
+        contributions,
+    } = handles;
     let client: ClientId = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut tx, mut rx) = socket.split();
     let mut events = sessions.subscribe();
@@ -84,6 +94,7 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
     let mut fanout = Fanout {
         attached: HashSet::new(),
         queue_watchers: HashSet::new(),
+        contribution_revision: None,
         carries: HashMap::new(),
     };
     let mut screens: HashMap<String, ScreenStreamer> = HashMap::new();
@@ -101,8 +112,8 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
                         let mut reply: Vec<ServerMessage> = Vec::new();
                         match ClientMessage::decode(&text) {
                             Ok(msg) => handle_client_message(
-                                msg, &sessions, client, &mut fanout, &mut screens,
-                                &mut reply,
+                                msg, &sessions, &contributions, client, &mut fanout,
+                                &mut screens, &mut reply,
                             ),
                             Err(e) => {
                                 // One sessionless error, and the connection lives: a
@@ -148,6 +159,20 @@ pub async fn handle(socket: WebSocket, sessions: Arc<dyn SessionsApi>) {
                         if let Some(frame) = streamer.frame(snapshot) {
                             outbound.push(frame);
                         }
+                    }
+                }
+                // A contribution appears or disappears when a plugin mounts or
+                // unmounts, which is not a session event and so has no bus to ride.
+                // Comparing one integer on the tick a watcher is already paying for
+                // is cheaper than a second broadcast channel for something that
+                // changes a handful of times in a daemon's life.
+                if let Some(seen) = fanout.contribution_revision {
+                    let current = contributions.revision();
+                    if current != seen {
+                        fanout.contribution_revision = Some(current);
+                        outbound.push(ServerMessage::Contributions {
+                            snapshot: contributions.snapshot(),
+                        });
                     }
                 }
             }
@@ -322,6 +347,7 @@ fn push_attached(
 fn handle_client_message(
     msg: ClientMessage,
     sessions: &Arc<dyn SessionsApi>,
+    contributions: &ContributionRegistry,
     client: ClientId,
     fanout: &mut Fanout,
     screens: &mut HashMap<String, ScreenStreamer>,
@@ -587,6 +613,43 @@ fn handle_client_message(
             }
         }
 
+        // The contribution surface is complete daemon-side and the `contributions`
+        // capability is still withheld: nothing renders a descriptor yet, so a client
+        // that switched its chrome on off the capability would draw nothing.
+        ClientMessage::SubscribeContributions => {
+            let snapshot = contributions.snapshot();
+            // Idempotent: a second subscribe from the same connection is not a second
+            // snapshot, exactly as for the queue.
+            if fanout.contribution_revision == Some(snapshot.revision) {
+                return;
+            }
+            fanout.contribution_revision = Some(snapshot.revision);
+            outbound.push(ServerMessage::Contributions { snapshot });
+        }
+
+        ClientMessage::UnsubscribeContributions => {
+            fanout.contribution_revision = None;
+        }
+
+        ClientMessage::ActivateContribution {
+            contribution,
+            target,
+            payload,
+        } => {
+            // The daemon runs the owning plugin's handler and answers. An id nobody
+            // claims is `unhandled`, not an error: the client's snapshot is simply
+            // older than the tree.
+            let activation = juancoded_cordis::Activation {
+                contribution: contribution.clone(),
+                target,
+                payload,
+            };
+            outbound.push(ServerMessage::ContributionResult {
+                outcome: contributions.activate(&activation),
+                contribution,
+            });
+        }
+
         // Feature-detected away by well-behaved clients; ignored either way, so an
         // older core can never kill a newer client.
         ClientMessage::Unknown { r#type } => debug!(r#type, "ignoring unimplemented message"),
@@ -610,8 +673,110 @@ mod tests {
         Fanout {
             attached: HashSet::new(),
             queue_watchers: HashSet::new(),
+            contribution_revision: None,
             carries: HashMap::new(),
         }
+    }
+
+    /// The same, against a real booted tree's contributions rather than an empty
+    /// registry, for the frames that only mean something with chrome mounted.
+    fn contribution_step(
+        msg: ClientMessage,
+        handles: &CoreHandles,
+        fanout: &mut Fanout,
+    ) -> Vec<ServerMessage> {
+        let mut reply = Vec::new();
+        let mut screens = HashMap::new();
+        handle_client_message(
+            msg,
+            &handles.sessions,
+            &handles.contributions,
+            1,
+            fanout,
+            &mut screens,
+            &mut reply,
+        );
+        reply
+    }
+
+    #[test]
+    fn subscribing_to_contributions_answers_with_the_whole_list_once() {
+        let handles = crate::testing::handles();
+        let mut fanout = fanout();
+
+        let first = contribution_step(ClientMessage::SubscribeContributions, &handles, &mut fanout);
+        let [ServerMessage::Contributions { snapshot }] = &first[..] else {
+            panic!("expected one snapshot, got {first:?}");
+        };
+        assert_eq!(snapshot.schema_version, 1);
+        let ids: Vec<&str> = snapshot.items.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"session.badge.waiting"), "{ids:?}");
+
+        // A second subscribe on an unchanged tree is not a second snapshot.
+        assert!(
+            contribution_step(ClientMessage::SubscribeContributions, &handles, &mut fanout,)
+                .is_empty()
+        );
+
+        // And unsubscribing stops the watch for this connection only.
+        contribution_step(
+            ClientMessage::UnsubscribeContributions,
+            &handles,
+            &mut fanout,
+        );
+        assert_eq!(fanout.contribution_revision, None);
+    }
+
+    #[test]
+    fn activating_a_contribution_answers_with_what_the_plugin_decided() {
+        let handles = crate::testing::handles();
+        let mut fanout = fanout();
+
+        let out = contribution_step(
+            ClientMessage::ActivateContribution {
+                contribution: juancoded_cordis::plugins::INTERRUPT_ID.into(),
+                target: Some("s-1".into()),
+                payload: serde_json::Value::Null,
+            },
+            &handles,
+            &mut fanout,
+        );
+        let [ServerMessage::ContributionResult {
+            contribution,
+            outcome,
+        }] = &out[..]
+        else {
+            panic!("expected one result, got {out:?}");
+        };
+        assert_eq!(contribution, juancoded_cordis::plugins::INTERRUPT_ID);
+        assert_eq!(
+            outcome,
+            &juancoded_cordis::ActivationOutcome::Handled {
+                result: serde_json::json!({ "interrupted": "s-1" })
+            }
+        );
+    }
+
+    #[test]
+    fn activating_an_id_the_tree_does_not_have_is_answered_not_an_error() {
+        let handles = crate::testing::handles();
+        let mut fanout = fanout();
+        let out = contribution_step(
+            ClientMessage::ActivateContribution {
+                contribution: "nobody.here".into(),
+                target: None,
+                payload: serde_json::Value::Null,
+            },
+            &handles,
+            &mut fanout,
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [ServerMessage::ContributionResult {
+                outcome: juancoded_cordis::ActivationOutcome::Unhandled,
+                ..
+            }]
+        ));
     }
 
     /// Feed one client frame through the handler, then fold in whatever the registry
@@ -624,7 +789,15 @@ mod tests {
     ) -> Vec<ServerMessage> {
         let mut reply = Vec::new();
         let mut screens = HashMap::new();
-        handle_client_message(msg, sessions, 1, fanout, &mut screens, &mut reply);
+        handle_client_message(
+            msg,
+            sessions,
+            &ContributionRegistry::new(),
+            1,
+            fanout,
+            &mut screens,
+            &mut reply,
+        );
         let mut ahead = Vec::new();
         let mut behind = Vec::new();
         drain_bus(events, sessions, fanout, &mut ahead, &mut behind);

@@ -20,6 +20,10 @@
 //!    with `next()`, fan-out, and ordered-with-return. The mode is the trait the event
 //!    implements, so a mismatched dispatch does not compile.
 //!
+//! [`contribution`] is the sixth thing, and it is ours rather than cordis's: a plugin
+//! changes the built-in surfaces by registering a descriptor, which is an effect like
+//! any other and disappears with its plugin.
+//!
 //! Deliberately not ported: groups/isolate realms and per-agent scoped registration
 //! with shadowing. Both exist to keep tenants from seeing each other's services, and
 //! this daemon serves one app.
@@ -28,6 +32,7 @@
 //! list is applied by hand; see `examples/dump_config.rs`.
 
 pub mod bus;
+pub mod contribution;
 pub mod dump;
 pub mod effect;
 pub mod entry;
@@ -39,6 +44,10 @@ pub mod service;
 pub mod services;
 
 pub use bus::{AroundEvent, Bus, DispatchMode, FanOutEvent, Next, ObserveEvent, SerialEvent};
+pub use contribution::{
+    Activation, ActivationOutcome, Badge, Contribution, ContributionRegistry, DataNeed, MenuTarget,
+    Placement, Scope, SettingsField, Snapshot as ContributionSnapshot, Tone,
+};
 pub use dump::dump_config;
 pub use effect::{Effect, EffectScope};
 pub use entry::{Entry, EntryList};

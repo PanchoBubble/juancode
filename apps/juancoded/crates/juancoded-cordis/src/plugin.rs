@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 
 use crate::bus::{AroundEvent, Bus, FanOutEvent, Next, ObserveEvent, SerialEvent};
+use crate::contribution::{
+    Activation, ActivationOutcome, Contribution, ContributionRegistry, ContributionTaken, Scope,
+};
 use crate::effect::{Effect, EffectScope};
 use crate::service::{ResolveError, Service, ServiceRegistry, ServiceTaken};
 
@@ -55,6 +58,7 @@ pub struct Context {
     config: serde_json::Value,
     services: ServiceRegistry,
     bus: Bus,
+    contributions: ContributionRegistry,
     scope: Mutex<EffectScope>,
 }
 
@@ -64,6 +68,7 @@ impl Context {
         config: serde_json::Value,
         services: ServiceRegistry,
         bus: Bus,
+        contributions: ContributionRegistry,
     ) -> Self {
         let id = id.into();
         Self {
@@ -72,6 +77,7 @@ impl Context {
             config,
             services,
             bus,
+            contributions,
         }
     }
 
@@ -91,6 +97,33 @@ impl Context {
 
     pub fn bus(&self) -> &Bus {
         &self.bus
+    }
+
+    pub fn contributions(&self) -> &ContributionRegistry {
+        &self.contributions
+    }
+
+    /// Add a descriptor to a built-in surface for as long as this plugin is mounted.
+    ///
+    /// Tracked like every other registration, so the chrome this puts on screen is
+    /// gone the moment the plugin unmounts and nothing has to be told to redraw.
+    pub fn contribute(&self, contribution: Contribution) -> Result<(), ContributionTaken> {
+        let effect = self.contributions.contribute(&self.id, contribution)?;
+        self.track(effect);
+        Ok(())
+    }
+
+    /// The same, with the action this plugin runs when a client activates the item.
+    pub fn contribute_with(
+        &self,
+        contribution: Contribution,
+        handler: impl Fn(&Activation, &Scope) -> ActivationOutcome + Send + Sync + 'static,
+    ) -> Result<(), ContributionTaken> {
+        let effect = self
+            .contributions
+            .contribute_with(&self.id, contribution, handler)?;
+        self.track(effect);
+        Ok(())
     }
 
     /// Hand an effect to this plugin's scope, so it is undone when the plugin unmounts.

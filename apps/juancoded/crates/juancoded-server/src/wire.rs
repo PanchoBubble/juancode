@@ -10,6 +10,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_state::{ClientId, QueuedMessage};
@@ -27,6 +28,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// paste-then-verified-Enter engine is still Swift-only. A client that saw `queue`
 /// here would offer a send button whose messages pile up forever, so the capability
 /// stays withheld until delivery lands with it.
+///
+/// `contributions` is withheld on the same terms and for the same reason. The daemon
+/// side is complete: descriptors register, snapshots go out on subscribe and on every
+/// revision, and activations round-trip to the owning plugin. What does not exist yet
+/// is a client that renders a descriptor, and advertising the capability before one
+/// does would promise chrome nothing draws.
 pub const CAPABILITIES: &[&str] = &[
     "inputAck",
     "resizeAck",
@@ -115,6 +122,17 @@ pub enum ClientMessage {
         session_id: String,
         text: String,
     },
+    /// Watch the contribution list: the complete set now, and again on every change,
+    /// until `unsubscribeContributions` or the socket closes.
+    SubscribeContributions,
+    UnsubscribeContributions,
+    /// Run a contribution's action. The daemon hands it to the plugin that registered
+    /// the descriptor; the client never executes plugin logic of its own.
+    ActivateContribution {
+        contribution: String,
+        target: Option<String>,
+        payload: Value,
+    },
     /// Cancel a still-pending message by the id its snapshot gave it.
     DequeueMessage {
         session_id: String,
@@ -159,6 +177,12 @@ struct RawClient {
     text: Option<String>,
     #[serde(rename = "messageId", default)]
     message_id: Option<String>,
+    #[serde(default)]
+    contribution: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    payload: Option<Value>,
 }
 
 impl ClientMessage {
@@ -239,6 +263,13 @@ impl ClientMessage {
             "dequeueMessage" => Ok(Self::DequeueMessage {
                 session_id: need_session()?,
                 message_id: raw.message_id.ok_or("missing messageId")?,
+            }),
+            "subscribeContributions" => Ok(Self::SubscribeContributions),
+            "unsubscribeContributions" => Ok(Self::UnsubscribeContributions),
+            "activateContribution" => Ok(Self::ActivateContribution {
+                contribution: raw.contribution.ok_or("missing contribution")?,
+                target: raw.target,
+                payload: raw.payload.unwrap_or(Value::Null),
             }),
             other => Ok(Self::Unknown {
                 r#type: other.to_string(),
@@ -342,6 +373,18 @@ pub enum ServerMessage {
         owner: Option<ClientId>,
         cols: u16,
         rows: u16,
+    },
+    /// Everything the mounted tree contributes to the built-in surfaces, with the
+    /// revision it is a snapshot of. Replace wholesale — never a patch — and skip any
+    /// row whose `surface` this client does not render, which is what lets a new
+    /// plugin reach an old client without breaking it.
+    Contributions {
+        snapshot: ContributionSnapshot,
+    },
+    /// What the owning plugin answered for one activation.
+    ContributionResult {
+        contribution: String,
+        outcome: ActivationOutcome,
     },
     Unresumable {
         session_id: String,
@@ -490,6 +533,30 @@ impl ServerMessage {
                 "cols": cols,
                 "rows": rows,
             }),
+            Self::Contributions { snapshot } => json!({
+                "type": "contributions",
+                "schemaVersion": snapshot.schema_version,
+                "revision": snapshot.revision,
+                "items": snapshot.items,
+            }),
+            Self::ContributionResult {
+                contribution,
+                outcome,
+            } => {
+                // The outcome tag is flattened in, so a client reads `outcome` off the
+                // frame rather than off a nested object it has to know about.
+                let mut v = json!({ "type": "contributionResult", "contribution": contribution });
+                if let (Some(map), Some(fields)) = (
+                    v.as_object_mut(),
+                    serde_json::to_value(outcome).ok().and_then(|o| match o {
+                        Value::Object(m) => Some(m),
+                        _ => None,
+                    }),
+                ) {
+                    map.extend(fields);
+                }
+                v
+            }
             Self::Unresumable { session_id, reason } => json!({
                 "type": "unresumable", "sessionId": session_id, "reason": reason,
             }),
@@ -631,6 +698,90 @@ mod tests {
                 "unimplemented capability advertised: {advertised}"
             );
         }
+    }
+
+    #[test]
+    fn the_contribution_frames_decode_even_though_the_capability_is_withheld() {
+        // Same shape as `queue`: the daemon half is complete and nothing renders a
+        // descriptor yet, so the capability stays off while the frames work for
+        // anything that asks for them by name.
+        assert!(!CAPABILITIES.contains(&"contributions"));
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"subscribeContributions"}"#).unwrap(),
+            ClientMessage::SubscribeContributions
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"unsubscribeContributions"}"#).unwrap(),
+            ClientMessage::UnsubscribeContributions
+        );
+        assert_eq!(
+            ClientMessage::decode(
+                r#"{"type":"activateContribution","contribution":"session.menu.interrupt",
+                    "target":"s-1","payload":{"why":"stuck"}}"#
+            )
+            .unwrap(),
+            ClientMessage::ActivateContribution {
+                contribution: "session.menu.interrupt".into(),
+                target: Some("s-1".into()),
+                payload: json!({ "why": "stuck" }),
+            }
+        );
+        // A target and a payload are both optional: a command has neither.
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"activateContribution","contribution":"c"}"#).unwrap(),
+            ClientMessage::ActivateContribution {
+                contribution: "c".into(),
+                target: None,
+                payload: Value::Null,
+            }
+        );
+    }
+
+    #[test]
+    fn an_activation_with_no_contribution_named_is_an_error_not_a_silent_drop() {
+        assert!(ClientMessage::decode(r#"{"type":"activateContribution"}"#).is_err());
+    }
+
+    #[test]
+    fn a_contributions_frame_carries_the_schema_version_and_the_revision() {
+        let snapshot = juancoded_cordis::ContributionSnapshot {
+            schema_version: 1,
+            revision: 4,
+            items: vec![juancoded_cordis::Contribution::new(
+                "goals.section",
+                juancoded_cordis::Placement::SidebarSection {
+                    title: "Goals".into(),
+                    icon: None,
+                    collapsible: true,
+                },
+            )],
+        };
+        let v = ServerMessage::Contributions { snapshot }.to_value();
+        assert_eq!(v["type"], "contributions");
+        assert_eq!(v["schemaVersion"], 1);
+        assert_eq!(v["revision"], 4);
+        assert_eq!(v["items"][0]["id"], "goals.section");
+        assert_eq!(v["items"][0]["surface"], "sidebarSection");
+    }
+
+    #[test]
+    fn a_contribution_result_reads_its_outcome_off_the_frame() {
+        let v = ServerMessage::ContributionResult {
+            contribution: "c".into(),
+            outcome: ActivationOutcome::refused("no session named"),
+        }
+        .to_value();
+        assert_eq!(v["type"], "contributionResult");
+        assert_eq!(v["contribution"], "c");
+        assert_eq!(v["outcome"], "refused");
+        assert_eq!(v["reason"], "no session named");
+
+        let handled = ServerMessage::ContributionResult {
+            contribution: "c".into(),
+            outcome: ActivationOutcome::Unhandled,
+        }
+        .to_value();
+        assert_eq!(handled["outcome"], "unhandled");
     }
 
     #[test]

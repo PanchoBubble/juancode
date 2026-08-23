@@ -624,6 +624,7 @@ dependencies = [
  "axum",
  "futures",
  "futures-util",
+ "juancoded-cordis",
  "juancoded-core",
  "juancoded-state",
  "juancoded-vt",

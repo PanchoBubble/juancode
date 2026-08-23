@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::bus::Bus;
+use crate::contribution::ContributionRegistry;
 use crate::entry::{DuplicateId, Entry, EntryList};
 use crate::plugin::{Context, FiberState, Plugin};
 use crate::service::ServiceRegistry;
@@ -115,6 +116,7 @@ impl LoadReport {
 pub struct Loader {
     services: ServiceRegistry,
     bus: Bus,
+    contributions: ContributionRegistry,
     plugins: BTreeMap<&'static str, Arc<dyn Plugin>>,
     fibers: Vec<Fiber>,
 }
@@ -130,6 +132,11 @@ impl Loader {
 
     pub fn bus(&self) -> &Bus {
         &self.bus
+    }
+
+    /// Everything the mounted tree contributes to the built-in surfaces.
+    pub fn contributions(&self) -> &ContributionRegistry {
+        &self.contributions
     }
 
     pub fn fibers(&self) -> &[Fiber] {
@@ -243,6 +250,7 @@ impl Loader {
         self.fibers.clear();
         self.services.shutdown();
         self.bus.shutdown();
+        self.contributions.shutdown();
     }
 
     /// Try to mount the fiber at `idx`, or park it PENDING with the keys it is missing.
@@ -275,6 +283,7 @@ impl Loader {
             self.fibers[idx].entry.config.clone(),
             self.services.clone(),
             self.bus.clone(),
+            self.contributions.clone(),
         ));
         match plugin.apply(&ctx) {
             Ok(()) => {

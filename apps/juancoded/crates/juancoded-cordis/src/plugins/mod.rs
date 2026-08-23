@@ -8,12 +8,14 @@ mod activity_log;
 mod core_pty;
 mod input_guard;
 mod pty_to_grid;
+mod session_chrome;
 mod vt_terminal;
 
 pub use activity_log::ActivityLog;
 pub use core_pty::CorePty;
 pub use input_guard::InputGuard;
 pub use pty_to_grid::PtyToGrid;
+pub use session_chrome::{SessionChrome, INTERRUPT_ID};
 pub use vt_terminal::VtTerminal;
 
 use std::sync::Arc;
@@ -29,12 +31,14 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(CorePty))
         .register(Arc::new(InputGuard))
         .register(Arc::new(PtyToGrid))
-        .register(Arc::new(ActivityLog));
+        .register(Arc::new(ActivityLog))
+        .register(Arc::new(SessionChrome));
 }
 
 /// The tree the daemon boots by default. `activity-log` is in it and stays PENDING
 /// until a transcripts service exists, which is the state `dump-config` has to make
-/// visible rather than swallow.
+/// visible rather than swallow. `session-chrome` is in it because the session row's
+/// own decorations go through the contribution contract like anyone else's.
 pub fn default_entries() -> EntryList {
     EntryList::new()
         .push(Entry::new("terminal", "vt-terminal"))
@@ -42,4 +46,5 @@ pub fn default_entries() -> EntryList {
         .push(Entry::new("input-guard", "input-guard"))
         .push(Entry::new("pty-to-grid", "pty-to-grid"))
         .push(Entry::new("activity-log", "activity-log"))
+        .push(Entry::new("session-chrome", "session-chrome"))
 }
