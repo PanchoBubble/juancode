@@ -138,6 +138,11 @@ pub fn entries_over_store(store: &str) -> EntryList {
         // correctness: both sources declare `transcripts` in `inject`, so the loader
         // would settle them in any order.
         .push(Entry::new("transcripts", "transcripts").config(at("db")))
+        // No config: the queue is in memory for the life of the process by
+        // construction, because its ids carry the epoch it was created at and an id
+        // that cannot name work after a restart has no business in a file that
+        // outlives one.
+        .push(Entry::new("queue", "steering-queue"))
         .push(Entry::new("transcript-claude", "transcript-claude"))
         .push(Entry::new("transcript-opencode", "transcript-opencode"))
         .push(Entry::new("activity-log", "activity-log"))

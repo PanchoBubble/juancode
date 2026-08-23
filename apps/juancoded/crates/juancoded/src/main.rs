@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         "juancoded starting"
     );
 
-    let handles = CoreHandles::new(sessions, loader.contributions().clone());
+    let handles = CoreHandles::from_loader(&loader, sessions);
     tokio::select! {
         r = serve(handles, config) => r?,
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),

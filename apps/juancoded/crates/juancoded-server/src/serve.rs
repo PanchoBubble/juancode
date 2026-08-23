@@ -12,25 +12,39 @@ use axum::routing::get;
 use axum::Router;
 use tracing::info;
 
-use juancoded_cordis::ContributionRegistry;
+use juancoded_cordis::services::queue::{QueueApi, QueueService};
+use juancoded_cordis::{Bus, ContributionRegistry, Loader};
 use juancoded_state::SessionsApi;
 
 use crate::conn;
+use crate::queue_delivery;
+use crate::seed::SeedTiming;
 
-/// What a connection needs from the booted tree: the sessions it drives, and the
-/// chrome the tree contributes to the built-in surfaces. Both come out of the same
-/// `boot`, so a server can never be serving one tree's sessions and another's chrome.
+/// What a connection needs from the booted tree: the sessions it drives, the chrome the
+/// tree contributes to the built-in surfaces, the steering queue it mutates, and the bus
+/// those changes are published on.
+///
+/// All four come out of **one** loader, which is what [`Self::from_loader`] is for. A
+/// handle set assembled field by field could serve one tree's sessions over another
+/// tree's bus, and the symptom of that is a queue snapshot that simply never arrives:
+/// no error, no log, just a dock that never updates.
 #[derive(Clone)]
 pub struct CoreHandles {
     pub sessions: Arc<dyn SessionsApi>,
     pub contributions: ContributionRegistry,
+    /// `None` when the tree mounted no `queue` row. Queue frames then say so rather
+    /// than pretending to have queued something.
+    pub queue: Option<Arc<dyn QueueApi>>,
+    pub bus: Bus,
 }
 
 impl CoreHandles {
-    pub fn new(sessions: Arc<dyn SessionsApi>, contributions: ContributionRegistry) -> Self {
+    pub fn from_loader(loader: &Loader, sessions: Arc<dyn SessionsApi>) -> Self {
         Self {
             sessions,
-            contributions,
+            contributions: loader.contributions().clone(),
+            queue: loader.services().resolve::<QueueService>().ok(),
+            bus: loader.bus().clone(),
         }
     }
 }
@@ -87,6 +101,16 @@ async fn ws_handler(ws: WebSocketUpgrade, State(handles): State<CoreHandles>) ->
 
 /// Serve on both listeners until one of them fails.
 pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
+    // One pump for the daemon, not one per connection: a queued message is delivered
+    // because a session can take it, not because somebody is watching the dock.
+    let _pump = handles.queue.clone().map(|queue| {
+        queue_delivery::spawn_pump(
+            Arc::clone(&handles.sessions),
+            queue,
+            SeedTiming::default(),
+            queue_delivery::PUMP_TICK,
+        )
+    });
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {

@@ -7,6 +7,7 @@
 //! remote clients already use it.
 
 pub mod conn;
+pub mod queue_delivery;
 pub mod screen;
 pub mod seed;
 pub mod serve;

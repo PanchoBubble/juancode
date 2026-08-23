@@ -22,12 +22,14 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tracing::{debug, warn};
 
 use juancoded_cordis::contribution::ContributionRegistry;
+use juancoded_cordis::plugins::QueueChanged;
+use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnapshot};
 use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionsApi};
 
 use crate::screen::ScreenStreamer;
-use crate::seed::{deliver_seed, log_outcome, SeedOutcome, SeedTiming};
+use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
 use crate::utf8::Utf8Stream;
 use crate::wire::{ClientMessage, ServerMessage};
@@ -66,10 +68,27 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
     let CoreHandles {
         sessions,
         contributions,
+        queue,
+        bus,
     } = handles;
     let client: ClientId = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut tx, mut rx) = socket.split();
     let mut events = sessions.subscribe();
+
+    // Queue snapshots come off the cordis bus rather than the registry's event stream,
+    // because the queue that publishes them is a mounted service and the snapshot it
+    // publishes is already complete. Listening for it means this connection never has
+    // to read a queue back out and never has to decide what "now" was: what goes on the
+    // wire is the exact value the mutation produced.
+    //
+    // The listener is an effect held for the length of the connection. Dropping it on
+    // the way out is what unregisters it, so a closed socket leaves nothing on the bus.
+    let (queue_tx, mut queue_rx) = tokio::sync::mpsc::unbounded_channel::<QueueSnapshot>();
+    let _queue_listener = bus.on::<QueueChanged, _>(&format!("wire.queue.{client}"), move |s| {
+        // A closed channel is a connection already on its way out; the frame it would
+        // have carried is nobody's any more.
+        let _ = queue_tx.send(s.clone());
+    });
 
     // Always first on the wire, before anything else can be sent.
     if tx
@@ -113,6 +132,14 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         let mut outbound: Vec<ServerMessage> = Vec::new();
 
         tokio::select! {
+            Some(snapshot) = queue_rx.recv() => {
+                // Gated on a watch, like output: a queue is something a client opted
+                // into, not a fact about a session everyone is owed.
+                if fanout.queue_watchers.contains(&snapshot.session) {
+                    outbound.push(ServerMessage::Queue { snapshot });
+                }
+            }
+
             incoming = rx.next() => {
                 let Some(Ok(frame)) = incoming else { break };
                 match frame {
@@ -120,8 +147,16 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                         let mut reply: Vec<ServerMessage> = Vec::new();
                         match ClientMessage::decode(&text) {
                             Ok(msg) => handle_client_message(
-                                msg, &sessions, &contributions, client, &mut fanout,
-                                &mut screens, &mut reply,
+                                msg,
+                                &Tree {
+                                    sessions: &sessions,
+                                    contributions: &contributions,
+                                    queue: queue.as_ref(),
+                                },
+                                client,
+                                &mut fanout,
+                                &mut screens,
+                                &mut reply,
                             ),
                             Err(e) => {
                                 // One sessionless error, and the connection lives: a
@@ -142,7 +177,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                         // lifecycle keep their place behind the reply, so `attached`
                         // stays the replay baseline it promises to be.
                         let mut behind: Vec<ServerMessage> = Vec::new();
-                        drain_bus(&mut events, &sessions, &mut fanout, &mut outbound, &mut behind);
+                        drain_bus(&mut events, &mut fanout, &mut outbound, &mut behind);
                         outbound.extend(reply);
                         outbound.extend(behind);
                     }
@@ -161,7 +196,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
             }
             event = events.recv() => {
                 match event {
-                    Ok(event) => push_event(event, &sessions, &mut fanout, &mut outbound),
+                    Ok(event) => push_event(event, &mut fanout, &mut outbound),
                     Err(RecvError::Lagged(n)) => {
                         debug!(dropped = n, "connection lagged behind the session bus");
                     }
@@ -209,12 +244,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
 /// an attachment because it is a byte stream a client opted into; the session-level
 /// broadcasts are not, because a sidebar row and a grid owner are facts about a
 /// session a client may never have attached to.
-fn push_event(
-    event: SessionEvent,
-    sessions: &Arc<dyn SessionsApi>,
-    fanout: &mut Fanout,
-    outbound: &mut Vec<ServerMessage>,
-) {
+fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<ServerMessage>) {
     match event {
         SessionEvent::Output { session_id, bytes } => {
             if fanout.attached.contains(&session_id) {
@@ -249,17 +279,12 @@ fn push_event(
             session_id,
             session: meta,
         }),
+        // Deliberately no frame. This announces the registry's own store-backed queue,
+        // and the wire's queue is the addressable one mounted as the `queue` service:
+        // sending both would put two different lists under one frame type, and the one
+        // a client could address by id would be whichever arrived last.
         SessionEvent::QueueChanged { session_id } => {
-            // Gated on a watch, like output: a queue is something a client opted
-            // into, not a fact about a session everyone is owed. The list is read
-            // here rather than carried on the event, so what goes out is the queue
-            // as it stands now and a late notification cannot regress a client.
-            if fanout.queue_watchers.contains(&session_id) {
-                outbound.push(ServerMessage::Queue {
-                    items: sessions.queue(&session_id),
-                    session_id,
-                });
-            }
+            debug!(session = %session_id, "ignoring the store queue's change event");
         }
         SessionEvent::GridChange {
             session_id,
@@ -283,7 +308,6 @@ fn push_event(
 /// pass and ends the connection there, so there is one place that decides to stop.
 fn drain_bus(
     events: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
-    sessions: &Arc<dyn SessionsApi>,
     fanout: &mut Fanout,
     ahead: &mut Vec<ServerMessage>,
     behind: &mut Vec<ServerMessage>,
@@ -296,7 +320,7 @@ fn drain_bus(
                 } else {
                     &mut *behind
                 };
-                push_event(event, sessions, fanout, bucket);
+                push_event(event, fanout, bucket);
             }
             Err(TryRecvError::Lagged(n)) => {
                 debug!(dropped = n, "connection lagged behind the session bus");
@@ -376,7 +400,10 @@ fn spawn_seed(
     tokio::spawn(async move {
         let outcome = deliver_seed(sessions, &id, &text, SeedTiming::default()).await;
         log_outcome(&id, &outcome);
-        if let SeedOutcome::Failed { reason } = outcome {
+        // Either failure is a prompt the agent never saw, and the client asked for a
+        // create that was supposed to carry one. Which of the two it was matters to the
+        // queue's claim boundary and to nobody here.
+        if let Some(reason) = outcome.reason() {
             // A closed channel is a client that already left; the log above is then
             // the whole record, which is the best there is to do for it.
             let _ = oob.send(ServerMessage::Error {
@@ -387,15 +414,55 @@ fn spawn_seed(
     });
 }
 
+/// Why a queue mutation did not happen, in the words the queue itself defines.
+///
+/// The code goes out verbatim, and there are only ever two of them. A missing session,
+/// an id that was never real, and an occurrence the delivery engine has already claimed
+/// all answer `queue-item-not-found`, because a client holding a stale row cannot tell
+/// those apart and must not try: the correct reaction to all three is to stop showing
+/// the row and take the next snapshot as the truth.
+fn queue_refusal(session: &str, error: QueueError) -> ServerMessage {
+    ServerMessage::Error {
+        session_id: Some(session.to_string()),
+        message: error.code().to_string(),
+    }
+}
+
+/// A daemon whose tree mounted no `queue` row.
+///
+/// Its own code, and not one of the two above, because it is not a stale row: retrying
+/// will never help and the client should put the dock away rather than resynchronise.
+fn queue_unavailable(session: &str, outbound: &mut Vec<ServerMessage>) {
+    outbound.push(ServerMessage::Error {
+        session_id: Some(session.to_string()),
+        message: "queue-unavailable".into(),
+    });
+}
+
+/// What one frame handler reads from the booted tree.
+///
+/// Grouped rather than passed one by one, because the three of them always travel
+/// together and always come from the same loader: a handler holding this cannot be
+/// looking at one tree's sessions and another tree's queue.
+struct Tree<'a> {
+    sessions: &'a Arc<dyn SessionsApi>,
+    contributions: &'a ContributionRegistry,
+    queue: Option<&'a Arc<dyn QueueApi>>,
+}
+
 fn handle_client_message(
     msg: ClientMessage,
-    sessions: &Arc<dyn SessionsApi>,
-    contributions: &ContributionRegistry,
+    tree: &Tree<'_>,
     client: ClientId,
     fanout: &mut Fanout,
     screens: &mut HashMap<String, ScreenStreamer>,
     outbound: &mut Vec<ServerMessage>,
 ) {
+    let Tree {
+        sessions,
+        contributions,
+        queue,
+    } = *tree;
     let attached = &mut fanout.attached;
     match msg {
         ClientMessage::Create {
@@ -606,18 +673,23 @@ fn handle_client_message(
             screens.remove(&session_id);
         }
 
-        // The queue surface is complete and the `queue` capability is still withheld:
-        // nothing here types a queued message into the pty, so a client that switched
-        // its send button on off the capability would watch messages pile up.
+        // Every one of these answers from the mounted `queue` service. A baseline goes
+        // out on subscribe and a complete snapshot on every change, so a client's whole
+        // job is to replace what it holds; there is no delta frame to miss.
         ClientMessage::SubscribeQueue { session_id } => {
             // Idempotent per session: a second subscribe from the same connection is
             // not a second snapshot.
             if !fanout.queue_watchers.insert(session_id.clone()) {
                 return;
             }
+            let Some(queue) = queue else {
+                return queue_unavailable(&session_id, outbound);
+            };
+            // A session nobody has queued to gets an empty queue at revision 0 rather
+            // than silence, which is what a client subscribing before the first message
+            // needs in order to draw an empty dock instead of guessing.
             outbound.push(ServerMessage::Queue {
-                items: sessions.queue(&session_id),
-                session_id,
+                snapshot: queue.snapshot(&session_id),
             });
         }
 
@@ -626,15 +698,37 @@ fn handle_client_message(
         }
 
         ClientMessage::QueueMessage { session_id, text } => {
+            let Some(queue) = queue else {
+                return queue_unavailable(&session_id, outbound);
+            };
+            // The queue keeps no session table of its own, so nothing below would
+            // refuse a message addressed to a session that never existed: it would open
+            // a lane for it and the client would watch its message sit there forever.
+            // `queue-item-not-found` and not a code of its own, on the same grounds the
+            // mutations share it: the session or the row you named is not there.
+            if sessions.meta(&session_id).is_none() {
+                return outbound.push(queue_refusal(&session_id, QueueError::NotFound));
+            }
             // A whitespace-only text is not a message: it is dropped, and no snapshot
-            // goes out for a queue that did not move. The new snapshot for a real one
-            // rides the bus like every other change, so every watcher sees it and not
-            // only the client that sent this frame.
-            if let Err(e) = sessions.queue_message(&session_id, &text) {
-                outbound.push(ServerMessage::Error {
-                    session_id: Some(session_id),
-                    message: e.to_string(),
-                });
+            // goes out for a queue that did not move. The snapshot for a real one rides
+            // the bus like every other change, so every watcher sees it and not only
+            // the client that sent this frame.
+            if text.trim().is_empty() {
+                return;
+            }
+            queue.enqueue(&session_id, Content::text(text), "wire");
+        }
+
+        ClientMessage::EditQueued {
+            session_id,
+            message_id,
+            text,
+        } => {
+            let Some(queue) = queue else {
+                return queue_unavailable(&session_id, outbound);
+            };
+            if let Err(e) = queue.edit(&session_id, &message_id, &text) {
+                outbound.push(queue_refusal(&session_id, e));
             }
         }
 
@@ -642,15 +736,11 @@ fn handle_client_message(
             session_id,
             message_id,
         } => {
-            // A message that is not in the queue is not an error: it was already
-            // cancelled, or belongs to another session, and the client's snapshot
-            // already says so. Only a real removal moves the queue, so only a real
-            // removal is announced.
-            if let Err(e) = sessions.dequeue_message(&session_id, &message_id) {
-                outbound.push(ServerMessage::Error {
-                    session_id: Some(session_id),
-                    message: e.to_string(),
-                });
+            let Some(queue) = queue else {
+                return queue_unavailable(&session_id, outbound);
+            };
+            if let Err(e) = queue.remove(&session_id, &message_id) {
+                outbound.push(queue_refusal(&session_id, e));
             }
         }
 
@@ -707,7 +797,6 @@ fn grid_or_default(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::sessions;
     use juancoded_state::registry::CreateRequest;
 
     fn fanout() -> Fanout {
@@ -733,8 +822,11 @@ mod tests {
         let mut screens = HashMap::new();
         handle_client_message(
             msg,
-            &handles.sessions,
-            &handles.contributions,
+            &Tree {
+                sessions: &handles.sessions,
+                contributions: &handles.contributions,
+                queue: handles.queue.as_ref(),
+            },
             1,
             fanout,
             &mut screens,
@@ -823,76 +915,150 @@ mod tests {
         ));
     }
 
-    /// Feed one client frame through the handler, then fold in whatever the registry
-    /// broadcast for it, in the order the connection loop would send them.
-    fn step(
-        msg: ClientMessage,
-        sessions: &Arc<dyn SessionsApi>,
-        events: &mut tokio::sync::broadcast::Receiver<SessionEvent>,
-        fanout: &mut Fanout,
-    ) -> Vec<ServerMessage> {
-        let mut reply = Vec::new();
-        let mut screens = HashMap::new();
-        handle_client_message(
-            msg,
-            sessions,
-            &ContributionRegistry::new(),
-            1,
-            fanout,
-            &mut screens,
-            &mut reply,
-        );
-        let mut ahead = Vec::new();
-        let mut behind = Vec::new();
-        drain_bus(events, sessions, fanout, &mut ahead, &mut behind);
-        ahead.extend(reply);
-        ahead.extend(behind);
-        ahead
+    /// One connection's worth of the loop, minus the socket.
+    ///
+    /// It exists because the queue's frames no longer come from the registry's event
+    /// stream: a mutation publishes a complete snapshot on the cordis bus, and the loop
+    /// forwards it to whichever of its watchers it belongs to. A test that read the
+    /// queue back out instead would be asserting its own read rather than the frame the
+    /// client would have received, and would pass just as happily if nothing were
+    /// published at all.
+    struct Wire {
+        handles: CoreHandles,
+        events: tokio::sync::broadcast::Receiver<SessionEvent>,
+        published: Arc<std::sync::Mutex<Vec<QueueSnapshot>>>,
+        _listener: juancoded_cordis::Effect,
     }
 
-    /// The queue snapshots in a batch of frames, as their item texts. Everything else
-    /// a session emits while this runs (output, activity, a grid grant) is somebody
-    /// else's assertion.
+    impl Wire {
+        fn new() -> Self {
+            let handles = crate::testing::handles();
+            let events = handles.sessions.subscribe();
+            let published: Arc<std::sync::Mutex<Vec<QueueSnapshot>>> = Arc::default();
+            let sink = Arc::clone(&published);
+            let listener = handles.bus.on::<QueueChanged, _>("test.queue", move |s| {
+                sink.lock().unwrap().push(s.clone());
+            });
+            Self {
+                handles,
+                events,
+                published,
+                _listener: listener,
+            }
+        }
+
+        fn sessions(&self) -> &Arc<dyn SessionsApi> {
+            &self.handles.sessions
+        }
+
+        fn queue(&self) -> &Arc<dyn QueueApi> {
+            self.handles
+                .queue
+                .as_ref()
+                .expect("the test tree mounts a queue")
+        }
+
+        fn session(&self) -> String {
+            self.sessions()
+                .create(CreateRequest {
+                    provider: ProviderId::Claude,
+                    cwd: "/tmp".into(),
+                    cols: 80,
+                    rows: 24,
+                    skip_permissions: false,
+                    model: None,
+                    dispatch_id: None,
+                    owner: 1,
+                })
+                .expect("create")
+                .id
+        }
+
+        /// Feed one frame through the handler and fold in everything the loop would have
+        /// sent for it, in the loop's own order: the registry's events, the handler's
+        /// own reply, and then each published snapshot, gated on this connection's
+        /// watches exactly as the loop gates them.
+        fn step(&mut self, msg: ClientMessage, fanout: &mut Fanout) -> Vec<ServerMessage> {
+            self.published.lock().unwrap().clear();
+            let mut reply = Vec::new();
+            let mut screens = HashMap::new();
+            handle_client_message(
+                msg,
+                &Tree {
+                    sessions: &self.handles.sessions,
+                    contributions: &self.handles.contributions,
+                    queue: self.handles.queue.as_ref(),
+                },
+                1,
+                fanout,
+                &mut screens,
+                &mut reply,
+            );
+            let mut ahead = Vec::new();
+            let mut behind = Vec::new();
+            drain_bus(&mut self.events, fanout, &mut ahead, &mut behind);
+            ahead.extend(reply);
+            ahead.extend(behind);
+            ahead.extend(self.forwarded(fanout));
+            ahead
+        }
+
+        /// The queue frames the loop's own select arm would have produced.
+        fn forwarded(&self, fanout: &Fanout) -> Vec<ServerMessage> {
+            self.published
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| fanout.queue_watchers.contains(&s.session))
+                .cloned()
+                .map(|snapshot| ServerMessage::Queue { snapshot })
+                .collect()
+        }
+    }
+
+    /// The queue snapshots in a batch of frames, as their item texts. Everything else a
+    /// session emits while this runs (output, activity, a grid grant) is somebody else's
+    /// assertion.
     fn snapshots(frames: &[ServerMessage]) -> Vec<Vec<String>> {
         frames
             .iter()
             .filter_map(|f| match f {
-                ServerMessage::Queue { items, .. } => {
-                    Some(items.iter().map(|i| i.text.clone()).collect())
-                }
+                ServerMessage::Queue { snapshot } => Some(
+                    snapshot
+                        .items
+                        .iter()
+                        .map(|i| i.content.as_text().unwrap_or("<keys>").to_string())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every error code in a batch of frames.
+    fn codes(frames: &[ServerMessage]) -> Vec<&str> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                ServerMessage::Error { message, .. } => Some(message.as_str()),
                 _ => None,
             })
             .collect()
     }
 
     /// The wire half of scenario 10: a watcher gets the complete ordered list on
-    /// subscribe and after every change, gets nothing for a change that did not
-    /// happen, and stops hearing about the queue once it unsubscribes.
+    /// subscribe and after every change, gets nothing for a change that did not happen,
+    /// and stops hearing about the queue once it unsubscribes.
     #[tokio::test]
     async fn a_watcher_gets_the_whole_queue_on_subscribe_and_after_every_change() {
-        let sessions = sessions();
-        let mut events = sessions.subscribe();
+        let mut wire = Wire::new();
         let mut fanout = fanout();
-        let id = sessions
-            .create(CreateRequest {
-                provider: ProviderId::Claude,
-                cwd: "/tmp".into(),
-                cols: 80,
-                rows: 24,
-                skip_permissions: false,
-                model: None,
-                dispatch_id: None,
-                owner: 1,
-            })
-            .expect("create")
-            .id;
+        let id = wire.session();
 
-        let subscribed = step(
+        let subscribed = wire.step(
             ClientMessage::SubscribeQueue {
                 session_id: id.clone(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert_eq!(
@@ -902,34 +1068,28 @@ mod tests {
         );
 
         // A second subscribe is not a second snapshot.
-        let again = step(
+        let again = wire.step(
             ClientMessage::SubscribeQueue {
                 session_id: id.clone(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert!(snapshots(&again).is_empty());
 
-        let first = step(
+        let first = wire.step(
             ClientMessage::QueueMessage {
                 session_id: id.clone(),
                 text: "first".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert_eq!(snapshots(&first), vec![vec!["first".to_string()]]);
 
-        let second = step(
+        let second = wire.step(
             ClientMessage::QueueMessage {
                 session_id: id.clone(),
                 text: "second".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert_eq!(
@@ -938,13 +1098,11 @@ mod tests {
             "the frame is the whole list, in insertion order, not a delta"
         );
 
-        let blank = step(
+        let blank = wire.step(
             ClientMessage::QueueMessage {
                 session_id: id.clone(),
                 text: "   ".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert!(
@@ -952,129 +1110,185 @@ mod tests {
             "a whitespace-only message is not queued, so no snapshot goes out"
         );
 
-        let pending = sessions.queue(&id);
-        let dequeued = step(
+        // An edit keeps the occurrence's id and its place, so the snapshot that follows
+        // is the same two rows in the same order with one of them rewritten.
+        let head = wire.queue().snapshot(&id).items[0].id.clone();
+        let edited = wire.step(
+            ClientMessage::EditQueued {
+                session_id: id.clone(),
+                message_id: head.clone(),
+                text: "first, revised".into(),
+            },
+            &mut fanout,
+        );
+        assert_eq!(
+            snapshots(&edited),
+            vec![vec!["first, revised".to_string(), "second".to_string()]]
+        );
+        assert_eq!(
+            wire.queue().snapshot(&id).items[0].id,
+            head,
+            "an edit is not a requeue: a new id would send the message to the back"
+        );
+
+        let dequeued = wire.step(
             ClientMessage::DequeueMessage {
                 session_id: id.clone(),
-                message_id: pending[0].id.clone(),
+                message_id: head,
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert_eq!(snapshots(&dequeued), vec![vec!["second".to_string()]]);
 
-        let missing = step(
+        let missing = wire.step(
             ClientMessage::DequeueMessage {
                 session_id: id.clone(),
                 message_id: "never-queued".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert!(
             snapshots(&missing).is_empty(),
-            "removing nothing changes nothing, and a client is not told otherwise"
+            "removing nothing changes nothing, so no snapshot goes out"
         );
+        assert_eq!(codes(&missing), ["queue-item-not-found"]);
 
-        let _ = step(
+        let _ = wire.step(
             ClientMessage::UnsubscribeQueue {
                 session_id: id.clone(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
-        let after = step(
+        let after = wire.step(
             ClientMessage::QueueMessage {
                 session_id: id.clone(),
                 text: "third".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
         assert!(
             snapshots(&after).is_empty(),
             "the watch is gone, so the queue is no longer this client's business"
         );
-        // The message itself was still queued — unsubscribing is a client's choice
-        // about frames, not a mute button on the queue.
-        assert_eq!(sessions.queue(&id).len(), 2);
+        // The message itself was still queued: unsubscribing is a client's choice about
+        // frames, not a mute button on the queue.
+        assert_eq!(wire.queue().snapshot(&id).items.len(), 2);
+    }
+
+    /// The claim is where a client's addressing rights end. Once the delivery engine
+    /// holds an occurrence, editing it would rewrite text that is already in the agent's
+    /// box, so both mutations answer the same code a stale id gets.
+    #[tokio::test]
+    async fn an_occurrence_the_engine_has_claimed_is_no_longer_the_clients_to_change() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let id = wire.session();
+        let _ = wire.step(
+            ClientMessage::SubscribeQueue {
+                session_id: id.clone(),
+            },
+            &mut fanout,
+        );
+        let _ = wire.step(
+            ClientMessage::QueueMessage {
+                session_id: id.clone(),
+                text: "ship it".into(),
+            },
+            &mut fanout,
+        );
+        let item = wire.queue().snapshot(&id).items[0].id.clone();
+
+        // The engine takes the row. Held, not settled: this is the state a delivery is
+        // in while its paste sits in the box waiting for the Enter.
+        let claim = wire.queue().claim_next(&id).expect("the head is claimable");
+        assert_eq!(claim.id, item);
+
+        let edit = wire.step(
+            ClientMessage::EditQueued {
+                session_id: id.clone(),
+                message_id: item.clone(),
+                text: "actually, do not".into(),
+            },
+            &mut fanout,
+        );
+        assert_eq!(codes(&edit), ["queue-item-not-found"]);
+        let remove = wire.step(
+            ClientMessage::DequeueMessage {
+                session_id: id.clone(),
+                message_id: item.clone(),
+            },
+            &mut fanout,
+        );
+        assert_eq!(codes(&remove), ["queue-item-not-found"]);
+        assert_eq!(
+            wire.queue()
+                .snapshot(&id)
+                .get(&item)
+                .unwrap()
+                .content
+                .as_text(),
+            Some("ship it"),
+            "a refused edit must not have changed anything"
+        );
+
+        // A missing session answers with the very same code, and that is deliberate: a
+        // client holding a stale row cannot tell the two apart and must not try.
+        let ghost = wire.step(
+            ClientMessage::DequeueMessage {
+                session_id: "no-such-session".into(),
+                message_id: item,
+            },
+            &mut fanout,
+        );
+        assert_eq!(codes(&ghost), ["queue-item-not-found"]);
     }
 
     /// A queue watch is per-connection: one client's unsubscribe cannot silence
     /// another's, and a change made by anyone reaches every watcher.
     #[tokio::test]
     async fn one_connections_watch_says_nothing_about_anothers() {
-        let sessions = sessions();
-        let mut events = sessions.subscribe();
+        let mut wire = Wire::new();
         let mut watcher = fanout();
         let mut bystander = fanout();
-        let id = sessions
-            .create(CreateRequest {
-                provider: ProviderId::Claude,
-                cwd: "/tmp".into(),
-                cols: 80,
-                rows: 24,
-                skip_permissions: false,
-                model: None,
-                dispatch_id: None,
-                owner: 1,
-            })
-            .expect("create")
-            .id;
-        let _ = step(
+        let id = wire.session();
+        let _ = wire.step(
             ClientMessage::SubscribeQueue {
                 session_id: id.clone(),
             },
-            &sessions,
-            &mut events,
             &mut watcher,
         );
 
-        // The bystander sends the message; the watcher is the one that hears about it.
-        let sent = step(
+        // The bystander sends the message and hears nothing back: it never asked to
+        // watch. The watcher hears about it because the snapshot is published to the
+        // bus, not returned to whoever caused it.
+        let sent = wire.step(
             ClientMessage::QueueMessage {
                 session_id: id.clone(),
                 text: "steer".into(),
             },
-            &sessions,
-            &mut events,
             &mut bystander,
         );
         assert!(snapshots(&sent).is_empty(), "it never asked to watch");
 
-        let mut outbound = Vec::new();
-        push_event(
-            SessionEvent::QueueChanged {
-                session_id: id.clone(),
-            },
-            &sessions,
-            &mut watcher,
-            &mut outbound,
-        );
-        assert_eq!(snapshots(&outbound), vec![vec!["steer".to_string()]]);
+        let heard = wire.forwarded(&watcher);
+        assert_eq!(snapshots(&heard), vec![vec!["steer".to_string()]]);
     }
 
     #[tokio::test]
     async fn queueing_to_a_session_that_does_not_exist_answers_with_an_error() {
-        let sessions = sessions();
-        let mut events = sessions.subscribe();
+        let mut wire = Wire::new();
         let mut fanout = fanout();
-        let frames = step(
+        let frames = wire.step(
             ClientMessage::QueueMessage {
                 session_id: "no-such-session".into(),
                 text: "hello".into(),
             },
-            &sessions,
-            &mut events,
             &mut fanout,
         );
-        assert!(matches!(
-            frames.first(),
-            Some(ServerMessage::Error { session_id: Some(id), .. }) if id == "no-such-session"
-        ));
+        assert_eq!(codes(&frames), ["queue-item-not-found"]);
+        assert!(
+            snapshots(&frames).is_empty(),
+            "nothing was queued, so there is no snapshot to send"
+        );
     }
 }

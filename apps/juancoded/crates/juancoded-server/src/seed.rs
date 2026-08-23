@@ -34,10 +34,27 @@ use tracing::{debug, warn};
 /// Where a delivery ended up. `verified_land` is whether the prompt was actually
 /// *seen* in the grid before the Enter, so a caller can tell a fully verified
 /// delivery from one that trusted the child's output instead.
+///
+/// The two failures are separate because one caller cannot treat them alike. A queued
+/// message is returned to its queue only when the engine can prove it typed nothing,
+/// and re-queueing a payload that may already be sitting in the agent's box is how
+/// this area has shipped duplicate pastes before. So the split is by evidence, not by
+/// severity: [`Self::Refused`] is exactly the case where no write ever succeeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
-    Submitted { verified_land: bool },
-    Failed { reason: String },
+    Submitted {
+        verified_land: bool,
+    },
+    /// Stopped before any byte reached the pty. Nothing is on screen that was not
+    /// there before, so a caller may safely act as though the delivery never started.
+    Refused {
+        reason: String,
+    },
+    /// Bytes went out and the delivery still did not finish. Whatever they put on
+    /// screen is still there, so a caller must not assume a clean slate.
+    Failed {
+        reason: String,
+    },
 }
 
 impl SeedOutcome {
@@ -45,11 +62,40 @@ impl SeedOutcome {
         matches!(self, Self::Submitted { .. })
     }
 
-    fn failed(reason: impl Into<String>) -> Self {
-        Self::Failed {
-            reason: reason.into(),
+    /// The reason a delivery did not submit, whichever way it failed.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Submitted { .. } => None,
+            Self::Refused { reason } | Self::Failed { reason } => Some(reason),
         }
     }
+
+    /// Classify a stop by the one thing that decides it: whether a write has already
+    /// succeeded for this delivery.
+    fn stopped(wrote: bool, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        if wrote {
+            Self::Failed { reason }
+        } else {
+            Self::Refused { reason }
+        }
+    }
+}
+
+/// What the engine may assume about the session before it pastes.
+///
+/// The difference is entirely about how to read a session that is already busy, and
+/// getting it backwards is silent: it reports a delivery that never typed anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precondition {
+    /// A session that was just spawned. Wait out the CLI's boot window, and read an
+    /// already-busy session as one something else has already seeded.
+    Booting,
+    /// A session that has been up for a while and is between turns. It settled long
+    /// ago, so a busy session here is not evidence of a delivery that already
+    /// happened, it is a turn in progress: pasting into it would interleave this text
+    /// with whatever the agent is doing, so the delivery is refused instead.
+    LiveIdle,
 }
 
 /// Timing budgets for one delivery. Mirrors the `Seed` block in
@@ -60,6 +106,10 @@ pub struct SeedTiming {
     /// Cap on waiting for the TUI to settle before pasting (MCP startup can be slow);
     /// we paste anyway once it elapses.
     pub ready_max_ms: u64,
+    /// The same wait for a session that is already up, and much shorter because it is
+    /// waiting for something else. There is no boot to sit through: the only thing that
+    /// could still be moving is the tail of the last turn.
+    pub live_settle_ms: u64,
     pub ready_poll_ms: u64,
     /// Per-round budget for the paste to show up on screen.
     pub land_ms: u64,
@@ -85,6 +135,7 @@ impl Default for SeedTiming {
     fn default() -> Self {
         Self {
             ready_max_ms: 45_000,
+            live_settle_ms: 2_000,
             ready_poll_ms: 200,
             land_ms: 2_000,
             land_deadline_ms: 24_000,
@@ -107,6 +158,21 @@ pub async fn deliver_seed(
     text: &str,
     timing: SeedTiming,
 ) -> SeedOutcome {
+    deliver_text(sessions, id, text, timing, Precondition::Booting).await
+}
+
+/// The engine itself: one paste, one verified Enter, into a session in the state
+/// `precondition` describes.
+pub async fn deliver_text(
+    sessions: Arc<dyn SessionsApi>,
+    id: &str,
+    text: &str,
+    timing: SeedTiming,
+    precondition: Precondition,
+) -> SeedOutcome {
+    // Nothing has been written yet, and every stop from here reads this to say whether
+    // it may be treated as "the delivery never started".
+    let mut wrote = false;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return SeedOutcome::Submitted {
@@ -123,18 +189,29 @@ pub async fn deliver_seed(
     // 1) Wait for the screen to stop changing, so the input box exists before we
     // paste. Trusting the first output byte instead is what the Swift engine used to
     // do: that byte is the startup banner, seconds before the box is interactive.
-    let settled = wait_for_stable_screen(&sessions, id, timing).await;
+    let settled = wait_for_stable_screen(&sessions, id, timing, precondition).await;
     debug!(session = id, settled, "seed: screen settle");
     if !sessions.is_running(id) {
-        return SeedOutcome::failed("the session exited during startup");
+        return SeedOutcome::stopped(wrote, "the session exited during startup");
     }
-    // A session that is already working was seeded by something else (or started
-    // itself). Checked once and only here: our own paste can flip the detector to
-    // busy, and treating that as submitted is what used to skip the Enter.
+    // Checked once and only here: our own paste can flip the detector to busy, and
+    // treating that as submitted is what used to skip the Enter.
     if sessions.activity(id) == Some(SessionActivity::Busy) {
-        return SeedOutcome::Submitted {
-            verified_land: false,
-        };
+        match precondition {
+            // A session that is already working was seeded by something else (or
+            // started itself).
+            Precondition::Booting => {
+                return SeedOutcome::Submitted {
+                    verified_land: false,
+                }
+            }
+            // A session that has been up and is now busy is mid-turn. Refusing hands
+            // the text back to whoever queued it, which is the only answer that does
+            // not either interleave it or lose it.
+            Precondition::LiveIdle => {
+                return SeedOutcome::stopped(wrote, "the session is in the middle of a turn")
+            }
+        }
     }
 
     // 2) Paste, then confirm it landed. A round that ends with the screen exactly as
@@ -145,7 +222,7 @@ pub async fn deliver_seed(
     let mut landed = None;
     while elapsed < timing.land_deadline_ms && pastes < timing.max_pastes {
         if !sessions.is_running(id) {
-            return SeedOutcome::failed("the session exited before the prompt was typed");
+            return SeedOutcome::stopped(wrote, "the session exited before the prompt was typed");
         }
         if seed_landed(&sessions, id, &signature) {
             landed = Some(true);
@@ -155,8 +232,9 @@ pub async fn deliver_seed(
         pastes += 1;
         debug!(session = id, attempt = pastes, "seed: paste");
         if let Err(e) = sessions.input(id, &payload) {
-            return SeedOutcome::failed(format!("the pty refused the paste: {e}"));
+            return SeedOutcome::stopped(wrote, format!("the pty refused the paste: {e}"));
         }
+        wrote = true;
         if wait_until(timing.land_ms, timing.poll_ms, || {
             seed_landed(&sessions, id, &signature)
         })
@@ -175,10 +253,13 @@ pub async fn deliver_seed(
     let verified_land = match landed {
         Some(v) => v,
         None => {
-            return SeedOutcome::failed(format!(
-                "the prompt never appeared on screen after {}s",
-                timing.land_deadline_ms / 1_000
-            ))
+            return SeedOutcome::stopped(
+                wrote,
+                format!(
+                    "the prompt never appeared on screen after {}s",
+                    timing.land_deadline_ms / 1_000
+                ),
+            )
         }
     };
 
@@ -187,13 +268,17 @@ pub async fn deliver_seed(
     sleep_ms(timing.submit_settle_ms).await;
     for attempt in 1..=timing.max_enter_attempts {
         if !sessions.is_running(id) {
-            return SeedOutcome::failed("the session exited before the prompt was submitted");
+            return SeedOutcome::stopped(
+                wrote,
+                "the session exited before the prompt was submitted",
+            );
         }
         let at_enter = screen(&sessions, id);
         debug!(session = id, attempt, "seed: enter");
         if let Err(e) = sessions.input(id, b"\r") {
-            return SeedOutcome::failed(format!("the pty refused the Enter: {e}"));
+            return SeedOutcome::stopped(wrote, format!("the pty refused the Enter: {e}"));
         }
+        wrote = true;
         let submitted = wait_until(timing.submit_ms, timing.poll_ms, || {
             if sessions.activity(id) == Some(SessionActivity::Busy) {
                 return true;
@@ -214,7 +299,10 @@ pub async fn deliver_seed(
             return SeedOutcome::Submitted { verified_land };
         }
     }
-    SeedOutcome::failed("the prompt stayed in the input box; it was never submitted")
+    SeedOutcome::stopped(
+        wrote,
+        "the prompt stayed in the input box; it was never submitted",
+    )
 }
 
 /// The bytes one paste is made of: bracketed for a CLI that reads the markers, plain
@@ -294,17 +382,28 @@ fn bottom(sessions: &Arc<dyn SessionsApi>, id: &str, rows: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Poll until the rendered screen stops changing (two identical non-empty frames) or
-/// the budget elapses. A CLI-agnostic "the TUI is up" signal; the return says whether
-/// it settled, so a caller can tell ready from still-streaming.
+/// Poll until the rendered screen stops changing, or the budget elapses. The return
+/// says whether it settled, so a caller can tell ready from still-streaming.
+///
+/// A blank screen counts as settled for a live session and does not for a booting one,
+/// and that difference is the whole reason the precondition is a parameter here. On the
+/// way up, blank means the CLI has not painted its banner yet, so waiting is right. On a
+/// session that has been up for an hour, blank is an ordinary resting state — a CLI that
+/// just cleared for the next turn — and treating it as "not ready yet" is how a queued
+/// message came to sit unsent for the length of a boot window that had already happened.
 async fn wait_for_stable_screen(
     sessions: &Arc<dyn SessionsApi>,
     id: &str,
     timing: SeedTiming,
+    precondition: Precondition,
 ) -> bool {
+    let (budget, needs_paint) = match precondition {
+        Precondition::Booting => (timing.ready_max_ms, true),
+        Precondition::LiveIdle => (timing.live_settle_ms, false),
+    };
     let mut elapsed = 0;
     let mut prev = screen(sessions, id);
-    while elapsed < timing.ready_max_ms {
+    while elapsed < budget {
         sleep_ms(timing.ready_poll_ms).await;
         elapsed += timing.ready_poll_ms;
         // A session that died on the way up is not a slow one: waiting out the whole
@@ -313,7 +412,7 @@ async fn wait_for_stable_screen(
             return false;
         }
         let cur = screen(sessions, id);
-        if !cur.trim().is_empty() && cur == prev {
+        if (!needs_paint || !cur.trim().is_empty()) && cur == prev {
             return true;
         }
         prev = cur;
@@ -349,6 +448,9 @@ pub fn log_outcome(id: &str, outcome: &SeedOutcome) {
         SeedOutcome::Submitted { verified_land } => {
             debug!(session = id, verified_land, "seed: submitted")
         }
+        SeedOutcome::Refused { reason } => {
+            warn!(session = id, reason = %reason, "seed: nothing typed")
+        }
         SeedOutcome::Failed { reason } => {
             warn!(session = id, reason = %reason, "seed: never submitted")
         }
@@ -358,15 +460,10 @@ pub fn log_outcome(id: &str, outcome: &SeedOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use juancoded_core::model::{ProviderId, SessionMeta, SessionStatus};
-    use juancoded_state::registry::{
-        AdoptRequest, Attached, CreateRequest, SessionEvent, StateError,
-    };
-    use juancoded_state::{ClientId, QueuedMessage, ResizeOutcome};
-    use juancoded_vt::{Snapshot, TerminalModel};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    use tokio::sync::broadcast;
+    use crate::testing::FakeChild;
+    use juancoded_core::model::ProviderId;
+    use juancoded_state::registry::CreateRequest;
+    use std::sync::atomic::Ordering;
 
     fn fast() -> SeedTiming {
         SeedTiming {
@@ -377,6 +474,7 @@ mod tests {
             submit_settle_ms: 10,
             submit_ms: 600,
             poll_ms: 10,
+            live_settle_ms: 300,
             ..SeedTiming::default()
         }
     }
@@ -405,168 +503,6 @@ mod tests {
         // multi-line prompt cannot submit itself line by line.
         assert!(!bytes.contains(&b'\r'));
         assert_eq!(paste_bytes("plain", false), b"plain".to_vec());
-    }
-
-    /// A session whose whole observable behaviour is scripted: what it echoes, when
-    /// it exits, and every byte it was written.
-    ///
-    /// A real pty is in the end-to-end case below and in the conformance suite. It is
-    /// the wrong instrument for "exactly once", where the question is which bytes the
-    /// child received in which order, and the answer must not depend on when a child
-    /// process happened to be scheduled.
-    struct FakeChild {
-        writes: Mutex<Vec<Vec<u8>>>,
-        model: Mutex<TerminalModel>,
-        /// Whether the child paints what it is sent, the way a TUI's input box does.
-        echoes: bool,
-        running: AtomicBool,
-        busy: AtomicBool,
-        events: broadcast::Sender<SessionEvent>,
-    }
-
-    impl FakeChild {
-        fn new(echoes: bool) -> Arc<Self> {
-            let mut model = TerminalModel::new(80, 24, 100);
-            // A settled banner, so the readiness wait has something stable to see.
-            model.feed(b"fake-agent ready\r\n");
-            let (events, _) = broadcast::channel(16);
-            Arc::new(Self {
-                writes: Mutex::new(Vec::new()),
-                model: Mutex::new(model),
-                echoes,
-                running: AtomicBool::new(true),
-                busy: AtomicBool::new(false),
-                events,
-            })
-        }
-
-        fn written(&self) -> Vec<Vec<u8>> {
-            self.writes.lock().unwrap().clone()
-        }
-
-        /// Every byte the child was sent, in order, as one string.
-        fn stream(&self) -> String {
-            String::from_utf8_lossy(&self.written().concat()).into_owned()
-        }
-
-        fn api(self: &Arc<Self>) -> Arc<dyn SessionsApi> {
-            self.clone()
-        }
-    }
-
-    impl SessionsApi for FakeChild {
-        fn input(&self, _id: &str, data: &[u8]) -> Result<(), StateError> {
-            self.writes.lock().unwrap().push(data.to_vec());
-            let mut model = self.model.lock().unwrap();
-            if data == b"\r" {
-                // Submitting clears the box and the child answers, which is what both
-                // of the engine's submission signals are looking at.
-                model.feed(b"\x1b[2J\x1b[Hthe child ran its turn\r\n");
-            } else if self.echoes {
-                model.feed(data);
-                model.feed(b"\r\n");
-            }
-            Ok(())
-        }
-
-        fn snapshot(&self, _id: &str) -> Option<Snapshot> {
-            Some(self.model.lock().unwrap().snapshot())
-        }
-
-        fn is_running(&self, _id: &str) -> bool {
-            self.running.load(Ordering::Relaxed)
-        }
-
-        fn activity(&self, _id: &str) -> Option<SessionActivity> {
-            Some(if self.busy.load(Ordering::Relaxed) {
-                SessionActivity::Busy
-            } else {
-                SessionActivity::Idle
-            })
-        }
-
-        fn meta(&self, id: &str) -> Option<SessionMeta> {
-            let mut meta = SessionMeta::new(
-                id.into(),
-                ProviderId::Claude,
-                "/tmp".into(),
-                "fake".into(),
-                0,
-                false,
-            );
-            meta.status = SessionStatus::Running;
-            Some(meta)
-        }
-
-        // Nothing below is on the delivery path; a fake that pretended otherwise
-        // would be lying about what this test covers.
-        fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-            self.events.subscribe()
-        }
-        fn ids(&self) -> Vec<String> {
-            vec!["fake".into()]
-        }
-        fn grid(&self, _id: &str) -> Option<(u16, u16)> {
-            Some((80, 24))
-        }
-        fn grid_owner(&self, _id: &str) -> Option<ClientId> {
-            None
-        }
-        fn create(&self, _req: CreateRequest) -> Result<SessionMeta, StateError> {
-            unimplemented!("the fake is handed an already-created session")
-        }
-        fn adopt_external(&self, _req: AdoptRequest) -> Result<Option<SessionMeta>, StateError> {
-            unimplemented!()
-        }
-        fn attach(
-            &self,
-            _id: &str,
-            _o: ClientId,
-            _c: u16,
-            _r: u16,
-        ) -> Result<Attached, StateError> {
-            unimplemented!()
-        }
-        fn reactivate(
-            &self,
-            _id: &str,
-            _o: ClientId,
-            _c: u16,
-            _r: u16,
-        ) -> Result<Option<Attached>, StateError> {
-            unimplemented!()
-        }
-        fn set_skip_permissions(
-            &self,
-            _id: &str,
-            _skip: bool,
-            _o: ClientId,
-            _c: u16,
-            _r: u16,
-        ) -> Result<Attached, StateError> {
-            unimplemented!()
-        }
-        fn queue(&self, _id: &str) -> Vec<QueuedMessage> {
-            Vec::new()
-        }
-        fn queue_message(
-            &self,
-            _id: &str,
-            _text: &str,
-        ) -> Result<Option<QueuedMessage>, StateError> {
-            unimplemented!()
-        }
-        fn dequeue_message(&self, _id: &str, _message_id: &str) -> Result<bool, StateError> {
-            unimplemented!()
-        }
-        fn resize(&self, _id: &str, _o: ClientId, _c: u16, _r: u16) -> ResizeOutcome {
-            unimplemented!()
-        }
-        fn release_client(&self, _owner: ClientId) {}
-        fn kill(&self, _id: &str) -> Result<(), StateError> {
-            self.running.store(false, Ordering::Relaxed);
-            Ok(())
-        }
     }
 
     #[tokio::test]
@@ -626,17 +562,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_died_before_the_paste_fails_loudly() {
+    async fn a_session_that_died_before_the_paste_is_refused_rather_than_failed() {
         let child = FakeChild::new(true);
         child.running.store(false, Ordering::Relaxed);
         let outcome = deliver_seed(child.api(), "fake", "never arrives", fast()).await;
-        match outcome {
-            SeedOutcome::Failed { reason } => assert!(reason.contains("exited"), "{reason}"),
+        // Refused and not Failed, and the write log is why the distinction is provable
+        // rather than a judgement: nothing was typed, so a caller holding a claim may
+        // put the message back where it came from.
+        match &outcome {
+            SeedOutcome::Refused { reason } => assert!(reason.contains("exited"), "{reason}"),
             other => panic!("a dead session must not report a delivery: {other:?}"),
         }
         assert!(
             child.written().is_empty(),
             "nothing is written to a dead pty"
+        );
+    }
+
+    /// The precondition is the whole difference between the two callers, and reading it
+    /// the wrong way is silent: a busy live session read as "already seeded" would
+    /// report a delivery that never typed a byte, and a queued message settled on that
+    /// report would retire unsent.
+    #[tokio::test]
+    async fn a_busy_session_is_a_finished_seed_but_a_refused_queued_message() {
+        let child = FakeChild::new(true);
+        child.busy.store(true, Ordering::Relaxed);
+
+        let seeded = deliver_text(
+            child.api(),
+            "fake",
+            "run the suite",
+            fast(),
+            Precondition::Booting,
+        )
+        .await;
+        assert_eq!(
+            seeded,
+            SeedOutcome::Submitted {
+                verified_land: false
+            },
+            "a session already working when its create's prompt arrives was seeded by \
+             something else"
+        );
+
+        let queued = deliver_text(
+            child.api(),
+            "fake",
+            "run the suite",
+            fast(),
+            Precondition::LiveIdle,
+        )
+        .await;
+        match &queued {
+            SeedOutcome::Refused { reason } => assert!(reason.contains("turn"), "{reason}"),
+            other => panic!("a mid-turn session must not consume a queued message: {other:?}"),
+        }
+        assert!(
+            child.written().is_empty(),
+            "neither call may write to a busy session"
+        );
+    }
+
+    /// A blank screen means opposite things in the two cases, and reading it the boot
+    /// way on a live session is what left a queued message unsent for the length of a
+    /// boot window that had already happened.
+    #[tokio::test]
+    async fn a_blank_screen_is_settled_for_a_live_session_and_not_for_a_booting_one() {
+        let child = FakeChild::blank(true);
+        let sessions = child.api();
+        assert!(
+            wait_for_stable_screen(&sessions, "fake", fast(), Precondition::LiveIdle).await,
+            "an idle CLI that cleared its screen is resting, not still starting"
+        );
+        assert!(
+            !wait_for_stable_screen(&sessions, "fake", fast(), Precondition::Booting).await,
+            "a CLI that has painted nothing has not brought its input box up yet"
+        );
+    }
+
+    /// Once a paste is out, a failure is no longer "nothing happened". The bytes are in
+    /// the box, so a caller holding a claim must retire the occurrence rather than put
+    /// it back: re-queueing it is how this area has shipped a duplicate paste.
+    #[tokio::test]
+    async fn a_paste_that_is_never_submitted_fails_rather_than_refusing() {
+        let child = FakeChild::new(true);
+        child.swallows_enter.store(true, Ordering::Relaxed);
+        let outcome = deliver_text(
+            child.api(),
+            "fake",
+            "ship it",
+            fast(),
+            Precondition::LiveIdle,
+        )
+        .await;
+        match &outcome {
+            SeedOutcome::Failed { reason } => {
+                assert!(reason.contains("never submitted"), "{reason}")
+            }
+            other => panic!("a paste that went out cannot be refused: {other:?}"),
+        }
+        let writes = child.written();
+        // One paste, then the Enter attempts. The paste is never repeated: the screen
+        // moved when it landed, so there is no evidence it was lost.
+        assert_eq!(writes[0], paste_bytes("ship it", true));
+        assert!(
+            writes[1..].iter().all(|w| w == b"\r"),
+            "{:?}",
+            child.stream()
+        );
+        assert_eq!(
+            writes.len(),
+            1 + fast().max_enter_attempts,
+            "{:?}",
+            child.stream()
         );
     }
 

@@ -19,7 +19,7 @@ fn entries() -> juancoded_cordis::EntryList {
 }
 
 const DUMP: &str = "\
-juancoded config: 12 entries (12 active, 0 pending, 0 disabled, 0 failed), 6 services, 4 events, 3 contributions
+juancoded config: 13 entries (13 active, 0 pending, 0 disabled, 0 failed), 7 services, 4 events, 5 contributions
 
 entries
 ├─ [ACTIVE  ] sessions             session-registry     needs=pty,store,terminal  effects=1
@@ -30,6 +30,7 @@ entries
 ├─ [ACTIVE  ] pty-to-grid          pty-to-grid          needs=pty,terminal  effects=3
 ├─ [ACTIVE  ] store                sqlite-store         effects=1
 ├─ [ACTIVE  ] transcripts          transcripts          effects=1
+├─ [ACTIVE  ] queue                steering-queue       effects=3
 ├─ [ACTIVE  ] transcript-claude    transcript-claude    needs=transcripts  effects=1
 ├─ [ACTIVE  ] transcript-opencode  transcript-opencode  needs=transcripts  effects=1
 ├─ [ACTIVE  ] activity-log         activity-log         needs=transcripts  effects=0
@@ -38,6 +39,7 @@ entries
 services
 ├─ goal         <- goal
 ├─ pty          <- pty
+├─ queue        <- queue
 ├─ sessions     <- sessions
 ├─ store        <- store
 ├─ terminal     <- terminal
@@ -52,7 +54,9 @@ events
 contributions
 ├─ session.badge.waiting   sessionBadge     <- session-chrome  sort=0  needs=session.activity
 ├─ session.menu.interrupt  contextMenuItem  <- session-chrome  sort=0  needs=session.activity
-└─ session.badge.busy      sessionBadge     <- session-chrome  sort=10  needs=session.activity
+├─ session.badge.busy      sessionBadge     <- session-chrome  sort=10  needs=session.activity
+├─ session.queue.edit      contextMenuItem  <- queue  sort=20
+└─ session.queue.remove    contextMenuItem  <- queue  sort=30
 ";
 
 #[test]

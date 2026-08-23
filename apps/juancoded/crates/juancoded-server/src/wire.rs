@@ -11,29 +11,36 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
+use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
-use juancoded_state::{ClientId, QueuedMessage};
+use juancoded_state::ClientId;
 use juancoded_vt::wire::RowUpdate;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// What the Rust core implements today, and nothing more. Deliberately shorter than
-/// the Swift core's list: no `queue`, no `trackedPrs`, no `editor`/`terminal`.
-/// Clients feature-detect off this, so a name here that the core does not answer is
-/// worse than an omission — it turns a hidden button into a broken one.
+/// the Swift core's list: no `trackedPrs`, no `editor`/`terminal`. Clients
+/// feature-detect off this, so a name here that the core does not answer is worse than
+/// an omission — it turns a hidden button into a broken one.
 ///
-/// `queue` is the pointed omission. Every queue frame below decodes and every
-/// snapshot goes out, but nothing types a queued message into the pty yet: the
-/// paste-then-verified-Enter engine is still Swift-only. A client that saw `queue`
-/// here would offer a send button whose messages pile up forever, so the capability
-/// stays withheld until delivery lands with it.
+/// `queue` is advertised now on exactly the terms it was withheld on. It was absent
+/// while every frame decoded and every snapshot went out but nothing typed a queued
+/// message into a pty, because a client switching its send button on off the capability
+/// would have watched messages pile up forever. Delivery landed with the claim
+/// boundary, so the button now does what it says.
 ///
-/// `contributions` is withheld on the same terms and for the same reason. The daemon
-/// side is complete: descriptors register, snapshots go out on subscribe and on every
-/// revision, and activations round-trip to the owning plugin. What does not exist yet
-/// is a client that renders a descriptor, and advertising the capability before one
-/// does would promise chrome nothing draws.
+/// `queueEdit` is separate from `queue` rather than folded into it, because the two are
+/// not the same promise. `queue` says messages can be queued and will be typed, which
+/// the Swift core also does; `queueEdit` says every occurrence has an id that survives
+/// being rewritten, which needs the addressable queue and which the Swift core has no
+/// frame for. Folding it in would make an otherwise conformant core a liar.
+///
+/// `contributions` is still withheld, and for its own reason rather than by
+/// association. The daemon side is complete: descriptors register, snapshots go out on
+/// subscribe and on every revision, and activations round-trip to the owning plugin.
+/// What does not exist yet is a client that renders a descriptor, and advertising the
+/// capability before one does would promise chrome nothing draws.
 pub const CAPABILITIES: &[&str] = &[
     "inputAck",
     "resizeAck",
@@ -41,7 +48,45 @@ pub const CAPABILITIES: &[&str] = &[
     "adoptExternal",
     "sessionMeta",
     "gridOwner",
+    "queue",
+    "queueEdit",
 ];
+
+/// One queued occurrence on the wire.
+///
+/// `content` is flattened rather than nested, so a client reads `kind` and then `text`
+/// or `label` without walking into a sub-object; the Swift core's `QueuedMessage` was
+/// exactly `{ id, text, createdAt }` and a text occurrence is still a superset of it.
+///
+/// `state` is here because it is the difference between a row a client may still offer
+/// an edit on and one whose text is already in the agent's box. A client that drew both
+/// the same way would show an edit button that can only answer `queue-item-not-found`.
+fn queue_item(item: &Occurrence) -> Value {
+    let mut v = json!({
+        "id": item.id,
+        "source": item.source,
+        "createdAt": item.created_at,
+        "state": match item.state {
+            ItemState::Pending => "pending",
+            ItemState::InFlight => "inFlight",
+        },
+    });
+    match &item.content {
+        Content::Text { text } => {
+            v["kind"] = json!("text");
+            v["text"] = json!(text);
+        }
+        Content::Keys { label, bytes } => {
+            v["kind"] = json!("keys");
+            v["label"] = json!(label);
+            // The bytes themselves stay off the wire. A client renders the label and
+            // addresses the id; nothing it can do with a control sequence is a thing it
+            // should be doing, and an edit of one is refused as `queue-item-not-text`.
+            v["bytes"] = json!(bytes.len());
+        }
+    }
+    v
+}
 
 /// How a connection's arbitration id is spelled on the wire. A client only ever
 /// compares it: to the `clientId` its own handshake gave it, so it can tell "somebody
@@ -120,6 +165,15 @@ pub enum ClientMessage {
     },
     QueueMessage {
         session_id: String,
+        text: String,
+    },
+    /// Replace a still-pending message's text in place, addressed by the id its
+    /// snapshot gave it. Not a cancel-and-requeue: the occurrence keeps its id, its
+    /// position in delivery order and the surface it arrived from, so editing the third
+    /// message in a queue does not send it to the back of one nobody asked to reorder.
+    EditQueued {
+        session_id: String,
+        message_id: String,
         text: String,
     },
     /// Watch the contribution list: the complete set now, and again on every change,
@@ -260,6 +314,11 @@ impl ClientMessage {
                 session_id: need_session()?,
                 text: raw.text.ok_or("missing text")?,
             }),
+            "editQueued" => Ok(Self::EditQueued {
+                session_id: need_session()?,
+                message_id: raw.message_id.ok_or("missing messageId")?,
+                text: raw.text.ok_or("missing text")?,
+            }),
             "dequeueMessage" => Ok(Self::DequeueMessage {
                 session_id: need_session()?,
                 message_id: raw.message_id.ok_or("missing messageId")?,
@@ -345,12 +404,15 @@ pub enum ServerMessage {
         changes: Option<ChangeStat>,
         dispatch_id: Option<String>,
     },
-    /// A session's pending steering queue: the complete ordered list, sent on
-    /// `subscribeQueue` and again after every change. Replace wholesale — it is
-    /// never a patch, and the items carry the ids `dequeueMessage` addresses.
+    /// A session's steering queue, complete, sent on `subscribeQueue` and again after
+    /// every change. Replace wholesale: it is never a patch, and the items carry the
+    /// ids `editQueued` and `dequeueMessage` address.
+    ///
+    /// `revision` is per session and strictly increasing, so a client that somehow sees
+    /// two snapshots out of order drops the older one. It is not a cursor; there is
+    /// nothing to fetch between revisions because there are no deltas to fetch.
     Queue {
-        session_id: String,
-        items: Vec<QueuedMessage>,
+        snapshot: QueueSnapshot,
     },
     /// A session's persisted row changed out of band: a title the CLI set for itself,
     /// a conversation id discovered after the spawn, a permission-mode flip. Carries
@@ -500,20 +562,13 @@ impl ServerMessage {
                 }
                 v
             }
-            Self::Queue { session_id, items } => json!({
+            Self::Queue { snapshot } => json!({
                 "type": "queue",
-                "sessionId": session_id,
-                // The item's own session id stays out of it: the frame already says
-                // which session this is, and the Swift core's `QueuedMessage` is
-                // exactly `{ id, text, createdAt }` on the wire.
-                "items": items
-                    .iter()
-                    .map(|i| json!({
-                        "id": i.id,
-                        "text": i.text,
-                        "createdAt": i.created_at,
-                    }))
-                    .collect::<Vec<_>>(),
+                // The item's own session id stays out of the items: the frame already
+                // says which session this is.
+                "sessionId": snapshot.session,
+                "revision": snapshot.revision,
+                "items": snapshot.items.iter().map(queue_item).collect::<Vec<_>>(),
             }),
             Self::SessionMeta {
                 session_id,
@@ -684,6 +739,23 @@ mod tests {
             }
         );
         assert!(CAPABILITIES.contains(&"adoptExternal"));
+        // `queue` covers four frames, and the send button a client draws off the
+        // capability is worth nothing if any one of them falls through to `Unknown`.
+        for frame in [
+            r#"{"type":"subscribeQueue","sessionId":"s"}"#,
+            r#"{"type":"unsubscribeQueue","sessionId":"s"}"#,
+            r#"{"type":"queueMessage","sessionId":"s","text":"x"}"#,
+            r#"{"type":"editQueued","sessionId":"s","messageId":"q-1","text":"x"}"#,
+            r#"{"type":"dequeueMessage","sessionId":"s","messageId":"q-1"}"#,
+        ] {
+            assert!(
+                !matches!(
+                    ClientMessage::decode(frame).unwrap(),
+                    ClientMessage::Unknown { .. }
+                ),
+                "{frame}"
+            );
+        }
         for advertised in CAPABILITIES {
             assert!(
                 [
@@ -693,6 +765,8 @@ mod tests {
                     "adoptExternal",
                     "sessionMeta",
                     "gridOwner",
+                    "queue",
+                    "queueEdit",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
@@ -785,12 +859,10 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_frames_decode_even_though_the_capability_is_withheld() {
-        // The surface is complete; delivery is not, so `queue` is deliberately absent
-        // from CAPABILITIES. That is the one direction of this mismatch that cannot
-        // mislead a client: it feature-detects the button away and the frames still
-        // work for anything that asks for them by name.
-        assert!(!CAPABILITIES.contains(&"queue"));
+    fn the_queue_frames_decode_and_the_capability_says_they_are_answered() {
+        // Advertised now that delivery landed: a client may switch its send button on
+        // off this name and expect the message to be typed.
+        assert!(CAPABILITIES.contains(&"queue"));
         assert_eq!(
             ClientMessage::decode(r#"{"type":"subscribeQueue","sessionId":"s"}"#).unwrap(),
             ClientMessage::SubscribeQueue {
@@ -812,6 +884,17 @@ mod tests {
             }
         );
         assert_eq!(
+            ClientMessage::decode(
+                r#"{"type":"editQueued","sessionId":"s","messageId":"q-1","text":"revised"}"#
+            )
+            .unwrap(),
+            ClientMessage::EditQueued {
+                session_id: "s".into(),
+                message_id: "q-1".into(),
+                text: "revised".into()
+            }
+        );
+        assert_eq!(
             ClientMessage::decode(r#"{"type":"dequeueMessage","sessionId":"s","messageId":"q-1"}"#)
                 .unwrap(),
             ClientMessage::DequeueMessage {
@@ -826,50 +909,74 @@ mod tests {
         assert!(ClientMessage::decode(r#"{"type":"queueMessage","sessionId":"s"}"#).is_err());
         assert!(ClientMessage::decode(r#"{"type":"dequeueMessage","sessionId":"s"}"#).is_err());
         assert!(ClientMessage::decode(r#"{"type":"subscribeQueue"}"#).is_err());
+        // An edit needs both halves of its address and the replacement, and a missing
+        // one must not decode to an edit of something else with an empty string.
+        assert!(ClientMessage::decode(
+            r#"{"type":"editQueued","sessionId":"s","messageId":"q-1"}"#
+        )
+        .is_err());
+        assert!(
+            ClientMessage::decode(r#"{"type":"editQueued","sessionId":"s","text":"x"}"#).is_err()
+        );
     }
 
     #[test]
-    fn a_queue_snapshot_carries_the_ordered_list_and_only_the_wire_fields() {
-        let items = vec![
-            QueuedMessage {
-                id: "q-1".into(),
-                session_id: "s1".into(),
-                text: "first".into(),
-                created_at: 1_700_000_000_000,
-            },
-            QueuedMessage {
-                id: "q-2".into(),
-                session_id: "s1".into(),
-                text: "second".into(),
-                created_at: 1_700_000_000_001,
-            },
-        ];
+    fn a_queue_snapshot_carries_the_ordered_list_the_revision_and_each_items_state() {
+        use juancoded_cordis::services::queue::{QueueApi, SessionQueues};
+        // A pinned epoch, so the ids in this test cannot collide with another run's.
+        let queue = SessionQueues::with_epoch("test");
+        let first = queue.enqueue("s1", Content::text("first"), "telegram");
+        queue.enqueue("s1", Content::keys("esc", vec![0x1b]), "native");
+
         let v = ServerMessage::Queue {
-            session_id: "s1".into(),
-            items,
+            snapshot: queue.snapshot("s1"),
         }
         .to_value();
         assert_eq!(v["type"], "queue");
         assert_eq!(v["sessionId"], "s1");
+        // Two mutations, so the revision a client compares against is 2.
+        assert_eq!(v["revision"], 2);
+
         let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
         // Insertion order is delivery order, and the frame is the whole list.
+        assert_eq!(items[0]["id"], first.id.as_str());
+        assert_eq!(items[0]["kind"], "text");
         assert_eq!(items[0]["text"], "first");
-        assert_eq!(items[1]["text"], "second");
-        assert_eq!(items[0]["id"], "q-1");
-        assert_eq!(items[0]["createdAt"], 1_700_000_000_000i64);
+        // The source survives onto the wire: an edited message is still the message
+        // that arrived from that surface, and a client renders where it came from.
+        assert_eq!(items[0]["source"], "telegram");
+        assert_eq!(items[0]["state"], "pending");
+        assert!(items[0]["createdAt"].is_i64());
         // The session is named once, on the frame; the item's own copy is ours.
         assert!(items[0].get("sessionId").is_none());
-        assert!(items[0].get("session_id").is_none());
+
+        // A keypress has a label and a count, never the bytes: nothing a client can do
+        // with a control sequence is a thing it should be doing.
+        assert_eq!(items[1]["kind"], "keys");
+        assert_eq!(items[1]["label"], "esc");
+        assert_eq!(items[1]["bytes"], 1);
+        assert!(items[1].get("text").is_none());
+
+        // A claim is visible, because it is the difference between a row a client may
+        // still offer an edit on and one whose text is already in the agent's box.
+        let claim = queue.claim_next("s1").expect("the head is claimable");
+        let v = ServerMessage::Queue {
+            snapshot: queue.snapshot("s1"),
+        }
+        .to_value();
+        assert_eq!(v["items"][0]["state"], "inFlight");
+        drop(claim);
 
         let v = ServerMessage::Queue {
-            session_id: "s1".into(),
-            items: Vec::new(),
+            snapshot: SessionQueues::with_epoch("test").snapshot("never-queued-to"),
         }
         .to_value();
         assert!(
             v["items"].as_array().unwrap().is_empty(),
             "an empty queue is an empty list, not a missing key"
         );
+        assert_eq!(v["revision"], 0, "a queue nobody has touched is at zero");
     }
 
     #[test]
@@ -905,7 +1012,7 @@ mod tests {
             .collect();
         assert!(caps.contains(&"screen".to_string()));
         // Not implemented yet — and the list must not claim otherwise.
-        assert!(!caps.contains(&"queue".to_string()));
+        assert!(caps.contains(&"queue".to_string()));
         assert!(!caps.contains(&"trackedPrs".to_string()));
     }
 
