@@ -24,6 +24,7 @@ use tracing::{debug, warn};
 use juancoded_cordis::contribution::ContributionRegistry;
 use juancoded_cordis::plugins::QueueChanged;
 use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnapshot};
+use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
 use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionsApi};
@@ -31,6 +32,7 @@ use juancoded_state::{ClientId, SessionsApi};
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
+use crate::transcript_pump::TranscriptPlane;
 use crate::utf8::Utf8Stream;
 use crate::wire::{ClientMessage, ServerMessage};
 
@@ -43,6 +45,9 @@ struct Fanout {
     /// per-connection, so unsubscribing stops the frames for this client and nobody
     /// else's, and closing the socket drops the watch with the rest of this state.
     queue_watchers: HashSet<String>,
+    /// Sessions whose transcript records this connection asked for. Per-connection
+    /// like the queue watch, and dropped with the socket.
+    transcript_watchers: HashSet<String>,
     /// The contribution revision this connection last saw, once it asked to watch.
     /// `None` means it is not watching, which is every client that does not know the
     /// surface exists.
@@ -69,6 +74,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         sessions,
         contributions,
         queue,
+        transcripts,
         bus,
         identity,
     } = handles;
@@ -90,6 +96,17 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         // have carried is nobody's any more.
         let _ = queue_tx.send(s.clone());
     });
+
+    // The transcript seam announces every batch it reads on the same bus, for the same
+    // reason: the pump that read it is not this connection, and what goes on the wire
+    // has to be the exact batch the poll produced rather than a re-read of a table
+    // whose newest rows may already have moved on.
+    let (transcript_tx, mut transcript_rx) =
+        tokio::sync::mpsc::unbounded_channel::<TranscriptBatch>();
+    let _transcript_listener =
+        bus.on::<TranscriptAppended, _>(&format!("wire.transcript.{client}"), move |batch| {
+            let _ = transcript_tx.send(batch.clone());
+        });
 
     // Always first on the wire, before anything else can be sent.
     if tx
@@ -124,6 +141,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
     let mut fanout = Fanout {
         attached: HashSet::new(),
         queue_watchers: HashSet::new(),
+        transcript_watchers: HashSet::new(),
         contribution_revision: None,
         carries: HashMap::new(),
         oob: oob_tx,
@@ -144,6 +162,14 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                 }
             }
 
+            Some(batch) = transcript_rx.recv() => {
+                // Gated on a watch, like output and like the queue: a transcript is a
+                // stream a client opted into.
+                if fanout.transcript_watchers.contains(&batch.session) {
+                    outbound.push(transcript_frame(&batch.session, false, batch.records.iter()));
+                }
+            }
+
             incoming = rx.next() => {
                 let Some(Ok(frame)) = incoming else { break };
                 match frame {
@@ -156,6 +182,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     sessions: &sessions,
                                     contributions: &contributions,
                                     queue: queue.as_ref(),
+                                    transcripts: transcripts.as_ref(),
                                 },
                                 client,
                                 &mut fanout,
@@ -443,6 +470,25 @@ fn queue_unavailable(session: &str, outbound: &mut Vec<ServerMessage>) {
     });
 }
 
+/// One batch of transcript records as a frame.
+///
+/// A record whose JSON cannot be built is dropped rather than allowed to fail the
+/// batch: `seq` is what a client orders and de-duplicates by, so a hole is a record it
+/// never learns about, while a refused batch is every record after it too.
+fn transcript_frame<'a>(
+    session: &str,
+    replay: bool,
+    records: impl Iterator<Item = &'a juancoded_transcripts::TranscriptRecord>,
+) -> ServerMessage {
+    ServerMessage::Transcript {
+        session_id: session.to_string(),
+        replay,
+        records: records
+            .filter_map(|record| serde_json::to_value(record).ok())
+            .collect(),
+    }
+}
+
 /// What one frame handler reads from the booted tree.
 ///
 /// Grouped rather than passed one by one, because the three of them always travel
@@ -452,6 +498,7 @@ struct Tree<'a> {
     sessions: &'a Arc<dyn SessionsApi>,
     contributions: &'a ContributionRegistry,
     queue: Option<&'a Arc<dyn QueueApi>>,
+    transcripts: Option<&'a TranscriptPlane>,
 }
 
 fn handle_client_message(
@@ -466,6 +513,7 @@ fn handle_client_message(
         sessions,
         contributions,
         queue,
+        transcripts,
     } = *tree;
     let attached = &mut fanout.attached;
     match msg {
@@ -701,6 +749,38 @@ fn handle_client_message(
             fanout.queue_watchers.remove(&session_id);
         }
 
+        // The transcript plane's baseline, and the same contract as the queue's: what
+        // is answered here is complete for the history the daemon kept, and everything
+        // after it arrives on the bus.
+        //
+        // The history is read out of the store rather than out of the CLI's own file.
+        // Two reasons, both about this being the connection loop: replaying from the
+        // source means re-parsing a jsonl that routinely runs to tens of megabytes,
+        // and a session whose file has since been pruned would answer with nothing at
+        // all. What the pump read is already ours.
+        ClientMessage::SubscribeTranscript { session_id } => {
+            if !fanout.transcript_watchers.insert(session_id.clone()) {
+                return;
+            }
+            // A session with no transcript gets an empty replay rather than silence,
+            // which is what a client needs in order to draw an empty panel instead of
+            // waiting for a frame that is not coming. Same for a core with no plane
+            // mounted: it does not advertise the capability, and a client that asked
+            // anyway is answered honestly.
+            let records = transcripts
+                .map(|plane| plane.history(&session_id))
+                .unwrap_or_default();
+            outbound.push(ServerMessage::Transcript {
+                session_id,
+                replay: true,
+                records,
+            });
+        }
+
+        ClientMessage::UnsubscribeTranscript { session_id } => {
+            fanout.transcript_watchers.remove(&session_id);
+        }
+
         ClientMessage::QueueMessage { session_id, text } => {
             let Some(queue) = queue else {
                 return queue_unavailable(&session_id, outbound);
@@ -807,6 +887,7 @@ mod tests {
         Fanout {
             attached: HashSet::new(),
             queue_watchers: HashSet::new(),
+            transcript_watchers: HashSet::new(),
             contribution_revision: None,
             carries: HashMap::new(),
             // Nothing in these tests reads the side channel; the receiver is dropped
@@ -830,6 +911,7 @@ mod tests {
                 sessions: &handles.sessions,
                 contributions: &handles.contributions,
                 queue: handles.queue.as_ref(),
+                transcripts: handles.transcripts.as_ref(),
             },
             1,
             fanout,
@@ -919,6 +1001,70 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn subscribing_to_a_transcript_answers_with_a_baseline_and_only_once() {
+        let handles = crate::testing::handles();
+        let id = handles
+            .sessions
+            .create(CreateRequest {
+                provider: ProviderId::Claude,
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                skip_permissions: false,
+                model: None,
+                dispatch_id: None,
+                owner: 1,
+            })
+            .expect("create")
+            .id;
+        let mut fanout = fanout();
+
+        // A session with no transcript yet is an empty replay, not silence: a client
+        // needs to know the panel is empty rather than that its frame is still coming.
+        let first = contribution_step(
+            ClientMessage::SubscribeTranscript {
+                session_id: id.clone(),
+            },
+            &handles,
+            &mut fanout,
+        );
+        match first.as_slice() {
+            [ServerMessage::Transcript {
+                session_id,
+                replay,
+                records,
+            }] => {
+                assert_eq!(session_id, &id);
+                assert!(*replay, "the baseline is a replay");
+                assert!(records.is_empty());
+            }
+            other => panic!("expected one transcript frame, got {other:?}"),
+        }
+        assert!(fanout.transcript_watchers.contains(&id));
+
+        // Idempotent per session, like the queue's: a second subscribe is not a second
+        // baseline, because a client that re-sent one would redraw a history it holds.
+        let again = contribution_step(
+            ClientMessage::SubscribeTranscript {
+                session_id: id.clone(),
+            },
+            &handles,
+            &mut fanout,
+        );
+        assert!(again.is_empty());
+
+        // Unsubscribing drops the watch, and with it every live batch the bus carries.
+        contribution_step(
+            ClientMessage::UnsubscribeTranscript {
+                session_id: id.clone(),
+            },
+            &handles,
+            &mut fanout,
+        );
+        assert!(!fanout.transcript_watchers.contains(&id));
+    }
+
     /// One connection's worth of the loop, minus the socket.
     ///
     /// It exists because the queue's frames no longer come from the registry's event
@@ -992,6 +1138,7 @@ mod tests {
                     sessions: &self.handles.sessions,
                     contributions: &self.handles.contributions,
                     queue: self.handles.queue.as_ref(),
+                    transcripts: self.handles.transcripts.as_ref(),
                 },
                 1,
                 fanout,

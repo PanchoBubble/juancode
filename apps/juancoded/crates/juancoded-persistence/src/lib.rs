@@ -32,6 +32,18 @@ pub struct Scrollback {
     pub bytes: Vec<u8>,
 }
 
+/// One transcript record on its way to or from the store: the sequence number that
+/// identifies it within its session, and the record itself as JSON.
+///
+/// The JSON is opaque here on purpose. The eight typed events are
+/// `juancoded-transcripts`' contract; this layer's job is to keep them, in order,
+/// bounded, and cascaded away with the session — not to know what a `toolResult` is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRow {
+    pub seq: u64,
+    pub json: String,
+}
+
 /// One queued steering message, in delivery order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedMessage {
@@ -93,6 +105,27 @@ pub fn sessions_per_project() -> usize {
         .unwrap_or(40)
 }
 
+/// How many transcript records a session keeps. 0 means unlimited.
+///
+/// The transcript plane's answer to `JUANCODE_SCROLLBACK`, and deliberately spelled
+/// the same way: a bound per session, enforced on every write, so the cost of a
+/// session that ran for a day is a number somebody chose rather than however much its
+/// CLI happened to write. Records are small — every string inside one is already
+/// clamped to `juancoded_transcripts::MAX_TEXT` — so the default is a count rather
+/// than a byte budget, and 4000 is several hundred turns of history.
+///
+/// The **per-project** bound is not here and does not need to be: `transcript_records`
+/// cascades from `sessions`, so pruning a project to `sessions_per_project()` takes
+/// the transcripts of the sessions it dropped with it.
+///
+/// Daemon-scoped, like the cap above: read once, when the store's owner is built.
+pub fn transcript_records_kept() -> usize {
+    std::env::var("JUANCODE_TRANSCRIPT_RECORDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+}
+
 /// The store contract. A trait rather than the concrete type so a test can stand in
 /// an in-memory double, and so the cordis mount site is the only place that knows
 /// this is SQLite at all.
@@ -106,6 +139,15 @@ pub trait SessionStore: Send + Sync {
 
     fn save_scrollback(&self, id: &str, cols: u16, rows: u16, bytes: &[u8]) -> Result<()>;
     fn scrollback(&self, id: &str) -> Result<Option<Scrollback>>;
+
+    /// Append transcript records for one session and trim it back to `keep` (0 =
+    /// unlimited), oldest first. Idempotent per `(session, seq)`: a record already
+    /// stored is left as it is rather than duplicated, so a poll that re-read its own
+    /// tail cannot put the same event on the wire twice.
+    fn append_transcript(&self, id: &str, rows: &[TranscriptRow], keep: usize) -> Result<()>;
+    /// The newest `limit` records for one session, oldest first — the order a
+    /// consumer replays them in. `limit == 0` returns everything kept.
+    fn transcript(&self, id: &str, limit: usize) -> Result<Vec<TranscriptRow>>;
 
     fn enqueue(&self, item: &QueuedMessage) -> Result<()>;
     /// Drop one queued message from one session's queue. `false` means there was
@@ -319,6 +361,56 @@ impl SessionStore for SqliteStore {
         Ok(row)
     }
 
+    fn append_transcript(&self, id: &str, rows: &[TranscriptRow], keep: usize) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            // `OR IGNORE` and not `OR REPLACE`: the row already there was written from
+            // the same source at the same sequence number, and rewriting it would
+            // churn the file for no change.
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO transcript_records (session_id, seq, record) \
+                 VALUES (?1,?2,?3)",
+            )?;
+            for row in rows {
+                insert.execute(params![id, row.seq as i64, row.json])?;
+            }
+        }
+        if keep > 0 {
+            // By sequence rather than by count-and-offset: `seq` is monotonic per
+            // session, so "everything below the keep-th newest" is one comparison and
+            // needs no second query to find the boundary.
+            tx.execute(
+                "DELETE FROM transcript_records WHERE session_id = ?1 AND seq <= \
+                 (SELECT MAX(seq) FROM transcript_records WHERE session_id = ?1) - ?2",
+                params![id, keep as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn transcript(&self, id: &str, limit: usize) -> Result<Vec<TranscriptRow>> {
+        let conn = self.conn();
+        // Newest `limit` in the inner query, then flipped: a client replays history
+        // forwards, and a tail is the half of a long session that is still interesting.
+        let mut stmt = conn.prepare(
+            "SELECT seq, record FROM (SELECT seq, record FROM transcript_records \
+             WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq ASC",
+        )?;
+        let cap = if limit == 0 { -1 } else { limit as i64 };
+        let rows = stmt.query_map(params![id, cap], |r| {
+            Ok(TranscriptRow {
+                seq: r.get::<_, i64>(0)? as u64,
+                json: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn enqueue(&self, item: &QueuedMessage) -> Result<()> {
         self.conn().execute(
             "INSERT INTO queue (id, session_id, text, created_at, position) \
@@ -524,6 +616,82 @@ mod tests {
         );
     }
 
+    fn row(seq: u64) -> TranscriptRow {
+        TranscriptRow {
+            seq,
+            json: format!("{{\"seq\":{seq}}}"),
+        }
+    }
+
+    #[test]
+    fn a_transcript_is_replayed_oldest_first_and_kept_to_its_bound() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        let rows: Vec<TranscriptRow> = (0..10).map(row).collect();
+        store.append_transcript("s1", &rows, 0).unwrap();
+        let back = store.transcript("s1", 0).unwrap();
+        assert_eq!(back.len(), 10);
+        assert_eq!(back.first().unwrap().seq, 0, "history replays forwards");
+        assert_eq!(back.last().unwrap().seq, 9);
+
+        // A limit is a tail, not a head: the recent end of a long session is the half
+        // worth drawing.
+        let tail = store.transcript("s1", 3).unwrap();
+        assert_eq!(
+            tail.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
+
+        // Writing with a bound trims what fell out of it, and does so by sequence, so
+        // the surviving window is always the newest.
+        store.append_transcript("s1", &[row(10)], 4).unwrap();
+        assert_eq!(
+            store
+                .transcript("s1", 0)
+                .unwrap()
+                .iter()
+                .map(|r| r.seq)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn re_appending_a_record_already_stored_is_not_a_second_copy() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store.append_transcript("s1", &[row(0), row(1)], 0).unwrap();
+        // A poll that re-read its own tail — the (session, seq) identity is what makes
+        // that harmless rather than a duplicate on somebody's screen.
+        store.append_transcript("s1", &[row(1), row(2)], 0).unwrap();
+        assert_eq!(
+            store
+                .transcript("s1", 0)
+                .unwrap()
+                .iter()
+                .map(|r| r.seq)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_transcript_survives_reopening_the_same_file() {
+        let dir = std::env::temp_dir().join(format!("juancoded-transcript-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+            store.append_transcript("s1", &[row(0), row(1)], 0).unwrap();
+        }
+        // The whole point of the table: a second daemon over the same file can draw a
+        // history the first one read.
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.transcript("s1", 0).unwrap().len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn deleting_a_session_takes_its_scrollback_and_queue_with_it() {
         let store = SqliteStore::in_memory().unwrap();
@@ -537,9 +705,13 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
+        store.append_transcript("s1", &[row(0)], 0).unwrap();
         store.delete("s1").unwrap();
         assert!(store.scrollback("s1").unwrap().is_none());
         assert!(store.queue("s1").unwrap().is_empty());
+        // The per-project bound is this cascade: pruning a project drops sessions, and
+        // dropping a session drops its transcript. There is no second retention knob.
+        assert!(store.transcript("s1", 0).unwrap().is_empty());
     }
 
     #[test]

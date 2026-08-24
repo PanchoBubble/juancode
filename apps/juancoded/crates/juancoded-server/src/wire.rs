@@ -45,6 +45,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// subscribe and on every revision, and activations round-trip to the owning plugin.
 /// What does not exist yet is a client that renders a descriptor, and advertising the
 /// capability before one does would promise chrome nothing draws.
+///
+/// `transcript` is advertised on the same terms `queue` finally was: the promise is
+/// about what this core answers, and it answers all of it. A session's transcript is
+/// bound to its CLI's own store, read forward as the session works, kept across a
+/// restart, and replayed from the beginning of what is kept on `subscribeTranscript`.
+/// It is not the `contributions` case — there is no button to draw here and no chrome
+/// to promise, only records a client either asks for or does not. A client that does
+/// not know the frame never sends the subscribe and never sees one.
 pub const CAPABILITIES: &[&str] = &[
     "inputAck",
     "resizeAck",
@@ -54,6 +62,7 @@ pub const CAPABILITIES: &[&str] = &[
     "gridOwner",
     "queue",
     "queueEdit",
+    "transcript",
 ];
 
 /// One queued occurrence on the wire.
@@ -179,6 +188,20 @@ pub enum ClientMessage {
         session_id: String,
         message_id: String,
         text: String,
+    },
+    /// Watch a session's structured transcript: the history that is kept now, and
+    /// every record the seam reads afterwards, until `unsubscribeTranscript` or the
+    /// socket closes.
+    ///
+    /// The second data plane, beside the pty bytes. `attached.scrollback` is unchanged
+    /// and stays the thing a pane repaints from; this is the typed record of what the
+    /// agent did — turn boundaries, reasoning, tool calls and what each step cost —
+    /// which is a shape no amount of scraping the grid recovers.
+    SubscribeTranscript {
+        session_id: String,
+    },
+    UnsubscribeTranscript {
+        session_id: String,
     },
     /// Watch the contribution list: the complete set now, and again on every change,
     /// until `unsubscribeContributions` or the socket closes.
@@ -327,6 +350,12 @@ impl ClientMessage {
                 session_id: need_session()?,
                 message_id: raw.message_id.ok_or("missing messageId")?,
             }),
+            "subscribeTranscript" => Ok(Self::SubscribeTranscript {
+                session_id: need_session()?,
+            }),
+            "unsubscribeTranscript" => Ok(Self::UnsubscribeTranscript {
+                session_id: need_session()?,
+            }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
             "unsubscribeContributions" => Ok(Self::UnsubscribeContributions),
             "activateContribution" => Ok(Self::ActivateContribution {
@@ -444,6 +473,22 @@ pub enum ServerMessage {
         cols: u16,
         rows: u16,
     },
+    /// Structured transcript records for one session, oldest first.
+    ///
+    /// Two kinds of frame, one shape. `replay: true` is the history a `subscribe`
+    /// answers with — what the daemon kept, bounded, ready to draw. `replay: false` is
+    /// a batch the seam has just read.
+    ///
+    /// Append by `seq`, never replace: `seq` is promised append-only per session and
+    /// never repeats, across restarts included, so a client's whole job is to ignore a
+    /// `seq` it already holds. That is also why a record can legitimately arrive twice
+    /// — a subscribe that lands in the middle of a poll gets it in the history and
+    /// again live — and why doing so costs a client nothing.
+    Transcript {
+        session_id: String,
+        replay: bool,
+        records: Vec<Value>,
+    },
     /// Everything the mounted tree contributes to the built-in surfaces, with the
     /// revision it is a snapshot of. Replace wholesale — never a patch — and skip any
     /// row whose `surface` this client does not render, which is what lets a new
@@ -483,6 +528,16 @@ impl ServerMessage {
                 // Present because this core is a separate process. An in-process
                 // core cannot be stale relative to its app, and sends nothing here.
                 "daemon": identity.to_value(),
+            }),
+            Self::Transcript {
+                session_id,
+                replay,
+                records,
+            } => json!({
+                "type": "transcript",
+                "sessionId": session_id,
+                "replay": replay,
+                "records": records,
             }),
             Self::Created { session } => json!({ "type": "created", "session": session }),
             Self::Attached {
@@ -761,6 +816,10 @@ mod tests {
             r#"{"type":"queueMessage","sessionId":"s","text":"x"}"#,
             r#"{"type":"editQueued","sessionId":"s","messageId":"q-1","text":"x"}"#,
             r#"{"type":"dequeueMessage","sessionId":"s","messageId":"q-1"}"#,
+            // Same rule for `transcript`: a client feature-detecting off it must find
+            // both halves of the subscription, not one.
+            r#"{"type":"subscribeTranscript","sessionId":"s"}"#,
+            r#"{"type":"unsubscribeTranscript","sessionId":"s"}"#,
         ] {
             assert!(
                 !matches!(
@@ -781,6 +840,7 @@ mod tests {
                     "gridOwner",
                     "queue",
                     "queueEdit",
+                    "transcript",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
@@ -1102,6 +1162,37 @@ mod tests {
         assert_eq!(v["dispatchId"], "d-1");
         // The debounce signature is ours, not the client's.
         assert!(v["changes"].get("signature").is_none());
+    }
+
+    #[test]
+    fn a_transcript_frame_says_whether_it_is_a_replay_and_carries_records_verbatim() {
+        let records = vec![
+            json!({"session":"s1","source":"claude-jsonl","seq":0,"kind":"turnStart","prompt":"go"}),
+            json!({"session":"s1","source":"claude-jsonl","seq":1,"kind":"assistant","text":"ok"}),
+        ];
+        let v = ServerMessage::Transcript {
+            session_id: "s1".into(),
+            replay: true,
+            records: records.clone(),
+        }
+        .to_value();
+        assert_eq!(v["type"], "transcript");
+        assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["replay"], true);
+        // Verbatim: the eight typed events are the transcripts crate's contract, and
+        // the wire re-shaping them would give a client a third spelling to learn.
+        assert_eq!(v["records"], json!(records));
+        // `seq` is what a client orders and de-duplicates by, so it has to survive.
+        assert_eq!(v["records"][1]["seq"], 1);
+
+        let live = ServerMessage::Transcript {
+            session_id: "s1".into(),
+            replay: false,
+            records: Vec::new(),
+        }
+        .to_value();
+        assert_eq!(live["replay"], false);
+        assert_eq!(live["records"], json!([]));
     }
 
     #[test]

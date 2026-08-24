@@ -631,6 +631,7 @@ dependencies = [
  "juancoded-core",
  "juancoded-persistence",
  "juancoded-state",
+ "juancoded-transcripts",
  "juancoded-vt",
  "libc",
  "serde",

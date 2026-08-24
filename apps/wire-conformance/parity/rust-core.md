@@ -5,8 +5,8 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 - Spec revision: 1.3.0 (protocol v1)
 - Status source: a real conformance run
-- As of: 2026-08-23
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit
+- As of: 2026-08-24
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit, transcript
 - Unmet scenarios: 4 of 23
 
 ## What is not satisfied yet (4)

@@ -2,7 +2,7 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-08-23",
+  "measuredAt": "2026-08-24",
   "specRevision": "1.3.0",
   "protocolVersion": 1,
   "capabilities": [
@@ -13,7 +13,8 @@
     "sessionMeta",
     "gridOwner",
     "queue",
-    "queueEdit"
+    "queueEdit",
+    "transcript"
   ],
   "scenarios": {
     "handshake": {

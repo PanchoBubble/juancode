@@ -122,6 +122,12 @@ export function coreEnv(port: number, dataDir: string, oracleDir: string): Recor
     SHELL: "/bin/bash",
     // Tracked-PR polling must not reach GitHub from a test run.
     JUANCODE_GH_BIN: fakeGh,
+    // The transcript seam reads claude's own project directories. Left unset it would
+    // read the developer's — 387 of them on the machine this was written on — and a
+    // conformance run would be walking somebody's real conversation history looking
+    // for the fake agent's session id. Read-only either way, but "its own everything"
+    // is the promise this boot makes, so it gets its own empty one.
+    JUANCODE_CLAUDE_PROJECTS_DIR: join(dataDir, "claude-projects"),
     // Fixed scrollback so replay assertions do not depend on a user's setting.
     JUANCODE_SCROLLBACK: String(64 * 1024),
     // No retention pruning and no reaping: a scenario's session must still exist

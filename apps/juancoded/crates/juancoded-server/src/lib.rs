@@ -13,6 +13,7 @@ pub mod queue_delivery;
 pub mod screen;
 pub mod seed;
 pub mod serve;
+pub mod transcript_pump;
 pub mod utf8;
 pub mod wire;
 

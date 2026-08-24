@@ -114,6 +114,32 @@ const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     );
     "#,
+    // 4: the records themselves, so a pane opened after a restart has a history to
+    // draw without re-parsing the CLI's own file from the top.
+    //
+    // The cursor above says where we stopped; it does not say what we read. Serving a
+    // session's history off the source would mean a full re-parse of a jsonl that
+    // routinely runs to tens of megabytes, on the open path, and it would come back
+    // empty for any session whose CLI file has since been pruned or moved. So the
+    // seam's output is cached here for the same reason the pty's bytes are cached in
+    // `scrollback`: it is the second data plane, and both planes have to survive a
+    // restart to be worth having.
+    //
+    // `record` is the whole `TranscriptRecord` as JSON, opaque to this layer. The
+    // eight typed events are the transcripts crate's contract, not the store's, and a
+    // column per field would have to be migrated every time that contract grows.
+    //
+    // `(session_id, seq)` is the identity: `seq` is promised append-only per session
+    // across restarts, so the primary key is also the de-duplication rule for a poll
+    // that re-read a record it had already stamped.
+    r#"
+    CREATE TABLE transcript_records (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        seq        INTEGER NOT NULL,
+        record     TEXT NOT NULL,
+        PRIMARY KEY (session_id, seq)
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

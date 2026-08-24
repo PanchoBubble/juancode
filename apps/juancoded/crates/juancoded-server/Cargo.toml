@@ -10,6 +10,7 @@ juancoded-cordis.workspace = true
 juancoded-core.workspace = true
 juancoded-persistence.workspace = true
 juancoded-state.workspace = true
+juancoded-transcripts.workspace = true
 juancoded-vt.workspace = true
 anyhow.workspace = true
 axum.workspace = true
