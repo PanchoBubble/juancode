@@ -72,6 +72,16 @@ struct CoreSettingsView: View {
                         detail("Daemon's own store",
                                "$JUANCODED_DATA_DIR/juancoded-rust.db (default ~/.juancode/rust-core)")
                         detail("Connection", model.coreConnectionDown.map { "down: \($0)" } ?? "up")
+                        if let daemon = model.coreSelection.daemon {
+                            detail("Daemon identity", daemon.summary)
+                            if let exe = daemon.exePath { detail("Daemon binary", exe) }
+                        } else {
+                            detail("Daemon identity",
+                                   "not reported — this daemon predates serverInfo.daemon")
+                        }
+                    }
+                    ForEach(model.coreSelection.daemonWarnings) { warning in
+                        DaemonWarningRow(warning: warning)
                     }
                     if let reason = model.coreSelection.unreachableReason {
                         detail("Fell back because", reason)
@@ -135,20 +145,44 @@ struct CoreBadgeLabel: View {
 
     var body: some View {
         let down = connectionDown != nil
+        // A stale daemon reads as "stale", not as "rust". The whole failure it comes
+        // from is a UI that looked normal while mirroring a two-hour-old core, so it
+        // has to be legible without opening anything.
+        let stale = selection.daemonIsStale
+        let tint: Color = down ? .red : (stale ? .yellow : (selection.active == .rust ? .orange : .secondary))
         return HStack(spacing: 4) {
-            Image(systemName: down ? "exclamationmark.triangle.fill" : "cpu")
+            Image(systemName: down || stale ? "exclamationmark.triangle.fill" : "cpu")
                 .font(.system(size: 9))
-            Text(selection.active.rawValue)
+            Text(stale ? "\(selection.active.rawValue) · stale" : selection.active.rawValue)
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(down ? Color.red.opacity(0.22)
-                      : (selection.active == .rust ? Color.orange.opacity(0.18)
-                         : Color.secondary.opacity(0.14))))
-        .foregroundStyle(down ? .red : (selection.active == .rust ? .orange : .secondary))
+        .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(down ? 0.22 : 0.18)))
+        .foregroundStyle(tint)
+    }
+}
+
+/// One thing wrong with the connected daemon, spelled out. Shared by the badge
+/// popover and the Settings pane so the two can never disagree about it.
+struct DaemonWarningRow: View {
+    let warning: DaemonWarning
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10)).foregroundStyle(.yellow)
+                Text(warning.headline)
+                    .font(.system(size: 11, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(warning.detail)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -181,6 +215,15 @@ struct CoreBadge: View {
                         .font(.caption).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                ForEach(model.coreSelection.daemonWarnings) { warning in
+                    DaemonWarningRow(warning: warning)
+                }
+                if let daemon = model.coreSelection.daemon,
+                   model.coreSelection.daemonWarnings.isEmpty {
+                    Text("Daemon \(daemon.summary)")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text("Wire protocol v\(model.core.info.protocolVersion)")
                     .font(.caption).foregroundStyle(.secondary)
                 Text(model.coreSelection.databasePath)
@@ -207,6 +250,7 @@ struct CoreBadge: View {
         var parts = ["Active core: \(model.coreSelection.active.label)"]
         if let down = model.coreConnectionDown { parts.append("connection down: \(down)") }
         if let reason = model.coreSelection.unreachableReason { parts.append("fell back: \(reason)") }
+        parts.append(contentsOf: model.coreSelection.daemonWarnings.map(\.headline))
         return parts.joined(separator: " · ")
     }
 }

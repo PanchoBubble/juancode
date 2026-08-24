@@ -629,6 +629,7 @@ dependencies = [
  "futures-util",
  "juancoded-cordis",
  "juancoded-core",
+ "juancoded-persistence",
  "juancoded-state",
  "juancoded-vt",
  "serde",

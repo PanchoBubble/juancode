@@ -98,6 +98,12 @@ impl FakeChild {
 }
 
 impl SessionsApi for FakeChild {
+    /// Unlimited: a fixture that pruned would delete the session a scenario is
+    /// halfway through addressing.
+    fn retention(&self) -> usize {
+        0
+    }
+
     fn input(&self, _id: &str, data: &[u8]) -> Result<(), StateError> {
         self.writes.lock().unwrap().push(data.to_vec());
         let mut model = self.model.lock().unwrap();

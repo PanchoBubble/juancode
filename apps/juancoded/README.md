@@ -169,6 +169,15 @@ Schema (`crates/juancoded-persistence/src/schema.rs`): `sessions`, `scrollback`
 `cols`/`rows` are not metadata — without them the bytes can only be replayed by
 guessing a width, and a wrong guess garbles every hard wrap in the history.
 
+Beside the DB, while the daemon is listening: `juancoded.run`, `key=value` lines
+carrying the pid, port, build stamp, `JUANCODE_BUILD_ID` and effective
+`sessions_per_project` (`crates/juancoded-server/src/identity.rs`). It exists so a
+launcher can tell whether the running daemon matches the checkout **without opening a
+socket** — `key=value` rather than JSON precisely because the only reader is a shell
+script, and a check that needs a JSON parser it may not have is a check that gets
+skipped. Written on a successful bind, removed on a clean stop; a crash leaves it
+behind, which is why every reader confirms the pid is alive first.
+
 ## Conformance
 
 Measured against `apps/wire-conformance` (20 golden scenarios, protocol v1) by
@@ -219,6 +228,23 @@ oracle sidecar owns 4281, so running all three at once is never a port fight.
 The daemon refuses to start if another instance is already listening on its socket,
 and binds TCP before touching the socket path — a failed second start used to unlink
 the live instance's socket and leave it running but unreachable.
+
+### It outlives the app, so it has to say who it is
+
+A daemon holding ptys must survive an app relaunch — that is the point of a separate
+process. The cost is that an app can reconnect to a daemon started hours ago, under
+an older build and a different environment, and show its mirror as if it were fresh.
+So `serverInfo` carries a `daemon` object — pid, boot time, binary path, build stamp,
+`buildId`, data dir, and the retention it actually enforces — and the client compares
+it against its own launch (`DaemonIdentity` in `apps/native/Sources/JuancodeClient`).
+A mismatch shows in the core badge as `rust · stale` rather than being invisible.
+
+`JUANCODE_SESSIONS_PER_PROJECT` is the one that bites: it is read **once, at daemon
+start**, so setting it on an app launch line does nothing until the daemon restarts.
+That is why the effective value goes out on the handshake instead of being inferred.
+
+`apps/native/scripts/juancoded.sh` (`ensure|status|stop|restart`) owns the lifetime
+from the app side. It adopts a matching daemon and never ends one silently.
 
 Then point the Swift client at it:
 

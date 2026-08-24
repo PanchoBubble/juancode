@@ -12,6 +12,7 @@
 //! at once is never a port fight. Overridable with JUANCODED_PORT / JUANCODED_SOCKET.
 
 use anyhow::Result;
+use juancoded_server::identity;
 use juancoded_server::{serve, CoreHandles, ServeConfig};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -43,9 +44,19 @@ async fn main() -> Result<()> {
     );
 
     let handles = CoreHandles::from_loader(&loader, sessions);
+    // Kept out of the move so the interrupt arm can clear it too: `serve` removes the
+    // run file on its own way out, but a ctrl-c never reaches that path, and a file
+    // still naming a dead pid is what makes a launcher hesitate over a daemon that is
+    // not there.
+    let run_file = config.run_file.clone();
     tokio::select! {
         r = serve(handles, config) => r?,
-        _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
+        _ = tokio::signal::ctrl_c() => {
+            info!("interrupted, shutting down");
+            if let Some(path) = run_file.as_deref() {
+                identity::remove_run_file(path);
+            }
+        }
     }
     // Dropping the loader unwinds every plugin's effects in reverse mount order,
     // which is the only shutdown path there is.

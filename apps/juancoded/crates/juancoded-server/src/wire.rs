@@ -7,6 +7,8 @@
 //!      honest about what this core implements. A narrower core is a supported
 //!      configuration precisely because clients feature-detect off this.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -16,6 +18,8 @@ use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_state::ClientId;
 use juancoded_vt::wire::RowUpdate;
+
+use crate::identity::DaemonIdentity;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -352,6 +356,10 @@ impl From<&str> for ClientMessage {
 pub enum ServerMessage {
     ServerInfo {
         client_id: ClientId,
+        /// Who this daemon is: build, boot time and effective retention. The one
+        /// frame a client can use to notice it reconnected to a core older than its
+        /// own launch — see `crate::identity`.
+        identity: Arc<DaemonIdentity>,
     },
     Created {
         session: SessionMeta,
@@ -461,7 +469,10 @@ pub enum ServerMessage {
 impl ServerMessage {
     pub fn to_value(&self) -> Value {
         match self {
-            Self::ServerInfo { client_id } => json!({
+            Self::ServerInfo {
+                client_id,
+                identity,
+            } => json!({
                 "type": "serverInfo",
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": CAPABILITIES,
@@ -469,6 +480,9 @@ impl ServerMessage {
                 // that somebody drives a grid but not whether that somebody is
                 // itself, since the token is minted server-side per connection.
                 "clientId": client_token(*client_id),
+                // Present because this core is a separate process. An in-process
+                // core cannot be stale relative to its app, and sends nothing here.
+                "daemon": identity.to_value(),
             }),
             Self::Created { session } => json!({ "type": "created", "session": session }),
             Self::Attached {
@@ -999,7 +1013,11 @@ mod tests {
 
     #[test]
     fn server_info_leads_with_the_version_and_an_honest_capability_list() {
-        let v = ServerMessage::ServerInfo { client_id: 7 }.to_value();
+        let v = ServerMessage::ServerInfo {
+            client_id: 7,
+            identity: Arc::new(DaemonIdentity::capture(40)),
+        }
+        .to_value();
         assert_eq!(v["type"], "serverInfo");
         assert_eq!(v["protocolVersion"], 1);
         // The token a client recognises itself by in an `owner` field.
@@ -1014,6 +1032,11 @@ mod tests {
         // Not implemented yet — and the list must not claim otherwise.
         assert!(caps.contains(&"queue".to_string()));
         assert!(!caps.contains(&"trackedPrs".to_string()));
+        // Staleness is decidable from frame 0 or not at all: by the time a client
+        // has drawn a session list it has already believed the daemon.
+        assert_eq!(v["daemon"]["pid"], std::process::id());
+        assert_eq!(v["daemon"]["sessionsPerProject"], 40);
+        assert!(v["daemon"]["startedAt"].is_i64());
     }
 
     #[test]

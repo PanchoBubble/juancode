@@ -244,10 +244,14 @@ public extension CoreClient {
 public struct CoreServerInfo: Sendable, Equatable {
     public let protocolVersion: Int
     public let capabilities: [String]
+    /// Who the core process is, when it is a separate one. Nil for an in-process
+    /// core: it launched with this app and cannot be stale relative to it.
+    public let daemon: DaemonIdentity?
 
-    public init(protocolVersion: Int, capabilities: [String]) {
+    public init(protocolVersion: Int, capabilities: [String], daemon: DaemonIdentity? = nil) {
         self.protocolVersion = protocolVersion
         self.capabilities = capabilities
+        self.daemon = daemon
     }
 
     /// Whether the core implements a named capability (`"queue"`, `"screen"`, …).

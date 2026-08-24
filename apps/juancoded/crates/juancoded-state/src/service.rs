@@ -34,6 +34,11 @@ pub trait SessionsApi: Send + Sync {
     /// Which client drives the session's grid, or `None` when it is unclaimed. The
     /// wire layer needs it to tell an arriving connection what it missed.
     fn grid_owner(&self, id: &str) -> Option<ClientId>;
+    /// The per-project session cap this registry enforces. On the trait rather than
+    /// read back out of the environment by whoever wants it, because the two answers
+    /// diverge for any tree built with a config of its own — and the number is only
+    /// worth reporting if it is the one that actually prunes.
+    fn retention(&self) -> usize;
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError>;
     fn adopt_external(&self, req: AdoptRequest) -> Result<Option<SessionMeta>, StateError>;
@@ -122,6 +127,10 @@ impl SessionsApi for SessionRegistry {
 
     fn grid_owner(&self, id: &str) -> Option<ClientId> {
         SessionRegistry::grid_owner(self, id)
+    }
+
+    fn retention(&self) -> usize {
+        SessionRegistry::retention(self)
     }
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError> {

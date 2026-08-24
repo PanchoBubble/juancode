@@ -298,6 +298,14 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    /// The per-project cap this registry prunes to, as configured at construction.
+    /// `0` is unlimited. Reported on the wire so an app whose own environment says
+    /// something else can say so instead of quietly losing rows to a cap the daemon
+    /// was started with and never told anyone about.
+    pub fn retention(&self) -> usize {
+        self.inner.config.retention
+    }
+
     /// Build the registry over the services it composes with, and rehydrate whatever
     /// the store remembers. Spawns nothing and binds nothing.
     pub fn new(

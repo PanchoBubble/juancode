@@ -278,9 +278,10 @@
         "capabilities"
       ],
       "optional": [
-        "clientId"
+        "clientId",
+        "daemon"
       ],
-      "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule. clientId is this connection's grid-ownership token, present on a core that advertises gridOwner: it is the value that comes back as the owner of gridChange and resizeAck when this connection holds the grid, and without it a client can see who drives the grid but not whether that is itself."
+      "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule. clientId is this connection's grid-ownership token, present on a core that advertises gridOwner: it is the value that comes back as the owner of gridChange and resizeAck when this connection holds the grid, and without it a client can see who drives the grid but not whether that is itself. daemon is who the core process is - { pid, startedAt, exePath, buildStamp, version, buildId, dataDir, sessionsPerProject } - and is present only on a core that runs as a separate process from its client, because that is the only kind that can be stale relative to it. A client compares it against its own launch time, build stamp and environment and says so when they disagree; an in-process core omits the key entirely. Every value inside may be null, which means unknown and never means agreement."
     },
     "created": {
       "required": [

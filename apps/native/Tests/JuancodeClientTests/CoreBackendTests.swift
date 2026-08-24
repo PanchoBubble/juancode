@@ -264,8 +264,9 @@ final class CoreBackendTests: XCTestCase {
 final class FakeCore: CoreClient, @unchecked Sendable {
     let info: CoreServerInfo
 
-    init(capabilities: [String]) {
-        self.info = CoreServerInfo(protocolVersion: WireProtocol.version, capabilities: capabilities)
+    init(capabilities: [String], daemon: DaemonIdentity? = nil) {
+        self.info = CoreServerInfo(protocolVersion: WireProtocol.version,
+                                   capabilities: capabilities, daemon: daemon)
     }
 
     private func unreached(_ member: String = #function) -> Never {

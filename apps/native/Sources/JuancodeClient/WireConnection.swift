@@ -41,6 +41,9 @@ final class WireConnection: @unchecked Sendable {
         /// This connection's grid-ownership token. Absent on cores that predate
         /// `serverInfo.clientId`, which is the same set that has no `gridOwner`.
         let clientId: String?
+        /// Who the daemon is: build, boot time and effective retention. Absent for an
+        /// in-process core, and for a daemon older than `serverInfo.daemon`.
+        let daemon: DaemonIdentity?
     }
 
     private let url: URL
@@ -186,7 +189,8 @@ final class WireConnection: @unchecked Sendable {
         if type == "serverInfo" {
             let landed = Handshake(protocolVersion: body["protocolVersion"] as? Int ?? 0,
                                    capabilities: body["capabilities"] as? [String] ?? [],
-                                   clientId: body["clientId"] as? String)
+                                   clientId: body["clientId"] as? String,
+                                   daemon: DaemonIdentity(json: body["daemon"]))
             let waiters: [DispatchSemaphore] = lock.withLock {
                 handshake = landed
                 let w = handshakeWaiters

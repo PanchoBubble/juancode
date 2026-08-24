@@ -10,13 +10,14 @@ use axum::extract::{ws::WebSocketUpgrade, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use tracing::info;
+use tracing::{info, warn};
 
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
 use juancoded_state::SessionsApi;
 
 use crate::conn;
+use crate::identity::{self, DaemonIdentity};
 use crate::queue_delivery;
 use crate::seed::SeedTiming;
 
@@ -36,15 +37,23 @@ pub struct CoreHandles {
     /// than pretending to have queued something.
     pub queue: Option<Arc<dyn QueueApi>>,
     pub bus: Bus,
+    /// Captured once, here, and handed to every connection unchanged. A daemon that
+    /// recomputed its identity per connection could not be caught being stale.
+    pub identity: Arc<DaemonIdentity>,
 }
 
 impl CoreHandles {
     pub fn from_loader(loader: &Loader, sessions: Arc<dyn SessionsApi>) -> Self {
+        let sessions_retention = sessions.retention();
         Self {
             sessions,
             contributions: loader.contributions().clone(),
             queue: loader.services().resolve::<QueueService>().ok(),
             bus: loader.bus().clone(),
+            // The retention the registry actually applies, not a second read of the
+            // environment: those differ for any tree built with a config of its own,
+            // and a number on the wire that nobody enforces is worse than none.
+            identity: Arc::new(DaemonIdentity::capture(sessions_retention)),
         }
     }
 }
@@ -57,6 +66,12 @@ pub struct ServeConfig {
     pub port: u16,
     /// Unix socket path for the local client.
     pub socket: PathBuf,
+    /// Where to record this daemon's identity while it is listening, so a launcher
+    /// can decide whether the running daemon matches the checkout without opening a
+    /// socket. `None` writes nothing, which is what a test wants: the default path is
+    /// a real one under `$HOME`, and a test that overwrote it would tell the
+    /// developer's own live daemon it had stopped.
+    pub run_file: Option<PathBuf>,
 }
 
 impl Default for ServeConfig {
@@ -70,6 +85,9 @@ impl Default for ServeConfig {
             socket: std::env::var("JUANCODED_SOCKET")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(format!("{home}/.juancode/juancoded.sock"))),
+            run_file: juancoded_persistence::db_path()
+                .parent()
+                .map(|d| d.join(identity::RUN_FILE)),
         }
     }
 }
@@ -103,6 +121,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(handles): State<CoreHandles>) ->
 pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     // One pump for the daemon, not one per connection: a queued message is delivered
     // because a session can take it, not because somebody is watching the dock.
+    let identity = Arc::clone(&handles.identity);
     let _pump = handles.queue.clone().map(|queue| {
         queue_delivery::spawn_pump(
             Arc::clone(&handles.sessions),
@@ -135,17 +154,40 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     let uds = tokio::net::UnixListener::bind(&config.socket)
         .with_context(|| format!("bind {}", config.socket.display()))?;
 
-    info!(socket = %config.socket.display(), port = config.port, "juancoded listening");
+    // Only now, with both listeners up, is this process the daemon. Written here and
+    // not in `main` so a start that lost the race for the socket cannot overwrite the
+    // run file belonging to the daemon that won it.
+    if let Some(path) = config.run_file.as_deref() {
+        if let Err(e) = identity::write_run_file(&identity, config.port, path) {
+            // Not fatal: the run file is how a launcher AVOIDS ending a healthy
+            // daemon. Refusing to serve without one would trade a missing warning for
+            // a dead core.
+            warn!("could not write the run file at {}: {e:#}", path.display());
+        }
+    }
+    info!(
+        socket = %config.socket.display(),
+        port = config.port,
+        pid = identity.pid,
+        build_stamp_ms = identity.build_stamp_ms,
+        sessions_per_project = identity.sessions_per_project,
+        "juancoded listening"
+    );
 
     let uds_app = app.clone();
     let uds_task = tokio::spawn(async move { axum::serve(uds, uds_app).await });
     let tcp_task = tokio::spawn(async move { axum::serve(tcp, app).await });
 
-    tokio::select! {
-        r = uds_task => r?.context("unix listener stopped")?,
-        r = tcp_task => r?.context("tcp listener stopped")?,
+    let outcome: Result<()> = tokio::select! {
+        r = uds_task => r?.context("unix listener stopped"),
+        r = tcp_task => r?.context("tcp listener stopped"),
+    };
+    // A daemon that stopped must stop claiming a pid. A crash leaves the file behind
+    // instead, which is why every reader checks the pid is alive before trusting it.
+    if let Some(path) = config.run_file.as_deref() {
+        identity::remove_run_file(path);
     }
-    Ok(())
+    outcome
 }
 
 #[cfg(test)]
@@ -184,6 +226,7 @@ mod tests {
             ServeConfig {
                 port: 0,
                 socket: socket.clone(),
+                run_file: None,
             },
         )
         .await

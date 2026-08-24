@@ -70,6 +70,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         contributions,
         queue,
         bus,
+        identity,
     } = handles;
     let client: ClientId = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut tx, mut rx) = socket.split();
@@ -93,9 +94,12 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
     // Always first on the wire, before anything else can be sent.
     if tx
         .send(Message::Text(
-            ServerMessage::ServerInfo { client_id: client }
-                .to_json()
-                .into(),
+            ServerMessage::ServerInfo {
+                client_id: client,
+                identity,
+            }
+            .to_json()
+            .into(),
         ))
         .await
         .is_err()

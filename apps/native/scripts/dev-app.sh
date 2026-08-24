@@ -21,6 +21,15 @@ PRINT_BIN=0
 
 NATIVE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${JUANCODE_CONFIG:-debug}"
+DAEMON="$NATIVE/scripts/juancoded.sh"
+
+# Daemon subcommands, forwarded so the lifetime of the core is reachable from the
+# same place you launch the app. See juancoded.sh for why adoption is the default.
+case "${1:-}" in
+  --daemon-status)  exec "$DAEMON" status ;;
+  --stop-daemon)    exec "$DAEMON" stop ;;
+  --restart-daemon) exec "$DAEMON" restart ;;
+esac
 
 if [ "$CONFIG" = "release" ]; then
   swift build --package-path "$NATIVE" --product juancode -c release >&2
@@ -62,7 +71,26 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# The core this launch will talk to, before the app opens a socket to it.
+#
+# On the Swift core this is a no-op — that core is in-process and launches with the
+# app. On the Rust core the daemon is a separate process that deliberately outlives
+# the app, and nothing used to own its lifetime: it drifted to PPID 1 and every later
+# app launch silently reconnected to it, whatever build it was and whatever
+# environment it had been started with. `ensure` adopts a daemon that matches this
+# checkout and offers (never assumes) a restart when it does not — killing one ends
+# live agent ptys, so that decision is always the user's.
+"$DAEMON" ensure
+
+# The same identity the daemon was stamped with, so the app can prove a match instead
+# of inferring one from a file mtime. Read by `AppIdentity.current`.
+export JUANCODE_BUILD_ID="${JUANCODE_BUILD_ID:-$("$DAEMON" build-id)}"
+
 if [ "$PRINT_BIN" = "1" ]; then
+  # The caller execs the binary itself, so this export does not reach it. Say so:
+  # without the stamp the app falls back to comparing the daemon binary's mtime,
+  # which still catches a rebuild but cannot prove an exact match.
+  echo "juancode: export JUANCODE_BUILD_ID=$JUANCODE_BUILD_ID before launching for exact build matching" >&2
   echo "$APP/Contents/MacOS/juancode"
 else
   exec "$APP/Contents/MacOS/juancode" "$@"

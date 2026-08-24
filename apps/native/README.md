@@ -251,6 +251,41 @@ JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control di
 scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
 ```
 
+### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
+
+On the Swift core there is nothing to manage: the core is in-process and launches
+and dies with the app. On the Rust core, `juancoded` is a **separate process that
+outlives the app on purpose** — it owns the ptys, and an app relaunch must not end
+your running agents.
+
+Nothing used to own that lifetime. The daemon drifted to `PPID 1` and every later
+app launch silently reconnected to it: an older build, with the environment it had
+been started with. The app's session list is a mirror of what that daemon reports,
+so it looked authoritative while being hours stale, and a
+`JUANCODE_SESSIONS_PER_PROJECT` set on the app's launch line pruned nothing because
+the daemon never saw it.
+
+`scripts/dev-app.sh` now runs `scripts/juancoded.sh ensure` before launching:
+
+```sh
+scripts/dev-app.sh --daemon-status    # what is running, and whether it matches the checkout
+scripts/dev-app.sh --restart-daemon   # end it (after confirming) and start a matching one
+scripts/dev-app.sh --stop-daemon      # end it (after confirming)
+```
+
+It **adopts** a daemon that matches this checkout and never ends one silently:
+restarting kills live agent ptys, so a mismatch prints what it is about to end —
+identity, uptime, and the child processes — and asks. `JUANCODE_DAEMON` picks the
+policy: `adopt` (never end one), `ask` (default), `restart` (end it without
+asking), `off` (manage it yourself).
+
+Whatever you decide, the app says so: the daemon reports its build, boot time and
+effective retention on the `serverInfo` handshake, and a mismatch shows in the core
+badge as `rust · stale`, with the full reason in the badge popover and Settings →
+Core. **Retention in particular is daemon-scoped** — `JUANCODE_SESSIONS_PER_PROJECT`
+is read once, at daemon start, so setting it on an app launch line changes nothing
+until the daemon restarts, and the badge now says exactly that.
+
 ### Other targets
 
 ```sh
