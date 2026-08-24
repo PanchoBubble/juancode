@@ -7,7 +7,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-24
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit, transcript
-- Unmet scenarios: 4 of 23
+- Unmet scenarios: 4 of 24
 
 ## What is not satisfied yet (4)
 
@@ -64,3 +64,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - restart-fresh: n/a - restarting a session as a fresh conversation
 - spawn-model: n/a - the model a create pins
 - seeded-input: yes - a create's initialInput is delivered and submitted
+- transcript-activity: yes - activity inferred from the CLI's own transcript

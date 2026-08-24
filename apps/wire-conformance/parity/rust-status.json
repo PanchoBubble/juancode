@@ -89,6 +89,9 @@
     },
     "seeded-input": {
       "status": "passed"
+    },
+    "transcript-activity": {
+      "status": "passed"
     }
   }
 }

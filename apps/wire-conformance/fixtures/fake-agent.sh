@@ -19,6 +19,7 @@
 #   HIDE / SHOW      hide / show the cursor
 #   MOVE <row> <col> position the cursor (1-based)
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
+#   TRANSCRIPT       append one record to the CLI's own stream-json transcript
 #   EXIT <code>      exit with that status
 #
 # Provider args (--session-id, --resume, --model, permission flags) do not change
@@ -37,6 +38,17 @@ stty echo 2>/dev/null
 ESC=$(printf '\033')
 
 ARGV="$*"
+
+# The conversation id the core pinned with `--session-id`, which is also the name of
+# the file a real `claude` would write its transcript to. `TRANSCRIPT` needs it to put
+# a record where the core will go looking.
+SESSION_ID=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "--session-id" ] && SESSION_ID=$arg
+  prev=$arg
+done
+RECORDS=0
 
 printf 'fake-agent ready\r\n'
 
@@ -89,6 +101,21 @@ while IFS= read -r line; do
     # A CLI naming its own session. The core adopts this as the session title and
     # broadcasts the new meta, without anyone having asked it to.
     printf '\033]2;%s\007' "$arg"
+    ;;
+  TRANSCRIPT)
+    # Append one claude-shaped record to the transcript the CLI owns, in the projects
+    # directory the harness pointed the core at. The only bytes this command puts on
+    # the pty are the line discipline's echo of the command itself: nothing paints a
+    # working footer, so any activity that follows is attributable to the record.
+    #
+    # The directory is the cwd with every non-alphanumeric character replaced, which is
+    # how claude names it, and the file is the pinned session id.
+    RECORDS=$((RECORDS + 1))
+    root=${JUANCODE_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}
+    slug=$(printf '%s' "$PWD" | tr -c 'A-Za-z0-9' '-')
+    mkdir -p "$root/$slug"
+    printf '{"type":"assistant","requestId":"req_%s","timestamp":"2026-08-24T10:00:0%s.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":4,"output_tokens":9},"content":[{"type":"text","text":"record %s"}]}}\n' \
+      "$RECORDS" "$RECORDS" "$RECORDS" >>"$root/$slug/${SESSION_ID:-unknown}.jsonl"
     ;;
   EXIT)
     exit "${arg:-0}"

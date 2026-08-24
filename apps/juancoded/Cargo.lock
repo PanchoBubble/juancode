@@ -590,6 +590,7 @@ name = "juancoded-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "juancoded-transcripts",
  "juancoded-vt",
  "libc",
  "portable-pty",
@@ -650,6 +651,7 @@ dependencies = [
  "juancoded-cordis",
  "juancoded-core",
  "juancoded-persistence",
+ "juancoded-transcripts",
  "juancoded-vt",
  "serde",
  "serde_json",

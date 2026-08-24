@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use juancoded_cordis::Service;
 use juancoded_persistence::{QueuedMessage, SessionStore};
+use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
 
 use juancoded_core::model::{SessionActivity, SessionMeta};
@@ -76,6 +77,18 @@ pub trait SessionsApi: Send + Sync {
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
+
+    /// Records one session's CLI has newly appended to its own transcript.
+    ///
+    /// On the trait for the same reason `flush_all` is: the only thing that polls a
+    /// transcript holds an `Arc<dyn SessionsApi>` and nothing else, and a signal it
+    /// cannot reach is a signal that does not arrive. It is the preferred half of
+    /// activity detection — wording independent, and the only way a session whose tool
+    /// call has gone quiet for minutes stays visibly busy.
+    ///
+    /// The caller owns the decision of what is newly appended: a backlog read out of a
+    /// file written before anyone was watching is history, and must not be passed here.
+    fn on_transcript(&self, id: &str, records: &[TranscriptRecord]);
 
     /// Persist every live session's newest bytes before the process goes away.
     ///
@@ -204,6 +217,10 @@ impl SessionsApi for SessionRegistry {
 
     fn release_client(&self, owner: ClientId) {
         SessionRegistry::release_client(self, owner)
+    }
+
+    fn on_transcript(&self, id: &str, records: &[TranscriptRecord]) {
+        SessionRegistry::on_transcript(self, id, records)
     }
 
     fn flush_all(&self) -> usize {

@@ -9,6 +9,7 @@ publish.workspace = true
 juancoded-cordis.workspace = true
 juancoded-core.workspace = true
 juancoded-persistence.workspace = true
+juancoded-transcripts.workspace = true
 juancoded-vt.workspace = true
 anyhow.workspace = true
 serde.workspace = true

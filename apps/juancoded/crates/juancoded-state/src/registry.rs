@@ -43,6 +43,7 @@ use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, Se
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
 use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SessionStore};
+use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
@@ -1295,16 +1296,58 @@ impl SessionRegistry {
         demote_stale_footer: bool,
     ) {
         let screen = self.screen_text(id);
-        let (transition, prev) = {
+        let (step, prev) = {
             let mut det = live.activity.lock().unwrap_or_else(|e| e.into_inner());
             let prev = det.state();
             (det.settle(generation, demote_stale_footer, &screen), prev)
         };
-        if let Some(t) = transition {
+        if let Some(t) = step.transition {
             self.broadcast_activity(id, live, prev, t);
             // A settled screen is a fully initialised TUI, which is the one moment a
             // missed spawn-time resize is safe to re-assert.
             self.reapply_grid(id);
+        }
+        // A turn held busy by an unresolved tool call asks to be looked at again: the
+        // hold has to be re-checked, and on a session gone quiet nothing else will
+        // make anyone look.
+        if let Some(armed) = step.armed {
+            self.arm_settle(id, live, armed);
+        }
+    }
+
+    /// Records one session's CLI has newly appended to its own transcript.
+    ///
+    /// The second way a turn opens, beside the working footer, and the only one that
+    /// survives a CLI renaming its footer copy. Everything downstream of the detector
+    /// is the byte path's: one state machine, one broadcast, one settle.
+    ///
+    /// The caller owns the decision of what counts as newly appended — a session's
+    /// backlog must never reach here — and this refuses a session that is no longer
+    /// running, because the pump's last poll after an exit reads records that are
+    /// history by the time we see them.
+    pub fn on_transcript(&self, id: &str, records: &[TranscriptRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let Some(live) = self.get(id) else {
+            return;
+        };
+        {
+            let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            if meta.status != SessionStatus::Running {
+                return;
+            }
+        }
+        let (step, prev) = {
+            let mut det = live.activity.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = det.state();
+            (det.on_transcript(records.iter().map(|r| &r.event)), prev)
+        };
+        if let Some(t) = step.transition {
+            self.broadcast_activity(id, &live, prev, t);
+        }
+        if let Some(armed) = step.armed {
+            self.arm_settle(id, &live, armed);
         }
     }
 

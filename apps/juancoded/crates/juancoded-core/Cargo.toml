@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+juancoded-transcripts.workspace = true
 juancoded-vt.workspace = true
 anyhow.workspace = true
 libc.workspace = true

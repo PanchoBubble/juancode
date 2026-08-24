@@ -13,7 +13,10 @@ pub mod model;
 pub mod provider;
 pub mod pty;
 
-pub use activity::{ActivityDetector, Armed, ScreenText, Step, Transition};
+pub use activity::{
+    ActivityClock, ActivityDetector, Armed, ManualClock, MonotonicClock, ScreenText, Step,
+    Transition,
+};
 pub use changes::ChangeStat;
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
 pub use provider::{

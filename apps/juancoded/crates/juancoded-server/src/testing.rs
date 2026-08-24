@@ -109,6 +109,10 @@ impl SessionsApi for FakeChild {
         0
     }
 
+    /// This fake has no activity detector, and the queue engine it stands in for
+    /// classifies busy off `busy` below rather than off any transcript.
+    fn on_transcript(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
+
     fn input(&self, _id: &str, data: &[u8]) -> Result<(), StateError> {
         self.writes.lock().unwrap().push(data.to_vec());
         let mut model = self.model.lock().unwrap();

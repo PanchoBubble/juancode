@@ -7,11 +7,16 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-23
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel
-- Unmet scenarios: 0 of 23
+- Unmet scenarios: 1 of 24
 
-## What is not satisfied yet (0)
+## What is not satisfied yet (1)
 
-Nothing: this core passes every scenario in the spec.
+### transcript-activity
+
+- Status: never measured
+- Needs: transcript, pty
+- Why: never measured
+- Asserts: a session whose CLI is appending records to its own stream-json transcript reads busy even though nothing painted a working footer, and the records a transcript already held when the core first read it do not pulse a session busy at all.
 
 ## Full scenario list
 
@@ -38,3 +43,4 @@ Nothing: this core passes every scenario in the spec.
 - restart-fresh: yes - restarting a session as a fresh conversation
 - spawn-model: yes - the model a create pins
 - seeded-input: yes - a create's initialInput is delivered and submitted
+- transcript-activity: never measured - activity inferred from the CLI's own transcript

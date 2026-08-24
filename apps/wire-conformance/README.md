@@ -160,16 +160,24 @@ one command per line off the pty and prints exactly what was asked for:
 | `HIDE` / `SHOW`    | hide / show the cursor                                        |
 | `MOVE <row> <col>` | position the cursor                                           |
 | `TITLE <text>`     | set an OSC 2 window title, the way a CLI names its session    |
+| `TRANSCRIPT`       | append one record to the CLI's own stream-json transcript     |
 | `EXIT <code>`      | exit with that status                                         |
+
+`TRANSCRIPT` is the one command that paints nothing: it writes a claude-shaped
+record into `$JUANCODE_CLAUDE_PROJECTS_DIR/<cwd slug>/<pinned session id>.jsonl`,
+which is where a real `claude` would write it. That is how the
+`transcript-activity` scenario can assert a session reads busy with no working
+footer anywhere on screen — the only bytes on the pty are the line discipline's
+echo of the command.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:
 
 1. **Activity is inferred, not commanded.** The core enters busy on the working
    footer (or a structured transcript event) and leaves it on a settle; the fake
-   agent paints that footer on demand, whereas a real CLI paints it whenever it
-   feels like it. A real-provider run therefore asserts the same transitions but
-   cannot assert exactly when they happen.
+   agent paints that footer on demand and writes that record on demand, whereas a
+   real CLI does both whenever it feels like it. A real-provider run therefore
+   asserts the same transitions but cannot assert exactly when they happen.
 2. **Resumability is real.** `claude` pins its session id, `codex`/`opencode`
    have theirs discovered from their own files. The `unresumable` scenario relies
    on a codex-shaped session whose id was never captured; with a real codex that
