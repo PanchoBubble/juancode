@@ -253,38 +253,54 @@ scripts/dev-app.sh --print-bin               # build + assemble, print the inner
 
 ### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
 
-On the Swift core there is nothing to manage: the core is in-process and launches
-and dies with the app. On the Rust core, `juancoded` is a **separate process that
-outlives the app on purpose** — it owns the ptys, and an app relaunch must not end
-your running agents.
+On the Swift core there is nothing to manage: the core is in-process and launches and
+dies with the app. On the Rust core, `juancoded` is a separate process — and nothing
+used to own its lifetime. It drifted to `PPID 1` and every later app launch silently
+reconnected to it: an older build, with the environment it had been started with. The
+app's session list is a mirror of what that daemon reports, so it looked authoritative
+while being hours stale, and a `JUANCODE_SESSIONS_PER_PROJECT` set on the app's launch
+line pruned nothing because the daemon never saw it.
 
-Nothing used to own that lifetime. The daemon drifted to `PPID 1` and every later
-app launch silently reconnected to it: an older build, with the environment it had
-been started with. The app's session list is a mirror of what that daemon reports,
-so it looked authoritative while being hours stale, and a
-`JUANCODE_SESSIONS_PER_PROJECT` set on the app's launch line pruned nothing because
-the daemon never saw it.
+**The invariant now is: after a launch, the daemon is from the current source and is
+younger than the app.** `scripts/dev-app.sh` gets there with two rules.
 
-`scripts/dev-app.sh` now runs `scripts/juancoded.sh ensure` before launching:
+1. **Always rebuild.** `cargo build` runs before the daemon starts, in the profile
+   `JUANCODE_CONFIG` selects. Cargo does the change detection and no-ops when nothing
+   moved; a build failure **fails the launch** rather than falling back to the binary
+   from last time, because that stale binary is the entire bug.
+2. **A launch that starts a daemon owns it, and reaps it on exit.** A trap on
+   `EXIT`/`INT`/`TERM` tears it down on a normal quit, a Ctrl-C and a crash alike, by
+   the exact recorded pid — never a blanket `pkill juancoded`, which would end another
+   checkout's daemon and its ptys. Teardown is `SIGTERM`, a grace period
+   (`JUANCODE_DAEMON_GRACE`, default 10s) so the store flushes, then `SIGKILL`.
+
+**The cost, plainly: live agent sessions no longer survive quitting the app.** That is
+the trade for never being able to read a stale mirror.
+
+A daemon this launch did **not** start is foreign. It is neither adopted nor killed —
+the script says so loudly and the boot handshake flags it on screen. Ending somebody
+else's daemon ends somebody else's ptys, so that is always an explicit command:
 
 ```sh
-scripts/dev-app.sh --daemon-status    # what is running, and whether it matches the checkout
-scripts/dev-app.sh --restart-daemon   # end it (after confirming) and start a matching one
-scripts/dev-app.sh --stop-daemon      # end it (after confirming)
+scripts/dev-app.sh --daemon-status    # what is running, who owns it, does it match the checkout
+scripts/dev-app.sh --stop-daemon      # end it, after confirming
+scripts/dev-app.sh --restart-daemon   # end it, then start a fresh unowned one
 ```
 
-It **adopts** a daemon that matches this checkout and never ends one silently:
-restarting kills live agent ptys, so a mismatch prints what it is about to end —
-identity, uptime, and the child processes — and asks. `JUANCODE_DAEMON` picks the
-policy: `adopt` (never end one), `ask` (default), `restart` (end it without
-asking), `off` (manage it yourself).
+(One exception to "foreign": a daemon whose owning launch is gone — killed with
+`SIGKILL`, so its trap never ran — reads as unowned, and a launch claims it if the
+build matches. Otherwise a crashed launch would strand the daemon forever.)
 
-Whatever you decide, the app says so: the daemon reports its build, boot time and
+Whatever happens, the app says so: the daemon reports its build, boot time and
 effective retention on the `serverInfo` handshake, and a mismatch shows in the core
 badge as `rust · stale`, with the full reason in the badge popover and Settings →
 Core. **Retention in particular is daemon-scoped** — `JUANCODE_SESSIONS_PER_PROJECT`
 is read once, at daemon start, so setting it on an app launch line changes nothing
 until the daemon restarts, and the badge now says exactly that.
+
+`scripts/dev-app.sh --print-bin` is the one path that cannot reap: it ends the moment
+it prints the path, so it starts the daemon **unowned** and tells you to stop it
+yourself. The next full `dev-app.sh` claims that daemon if the build still matches.
 
 ### Other targets
 

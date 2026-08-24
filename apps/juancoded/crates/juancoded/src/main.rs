@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
     let run_file = config.run_file.clone();
     tokio::select! {
         r = serve(handles, config) => r?,
-        _ = tokio::signal::ctrl_c() => {
-            info!("interrupted, shutting down");
+        signal = shutdown_signal() => {
+            info!(%signal, "shutting down");
             if let Some(path) = run_file.as_deref() {
                 identity::remove_run_file(path);
             }
@@ -62,4 +62,28 @@ async fn main() -> Result<()> {
     // which is the only shutdown path there is.
     drop(loader);
     Ok(())
+}
+
+/// Resolves when this daemon is asked to stop, whichever way it is asked.
+///
+/// SIGTERM is here for a reason, not for symmetry: the launcher ends a daemon with
+/// TERM and then waits a grace period before SIGKILL, so that the store gets a chance
+/// to flush. Default SIGTERM disposition is immediate death with no unwinding, which
+/// would have made that grace period a wait over an already-dead process — the exact
+/// torn-write-mid-flush the grace period exists to avoid.
+async fn shutdown_signal() -> &'static str {
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            // Nothing to do but keep the interrupt path: a daemon that refused to boot
+            // because it could not install a handler would be a worse failure.
+            warn!("could not listen for SIGTERM ({e}); only ctrl-c will shut down cleanly");
+            let _ = tokio::signal::ctrl_c().await;
+            return "interrupt";
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => "interrupt",
+        _ = term.recv() => "terminate",
+    }
 }

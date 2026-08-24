@@ -73,14 +73,40 @@ PLIST
 
 # The core this launch will talk to, before the app opens a socket to it.
 #
-# On the Swift core this is a no-op — that core is in-process and launches with the
-# app. On the Rust core the daemon is a separate process that deliberately outlives
-# the app, and nothing used to own its lifetime: it drifted to PPID 1 and every later
-# app launch silently reconnected to it, whatever build it was and whatever
-# environment it had been started with. `ensure` adopts a daemon that matches this
-# checkout and offers (never assumes) a restart when it does not — killing one ends
-# live agent ptys, so that decision is always the user's.
-"$DAEMON" ensure
+# On the Swift core this is a no-op — that core is in-process and launches and dies
+# with the app. On the Rust core the daemon is a separate process, and nothing used to
+# own its lifetime: it drifted to PPID 1 and every later app launch silently
+# reconnected to it, whatever build it was and whatever environment it had been
+# started with. The app's session list is a mirror of what that daemon reports, so it
+# looked authoritative while being hours stale.
+#
+# `ensure` rebuilds juancoded (cargo no-ops when nothing changed, and a build failure
+# fails this launch rather than falling back to the stale binary), then starts a daemon
+# THIS launch owns — reaped by the trap below. A daemon somebody else started is
+# reported and left strictly alone: ending it would end their ptys.
+#
+# The cost, stated plainly: live agent sessions no longer survive quitting the app.
+# That is the trade for never being able to read a stale mirror.
+#
+# An empty token under `--print-bin` is not an oversight: that invocation ends the
+# moment it prints the path, so it can never reap anything, and claiming ownership it
+# cannot honour would arm a trap that fires while the caller is still about to launch
+# the app. It starts the daemon UNOWNED and says who has to stop it.
+if [ "$PRINT_BIN" = "1" ]; then LAUNCH_TOKEN=""; else LAUNCH_TOKEN="$$-$RANDOM"; fi
+DAEMON_STATE="$("$DAEMON" ensure "$LAUNCH_TOKEN" "$$")"
+
+# Reap only what this launch started or claimed. `reap` re-checks the token, so a
+# daemon another launch has taken over in the meantime is left alone.
+#
+# EXIT covers a normal quit and any `set -e` abort; INT and TERM cover ctrl-c and a
+# kill. All three funnel through one function, because a teardown that only some exit
+# paths reach is the orphan this whole change is about.
+reap_daemon() { "$DAEMON" reap "$LAUNCH_TOKEN" || true; }
+if [ -n "$LAUNCH_TOKEN" ]; then
+  case "$DAEMON_STATE" in
+    started*|claimed*) trap reap_daemon EXIT INT TERM ;;
+  esac
+fi
 
 # The same identity the daemon was stamped with, so the app can prove a match instead
 # of inferring one from a file mtime. Read by `AppIdentity.current`.
@@ -93,5 +119,10 @@ if [ "$PRINT_BIN" = "1" ]; then
   echo "juancode: export JUANCODE_BUILD_ID=$JUANCODE_BUILD_ID before launching for exact build matching" >&2
   echo "$APP/Contents/MacOS/juancode"
 else
-  exec "$APP/Contents/MacOS/juancode" "$@"
+  # Deliberately NOT `exec`: exec replaces this shell, and a trap in a shell that no
+  # longer exists never fires. Running the app as a child costs one bash process and
+  # is what makes the teardown reachable. Env fidelity is unaffected — a child
+  # inherits this shell's environment exactly, which is what the prime directive
+  # needs; it is `open`/Finder that would have stripped it.
+  "$APP/Contents/MacOS/juancode" "$@"
 fi

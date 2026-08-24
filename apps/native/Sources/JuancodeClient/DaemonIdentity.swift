@@ -197,9 +197,10 @@ public extension DaemonIdentity {
                     + "\(Self.clock.string(from: started)))",
                 detail: "The daemon has been running since "
                     + "\(Self.clock.string(from: started)), before this app launched at "
-                    + "\(Self.clock.string(from: app.launchedAt)). Its sessions survived, which "
-                    + "is the point — but JUANCODE_* variables set on this launch line went to "
-                    + "the app only. The daemon still has the environment it started with."))
+                    + "\(Self.clock.string(from: app.launchedAt)), so this launch did not start "
+                    + "it. JUANCODE_* variables set on this launch line went to the app only — "
+                    + "the daemon still has the environment it started with. "
+                    + "`apps/native/scripts/dev-app.sh --daemon-status` says who owns it."))
         }
 
         if let mine = app.sessionsPerProject, let theirs = sessionsPerProject, mine != theirs {

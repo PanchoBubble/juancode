@@ -243,8 +243,17 @@ A mismatch shows in the core badge as `rust · stale` rather than being invisibl
 start**, so setting it on an app launch line does nothing until the daemon restarts.
 That is why the effective value goes out on the handshake instead of being inferred.
 
-`apps/native/scripts/juancoded.sh` (`ensure|status|stop|restart`) owns the lifetime
-from the app side. It adopts a matching daemon and never ends one silently.
+`apps/native/scripts/juancoded.sh` (`ensure|reap|status|stop|restart`) owns the
+lifetime from the app side: a launch that starts a daemon owns it and reaps it when
+the app exits (`SIGTERM`, grace period, then `SIGKILL`), and a daemon it did not start
+is reported but never touched. Ownership is recorded in `juancoded.owner` beside the
+run file — separate files because they have separate writers, and one process must
+never be editing the other's record.
+
+That teardown is why `main` takes **SIGTERM** through the same orderly shutdown as
+ctrl-c. Default SIGTERM disposition is immediate death with no unwinding, which would
+have made the launcher's grace period a wait over an already-dead process — the exact
+torn-write-mid-flush the grace period exists to avoid.
 
 Then point the Swift client at it:
 
