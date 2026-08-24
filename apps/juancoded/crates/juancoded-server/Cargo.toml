@@ -14,6 +14,7 @@ juancoded-vt.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 futures.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -22,9 +22,18 @@
 #      a stale binary is the whole bug.
 #   2. A launch that STARTS a daemon OWNS it, and reaps it when the app exits (see the
 #      trap in dev-app.sh). The daemon no longer outlives the app.
+#   3. The daemon enforces rule 2 from ITS side too. A trap cannot fire in a shell that
+#      was SIGKILLed, and macOS has no PDEATHSIG, so the owner's pid is handed to the
+#      daemon at spawn and the daemon ends ITSELF once that pid is gone for the grace
+#      period (crates/juancoded-server/src/owner.rs). Rule 2 covers every ordinary
+#      exit; rule 3 is what covers the ones bash never sees.
 #
 # Rule 2 has a real cost, stated plainly: live agent ptys do NOT survive quitting the
 # app any more. That is the trade for never being able to read a stale mirror.
+#
+# Rule 3 only ever applies to a daemon somebody CLAIMED. An unowned one — `cargo run -p
+# juancoded`, or one a developer keeps alive deliberately — is never handed an owner,
+# so its watchdog is inert and it outlives everything, which is the point.
 #
 # WHEN THE INVARIANT CANNOT HOLD
 #
@@ -50,6 +59,8 @@
 #   JUANCODE_CONFIG=debug|release   which profile to build and run (matches dev-app.sh)
 #   JUANCODE_DAEMON=off             do nothing at all; you are managing it yourself
 #   JUANCODE_SKIP_DAEMON_BUILD=1    skip cargo (test harnesses only — reintroduces the bug)
+#   JUANCODE_OWNER_GRACE_SECONDS=N  how long an ORPHANED daemon keeps serving before it
+#                                   ends itself (default 120; 0 disables the watchdog)
 set -euo pipefail
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,6 +86,13 @@ BIN="${JUANCODE_JUANCODED_BIN:-$ROOT/apps/juancoded/target/$CONFIG/juancoded}"
 # get a torn WAL, so this is generous on purpose. juancoded takes SIGTERM through the
 # same orderly shutdown as ctrl-c (see crates/juancoded/src/main.rs).
 GRACE_SECONDS="${JUANCODE_DAEMON_GRACE:-10}"
+
+# How long the DAEMON's own watchdog waits after its owner disappears before it ends
+# itself. Unrelated to GRACE_SECONDS above (that one is TERM-to-KILL on a teardown we
+# are driving); this one is the safety net for a teardown that never ran. Generous on
+# purpose: it only ever runs after a bad death, and a short one would end live ptys
+# during a legitimate relaunch. Read by juancoded as JUANCODE_OWNER_GRACE_SECONDS.
+OWNER_GRACE_SECONDS="${JUANCODE_OWNER_GRACE_SECONDS:-120}"
 
 say()  { printf 'juancoded: %s\n' "$*" >&2; }
 warn() { printf 'juancoded: %s\n' "$*" >&2; }
@@ -232,7 +250,32 @@ start_daemon() {
   # JUANCODE_* set on the launch line has to reach the process that acts on it.
   # JUANCODE_BUILD_ID is stamped here and read by both sides, so the app can prove an
   # exact match rather than inferring one from a file mtime.
-  JUANCODE_BUILD_ID="$want" nohup "$BIN" >>"$LOG_FILE" 2>&1 &
+  #
+  # JUANCODE_OWNER_PID is the other half of the lifetime contract: the trap below
+  # reaps this daemon on every exit bash can see, and this tells the daemon whose
+  # death to watch for on the exits bash CANNOT see (SIGKILL, a vanished terminal).
+  # It is set only when this launch is actually claiming ownership — an unowned start
+  # must stay unowned, or a `--print-bin` invocation that exits immediately would tell
+  # the daemon its owner had already died.
+  local claiming=0
+  if [ -n "$token" ] && [ "$owner_pid" != "0" ]; then
+    claiming=1
+    say "  owned by pid $owner_pid; it self-exits ${OWNER_GRACE_SECONDS}s after that pid is gone"
+  else
+    say "  UNOWNED: no watchdog. Nothing will end it but \`juancoded.sh stop\`."
+  fi
+  # A subshell that `export`s and then `exec`s, rather than an assignment prefix built
+  # up in a variable. Bash decides what is an assignment prefix when it PARSES the
+  # line, so a word that only expands into `FOO=1` is read as the command name — that
+  # spelling silently started no daemon at all and reported `command not found`.
+  # `exec` keeps the pid: the subshell becomes nohup, which becomes the daemon, so `$!`
+  # is the daemon's own pid and the ownership record names the right process.
+  (
+    export JUANCODE_BUILD_ID="$want"
+    export JUANCODE_OWNER_GRACE_SECONDS="$OWNER_GRACE_SECONDS"
+    [ "$claiming" = "1" ] && export JUANCODE_OWNER_PID="$owner_pid"
+    exec nohup "$BIN" >>"$LOG_FILE" 2>&1
+  ) &
   local pid=$!
   disown "$pid" 2>/dev/null || true
   local waited=0
@@ -264,6 +307,16 @@ cmd_status() {
     unowned) say "  owner: nobody — nothing will reap it when an app exits" ;;
     *)       say "  owner: launch $(own_get token) (shell pid $(own_get owner_pid), $(alive "$(own_get owner_pid)" && echo alive || echo gone))" ;;
   esac
+  local wpid wgrace; wpid="$(run_get owner_pid)"; wgrace="$(run_get owner_grace_ms)"
+  if [ -z "$wgrace" ]; then
+    warn "  watchdog: NONE — this daemon predates the self-exit watchdog and can orphan"
+  elif [ "$wgrace" = "0" ]; then
+    warn "  watchdog: DISABLED (JUANCODE_OWNER_GRACE_SECONDS=0) — it can outlive its owner"
+  elif [ -z "$wpid" ]; then
+    say "  watchdog: armed only by a claim (started with no owner); grace $((wgrace / 1000))s"
+  else
+    say "  watchdog: self-exits $((wgrace / 1000))s after pid $wpid is gone ($(alive "$wpid" && echo alive || echo GONE))"
+  fi
   local want theirs; want="$(build_id)"; theirs="$(run_get build_id)"
   if [ -z "$theirs" ]; then
     warn "  build: UNSTAMPED — started outside this script, so it cannot be matched to the checkout"

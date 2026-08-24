@@ -250,6 +250,21 @@ is reported but never touched. Ownership is recorded in `juancoded.owner` beside
 run file — separate files because they have separate writers, and one process must
 never be editing the other's record.
 
+A trap cannot fire in a shell that was `SIGKILL`ed, though, and macOS has no
+`PDEATHSIG`. So the launcher also hands its pid over at spawn and `owner.rs` watches
+it: once the owner has been gone for `JUANCODE_OWNER_GRACE_SECONDS` (default 120s) the
+daemon ends **itself**, through the same `select!` arm shape as the signal handler so
+the shutdown path is one path and not two. A daemon nobody declared an owner for —
+`cargo run -p juancoded` — reads as unowned and the watchdog is inert: ownership is
+declared, never inferred, because the thing being ended is somebody's ptys. The live
+verdict rides on `serverInfo.daemon` as `ownerState` / `ownerPid` / `ownerGraceMs`.
+
+That shutdown path calls `SessionsApi::flush_all` before the tree unwinds. Scrollback
+is persisted on a 2-second throttle while a session runs and no plugin unmount writes
+it (teardown is effects going away; there is no unmount hook), so without it every exit
+silently truncated every live transcript by up to two seconds. Invisible while the
+daemon outlived the app; a lost transcript on every quit now that it does not.
+
 That teardown is why `main` takes **SIGTERM** through the same orderly shutdown as
 ctrl-c. Default SIGTERM disposition is immediate death with no unwinding, which would
 have made the launcher's grace period a wait over an already-dead process — the exact

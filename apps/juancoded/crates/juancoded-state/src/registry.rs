@@ -1418,6 +1418,32 @@ impl SessionRegistry {
         );
     }
 
+    /// Persist every live session's newest bytes, ignoring the throttle. Called on
+    /// the way out of the process — once, from the one shutdown path.
+    ///
+    /// Without this, a shutdown loses up to `FLUSH_EVERY` of the newest scrollback
+    /// for EVERY live session: `flush_scrollback` is throttled on the output path,
+    /// nothing forces it at exit, and no plugin unmount does it either (there is no
+    /// unmount hook — teardown is effects going away). That was survivable while the
+    /// daemon outlived the app; now that quitting the app ends the daemon it is a
+    /// truncated transcript on every single quit, which is why it is here.
+    ///
+    /// Returns how many sessions it wrote, for the log line that proves it ran.
+    pub fn flush_all(&self) -> usize {
+        // The map is cloned out before any store write so the lock is not held across
+        // SQLite: an output chunk arriving mid-flush must be able to take it.
+        let live: Vec<(String, Arc<LiveSession>)> = self
+            .lock_sessions()
+            .iter()
+            .map(|(id, live)| (id.clone(), Arc::clone(live)))
+            .collect();
+        let n = live.len();
+        for (id, session) in &live {
+            self.flush_scrollback(id, session, true);
+        }
+        n
+    }
+
     /// Write the byte ring and the grid it was written at. `force` skips the
     /// time-based throttle (an exit or an attach must not read a stale row).
     fn flush_scrollback(&self, id: &str, live: &Arc<LiveSession>, force: bool) {

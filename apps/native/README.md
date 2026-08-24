@@ -269,10 +269,24 @@ younger than the app.** `scripts/dev-app.sh` gets there with two rules.
    moved; a build failure **fails the launch** rather than falling back to the binary
    from last time, because that stale binary is the entire bug.
 2. **A launch that starts a daemon owns it, and reaps it on exit.** A trap on
-   `EXIT`/`INT`/`TERM` tears it down on a normal quit, a Ctrl-C and a crash alike, by
-   the exact recorded pid — never a blanket `pkill juancoded`, which would end another
-   checkout's daemon and its ptys. Teardown is `SIGTERM`, a grace period
-   (`JUANCODE_DAEMON_GRACE`, default 10s) so the store flushes, then `SIGKILL`.
+   `EXIT`/`INT`/`TERM`/`HUP` tears it down on a normal quit, a Cmd-Q, a Ctrl-C, a
+   closed terminal window and a crash alike, by the exact recorded pid — never a
+   blanket `pkill juancoded`, which would end another checkout's daemon and its ptys.
+   Teardown is `SIGTERM`, a grace period (`JUANCODE_DAEMON_GRACE`, default 10s) so the
+   store flushes, then `SIGKILL`.
+3. **The daemon enforces rule 2 from its own side.** A trap cannot fire in a shell that
+   was `SIGKILL`ed, and macOS has no `PDEATHSIG`, so the launch hands its pid to the
+   daemon at spawn (`JUANCODE_OWNER_PID`) and the daemon ends **itself** once that pid
+   has been gone for `JUANCODE_OWNER_GRACE_SECONDS` — default **120s**, deliberately
+   generous because this countdown only ever runs after a bad death, and a short one
+   would end live ptys during a legitimate relaunch. It goes out through the same
+   orderly path as `SIGTERM`, so the store is flushed either way. A relaunch that
+   claims the daemon inside the window cancels the countdown.
+
+   Rule 3 only ever applies to a daemon somebody **claimed**. An unowned one —
+   `cargo run -p juancoded`, or one you are keeping alive on purpose — is never handed
+   an owner, so its watchdog is inert and it outlives everything. Ownership is declared,
+   never inferred from "it happens to be on my port".
 
 **The cost, plainly: live agent sessions no longer survive quitting the app.** That is
 the trade for never being able to read a stale mirror.
@@ -298,9 +312,23 @@ Core. **Retention in particular is daemon-scoped** — `JUANCODE_SESSIONS_PER_PR
 is read once, at daemon start, so setting it on an app launch line changes nothing
 until the daemon restarts, and the badge now says exactly that.
 
+The handshake carries the lifetime too: `serverInfo.daemon` reports `ownerState`
+(`owned` / `orphaned` / `unowned`), `ownerPid` and `ownerGraceMs`, so "nothing will
+ever end this daemon" is something the app can say rather than something you find out
+two hours later in `ps`.
+
 `scripts/dev-app.sh --print-bin` is the one path that cannot reap: it ends the moment
-it prints the path, so it starts the daemon **unowned** and tells you to stop it
-yourself. The next full `dev-app.sh` claims that daemon if the build still matches.
+it prints the path, so it starts the daemon **unowned** — no trap and no watchdog — and
+tells you to stop it yourself. The next full `dev-app.sh` claims that daemon if the
+build still matches, and claiming it also arms its watchdog.
+
+`scripts/daemon-lifecycle-check.sh` is the end-to-end proof, on its own port (4390) and
+its own data dir so it cannot touch anything real: it launches and quits (no daemon
+left), launches and `SIGKILL`s the launch (the daemon self-exits), and starts a foreign
+daemon then launches and quits over it (it survives, and never self-exits, because
+nobody claimed it). A sleeper stands in for the app — the lifetime is a contract
+between the launch shell, `juancoded.sh` and `juancoded`, and the real app would need a
+window server and would fight the running instance for `:4280`.
 
 ### Other targets
 

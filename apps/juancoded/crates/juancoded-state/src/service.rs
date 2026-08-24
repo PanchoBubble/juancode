@@ -76,6 +76,16 @@ pub trait SessionsApi: Send + Sync {
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
+
+    /// Persist every live session's newest bytes before the process goes away.
+    ///
+    /// On the trait because the daemon's shutdown path only ever holds a
+    /// `dyn SessionsApi`, and a flush it cannot reach is a flush that does not
+    /// happen. Scrollback is written on a throttle while a session runs, so without
+    /// this the last couple of seconds of every live session is lost on every exit —
+    /// which stopped being acceptable the moment quitting the app started ending the
+    /// daemon.
+    fn flush_all(&self) -> usize;
 }
 
 /// `ctx.resolve::<SessionsService>()` yields `Arc<dyn SessionsApi>`.
@@ -194,6 +204,10 @@ impl SessionsApi for SessionRegistry {
 
     fn release_client(&self, owner: ClientId) {
         SessionRegistry::release_client(self, owner)
+    }
+
+    fn flush_all(&self) -> usize {
+        SessionRegistry::flush_all(self)
     }
 
     fn kill(&self, id: &str) -> Result<(), StateError> {

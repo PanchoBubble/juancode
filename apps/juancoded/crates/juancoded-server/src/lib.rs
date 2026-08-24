@@ -8,6 +8,7 @@
 
 pub mod conn;
 pub mod identity;
+pub mod owner;
 pub mod queue_delivery;
 pub mod screen;
 pub mod seed;
@@ -19,5 +20,6 @@ pub mod wire;
 mod testing;
 
 pub use identity::DaemonIdentity;
+pub use owner::{Orphaned, Ownership, Watchdog};
 pub use serve::{serve, CoreHandles, ServeConfig};
 pub use wire::{ClientMessage, ServerMessage, CAPABILITIES, PROTOCOL_VERSION};

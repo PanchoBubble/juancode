@@ -204,3 +204,60 @@ final class DaemonIdentityTests: XCTestCase {
         XCTAssertGreaterThan(started!, Date(timeIntervalSinceNow: -86_400))
     }
 }
+// MARK: - who ends the daemon
+
+extension DaemonIdentityTests {
+    /// The three states have to be distinguishable, and "this daemon does not report
+    /// ownership at all" has to be a fourth answer rather than being read as unowned.
+    func testOwnershipDecodesEveryStateAndTheAbsenceOfOne() throws {
+        let owned = try XCTUnwrap(DaemonIdentity(json: [
+            "pid": 4242, "ownerState": "owned", "ownerPid": 99, "ownerGraceMs": 120_000,
+        ]))
+        XCTAssertEqual(owned.owner.state, .owned)
+        XCTAssertEqual(owned.owner.pid, 99)
+        XCTAssertEqual(owned.owner.grace, 120)
+        XCTAssertTrue(owned.owner.willBeReaped)
+        XCTAssertTrue(owned.summary.contains("owned by pid 99"), owned.summary)
+
+        let unowned = try XCTUnwrap(DaemonIdentity(json: [
+            "pid": 1, "ownerState": "unowned", "ownerGraceMs": 120_000,
+        ]))
+        XCTAssertEqual(unowned.owner.state, .unowned)
+        XCTAssertNil(unowned.owner.pid)
+        XCTAssertFalse(unowned.owner.willBeReaped, "nothing will end an unclaimed daemon")
+
+        let orphaned = try XCTUnwrap(DaemonIdentity(json: [
+            "pid": 2, "ownerState": "orphaned", "ownerPid": 7, "ownerGraceMs": 120_000,
+        ]))
+        XCTAssertEqual(orphaned.owner.state, .orphaned)
+        XCTAssertTrue(orphaned.summary.contains("ORPHANED"), orphaned.summary)
+
+        // A daemon predating these keys: unknown, and it must not be flattened into
+        // `unowned`. One of those is a fact and the other is a missing field.
+        let silent = try XCTUnwrap(DaemonIdentity(json: ["pid": 3]))
+        XCTAssertNil(silent.owner.state)
+        XCTAssertFalse(silent.owner.willBeReaped)
+        XCTAssertTrue(silent.summary.contains("ownership unreported"), silent.summary)
+    }
+
+    /// A watchdog switched off is owned-but-unreaped, and saying "self-exits 0s after
+    /// it goes" would be a promise nothing keeps.
+    func testAZeroGraceIsNotAPromiseToReap() throws {
+        let daemon = try XCTUnwrap(DaemonIdentity(json: [
+            "pid": 5, "ownerState": "owned", "ownerPid": 11, "ownerGraceMs": 0,
+        ]))
+        XCTAssertFalse(daemon.owner.willBeReaped)
+        XCTAssertEqual(daemon.owner.summary, "owned by pid 11")
+    }
+
+    /// Ownership is not a staleness verdict. A daemon nobody claimed is exactly what
+    /// `cargo run -p juancoded` produces, and making the badge read `stale` for it
+    /// would cry wolf on the deliberate case.
+    func testOwnershipAloneIsNotAWarning() throws {
+        let daemon = try XCTUnwrap(DaemonIdentity(json: [
+            "pid": 6, "buildId": "abc-1", "ownerState": "unowned", "ownerGraceMs": 120_000,
+        ]))
+        let app = AppIdentity(launchedAt: Date(), buildId: "abc-1", sessionsPerProject: nil)
+        XCTAssertTrue(daemon.warnings(against: app, binaryModifiedAt: nil).isEmpty)
+    }
+}

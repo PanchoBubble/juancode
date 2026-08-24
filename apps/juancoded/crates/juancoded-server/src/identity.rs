@@ -20,10 +20,13 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+
+use crate::owner::{self, Ownership, Watchdog};
 
 /// Milliseconds since the epoch, or `None` for a clock we could not read.
 fn millis(t: SystemTime) -> Option<i64> {
@@ -55,11 +58,30 @@ pub struct DaemonIdentity {
     /// environment at boot, so an app launched later with a different
     /// `JUANCODE_SESSIONS_PER_PROJECT` is describing a value the daemon never saw.
     pub sessions_per_project: usize,
+    /// Who will end this daemon, and after how long. The one part of the identity
+    /// that is deliberately NOT frozen at boot: everything above is a fact about the
+    /// build, which cannot change while the process runs, whereas ownership changes
+    /// hands the moment a later launch claims a running daemon. `to_value` therefore
+    /// resolves it per frame, which is also the only way a client that just claimed
+    /// this daemon sees itself as the owner.
+    pub lifetime: Arc<Watchdog>,
 }
 
 impl DaemonIdentity {
     /// Capture the running process's identity. Called once, from `CoreHandles`.
     pub fn capture(sessions_per_project: usize) -> Self {
+        let owner_file = juancoded_persistence::db_path()
+            .parent()
+            .map(|d| d.join(owner::OWNER_FILE));
+        Self::capture_owned(
+            sessions_per_project,
+            Arc::new(Watchdog::from_env(std::process::id(), owner_file)),
+        )
+    }
+
+    /// `capture` with the lifetime contract handed in, for the tests that must not
+    /// read the developer's real ownership record.
+    pub fn capture_owned(sessions_per_project: usize, lifetime: Arc<Watchdog>) -> Self {
         let exe = std::env::current_exe().ok();
         let build_stamp_ms = exe
             .as_deref()
@@ -79,6 +101,7 @@ impl DaemonIdentity {
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned()),
             sessions_per_project,
+            lifetime,
         }
     }
 
@@ -87,6 +110,12 @@ impl DaemonIdentity {
     /// are different answers, and a client that wants to warn about staleness has to
     /// be able to tell them apart.
     pub fn to_value(&self) -> Value {
+        // Live, not captured: see `lifetime`.
+        let (state, owner_pid) = match self.lifetime.ownership(&owner::process_alive) {
+            Ownership::Unowned => ("unowned", None),
+            Ownership::Owned(pid) => ("owned", Some(pid)),
+            Ownership::Orphaned(pid) => ("orphaned", Some(pid)),
+        };
         json!({
             "pid": self.pid,
             "startedAt": self.started_at_ms,
@@ -96,6 +125,13 @@ impl DaemonIdentity {
             "buildId": self.build_id,
             "dataDir": self.data_dir,
             "sessionsPerProject": self.sessions_per_project,
+            // Who ends this process, in the client's words: `owned` (a live launch
+            // will reap it), `orphaned` (its launch is gone and the countdown is
+            // running), `unowned` (nobody claimed it, and nothing — including the
+            // daemon itself — will ever end it).
+            "ownerState": state,
+            "ownerPid": owner_pid,
+            "ownerGraceMs": i64::try_from(self.lifetime.grace.as_millis()).ok(),
         })
     }
 }
@@ -136,6 +172,19 @@ pub fn write_run_file(identity: &DaemonIdentity, port: u16, path: &Path) -> Resu
         "sessions_per_project",
         identity.sessions_per_project.to_string(),
     );
+    // The launcher writes its own ownership record; these two are the DAEMON's side
+    // of the same question, so `juancoded.sh status` can say whether the watchdog is
+    // armed without having to guess from the environment it cannot see.
+    line(
+        "owner_pid",
+        opt(identity.lifetime.spawn_owner.map(i64::from)),
+    );
+    line(
+        "owner_grace_ms",
+        i64::try_from(identity.lifetime.grace.as_millis())
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+    );
 
     // Write-then-rename: a reader that catches a half-written file would decide the
     // daemon is unidentifiable and offer to kill it, which is the one outcome this
@@ -163,9 +212,21 @@ pub fn remove_run_file(path: &Path) {
 mod tests {
     use super::*;
 
+    /// A watchdog with no owner and no record to read: what an identity test wants,
+    /// because `capture` would otherwise read the developer's live ownership record.
+    fn unowned() -> Arc<Watchdog> {
+        Arc::new(Watchdog {
+            daemon_pid: std::process::id(),
+            spawn_owner: None,
+            owner_file: None,
+            grace: owner::DEFAULT_GRACE,
+            poll: owner::DEFAULT_POLL,
+        })
+    }
+
     #[test]
     fn capture_reports_this_process() {
-        let id = DaemonIdentity::capture(40);
+        let id = DaemonIdentity::capture_owned(40, unowned());
         assert_eq!(id.pid, std::process::id());
         assert_eq!(id.sessions_per_project, 40);
         assert!(id.started_at_ms.unwrap() > 1_600_000_000_000);
@@ -176,7 +237,7 @@ mod tests {
 
     #[test]
     fn to_value_carries_every_field_a_client_compares() {
-        let id = DaemonIdentity::capture(7);
+        let id = DaemonIdentity::capture_owned(7, unowned());
         let v = id.to_value();
         for key in [
             "pid",
@@ -187,17 +248,43 @@ mod tests {
             "buildId",
             "dataDir",
             "sessionsPerProject",
+            "ownerState",
+            "ownerPid",
+            "ownerGraceMs",
         ] {
             assert!(v.get(key).is_some(), "serverInfo.daemon is missing {key}");
         }
         assert_eq!(v["sessionsPerProject"], 7);
+        // Nobody claimed this one, so the client is told plainly that nothing will
+        // end it — never left to infer it from a missing key.
+        assert_eq!(v["ownerState"], "unowned");
+        assert!(v["ownerPid"].is_null());
+    }
+
+    #[test]
+    fn a_live_owner_is_reported_as_owned() {
+        let id = DaemonIdentity::capture_owned(
+            1,
+            Arc::new(Watchdog {
+                daemon_pid: std::process::id(),
+                // This test process: alive by definition, so no clock is needed.
+                spawn_owner: Some(std::process::id()),
+                owner_file: None,
+                grace: std::time::Duration::from_secs(120),
+                poll: owner::DEFAULT_POLL,
+            }),
+        );
+        let v = id.to_value();
+        assert_eq!(v["ownerState"], "owned");
+        assert_eq!(v["ownerPid"], std::process::id());
+        assert_eq!(v["ownerGraceMs"], 120_000);
     }
 
     #[test]
     fn run_file_is_key_value_lines_a_shell_can_read() {
         let dir = std::env::temp_dir().join(format!("juancoded-run-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let id = DaemonIdentity::capture(0);
+        let id = DaemonIdentity::capture_owned(0, unowned());
         let path = dir.join(RUN_FILE);
         write_run_file(&id, 4290, &path).unwrap();
 
@@ -215,11 +302,18 @@ mod tests {
                 "build_id",
                 "data_dir",
                 "sessions_per_project",
+                "owner_pid",
+                "owner_grace_ms",
             ]
         );
         assert!(body.contains(&format!("pid={}\n", std::process::id())));
         assert!(body.contains("port=4290\n"));
         assert!(body.contains("sessions_per_project=0\n"));
+        // An unowned daemon writes an EMPTY owner_pid rather than omitting the line:
+        // a launcher reading a missing key cannot tell "unowned" from "an older
+        // daemon that did not report ownership at all".
+        assert!(body.contains("owner_pid=\n"));
+        assert!(body.contains("owner_grace_ms=120000\n"));
         // No temp file left behind for a reader to trip over.
         assert!(!dir.join("juancoded.run.tmp").exists());
 

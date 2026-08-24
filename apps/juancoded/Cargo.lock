@@ -632,6 +632,7 @@ dependencies = [
  "juancoded-persistence",
  "juancoded-state",
  "juancoded-vt",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

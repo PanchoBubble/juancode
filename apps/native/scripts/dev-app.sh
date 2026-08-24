@@ -23,6 +23,14 @@ NATIVE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${JUANCODE_CONFIG:-debug}"
 DAEMON="$NATIVE/scripts/juancoded.sh"
 
+# A stand-in for the app, and the seam `daemon-lifecycle-check.sh` drives. The daemon's
+# lifetime is a contract between THIS shell, juancoded.sh and juancoded; which binary
+# sits in the foreground is irrelevant to it. Testing that contract with the real app
+# would need a GUI and would fight the running instance for :4280, so the check runs a
+# sleeper here instead — and it runs it through this script, so what is under test is
+# the real ensure/trap/reap path rather than a copy of it.
+APP_BIN="${JUANCODE_APP_BIN:-}"
+
 # Daemon subcommands, forwarded so the lifetime of the core is reachable from the
 # same place you launch the app. See juancoded.sh for why adoption is the default.
 case "${1:-}" in
@@ -31,6 +39,7 @@ case "${1:-}" in
   --restart-daemon) exec "$DAEMON" restart ;;
 esac
 
+if [ -z "$APP_BIN" ]; then
 if [ "$CONFIG" = "release" ]; then
   swift build --package-path "$NATIVE" --product juancode -c release >&2
 else
@@ -70,6 +79,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+# Close the "no stand-in binary" block: everything above builds and assembles the real
+# .app, and a lifecycle check that only needs a foreground process skips all of it.
+APP_BIN="$APP/Contents/MacOS/juancode"
+fi
 
 # The core this launch will talk to, before the app opens a socket to it.
 #
@@ -91,20 +104,28 @@ PLIST
 # An empty token under `--print-bin` is not an oversight: that invocation ends the
 # moment it prints the path, so it can never reap anything, and claiming ownership it
 # cannot honour would arm a trap that fires while the caller is still about to launch
-# the app. It starts the daemon UNOWNED and says who has to stop it.
+# the app. It starts the daemon UNOWNED — no trap and no watchdog — and says who has to
+# stop it.
 if [ "$PRINT_BIN" = "1" ]; then LAUNCH_TOKEN=""; else LAUNCH_TOKEN="$$-$RANDOM"; fi
 DAEMON_STATE="$("$DAEMON" ensure "$LAUNCH_TOKEN" "$$")"
 
 # Reap only what this launch started or claimed. `reap` re-checks the token, so a
 # daemon another launch has taken over in the meantime is left alone.
 #
-# EXIT covers a normal quit and any `set -e` abort; INT and TERM cover ctrl-c and a
-# kill. All three funnel through one function, because a teardown that only some exit
-# paths reach is the orphan this whole change is about.
+# EXIT covers a normal quit (including Cmd-Q, which is just the app process exiting)
+# and any `set -e` abort; INT and TERM cover ctrl-c and a kill; HUP covers the terminal
+# window being closed under this shell, which otherwise skips the trap entirely and is
+# one of the ways an orphan got made. All of them funnel through one function, because a
+# teardown that only some exit paths reach is the orphan this whole change is about.
+#
+# What no trap can cover is this shell being SIGKILLed, and that is deliberately not
+# solved here: the daemon was handed this shell's pid at spawn and ends ITSELF once
+# that pid has been gone for JUANCODE_OWNER_GRACE_SECONDS (default 120s). Two layers,
+# because each one covers exactly what the other cannot.
 reap_daemon() { "$DAEMON" reap "$LAUNCH_TOKEN" || true; }
 if [ -n "$LAUNCH_TOKEN" ]; then
   case "$DAEMON_STATE" in
-    started*|claimed*) trap reap_daemon EXIT INT TERM ;;
+    started*|claimed*) trap reap_daemon EXIT INT TERM HUP ;;
   esac
 fi
 
@@ -117,12 +138,12 @@ if [ "$PRINT_BIN" = "1" ]; then
   # without the stamp the app falls back to comparing the daemon binary's mtime,
   # which still catches a rebuild but cannot prove an exact match.
   echo "juancode: export JUANCODE_BUILD_ID=$JUANCODE_BUILD_ID before launching for exact build matching" >&2
-  echo "$APP/Contents/MacOS/juancode"
+  echo "$APP_BIN"
 else
   # Deliberately NOT `exec`: exec replaces this shell, and a trap in a shell that no
   # longer exists never fires. Running the app as a child costs one bash process and
   # is what makes the teardown reachable. Env fidelity is unaffected — a child
   # inherits this shell's environment exactly, which is what the prime directive
   # needs; it is `open`/Finder that would have stripped it.
-  "$APP/Contents/MacOS/juancode" "$@"
+  "$APP_BIN" "$@"
 fi

@@ -32,10 +32,12 @@ public struct DaemonIdentity: Sendable, Equatable {
     public let dataDir: String?
     /// The per-project session cap the daemon actually enforces.
     public let sessionsPerProject: Int?
+    /// Who will end this daemon, as the daemon itself sees it right now.
+    public let owner: DaemonOwner
 
     public init(pid: Int, startedAt: Date?, exePath: String?, buildStamp: Date?,
                 version: String?, buildId: String?, dataDir: String?,
-                sessionsPerProject: Int?) {
+                sessionsPerProject: Int?, owner: DaemonOwner = DaemonOwner(state: nil, pid: nil, grace: nil)) {
         self.pid = pid
         self.startedAt = startedAt
         self.exePath = exePath
@@ -44,6 +46,7 @@ public struct DaemonIdentity: Sendable, Equatable {
         self.buildId = buildId
         self.dataDir = dataDir
         self.sessionsPerProject = sessionsPerProject
+        self.owner = owner
     }
 
     /// Decode the handshake's `daemon` object. Every field except `pid` is optional
@@ -59,6 +62,7 @@ public struct DaemonIdentity: Sendable, Equatable {
         self.buildId = (body["buildId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         self.dataDir = (body["dataDir"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         self.sessionsPerProject = body["sessionsPerProject"] as? Int
+        self.owner = DaemonOwner(json: body)
     }
 
     private static func date(_ raw: Any?) -> Date? {
@@ -74,6 +78,7 @@ public struct DaemonIdentity: Sendable, Equatable {
         if let sessionsPerProject {
             parts.append("keeps \(sessionsPerProject == 0 ? "all" : "\(sessionsPerProject)") per project")
         }
+        parts.append(owner.summary)
         return parts.joined(separator: " · ")
     }
 
@@ -82,6 +87,67 @@ public struct DaemonIdentity: Sendable, Equatable {
         f.dateFormat = "HH:mm:ss"
         return f
     }()
+}
+
+/// Who will end the daemon, and after how long.
+///
+/// A daemon nobody claimed is not broken — that is `cargo run -p juancoded`, and the
+/// deliberate answer there is "outlive everything". It is worth SAYING, though, because
+/// an unowned daemon is the one that becomes the stale 09:39 process at PPID 1 that
+/// this whole area of the code exists for.
+public struct DaemonOwner: Sendable, Equatable {
+    public enum State: String, Sendable {
+        /// A live launch owns it and will reap it when it exits.
+        case owned
+        /// Its launch is gone and the daemon's own countdown to self-exit is running.
+        case orphaned
+        /// Nobody claimed it. Nothing will end it.
+        case unowned
+    }
+
+    /// Nil for a daemon too old to report ownership at all, which is a different
+    /// answer from `unowned` and must not be flattened into it.
+    public let state: State?
+    /// The process that owns it, when there is one.
+    public let pid: Int?
+    /// How long the daemon waits after its owner is gone before ending itself. Zero
+    /// means the watchdog is switched off.
+    public let grace: TimeInterval?
+
+    public init(state: State?, pid: Int?, grace: TimeInterval?) {
+        self.state = state
+        self.pid = pid
+        self.grace = grace
+    }
+
+    /// Decode the ownership keys off the `daemon` object.
+    public init(json body: [String: Any]) {
+        self.state = (body["ownerState"] as? String).flatMap(State.init(rawValue:))
+        self.pid = body["ownerPid"] as? Int
+        self.grace = (body["ownerGraceMs"] as? Int).map { TimeInterval($0) / 1000 }
+    }
+
+    /// Whether anything at all will end this daemon.
+    public var willBeReaped: Bool {
+        guard let state else { return false }
+        return state != .unowned && (grace ?? 0) > 0
+    }
+
+    /// One clause for the identity line.
+    public var summary: String {
+        switch state {
+        case .owned:
+            let seconds = Int(grace ?? 0)
+            return pid.map { "owned by pid \($0)\(seconds > 0 ? ", self-exits \(seconds)s after it goes" : "")" }
+                ?? "owned"
+        case .orphaned:
+            return "ORPHANED — its launch is gone and it is shutting down"
+        case .unowned:
+            return "unowned — nothing will end it"
+        case nil:
+            return "ownership unreported"
+        }
+    }
 }
 
 /// What this app is, for the comparison. Deliberately tiny: a launch time and the
