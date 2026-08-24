@@ -157,7 +157,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     public var info: CoreServerInfo {
         let landed = lock.withLock { handshake }
         return CoreServerInfo(protocolVersion: landed?.protocolVersion ?? WireProtocol.version,
-                              capabilities: landed?.capabilities ?? [])
+                              capabilities: landed?.capabilities ?? [],
+                              daemon: landed?.daemon)
     }
 
     var backendName: String { "rust" }

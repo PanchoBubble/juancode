@@ -34,6 +34,11 @@ pub trait SessionsApi: Send + Sync {
     /// Which client drives the session's grid, or `None` when it is unclaimed. The
     /// wire layer needs it to tell an arriving connection what it missed.
     fn grid_owner(&self, id: &str) -> Option<ClientId>;
+    /// The per-project session cap this registry enforces. On the trait rather than
+    /// read back out of the environment by whoever wants it, because the two answers
+    /// diverge for any tree built with a config of its own — and the number is only
+    /// worth reporting if it is the one that actually prunes.
+    fn retention(&self) -> usize;
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError>;
     fn adopt_external(&self, req: AdoptRequest) -> Result<Option<SessionMeta>, StateError>;
@@ -71,6 +76,16 @@ pub trait SessionsApi: Send + Sync {
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
+
+    /// Persist every live session's newest bytes before the process goes away.
+    ///
+    /// On the trait because the daemon's shutdown path only ever holds a
+    /// `dyn SessionsApi`, and a flush it cannot reach is a flush that does not
+    /// happen. Scrollback is written on a throttle while a session runs, so without
+    /// this the last couple of seconds of every live session is lost on every exit —
+    /// which stopped being acceptable the moment quitting the app started ending the
+    /// daemon.
+    fn flush_all(&self) -> usize;
 }
 
 /// `ctx.resolve::<SessionsService>()` yields `Arc<dyn SessionsApi>`.
@@ -122,6 +137,10 @@ impl SessionsApi for SessionRegistry {
 
     fn grid_owner(&self, id: &str) -> Option<ClientId> {
         SessionRegistry::grid_owner(self, id)
+    }
+
+    fn retention(&self) -> usize {
+        SessionRegistry::retention(self)
     }
 
     fn create(&self, req: CreateRequest) -> Result<SessionMeta, StateError> {
@@ -185,6 +204,10 @@ impl SessionsApi for SessionRegistry {
 
     fn release_client(&self, owner: ClientId) {
         SessionRegistry::release_client(self, owner)
+    }
+
+    fn flush_all(&self) -> usize {
+        SessionRegistry::flush_all(self)
     }
 
     fn kill(&self, id: &str) -> Result<(), StateError> {

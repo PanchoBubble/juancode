@@ -169,6 +169,15 @@ Schema (`crates/juancoded-persistence/src/schema.rs`): `sessions`, `scrollback`
 `cols`/`rows` are not metadata — without them the bytes can only be replayed by
 guessing a width, and a wrong guess garbles every hard wrap in the history.
 
+Beside the DB, while the daemon is listening: `juancoded.run`, `key=value` lines
+carrying the pid, port, build stamp, `JUANCODE_BUILD_ID` and effective
+`sessions_per_project` (`crates/juancoded-server/src/identity.rs`). It exists so a
+launcher can tell whether the running daemon matches the checkout **without opening a
+socket** — `key=value` rather than JSON precisely because the only reader is a shell
+script, and a check that needs a JSON parser it may not have is a check that gets
+skipped. Written on a successful bind, removed on a clean stop; a crash leaves it
+behind, which is why every reader confirms the pid is alive first.
+
 ## Conformance
 
 Measured against `apps/wire-conformance` (20 golden scenarios, protocol v1) by
@@ -219,6 +228,47 @@ oracle sidecar owns 4281, so running all three at once is never a port fight.
 The daemon refuses to start if another instance is already listening on its socket,
 and binds TCP before touching the socket path — a failed second start used to unlink
 the live instance's socket and leave it running but unreachable.
+
+### It outlives the app, so it has to say who it is
+
+A daemon holding ptys must survive an app relaunch — that is the point of a separate
+process. The cost is that an app can reconnect to a daemon started hours ago, under
+an older build and a different environment, and show its mirror as if it were fresh.
+So `serverInfo` carries a `daemon` object — pid, boot time, binary path, build stamp,
+`buildId`, data dir, and the retention it actually enforces — and the client compares
+it against its own launch (`DaemonIdentity` in `apps/native/Sources/JuancodeClient`).
+A mismatch shows in the core badge as `rust · stale` rather than being invisible.
+
+`JUANCODE_SESSIONS_PER_PROJECT` is the one that bites: it is read **once, at daemon
+start**, so setting it on an app launch line does nothing until the daemon restarts.
+That is why the effective value goes out on the handshake instead of being inferred.
+
+`apps/native/scripts/juancoded.sh` (`ensure|reap|status|stop|restart`) owns the
+lifetime from the app side: a launch that starts a daemon owns it and reaps it when
+the app exits (`SIGTERM`, grace period, then `SIGKILL`), and a daemon it did not start
+is reported but never touched. Ownership is recorded in `juancoded.owner` beside the
+run file — separate files because they have separate writers, and one process must
+never be editing the other's record.
+
+A trap cannot fire in a shell that was `SIGKILL`ed, though, and macOS has no
+`PDEATHSIG`. So the launcher also hands its pid over at spawn and `owner.rs` watches
+it: once the owner has been gone for `JUANCODE_OWNER_GRACE_SECONDS` (default 120s) the
+daemon ends **itself**, through the same `select!` arm shape as the signal handler so
+the shutdown path is one path and not two. A daemon nobody declared an owner for —
+`cargo run -p juancoded` — reads as unowned and the watchdog is inert: ownership is
+declared, never inferred, because the thing being ended is somebody's ptys. The live
+verdict rides on `serverInfo.daemon` as `ownerState` / `ownerPid` / `ownerGraceMs`.
+
+That shutdown path calls `SessionsApi::flush_all` before the tree unwinds. Scrollback
+is persisted on a 2-second throttle while a session runs and no plugin unmount writes
+it (teardown is effects going away; there is no unmount hook), so without it every exit
+silently truncated every live transcript by up to two seconds. Invisible while the
+daemon outlived the app; a lost transcript on every quit now that it does not.
+
+That teardown is why `main` takes **SIGTERM** through the same orderly shutdown as
+ctrl-c. Default SIGTERM disposition is immediate death with no unwinding, which would
+have made the launcher's grace period a wait over an already-dead process — the exact
+torn-write-mid-flush the grace period exists to avoid.
 
 Then point the Swift client at it:
 

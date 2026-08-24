@@ -251,6 +251,85 @@ JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control di
 scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
 ```
 
+### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
+
+On the Swift core there is nothing to manage: the core is in-process and launches and
+dies with the app. On the Rust core, `juancoded` is a separate process — and nothing
+used to own its lifetime. It drifted to `PPID 1` and every later app launch silently
+reconnected to it: an older build, with the environment it had been started with. The
+app's session list is a mirror of what that daemon reports, so it looked authoritative
+while being hours stale, and a `JUANCODE_SESSIONS_PER_PROJECT` set on the app's launch
+line pruned nothing because the daemon never saw it.
+
+**The invariant now is: after a launch, the daemon is from the current source and is
+younger than the app.** `scripts/dev-app.sh` gets there with two rules.
+
+1. **Always rebuild.** `cargo build` runs before the daemon starts, in the profile
+   `JUANCODE_CONFIG` selects. Cargo does the change detection and no-ops when nothing
+   moved; a build failure **fails the launch** rather than falling back to the binary
+   from last time, because that stale binary is the entire bug.
+2. **A launch that starts a daemon owns it, and reaps it on exit.** A trap on
+   `EXIT`/`INT`/`TERM`/`HUP` tears it down on a normal quit, a Cmd-Q, a Ctrl-C, a
+   closed terminal window and a crash alike, by the exact recorded pid — never a
+   blanket `pkill juancoded`, which would end another checkout's daemon and its ptys.
+   Teardown is `SIGTERM`, a grace period (`JUANCODE_DAEMON_GRACE`, default 10s) so the
+   store flushes, then `SIGKILL`.
+3. **The daemon enforces rule 2 from its own side.** A trap cannot fire in a shell that
+   was `SIGKILL`ed, and macOS has no `PDEATHSIG`, so the launch hands its pid to the
+   daemon at spawn (`JUANCODE_OWNER_PID`) and the daemon ends **itself** once that pid
+   has been gone for `JUANCODE_OWNER_GRACE_SECONDS` — default **120s**, deliberately
+   generous because this countdown only ever runs after a bad death, and a short one
+   would end live ptys during a legitimate relaunch. It goes out through the same
+   orderly path as `SIGTERM`, so the store is flushed either way. A relaunch that
+   claims the daemon inside the window cancels the countdown.
+
+   Rule 3 only ever applies to a daemon somebody **claimed**. An unowned one —
+   `cargo run -p juancoded`, or one you are keeping alive on purpose — is never handed
+   an owner, so its watchdog is inert and it outlives everything. Ownership is declared,
+   never inferred from "it happens to be on my port".
+
+**The cost, plainly: live agent sessions no longer survive quitting the app.** That is
+the trade for never being able to read a stale mirror.
+
+A daemon this launch did **not** start is foreign. It is neither adopted nor killed —
+the script says so loudly and the boot handshake flags it on screen. Ending somebody
+else's daemon ends somebody else's ptys, so that is always an explicit command:
+
+```sh
+scripts/dev-app.sh --daemon-status    # what is running, who owns it, does it match the checkout
+scripts/dev-app.sh --stop-daemon      # end it, after confirming
+scripts/dev-app.sh --restart-daemon   # end it, then start a fresh unowned one
+```
+
+(One exception to "foreign": a daemon whose owning launch is gone — killed with
+`SIGKILL`, so its trap never ran — reads as unowned, and a launch claims it if the
+build matches. Otherwise a crashed launch would strand the daemon forever.)
+
+Whatever happens, the app says so: the daemon reports its build, boot time and
+effective retention on the `serverInfo` handshake, and a mismatch shows in the core
+badge as `rust · stale`, with the full reason in the badge popover and Settings →
+Core. **Retention in particular is daemon-scoped** — `JUANCODE_SESSIONS_PER_PROJECT`
+is read once, at daemon start, so setting it on an app launch line changes nothing
+until the daemon restarts, and the badge now says exactly that.
+
+The handshake carries the lifetime too: `serverInfo.daemon` reports `ownerState`
+(`owned` / `orphaned` / `unowned`), `ownerPid` and `ownerGraceMs`, so "nothing will
+ever end this daemon" is something the app can say rather than something you find out
+two hours later in `ps`.
+
+`scripts/dev-app.sh --print-bin` is the one path that cannot reap: it ends the moment
+it prints the path, so it starts the daemon **unowned** — no trap and no watchdog — and
+tells you to stop it yourself. The next full `dev-app.sh` claims that daemon if the
+build still matches, and claiming it also arms its watchdog.
+
+`scripts/daemon-lifecycle-check.sh` is the end-to-end proof, on its own port (4390) and
+its own data dir so it cannot touch anything real: it launches and quits (no daemon
+left), launches and `SIGKILL`s the launch (the daemon self-exits), and starts a foreign
+daemon then launches and quits over it (it survives, and never self-exits, because
+nobody claimed it). A sleeper stands in for the app — the lifetime is a contract
+between the launch shell, `juancoded.sh` and `juancoded`, and the real app would need a
+window server and would fight the running instance for `:4280`.
+
 ### Other targets
 
 ```sh

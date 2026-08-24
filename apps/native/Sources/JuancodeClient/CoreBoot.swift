@@ -51,16 +51,33 @@ public struct CoreSelection: Sendable, Equatable {
     public let databasePath: String
     /// Where the Rust daemon was looked for, shown whether or not it answered.
     public let rustCoreURL: String
+    /// Who answered, when the answer came from a separate process. Nil on the Swift
+    /// core and on any daemon too old to identify itself.
+    public let daemon: DaemonIdentity?
+    /// Everything wrong with the daemon that answered, worst first. Empty is the
+    /// normal case and the only one that needs no explaining.
+    ///
+    /// A stale daemon is NOT a boot failure: it owns live ptys, and refusing to
+    /// connect would end somebody's running sessions to fix a reporting problem. It
+    /// rides here beside `unreachableReason` so the badge and the Settings pane say
+    /// so instead.
+    public let daemonWarnings: [DaemonWarning]
 
     public init(requested: CoreBackend, active: CoreBackend, source: Source,
-                unreachableReason: String?, databasePath: String, rustCoreURL: String) {
+                unreachableReason: String?, databasePath: String, rustCoreURL: String,
+                daemon: DaemonIdentity? = nil, daemonWarnings: [DaemonWarning] = []) {
         self.requested = requested
         self.active = active
         self.source = source
         self.unreachableReason = unreachableReason
         self.databasePath = databasePath
         self.rustCoreURL = rustCoreURL
+        self.daemon = daemon
+        self.daemonWarnings = daemonWarnings
     }
+
+    /// Whether the core that answered is not the one this checkout would have built.
+    public var daemonIsStale: Bool { !daemonWarnings.isEmpty }
 
     public var didFallBack: Bool { requested != active }
 
@@ -116,18 +133,29 @@ public enum CoreBoot {
         },
         makeRust: (String) throws -> any CoreClient = { url in
             try RustCoreClient.connect(baseURL: url)
-        }
+        },
+        appIdentity: AppIdentity = .current
     ) -> BootedCore {
         let (requested, source) = CoreSelection.resolve(persisted: persisted, override: override)
         if requested == .rust {
             do {
                 let client = try makeRust(rustCoreURL)
+                // Asked and answered at boot, not on demand: the daemon's build stamp
+                // is what it was when IT started, and the whole comparison is against
+                // that. Deferring it would leave the first, most misleading session
+                // list on screen unlabelled.
+                let daemon = client.info.daemon
+                let warnings = daemon?.warnings(against: appIdentity) ?? []
+                for warning in warnings {
+                    NSLog("juancode: rust core at \(rustCoreURL) — \(warning.headline). \(warning.detail)")
+                }
                 return BootedCore(
                     client: client,
                     selection: CoreSelection(requested: .rust, active: .rust, source: source,
                                              unreachableReason: nil,
                                              databasePath: Config.databasePath(for: .rust),
-                                             rustCoreURL: rustCoreURL),
+                                             rustCoreURL: rustCoreURL,
+                                             daemon: daemon, daemonWarnings: warnings),
                     degradedReason: nil,
                     corruptDbPath: Config.databasePath(for: .rust))
             } catch {

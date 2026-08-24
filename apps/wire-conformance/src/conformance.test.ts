@@ -40,6 +40,7 @@ let core: CoreUnderTest;
 let workspace: Workspace;
 let ctx: RunContext;
 let protocolVersion: number | null = null;
+let daemon: Record<string, unknown> | undefined;
 const outcomes: Outcome[] = [];
 
 /** What this machine can actually provide a scenario. A pty always (the fake
@@ -64,6 +65,9 @@ beforeAll(async () => {
   const info = readServerInfo(first);
   probe.close();
   protocolVersion = info.protocolVersion;
+  // Kept raw: `readServerInfo` validates the frame this suite drives the core with,
+  // and the daemon object is about the PROCESS rather than the protocol.
+  daemon = (first as Record<string, unknown>).daemon as Record<string, unknown> | undefined;
   ctx = {
     wsUrl: core.wsUrl,
     workspace,
@@ -108,6 +112,21 @@ describe(`wire protocol v${spec.protocolVersion}`, () => {
       SUITE_REQUIREMENTS,
     );
     expect(verdict.ok, verdict.ok ? "" : verdict.reason).toBe(true);
+  });
+
+  it("reports who will end the core process, or is an in-process core", () => {
+    // An out-of-process core can outlive its client, go stale, and be read as
+    // authoritative while it is hours behind. The handshake has to say who will end
+    // it — and "nobody" is a legitimate answer that still has to be SAID, because an
+    // unowned core is exactly the one that becomes the orphan at PPID 1.
+    if (!daemon) return; // in-process core: it cannot outlive its own app
+    expect(["owned", "orphaned", "unowned"]).toContain(daemon.ownerState);
+    expect(typeof daemon.ownerGraceMs).toBe("number");
+    // This harness spawns the daemon itself and never claims it, so it must read as
+    // unowned: a harness-started core that read as owned would be one the watchdog
+    // could decide to shut down underneath a running scenario.
+    expect(daemon.ownerState).toBe("unowned");
+    expect(daemon.ownerPid).toBeNull();
   });
 
   it("is refused by a client that speaks a different protocol version", () => {

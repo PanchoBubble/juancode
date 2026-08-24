@@ -77,6 +77,15 @@ pub fn db_path() -> PathBuf {
 /// How many sessions a project keeps. 0 means unlimited, matching the Swift core's
 /// `JUANCODE_SESSIONS_PER_PROJECT=0` escape hatch (the conformance suite sets it so a
 /// scenario's session is still there when the next step addresses it).
+///
+/// **This is daemon-scoped, and read exactly once, at daemon start.** The daemon
+/// outlives the app: setting `JUANCODE_SESSIONS_PER_PROJECT` on an app launch line
+/// changes nothing about a daemon that was already running, which is how a cap of 40
+/// once pruned sessions somebody had just raised the cap to keep. The value this
+/// returns is therefore only the truth for the process that called it — which is why
+/// the effective cap goes out on `serverInfo.daemon.sessionsPerProject` and into the
+/// run file, so a client can compare its own environment against the daemon's instead
+/// of assuming they agree.
 pub fn sessions_per_project() -> usize {
     std::env::var("JUANCODE_SESSIONS_PER_PROJECT")
         .ok()
