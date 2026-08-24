@@ -142,7 +142,13 @@ let package = Package(
         ),
         .testTarget(
             name: "JuancodeClientTests",
-            dependencies: ["JuancodeClient", "JuancodePersistence"]
+            dependencies: [
+                "JuancodeClient", "JuancodePersistence",
+                // A stand-in daemon over a real socket, so the frames the client
+                // sends are asserted as frames rather than as mocked method calls.
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
+            ]
         ),
         .testTarget(
             name: "JuancodeServerTests",

@@ -117,7 +117,8 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil)
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: nil, onSeedFailure: nil)
         XCTAssertTrue(session.isRunning)
         XCTAssertEqual(session.meta.provider, .claude)
         // The row reached the desktop mirror, which is what the sidebar reads.
@@ -164,7 +165,8 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil)
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
         XCTAssertTrue(session.resizeLocal(cols: 95, rows: 28))
         let owned = expectation(description: "the grid names an owner")
@@ -178,6 +180,36 @@ final class RustCoreLiveTests: XCTestCase {
         print("grid owner after our resize: \(session.gridOwner() ?? "nil")")
     }
 
+    /// The dispatch path, end to end: a prompt handed to `create` is delivered by
+    /// the DAEMON — pasted, confirmed on screen, then submitted with its own Enter.
+    ///
+    /// The fake agent only acts on a line it has been given in full, so the title it
+    /// sets is proof of both halves: that the text arrived, and that an Enter
+    /// followed it. This is the regression the whole change is about — the client
+    /// used to leave `initialInput` off the frame and paste from the app instead,
+    /// which typed the prompt into a still-booting TUI and never submitted it.
+    func testAPromptOnTheCreateIsDeliveredAndSubmittedByTheDaemon() throws {
+        try XCTSkipUnless(core.supports(.sessionMeta), "this daemon has no sessionMeta capability")
+        let seedFailed = expectation(description: "no seed failure was reported")
+        seedFailed.isInverted = true
+        let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
+                                      cols: 100, rows: 30,
+                                      opts: SpawnOptions(skipPermissions: true, model: nil),
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: "TITLE seeded-by-the-core",
+                                      onSeedFailure: { _, reason in
+                                          XCTFail("the seed was not delivered: \(reason)")
+                                          seedFailed.fulfill()
+                                      })
+        defer { session.kill() }
+        let ran = expectation(description: "the seeded line was submitted, not just typed")
+        _ = session.onMetaChange { meta in
+            if meta.title.contains("seeded-by-the-core") { ran.fulfill() }
+        }
+        wait(for: [ran], timeout: 60)
+        wait(for: [seedFailed], timeout: 1)
+    }
+
     /// On a `sessionMeta` core, a title the CLI sets for itself reaches the app
     /// without re-attaching — the frame that stops a sidebar row being frozen.
     func testSessionMetaFrameCarriesTheCliTitle() throws {
@@ -185,7 +217,8 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil)
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
         let renamed = expectation(description: "the CLI's own title arrived")
         _ = session.onMetaChange { meta in

@@ -75,9 +75,22 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                        opts: SpawnOptions, worktreePath: String?,
-                       dispatchId: String?) throws -> any LiveSession {
-        try state.registry.create(provider: provider, cwd: cwd, cols: cols, rows: rows,
-                                 opts: opts, worktreePath: worktreePath, dispatchId: dispatchId)
+                       dispatchId: String?, initialInput: String?,
+                       onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
+        let session = try state.registry.create(provider: provider, cwd: cwd, cols: cols, rows: rows,
+                                                opts: opts, worktreePath: worktreePath,
+                                                dispatchId: dispatchId)
+        // In-process, so the core's delivery engine is a method call: this IS
+        // `Session.autoSubmit`, the same verified paste-then-Enter the daemon runs
+        // for a create that carries `initialInput`.
+        if let initialInput, !initialInput.isEmpty {
+            let id = session.id
+            session.autoSubmit(initialInput) { outcome in
+                guard case let .failed(reason) = outcome else { return }
+                onSeedFailure?(id, reason)
+            }
+        }
+        return session
     }
 
     @discardableResult

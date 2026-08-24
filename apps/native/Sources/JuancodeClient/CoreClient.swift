@@ -36,10 +36,26 @@ public protocol CoreClient: AnyObject, Sendable {
 
     /// Spawn a new agent session (wire `create`). Blocking: resolves the CLI
     /// through a login shell and forkpty()s, so callers keep it off the main actor.
+    ///
+    /// `initialInput` is an opening prompt for the core to *deliver*, not bytes to
+    /// write: the core pastes it, confirms the paste is in the CLI's input box, and
+    /// sends the submitting Enter separately once it is. Both cores implement that
+    /// (`Session.autoSubmit`, the daemon's `deliver_seed`), and handing the text to
+    /// `create` is the only thing that reaches them — a caller that instead calls
+    /// `LiveSession.autoSubmit` on the returned session reaches the verified engine
+    /// only in-process. On a remote core that call degrades to a paste plus a CR
+    /// 120ms later, which arrives while the CLI is still booting, and the prompt is
+    /// left typed and unsent with nothing running: the dispatch stall.
+    ///
+    /// `onSeedFailure` is `(sessionId, reason)` and fires only when a delivery did
+    /// not submit. There is no success callback on purpose: the daemon reports a
+    /// failed seed and says nothing about one that worked, so a success signal here
+    /// would exist on one core and be invented on the other.
     @discardableResult
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                 opts: SpawnOptions, worktreePath: String?,
-                dispatchId: String?) throws -> any LiveSession
+                dispatchId: String?, initialInput: String?,
+                onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession
 
     /// Spawn an editor session rooted in `parent`'s effective working directory.
     /// The in-app twin of the wire `openEditor`, which spawns an ephemeral pty

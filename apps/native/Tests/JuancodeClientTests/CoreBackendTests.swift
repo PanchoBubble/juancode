@@ -274,7 +274,8 @@ final class FakeCore: CoreClient, @unchecked Sendable {
     }
 
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int, opts: SpawnOptions,
-                worktreePath: String?, dispatchId: String?) throws -> any LiveSession { unreached() }
+                worktreePath: String?, dispatchId: String?, initialInput: String?,
+                onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession { unreached() }
     func createEditorSession(parent: SessionMeta, file: String?, line: Int?, cols: Int,
                              rows: Int) throws -> any LiveSession { unreached() }
     func resume(_ meta: SessionMeta, cols: Int, rows: Int,

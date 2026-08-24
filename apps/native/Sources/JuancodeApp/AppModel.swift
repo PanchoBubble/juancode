@@ -1601,25 +1601,30 @@ final class AppModel {
             // session opens short" / the Oracle dock garble). Oracle passes its dock
             // size explicitly since the dock is narrower than the main window.
             let grid: (cols: Int, rows: Int) = (cols != nil && rows != nil) ? (cols!, rows!) : TerminalGrid.spawn
-            let s = try await Task.detached(priority: .userInitiated) {
+            // The opening prompt goes ON the create, so whichever core is running
+            // delivers it with its own verified paste-then-Enter: in-process that is
+            // `Session.autoSubmit`, on the daemon it is `deliver_seed`. Seeding the
+            // returned session from here instead reached the verified engine only on
+            // the Swift core — on the rust core `LiveSession.autoSubmit` is a blind
+            // paste plus a CR 120ms later, so a dispatched agent sat with its prompt
+            // typed into a still-booting TUI and never ran it.
+            let seed = (initialInput?.isEmpty ?? true) ? nil : initialInput
+            let s = try await Task.detached(priority: .userInitiated) { [weak self] in
                 try core.create(
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
                     opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt,
-                    dispatchId: dispatchId)
+                    dispatchId: dispatchId, initialInput: seed,
+                    // A prompt that never reached the agent is said out loud: the
+                    // failure mode being guarded against is a session that looks
+                    // started and is silently idle.
+                    onSeedFailure: { sessionId, reason in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            let title = self.core.session(sessionId)?.title ?? "the session"
+                            self.errorMessage = "Couldn't deliver the prompt to \(title): \(reason)"
+                        }
+                    })
             }.value
-            // Seed the session with an initial prompt once its TUI is up — the same
-            // mechanism the WS `.create` path uses (Session.autoSubmit). Surface a
-            // delivery failure instead of leaving the session silently idle with an
-            // unsent prompt (the dispatch-loop bug we're guarding against).
-            if let initialInput, !initialInput.isEmpty {
-                let title = s.meta.title
-                s.autoSubmit(initialInput) { [weak self] outcome in
-                    guard case .failed(let reason) = outcome else { return }
-                    Task { @MainActor in
-                        self?.errorMessage = "Couldn't deliver the prompt to \(title): \(reason)"
-                    }
-                }
-            }
             refresh()
             if select {
                 selection = s.id

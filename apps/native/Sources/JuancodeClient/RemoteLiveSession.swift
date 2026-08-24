@@ -107,10 +107,15 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         paste(text, thenEnter: false, onResult: onResult)
     }
 
-    /// The opening prompt, delivered once the CLI has printed something — the only
-    /// "the TUI is up" signal available without the core's model. No land check and
-    /// no retry across the boot window, so a prompt that arrives while the CLI is
-    /// still drawing is lost rather than re-sent.
+    /// NOT the path an opening prompt takes. A prompt belongs on the `create` frame,
+    /// which is what reaches the core's verified engine; this is what is left for a
+    /// caller that seeds a session it did not create, and it is worse in the way that
+    /// matters. "The CLI has printed something" is the only "the TUI is up" signal
+    /// available without the core's model, and it fires on the startup banner —
+    /// seconds before the input box is interactive. There is no land check and no
+    /// retry, so the prompt is typed into a booting TUI and the CR that follows is
+    /// read by nobody: the agent sits with it unsent (the dispatch stall,
+    /// juancode-t0vj).
     func autoSubmit(_ text: String, onResult: (@Sendable (AutoSubmitOutcome) -> Void)?) {
         guard !text.isEmpty else { onResult?(.submitted); return }
         waitForFirstOutput(timeout: 20) { [weak self] sawOutput in

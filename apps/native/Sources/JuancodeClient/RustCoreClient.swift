@@ -39,6 +39,14 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     private var createdListeners: [Int: (any LiveSession) -> Void] = [:]
     private var nextListenerToken = 1
     private var pending: LifecycleWaiter?
+    /// The session the in-flight lifecycle request is about, so an error frame for
+    /// some other session is not read as its answer. Nil for a `create`, which has no
+    /// session id until it is acked.
+    private var pendingSessionId: String?
+    /// Per-session reporters for a seed the daemon accepted on `create` and could not
+    /// deliver, keyed by session id. One entry lives from the create's ack until the
+    /// daemon says the delivery failed, or until the session exits.
+    private var seedFailureReporters: [String: @Sendable (String, String) -> Void] = [:]
     /// Sessions we have asked the core about but not yet heard back on, so one
     /// activity burst does not produce a dozen `attach` frames.
     private var probing: Set<String> = []
@@ -181,7 +189,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                        opts: SpawnOptions, worktreePath: String?,
-                       dispatchId: String?) throws -> any LiveSession {
+                       dispatchId: String?, initialInput: String?,
+                       onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
         let pinsModel = supports(.spawnModel)
         if opts.model != nil, !pinsModel {
             // The pin is dropped rather than faked: a core that does not advertise
@@ -209,7 +218,21 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         ]
         if let dispatchId { frame["dispatchId"] = dispatchId }
         if pinsModel, let model = opts.model, !model.isEmpty { frame["model"] = model }
-        return try lifecycle(frame, operation: "create", timeout: 60)
+        // The prompt travels on the create so the DAEMON delivers it: it owns the pty
+        // and the parsed screen, so it is the only side that can confirm the paste
+        // landed before pressing Enter. Delivering it from here instead is
+        // `RemoteLiveSession.autoSubmit`, a blind paste plus a CR 120ms after the
+        // CLI's first byte of output, which is seconds before its input box exists —
+        // the prompt was typed into a booting TUI and never submitted.
+        let seed = (initialInput?.isEmpty ?? true) ? nil : initialInput
+        if let seed { frame["initialInput"] = seed }
+        let handle = try lifecycle(frame, operation: "create", timeout: 60)
+        // Registered after the ack because the daemon's verdict comes minutes later,
+        // as its own frame, long after this create was answered.
+        if seed != nil, let onSeedFailure {
+            lock.withLock { seedFailureReporters[handle.id] = onSeedFailure }
+        }
+        return handle
     }
 
     @discardableResult
@@ -475,6 +498,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "exit":
             guard let id = sessionId else { return }
+            // Nothing more will be said about a seed for a session that is gone: the
+            // daemon reports an exit during a delivery as the delivery's own failure,
+            // which has already been routed by the time this arrives.
+            lock.withLock { seedFailureReporters[id] = nil }
             let code = body["exitCode"] as? Int
             if let handle = handleFor(id) {
                 handle.apply(exitCode: code)
@@ -509,6 +536,20 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "error":
             let message = body["message"] as? String ?? "unknown core error"
+            // A seed the daemon could not deliver is reported as an error frame for
+            // that session, arriving long after the create it belongs to was acked. It
+            // is nobody's answer, so it must reach the session's own reporter rather
+            // than fail whichever lifecycle request happens to be in flight — and an
+            // error naming the session a request IS about stays that request's answer.
+            if let id = sessionId,
+               let report = lock.withLock({ () -> (@Sendable (String, String) -> Void)? in
+                   guard pendingSessionId != id else { return nil }
+                   return seedFailureReporters.removeValue(forKey: id)
+               }) {
+                NSLog("juancode: rust core did not deliver the prompt for \(id): \(message)")
+                report(id, message)
+                return
+            }
             if let id = sessionId, lock.withLock({ probing.remove(id) }) != nil {
                 // A probe for a session the daemon does not have: expected, and not
                 // the answer to whatever lifecycle request may be in flight.
@@ -599,8 +640,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         lifecycleGate.lock()
         defer { lifecycleGate.unlock() }
         let waiter = LifecycleWaiter()
-        lock.withLock { pending = waiter }
-        defer { lock.withLock { pending = nil } }
+        let target = frame["sessionId"] as? String
+        lock.withLock {
+            pending = waiter
+            pendingSessionId = target
+        }
+        defer { lock.withLock { pending = nil; pendingSessionId = nil } }
         connection.send(frame)
         guard waiter.wait(timeout: timeout) else {
             throw CoreRemoteError(
