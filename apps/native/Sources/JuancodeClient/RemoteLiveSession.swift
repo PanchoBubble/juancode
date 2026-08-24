@@ -227,6 +227,12 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
     /// There is no sleep frame on the wire (the Swift core serves it over REST), so
     /// this is a kill plus the dormant flag on the mirror row: the pty goes, the row
     /// stays resumable, which is what dormant means.
+    /// The reason is a local diagnostic (it goes to the app's own activity log);
+    /// a remote session can only ask the server to sleep it.
+    func markDormant(reason: SessionSleepReason, audit: [String: String]) {
+        markDormant()
+    }
+
     func markDormant() {
         let (row, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             storedMeta.dormant = true

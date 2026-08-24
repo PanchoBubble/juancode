@@ -59,7 +59,10 @@ public final class AppState: @unchecked Sendable {
                                                   log: activityLog))
         self.registry = registry
         self.prTracking = PrTrackingEngine(registry: registry, store: store, activityLog: activityLog)
-        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue)
+        // The reaper writes its own trail into the same log the sessions use, so a
+        // kill and the session's last minutes read in one file.
+        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue,
+                                          log: activityLog)
         self.sessionReaper = sessionReaper
         Task { await sessionReaper.start() }
         // Any session still "running" in the db is stale — its pty died with the
@@ -139,7 +142,12 @@ public final class AppState: @unchecked Sendable {
         // kill so the row `handleExit` finalises reads "sleeping, resumable", and
         // record the ids so the next boot keeps them surfaced exactly like crash
         // orphans. Quitting the app used to bury all open sessions as dead rows.
-        for session in live { session.markDormant() }
+        // Labelled `quit`, not left bare: this path kills every live pty whatever
+        // the agent was doing, and an unlabelled bulk sleep here is exactly what
+        // read as a 25-session reap in the log (oracle-qb5).
+        for session in live {
+            session.markDormant(reason: .quit, audit: ["activity": session.activity.rawValue])
+        }
         UserDefaults.standard.set(live.map(\.id), forKey: Self.sleptOnQuitKey)
         let group = DispatchGroup()
         var cancels: [() -> Void] = []

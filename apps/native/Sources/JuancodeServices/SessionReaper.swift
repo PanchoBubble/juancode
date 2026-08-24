@@ -56,6 +56,20 @@ public struct ReapSample: Sendable, Equatable {
     /// so growth is the thing that means the agent produced something, while the
     /// mtime also moves on flushes that add no records.
     public var transcriptSizeBytes: Int?
+    /// ms-since-epoch of the last pty *output* byte, and the total bytes this
+    /// session has produced (`Session.lastOutputMs` / `outputBytes`). Input is not
+    /// a liveness signal for a dispatched agent — nobody types at one for hours —
+    /// so the streak also watches what the pty *says*. Read as a rate, never as
+    /// "any byte at all": a settled TUI still repaints itself, and keying on that
+    /// is what defeated the old GUI idle sweep this reaper replaced.
+    public var lastOutputMs: Int
+    public var outputBytes: Int
+    /// ms-since-epoch of the last moment the `ActivityDetector` classified this
+    /// session as non-idle (`Session.lastBusyMs`). `activity` is a snapshot at
+    /// sweep time; a whole turn can start and finish inside one 90s sweep gap and
+    /// leave it reading idle. This is the same detector's memory of that turn — the
+    /// one notion of "busy" in the codebase, not a second one.
+    public var lastBusyMs: Int
     /// An agent tool call the CLI opened and hasn't resolved. Unlike `activity`,
     /// this is not capped by `ActivityDetector.toolHoldCapMs`: a delegated subagent
     /// or a long Bash run goes screen- and transcript-quiet, and past that 30-min
@@ -73,6 +87,9 @@ public struct ReapSample: Sendable, Equatable {
         descendantCount: Int,
         cpuTimeMs: Int,
         transcriptSizeBytes: Int?,
+        lastOutputMs: Int = 0,
+        outputBytes: Int = 0,
+        lastBusyMs: Int = 0,
         hasPendingToolUse: Bool = false,
         isProtected: Bool = false
     ) {
@@ -83,6 +100,9 @@ public struct ReapSample: Sendable, Equatable {
         self.descendantCount = descendantCount
         self.cpuTimeMs = cpuTimeMs
         self.transcriptSizeBytes = transcriptSizeBytes
+        self.lastOutputMs = lastOutputMs
+        self.outputBytes = outputBytes
+        self.lastBusyMs = lastBusyMs
         self.hasPendingToolUse = hasPendingToolUse
         self.isProtected = isProtected
     }
@@ -101,11 +121,20 @@ public enum SessionReapPolicy {
         /// Transcript size at idle-entry; growth past it means the agent produced
         /// records. Nil when the transcript couldn't be located.
         public var transcriptSizeBytes: Int?
-        /// When the *previous* sweep sampled, and the tree CPU it saw. The CPU
-        /// signal is a rate between consecutive sweeps, so it needs the last
-        /// sample rather than only the idle-entry anchor.
+        /// When the *previous* sweep sampled, the tree CPU it saw, and the output
+        /// byte total it saw. The CPU and output signals are rates between
+        /// consecutive sweeps, so they need the last sample rather than only the
+        /// idle-entry anchor.
         public var lastSampleMs: Int
         public var lastSampleCpuMs: Int
+        public var lastSampleOutputBytes: Int
+        /// How many consecutive sweeps have *observed* this session quiet, this one
+        /// included. Elapsed time alone is a shared clock: one long stall, one
+        /// clock jump or one settings change reads the same for every session at
+        /// once, which is how 25 of them can be judged dormant in the same second.
+        /// A count of independent observations cannot be shared that way — it is
+        /// this session's own evidence, and it only grows one sweep at a time.
+        public var quietSamples: Int
 
         public init(
             idleSinceMs: Int,
@@ -113,7 +142,9 @@ public enum SessionReapPolicy {
             cpuTimeMs: Int,
             transcriptSizeBytes: Int? = nil,
             lastSampleMs: Int? = nil,
-            lastSampleCpuMs: Int? = nil
+            lastSampleCpuMs: Int? = nil,
+            lastSampleOutputBytes: Int = 0,
+            quietSamples: Int = 1
         ) {
             self.idleSinceMs = idleSinceMs
             self.descendantCount = descendantCount
@@ -121,6 +152,8 @@ public enum SessionReapPolicy {
             self.transcriptSizeBytes = transcriptSizeBytes
             self.lastSampleMs = lastSampleMs ?? idleSinceMs
             self.lastSampleCpuMs = lastSampleCpuMs ?? cpuTimeMs
+            self.lastSampleOutputBytes = lastSampleOutputBytes
+            self.quietSamples = quietSamples
         }
     }
 
@@ -154,6 +187,62 @@ public enum SessionReapPolicy {
     /// where the rate divisor is tiny and any jitter would read as busy.
     public static let defaultCpuFloorMs = 2_000
 
+    /// How fast the pty may produce output between two sweeps before the streak is
+    /// disturbed, in bytes per second, with `defaultOutputFloorBytes` as the floor
+    /// under it (same rate-plus-floor shape as the CPU signal).
+    ///
+    /// These are chosen bounds, not measurements: no numbers exist for how much a
+    /// settled `claude`/`codex` TUI repaints while nobody is typing at it. They are
+    /// deliberately loose, because the asymmetry this whole file is built on says a
+    /// false "busy" only delays freeing RAM while a false "idle" kills work. 64KB
+    /// inside one 90s sweep is roughly 700 B/s sustained — orders of magnitude more
+    /// than a status line redrawing itself, and far less than any real stream (a
+    /// build log, a test run, a tool dumping a file). Agent *token* streaming is
+    /// slower than this bound and is deliberately not what it catches: the detector
+    /// already classifies that as busy, and `lastBusyMs` carries it.
+    public static let defaultOutputBusyBytesPerSec = 1_024
+    public static let defaultOutputFloorBytes = 64 * 1024
+
+    /// How many separate sweeps must observe a session quiet before it may be
+    /// reaped, on top of the window. See `Baseline.quietSamples`.
+    public static let defaultMinQuietSamples = 3
+
+    /// The longest gap between two samples that still counts as an unbroken
+    /// streak. Past it the reaper was not watching — a stalled sweep loop, a
+    /// suspended machine, a clock jump — and time nobody observed is not evidence
+    /// of dormancy, so the streak re-anchors and the session serves a fresh,
+    /// observed window. With a 90s sweep this leaves ~6x headroom, so an ordinary
+    /// late tick on a thrashing machine does not keep resetting everything.
+    public static let defaultMaxSampleGapMs = 10 * 60 * 1000
+
+    /// A fresh streak anchor from this sample: the moment the streak starts plus
+    /// the tree shape, CPU, transcript size and output total at that moment. One
+    /// observation of evidence, so `quietSamples` starts at 1.
+    public static func anchor(_ sample: ReapSample, at nowMs: Int) -> Baseline {
+        Baseline(
+            idleSinceMs: nowMs,
+            descendantCount: sample.descendantCount,
+            cpuTimeMs: sample.cpuTimeMs,
+            transcriptSizeBytes: sample.transcriptSizeBytes,
+            lastSampleMs: nowMs,
+            lastSampleCpuMs: sample.cpuTimeMs,
+            lastSampleOutputBytes: sample.outputBytes,
+            quietSamples: 1
+        )
+    }
+
+    /// The same streak, one observation older: the anchor is kept, the sample point
+    /// moves to this sweep (the CPU and output signals are sweep-to-sweep rates)
+    /// and the evidence count grows by one.
+    public static func advance(_ base: Baseline, with sample: ReapSample, at nowMs: Int) -> Baseline {
+        var next = base
+        next.lastSampleMs = nowMs
+        next.lastSampleCpuMs = sample.cpuTimeMs
+        next.lastSampleOutputBytes = sample.outputBytes
+        next.quietSamples = base.quietSamples + 1
+        return next
+    }
+
     /// Evaluate one session against its tracked streak. `baseline` is what the
     /// previous sweep returned in `.holding` (nil when untracked).
     public static func evaluate(
@@ -162,7 +251,11 @@ public enum SessionReapPolicy {
         nowMs: Int,
         windowMs: Int,
         cpuBusyPermille: Int = defaultCpuBusyPermille,
-        cpuFloorMs: Int = defaultCpuFloorMs
+        cpuFloorMs: Int = defaultCpuFloorMs,
+        outputBusyBytesPerSec: Int = defaultOutputBusyBytesPerSec,
+        outputFloorBytes: Int = defaultOutputFloorBytes,
+        minQuietSamples: Int = defaultMinQuietSamples,
+        maxSampleGapMs: Int = defaultMaxSampleGapMs
     ) -> Verdict {
         guard windowMs > 0 else { return .notIdle } // reaping disabled
         // Hard resets: the detector says work (or a prompt) is pending, a tool call
@@ -174,14 +267,7 @@ public enum SessionReapPolicy {
             return .notIdle
         }
 
-        let fresh = Baseline(
-            idleSinceMs: nowMs,
-            descendantCount: sample.descendantCount,
-            cpuTimeMs: sample.cpuTimeMs,
-            transcriptSizeBytes: sample.transcriptSizeBytes,
-            lastSampleMs: nowMs,
-            lastSampleCpuMs: sample.cpuTimeMs
-        )
+        let fresh = anchor(sample, at: nowMs)
         guard let base = baseline else { return .holding(fresh) } // idle-entry
 
         // OS ground truth the detector can't fake. Any disturbance restarts the
@@ -201,8 +287,20 @@ public enum SessionReapPolicy {
         } else {
             transcriptGrew = false
         }
+        // Output as a rate, for the same reason as CPU and with the same floor:
+        // what the pty says is liveness for a session nobody types at, but a
+        // repainting TUI must not be able to hold a session alive forever.
+        let outputDelta = sample.outputBytes - base.lastSampleOutputBytes
+        let outputMoved = outputDelta >= outputFloorBytes
+            && outputDelta * 1_000 > intervalMs * outputBusyBytesPerSec
         let typedSinceIdle = sample.lastInputMs > base.idleSinceMs
-        if treeChanged || cpuMoved || transcriptGrew || typedSinceIdle {
+        // The detector's memory of the streak: a turn that ran and finished between
+        // two sweeps leaves `activity` idle but moves this.
+        let workedSinceIdle = sample.lastBusyMs > base.idleSinceMs
+        // Nobody was watching for `intervalMs`, so nothing was verified in it.
+        let unobservedGap = intervalMs > maxSampleGapMs
+        if treeChanged || cpuMoved || transcriptGrew || outputMoved
+            || typedSinceIdle || workedSinceIdle || unobservedGap {
             return .holding(fresh)
         }
 
@@ -210,11 +308,10 @@ public enum SessionReapPolicy {
         // last keystroke is older than the window, and a resume is possible.
         // The sample point advances even while holding, so the next sweep's rate
         // is measured against this sweep rather than against idle-entry.
-        var held = base
-        held.lastSampleMs = nowMs
-        held.lastSampleCpuMs = sample.cpuTimeMs
+        let held = advance(base, with: sample, at: nowMs)
         guard nowMs - base.idleSinceMs >= windowMs,
               nowMs - sample.lastInputMs >= windowMs,
+              held.quietSamples >= minQuietSamples,
               sample.resumable
         else { return .holding(held) }
         return .eligible
@@ -402,6 +499,15 @@ public actor SessionReaper {
     private var maxLive: Int
     private let cpuBusyPermille: Int
     private let sweepInterval: Duration
+    /// Hard ceiling on how many sessions one sweep may put to sleep, idle reaps and
+    /// cap evictions together. A sweep that wants more takes the most-dormant ones
+    /// and leaves the rest holding their streaks for the next tick, so reclaiming a
+    /// backlog is a visible trickle (one every 90s) instead of a batch — and no
+    /// single mistaken threshold can take the machine's whole session set with it.
+    private let maxSleepsPerSweep: Int
+    /// Where the audit trail goes: one `dormant` line per kill carrying the sample
+    /// that justified it, plus one `reap_sweep` summary per sweep.
+    private let log: SessionActivityLogging
 
     /// Tracked idle streaks by session id; entries drop whenever a session stops
     /// being idle (or stops existing).
@@ -419,7 +525,9 @@ public actor SessionReaper {
         windowMs: Int = Config.reapIdleMinutes * 60_000,
         maxLive: Int = Config.maxLiveSessions,
         cpuBusyPermille: Int = SessionReapPolicy.defaultCpuBusyPermille,
-        sweepInterval: Duration = .seconds(90)
+        sweepInterval: Duration = .seconds(90),
+        maxSleepsPerSweep: Int = 3,
+        log: SessionActivityLogging = NoopSessionActivityLog()
     ) {
         self.registry = registry
         self.messageQueue = messageQueue
@@ -428,6 +536,8 @@ public actor SessionReaper {
         self.maxLive = maxLive
         self.cpuBusyPermille = cpuBusyPermille
         self.sweepInterval = sweepInterval
+        self.maxSleepsPerSweep = max(1, maxSleepsPerSweep)
+        self.log = log
     }
 
     /// Change the idle window at runtime (the Settings → Sessions stepper).
@@ -479,20 +589,32 @@ public actor SessionReaper {
         loop = nil
     }
 
-    /// One sweep over every live session: sample, evaluate, and reap the eligible
-    /// ones. Returns the reaped session ids (for tests / logging).
+    /// One sweep over every live session: sample, evaluate, and put the eligible
+    /// ones to sleep. Returns the slept session ids (for tests / logging).
+    ///
+    /// Three properties this loop owes the machine, learned the hard way:
+    /// nothing dies without its own per-session evidence (`Baseline.quietSamples`);
+    /// no sweep may take more than `maxSleepsPerSweep` sessions; and every kill is
+    /// re-checked against live state at the instant of the kill, because the loop
+    /// awaits a transcript stat per session and a verdict from the top of the loop
+    /// can be seconds old by the time we act on it.
     @discardableResult
     public func sweepOnce() async -> [String] {
+        let now = probes.nowMs()
         guard windowMs > 0 else {
             baselines = [:]
             // The cap is a separate guarantee from the idle window: turning
             // auto-sleep off must not let the machine accumulate without bound.
-            return sleepSurplus(nowMs: probes.nowMs())
+            let capped = sleepSurplus(nowMs: now, budget: maxSleepsPerSweep)
+            logSweep(live: registry.all().filter(\.isRunning).count,
+                     eligible: 0, reaped: 0, capSlept: capped.count, deferred: 0)
+            return capped
         }
-        let now = probes.nowMs()
-        var reaped: [String] = []
         var next: [String: SessionReapPolicy.Baseline] = [:]
+        var eligible: [(session: Session, sample: ReapSample, prior: SessionReapPolicy.Baseline?)] = []
+        var live = 0
         for session in registry.all() where session.isRunning {
+            live += 1
             let meta = session.meta
             // No live child pid (already exiting) — nothing to reap.
             guard let pid = session.childPid else { continue }
@@ -500,19 +622,10 @@ public actor SessionReaper {
             if let cliSessionId = meta.cliSessionId {
                 transcriptSize = await probes.transcriptSizeBytes(meta.provider, cliSessionId)
             }
-            let sample = ReapSample(
-                activity: session.activity,
-                resumable: meta.cliSessionId != nil,
-                queueEmpty: messageQueue.peek(meta.id) == nil,
-                lastInputMs: session.lastInputMs,
-                descendantCount: probes.descendantCount(pid),
-                cpuTimeMs: probes.treeCpuTimeMs(pid),
-                transcriptSizeBytes: transcriptSize,
-                hasPendingToolUse: session.hasPendingToolUse,
-                isProtected: protected(meta.id)
-            )
+            let sample = self.sample(session, pid: pid, transcriptSizeBytes: transcriptSize)
+            let prior = baselines[meta.id]
             switch SessionReapPolicy.evaluate(
-                sample, baseline: baselines[meta.id],
+                sample, baseline: prior,
                 nowMs: now, windowMs: windowMs, cpuBusyPermille: cpuBusyPermille
             ) {
             case .notIdle:
@@ -520,44 +633,171 @@ public actor SessionReaper {
             case .holding(let baseline):
                 next[meta.id] = baseline
             case .eligible:
-                // Flag first so the exited row `handleExit` persists already reads
-                // as dormant; scrollback + meta survive via the normal exit path.
-                session.markDormant()
-                session.kill()
-                reaped.append(meta.id)
+                eligible.append((session, sample, prior))
             }
         }
+
+        // Most-dormant first, so a capped sweep reclaims the stalest RAM and the
+        // order is deterministic (id breaks ties) rather than registry-dependent.
+        eligible.sort {
+            (($0.prior?.idleSinceMs ?? now), $0.session.meta.id)
+                < (($1.prior?.idleSinceMs ?? now), $1.session.meta.id)
+        }
+        var reaped: [String] = []
+        var deferred = 0
+        for (session, sample, prior) in eligible {
+            let id = session.meta.id
+            guard reaped.count < maxSleepsPerSweep else {
+                // Over budget for this tick: keep the streak (it stays eligible) so
+                // the next sweep takes it, and say so in the log.
+                deferred += 1
+                next[id] = prior.map { SessionReapPolicy.advance($0, with: sample, at: now) }
+                    ?? SessionReapPolicy.anchor(sample, at: now)
+                continue
+            }
+            // Re-read the volatile signals at the instant of the kill. Between the
+            // verdict and here the session may have started a turn, opened a tool
+            // call, or become the pane the user is looking at — and a stale
+            // "eligible" is precisely how a focused, working session gets reaped.
+            if let veto = killTimeVeto(session) {
+                log.log("reap_skipped", sessionId: id, project: session.meta.cwd,
+                        fields: ["veto": veto, "waitedMs": "\(max(0, probes.nowMs() - now))"])
+                next[id] = SessionReapPolicy.anchor(sample, at: now)
+                continue
+            }
+            session.markDormant(
+                reason: .idleReap,
+                audit: audit(sample: sample, baseline: prior, now: now))
+            session.kill()
+            reaped.append(id)
+        }
         baselines = next
-        reaped.append(contentsOf: sleepSurplus(nowMs: now, alreadyReaped: Set(reaped)))
-        return reaped
+        let capped = sleepSurplus(nowMs: now, budget: maxSleepsPerSweep - reaped.count,
+                                  alreadyReaped: Set(reaped))
+        logSweep(live: live, eligible: eligible.count, reaped: reaped.count,
+                 capSlept: capped.count, deferred: deferred)
+        return reaped + capped
+    }
+
+    /// Everything about one session the policy reads. Kept in one place so the
+    /// sweep's decision and its kill-time re-check cannot drift apart.
+    private func sample(
+        _ session: Session, pid: pid_t, transcriptSizeBytes: Int?
+    ) -> ReapSample {
+        let meta = session.meta
+        return ReapSample(
+            activity: session.activity,
+            resumable: meta.cliSessionId != nil,
+            queueEmpty: messageQueue.peek(meta.id) == nil,
+            lastInputMs: session.lastInputMs,
+            descendantCount: probes.descendantCount(pid),
+            cpuTimeMs: probes.treeCpuTimeMs(pid),
+            transcriptSizeBytes: transcriptSizeBytes,
+            lastOutputMs: session.lastOutputMs,
+            outputBytes: session.outputBytes,
+            lastBusyMs: session.lastBusyMs,
+            hasPendingToolUse: session.hasPendingToolUse,
+            isProtected: protected(meta.id)
+        )
+    }
+
+    /// Why this session must not be killed right now, or nil when it may be. The
+    /// cheap, non-awaiting half of the policy, re-evaluated immediately before the
+    /// kill; the returned string is the log's `veto` field.
+    private func killTimeVeto(_ session: Session) -> String? {
+        let meta = session.meta
+        if !session.isRunning { return "exited" }
+        if protected(meta.id) { return "protected" }
+        if session.activity != .idle { return session.activity.rawValue }
+        if session.hasPendingToolUse { return "tool_open" }
+        if messageQueue.peek(meta.id) != nil { return "queued" }
+        if meta.cliSessionId == nil { return "unresumable" }
+        return nil
+    }
+
+    /// The evidence behind one kill, as flat log fields: how long the streak ran,
+    /// how many sweeps observed it, and where each signal stood. Reading one of
+    /// these lines should answer "why did this die" without a forensic session.
+    private func audit(
+        sample: ReapSample, baseline: SessionReapPolicy.Baseline?, now: Int
+    ) -> [String: String] {
+        var fields: [String: String] = [
+            "activity": sample.activity.rawValue,
+            "idleMs": "\(now - (baseline?.idleSinceMs ?? now))",
+            "windowMs": "\(windowMs)",
+            "samples": "\(baseline?.quietSamples ?? 0)",
+            "inputAgeMs": "\(now - sample.lastInputMs)",
+            "outputAgeMs": "\(now - sample.lastOutputMs)",
+            "busyAgeMs": sample.lastBusyMs > 0 ? "\(now - sample.lastBusyMs)" : "never",
+            "descendants": "\(sample.descendantCount)",
+            "cpuMs": "\(sample.cpuTimeMs)",
+            "outputBytes": "\(sample.outputBytes)",
+            "toolOpen": "\(sample.hasPendingToolUse)",
+            "protected": "\(sample.isProtected)",
+        ]
+        if let base = baseline {
+            let interval = max(1, now - base.lastSampleMs)
+            fields["cpuPermille"] = "\((sample.cpuTimeMs - base.lastSampleCpuMs) * 1_000 / interval)"
+            fields["outputDeltaBytes"] = "\(sample.outputBytes - base.lastSampleOutputBytes)"
+        }
+        if let size = sample.transcriptSizeBytes { fields["transcriptBytes"] = "\(size)" }
+        return fields
+    }
+
+    /// One line per sweep, whether or not anything died: the denominator that makes
+    /// the `dormant` lines readable (how many were live, how many the policy judged
+    /// eligible, how many the per-sweep budget held back).
+    private func logSweep(live: Int, eligible: Int, reaped: Int, capSlept: Int, deferred: Int) {
+        guard live > 0 else { return }
+        log.log("reap_sweep", sessionId: "-", project: "", fields: [
+            "live": "\(live)", "eligible": "\(eligible)", "reaped": "\(reaped)",
+            "capSlept": "\(capSlept)", "deferred": "\(deferred)",
+            "windowMs": "\(windowMs)", "maxLive": "\(maxLive)",
+            "budget": "\(maxSleepsPerSweep)",
+        ])
     }
 
     /// Enforce the live-session ceiling: sleep the least-recently-active sessions
-    /// that are safe to sleep until at most `maxLive` remain. Independent of the
-    /// idle streak — a session that keeps getting touched never serves a full
-    /// window, but still holds a whole CLI process tree.
-    private func sleepSurplus(nowMs: Int, alreadyReaped: Set<String> = []) -> [String] {
-        guard maxLive > 0 else { return [] }
+    /// that are safe to sleep until at most `maxLive` remain, at most `budget` of
+    /// them in this sweep. Independent of the idle streak — a session that keeps
+    /// getting touched never serves a full window, but still holds a whole CLI
+    /// process tree.
+    private func sleepSurplus(
+        nowMs: Int, budget: Int, alreadyReaped: Set<String> = []
+    ) -> [String] {
+        guard maxLive > 0, budget > 0 else { return [] }
         let live = registry.all().filter { $0.isRunning && !alreadyReaped.contains($0.meta.id) }
         let candidates = live.map { session -> SessionCapPolicy.Candidate in
             let meta = session.meta
-            let sleepable = session.activity == .idle
-                && !session.hasPendingToolUse
-                && meta.cliSessionId != nil
-                && messageQueue.peek(meta.id) == nil
-                && !protected(meta.id)
             return .init(id: meta.id,
                          lastActiveMs: max(meta.updatedAt, session.lastInputMs),
-                         sleepable: sleepable)
+                         sleepable: killTimeVeto(session) == nil)
         }
-        let surplus = Set(SessionCapPolicy.surplus(candidates, maxLive: maxLive))
+        let surplus = SessionCapPolicy.surplus(candidates, maxLive: maxLive)
         guard !surplus.isEmpty else { return [] }
-        for session in live where surplus.contains(session.meta.id) {
-            session.markDormant()
+        let byId = Dictionary(uniqueKeysWithValues: live.map { ($0.meta.id, $0) })
+        var slept: [String] = []
+        for id in surplus {
+            guard slept.count < budget else { break }
+            guard let session = byId[id] else { continue }
+            // Same instant-of-the-kill re-check as the idle path: the LRU order was
+            // computed before this loop started.
+            if let veto = killTimeVeto(session) {
+                log.log("cap_skipped", sessionId: id, project: session.meta.cwd,
+                        fields: ["veto": veto])
+                continue
+            }
+            session.markDormant(reason: .liveCap, audit: [
+                "activity": session.activity.rawValue,
+                "maxLive": "\(maxLive)",
+                "liveCount": "\(live.count)",
+                "lastActiveMs": "\(nowMs - max(session.meta.updatedAt, session.lastInputMs))",
+            ])
             session.kill()
+            slept.append(id)
+            // Its streak is meaningless now the pty is gone.
+            baselines[id] = nil
         }
-        // Their streaks are meaningless now the pty is gone.
-        for id in surplus { baselines[id] = nil }
-        return Array(surplus)
+        return slept
     }
 }

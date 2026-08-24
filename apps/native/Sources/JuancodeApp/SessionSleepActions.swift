@@ -16,7 +16,7 @@ extension AppModel {
     /// Put one session to sleep. No-op when it isn't live.
     func sleepSession(_ id: String) {
         guard let session = core.liveSession(id), session.isRunning else { return }
-        session.markDormant()
+        session.markDormant(reason: .manual, audit: [:])
         killSession(id)
     }
 
