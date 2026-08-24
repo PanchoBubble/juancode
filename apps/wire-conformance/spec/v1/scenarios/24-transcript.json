@@ -1,0 +1,138 @@
+{
+  "id": "transcript",
+  "title": "transcript replay and live batches",
+  "asserts": "subscribing is answered at once with the history the core kept as one replay frame, every record read afterwards arrives as a live batch whose seq numbers are strictly above the replayed ones, so a client that appends by seq and drops a seq it already holds loses nothing and duplicates nothing, and no batch is pushed after unsubscribe.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "transcript"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT hello\r"
+      },
+      "note": "the fake agent writes this turn into claude's own jsonl, which is the plane's source; the pty bytes it also prints are a different plane and are ignored here"
+    },
+    {
+      "sleep": 3000,
+      "note": "long enough for the core to have read the turn BEFORE anyone subscribes, so what comes back is history rather than a live batch that happened to be in flight"
+    },
+    {
+      "send": {
+        "type": "subscribeTranscript",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "transcript",
+        "sessionId": "$session",
+        "replay": true,
+        "records": {
+          "$length": 3,
+          "$every": {
+            "session": "$session",
+            "source": "claude-jsonl",
+            "seq": {
+              "$type": "number"
+            }
+          },
+          "$some": {
+            "kind": "turnStart",
+            "prompt": "hello"
+          }
+        }
+      },
+      "bind": {
+        "baseSeq": "records.2.seq"
+      },
+      "timeoutMs": 10000,
+      "note": "one turn is three records - the prompt that opened it, the model request, and the prose - and the replay carries all of them, not the tail of one"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT again\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "transcript",
+        "sessionId": "$session",
+        "replay": false,
+        "records": {
+          "$every": {
+            "session": "$session",
+            "seq": {
+              "$gt": "$baseSeq"
+            }
+          },
+          "$some": {
+            "kind": "turnStart",
+            "prompt": "again"
+          }
+        }
+      },
+      "timeoutMs": 10000,
+      "note": "append, never replace: every seq in a live batch is above every seq the replay carried, which is what makes dedup-by-seq a client's whole job"
+    },
+    {
+      "send": {
+        "type": "unsubscribeTranscript",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "sleep": 200
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT third\r"
+      }
+    },
+    {
+      "expectNone": {
+        "type": "transcript"
+      },
+      "withinMs": 3000,
+      "note": "the records are still read - this connection just stopped being told, the same way unsubscribeQueue works"
+    }
+  ]
+}

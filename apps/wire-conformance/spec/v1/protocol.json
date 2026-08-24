@@ -1,7 +1,7 @@
 {
-  "specRevision": "1.3.0",
+  "specRevision": "1.4.0",
   "protocolVersion": 1,
-  "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift",
+  "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
     "path": "/ws",
     "encoding": "json-text-frames",
@@ -28,7 +28,9 @@
       "sessionMeta",
       "gridOwner",
       "restartFresh",
-      "spawnModel"
+      "spawnModel",
+      "queueEdit",
+      "transcript"
     ],
     "gates": {
       "queue": [
@@ -79,9 +81,17 @@
       ],
       "spawnModel": [
         "create.model"
+      ],
+      "queueEdit": [
+        "editQueued"
+      ],
+      "transcript": [
+        "subscribeTranscript",
+        "unsubscribeTranscript",
+        "transcript"
       ]
     },
-    "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured."
+    "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
   },
   "clientMessages": {
     "create": {
@@ -207,6 +217,31 @@
       ],
       "optional": [],
       "capability": "queue"
+    },
+    "editQueued": {
+      "required": [
+        "sessionId",
+        "messageId",
+        "text"
+      ],
+      "optional": [],
+      "capability": "queueEdit",
+      "notes": "Replace a still-pending message's text in place, addressed by the id its last `queue` snapshot gave it. Not a cancel-and-requeue: the occurrence keeps its id, its position in delivery order and the surface it arrived from, so editing the third message in a queue does not send it to the back of one nobody asked to reorder. Answered with the whole new `queue` snapshot, or with an `error` whose message is `queue-item-not-found` (no pending occurrence has that id, which includes one already claimed for delivery) or `queue-item-not-text` (the occurrence holds key bytes rather than text). Gated separately from `queue` because it is a separate promise: `queue` says messages can be queued and will be typed, `queueEdit` says every occurrence has an id that survives being rewritten, and a core with the first and not the second is not a liar."
+    },
+    "subscribeTranscript": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [],
+      "capability": "transcript",
+      "notes": "Watch a session's structured transcript: the history the core kept, answered at once as one `transcript` frame with `replay: true`, and every record read afterwards as live batches until `unsubscribeTranscript` or the socket closes. Per connection, like `subscribeQueue` and `subscribeScreen`; a second subscribe on the same connection is not a second baseline. A session with no transcript is answered with an empty replay rather than silence, so a client draws an empty panel instead of waiting for a frame that is not coming. This is a SECOND data plane beside the pty bytes: `attached.scrollback` is unchanged and stays what a pane repaints from."
+    },
+    "unsubscribeTranscript": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [],
+      "capability": "transcript"
     },
     "subscribeScreen": {
       "required": [
@@ -392,6 +427,16 @@
       "optional": [],
       "capability": "queue"
     },
+    "transcript": {
+      "required": [
+        "sessionId",
+        "replay",
+        "records"
+      ],
+      "optional": [],
+      "capability": "transcript",
+      "notes": "Structured transcript records for one session, oldest first. Two kinds of frame, one shape: `replay: true` is the history a `subscribeTranscript` is answered with, `replay: false` is a batch the core has just read. A record carries at least `session`, `source`, `seq` and `kind`, plus the fields of its kind; the eight kinds are turnStart, turnEnd, step, assistant, thinking, toolCall, toolResult and usage. Append by `seq`, never replace: `seq` is append-only per session and never repeats, restarts included, so a client's whole job is to drop a `seq` it already holds. That is also why a record may legitimately arrive twice, once in a replay and again live when a subscribe lands mid-poll, and why it costs a client nothing."
+    },
     "editorReady": {
       "required": [
         "editorId"
@@ -491,7 +536,8 @@
     "TRACKED_PRS_ARE_CHANGES: a trackedPrs frame is the whole watch list, replaced wholesale, and it is a change notification. A core sends one snapshot in answer to subscribeTrackedPrs, and after that only when the list it would send differs from the one that connection was last sent. A poll pass that found nothing, or any other internal refresh that moved nothing, sends no frame at all: an identical list carries no information, and a redundant one races whatever the client asks for next, so a client that untracks a PR is answered by a snapshot that still lists it as watched.",
     "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage.",
     "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means.",
-    "ADDITIVE_FIELDS: a new OPTIONAL FIELD on an existing frame is additive within a version too, but it fails differently from a new frame type. A core that does not implement the field still runs the frame without it and answers exactly as it would have, so the field may only be added when ignoring it leaves a defensible default (create.model falls back to the CLI's own model), and it carries a capability string so a client can tell \"this core honours it\" from \"this core will drop it\". An operation whose ignored form would be a DIFFERENT operation gets a frame type of its own instead, because an unknown type is ignored whole and the client can see the silence: that is why restarting a session as a fresh conversation is `restartFresh` and not a `fresh` flag on `reactivate`, which an old core would answer by resuming the conversation the client asked to discard."
+    "ADDITIVE_FIELDS: a new OPTIONAL FIELD on an existing frame is additive within a version too, but it fails differently from a new frame type. A core that does not implement the field still runs the frame without it and answers exactly as it would have, so the field may only be added when ignoring it leaves a defensible default (create.model falls back to the CLI's own model), and it carries a capability string so a client can tell \"this core honours it\" from \"this core will drop it\". An operation whose ignored form would be a DIFFERENT operation gets a frame type of its own instead, because an unknown type is ignored whole and the client can see the silence: that is why restarting a session as a fresh conversation is `restartFresh` and not a `fresh` flag on `reactivate`, which an old core would answer by resuming the conversation the client asked to discard.",
+    "CATALOGUE_IS_THE_UNION: this file catalogues the PROTOCOL, which is the union of what the cores speak, not the surface of any one of them. A message only one core implements is listed here like any other, and its capability gate is what says which: `drift.test.ts` reads each core's own source, works out the messages its advertised capability list entails, and requires that core to implement exactly those and nothing off this catalogue. So a core that advertises a capability must answer every frame the gate names (no empty promises), and a frame either core speaks must be described here (no drift) - but a core is never asked to grow a decode case, or an encoder it would never use, for a capability it does not advertise. The rule this replaced made the catalogue a mirror of WireProtocol.swift, which left `editQueued` and the transcript frames implemented, advertised and unlistable, and therefore unmeasurable: a golden transcript may only reference catalogued types, so the only planes with no scenario were the ones only one core had."
   ],
   "decisions": {
     "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
@@ -500,6 +546,6 @@
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",
     "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here.",
     "restartFresh grid": "restartFresh takes cols/rows like attach and reactivate rather than reusing the grid the session died at: the client that asks for the restart is the one about to render it, and the CLI wraps its first turn at the spawn width forever.",
-    "subscribeTranscript / unsubscribeTranscript / transcript": "Implemented by the Rust core and NOT catalogued here yet, on purpose. This file is derived from WireProtocol.swift \u2014 drift.test.ts asserts the two message lists are equal \u2014 so a frame the Swift core has no case for cannot be listed without adding a decode case and an encoder it would never use. The Rust core therefore advertises the `transcript` capability and answers all three frames, and a client feature-detects off the capability exactly as it does for `queueEdit`, which is in the same position. What this costs is a scenario: a golden transcript may only reference catalogued types, so the transcript plane has no conformance scenario until the frames land in the Swift catalogue. What is measured in the meantime is that mounting the plane changed nothing else \u2014 attach-scrollback still replays the pty bytes, and every other scenario still passes without listing `transcript` in its ignore list, which is what proves the core sends no transcript frame to a client that did not subscribe."
+    "contributions": "The Rust core decodes `subscribeContributions`, `unsubscribeContributions` and `activateContribution` and encodes `contributions` and `contributionResult`, and they are deliberately absent from this catalogue, because it withholds the `contributions` capability: nothing renders a descriptor yet, and advertising it would promise chrome nothing draws. Under CATALOGUE_IS_THE_UNION an unadvertised frame is not on the wire as far as any feature-detecting client is concerned, so it is not catalogued either - which is why `drift.test.ts` carries the five type names in one explicit list with this reason attached. The day the capability is advertised, that list is what makes the suite go red until this file describes them."
   }
 }
