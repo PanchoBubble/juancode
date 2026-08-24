@@ -13,12 +13,14 @@ use axum::Router;
 use tracing::info;
 
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
+use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
-use juancoded_state::SessionsApi;
+use juancoded_state::{SessionsApi, StoreService};
 
 use crate::conn;
 use crate::queue_delivery;
 use crate::seed::SeedTiming;
+use crate::transcript_pump::{self, TranscriptPlane};
 
 /// What a connection needs from the booted tree: the sessions it drives, the chrome the
 /// tree contributes to the built-in surfaces, the steering queue it mutates, and the bus
@@ -35,15 +37,29 @@ pub struct CoreHandles {
     /// `None` when the tree mounted no `queue` row. Queue frames then say so rather
     /// than pretending to have queued something.
     pub queue: Option<Arc<dyn QueueApi>>,
+    /// `None` when the tree mounted no `transcripts` row, or no `store` for it to keep
+    /// history in. A `subscribeTranscript` then answers with an empty replay rather
+    /// than with records this core cannot produce.
+    pub transcripts: Option<TranscriptPlane>,
     pub bus: Bus,
 }
 
 impl CoreHandles {
     pub fn from_loader(loader: &Loader, sessions: Arc<dyn SessionsApi>) -> Self {
+        // Both halves of the transcript plane or neither. The hub with no store is a
+        // reader whose records nobody keeps, and a store with no hub is a table nothing
+        // fills; either one alone would advertise a history that does not survive.
+        let transcripts = loader
+            .services()
+            .resolve::<TranscriptsService>()
+            .ok()
+            .zip(loader.services().resolve::<StoreService>().ok())
+            .map(|(hub, store)| TranscriptPlane::new(hub, store));
         Self {
             sessions,
             contributions: loader.contributions().clone(),
             queue: loader.services().resolve::<QueueService>().ok(),
+            transcripts,
             bus: loader.bus().clone(),
         }
     }
@@ -109,6 +125,15 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
             queue,
             SeedTiming::default(),
             queue_delivery::PUMP_TICK,
+        )
+    });
+    // The other pump, and the same reason for being one: a transcript is read because
+    // a session wrote one, not because a client is looking at the pane.
+    let _transcripts = handles.transcripts.clone().map(|plane| {
+        transcript_pump::spawn_pump(
+            Arc::clone(&handles.sessions),
+            plane,
+            transcript_pump::PUMP_TICK,
         )
     });
     let app = router(handles);
