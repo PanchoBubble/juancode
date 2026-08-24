@@ -211,3 +211,22 @@ extension SessionMeta {
 public func nowMs() -> Int {
     Int(Date().timeIntervalSince1970 * 1000)
 }
+
+/// Which path put a session to sleep. Not persisted on the row — it is written to
+/// `session-activity.log` alongside the sampled evidence, so a bulk sleep can be
+/// told apart from a verified reap by reading one file instead of reconstructing
+/// the live set from spawn/exit events (oracle-qb5).
+public enum SessionSleepReason: String, Sendable {
+    /// The idle reaper: every independent signal quiet across the whole window.
+    case idleReap = "idle_reap"
+    /// The live-session ceiling: least-recently-active session evicted to bound RAM.
+    case liveCap = "live_cap"
+    /// Process exit (app quit). Cannot honour the reap policy — the ptys are our
+    /// children and die with us — so it is labelled instead of pretending to be one.
+    case quit
+    /// Someone asked for it: the sleep command / menu action.
+    case manual
+    /// A caller that has not been taught to say. Kept so the bare `markDormant()`
+    /// overload stays source-compatible with embedders.
+    case unspecified
+}

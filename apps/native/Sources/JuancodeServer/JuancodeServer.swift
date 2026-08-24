@@ -143,7 +143,7 @@ public enum JuancodeServer {
             guard let session = state.registry.get(id), session.isRunning else {
                 throw APIError(.notFound, "no live session")
             }
-            session.markDormant()
+            session.markDormant(reason: .manual)
             session.kill()
             return Response(status: .noContent)
         }

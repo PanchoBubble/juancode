@@ -453,6 +453,10 @@ private final class WireBackedSession: LiveSession, @unchecked Sendable {
         lock.withLock { _meta.status = .exited }
     }
 
+    func markDormant(reason: SessionSleepReason, audit: [String: String]) {
+        markDormant()
+    }
+
     func setTitle(_ title: String) {
         let changed = lock.withLock { () -> SessionMeta? in
             guard _meta.title != title else { return nil }

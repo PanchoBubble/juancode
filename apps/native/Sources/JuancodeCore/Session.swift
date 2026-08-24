@@ -265,6 +265,20 @@ public final class Session: @unchecked Sendable {
     /// — still protects the session from being reaped. Guarded by `lock`.
     private var _lastInputMs: Int
 
+    /// ms-since-epoch of the last pty *output* byte, and the cumulative byte count.
+    /// The counterpart to `_lastInputMs` for a session nobody is typing at: a
+    /// dispatched agent works for hours without a keystroke, so input alone is not
+    /// a liveness signal — see `ReapSample.outputBytes`. Guarded by `lock`.
+    private var _lastOutputMs: Int
+    private var _outputBytes = 0
+
+    /// ms-since-epoch of the last moment the `ActivityDetector` classified this
+    /// session as anything other than idle (busy, or waiting on a prompt). The
+    /// detector's own state is a snapshot: a turn that starts and finishes between
+    /// two reaper sweeps is invisible to `activity`, while this latch records that
+    /// it happened. Guarded by `lock`.
+    private var _lastBusyMs = 0
+
     public var meta: SessionMeta { lock.withLock { _meta } }
     public var id: String { lock.withLock { _meta.id } }
     public var isRunning: Bool { lock.withLock { _meta.status == .running } }
@@ -275,6 +289,15 @@ public final class Session: @unchecked Sendable {
     /// `ActivityDetector.hasPendingToolUse`.
     public var hasPendingToolUse: Bool { detector.hasPendingToolUse }
     public var lastInputMs: Int { lock.withLock { _lastInputMs } }
+    /// When the pty last produced output, and how much it has produced in total.
+    /// Read together by the reaper as a rate: output the agent is streaming is
+    /// work, while a TUI repainting itself is not.
+    public var lastOutputMs: Int { lock.withLock { _lastOutputMs } }
+    public var outputBytes: Int { lock.withLock { _outputBytes } }
+    /// When the detector last saw this session working (or holding a prompt), 0 if
+    /// it never has. The reaper reads it so a turn that ran entirely between two
+    /// sweeps still restarts the idle streak.
+    public var lastBusyMs: Int { lock.withLock { _lastBusyMs } }
 
     /// The pty child's pid while the session is running, nil once exited. The
     /// idle reaper walks its descendants for the OS-ground-truth idle checks.
@@ -427,6 +450,7 @@ public final class Session: @unchecked Sendable {
         self.env = env
         self.persistEnabled = persist
         self._lastInputMs = nowMs()
+        self._lastOutputMs = nowMs()
         self.spec = Providers.spec(for: meta.provider)
         self.scroll = Scrollback(limit: env.scrollbackLimit, seed: seedScrollback)
         self.workQueue = DispatchQueue(label: "juancode.session.\(meta.id)")
@@ -563,6 +587,10 @@ public final class Session: @unchecked Sendable {
     private func handleData(_ bytes: [UInt8]) {
         let flushNow = lock.withLock { () -> Bool in
             scroll.append(bytes)
+            // Liveness for a session nobody types at: when output last arrived and
+            // how much of it there has been (the reaper reads the pair as a rate).
+            _lastOutputMs = nowMs()
+            _outputBytes += bytes.count
             return writeThrottle.onOutput(bytes.count)
         }
         // Parse into the headless model once, here on the workQueue (juancode-a2h) —
@@ -603,6 +631,9 @@ public final class Session: @unchecked Sendable {
 
     private func emitActivity(_ state: SessionActivity, _ notify: Bool) {
         logEvent("activity", ["state": state.rawValue])
+        // Latch the non-idle moment: the reaper samples every 90s, so a whole turn
+        // can begin and end between two sweeps and leave `activity` reading idle.
+        if state != .idle { lock.withLock { _lastBusyMs = nowMs() } }
         for l in lock.withLock({ Array(activityListeners.values) }) { l(state, notify) }
         maybeFlushQueueOnEdge(state)
         maybePersistOnIdleEdge(state)
@@ -1363,7 +1394,20 @@ public final class Session: @unchecked Sendable {
     /// tell "reaped while idle, wake me on demand" from a crash/exit. The flag is
     /// cleared by `Session.resume`.
     public func markDormant() {
-        logEvent("dormant")
+        markDormant(reason: .unspecified)
+    }
+
+    /// Sleep this session, recording *who* slept it and on what evidence.
+    ///
+    /// Every dormancy used to write the same bare `dormant` line, so a verified
+    /// idle reap, a live-session-cap eviction and an app quit killing 25 mid-turn
+    /// agents were indistinguishable in `session-activity.log` after the fact —
+    /// which is what turned one bad night into three forensic sessions
+    /// (oracle-qb5). `reason` plus the sampled `audit` fields make the next
+    /// occurrence readable in one grep: which path decided, how long the session
+    /// had been quiet, and which signal said so.
+    public func markDormant(reason: SessionSleepReason, audit: [String: String] = [:]) {
+        logEvent("dormant", audit.merging(["reason": reason.rawValue]) { _, new in new })
         let meta = lock.withLock { () -> SessionMeta in
             _meta.dormant = true
             _meta.updatedAt = nowMs()

@@ -123,6 +123,12 @@ public protocol LiveSession: AnyObject, Sendable {
     /// (REST `/api/sessions/:id/sleep`).
     func markDormant()
 
+    /// Sleep it, saying which path decided and on what evidence — the fields land
+    /// in `session-activity.log`. A requirement rather than only an extension so a
+    /// local `Session` reached through this protocol still records the reason; the
+    /// remote client, which has no log of its own, takes the default below.
+    func markDormant(reason: SessionSleepReason, audit: [String: String])
+
     /// Pin a title, overriding the CLI-title poll.
     func setTitle(_ title: String)
 
