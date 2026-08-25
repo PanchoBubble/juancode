@@ -5,11 +5,11 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 - Spec revision: 1.4.0 (protocol v1)
 - Status source: a real conformance run
-- As of: 2026-08-24
+- As of: 2026-08-25
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel
-- Unmet scenarios: 2 of 25
+- Unmet scenarios: 3 of 26
 
-## What is not satisfied yet (2)
+## What is not satisfied yet (3)
 
 ### transcript
 
@@ -24,6 +24,13 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: queue, queueEdit, pty
 - Why: core does not advertise the "queueEdit" capability
 - Asserts: a pending message's text can be rewritten by the id its snapshot gave it, and the occurrence keeps that id and its position in delivery order rather than being cancelled and requeued behind everything after it; an id that names no pending occurrence is refused with queue-item-not-found and changes nothing.
+
+### transcript-activity
+
+- Status: n/a
+- Needs: transcript, pty
+- Why: core does not advertise the "transcript" capability
+- Asserts: a session whose CLI is appending records to its own stream-json transcript reads busy even though nothing painted a working footer, and the records a transcript already held when the core first read it do not pulse a session busy at all.
 
 ## Full scenario list
 
@@ -52,3 +59,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - seeded-input: yes - a create's initialInput is delivered and submitted
 - transcript: n/a - transcript replay and live batches
 - queue-edit: n/a - editing a queued message in place
+- transcript-activity: n/a - activity inferred from the CLI's own transcript

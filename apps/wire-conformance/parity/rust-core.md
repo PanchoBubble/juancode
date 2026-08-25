@@ -5,9 +5,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 - Spec revision: 1.4.0 (protocol v1)
 - Status source: a real conformance run
-- As of: 2026-08-24
+- As of: 2026-08-25
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit, transcript
-- Unmet scenarios: 4 of 25
+- Unmet scenarios: 4 of 26
 
 ## What is not satisfied yet (4)
 
@@ -66,3 +66,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - seeded-input: yes - a create's initialInput is delivered and submitted
 - transcript: yes - transcript replay and live batches
 - queue-edit: yes - editing a queued message in place
+- transcript-activity: yes - activity inferred from the CLI's own transcript

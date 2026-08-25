@@ -291,9 +291,15 @@ there, because the paste-then-verified-Enter engine is still Swift-only
 can offer a send button whose messages pile up.
 
 No `trackedPrs` / `editor` / `terminal` wire surfaces (both have their tables, neither
-has its messages), and no structured-transcript activity signal: the detector reads the
-rendered screen only, where the Swift one also fuses the CLI's stream-json transcript
-(juancode-52e8.12). Each of those is a named child of the epic.
+has its messages). Each of those is a named child of the epic.
+
+The activity detector now fuses both signals the Swift one does: the rendered screen,
+and the CLI's own stream-json transcript through the seam (an agent-produced record
+opens a turn with no footer on screen, and an unresolved tool call holds one busy past
+the stuck-footer watchdog). Two things are on purpose NOT ported, both because they are
+the only ways a transcript could make a session read idle *sooner* than the screen
+said: a record does not let a settle skip the footer check, and a `turnEnd` record is
+inert. See `juancoded-core/src/activity.rs`.
 
 Nothing in `apps/native` was modified, and nothing here runs unless started by hand:
 the daemon binds no port until launched, and mounting the tree spawns no child until a

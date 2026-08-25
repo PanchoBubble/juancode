@@ -2,7 +2,7 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-08-24",
+  "measuredAt": "2026-08-25",
   "specRevision": "1.4.0",
   "protocolVersion": 1,
   "capabilities": [
@@ -96,6 +96,10 @@
     "queue-edit": {
       "status": "skipped",
       "note": "core does not advertise the \"queueEdit\" capability"
+    },
+    "transcript-activity": {
+      "status": "skipped",
+      "note": "core does not advertise the \"transcript\" capability"
     }
   }
 }

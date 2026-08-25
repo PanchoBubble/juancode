@@ -48,8 +48,20 @@
       "note": "the fake agent writes this turn into claude's own jsonl, which is the plane's source; the pty bytes it also prints are a different plane and are ignored here"
     },
     {
-      "sleep": 3000,
-      "note": "long enough for the core to have read the turn BEFORE anyone subscribes, so what comes back is history rather than a live batch that happened to be in flight"
+      "sleep": 6000,
+      "note": "a core's first bind attempt lands on the spawn banner, before this turn's file exists, so it backs off for BIND_RETRY; this outlasts that back-off"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO nudge\r"
+      },
+      "note": "a bound transcript is only polled for a session that has produced output, so this is what gets the turn read BEFORE anyone subscribes: what comes back is then history rather than a live batch that happened to be in flight"
+    },
+    {
+      "sleep": 1500,
+      "note": "one pump tick plus room, so the read has landed in the store the subscribe replays from"
     },
     {
       "send": {

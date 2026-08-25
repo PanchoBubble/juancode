@@ -39,19 +39,23 @@ ESC=$(printf '\033')
 
 ARGV="$*"
 
-# Where claude would keep this conversation's own jsonl, and the file itself.
+# Where claude would keep this conversation's own jsonl.
 #
 # The transcript plane does not read the pty: it reads the CLI's own store. So a
 # stand-in that only paints a screen leaves that plane with nothing to read, and the
 # `transcript` scenario would be asserting an empty history against an empty file.
 # This writes what claude writes, into the projects directory the harness already
-# points every booted core at (never a developer's real ~/.claude).
+# points every booted core at, and NEVER a developer's real ~/.claude: with the
+# variable unset there is no file and TRANSCRIPT is a no-op.
 #
-# The file is created empty on start, before any command arrives, because binding is
-# what costs: a source that cannot find the file backs off for BIND_RETRY seconds, and
-# the first bind attempt happens on the spawn banner. An empty file binds and yields no
-# events, so every OTHER scenario is unaffected: nothing is read because nothing was
-# written.
+# The file is deliberately NOT created here. A core's first bind attempt lands on the
+# spawn banner, so a file that already exists binds at once and the first batch a
+# session ever yields is empty. `transcript-activity` needs the opposite: it asserts
+# that records a transcript ALREADY HELD when the core first read it are history and
+# pulse nothing, which is only expressible if the first successful bind finds a file
+# with records in it. Creating it here would make that batch empty and the assertion
+# vacuous. The price is that the first bind fails and backs off for BIND_RETRY, which
+# is why both transcript scenarios wait out that back-off and then nudge.
 SESSION_ID=""
 prev=""
 for a in "$@"; do
@@ -65,8 +69,6 @@ if [ -n "${JUANCODE_CLAUDE_PROJECTS_DIR:-}" ] && [ -n "$SESSION_ID" ]; then
   slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
   mkdir -p "$JUANCODE_CLAUDE_PROJECTS_DIR/$slug"
   TRANSCRIPT_FILE="$JUANCODE_CLAUDE_PROJECTS_DIR/$slug/$SESSION_ID.jsonl"
-  # Append-mode create: a resumed conversation keeps the history it already had.
-  : >>"$TRANSCRIPT_FILE"
 fi
 
 printf 'fake-agent ready\r\n'
@@ -126,6 +128,9 @@ while IFS= read -r line; do
     # answers it. Three events come out of the pair (turnStart, step, assistant), and
     # a second TRANSCRIPT closes the open turn first, so the seq numbers a scenario
     # asserts on are the source's, not this script's.
+    #
+    # Nothing here paints a working footer, which is what lets `transcript-activity`
+    # attribute the busy edge that follows to the record rather than to the screen.
     #
     # <text> is embedded in JSON unquoted, so scenarios keep it to plain words.
     if [ -n "$TRANSCRIPT_FILE" ]; then

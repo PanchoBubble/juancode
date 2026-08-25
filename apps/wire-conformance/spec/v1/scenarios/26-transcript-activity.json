@@ -1,0 +1,110 @@
+{
+  "id": "transcript-activity",
+  "title": "activity inferred from the CLI's own transcript",
+  "asserts": "a session whose CLI is appending records to its own stream-json transcript reads busy even though nothing painted a working footer, and the records a transcript already held when the core first read it do not pulse a session busy at all.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "transcript"
+  ],
+  "ignore": [
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ],
+      "note": "the first activity broadcast can precede `created`; see the ambiguity notes"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      },
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange"
+      ]
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT record\r"
+      },
+      "note": "the CLI writes this turn into its own jsonl; the pty bytes it also prints are prose, and nothing here paints a working footer"
+    },
+    {
+      "sleep": 6000,
+      "note": "a core that could not bind the transcript before the file existed backs off; this outlasts it"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO nudge\r"
+      },
+      "note": "output is what makes a core read the transcript, so this is what gets the first records read"
+    },
+    {
+      "expectNone": {
+        "type": "activity",
+        "state": "busy"
+      },
+      "withinMs": 2000,
+      "note": "the file as it stood before the core was reading it is history: a resumed conversation's finished turns must not read as work in progress"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT record\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "busy",
+        "notify": false
+      },
+      "timeoutMs": 10000,
+      "note": "a record the agent produced opens a turn with no footer anywhere on screen, and opening one never pings"
+    },
+    {
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "idle",
+        "notify": true
+      },
+      "timeoutMs": 10000,
+      "note": "the settle a record armed is the settle output arms: a quiet screen ends the turn and that is the edge a human is told about"
+    }
+  ]
+}

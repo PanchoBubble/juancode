@@ -135,6 +135,14 @@ impl TranscriptPlane {
 pub struct Pump {
     bound: HashSet<String>,
     tried: HashMap<String, Instant>,
+    /// Sessions bound whose first batch has not come back yet.
+    ///
+    /// That first batch is the file as it stood before anyone was reading it: a resumed
+    /// conversation's prior turns, or the gap a restarted daemon has to catch up on.
+    /// It is history, and history must not pulse a session busy — the Swift core skips
+    /// its own first batch (`reset: true`) for exactly this reason. Everything after it
+    /// is the CLI writing as it works, which is the signal.
+    fresh: HashSet<String>,
 }
 
 impl Pump {
@@ -160,6 +168,7 @@ impl Pump {
             // with it through the foreign key.
             self.bound.remove(session);
             self.tried.remove(session);
+            self.fresh.remove(session);
             return 0;
         };
         if !self.bound.contains(session) {
@@ -180,6 +189,7 @@ impl Pump {
             };
             debug!(session, source, "transcript bound");
             self.bound.insert(session.to_string());
+            self.fresh.insert(session.to_string());
         }
         let records = match plane.hub.poll(session) {
             Ok(records) => records,
@@ -203,6 +213,19 @@ impl Pump {
             })
             .collect();
         let appended = rows.len();
+        // The preferred activity signal, and the reason this pump is on the liveness
+        // path and not just the history one: a session whose tool call has gone
+        // screen-quiet for minutes is still writing records, and the detector holds it
+        // busy on them. Backlog excluded, per `fresh`.
+        if self.fresh.remove(session) {
+            debug!(
+                session,
+                records = appended,
+                "transcript backlog read; not an activity pulse"
+            );
+        } else {
+            sessions.on_transcript(session, &records);
+        }
         if let Err(error) = plane.store.append_transcript(session, &rows, plane.keep) {
             // The batch is already on the bus, so a live watcher has it; what is lost is
             // the history a later client would have read. Worth a warning and not a
@@ -311,7 +334,7 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
-    use juancoded_core::model::ProviderId;
+    use juancoded_core::model::{ProviderId, SessionActivity};
     use juancoded_state::registry::CreateRequest;
 
     use crate::serve::CoreHandles;
@@ -495,6 +518,42 @@ mod tests {
         );
         assert_eq!(plane2.history(&session).len(), 9);
         drop(loader2);
+    }
+
+    #[tokio::test]
+    async fn the_backlog_is_history_and_only_what_is_written_afterwards_pulses_busy() {
+        let scratch = Scratch::new("pulse");
+        let cwd = scratch.cwd();
+        let (loader, handles) = scratch.boot();
+        let plane = handles.transcripts.clone().expect("the plane mounted");
+        let session = create(&handles, &cwd);
+        let path = scratch.transcript_for(&session);
+
+        // One pump across both polls, because the state that knows which batch is the
+        // first one lives in it — and a fresh pump per poll is exactly how a resumed
+        // conversation would pulse busy for turns that finished yesterday.
+        let mut pump = Pump::new();
+        append(&path, &[PROMPT, CALL, RESULT, DONE]);
+        assert_eq!(
+            pump.poll_session(&handles.sessions, &plane, &session, Instant::now()),
+            9
+        );
+        assert_eq!(
+            handles.sessions.activity(&session),
+            Some(SessionActivity::Idle),
+            "the file as it stood before anyone was reading it is history"
+        );
+
+        // The CLI writes its next turn while we are watching. No pty output is
+        // involved: this session's stand-in child has printed nothing at all.
+        append(&path, &[PROMPT, CALL]);
+        assert!(pump.poll_session(&handles.sessions, &plane, &session, Instant::now()) > 0);
+        assert_eq!(
+            handles.sessions.activity(&session),
+            Some(SessionActivity::Busy),
+            "records appended while we watch are the preferred busy signal"
+        );
+        drop(loader);
     }
 
     #[tokio::test]

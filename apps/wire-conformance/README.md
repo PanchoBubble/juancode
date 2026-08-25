@@ -198,21 +198,30 @@ one command per line off the pty and prints exactly what was asked for:
 
 `TRANSCRIPT` is the odd one out: it writes a file rather than painting a screen.
 The transcript plane does not read the pty, it reads the CLI's own store, so a
-stand-in that only paints would leave that plane with nothing to read. It writes
-into the `JUANCODE_CLAUDE_PROJECTS_DIR` the boot already points every core at,
-never a developer's real `~/.claude`. The empty file is created on spawn, before
-any command: binding is the expensive half, a source that cannot find the file
-backs off for seconds, and an empty file binds and yields nothing - so every other
-scenario is unaffected.
+stand-in that only paints would leave that plane with nothing to read. It writes a
+claude-shaped turn into `$JUANCODE_CLAUDE_PROJECTS_DIR/<cwd slug>/<pinned session
+id>.jsonl`, which is where a real `claude` would write it, and never a developer's
+real `~/.claude`: with the variable unset the command is a no-op. Nothing it does
+paints a working footer, which is how `transcript-activity` can attribute a busy
+edge to the record rather than to the screen.
+
+The file is deliberately not created on spawn. A core's first bind attempt lands on
+the spawn banner, so a file that already exists binds at once and the first batch a
+session yields is empty - which would make `transcript-activity`'s history
+assertion vacuous, since the records that must not pulse are exactly the ones the
+first successful bind finds already written. The price is a failed first bind and a
+`BIND_RETRY` back-off, which is why both transcript scenarios wait it out and then
+send an unrelated `ECHO` to make the session dirty again: a bound transcript is
+only polled for a session that has produced output.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:
 
 1. **Activity is inferred, not commanded.** The core enters busy on the working
    footer (or a structured transcript event) and leaves it on a settle; the fake
-   agent paints that footer on demand, whereas a real CLI paints it whenever it
-   feels like it. A real-provider run therefore asserts the same transitions but
-   cannot assert exactly when they happen.
+   agent paints that footer on demand and writes that record on demand, whereas a
+   real CLI does both whenever it feels like it. A real-provider run therefore
+   asserts the same transitions but cannot assert exactly when they happen.
 2. **Resumability is real.** `claude` pins its session id, `codex`/`opencode`
    have theirs discovered from their own files. The `unresumable` scenario relies
    on a codex-shaped session whose id was never captured; with a real codex that
