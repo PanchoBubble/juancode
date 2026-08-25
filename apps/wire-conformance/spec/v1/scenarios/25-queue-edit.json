@@ -1,0 +1,173 @@
+{
+  "id": "queue-edit",
+  "title": "editing a queued message in place",
+  "asserts": "a pending message's text can be rewritten by the id its snapshot gave it, and the occurrence keeps that id and its position in delivery order rather than being cancelled and requeued behind everything after it; an id that names no pending occurrence is refused with queue-item-not-found and changes nothing.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "queue",
+    "queueEdit"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      },
+      "note": "hold the session busy so nothing is delivered out from under the snapshots, exactly as the queue scenario does"
+    },
+    {
+      "sleep": 500
+    },
+    {
+      "send": {
+        "type": "subscribeQueue",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": []
+      }
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "first"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "text": "first"
+          }
+        ]
+      },
+      "bind": {
+        "firstId": "items.0.id"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "send": {
+        "type": "queueMessage",
+        "sessionId": "$session",
+        "text": "second"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "text": "first"
+          },
+          {
+            "text": "second"
+          }
+        ]
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "BUSY\r"
+      }
+    },
+    {
+      "send": {
+        "type": "editQueued",
+        "sessionId": "$session",
+        "messageId": "$firstId",
+        "text": "first, revised"
+      }
+    },
+    {
+      "expect": {
+        "type": "queue",
+        "sessionId": "$session",
+        "items": [
+          {
+            "id": "$firstId",
+            "text": "first, revised"
+          },
+          {
+            "text": "second"
+          }
+        ]
+      },
+      "note": "same id, same slot: an edit that minted a new id would have sent the head of the queue to the back of it"
+    },
+    {
+      "send": {
+        "type": "editQueued",
+        "sessionId": "$session",
+        "messageId": "no-such-message",
+        "text": "nowhere"
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$session",
+        "message": "queue-item-not-found"
+      }
+    },
+    {
+      "expectNone": {
+        "type": "queue"
+      },
+      "withinMs": 600,
+      "note": "a refused edit is not a change, so it does not push a snapshot"
+    }
+  ]
+}

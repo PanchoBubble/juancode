@@ -199,7 +199,11 @@ function applyOperator(
     case "$lte":
     case "$lt": {
       if (typeof actual !== "number") return fail(path, `expected a number, got ${show(actual)}`);
-      const n = Number(arg);
+      // Through resolveVars so a bound value can be the bound: a transcript asserts
+      // that a live batch's seq is above the last one a replay carried, and the only
+      // place that number exists is a variable a previous step bound.
+      const n = Number(resolveVars(arg, vars));
+      if (Number.isNaN(n)) return fail(path, `${key} needs a number, got ${show(arg)}`);
       const ok =
         key === "$gte"
           ? actual >= n

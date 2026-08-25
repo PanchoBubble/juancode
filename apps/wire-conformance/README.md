@@ -34,10 +34,43 @@ conformant at v1 when it passes every scenario in `spec/v1`.
   cores advertise `protocolVersion: 2`. v1 stays in the tree and keeps being
   measured for as long as any core claims it.
 
-`src/drift.test.ts` compares the catalogue against
-`apps/native/Sources/JuancodeServer/WireProtocol.swift` directly: add a message
-or a capability there and the suite goes red until the spec describes it. That is
+`src/drift.test.ts` compares the catalogue against both cores' wire sources
+directly - `apps/native/Sources/JuancodeServer/WireProtocol.swift` and
+`apps/juancoded/crates/juancoded-server/src/wire.rs` - so adding a message or a
+capability to either one turns the suite red until the spec describes it. That is
 what keeps the spec from becoming documentation.
+
+### The catalogue is the union, and the gate says which core
+
+The two cores do not implement the same set. The Swift core has `trackedPrs`,
+`editor`, `terminal`, `restartFresh` and `spawnModel`; the Rust core has
+`queueEdit` and `transcript`. The catalogue describes **all** of it, and a
+message's capability gate is what says which core speaks it. Each core is then
+measured against the subset its own advertised capability list entails:
+
+- **nothing off the catalogue** - a type a core speaks that `protocol.json` does
+  not describe is drift, whichever core grew it;
+- **no empty promises** - a capability a core advertises has to come with every
+  frame its gate names, because a client switches a feature on off that string.
+
+Neither half asks a core to grow a decode case, or an encoder it would never use,
+for a capability it does not advertise. Two cross-checks stop the catalogue
+inventing things nobody implements: every catalogued message must be implemented
+by at least one core, and every known capability advertised by at least one.
+
+This replaced a rule that compared the catalogue to `WireProtocol.swift` alone,
+under which a frame only the Rust core spoke could not be listed at all - and an
+unlisted frame is an unmeasurable one, because a golden transcript may only
+reference catalogued types. `editQueued` and the three transcript frames sat in
+that hole; the `transcript` and `queue-edit` scenarios are what came out of
+closing it.
+
+A frame behind a capability a core deliberately **withholds** (the Rust core's
+`contributions`: complete daemon-side, unadvertised because nothing renders a
+descriptor yet) is exempt from the first check, by name, in a list in
+`drift.test.ts` that carries the reason. The exemption lasts exactly as long as
+the capability stays unadvertised: advertise it and the suite goes red until the
+catalogue describes the frames.
 
 ## Running it
 
@@ -160,7 +193,17 @@ one command per line off the pty and prints exactly what was asked for:
 | `HIDE` / `SHOW`    | hide / show the cursor                                        |
 | `MOVE <row> <col>` | position the cursor                                           |
 | `TITLE <text>`     | set an OSC 2 window title, the way a CLI names its session    |
+| `TRANSCRIPT <text>`| append one turn to claude's own jsonl (the transcript plane)   |
 | `EXIT <code>`      | exit with that status                                         |
+
+`TRANSCRIPT` is the odd one out: it writes a file rather than painting a screen.
+The transcript plane does not read the pty, it reads the CLI's own store, so a
+stand-in that only paints would leave that plane with nothing to read. It writes
+into the `JUANCODE_CLAUDE_PROJECTS_DIR` the boot already points every core at,
+never a developer's real `~/.claude`. The empty file is created on spawn, before
+any command: binding is the expensive half, a source that cannot find the file
+backs off for seconds, and an empty file binds and yields nothing - so every other
+scenario is unaffected.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:

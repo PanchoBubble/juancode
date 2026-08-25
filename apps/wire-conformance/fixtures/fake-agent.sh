@@ -19,6 +19,7 @@
 #   HIDE / SHOW      hide / show the cursor
 #   MOVE <row> <col> position the cursor (1-based)
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
+#   TRANSCRIPT <text> append a turn to claude's own jsonl (the transcript plane's source)
 #   EXIT <code>      exit with that status
 #
 # Provider args (--session-id, --resume, --model, permission flags) do not change
@@ -37,6 +38,36 @@ stty echo 2>/dev/null
 ESC=$(printf '\033')
 
 ARGV="$*"
+
+# Where claude would keep this conversation's own jsonl, and the file itself.
+#
+# The transcript plane does not read the pty: it reads the CLI's own store. So a
+# stand-in that only paints a screen leaves that plane with nothing to read, and the
+# `transcript` scenario would be asserting an empty history against an empty file.
+# This writes what claude writes, into the projects directory the harness already
+# points every booted core at (never a developer's real ~/.claude).
+#
+# The file is created empty on start, before any command arrives, because binding is
+# what costs: a source that cannot find the file backs off for BIND_RETRY seconds, and
+# the first bind attempt happens on the spawn banner. An empty file binds and yields no
+# events, so every OTHER scenario is unaffected: nothing is read because nothing was
+# written.
+SESSION_ID=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--session-id" ] && SESSION_ID=$a
+  prev=$a
+done
+TRANSCRIPT_FILE=""
+TRANSCRIPT_TURN=0
+if [ -n "${JUANCODE_CLAUDE_PROJECTS_DIR:-}" ] && [ -n "$SESSION_ID" ]; then
+  # claude's own directory rule: every character outside [A-Za-z0-9] becomes a dash.
+  slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
+  mkdir -p "$JUANCODE_CLAUDE_PROJECTS_DIR/$slug"
+  TRANSCRIPT_FILE="$JUANCODE_CLAUDE_PROJECTS_DIR/$slug/$SESSION_ID.jsonl"
+  # Append-mode create: a resumed conversation keeps the history it already had.
+  : >>"$TRANSCRIPT_FILE"
+fi
 
 printf 'fake-agent ready\r\n'
 
@@ -89,6 +120,25 @@ while IFS= read -r line; do
     # A CLI naming its own session. The core adopts this as the session title and
     # broadcasts the new meta, without anyone having asked it to.
     printf '\033]2;%s\007' "$arg"
+    ;;
+  TRANSCRIPT)
+    # One turn as claude records it: the prompt line, then the assistant line that
+    # answers it. Three events come out of the pair (turnStart, step, assistant), and
+    # a second TRANSCRIPT closes the open turn first, so the seq numbers a scenario
+    # asserts on are the source's, not this script's.
+    #
+    # <text> is embedded in JSON unquoted, so scenarios keep it to plain words.
+    if [ -n "$TRANSCRIPT_FILE" ]; then
+      TRANSCRIPT_TURN=$((TRANSCRIPT_TURN + 1))
+      at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      printf '{"type":"user","timestamp":"%s","promptId":"turn-%s","message":{"role":"user","content":"%s"}}\n' \
+        "$at" "$TRANSCRIPT_TURN" "$arg" >>"$TRANSCRIPT_FILE"
+      printf '{"type":"assistant","timestamp":"%s","requestId":"req-%s","message":{"role":"assistant","model":"fake-model","content":[{"type":"text","text":"answered %s"}]}}\n' \
+        "$at" "$TRANSCRIPT_TURN" "$arg" >>"$TRANSCRIPT_FILE"
+    fi
+    # Printed AFTER the file is written: the output is what marks the session dirty,
+    # and a pump that polled first would read a file the turn has not reached yet.
+    printf 'transcript %s\r\n' "$arg"
     ;;
   EXIT)
     exit "${arg:-0}"

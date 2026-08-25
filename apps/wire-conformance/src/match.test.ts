@@ -34,6 +34,17 @@ describe("matchValue", () => {
     expect(matchValue({ state: "idle" }, { state: { $oneOf: ["busy", "idle"] } }).ok).toBe(true);
   });
 
+  it("compares a numeric operator against a bound variable", () => {
+    // A transcript's live batch is asserted to be strictly above the last seq its
+    // replay carried, and that number only exists as a binding.
+    const vars = { baseSeq: 3 };
+    expect(matchValue({ seq: 4 }, { seq: { $gt: "$baseSeq" } }, vars).ok).toBe(true);
+    expect(matchValue({ seq: 3 }, { seq: { $gt: "$baseSeq" } }, vars).ok).toBe(false);
+    // An unbound name is a failure, not a silent NaN comparison that always fails
+    // for the wrong reason.
+    expect(matchValue({ seq: 4 }, { seq: { $gt: "$missing" } }).why).toContain("needs a number");
+  });
+
   it("resolves bound variables on both sides", () => {
     const vars = { session: "s-42" };
     expect(matchValue({ sessionId: "s-42" }, { sessionId: "$session" }, vars).ok).toBe(true);
