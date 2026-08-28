@@ -139,4 +139,66 @@ import Testing
         #expect(await poll { done.bytesSeen != 0 })
         #expect(done.bytesSeen == -1)
     }
+
+    /// Signal 0 asks the kernel whether a pid exists without touching it. `EPERM`
+    /// means it exists and is someone else's, which for this check is still alive.
+    private func alive(_ pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    /// A helper that outlives the child must not outlive the session.
+    ///
+    /// juancode-r34g: the SIGKILL escalation was gated on the direct child still
+    /// being alive, so a helper that ignores SIGTERM — a build, a test run, a
+    /// language server — survived the child, the child was reaped inside the 200ms
+    /// window, the escalation was skipped, and the helper was stranded for good. The
+    /// members that need the group SIGKILL are exactly the ones that outlived the
+    /// child. The wire-level version of this is the `orphan-reap` conformance
+    /// scenario, which both cores failed until this landed.
+    @Test func terminateReapsAHelperThatIgnoresThePoliteSignal() async throws {
+        let out = Collector()
+        let pidFile = "/tmp/juancode-orphan-\(ProcessInfo.processInfo.processIdentifier).pid"
+        try? FileManager.default.removeItem(atPath: pidFile)
+        // `$$` is single-quoted, so the OUTER shell leaves it for the inner one to
+        // expand to its own pid. `sleep 30` and not a loop: a fixture that could
+        // outlive the suite would be the very bug this asserts against.
+        // The outer child blocks on `read`, not on `sleep`, so SIGTERM takes it out at
+        // once and the waitpid thread reaps it INSIDE the 200ms escalation window —
+        // which is the condition that strands the helper, and is what a real CLI
+        // waiting at its prompt does. With `sleep 30` out there the child outlived the
+        // window, the escalation fired for that reason alone, and the test passed with
+        // the bug still in place.
+        let script =
+            "/bin/sh -c 'trap \"\" TERM HUP; printf %s $$ >\"\(pidFile)\"; sleep 30'"
+            + " & printf READY; read ignored"
+        guard let proc = spawn(script, into: out) else {
+            Issue.record("pty spawn failed")
+            return
+        }
+        #expect(await poll { out.bytesSeen > 0 }, "the child never started")
+
+        func helperPid() -> pid_t? {
+            guard let raw = try? String(contentsOfFile: pidFile, encoding: .utf8),
+                  let pid = pid_t(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { return nil }
+            return pid
+        }
+        #expect(await poll { helperPid() != nil }, "the helper never recorded a pid")
+        guard let helper = helperPid() else { return }
+        // The control: with no live helper here, the assertion below would pass for a
+        // helper that never started.
+        #expect(alive(helper), "the helper was not running before the terminate")
+
+        proc.terminate()
+
+        let reaped = await poll(3.0) { !self.alive(helper) }
+        // Never leave the fixture behind, even on the failing path.
+        if !reaped { _ = killpg(helper, SIGKILL) }
+        try? FileManager.default.removeItem(atPath: pidFile)
+        #expect(
+            reaped,
+            "helper \(helper) outlived the session; killing a session has to reap the whole group"
+        )
+    }
 }

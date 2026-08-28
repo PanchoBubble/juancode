@@ -102,8 +102,7 @@
       "note": "core does not advertise the \"transcript\" capability"
     },
     "orphan-reap": {
-      "status": "failed",
-      "note": "step 8 (the assertion: the exit frame means the group is gone, not just the child that answered the pty): helper 44665 survived the session by 8000ms. Killing a session has to reap the whole process group: this helper ignores HUP and TERM, so only an escalation to killpg(SIGKILL) reaches it, and not"
+      "status": "passed"
     }
   }
 }

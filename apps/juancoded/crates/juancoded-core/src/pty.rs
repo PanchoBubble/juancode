@@ -91,6 +91,22 @@ fn signal_group(pid: u32, sig: libc::c_int) {
     }
 }
 
+/// `killpg` with no bare-pid fallback, for the sweep after the child is already gone.
+///
+/// [`signal_group`] falls back to `kill(pid, sig)` when `killpg` fails, which is right
+/// while the child is alive and wrong the moment it is not: a reaped pid can be
+/// recycled, and the fallback would then signal a stranger. The group id stays safe to
+/// name for as long as the group has members, which is exactly the case this is for —
+/// an empty group answers `ESRCH` and nothing happens, which is the outcome we wanted.
+#[cfg(unix)]
+fn signal_group_only(pid: u32, sig: libc::c_int) {
+    // SAFETY: a group id we spawned and a valid signal number. A group that no longer
+    // exists answers ESRCH, which needs no handling.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, sig);
+    }
+}
+
 impl PtyHandle {
     /// Spawn the program and start pumping its output onto the event bus.
     ///
@@ -273,15 +289,35 @@ impl PtyHandle {
             let deadline = Instant::now() + grace;
             while Instant::now() < deadline {
                 if self.has_exited() {
-                    return Ok(());
+                    return self.reap_group();
                 }
                 std::thread::sleep(REAP_POLL);
             }
         }
         if self.has_exited() {
-            return Ok(());
+            return self.reap_group();
         }
         self.kill()
+    }
+
+    /// SIGKILL whatever is left of the child's group once the child itself is gone.
+    ///
+    /// The child exiting is not the group emptying. A helper that ignores SIGTERM —
+    /// a build, a test run, a language server, anything wrapped in `nohup` — outlives
+    /// the child that spawned it, and the child is reaped inside the grace, so
+    /// returning `Ok` there strands the helper for good. That was the bug the
+    /// `orphan-reap` conformance scenario caught (juancode-r34g): both cores gated the
+    /// group SIGKILL on the child still being alive, when the members that need it are
+    /// precisely the ones that outlived it.
+    ///
+    /// Always `Ok`: the child is already gone, which is what the caller asked for, and
+    /// an empty group is the normal case rather than a failure to report.
+    fn reap_group(&self) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid() {
+            signal_group_only(pid, libc::SIGKILL);
+        }
+        Ok(())
     }
 
     /// Take the child out now, with no grace. The last rung of [`stop`](Self::stop),
@@ -582,6 +618,86 @@ mod tests {
                 Err(e) => panic!("the stream ended without an exit: {e}"),
             }
         }
+    }
+
+    /// A helper that outlives the child must not outlive the session.
+    ///
+    /// The companion to the flush test below: there the helper answers TERM and dying
+    /// is what lets the child flush, here it ignores TERM and HUP, so the child is
+    /// reaped inside the grace with the helper still running. Returning `Ok` at that
+    /// point stranded it (juancode-r34g); the group sweep is what takes it out. The
+    /// wire-level version of this is the `orphan-reap` conformance scenario, which both
+    /// cores failed until this landed.
+    #[test]
+    fn stop_reaps_a_helper_that_ignores_the_polite_signal() {
+        // Plain characters only: this path is interpolated into a shell script, and a
+        // `ThreadId(3)` in the name put unquoted parentheses in it, which the shell read
+        // as a syntax error and no pid was ever written. One test uses it, so the pid of
+        // the test process is unique enough.
+        let pid_file =
+            std::env::temp_dir().join(format!("juancoded-orphan-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pid_file);
+        // The inner shell reports its OWN pid: `$$` is inside single quotes, so the
+        // outer shell leaves it for the inner one to expand. `sleep 30` and not a loop —
+        // a fixture that could outlive the suite would be the very bug under test.
+        let script = format!(
+            "/bin/sh -c 'trap \"\" TERM HUP; printf %s $$ >\"{}\"; sleep 30' & printf READY; sleep 30",
+            pid_file.display()
+        );
+        let pty = PtyHandle::spawn(spec("/bin/sh", &["-c", &script]), 256).expect("spawn");
+        let mut rx = pty.subscribe();
+        let ready = wait_for(&mut rx, "READY", Duration::from_secs(10));
+        assert!(
+            ready.contains("READY"),
+            "the child never started; saw {ready:?}"
+        );
+
+        let helper = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(raw) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = raw.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                assert!(Instant::now() < deadline, "the helper never recorded a pid");
+                std::thread::sleep(REAP_POLL);
+            }
+        };
+        // The control: without a live helper here the assertion below would pass for a
+        // helper that never started.
+        assert!(
+            pid_alive(helper),
+            "the helper was not running before the stop"
+        );
+
+        pty.stop_within(Duration::from_millis(300)).expect("stop");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pid_alive(helper) && Instant::now() < deadline {
+            std::thread::sleep(REAP_POLL);
+        }
+        let survived = pid_alive(helper);
+        if survived {
+            // Never leave the fixture behind, even on the failing path.
+            signal_group_only(helper as u32, libc::SIGKILL);
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(
+            !survived,
+            "helper {helper} outlived the session: killing a session has to reap the whole group"
+        );
+    }
+
+    /// Signal 0 asks whether a pid exists without touching it. `EPERM` means it exists
+    /// and belongs to someone else, which for this check is still alive.
+    #[cfg(unix)]
+    fn pid_alive(pid: i32) -> bool {
+        // SAFETY: signal 0 is the documented existence probe and delivers nothing.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
     /// The signal goes to the group, and that is what makes the flush reachable at

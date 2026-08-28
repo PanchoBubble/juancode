@@ -7,9 +7,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-28
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel
-- Unmet scenarios: 4 of 27
+- Unmet scenarios: 3 of 27
 
-## What is not satisfied yet (4)
+## What is not satisfied yet (3)
 
 ### transcript
 
@@ -31,13 +31,6 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: transcript, pty
 - Why: core does not advertise the "transcript" capability
 - Asserts: a session whose CLI is appending records to its own stream-json transcript reads busy even though nothing painted a working footer, and the records a transcript already held when the core first read it do not pulse a session busy at all.
-
-### orphan-reap
-
-- Status: NO
-- Needs: pty
-- Why: step 8 (the assertion: the exit frame means the group is gone, not just the child that answered the pty): helper 44665 survived the session by 8000ms. Killing a session has to reap the whole process group: this helper ignores HUP and TERM, so only an escalation to killpg(SIGKILL) reaches it, and not
-- Asserts: a helper the agent left running in the session's process group is gone once the session is killed, so a core never strands a build, a test run or a language server after the session that owns it is over. The helper ignores SIGHUP and SIGTERM, so closing the pty and asking nicely both fail to reach it and only an escalation to killpg(SIGKILL) can pass this.
 
 ## Full scenario list
 
@@ -67,4 +60,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - transcript: n/a - transcript replay and live batches
 - queue-edit: n/a - editing a queued message in place
 - transcript-activity: n/a - activity inferred from the CLI's own transcript
-- orphan-reap: NO - killing a session reaps the helpers it spawned
+- orphan-reap: yes - killing a session reaps the helpers it spawned

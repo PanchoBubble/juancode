@@ -421,11 +421,23 @@ public final class PtyProcess: @unchecked Sendable {
         _ = killpg(pid, SIGTERM)
         // Escalate on a dedicated thread, NOT on `queue` (which may be wedged): a
         // child stuck such that SIGTERM can't unwind it still dies on SIGKILL.
-        // Skipped if the child was reaped in the meantime (recycled-pid guard).
         Thread.detachNewThread { [weak self] in
             Thread.sleep(forTimeInterval: 0.2)
-            guard let self, !self.reaped.withLock({ $0 }) else { return }
+            guard let self else { return }
+            // The GROUP is signalled whether or not the child was reaped in the
+            // meantime, because the members that need SIGKILL are exactly the ones
+            // that outlived it: a helper ignoring SIGTERM (a build, a test run, a
+            // language server) survives the child, the child is reaped inside these
+            // 200ms, and skipping here stranded that helper for good — juancode-r34g,
+            // caught by the `orphan-reap` conformance scenario. A pid is not recycled
+            // while it is still a live group's id, and this runs 200ms after we
+            // signalled that group ourselves, so naming it is safe; an empty group
+            // answers ESRCH and nothing happens.
             _ = killpg(self.pid, SIGKILL)
+            // The bare pid keeps the guard: once reaped it can be recycled, and this
+            // one addresses a process rather than a group, so it could land on a
+            // stranger.
+            guard !self.reaped.withLock({ $0 }) else { return }
             _ = kill(self.pid, SIGKILL)
         }
         // Healthy-queue path (unchanged for the common case): close the master so
