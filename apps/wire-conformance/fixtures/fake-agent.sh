@@ -20,6 +20,7 @@
 #   MOVE <row> <col> position the cursor (1-based)
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
 #   TRANSCRIPT <text> append a turn to claude's own jsonl (the transcript plane's source)
+#   SPAWN            leave a helper running in the session's process group
 #   EXIT <code>      exit with that status
 #
 # Provider args (--session-id, --resume, --model, permission flags) do not change
@@ -144,6 +145,30 @@ while IFS= read -r line; do
     # Printed AFTER the file is written: the output is what marks the session dirty,
     # and a pump that polled first would read a file the turn has not reached yet.
     printf 'transcript %s\r\n' "$arg"
+    ;;
+  SPAWN)
+    # The helper a real CLI leaves behind: a build, a test run, a language server.
+    # It lands in this process's group (job control is off in a non-interactive
+    # shell, so a background job keeps the shell's pgid) and the core spawned us
+    # through login_tty, so that group is the session's.
+    #
+    # It ignores HUP and TERM on purpose. Closing the pty master hangs up the
+    # foreground group, and a graceful stop sends TERM, so a helper that answered
+    # either one would die whatever the core did and the scenario would pass
+    # vacuously. Ignoring both leaves exactly one thing that can reap it: a core
+    # that escalates killpg to SIGKILL. That is the behaviour under test.
+    #
+    # `sleep 30` and not a loop: the run is seconds long, so any helper still
+    # breathing at 30s is one the core failed to reap, and it ends itself either
+    # way. An unbounded `while :` here would be the very orphan this asserts
+    # against, one signal-handling bug away from outliving the suite.
+    # A child shell rather than a `( )` subshell, because it has to report its OWN
+    # pid and `$BASHPID` does not exist in bash 3.2 — which is what /bin/bash is on
+    # macOS, where the Swift core's job runs. `$$` inside `bash -c` is that shell's
+    # pid on both, so this reads the same on 3.2 and on CI's 5.x.
+    rm -f "$PWD/orphan.pid"
+    bash -c 'trap "" HUP TERM; printf "%s\n" "$$" >"$1/orphan.pid"; sleep 30' _ "$PWD" &
+    printf 'spawned helper\r\n'
     ;;
   EXIT)
     exit "${arg:-0}"

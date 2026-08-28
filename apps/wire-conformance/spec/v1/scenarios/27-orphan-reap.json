@@ -1,0 +1,80 @@
+{
+  "id": "orphan-reap",
+  "title": "killing a session reaps the helpers it spawned",
+  "asserts": "a helper the agent left running in the session's process group is gone once the session is killed, so a core never strands a build, a test run or a language server after the session that owns it is over. The helper ignores SIGHUP and SIGTERM, so closing the pty and asking nicely both fail to reach it and only an escalation to killpg(SIGKILL) can pass this.",
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "SPAWN\r"
+      },
+      "note": "the agent forks a helper into its own process group, the way a real CLI shells out"
+    },
+    {
+      "descendant": "alive",
+      "pidFile": "$orphanPid",
+      "withinMs": 5000,
+      "note": "the control: with no live helper here, the reap below would pass for a helper that never started"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": {
+          "$oneOf": [
+            0,
+            -1
+          ]
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the session's own death, already covered by exit-codes; here it is the precondition for the reap"
+    },
+    {
+      "descendant": "reaped",
+      "pidFile": "$orphanPid",
+      "withinMs": 8000,
+      "note": "the assertion: the exit frame means the group is gone, not just the child that answered the pty"
+    }
+  ]
+}

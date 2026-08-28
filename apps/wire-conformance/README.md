@@ -194,6 +194,7 @@ one command per line off the pty and prints exactly what was asked for:
 | `MOVE <row> <col>` | position the cursor                                           |
 | `TITLE <text>`     | set an OSC 2 window title, the way a CLI names its session    |
 | `TRANSCRIPT <text>`| append one turn to claude's own jsonl (the transcript plane)   |
+| `SPAWN`            | leave a helper running in the session's process group         |
 | `EXIT <code>`      | exit with that status                                         |
 
 `TRANSCRIPT` is the odd one out: it writes a file rather than painting a screen.
@@ -213,6 +214,14 @@ first successful bind finds already written. The price is a failed first bind an
 `BIND_RETRY` back-off, which is why both transcript scenarios wait it out and then
 send an unrelated `ECHO` to make the session dirty again: a bound transcript is
 only polled for a session that has produced output.
+
+`SPAWN` is the other one that reaches past the screen. It forks a helper into the
+agent's process group and records its pid in `orphan.pid` in the session cwd, then
+the `orphan-reap` scenario reads that pid directly. The helper ignores `SIGHUP` and
+`SIGTERM`, so closing the pty master and a graceful stop both fail to reach it and
+only a core that escalates `killpg` to `SIGKILL` passes. It runs `sleep 30`, not a
+loop: the assertion is about a process outliving its session, and a fixture that
+could outlive the suite would be the same bug wearing the test's clothes.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:
@@ -258,7 +267,7 @@ it buys a client, the capabilities and environment it needs, and steps.
 
 Steps: `open` (a second connection), `close` (drop one, which is how a core's
 disconnect behaviour gets driven), `send`, `raw` (a non-JSON frame), `expect`,
-`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`. `expect` consumes
+`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`, `descendant`. `expect` consumes
 frames with a cursor, so consecutive expects assert **order**; a frame that is
 neither the match nor in `ignore` fails the step. `bind` reads a value out of a
 matched frame (`{"session": "session.id"}`) for later `$session` references.
@@ -272,6 +281,15 @@ Matchers are partial on objects and exact on arrays, with explicit operators for
 anything looser: `$absent`, `$present`, `$type`, `$oneOf`, `$regex`, `$contains`,
 `$notContains`, `$gte`/`$gt`/`$lte`/`$lt`, `$length`, `$exact`, `$not`, `$every`,
 `$some`, `$any`, `$var`. A mistyped operator is an error, not a silent pass.
+
+`descendant` is the one step that does not touch the socket:
+`{"descendant": "alive" | "reaped", "pidFile": "$orphanPid", "withinMs": 5000}`
+asserts that the helper `SPAWN` left running is up, or gone. It exists because
+reaping a process group produces no frame and deliberately never will (see
+`decisions` in `protocol.json`), so `orphan-reap` reads the pid the fixture wrote.
+The two polarities are a pair: `reaped` refuses to run when the pid file names
+nothing, because a `SPAWN` that silently did nothing would otherwise satisfy it, so
+the `alive` step before the kill is what makes the assertion mean anything.
 
 `requires` gates a scenario on the environment (`pty`, `git`, `gh`);
 `capabilities` gates it on what the core advertises. Either way the scenario is

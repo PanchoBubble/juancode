@@ -3,7 +3,7 @@
 // Swift and the Rust core is the URL.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -113,6 +113,14 @@ export function seedVars(
     dispatchId: `conformance-${scenarioId}-${stamp}`,
     requestId: `req-${scenarioId}-${stamp}`,
     cliSessionId: `conformance-adopted-${scenarioId}-${stamp}`,
+    // Where the fake agent's `SPAWN` records its helper's pid. Fixed per workspace
+    // rather than stamped like the ids above, because the AGENT has to write it
+    // knowing only its own cwd: an `input` frame carries one literal string, and
+    // `resolveVars` substitutes a whole value, never inside one, so a stamped path
+    // could not be spelled into the command. `SPAWN` unlinks before it forks and
+    // the probe re-reads on every poll, so a file left by an earlier attempt costs
+    // that attempt a few milliseconds, not a verdict.
+    orphanPid: join(workspace.cwd, "orphan.pid"),
   };
 }
 
@@ -269,7 +277,80 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     }
     return;
   }
+  if ("descendant" in step) {
+    await probeDescendant(step.descendant, resolveVars(step.pidFile, s.vars) as string, step.withinMs);
+    return;
+  }
   throw new Error(`unrecognised step: ${JSON.stringify(step)}`);
+}
+
+/** The pid the fake agent's helper recorded, or null while the file is absent or
+ *  not yet a number. Re-read on every poll: `SPAWN` unlinks and rewrites, so a
+ *  stale file resolves itself within milliseconds. */
+function readHelperPid(pidFile: string): number | null {
+  try {
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    // > 1 rejects both an empty parse (NaN) and pid 1, which is never ours and
+    // whose liveness would make every `alive` probe pass.
+    return Number.isInteger(pid) && pid > 1 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Signal 0 asks the kernel whether a pid exists without touching it. EPERM means
+ *  it exists and is someone else's, which for this probe is still alive. */
+function pidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Assert a session's spawned helper is running, or gone.
+ *
+ *  Not a wire assertion: reaping a process group leaves no frame behind, so this
+ *  reads the pid the fixture recorded. `alive` is the control — it has to pass
+ *  before `reaped` means anything, and `reaped` refuses to run without a pid for
+ *  exactly that reason, so a `SPAWN` that silently did nothing fails the scenario
+ *  instead of quietly satisfying it. */
+async function probeDescendant(
+  want: "alive" | "reaped",
+  pidFile: string,
+  withinMs = 8000,
+): Promise<void> {
+  const deadline = Date.now() + withinMs;
+
+  if (want === "reaped") {
+    const pid = readHelperPid(pidFile);
+    if (pid === null) {
+      throw new Error(
+        `nothing to reap: no helper pid in ${pidFile}. A "descendant: alive" step has to ` +
+          `pass first, or this step would report a pass for a helper that never started.`,
+      );
+    }
+    while (Date.now() < deadline) {
+      if (!pidRunning(pid)) return;
+      await sleep(100);
+    }
+    throw new Error(
+      `helper ${pid} survived the session by ${withinMs}ms. Killing a session has to reap ` +
+        `the whole process group: this helper ignores HUP and TERM, so only an escalation ` +
+        `to killpg(SIGKILL) reaches it, and nothing did.`,
+    );
+  }
+
+  while (Date.now() < deadline) {
+    const pid = readHelperPid(pidFile);
+    if (pid !== null && pidRunning(pid)) return;
+    await sleep(100);
+  }
+  throw new Error(
+    `no live helper pid in ${pidFile} after ${withinMs}ms — the fake agent's SPAWN did not ` +
+      `leave one running, so the reap assertion that follows would be vacuous.`,
+  );
 }
 
 /** Kill every session a scenario created, so the next scenario's connection does

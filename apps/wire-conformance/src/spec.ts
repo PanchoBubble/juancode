@@ -74,6 +74,19 @@ export type Step =
   | { expectFirstFrame: Record<string, unknown>; on?: string; note?: string }
   | { expectHandshake: Record<string, unknown>; on?: string; note?: string }
   | { expectNone: Record<string, unknown>; withinMs?: number; on?: string; note?: string }
+  /** The one assertion in the spec that is NOT about a frame.
+   *
+   *  Whether a session's teardown reached the helpers the agent spawned is not
+   *  observable on the wire and deliberately has no frame (see `decisions` in
+   *  protocol.json): the pty carries the child's bytes, not its process tree. So
+   *  the fake agent's `SPAWN` records its helper's pid in a file and this step
+   *  reads it directly, the same side channel `TRANSCRIPT` already uses in the
+   *  other direction.
+   *
+   *  `alive` before the kill and `reaped` after it are a pair, not two options: a
+   *  `reaped` step whose pid file names nothing passes for the wrong reason, so the
+   *  `alive` step is what makes the assertion mean anything. */
+  | { descendant: "alive" | "reaped"; pidFile: string; withinMs?: number; note?: string }
   | { sleep: number; note?: string };
 
 /** Environment a scenario needs beyond a bare core: a pty child, git, gh. */

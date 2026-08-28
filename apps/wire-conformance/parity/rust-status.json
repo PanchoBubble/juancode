@@ -2,8 +2,8 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-08-25",
-  "specRevision": "1.4.0",
+  "measuredAt": "2026-08-28",
+  "specRevision": "1.5.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -98,6 +98,10 @@
     },
     "transcript-activity": {
       "status": "passed"
+    },
+    "orphan-reap": {
+      "status": "failed",
+      "note": "step 8 (the assertion: the exit frame means the group is gone, not just the child that answered the pty): helper 46012 survived the session by 8000ms. Killing a session has to reap the whole process group: this helper ignores HUP and TERM, so only an escalation to killpg(SIGKILL) reaches it, and not"
     }
   }
 }
