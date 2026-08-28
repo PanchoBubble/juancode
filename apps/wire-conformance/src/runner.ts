@@ -121,6 +121,12 @@ export function seedVars(
     // the probe re-reads on every poll, so a file left by an earlier attempt costs
     // that attempt a few milliseconds, not a verdict.
     orphanPid: join(workspace.cwd, "orphan.pid"),
+    // The preset `seedPresets` wrote, and a name it deliberately did not: a core has to
+    // error on a name it cannot resolve rather than spawn without it. Fixed rather than
+    // stamped, because the file is written at boot and every attempt reads the same one.
+    presetName: "conformance",
+    presetMarker: "PRESET-MARKER-conformance",
+    missingPresetName: "conformance-missing",
   };
 }
 

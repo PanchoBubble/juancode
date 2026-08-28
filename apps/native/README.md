@@ -18,10 +18,40 @@ core has no UI/server deps.
 | `SessionRegistry`              | `registry.ts`                                  |
 | `CodexSessionDiscovery`        | `codexSession.ts`                              |
 | `Providers` / `resolveBin`     | `providers.ts` / `resolveBin.ts`               |
+| `PresetStore`                  | new in `spawnPreset` — no server ancestor      |
 | `ActivityDetector`             | `activityDetector.ts`                          |
 | `Scrollback`                   | `scrollback.ts`                                |
 | `Protocol` (models)            | `protocol.ts`                                  |
 | `SessionStore` (seam)          | `db.ts` surface — in-memory now, GRDB in u34.5 |
+
+### Session presets (`spawnPreset`)
+
+A `create` may name a **preset**: a per-session instruction set, selected by name.
+Presets live in juancode's own directory — `~/.juancode/presets` (or
+`<JUANCODE_DATA_DIR>/presets`, or `JUANCODE_PRESET_DIR` outright) — never inside a
+CLI's config.
+
+One name, three mechanisms, because the CLIs share nothing here:
+
+| Provider | Flag | What it does |
+| -------- | ---- | ------------ |
+| claude   | `--append-system-prompt <body>` | Appends the body of `<name>.md`. The only true append, and the only one where juancode supplies the prose. |
+| codex    | `--profile <name>` | Layers `$CODEX_HOME/<name>.config.toml`, a file the **user** wrote. |
+| opencode | `--agent <name>` | Selects an agent the **user** defined. Note this *replaces* the prompt rather than appending. |
+
+That asymmetry is what keeps presets inside the prime directive: for the two CLIs
+that own the concept we select what the user already configured, and we never author
+a CLI's config. Only claude, which has no such concept, takes prose from us — through
+a flag built for exactly that.
+
+The name is validated against an allowlist (`[A-Za-z0-9]` then `[A-Za-z0-9_-]`, ≤64)
+rather than escaped, because it reaches both a filesystem path and an argv slot: that
+rejects `../` traversal out of the preset directory and a leading `-` the CLI would
+read as a flag. A name that cannot be resolved is answered with `error` and no
+session — a preset the client asked for and the core dropped is indistinguishable
+from one it applied. Bodies are capped at 32 KiB so an oversized prompt is a clear
+refusal rather than an `E2BIG` from `execve` surfacing as a session that would not
+start. All three flags are per-invocation, so the preset rides on `--resume` too.
 
 ### Key invariants
 

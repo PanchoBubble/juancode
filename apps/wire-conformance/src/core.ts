@@ -17,7 +17,7 @@
 // oracle control dir, its own unix socket, and fake provider binaries.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,6 +94,20 @@ async function waitHealthy(httpBase: string, timeoutMs: number): Promise<void> {
   throw new Error(`core at ${httpBase} never became healthy (${lastError})`);
 }
 
+/** Write the preset the `spawn-preset` scenario names, and return the directory.
+ *
+ *  One line, and a marker rather than prose: claude's mechanism puts the body in the
+ *  CLI's argv, the fake agent echoes argv back through `ARGS`, and the scenario matches
+ *  on the marker — so a multi-line body would arrive folded into the output frame and a
+ *  generic one could match something else in the line. `conformance-missing` is
+ *  deliberately NOT written: the scenario needs a name that resolves to nothing to prove
+ *  the core errors instead of dropping it. */
+export function seedPresets(dir: string): string {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "conformance.md"), "PRESET-MARKER-conformance\n", "utf8");
+  return dir;
+}
+
 /** The environment a booted core runs with. Every knob here exists so the golden
  *  transcripts are reproducible; see apps/native/Sources/JuancodeCore/Config.swift. */
 export function coreEnv(port: number, dataDir: string, oracleDir: string): Record<string, string> {
@@ -128,6 +142,11 @@ export function coreEnv(port: number, dataDir: string, oracleDir: string): Recor
     // for the fake agent's session id. Read-only either way, but "its own everything"
     // is the promise this boot makes, so it gets its own empty one.
     JUANCODE_CLAUDE_PROJECTS_DIR: join(dataDir, "claude-projects"),
+    // The preset directory a `create.preset` name resolves against. Its own, and
+    // seeded here rather than by a scenario, because the core reads it at spawn and a
+    // scenario cannot write a file. Left unset a core would read the developer's real
+    // presets, so a run would depend on what they happen to have written.
+    JUANCODE_PRESET_DIR: seedPresets(join(dataDir, "presets")),
     // Fixed scrollback so replay assertions do not depend on a user's setting.
     JUANCODE_SCROLLBACK: String(64 * 1024),
     // No retention pruning and no reaping: a scenario's session must still exist

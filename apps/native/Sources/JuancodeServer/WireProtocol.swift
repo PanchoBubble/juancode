@@ -24,9 +24,14 @@ public enum ClientMessage: Sendable {
     /// pin, and the `model` a dispatch line asks for). Nil or empty means the CLI's
     /// own default, which is also what a core without the `spawnModel` capability
     /// does with it.
+    /// `preset` names a per-spawn instruction set, gated by `spawnPreset`. A NAME, never
+    /// prose: the three CLIs share no mechanism, so one name maps to three (claude
+    /// `--append-system-prompt` with a body the core resolves, codex `--profile`,
+    /// opencode `--agent`). A name the core cannot resolve is answered with `error`
+    /// rather than spawned without it.
     case create(provider: String, cwd: String, cols: Int?, rows: Int?,
                 initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?,
-                model: String?, dispatchId: String?)
+                model: String?, preset: String?, dispatchId: String?)
     case attach(sessionId: String, cols: Int, rows: Int)
     case reactivate(sessionId: String, cols: Int, rows: Int)
     /// Restart an exited session as a brand-new CLI conversation under the same
@@ -99,7 +104,7 @@ public enum ClientMessage: Sendable {
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
-        case sessionId, data, file, requestId, cliSessionId, startMs, seq, model
+        case sessionId, data, file, requestId, cliSessionId, startMs, seq, model, preset
         // Oracle dispatch over WS (juancode-2kz.1).
         case dispatchId
         // Tracked-PR registry (juancode-bt2).
@@ -122,6 +127,7 @@ extension ClientMessage: Decodable {
                 skipPermissions: try c.decodeIfPresent(Bool.self, forKey: .skipPermissions),
                 isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree),
                 model: try c.decodeIfPresent(String.self, forKey: .model),
+                preset: try c.decodeIfPresent(String.self, forKey: .preset),
                 dispatchId: try c.decodeIfPresent(String.self, forKey: .dispatchId)
             )
         case "attach":
@@ -213,7 +219,7 @@ public enum WireProtocol {
     public static let version = 1
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
-                                      "restartFresh", "spawnModel"]
+                                      "restartFresh", "spawnModel", "spawnPreset"]
 }
 
 public enum ServerMessage: Sendable {

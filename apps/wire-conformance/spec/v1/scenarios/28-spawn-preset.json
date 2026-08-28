@@ -1,0 +1,149 @@
+{
+  "id": "spawn-preset",
+  "title": "the preset a create names",
+  "asserts": "a create that names a preset spawns the CLI with the mechanism that provider actually offers - claude's --append-system-prompt carrying the resolved body, and nothing at all when no preset was asked for - while a name the core cannot resolve is refused rather than dropped. Without this a client cannot offer a per-session instruction set, and a preset the core swallows looks identical to one it applied.",
+  "capabilities": [
+    "spawnPreset"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "preset": "$presetName"
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude"
+        }
+      },
+      "bind": {
+        "presetted": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$presetted"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$presetted",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$presetted",
+        "data": {
+          "$contains": "--append-system-prompt"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the mechanism claude offers, not a name forwarded verbatim"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$presetted",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$presetted",
+        "data": {
+          "$contains": "$presetMarker"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "and the BODY was resolved and passed, not the name: a core that forwarded the name would pass the flag and still send the wrong prompt"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "no preset: the other half of the contract"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude"
+        }
+      },
+      "bind": {
+        "plain": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$plain"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$plain",
+        "data": "ARGS\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$plain",
+        "data": {
+          "$contains": "argv:",
+          "$notContains": "--append-system-prompt"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the flag appears because the frame asked for it, not because every spawn gets one"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "preset": "$missingPresetName"
+      },
+      "note": "a name with no body behind it"
+    },
+    {
+      "expect": {
+        "type": "error"
+      },
+      "timeoutMs": 20000,
+      "note": "refused, not spawned without it: silently dropping the preset is the bug this closes"
+    }
+  ]
+}

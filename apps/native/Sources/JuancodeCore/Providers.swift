@@ -16,9 +16,14 @@ public struct SpawnOptions: Sendable, Equatable {
     /// default. Wired for both Claude and Codex via each CLI's `--model` flag
     /// (note the two CLIs accept different model names).
     public var model: String?
-    public init(skipPermissions: Bool = false, model: String? = nil) {
+    /// A per-spawn instruction set, already resolved by `PresetStore`. nil = none.
+    /// One name, three mechanisms — see `Preset` for why each provider takes a
+    /// different half of it.
+    public var preset: Preset?
+    public init(skipPermissions: Bool = false, model: String? = nil, preset: Preset? = nil) {
         self.skipPermissions = skipPermissions
         self.model = model
+        self.preset = preset
     }
 }
 
@@ -85,6 +90,33 @@ public enum Providers {
         return ["--model", model]
     }
 
+    /// claude's `--append-system-prompt <body>`: the one true append of the three, and
+    /// the only mechanism where juancode supplies the prose. Empty when no preset, or
+    /// when a body somehow did not resolve — `PresetStore.resolve` throws for claude
+    /// before we ever get here, so the nil branch is belt, not a silent drop.
+    static func claudePresetArgs(_ preset: Preset?) -> [String] {
+        guard let body = preset?.body, !body.isEmpty else { return [] }
+        return ["--append-system-prompt", body]
+    }
+
+    /// codex's `--profile <name>`, which layers `$CODEX_HOME/<name>.config.toml` on the
+    /// user's base config. We forward the name and let codex validate it, exactly as
+    /// with `--model`: the file is the user's to write, and inventing one for them is
+    /// the shadow-config move the prime directive forbids.
+    static func codexPresetArgs(_ preset: Preset?) -> [String] {
+        guard let name = preset?.name, !name.isEmpty else { return [] }
+        return ["--profile", name]
+    }
+
+    /// opencode's `--agent <name>`, naming an agent defined in the user's own config.
+    /// Note this SELECTS rather than appends: unlike claude's flag it replaces the
+    /// agent's prompt wholesale, which is opencode's model of the concept and not
+    /// something we can paper over.
+    static func opencodePresetArgs(_ preset: Preset?) -> [String] {
+        guard let name = preset?.name, !name.isEmpty else { return [] }
+        return ["--agent", name]
+    }
+
     public static let claude = ProviderSpec(
         id: .claude,
         label: "Claude Code",
@@ -95,11 +127,16 @@ public enum Providers {
             ["--session-id", juancodeId]
                 + claudePermArgs(opts.skipPermissions)
                 + claudeModelArgs(opts.model)
+                + claudePresetArgs(opts.preset)
         },
+        // The preset rides on resume too: all three mechanisms are per-invocation
+        // flags, not state the conversation carries, so a resumed session without it
+        // would quietly lose its instruction set halfway through.
         resumeArgs: { cliSessionId, opts in
             ["--resume", cliSessionId]
                 + claudePermArgs(opts.skipPermissions)
                 + claudeModelArgs(opts.model)
+                + claudePresetArgs(opts.preset)
         }
     )
 
@@ -112,11 +149,13 @@ public enum Providers {
         startArgs: { _, opts in
             (opts.skipPermissions ? ["--dangerously-bypass-approvals-and-sandbox"] : [])
                 + codexModelArgs(opts.model)
+                + codexPresetArgs(opts.preset)
         },
         resumeArgs: { cliSessionId, opts in
             ["resume"]
                 + (opts.skipPermissions ? ["--dangerously-bypass-approvals-and-sandbox"] : [])
                 + codexModelArgs(opts.model)
+                + codexPresetArgs(opts.preset)
                 + [cliSessionId]
         }
     )
@@ -135,9 +174,13 @@ public enum Providers {
         // `--session <id>` continues an EXISTING conversation only — there's no flag
         // to pin a new one — so a fresh session starts clean and we read the id it
         // created out of opencode's own database (see `OpencodeStore`).
-        startArgs: { _, opts in opencodeModelArgs(opts.model) },
+        startArgs: { _, opts in
+            opencodeModelArgs(opts.model) + opencodePresetArgs(opts.preset)
+        },
         resumeArgs: { cliSessionId, opts in
-            ["--session", cliSessionId] + opencodeModelArgs(opts.model)
+            ["--session", cliSessionId]
+                + opencodeModelArgs(opts.model)
+                + opencodePresetArgs(opts.preset)
         },
         // opencode's TUI has no `--dangerously-skip-permissions` (only `opencode run`
         // does), so bypass rides on the env var its config layer reads. Set ONLY when

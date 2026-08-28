@@ -309,7 +309,7 @@ final class WebSocketConnection: @unchecked Sendable {
     func handle(_ msg: ClientMessage) async {
         switch msg {
         case let .create(provider, cwd, requestedCols, requestedRows, initialInput,
-                         skipPermissions, isolateWorktree, model, dispatchId):
+                         skipPermissions, isolateWorktree, model, preset, dispatchId):
             // A client that isn't going to display this session (the Oracle
             // dispatch) sends no grid. Boot at the desktop's real one: whatever the
             // CLI prints during its first turn is wrapped at the spawn width
@@ -344,6 +344,20 @@ final class WebSocketConnection: @unchecked Sendable {
                 recordResult(nil, message)
                 send(.error(sessionId: nil, message: message)); return
             }
+            // Resolved BEFORE the worktree below, so a preset the core cannot make sense
+            // of costs an error frame and not an orphaned worktree. Refused rather than
+            // dropped: a session that silently started without the instruction set it
+            // was asked for looks exactly like one that has it.
+            var resolvedPreset: Preset? = nil
+            if let preset, !preset.isEmpty {
+                do {
+                    resolvedPreset = try PresetStore.resolve(name: preset, for: pid)
+                } catch {
+                    let message = "Preset rejected: \(errMsg(error))"
+                    recordResult(nil, message)
+                    send(.error(sessionId: nil, message: message)); return
+                }
+            }
             do {
                 // Opt-in isolation: a fresh worktree off cwd so the session can't
                 // clobber other sessions' working tree.
@@ -359,7 +373,8 @@ final class WebSocketConnection: @unchecked Sendable {
                     // An empty model reads as no pin, so a client that always sends
                     // the key gets the CLI's default rather than a `--model ` flag.
                     opts: SpawnOptions(skipPermissions: skipPermissions ?? false,
-                                       model: (model?.isEmpty ?? true) ? nil : model),
+                                       model: (model?.isEmpty ?? true) ? nil : model,
+                                       preset: resolvedPreset),
                     worktreePath: worktreePath,
                     dispatchId: dispatchId
                 )

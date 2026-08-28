@@ -204,7 +204,7 @@ final class RestartFreshAndModelTests: XCTestCase {
                                       cwd: FileManager.default.temporaryDirectory.path,
                                       cols: 80, rows: 24, initialInput: nil,
                                       skipPermissions: nil, isolateWorktree: nil,
-                                      model: "opus", dispatchId: nil))
+                                      model: "opus", preset: nil, dispatchId: nil))
 
         let created = frames(await tap.drain(), ofType: "created").first
         let id = try XCTUnwrap((created?["session"] as? [String: Any])?["id"] as? String)
@@ -228,7 +228,7 @@ final class RestartFreshAndModelTests: XCTestCase {
                                       cwd: FileManager.default.temporaryDirectory.path,
                                       cols: 80, rows: 24, initialInput: nil,
                                       skipPermissions: nil, isolateWorktree: nil,
-                                      model: "", dispatchId: nil))
+                                      model: "", preset: nil, dispatchId: nil))
 
         let created = frames(await tap.drain(), ofType: "created").first
         let id = try XCTUnwrap((created?["session"] as? [String: Any])?["id"] as? String)

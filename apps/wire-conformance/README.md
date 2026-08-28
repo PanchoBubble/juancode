@@ -43,7 +43,7 @@ what keeps the spec from becoming documentation.
 ### The catalogue is the union, and the gate says which core
 
 The two cores do not implement the same set. The Swift core has `trackedPrs`,
-`editor`, `terminal`, `restartFresh` and `spawnModel`; the Rust core has
+`editor`, `terminal`, `restartFresh`, `spawnModel` and `spawnPreset`; the Rust core has
 `queueEdit` and `transcript`. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
 measured against the subset its own advertised capability list entails:
@@ -222,6 +222,14 @@ the `orphan-reap` scenario reads that pid directly. The helper ignores `SIGHUP` 
 only a core that escalates `killpg` to `SIGKILL` passes. It runs `sleep 30`, not a
 loop: the assertion is about a process outliving its session, and a fixture that
 could outlive the suite would be the same bug wearing the test's clothes.
+
+The `spawn-preset` scenario needs one more thing the pty cannot carry: a preset on
+disk for a name to resolve against. `coreEnv` points every booted core at its own
+`JUANCODE_PRESET_DIR` and writes `conformance.md` into it (a one-line marker, since
+claude's mechanism puts the body in the CLI's argv and the scenario matches it out of
+`ARGS`). `conformance-missing` is deliberately never written: a core has to refuse a
+name it cannot resolve rather than spawn without it. Unset, a core would read the
+developer's real presets and the run would depend on what they happen to have written.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:

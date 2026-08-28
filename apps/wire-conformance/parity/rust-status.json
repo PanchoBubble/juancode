@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-08-28",
-  "specRevision": "1.5.0",
+  "specRevision": "1.6.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -101,6 +101,10 @@
     },
     "orphan-reap": {
       "status": "passed"
+    },
+    "spawn-preset": {
+      "status": "skipped",
+      "note": "core does not advertise the \"spawnPreset\" capability"
     }
   }
 }

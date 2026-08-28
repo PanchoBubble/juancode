@@ -34,7 +34,7 @@ final class WireProtocolTests: XCTestCase {
          "dispatchId":"c0ffee-1"}
         """
         guard case let .create(provider, cwd, cols, rows, initialInput,
-                               skipPermissions, isolateWorktree, _, dispatchId) = try decode(json) else {
+                               skipPermissions, isolateWorktree, _, _, dispatchId) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(provider, "claude")
@@ -51,7 +51,7 @@ final class WireProtocolTests: XCTestCase {
         // Ordinary interactive creates (desktop/web clients) carry no dispatchId;
         // it must decode to nil, not fail.
         let json = #"{"type":"create","provider":"codex","cwd":"/p","cols":80,"rows":24}"#
-        guard case let .create(provider, cwd, _, _, initialInput, _, _, model, dispatchId) = try decode(json) else {
+        guard case let .create(provider, cwd, _, _, initialInput, _, _, model, _, dispatchId) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(provider, "codex")
@@ -65,7 +65,7 @@ final class WireProtocolTests: XCTestCase {
 
     func testDecodesCreateWithAModel() throws {
         let json = #"{"type":"create","provider":"claude","cwd":"/p","cols":80,"rows":24,"model":"opus"}"#
-        guard case let .create(_, _, _, _, _, _, _, model, _) = try decode(json) else {
+        guard case let .create(_, _, _, _, _, _, _, model, _, _) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(model, "opus")
@@ -75,7 +75,7 @@ final class WireProtocolTests: XCTestCase {
         // A client that always sends the key sends "" for "no pin"; the decoder
         // keeps it verbatim and the handler is the one place that reads it as nil.
         let json = #"{"type":"create","provider":"claude","cwd":"/p","cols":80,"rows":24,"model":""}"#
-        guard case let .create(_, _, _, _, _, _, _, model, _) = try decode(json) else {
+        guard case let .create(_, _, _, _, _, _, _, model, _, _) = try decode(json) else {
             return XCTFail("expected .create")
         }
         XCTAssertEqual(model, "")
