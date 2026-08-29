@@ -63,6 +63,7 @@ pub const CAPABILITIES: &[&str] = &[
     "queue",
     "queueEdit",
     "transcript",
+    "isolateWorktree",
 ];
 
 /// One queued occurrence on the wire.
@@ -118,6 +119,10 @@ pub enum ClientMessage {
         rows: Option<u16>,
         initial_input: Option<String>,
         skip_permissions: Option<bool>,
+        /// Spawn in a fresh git worktree off `cwd` rather than in `cwd`. Absent and
+        /// `false` are the same thing; `true` is a promise, so a core that cannot
+        /// keep it answers `error` rather than starting in the shared tree.
+        isolate_worktree: Option<bool>,
         dispatch_id: Option<String>,
     },
     Attach {
@@ -242,6 +247,8 @@ struct RawClient {
     initial_input: Option<String>,
     #[serde(rename = "skipPermissions", default)]
     skip_permissions: Option<bool>,
+    #[serde(rename = "isolateWorktree", default)]
+    isolate_worktree: Option<bool>,
     #[serde(rename = "cliSessionId", default)]
     cli_session_id: Option<String>,
     #[serde(rename = "startMs", default)]
@@ -285,6 +292,7 @@ impl ClientMessage {
                 rows: raw.rows,
                 initial_input: raw.initial_input,
                 skip_permissions: raw.skip_permissions,
+                isolate_worktree: raw.isolate_worktree,
                 dispatch_id: raw.dispatch_id,
             }),
             "attach" => Ok(Self::Attach {
@@ -747,6 +755,7 @@ mod tests {
                 rows: None,
                 initial_input: None,
                 skip_permissions: None,
+                isolate_worktree: None,
                 dispatch_id: None,
             }
         );
@@ -829,6 +838,23 @@ mod tests {
                 "{frame}"
             );
         }
+        // `isolateWorktree` gates a FIELD, not a frame, so the lie it could tell is
+        // one level down: the create still decodes, minus the flag, and the session
+        // starts in the shared checkout under a `created` that says otherwise.
+        let isolated = ClientMessage::decode(
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","isolateWorktree":true}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                isolated,
+                ClientMessage::Create {
+                    isolate_worktree: Some(true),
+                    ..
+                }
+            ),
+            "{isolated:?}"
+        );
         for advertised in CAPABILITIES {
             assert!(
                 [
@@ -841,6 +867,7 @@ mod tests {
                     "queue",
                     "queueEdit",
                     "transcript",
+                    "isolateWorktree",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

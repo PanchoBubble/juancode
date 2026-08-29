@@ -1,0 +1,125 @@
+{
+  "id": "isolate-worktree",
+  "title": "the isolation a create asks for",
+  "asserts": "a create with isolateWorktree lands the session in a FRESH git worktree beside the repo - the pty's own cwd, not just a field in the meta - while a create without the flag runs in the directory it named, and a target that cannot be isolated is refused rather than started in the shared tree. Several agents are dispatched into one checkout at a time and the worktree is the only thing keeping them off each other's files, so a core that drops the flag and still answers `created` reports a success that did not happen.",
+  "capabilities": [
+    "isolateWorktree"
+  ],
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "provider": "claude",
+          "cwd": {
+            "$regex": "-worktrees/[0-9a-f]{8}$"
+          },
+          "worktreePath": {
+            "$regex": "-worktrees/[0-9a-f]{8}$"
+          }
+        }
+      },
+      "bind": {
+        "isolated": "session.id",
+        "isolatedCwd": "session.cwd"
+      },
+      "timeoutMs": 20000,
+      "note": "a sibling <repo>-worktrees/<name> tree, and worktreePath records what has to be removed later"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$isolated"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$isolated",
+        "data": "CWD\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$isolated",
+        "data": {
+          "$contains": "$isolatedCwd"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the agent PROCESS is in the worktree: a core that reported the path but spawned in the repo would pass the meta assertion and fail here"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "no flag: the other half of the contract"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "cwd": "$gitCwd",
+          "worktreePath": {
+            "$absent": true
+          }
+        }
+      },
+      "bind": {
+        "plain": "session.id"
+      },
+      "timeoutMs": 20000,
+      "note": "the worktree appears because the frame asked for it, not because every create gets one"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$plain"
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true
+      },
+      "note": "a target that is not a git repository at all"
+    },
+    {
+      "expect": {
+        "type": "error"
+      },
+      "timeoutMs": 20000,
+      "note": "refused, not started unisolated: an agent loose in a shared checkout that was told it had its own is the bug this closes"
+    }
+  ]
+}

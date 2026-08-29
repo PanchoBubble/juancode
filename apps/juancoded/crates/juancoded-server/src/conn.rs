@@ -524,6 +524,7 @@ fn handle_client_message(
             rows,
             initial_input,
             skip_permissions,
+            isolate_worktree,
             dispatch_id,
         } => {
             let Some(provider_id) = ProviderId::parse(&provider) else {
@@ -541,6 +542,7 @@ fn handle_client_message(
                 rows,
                 skip_permissions: skip_permissions.unwrap_or(false),
                 model: None,
+                isolate_worktree: isolate_worktree.unwrap_or(false),
                 dispatch_id,
                 owner: client,
             };
@@ -1013,6 +1015,7 @@ mod tests {
                 rows: 24,
                 skip_permissions: false,
                 model: None,
+                isolate_worktree: false,
                 dispatch_id: None,
                 owner: 1,
             })
@@ -1117,6 +1120,7 @@ mod tests {
                     rows: 24,
                     skip_permissions: false,
                     model: None,
+                    isolate_worktree: false,
                     dispatch_id: None,
                     owner: 1,
                 })

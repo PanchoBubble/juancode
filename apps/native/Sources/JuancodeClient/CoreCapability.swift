@@ -21,6 +21,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case gridOwner
     case restartFresh
     case spawnModel
+    case isolateWorktree
 
     /// What the user calls this.
     public var title: String {
@@ -37,6 +38,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .gridOwner: return "Grid ownership"
         case .restartFresh: return "Restart as a fresh conversation"
         case .spawnModel: return "Pinned model"
+        case .isolateWorktree: return "Isolate in a fresh worktree"
         }
     }
 
@@ -68,6 +70,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "An exited session with nothing to resume cannot be restarted in place: it stays a replay-only pane, and starting over means a new session with a new id."
         case .spawnModel:
             return "The model pin is dropped: every session, including a dispatched one that asked for a specific model, runs on the CLI's own default."
+        case .isolateWorktree:
+            return "A session cannot be given a worktree of its own: the isolate toggle is disabled, and a dispatch that asks for isolation is refused rather than run in the shared checkout."
         }
     }
 }

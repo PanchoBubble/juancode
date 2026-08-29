@@ -2,8 +2,8 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-08-28",
-  "specRevision": "1.6.0",
+  "measuredAt": "2026-08-29",
+  "specRevision": "1.7.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -18,7 +18,8 @@
     "gridOwner",
     "restartFresh",
     "spawnModel",
-    "spawnPreset"
+    "spawnPreset",
+    "isolateWorktree"
   ],
   "scenarios": {
     "handshake": {
@@ -106,6 +107,9 @@
       "status": "passed"
     },
     "spawn-preset": {
+      "status": "passed"
+    },
+    "isolate-worktree": {
       "status": "passed"
     }
   }

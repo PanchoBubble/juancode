@@ -48,9 +48,28 @@ interface CoreProbe {
   serverTypes(src: string): string[];
   capabilities(src: string): string[];
   version(src: string): number | null;
+  /** Every field name this core's decoder can actually READ off a client frame.
+   *  Type-level drift is not the only kind: `isolateWorktree` was catalogued,
+   *  sent by the dispatcher, and absent from the Rust decoder's struct, so serde
+   *  dropped it and the daemon ran the agent in the shared checkout while still
+   *  answering `created` (juancode-yiho). A type check cannot see that; this can. */
+  clientFields(src: string): string[];
   /** Frames behind a capability this core withholds. Exempt from the
    *  nothing-off-the-catalogue check for exactly as long as it stays withheld. */
   withheld: Withheld[];
+}
+
+/** `isolateWorktree` -> `isolate_worktree`: the Rust decoder spells a field either
+ *  way, as a serde rename or as the struct field the rename is on. */
+function snake(field: string): string {
+  return field.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
+/** Identifiers and string literals in a slice of source, as a set. Tokenised rather
+ *  than substring-matched so a short field name (`pr`) cannot be satisfied by an
+ *  unrelated word that contains it (`provider`). */
+function tokens(src: string): Set<string> {
+  return new Set([...src.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0] as string));
 }
 
 const SWIFT: CoreProbe = {
@@ -72,6 +91,13 @@ const SWIFT: CoreProbe = {
   version: (src) => {
     const m = /static let version = (\d+)/.exec(src);
     return m ? Number(m[1]) : null;
+  },
+  /** `private enum K: String, CodingKey { case type, provider, ... }`: a key that is
+   *  not in there cannot be read, whatever the switch below it does. */
+  clientFields: (src) => {
+    const start = src.indexOf("extension ClientMessage: Decodable");
+    const keys = src.slice(start, src.indexOf("public init(from decoder", start));
+    return [...tokens(keys)];
   },
   withheld: [],
 };
@@ -104,6 +130,14 @@ const RUST: CoreProbe = {
   version: (src) => {
     const m = /pub const PROTOCOL_VERSION: u32 = (\d+)/.exec(src);
     return m ? Number(m[1]) : null;
+  },
+  /** `struct RawClient` alone, and deliberately not the decode fn below it: the
+   *  struct is the only thing serde reads, and the enum variant in `decode` names
+   *  the same field again, so a slice that included it would still find the name
+   *  after the struct had lost it. */
+  clientFields: (src) => {
+    const start = src.indexOf("struct RawClient");
+    return [...tokens(src.slice(start, src.indexOf("impl ClientMessage", start)))];
   },
   withheld: [
     {
@@ -169,6 +203,29 @@ describe.each(PROBES)("the $name core against the catalogue", (probe) => {
     const server = new Set(probe.serverTypes(src as string));
     expect(entailedBy(caps, spec.clientMessages).filter((t) => !client.has(t))).toEqual([]);
     expect(entailedBy(caps, spec.serverMessages).filter((t) => !server.has(t))).toEqual([]);
+  });
+
+  it.runIf(src)("can read every field of every message it has promised to run", () => {
+    // The other half of "no empty promises", one level down. A core answers a frame
+    // whose optional field it never decodes with the same `created` it would send
+    // for a frame that carried the field, so the client is told the operation it
+    // asked for happened. `isolateWorktree` is why this test exists: catalogued,
+    // sent by the Oracle dispatcher, and absent from the Rust decoder's struct, so
+    // every isolated dispatch ran in the shared checkout and reported started
+    // (juancode-yiho). Gated fields are exempt for as long as the gate is: a core
+    // that does not advertise `spawnModel` has promised nothing about `create.model`.
+    const readable = new Set(probe.clientFields(src as string));
+    expect(readable.size, "the client-field reader found nothing").toBeGreaterThan(5);
+    const missing: string[] = [];
+    for (const [type, msg] of Object.entries(spec.clientMessages)) {
+      if (msg.capability !== undefined && !caps.includes(msg.capability)) continue;
+      for (const field of [...msg.required, ...msg.optional]) {
+        const gate = msg.fieldCapabilities?.[field];
+        if (gate !== undefined && !caps.includes(gate)) continue;
+        if (!readable.has(field) && !readable.has(snake(field))) missing.push(`${type}.${field}`);
+      }
+    }
+    expect(missing, "catalogued, entailed, and silently dropped").toEqual([]);
   });
 
   it.runIf(src)("advertises only capabilities the catalogue knows", () => {

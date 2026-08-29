@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.6.0",
+  "specRevision": "1.7.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -30,6 +30,7 @@
       "restartFresh",
       "spawnModel",
       "spawnPreset",
+      "isolateWorktree",
       "queueEdit",
       "transcript"
     ],
@@ -86,6 +87,9 @@
       "spawnPreset": [
         "create.preset"
       ],
+      "isolateWorktree": [
+        "create.isolateWorktree"
+      ],
       "queueEdit": [
         "editQueued"
       ],
@@ -113,10 +117,11 @@
         "preset",
         "dispatchId"
       ],
-      "notes": "cols/rows omitted means the core picks its own spawn grid. `model` pins the CLI to one model for this spawn (the desktop's model setting, and the `model` an Oracle dispatch line asks for); it is gated by `spawnModel`, and omitting it, sending null, or sending an empty string all mean the CLI's own default, which is also what a core without the capability does with it. `initialInput` is a prompt to deliver, not bytes to write: the core pastes it and sends the submitting Enter itself, once it has confirmed the paste landed, so a client never appends a newline of its own. A core that only writes the text leaves the agent with the prompt typed and unsent, and nothing runs. `preset` names a per-spawn instruction set and is gated by `spawnPreset`. It is a NAME, never prose: the three CLIs expose nothing in common here, so one name means three mechanisms - claude takes `--append-system-prompt` with the body the core reads from its preset directory, codex takes `--profile <name>` layering a config the user owns, opencode takes `--agent <name>` naming an agent the user defined. Only claude's is an APPEND; the other two select something the user wrote, which is what keeps this inside the prime directive - the core never authors a CLI's config. A name the core cannot resolve is an error, not a silent drop: a preset the client asked for and the core swallowed is the same class of bug `spawn-model` exists to catch. Replies created + attached, or error.",
+      "notes": "cols/rows omitted means the core picks its own spawn grid. `model` pins the CLI to one model for this spawn (the desktop's model setting, and the `model` an Oracle dispatch line asks for); it is gated by `spawnModel`, and omitting it, sending null, or sending an empty string all mean the CLI's own default, which is also what a core without the capability does with it. `initialInput` is a prompt to deliver, not bytes to write: the core pastes it and sends the submitting Enter itself, once it has confirmed the paste landed, so a client never appends a newline of its own. A core that only writes the text leaves the agent with the prompt typed and unsent, and nothing runs. `preset` names a per-spawn instruction set and is gated by `spawnPreset`. It is a NAME, never prose: the three CLIs expose nothing in common here, so one name means three mechanisms - claude takes `--append-system-prompt` with the body the core reads from its preset directory, codex takes `--profile <name>` layering a config the user owns, opencode takes `--agent <name>` naming an agent the user defined. Only claude's is an APPEND; the other two select something the user wrote, which is what keeps this inside the prime directive - the core never authors a CLI's config. A name the core cannot resolve is an error, not a silent drop: a preset the client asked for and the core swallowed is the same class of bug `spawn-model` exists to catch. `isolateWorktree` spawns in a fresh `<repo>-worktrees/<name>` tree off `cwd` on a `juancode/<name>` branch, and is gated by `isolateWorktree` for the reason ADDITIVE_FIELDS gives: dropping it is not a defensible default but a DIFFERENT operation, an agent loose in a checkout other agents are writing to. So a core that cannot honour it answers error, and the session's `cwd` and `worktreePath` both report the tree it really got. Replies created + attached, or error.",
       "fieldCapabilities": {
         "model": "spawnModel",
-        "preset": "spawnPreset"
+        "preset": "spawnPreset",
+        "isolateWorktree": "isolateWorktree"
       }
     },
     "attach": {
