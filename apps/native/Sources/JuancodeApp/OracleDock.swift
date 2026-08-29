@@ -327,6 +327,8 @@ private struct OracleDispatchPicker: View {
     let dismiss: () -> Void
 
     @State private var project = ""
+    /// Seeded from the Oracle in play on appear, matching what a provider-less
+    /// dispatch line from that Oracle would resolve to.
     @State private var provider: ProviderId = .claude
     @State private var worktree = false
 
@@ -368,6 +370,7 @@ private struct OracleDispatchPicker: View {
         }
         .padding(12)
         .frame(width: 300)
+        .onAppear { provider = oracle.oracleProvider }
     }
 }
 
@@ -453,6 +456,18 @@ struct OracleGlobalRail: View {
 
     /// The running Oracles, most-recent first (see `OracleModel.oracleSessions`).
     private var sessions: [SessionMeta] { oracle.oracleSessions }
+
+    /// The CLI choices for a new Oracle. Which one you pick is more than a terminal:
+    /// the dispatches that Oracle makes inherit it, so its agents run on the same CLI
+    /// unless the dispatch names another (`OracleDispatch.resolvedProvider(default:)`).
+    @ViewBuilder private var newOracleItems: some View {
+        ForEach(ProviderId.allCases, id: \.self) { p in
+            Button(Providers.spec(for: p).label) {
+                oracle.reveal()
+                oracle.newOracle(provider: p)
+            }
+        }
+    }
 
     /// One rail entry: an Oracle plus the live state its row and its ordering read.
     private struct Entry: Identifiable {
@@ -543,10 +558,16 @@ struct OracleGlobalRail: View {
                         .help("\(active.count) of \(sessions.count) Oracles running")
                 }
                 Spacer()
-                Button { oracle.reveal(); oracle.newOracle() } label: { Image(systemName: "plus") }
-                    .buttonStyle(.borderless)
-                    .help("Start another Oracle")
-                    .clickCursor()
+                Menu {
+                    newOracleItems
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Start another Oracle on claude, codex or opencode")
+                .clickCursor()
             }
             .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
             if !sessions.isEmpty {
@@ -585,8 +606,11 @@ struct OracleGlobalRail: View {
                     Text("No Oracle running.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                    Button("Start Oracle") { oracle.reveal(); oracle.newOracle() }
-                        .controlSize(.small).clickCursor()
+                    Menu("Start Oracle") { newOracleItems }
+                        .menuStyle(.borderlessButton)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .clickCursor()
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -815,6 +839,9 @@ private struct OracleRailRow: View {
     /// usage rollup once the CLI reports one — the same vocabulary as sidebar rows.
     private var subtitle: String {
         var parts = ["Oracle \(number)", SessionDateFormat.compact(msSinceEpoch: meta.createdAt)]
+        // Only non-default CLIs are named: with every Oracle on claude the badge would
+        // be noise, and the rail's width is the scarce thing here.
+        if meta.provider != .claude { parts.insert(Providers.spec(for: meta.provider).label, at: 1) }
         if let label = meta.usage?.badgeLabel { parts.append(label) }
         return parts.joined(separator: " · ")
     }

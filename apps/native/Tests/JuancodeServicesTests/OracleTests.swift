@@ -39,6 +39,35 @@ final class OracleTests: XCTestCase {
         XCTAssertEqual(OracleDispatch(project: "/p", prompt: "x", provider: "bogus").resolvedProvider, .claude)
     }
 
+    func testDispatchInheritsTheOraclesProviderWhenUnset() {
+        let bare = OracleDispatch(project: "/p", prompt: "x")
+        XCTAssertEqual(bare.resolvedProvider(default: .codex), .codex)
+        // An explicit provider still wins over what the Oracle runs on.
+        XCTAssertEqual(
+            OracleDispatch(project: "/p", prompt: "x", provider: "claude")
+                .resolvedProvider(default: .codex), .claude)
+        // An unrecognized value inherits rather than silently snapping to claude.
+        XCTAssertEqual(
+            OracleDispatch(project: "/p", prompt: "x", provider: "bogus")
+                .resolvedProvider(default: .opencode), .opencode)
+    }
+
+    func testCurrentOracleProviderPrefersTheActiveChat() {
+        let oracles = [oracleMeta("a", .opencode), oracleMeta("b", .codex)]
+        XCTAssertEqual(currentOracleProvider(active: "b", oracles: oracles), .codex)
+        // No active id (or one no longer in the rail) → the most recent Oracle.
+        XCTAssertEqual(currentOracleProvider(active: nil, oracles: oracles), .opencode)
+        XCTAssertEqual(currentOracleProvider(active: "gone", oracles: oracles), .opencode)
+        // Nothing to inherit from at all → claude.
+        XCTAssertEqual(currentOracleProvider(active: "a", oracles: []), .claude)
+    }
+
+    private func oracleMeta(_ id: String, _ provider: ProviderId) -> SessionMeta {
+        SessionMeta(id: id, provider: provider, cwd: dir, title: "Oracle", status: .running,
+                    exitCode: nil, createdAt: 0, updatedAt: 0, cliSessionId: nil,
+                    skipPermissions: true, worktreePath: nil, usage: nil)
+    }
+
     func testAppendThenReadRoundTrips() throws {
         try appendOracleDispatch(OracleDispatch(project: "/a", prompt: "do a"))
         try appendOracleDispatch(OracleDispatch(project: "/b", prompt: "do b", provider: "codex", worktree: true))

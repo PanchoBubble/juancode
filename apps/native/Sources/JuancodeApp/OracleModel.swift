@@ -88,6 +88,14 @@ final class OracleModel {
             .sorted { $0.createdAt > $1.createdAt }
     }
 
+    /// The provider the Oracle in play is running on — the active chat's, else the
+    /// most recent Oracle's, else Claude. Auto-spawns and provider-less dispatches
+    /// inherit it, so picking codex/opencode for an Oracle carries through to the
+    /// agents it starts.
+    var oracleProvider: ProviderId {
+        currentOracleProvider(active: oracleSessionId, oracles: oracleSessions)
+    }
+
     /// Count of open global tracker items, for the top-bar Issues badge.
     var openCount: Int {
         guard let r = globalBeads, r.available else { return 0 }
@@ -238,9 +246,10 @@ final class OracleModel {
         guard ready else { startAgent(); return }
         // Stop the garbled pty but keep its persisted row, so the conversation stays
         // in the rail and can be resumed later (kill ≠ delete).
+        let provider = oracleProvider
         if let id = oracleSessionId { app.liveSession(id)?.kill() }
         oracleSessionId = nil
-        spawnAgent()
+        spawnAgent(provider: provider)
     }
 
     /// Hard-refresh the chat terminal: deep-refresh the Oracle's session (restart
@@ -262,10 +271,14 @@ final class OracleModel {
     /// can run in parallel — all in the control dir, all listed in the session rail —
     /// so you can keep one working while you start another. Always a fresh spawn (it
     /// becomes `oracleSessionId` once up); existing Oracles are untouched.
-    func newOracle() {
+    ///
+    /// `provider` is the CLI it runs (the rail's "+" menu picks one); nil inherits the
+    /// Oracle in play, so the keyboard paths (⌘N / ⌃N over the dock) stay one keystroke
+    /// and still land on the CLI you're already working with.
+    func newOracle(provider: ProviderId? = nil) {
         guard ready else { bootstrap(); return }
         tab = .chat
-        spawnAgent()
+        spawnAgent(provider: provider ?? oracleProvider)
         chatFocusToken += 1
     }
 
@@ -307,7 +320,7 @@ final class OracleModel {
             chatFocusToken += 1
             reviveOracle(id)
         case .spawnFresh:
-            spawnAgent()
+            spawnAgent(provider: oracleProvider)
         }
     }
 
@@ -328,7 +341,7 @@ final class OracleModel {
             // Clear the resume error so the dock doesn't show a stale "no conversation
             // to resume" banner over a working fresh Oracle.
             app.errorMessage = nil
-            spawnAgent()
+            spawnAgent(provider: oracleProvider)
         }
     }
 
@@ -365,7 +378,7 @@ final class OracleModel {
         if let recent = oracleSessions.first {
             apply(.revive(recent.id))
         } else {
-            spawnAgent()
+            spawnAgent(provider: oracleProvider)
         }
     }
 
@@ -373,7 +386,7 @@ final class OracleModel {
     /// routine live in the control dir's `AGENTS.md`, which the CLI reads on launch, so
     /// there's no seed prompt typed into the chat. `seed` is only non-empty on the ask
     /// path (`receiveAsk`), where the remote question is delivered as the first turn.
-    private func spawnAgent(seed: String = "") {
+    private func spawnAgent(provider: ProviderId, seed: String = "") {
         Task {
             // Accept-all so Oracle can run bd + manage its mailbox without prompts;
             // it operates only in its own control dir. Don't steal the selection.
@@ -381,7 +394,7 @@ final class OracleModel {
             // alt-screen boots at the drawer's width — otherwise it renders at the wide
             // main-window size and wraps into garbage inside the narrower drawer.
             let grid = dockGrid
-            let s = await app.create(provider: .claude, cwd: controlDir, skipPermissions: true,
+            let s = await app.create(provider: provider, cwd: controlDir, skipPermissions: true,
                                      isolateWorktree: false, initialInput: seed,
                                      select: false, cols: grid.cols, rows: grid.rows)
             oracleSessionId = s?.id
@@ -401,7 +414,7 @@ final class OracleModel {
             // as a paste and keep the CR as a literal newline, leaving it unsent.
             s.submit(text)
         } else {
-            spawnAgent(seed: text)
+            spawnAgent(provider: oracleProvider, seed: text)
         }
     }
 
@@ -522,7 +535,7 @@ final class OracleModel {
             }
             // Spawn (or seed) the agent in the target project. Selecting it lets the
             // user jump straight to freshly dispatched work.
-            let s = await app.create(provider: d.resolvedProvider, cwd: d.project,
+            let s = await app.create(provider: d.resolvedProvider(default: oracleProvider), cwd: d.project,
                                      skipPermissions: true, isolateWorktree: d.worktree ?? false,
                                      initialInput: d.prompt, select: true, model: d.model,
                                      dispatchId: d.dispatchId)
