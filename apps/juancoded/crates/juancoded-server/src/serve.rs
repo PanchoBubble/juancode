@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
-use juancoded_state::{SessionsApi, StoreService};
+use juancoded_state::{ReaperConfig, ReaperProbes, SessionReaper, SessionsApi, StoreService};
 
 use crate::conn;
 use crate::identity::{self, DaemonIdentity};
@@ -42,6 +42,11 @@ pub struct CoreHandles {
     /// history in. A `subscribeTranscript` then answers with an empty replay rather
     /// than with records this core cannot produce.
     pub transcripts: Option<TranscriptPlane>,
+    /// The idle-session reaper. `None` would be a core that never sleeps anything;
+    /// this daemon always builds one, because the alternative is what this ticket was
+    /// filed about — 19 live sessions, none of them ever dormant. Its two knobs are at
+    /// the daemon's boot defaults until a client sends `setReaperPolicy`.
+    pub reaper: Option<Arc<SessionReaper>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -60,11 +65,22 @@ impl CoreHandles {
             .ok()
             .zip(loader.services().resolve::<StoreService>().ok())
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
+        let queue = loader.services().resolve::<QueueService>().ok();
+        // The reaper reads the transcripts hub directly for its size probe: the hub
+        // already holds every binding it has resolved, so one call per sweep replaces a
+        // path resolution per session and nothing has to shell out to `stat`.
+        let reaper = Some(Arc::new(SessionReaper::new(
+            Arc::clone(&sessions),
+            queue.clone(),
+            ReaperProbes::live(loader.services().resolve::<TranscriptsService>().ok()),
+            ReaperConfig::from_env(),
+        )));
         Self {
             sessions,
             contributions: loader.contributions().clone(),
-            queue: loader.services().resolve::<QueueService>().ok(),
+            queue,
             transcripts,
+            reaper,
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
@@ -155,6 +171,10 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
             transcript_pump::PUMP_TICK,
         )
     });
+    // And the third: a session goes dormant because it has been verifiably idle, not
+    // because somebody is looking at the dock. Nothing here binds or spawns — the loop
+    // is a no-op tick while the window is disabled and the cap is off.
+    let _reaper = handles.reaper.as_ref().map(|reaper| reaper.spawn());
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {

@@ -1,0 +1,186 @@
+{
+  "id": "reaper",
+  "title": "an idle session goes dormant, and the pane you protect does not",
+  "asserts": "a core that advertises `reaper` honours the two frames a client steers it with. A session left alone for the idle window is flagged dormant on the wire (a sessionMeta carrying dormant: true) and only then killed, so the row a client keeps says \"slept, wake me on demand\" rather than \"died\"; a session the client has declared protected survives the same window untouched, because sleeping the pane somebody is looking at is visible work vanishing under them; and reactivate brings it back with the flag cleared, which is the one click that has to make the moon go away. The live-session ceiling travels on the same frame and is driven here, but which session it evicts is asserted in the core's own suite, where the session set is controlled - a conformance run shares one daemon with every scenario before it, so an LRU order over that daemon's whole session list is not a fact this file can pin.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "reaper",
+    "sessionMeta"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "exit",
+    "queue"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "setReaperPolicy",
+        "windowMs": 0,
+        "maxLive": 0
+      },
+      "note": "start from a known policy: a conformance daemon is shared with every scenario before this one, and the boot default is whatever the harness set"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "session": {
+          "dormant": false,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "setReaperProtectedIds",
+        "sessionIds": [
+          "$session"
+        ]
+      },
+      "note": "the pane the client has open; the core must never sleep it"
+    },
+    {
+      "send": {
+        "type": "setReaperPolicy",
+        "windowMs": 1200,
+        "maxLive": 0
+      },
+      "note": "idle reaping on with a window this scenario can wait out; the ceiling stays off so nothing else can decide to sleep this session"
+    },
+    {
+      "expectNone": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "dormant": true
+        }
+      },
+      "withinMs": 6000,
+      "note": "five times the window, and it has to survive all of it. The assertion is scoped to this session: the daemon may legitimately be sleeping sessions other scenarios left behind"
+    },
+    {
+      "expectNone": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "withinMs": 500,
+      "note": "and it is still alive, not merely un-flagged"
+    },
+    {
+      "send": {
+        "type": "setReaperProtectedIds",
+        "sessionIds": []
+      },
+      "note": "the client looked away; an empty list clears this connection's whole set"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "dormant": true,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "the flag lands while the pty is still alive: flagging after the kill would leave the exited row looking like a crash"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ],
+      "note": "and only then is the CLI process tree freed, which is the whole point of sleeping it"
+    },
+    {
+      "send": {
+        "type": "setReaperPolicy",
+        "windowMs": 0
+      },
+      "note": "off before waking, or the session is eligible again the moment it is back"
+    },
+    {
+      "send": {
+        "type": "reactivate",
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "dormant": false,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "one click resumes it and the moon clears"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      },
+      "note": "this scenario's own cleanup: it woke a session, so it ends it"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ]
+    },
+    {
+      "send": {
+        "type": "setReaperPolicy",
+        "windowMs": 0,
+        "maxLive": 0
+      },
+      "note": "leave the daemon as it was found, so a scenario that runs after this one is not measured against a reaper this one switched on"
+    }
+  ]
+}

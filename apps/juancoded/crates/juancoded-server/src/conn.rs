@@ -27,7 +27,7 @@ use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnap
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
 use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
-use juancoded_state::{ClientId, SessionsApi};
+use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
@@ -69,12 +69,28 @@ const DEFAULT_GRID: (u16, u16) = (120, 40);
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Everything a closing connection has to hand back: the grids it claimed, so the next
+/// viewer's resize is applied rather than denied by a connection nobody is holding, and
+/// the sessions it declared off-limits, so a pane nobody is looking at any more stops
+/// being un-reapable forever.
+fn release(
+    sessions: &Arc<dyn SessionsApi>,
+    reaper: Option<&Arc<SessionReaper>>,
+    client: ClientId,
+) {
+    sessions.release_client(client);
+    if let Some(reaper) = reaper {
+        reaper.release_client(client);
+    }
+}
+
 pub async fn handle(socket: WebSocket, handles: CoreHandles) {
     let CoreHandles {
         sessions,
         contributions,
         queue,
         transcripts,
+        reaper,
         bus,
         identity,
     } = handles;
@@ -121,7 +137,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         .await
         .is_err()
     {
-        sessions.release_client(client);
+        release(&sessions, reaper.as_ref(), client);
         return;
     }
     // Then who already drives which grid, so a client that arrives mid-flight starts
@@ -132,7 +148,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
             .await
             .is_err()
         {
-            sessions.release_client(client);
+            release(&sessions, reaper.as_ref(), client);
             return;
         }
     }
@@ -183,6 +199,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     contributions: &contributions,
                                     queue: queue.as_ref(),
                                     transcripts: transcripts.as_ref(),
+                                    reaper: reaper.as_ref(),
                                 },
                                 client,
                                 &mut fanout,
@@ -261,14 +278,14 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
 
         for msg in outbound {
             if tx.send(Message::Text(msg.to_json().into())).await.is_err() {
-                sessions.release_client(client);
+                release(&sessions, reaper.as_ref(), client);
                 return;
             }
         }
     }
     // The socket is gone: drop this client's grid claims so the next viewer's resize
     // is applied rather than denied by a connection nobody is holding.
-    sessions.release_client(client);
+    release(&sessions, reaper.as_ref(), client);
 }
 
 /// Turn one bus event into the frames this connection owes for it. Output is gated on
@@ -499,6 +516,10 @@ struct Tree<'a> {
     contributions: &'a ContributionRegistry,
     queue: Option<&'a Arc<dyn QueueApi>>,
     transcripts: Option<&'a TranscriptPlane>,
+    /// `None` when this core runs no reaper. The two reaper frames then answer with an
+    /// error rather than silently doing nothing, which is the failure the no-op
+    /// `setReaperIdleWindow` on the Swift client was.
+    reaper: Option<&'a Arc<SessionReaper>>,
 }
 
 fn handle_client_message(
@@ -514,6 +535,7 @@ fn handle_client_message(
         contributions,
         queue,
         transcripts,
+        reaper,
     } = *tree;
     let attached = &mut fanout.attached;
     match msg {
@@ -867,6 +889,44 @@ fn handle_client_message(
 
         // Feature-detected away by well-behaved clients; ignored either way, so an
         // older core can never kill a newer client.
+        ClientMessage::SetReaperPolicy {
+            minutes,
+            window_ms,
+            max_live,
+        } => {
+            let Some(reaper) = reaper else {
+                outbound.push(ServerMessage::Error {
+                    session_id: None,
+                    message: "This core runs no session reaper".into(),
+                });
+                return;
+            };
+            // `windowMs` wins over `minutes`: it is the precise spelling, and a client
+            // that sends both meant the exact one.
+            if let Some(ms) = window_ms.or_else(|| minutes.map(|m| m * 60_000)) {
+                reaper.set_window_ms(ms);
+            }
+            if let Some(max) = max_live {
+                reaper.set_max_live(max);
+            }
+            debug!(
+                window_ms = reaper.window_ms(),
+                max_live = reaper.max_live(),
+                "reaper policy set by a client"
+            );
+        }
+
+        ClientMessage::SetReaperProtectedIds { session_ids } => {
+            let Some(reaper) = reaper else {
+                outbound.push(ServerMessage::Error {
+                    session_id: None,
+                    message: "This core runs no session reaper".into(),
+                });
+                return;
+            };
+            reaper.set_protected(client, session_ids.into_iter().collect());
+        }
+
         ClientMessage::Unknown { r#type } => debug!(r#type, "ignoring unimplemented message"),
     }
 }
@@ -912,6 +972,7 @@ mod tests {
                 contributions: &handles.contributions,
                 queue: handles.queue.as_ref(),
                 transcripts: handles.transcripts.as_ref(),
+                reaper: handles.reaper.as_ref(),
             },
             1,
             fanout,
@@ -1139,6 +1200,7 @@ mod tests {
                     contributions: &self.handles.contributions,
                     queue: self.handles.queue.as_ref(),
                     transcripts: self.handles.transcripts.as_ref(),
+                    reaper: self.handles.reaper.as_ref(),
                 },
                 1,
                 fanout,

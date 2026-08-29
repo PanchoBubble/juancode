@@ -18,6 +18,7 @@ use juancoded_core::model::{SessionActivity, SessionMeta};
 use tokio::sync::broadcast;
 
 use crate::grid::{ClientId, ResizeOutcome};
+use crate::reaper::ReapProbe;
 use crate::registry::{
     AdoptRequest, Attached, CreateRequest, SessionEvent, SessionRegistry, StateError,
 };
@@ -99,6 +100,21 @@ pub trait SessionsApi: Send + Sync {
     /// which stopped being acceptable the moment quitting the app started ending the
     /// daemon.
     fn flush_all(&self) -> usize;
+
+    /// Everything the idle reaper reads about one session, in one call.
+    ///
+    /// On the trait for the same reason `on_transcript` and `flush_all` are: the sweep
+    /// holds an `Arc<dyn SessionsApi>` and nothing else, and a signal it cannot reach
+    /// is a signal that does not arrive. One call rather than a getter per signal
+    /// because the reaper asks twice — once to decide, once immediately before the
+    /// kill — and two assemblies that could drift apart is the bug the second ask
+    /// exists to catch.
+    fn reap_probe(&self, id: &str) -> Option<ReapProbe>;
+
+    /// Flag a session dormant and broadcast the row. `false` when it already was.
+    /// Called before `kill`, so the exited row carries the flag and a client can tell
+    /// "slept, wake me on demand" from a crash.
+    fn mark_dormant(&self, id: &str) -> bool;
 }
 
 /// `ctx.resolve::<SessionsService>()` yields `Arc<dyn SessionsApi>`.
@@ -229,6 +245,14 @@ impl SessionsApi for SessionRegistry {
 
     fn kill(&self, id: &str) -> Result<(), StateError> {
         SessionRegistry::kill(self, id)
+    }
+
+    fn reap_probe(&self, id: &str) -> Option<ReapProbe> {
+        SessionRegistry::reap_probe(self, id)
+    }
+
+    fn mark_dormant(&self, id: &str) -> bool {
+        SessionRegistry::mark_dormant(self, id)
     }
 }
 

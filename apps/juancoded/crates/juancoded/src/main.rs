@@ -103,6 +103,24 @@ async fn main() -> Result<()> {
 /// and remove a run file that is not ours.
 fn stop_serving(live: &Arc<dyn juancoded_state::SessionsApi>, run_file: Option<&std::path::Path>) {
     let flushed = live.flush_all();
+    // Labelled, and labelled `quit` rather than left to look like a reap. The ptys are
+    // this process's children and die with it, so every live agent is interrupted here
+    // — the reaper's own sleeps say `session_sleep reason=idle_reap|live_cap`, and a
+    // month of blame for interrupted agents landed on the reaper the last time these
+    // two wrote the same line. Nothing here flips `dormant`: these sessions were not
+    // judged idle, they were ended.
+    let interrupted: Vec<String> = live
+        .ids()
+        .into_iter()
+        .filter(|id| live.is_running(id))
+        .collect();
+    if !interrupted.is_empty() {
+        info!(
+            reason = "quit",
+            sessions = interrupted.len(),
+            "ending live sessions with the daemon; this is not a reap"
+        );
+    }
     info!(sessions = flushed, "persisted live scrollback");
     if let Some(path) = run_file {
         identity::remove_run_file(path);
