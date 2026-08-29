@@ -18,6 +18,7 @@ fn request(cwd: &str) -> CreateRequest {
         rows: 24,
         skip_permissions: false,
         model: None,
+        isolate_worktree: false,
         dispatch_id: None,
         owner: 1,
     }
@@ -382,6 +383,78 @@ async fn the_activity_machine_notifies_on_a_turn_boundary_and_on_a_prompt_only()
         next_activity(&mut events, &id).await,
         (SessionActivity::Idle, false)
     );
+}
+
+/// A repo with one commit under `<harness dir>/<name>`, ready for `worktree add`.
+fn seed_repo(harness: &Harness, name: &str) -> std::path::PathBuf {
+    let repo = harness.dir.join(name);
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@localhost")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@localhost")
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&["add", "a.txt"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    repo
+}
+
+#[tokio::test]
+async fn an_isolated_create_spawns_in_its_own_worktree_and_says_which_one() {
+    let harness = Harness::new("isolate");
+    let repo = seed_repo(&harness, "repo");
+    let mut req = request(repo.to_str().unwrap());
+    req.isolate_worktree = true;
+    let meta = harness.sessions.create(req).expect("create");
+    let worktree = meta
+        .worktree_path
+        .clone()
+        .expect("an isolated session records the tree it was given");
+    // The cwd is the worktree, not the repo: the whole point is that the agent
+    // cannot reach the checkout other agents are working in.
+    assert_eq!(meta.cwd, worktree);
+    assert_ne!(meta.cwd, repo.to_string_lossy());
+    assert!(std::path::Path::new(&worktree).join("a.txt").is_file());
+    assert!(worktree.contains("repo-worktrees/"), "{worktree}");
+}
+
+#[tokio::test]
+async fn a_create_that_cannot_be_isolated_is_refused_rather_than_run_in_the_shared_tree() {
+    let harness = Harness::new("isolate-guard");
+    let plain = harness.dir.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let mut req = request(plain.to_str().unwrap());
+    req.isolate_worktree = true;
+    let err = harness
+        .sessions
+        .create(req)
+        .expect_err("a directory that is not a repo cannot be isolated");
+    assert!(err.to_string().contains("Not a git repository"), "{err}");
+    // And nothing was started: a refusal that still left a session running would be
+    // the same bug with an error frame stapled to it.
+    assert!(harness.sessions.ids().is_empty());
+}
+
+#[tokio::test]
+async fn a_create_without_the_flag_stays_in_the_directory_it_named() {
+    let harness = Harness::new("no-isolate");
+    let repo = seed_repo(&harness, "repo");
+    let meta = harness
+        .sessions
+        .create(request(repo.to_str().unwrap()))
+        .expect("create");
+    assert_eq!(meta.cwd, repo.to_string_lossy());
+    assert_eq!(meta.worktree_path, None);
 }
 
 #[tokio::test]

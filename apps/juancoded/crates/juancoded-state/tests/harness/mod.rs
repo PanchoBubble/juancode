@@ -107,6 +107,7 @@ impl Harness {
                 rows,
                 skip_permissions: false,
                 model: None,
+                isolate_worktree: false,
                 dispatch_id: None,
                 owner,
             })

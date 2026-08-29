@@ -13,6 +13,7 @@
     "sessionMeta",
     "gridOwner",
     "queue",
+    "isolateWorktree",
     "queueEdit",
     "transcript",
     "reaper"
@@ -108,6 +109,9 @@
       "note": "core does not advertise the \"spawnPreset\" capability"
     },
     "reaper": {
+      "status": "passed"
+    },
+    "isolate-worktree": {
       "status": "passed"
     }
   }

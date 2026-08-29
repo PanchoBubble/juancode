@@ -18,7 +18,8 @@
     "gridOwner",
     "restartFresh",
     "spawnModel",
-    "spawnPreset"
+    "spawnPreset",
+    "isolateWorktree"
   ],
   "scenarios": {
     "handshake": {
@@ -111,6 +112,9 @@
     "reaper": {
       "status": "skipped",
       "note": "core does not advertise the \"reaper\" capability"
+    },
+    "isolate-worktree": {
+      "status": "passed"
     }
   }
 }

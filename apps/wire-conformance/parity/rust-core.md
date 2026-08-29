@@ -6,8 +6,8 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Spec revision: 1.7.0 (protocol v1)
 - Status source: a real conformance run
 - As of: 2026-08-29
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, queueEdit, transcript, reaper
-- Unmet scenarios: 5 of 29
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper
+- Unmet scenarios: 5 of 30
 
 ## What is not satisfied yet (5)
 
@@ -77,3 +77,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - orphan-reap: yes - killing a session reaps the helpers it spawned
 - spawn-preset: n/a - the preset a create names
 - reaper: yes - an idle session goes dormant, and the pane you protect does not
+- isolate-worktree: yes - the isolation a create asks for

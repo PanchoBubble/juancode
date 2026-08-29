@@ -42,6 +42,7 @@ use juancoded_core::changes::{self, ChangeStat};
 use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
+use juancoded_core::worktree;
 use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
@@ -106,6 +107,12 @@ pub struct CreateRequest {
     pub rows: u16,
     pub skip_permissions: bool,
     pub model: Option<String>,
+    /// Run in a fresh git worktree off `cwd` instead of in `cwd` itself. Several
+    /// agents are routinely dispatched into one checkout at once, and this is the
+    /// only thing keeping them off each other's files, so it is never best-effort:
+    /// a create that asks for it and cannot have it is an error, not a session in
+    /// the shared tree (juancode-yiho).
+    pub isolate_worktree: bool,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -142,6 +149,8 @@ pub enum StateError {
     /// The session exists but has no live pty.
     NotRunning,
     NotADirectory(String),
+    /// Isolation was asked for and could not be given. Carries git's own reason.
+    Worktree(String),
     DispatchAlreadyProcessed(String),
     /// A dead session with no CLI conversation id to resume from.
     Unresumable(String),
@@ -155,6 +164,7 @@ impl std::fmt::Display for StateError {
             Self::NotFound => write!(f, "Session not found"),
             Self::NotRunning => write!(f, "Session is not running"),
             Self::NotADirectory(cwd) => write!(f, "\"{cwd}\" is not an existing directory"),
+            Self::Worktree(why) => write!(f, "{why}"),
             Self::DispatchAlreadyProcessed(id) => {
                 write!(f, "Dispatch {id} was already processed")
             }
@@ -489,6 +499,26 @@ impl SessionRegistry {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        // Isolation, if it was asked for, before anything is inserted anywhere: a
+        // refusal here costs nothing but the dispatch claim above, and the caller is
+        // told why. The alternative the Swift core also rejects is spawning in the
+        // shared checkout and reporting success, which is the same frame a real
+        // isolated start sends (juancode-yiho).
+        let worktree = if req.isolate_worktree {
+            // Named after the session, so a stray tree in `<repo>-worktrees` can be
+            // traced back to the row that made it.
+            let name = id.chars().take(8).collect::<String>();
+            Some(worktree::create(&req.cwd, &name).map_err(|e| StateError::Worktree(e.0))?)
+        } else {
+            None
+        };
+        // The session's real cwd. Both cores put the worktree path in `cwd` AND in
+        // `worktreePath`: `cwd` is where the agent is, `worktreePath` is the record
+        // of what has to be removed when the session is deleted.
+        let cwd = worktree
+            .as_ref()
+            .map(|w| w.path.clone())
+            .unwrap_or_else(|| req.cwd.clone());
         let spec = Providers::spec(req.provider);
         let opts = SpawnOptions {
             skip_permissions: req.skip_permissions,
@@ -496,18 +526,19 @@ impl SessionRegistry {
         };
         let (program, args) = self.program_for(req.provider, &id, &opts, None)?;
 
-        let title = std::path::Path::new(&req.cwd)
+        let title = std::path::Path::new(&cwd)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| req.cwd.clone());
+            .unwrap_or_else(|| cwd.clone());
         let mut meta = SessionMeta::new(
             id.clone(),
             req.provider,
-            req.cwd.clone(),
+            cwd.clone(),
             title,
             now_ms(),
             req.skip_permissions,
         );
+        meta.worktree_path = worktree.as_ref().map(|w| w.path.clone());
         // Claude pins its conversation id to ours, so the session is resumable at
         // once; the others have to be discovered from their own state later.
         if spec.pins_session_id() {
@@ -546,7 +577,7 @@ impl SessionRegistry {
         let plan = SpawnPlan {
             program,
             args,
-            cwd: req.cwd.clone(),
+            cwd: cwd.clone(),
             cols: req.cols,
             rows: req.rows,
         };

@@ -219,7 +219,8 @@ public enum WireProtocol {
     public static let version = 1
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
-                                      "restartFresh", "spawnModel", "spawnPreset"]
+                                      "restartFresh", "spawnModel", "spawnPreset",
+                                      "isolateWorktree"]
 }
 
 public enum ServerMessage: Sendable {

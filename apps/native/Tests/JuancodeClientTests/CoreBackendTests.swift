@@ -163,9 +163,11 @@ final class CoreBackendTests: XCTestCase {
     /// shrinking without any of the call sites changing. `restartFresh` and
     /// `spawnModel` join it the other way round: the frames exist in the spec now,
     /// and the daemon is honestly silent about them until it implements them.
+    /// `isolateWorktree` went the shrinking way on 2026-08-29 (juancode-yiho): the
+    /// daemon now makes the worktree itself, so the toggle is no longer gated off it.
     func testTheRustDaemonsCapabilitySetGatesTheAffordancesItLacks() {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen", "adoptExternal",
-                                           "sessionMeta", "gridOwner"])
+                                           "sessionMeta", "gridOwner", "isolateWorktree"])
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .editor, .terminal, .restartFresh, .spawnModel])
         for capability in core.missingCapabilities {
@@ -185,7 +187,8 @@ final class CoreBackendTests: XCTestCase {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen"])
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .editor, .terminal, .adoptExternal,
-                        .sessionMeta, .gridOwner, .restartFresh, .spawnModel])
+                        .sessionMeta, .gridOwner, .restartFresh, .spawnModel,
+                        .isolateWorktree])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, so

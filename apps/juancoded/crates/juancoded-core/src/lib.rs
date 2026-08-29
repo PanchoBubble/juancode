@@ -13,6 +13,7 @@ pub mod model;
 pub mod proc;
 pub mod provider;
 pub mod pty;
+pub mod worktree;
 
 pub use activity::{
     ActivityClock, ActivityDetector, Armed, ManualClock, MonotonicClock, ScreenText, Step,
@@ -26,3 +27,4 @@ pub use provider::{
     SpawnOptions,
 };
 pub use pty::{PtyEvent, PtyHandle, SpawnSpec};
+pub use worktree::{CreatedWorktree, WorktreeError};

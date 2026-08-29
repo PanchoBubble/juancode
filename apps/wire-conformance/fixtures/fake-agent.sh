@@ -10,6 +10,7 @@
 # The command vocabulary IS part of the spec (spec/v1/scenarios/*.json drive it):
 #   READY            banner, printed on start without being asked
 #   ARGS             print the argv this process was spawned with
+#   CWD              print the working directory this process was spawned in
 #   ECHO <text>      print text and a CRLF
 #   BUSY             print the working footer both real CLIs paint while a turn runs
 #   PROMPT           print a yes/no question on the bottom row (a waiting-input screen)
@@ -86,6 +87,12 @@ while IFS= read -r line; do
   case "$cmd" in
   ARGS)
     printf 'argv: %s\r\n' "$ARGV"
+    ;;
+  CWD)
+    # Where the core actually put us. The only witness to isolation that a core
+    # cannot satisfy by filling in a field: `isolateWorktree` is a promise about
+    # the process, not about the meta.
+    printf 'cwd: %s\r\n' "$PWD"
     ;;
   ECHO)
     printf '%s\r\n' "$arg"
