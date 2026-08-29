@@ -69,6 +69,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// A dropped daemon has to be visible — a frozen pane that explains nothing is
     /// the failure mode this whole ticket exists to avoid.
     private var connectedFlag = true
+    /// The last reaper policy this client pushed, so a reconnect can re-state it. The
+    /// daemon is a separate process: its never-sleep set is per connection and its
+    /// window resets to its own boot default when it restarts.
+    private var reaperWindowMinutes: Int?
+    private var reaperProtectedIds: Set<String>?
     private var connectionListeners: [Int: @Sendable (Bool, String?) -> Void] = [:]
 
     /// The grid an attach we initiate uses when no pane has sized the session yet.
@@ -409,13 +414,64 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         return activityLog.logPath
     }
 
-    /// The reaper runs inside a core; the daemon has one of its own and no frame to
-    /// configure it. The Settings idle window therefore does not reach the rust core.
-    public func setReaperIdleWindow(minutes: Int) async {}
+    // MARK: - Idle reaper (capability: reaper)
 
-    /// Same reason: the daemon owns its own reaper, so the open pane / active
-    /// Oracle exemptions are pushed to nothing here.
-    public func setReaperProtectedIds(_ ids: Set<String>) async {}
+    /// The Settings → Sessions idle window, over the wire.
+    ///
+    /// This used to be a no-op whose comment claimed the daemon owned its own reaper.
+    /// It did not own one at all: nothing in `apps/juancoded` had ever set a session
+    /// dormant, so on this core the stepper moved a number nothing read, no session
+    /// ever slept, and 19 live CLI trees sat where the Swift core would have been
+    /// reclaiming about 5.7GB. The daemon has a real reaper now (juancode-52e8.14.1)
+    /// and this is the frame that steers it.
+    public func setReaperIdleWindow(minutes: Int) async {
+        lock.withLock { reaperWindowMinutes = minutes }
+        guard sendsReaperFrames("idle window") else { return }
+        connection.send(["type": "setReaperPolicy", "minutes": minutes])
+    }
+
+    /// The sessions the reaper must never sleep: the pane the user has open and the
+    /// active Oracle. Replaces this connection's whole set, so an empty set clears it.
+    public func setReaperProtectedIds(_ ids: Set<String>) async {
+        lock.withLock { reaperProtectedIds = ids }
+        guard sendsReaperFrames("never-sleep set") else { return }
+        connection.send(["type": "setReaperProtectedIds", "sessionIds": Array(ids).sorted()])
+    }
+
+    /// Re-state both after a reconnect.
+    ///
+    /// The daemon keys the never-sleep set on the *connection* that declared it, so a
+    /// reconnect arrives with nothing protected — and the app will not re-push on its
+    /// own: `AppModel.applyReaperProtection` short-circuits when the set has not
+    /// changed, which it has not. Without this the pane the user is looking at is
+    /// reapable from the moment the socket blips, which is the one thing the set
+    /// exists to prevent. The window is re-stated for the matching reason: a restarted
+    /// daemon is back at its own boot default, not at the Settings value.
+    private func resendReaperPolicy() {
+        guard info.has("reaper") else { return }
+        let (minutes, ids) = lock.withLock { (reaperWindowMinutes, reaperProtectedIds) }
+        if let minutes {
+            connection.send(["type": "setReaperPolicy", "minutes": minutes])
+        }
+        if let ids {
+            connection.send(["type": "setReaperProtectedIds", "sessionIds": Array(ids).sorted()])
+        }
+    }
+
+    /// Whether the connected daemon speaks the reaper frames.
+    ///
+    /// Checked against the raw capability string rather than a `CoreCapability` case
+    /// on purpose: `reaper` names two frames, not a feature. The Swift core reaps
+    /// without them because its reaper is in-process, so a `CoreCapability` case would
+    /// make the capability panel report "no idle reaper" for the one core that has
+    /// always had one.
+    private func sendsReaperFrames(_ what: String) -> Bool {
+        guard info.has("reaper") else {
+            NSLog("juancode: the \(backendName) core has no reaper capability — \(what) not applied")
+            return false
+        }
+        return true
+    }
 
     /// Closing the app does NOT kill the daemon's ptys: it is another process, its
     /// sessions outlive this window, and re-adopting them is what the boot probe is
@@ -583,6 +639,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 connection.send(["type": "attach", "sessionId": handle.id,
                                  "cols": grid.cols, "rows": grid.rows])
             }
+            resendReaperPolicy()
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
         }

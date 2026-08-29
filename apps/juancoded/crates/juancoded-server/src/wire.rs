@@ -46,6 +46,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// What does not exist yet is a client that renders a descriptor, and advertising the
 /// capability before one does would promise chrome nothing draws.
 ///
+/// `reaper` says this core puts idle sessions to sleep on its own and will honour a
+/// client's idle window and never-sleep set. It is advertised because both halves are
+/// real: the sweep runs in the daemon, and the two frames its gate names change what
+/// the sweep does. A client that does not know them still gets a reaper — at the
+/// daemon's own boot defaults — which is the honest shape: the capability is about the
+/// frames, not about whether anything sleeps.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -63,6 +70,7 @@ pub const CAPABILITIES: &[&str] = &[
     "queue",
     "queueEdit",
     "transcript",
+    "reaper",
 ];
 
 /// One queued occurrence on the wire.
@@ -214,6 +222,31 @@ pub enum ClientMessage {
         target: Option<String>,
         payload: Value,
     },
+    /// The Settings → Sessions knobs for the idle reaper. Every field is optional and
+    /// only the ones present are applied, so a client that only has an idle-window
+    /// stepper does not have to invent a ceiling.
+    ///
+    /// `windowMs` exists beside `minutes` because the daemon is a separate process and
+    /// this frame is the only channel to it: the Settings stepper speaks minutes, and
+    /// anything that needs to be exact — a conformance run, a shorter window than the
+    /// stepper can express — needs the precise unit. `windowMs` wins when both are
+    /// sent. `0` in either spelling disables idle reaping; the ceiling is separate and
+    /// keeps applying.
+    SetReaperPolicy {
+        minutes: Option<i64>,
+        window_ms: Option<i64>,
+        max_live: Option<usize>,
+    },
+    /// The sessions this client says must never be slept: the pane it has open and the
+    /// active Oracle. Replaces this client's whole set — it is never a patch — and an
+    /// empty list clears it.
+    ///
+    /// Per connection, unlike the in-process Swift core's single set, because a daemon
+    /// outlives its clients: a protection that survived the connection that declared it
+    /// would be a session nobody is looking at that can never be reaped again.
+    SetReaperProtectedIds {
+        session_ids: Vec<String>,
+    },
     /// Cancel a still-pending message by the id its snapshot gave it.
     DequeueMessage {
         session_id: String,
@@ -264,6 +297,14 @@ struct RawClient {
     target: Option<String>,
     #[serde(default)]
     payload: Option<Value>,
+    #[serde(default)]
+    minutes: Option<i64>,
+    #[serde(rename = "windowMs", default)]
+    window_ms: Option<i64>,
+    #[serde(rename = "maxLive", default)]
+    max_live: Option<usize>,
+    #[serde(rename = "sessionIds", default)]
+    session_ids: Option<Vec<String>>,
 }
 
 impl ClientMessage {
@@ -355,6 +396,16 @@ impl ClientMessage {
             }),
             "unsubscribeTranscript" => Ok(Self::UnsubscribeTranscript {
                 session_id: need_session()?,
+            }),
+            "setReaperPolicy" => Ok(Self::SetReaperPolicy {
+                minutes: raw.minutes,
+                window_ms: raw.window_ms,
+                max_live: raw.max_live,
+            }),
+            "setReaperProtectedIds" => Ok(Self::SetReaperProtectedIds {
+                // An absent list is an empty one: "protect nothing" and "I sent no
+                // list" mean the same thing to a set that is replaced wholesale.
+                session_ids: raw.session_ids.unwrap_or_default(),
             }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
             "unsubscribeContributions" => Ok(Self::UnsubscribeContributions),
@@ -820,6 +871,10 @@ mod tests {
             // both halves of the subscription, not one.
             r#"{"type":"subscribeTranscript","sessionId":"s"}"#,
             r#"{"type":"unsubscribeTranscript","sessionId":"s"}"#,
+            // And for `reaper`: a Settings stepper that reached `Unknown` would be the
+            // exact failure this capability was added to end.
+            r#"{"type":"setReaperPolicy","minutes":30}"#,
+            r#"{"type":"setReaperProtectedIds","sessionIds":["s"]}"#,
         ] {
             assert!(
                 !matches!(
@@ -841,11 +896,64 @@ mod tests {
                     "queue",
                     "queueEdit",
                     "transcript",
+                    "reaper",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
             );
         }
+    }
+
+    #[test]
+    fn the_reaper_policy_frame_carries_both_spellings_of_the_window() {
+        // The Settings stepper speaks minutes; anything that needs to be exact — a
+        // conformance run, a window shorter than a minute — needs the precise unit.
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"setReaperPolicy","minutes":30}"#).unwrap(),
+            ClientMessage::SetReaperPolicy {
+                minutes: Some(30),
+                window_ms: None,
+                max_live: None,
+            }
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"setReaperPolicy","windowMs":1500,"maxLive":4}"#)
+                .unwrap(),
+            ClientMessage::SetReaperPolicy {
+                minutes: None,
+                window_ms: Some(1_500),
+                max_live: Some(4),
+            }
+        );
+        // Every field optional: a client with only a stepper does not have to invent a
+        // ceiling, and one with only a ceiling does not have to resend a window.
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"setReaperPolicy"}"#).unwrap(),
+            ClientMessage::SetReaperPolicy {
+                minutes: None,
+                window_ms: None,
+                max_live: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_absent_protected_list_is_an_empty_one() {
+        // "Protect nothing" and "I sent no list" mean the same thing to a set that is
+        // replaced wholesale, and a client clearing its selection sends exactly this.
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"setReaperProtectedIds"}"#).unwrap(),
+            ClientMessage::SetReaperProtectedIds {
+                session_ids: Vec::new(),
+            }
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"setReaperProtectedIds","sessionIds":["a","b"]}"#)
+                .unwrap(),
+            ClientMessage::SetReaperProtectedIds {
+                session_ids: vec!["a".into(), "b".into()],
+            }
+        );
     }
 
     #[test]

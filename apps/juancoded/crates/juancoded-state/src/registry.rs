@@ -24,7 +24,7 @@
 //! latency floor for an imaginary saving.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,7 @@ use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
+use crate::reaper::ReapProbe;
 
 /// How long between scrollback flushes for a session that keeps producing output. A
 /// hard-killed daemon loses at most this much history; a write per chunk would put a
@@ -233,6 +234,32 @@ struct Revival {
     rows: u16,
 }
 
+/// The liveness counters the idle reaper samples, and nothing else reads.
+///
+/// Atomics rather than another field in the meta lock: they are written on the pty
+/// pump's hot path (once per output chunk) and read from a sweep on another task, and
+/// neither should ever wait on the other.
+///
+/// Input is here but is deliberately NOT the liveness signal. A dispatched agent is
+/// typed at exactly once and then works for hours, so keying dormancy on keystrokes
+/// reads "idle" at its busiest; `last_input_ms` exists to protect a half-typed,
+/// unsubmitted prompt that no other signal can see. What the pty *says*
+/// (`output_bytes`, read as a rate) and what the detector *remembers* (`last_busy_ms`)
+/// are the liveness pair. See `crate::reaper`.
+#[derive(Default)]
+struct LiveSignals {
+    /// ms-since-epoch of the last byte written INTO the pty.
+    last_input_ms: AtomicI64,
+    /// ms-since-epoch of the last byte the pty produced.
+    last_output_ms: AtomicI64,
+    /// Total bytes this session has produced, monotonic across a respawn.
+    output_bytes: AtomicU64,
+    /// ms-since-epoch of the last moment the detector classified this session
+    /// non-idle. `activity` is a snapshot; a whole turn can begin and end between two
+    /// sweeps and leave it reading idle.
+    last_busy_ms: AtomicI64,
+}
+
 struct LiveSession {
     meta: Mutex<SessionMeta>,
     /// `None` once the child is gone. The session row outlives its pty.
@@ -241,6 +268,7 @@ struct LiveSession {
     grid: Mutex<GridState>,
     activity: Mutex<ActivityDetector>,
     opts: Mutex<SpawnOptions>,
+    signals: LiveSignals,
     /// Bumped on every spawn. A pump whose epoch is stale lost its pty to a respawn
     /// and must not report that pty's exit as the session's.
     epoch: AtomicU64,
@@ -375,6 +403,7 @@ impl SessionRegistry {
                     grid: Mutex::new(GridState::new(cols, rows_)),
                     activity: Mutex::new(ActivityDetector::new()),
                     opts: Mutex::new(opts),
+                    signals: LiveSignals::default(),
                     epoch: AtomicU64::new(0),
                 }),
             );
@@ -493,6 +522,7 @@ impl SessionRegistry {
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
             activity: Mutex::new(ActivityDetector::new()),
             opts: Mutex::new(opts),
+            signals: LiveSignals::default(),
             epoch: AtomicU64::new(0),
         });
         // The creating client owns the grid it spawned the session at.
@@ -580,6 +610,7 @@ impl SessionRegistry {
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
             activity: Mutex::new(ActivityDetector::new()),
             opts: Mutex::new(opts),
+            signals: LiveSignals::default(),
             epoch: AtomicU64::new(0),
         });
         live.grid
@@ -728,9 +759,9 @@ impl SessionRegistry {
 
     pub fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError> {
         use juancoded_cordis::events::{InputDecision, InputRequest, SessionInput};
-        if self.get(id).is_none() {
+        let Some(live) = self.get(id) else {
             return Err(StateError::NotFound);
-        }
+        };
         // Input goes through the around chain, so policy (a live-pty guard today, a
         // steering queue's claim boundary later) can refuse it without the registry
         // knowing that any policy exists.
@@ -739,7 +770,12 @@ impl SessionRegistry {
             InputDecision::Refused("no writer is mounted for `session.input`".into())
         });
         match decision {
-            InputDecision::Delivered(_) => Ok(()),
+            InputDecision::Delivered(_) => {
+                // A keystroke that reached the pty. Not liveness — see `LiveSignals` —
+                // but the one thing that protects a prompt typed and not yet sent.
+                live.signals.last_input_ms.store(now_ms(), Ordering::Relaxed);
+                Ok(())
+            }
             InputDecision::Refused(why) => Err(StateError::Spawn(why)),
         }
     }
@@ -956,6 +992,66 @@ impl SessionRegistry {
             .map_err(|e| StateError::Spawn(e.to_string()))
     }
 
+    // MARK: - dormancy
+
+    /// Everything the idle reaper reads about one session, gathered under this
+    /// session's own locks in a single call.
+    ///
+    /// One call rather than a getter per signal, because the reaper asks the same
+    /// question twice — once to decide and once immediately before the kill — and two
+    /// assemblies that could drift apart is exactly the bug the second ask exists to
+    /// catch. See `crate::reaper`.
+    pub fn reap_probe(&self, id: &str) -> Option<ReapProbe> {
+        let live = self.get(id)?;
+        let child_pid = live
+            .pty
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|pty| pty.pid());
+        let running = {
+            let slot = live.pty.lock().unwrap_or_else(|e| e.into_inner());
+            slot.is_some()
+        };
+        let (activity, open_tool_call) = {
+            let det = live.activity.lock().unwrap_or_else(|e| e.into_inner());
+            (det.state(), det.has_open_tool_call())
+        };
+        let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        Some(ReapProbe {
+            id: meta.id,
+            cwd: meta.cwd,
+            cli_session_id: meta.cli_session_id,
+            running,
+            child_pid,
+            activity,
+            open_tool_call,
+            last_input_ms: live.signals.last_input_ms.load(Ordering::Relaxed),
+            last_output_ms: live.signals.last_output_ms.load(Ordering::Relaxed),
+            output_bytes: live.signals.output_bytes.load(Ordering::Relaxed),
+            last_busy_ms: live.signals.last_busy_ms.load(Ordering::Relaxed),
+            updated_at: meta.updated_at,
+        })
+    }
+
+    /// Flag a session dormant and tell everyone. `false` when it already was.
+    ///
+    /// The reaper calls this *before* `kill`, so the exited row the pty's death
+    /// finalises already carries `dormant = true` and a client can tell "slept, wake me
+    /// on demand" from a crash. The flag is cleared by the respawn behind `reactivate`.
+    pub fn mark_dormant(&self, id: &str) -> bool {
+        let Some(live) = self.get(id) else {
+            return false;
+        };
+        self.edit_meta(id, &live, |meta| {
+            if meta.dormant {
+                return false;
+            }
+            meta.dormant = true;
+            true
+        })
+    }
+
     // MARK: - internals
 
     fn get(&self, id: &str) -> Option<Arc<LiveSession>> {
@@ -1170,6 +1266,10 @@ impl SessionRegistry {
             let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
             meta.status = SessionStatus::Running;
             meta.exit_code = None;
+            // Waking a slept session: the moon clears the moment the CLI is back, and
+            // it clears here rather than in `reactivate` so every path that respawns a
+            // pty (a revive, a permission-mode flip) agrees about it.
+            meta.dormant = false;
             meta.updated_at = now_ms();
         }
         {
@@ -1198,6 +1298,12 @@ impl SessionRegistry {
             .store
             .upsert(&meta)
             .map_err(|e| StateError::Store(e.to_string()))?;
+        // The reviving client learns the row from its own `attached`; every other
+        // client learns it here, which is what clears a moon glyph on a second surface.
+        let _ = self.inner.events.send(SessionEvent::Meta {
+            session_id: id.to_string(),
+            meta,
+        });
         Ok(())
     }
 
@@ -1236,6 +1342,13 @@ impl SessionRegistry {
 
     fn on_output(&self, id: &str, live: &Arc<LiveSession>, bytes: Arc<Vec<u8>>) {
         let chunk = Arc::clone(&bytes);
+        // What the pty says, as a running total. The reaper reads it as a rate, so a
+        // TUI redrawing its status line cannot hold a session alive while a tool
+        // streaming its log can.
+        live.signals
+            .output_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        live.signals.last_output_ms.store(now_ms(), Ordering::Relaxed);
         // The bus feeds the grid: one listener, one grid, one lock. Emitting first
         // means the screen the activity classifier re-reads already includes this
         // chunk, which is the only ordering that makes settle correct.
@@ -1358,6 +1471,13 @@ impl SessionRegistry {
         prev: SessionActivity,
         transition: juancoded_core::Transition,
     ) {
+        // Latch the moment the detector left idle. The reaper samples on a cadence, so
+        // a whole turn can begin and end between two sweeps and leave `activity`
+        // reading idle at both of them; this is the same detector's memory of that
+        // turn, not a second notion of busy.
+        if transition.state != SessionActivity::Idle {
+            live.signals.last_busy_ms.store(now_ms(), Ordering::Relaxed);
+        }
         let (cwd, dispatch_id) = {
             let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
             (meta.effective_cwd().to_string(), meta.dispatch_id.clone())

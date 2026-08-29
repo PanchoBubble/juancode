@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.6.0",
+  "specRevision": "1.7.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -31,7 +31,8 @@
       "spawnModel",
       "spawnPreset",
       "queueEdit",
-      "transcript"
+      "transcript",
+      "reaper"
     ],
     "gates": {
       "queue": [
@@ -93,6 +94,10 @@
         "subscribeTranscript",
         "unsubscribeTranscript",
         "transcript"
+      ],
+      "reaper": [
+        "setReaperPolicy",
+        "setReaperProtectedIds"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -310,6 +315,24 @@
       ],
       "optional": [],
       "capability": "trackedPrs"
+    },
+    "setReaperPolicy": {
+      "required": [],
+      "optional": [
+        "minutes",
+        "windowMs",
+        "maxLive"
+      ],
+      "capability": "reaper",
+      "notes": "The Settings idle window and the live-session ceiling for a core that reaps in its own process. Every field is optional and only the ones present are applied, so a client with just an idle-window stepper does not have to invent a ceiling. windowMs is the precise spelling of the same quantity as minutes and wins when both are sent; it exists because a core in a separate process can only be told exactly through a frame. 0 in either spelling disables idle reaping, and the ceiling is separate and keeps applying. There is no reply: the effect is visible as sessionMeta frames carrying dormant, and as the exit that follows one."
+    },
+    "setReaperProtectedIds": {
+      "required": [
+        "sessionIds"
+      ],
+      "optional": [],
+      "capability": "reaper",
+      "notes": "The sessions this client says must never be slept: the pane it has open and the active Oracle. Replaces this connection's whole set - never a patch - and an empty list clears it. Scoped to the connection, so a client that goes away stops protecting a pane nobody is looking at; a core that kept it would make those sessions permanently un-reapable."
     }
   },
   "serverMessages": {
@@ -423,7 +446,7 @@
       ],
       "optional": [],
       "capability": "sessionMeta",
-      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta \u2014 replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
+      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta — replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
     },
     "queue": {
       "required": [
@@ -546,13 +569,14 @@
     "CATALOGUE_IS_THE_UNION: this file catalogues the PROTOCOL, which is the union of what the cores speak, not the surface of any one of them. A message only one core implements is listed here like any other, and its capability gate is what says which: `drift.test.ts` reads each core's own source, works out the messages its advertised capability list entails, and requires that core to implement exactly those and nothing off this catalogue. So a core that advertises a capability must answer every frame the gate names (no empty promises), and a frame either core speaks must be described here (no drift) - but a core is never asked to grow a decode case, or an encoder it would never use, for a capability it does not advertise. The rule this replaced made the catalogue a mirror of WireProtocol.swift, which left `editQueued` and the transcript frames implemented, advertised and unlistable, and therefore unmeasurable: a golden transcript may only reference catalogued types, so the only planes with no scenario were the ones only one core had."
   ],
   "decisions": {
-    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire \u2014 so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
-    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
+    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire — so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
+    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side — the core knows both the pid and the cwd — and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
     "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
     "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",
     "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here.",
     "restartFresh grid": "restartFresh takes cols/rows like attach and reactivate rather than reusing the grid the session died at: the client that asks for the restart is the one about to render it, and the CLI wraps its first turn at the spawn width forever.",
-    "contributions": "The Rust core decodes `subscribeContributions`, `unsubscribeContributions` and `activateContribution` and encodes `contributions` and `contributionResult`, and they are deliberately absent from this catalogue, because it withholds the `contributions` capability: nothing renders a descriptor yet, and advertising it would promise chrome nothing draws. Under CATALOGUE_IS_THE_UNION an unadvertised frame is not on the wire as far as any feature-detecting client is concerned, so it is not catalogued either - which is why `drift.test.ts` carries the five type names in one explicit list with this reason attached. The day the capability is advertised, that list is what makes the suite go red until this file describes them."
+    "contributions": "The Rust core decodes `subscribeContributions`, `unsubscribeContributions` and `activateContribution` and encodes `contributions` and `contributionResult`, and they are deliberately absent from this catalogue, because it withholds the `contributions` capability: nothing renders a descriptor yet, and advertising it would promise chrome nothing draws. Under CATALOGUE_IS_THE_UNION an unadvertised frame is not on the wire as far as any feature-detecting client is concerned, so it is not catalogued either - which is why `drift.test.ts` carries the five type names in one explicit list with this reason attached. The day the capability is advertised, that list is what makes the suite go red until this file describes them.",
+    "sleepAndWake": "Sleeping a session has no frame of its own, and waking it has no frame beyond reactivate. A reap is not a command a client sends; it is something the core decides, and what a client needs to see is the outcome - a sessionMeta carrying dormant: true, followed by the session's exit. Waking is reactivate, which already answers with the woken row. A dedicated sleep/wake pair would be a second way to say what kill and reactivate already say, and a second way for the two to disagree."
   }
 }

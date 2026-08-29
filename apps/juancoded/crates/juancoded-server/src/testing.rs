@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use juancoded_core::model::{ProviderId, SessionActivity, SessionMeta, SessionStatus};
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
-use juancoded_state::{ClientId, QueuedMessage, ResizeOutcome, SessionsApi};
+use juancoded_state::{ClientId, QueuedMessage, ReapProbe, ResizeOutcome, SessionsApi};
 use juancoded_vt::{Snapshot, TerminalModel};
 use tokio::sync::broadcast;
 
@@ -53,6 +53,7 @@ pub struct FakeChild {
     pub swallows_enter: AtomicBool,
     pub running: AtomicBool,
     pub busy: AtomicBool,
+    pub dormant: AtomicBool,
     events: broadcast::Sender<SessionEvent>,
 }
 
@@ -79,6 +80,7 @@ impl FakeChild {
             swallows_enter: AtomicBool::new(false),
             running: AtomicBool::new(true),
             busy: AtomicBool::new(false),
+            dormant: AtomicBool::new(false),
             events,
         })
     }
@@ -222,5 +224,27 @@ impl SessionsApi for FakeChild {
     fn kill(&self, _id: &str) -> Result<(), StateError> {
         self.running.store(false, Ordering::Relaxed);
         Ok(())
+    }
+    /// No pty, so no child pid — which is exactly what a reaper sweep over this fake
+    /// should see. The reaper's own behaviour is measured against a fake that does
+    /// have one, in `juancoded_state::reaper::tests`.
+    fn reap_probe(&self, id: &str) -> Option<ReapProbe> {
+        Some(ReapProbe {
+            id: id.into(),
+            cwd: "/tmp".into(),
+            cli_session_id: Some("fake-cli-id".into()),
+            running: self.running.load(Ordering::Relaxed),
+            child_pid: None,
+            activity: self.activity(id).unwrap_or(SessionActivity::Idle),
+            open_tool_call: false,
+            last_input_ms: 0,
+            last_output_ms: 0,
+            output_bytes: 0,
+            last_busy_ms: 0,
+            updated_at: 0,
+        })
+    }
+    fn mark_dormant(&self, _id: &str) -> bool {
+        !self.dormant.swap(true, Ordering::Relaxed)
     }
 }

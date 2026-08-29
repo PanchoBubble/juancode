@@ -11,10 +11,12 @@
 
 pub mod grid;
 pub mod plugins;
+pub mod reaper;
 pub mod registry;
 pub mod service;
 
 pub use grid::{ClientId, ResizeOutcome};
+pub use reaper::{ReapProbe, ReaperConfig, ReaperProbes, SessionReaper, SleepReason};
 pub use registry::{
     AdoptRequest, Attached, CreateRequest, RegistryConfig, SessionEvent, SessionRegistry,
     StateError, UNRESUMABLE_REASON,

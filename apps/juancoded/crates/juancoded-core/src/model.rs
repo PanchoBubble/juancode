@@ -39,6 +39,19 @@ pub enum SessionActivity {
     WaitingInput,
 }
 
+impl SessionActivity {
+    /// The wire spelling, for a log field or a veto reason. Deliberately the same
+    /// string serde emits, so a line in the daemon log and a frame on the socket
+    /// cannot disagree about what a session was doing.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::Idle => "idle",
+            Self::WaitingInput => "waiting_input",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
