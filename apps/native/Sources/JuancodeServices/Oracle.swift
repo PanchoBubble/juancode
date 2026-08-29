@@ -84,8 +84,25 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     /// Resolve `provider` to a `ProviderId`, defaulting to Claude for an absent or
     /// unrecognized value (the dispatch should still go through).
     public var resolvedProvider: ProviderId {
-        provider.flatMap { ProviderId(rawValue: $0.lowercased()) } ?? .claude
+        resolvedProvider(default: .claude)
     }
+
+    /// Resolve `provider`, falling back to `fallback` for an absent or unrecognized
+    /// value. The app passes the dispatching Oracle's own provider, so an Oracle
+    /// started on codex/opencode dispatches agents on the same CLI unless the
+    /// dispatch names one explicitly.
+    public func resolvedProvider(default fallback: ProviderId) -> ProviderId {
+        provider.flatMap { ProviderId(rawValue: $0.lowercased()) } ?? fallback
+    }
+}
+
+/// The provider a dispatch inherits when it names none: the provider the Oracle
+/// that asked for it is itself running on. `oracles` is the Oracle session list in
+/// rail order (most recent first); `active` is the one the chat is pointed at. Falls
+/// back to Claude when there is no Oracle to inherit from.
+public func currentOracleProvider(active: String?, oracles: [SessionMeta]) -> ProviderId {
+    if let active, let meta = oracles.first(where: { $0.id == active }) { return meta.provider }
+    return oracles.first?.provider ?? .claude
 }
 
 /// A line appended to `ask.jsonl` by an out-of-process caller (the MCP sidecar that
@@ -533,7 +550,8 @@ juancode session in that project:
 ```
 
 Fields: `project` (absolute path from the `projects` list, required), `prompt`
-(required), `provider` (`"claude"`, `"codex"` or `"opencode"`, default claude), `worktree`
+(required), `provider` (`"claude"`, `"codex"` or `"opencode"` — omit it and the
+dispatched agent runs on the same CLI you are running on), `worktree`
 (default false — set true to isolate the agent in a fresh git worktree off the
 project so parallel agents don't collide), `model` (optional — a model override
 passed to the provider CLI, e.g. `"opus"`, `"sonnet"`, or a full model id; omit
