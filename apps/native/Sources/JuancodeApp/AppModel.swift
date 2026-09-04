@@ -21,6 +21,10 @@ private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
+/// Ids the global pause is holding asleep. Survives a quit so play still knows what
+/// to revive; see `AppModel.pausedSessionIds`.
+private let pausedSessionsKey = "juancode.pausedSessions"
+
 /// UserDefaults key for the idle-session sleep window driving the `SessionReaper`,
 /// in minutes (`0` = never / disabled). Key name predates the reaper.
 private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
@@ -497,6 +501,14 @@ final class AppModel {
     /// The sweep's parallel lanes. Unstructured, so `cancelLaunchRevive` has to cancel
     /// them itself — cancelling `launchReviveTask` alone wouldn't reach them.
     @ObservationIgnored private var launchReviveLanes: [Task<Void, Never>] = []
+
+    /// The global play sweep (`resumeAllSessions`). Internal, not private: the pause
+    /// actions live in `SessionSleepActions`.
+    @ObservationIgnored var globalResumeTask: Task<Void, Never>?
+
+    /// Its parallel lanes. Unstructured, so `cancelGlobalResume` cancels them itself —
+    /// cancelling the parent task alone wouldn't reach them.
+    @ObservationIgnored var globalResumeLanes: [Task<Void, Never>] = []
 
     /// Restore candidates already revived once this run, so re-opening one within the
     /// same run (after it exits again, say) doesn't re-announce a restore.
@@ -1282,6 +1294,23 @@ final class AppModel {
     /// The held idle-sleep assertion, when `keepAwake` is on. `nil` means the Mac is
     /// free to idle-sleep as usual.
     @ObservationIgnored private var keepAwakeToken: NSObjectProtocol?
+
+    /// Sessions the global pause button put to sleep, so play knows exactly which
+    /// rows to bring back. Persisted: quitting while paused is common (that is half
+    /// of why you paused), and losing the set would strand every one of them asleep
+    /// with no way to tell them from a session you slept yourself.
+    ///
+    /// Non-empty *is* the paused state — see `isGloballyPaused`.
+    var pausedSessionIds: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: pausedSessionsKey) ?? []) {
+        didSet {
+            UserDefaults.standard.set(Array(pausedSessionIds), forKey: pausedSessionsKey)
+        }
+    }
+
+    /// True while a global pause is in effect. Drives the toolbar button's pause/play
+    /// face and its badge count.
+    var isGloballyPaused: Bool { !pausedSessionIds.isEmpty }
 
     /// Acquire or release the idle-system-sleep assertion to match `keepAwake`.
     /// Idempotent: re-applying the current state is a no-op.

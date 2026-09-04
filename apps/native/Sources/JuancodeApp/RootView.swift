@@ -59,6 +59,7 @@ struct RootView: View {
                 // into Tools; Open in Editor into the session-row hover menu; Tracked Issues into
                 // the sidebar; Appearance into the ⌘, Settings window.
                 NotificationsBell()
+                GlobalPauseButton()
                 Button { oracle.open(tab: .chat) } label: {
                     Label("Oracle", systemImage: "sparkles")
                 }
@@ -300,6 +301,49 @@ private struct FolderGroup: Identifiable {
 /// listing every session with a pending turn-end notification. Clicking a row jumps
 /// to that session (which clears its unread). Hidden-from-sidebar Oracle sessions are
 /// excluded — the Oracle dock clears those itself.
+/// Global pause / play (juancode): one button that sleeps every live agent and
+/// brings the same set back.
+///
+/// Pause is the existing per-session sleep applied to all of them, so it genuinely
+/// returns the RAM — the reason to reach for it is usually memory pressure or
+/// walking away. Play resumes each conversation with `--resume`, which is a reload,
+/// not a continuation of the turn that was in flight, so the confirmation says so
+/// rather than letting the pause look free.
+private struct GlobalPauseButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirming = false
+
+    /// Live agents a pause would sleep right now. Zero means there is nothing to
+    /// pause, and the button goes quiet rather than pretending it would do something.
+    private var pausable: Int {
+        model.sessions.filter { model.isLive($0.id) && !model.isEditorSession($0.id)
+                                && !model.isExternal($0.id) }.count
+    }
+
+    var body: some View {
+        Button {
+            if model.isGloballyPaused { model.resumeAllSessions() } else { confirming = true }
+        } label: {
+            Label(model.isGloballyPaused ? "Resume All" : "Pause All",
+                  systemImage: model.isGloballyPaused ? "play.circle.fill" : "pause.circle")
+        }
+        .disabled(!model.isGloballyPaused && pausable == 0)
+        .foregroundStyle(model.isGloballyPaused ? Color.orange : Color.primary)
+        .help(model.isGloballyPaused
+              ? "Resume the \(model.pausedSessionCount) session(s) the pause put to sleep"
+              : "Pause all — sleep \(pausable) running session(s) and free their memory")
+        .clickCursor()
+        .confirmationDialog("Pause \(pausable) running session(s)?",
+                            isPresented: $confirming, titleVisibility: .visible) {
+            Button("Pause All") { model.pauseAllSessions() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Each agent is stopped and its memory freed. Resume reloads the "
+                 + "conversation with --resume, so a turn that is mid-flight now is lost.")
+        }
+    }
+}
+
 private struct NotificationsBell: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
