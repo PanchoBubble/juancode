@@ -86,6 +86,14 @@ public final class PtyProcess: @unchecked Sendable {
         // hit the filesystem. (`execvp` below stays as the last-ditch fallback.)
         let cExecutable = strdup(Self.onPath(executable) ?? executable)
         let cCwd: UnsafeMutablePointer<CChar>? = cwd.isEmpty ? nil : strdup(cwd)
+        // A Dock/Finder launch inherits launchd's stripped environment, and the child
+        // would inherit it in turn — no Homebrew/nvm on PATH, none of the API keys and
+        // MCP credentials the user exports from .zshrc (juancode-aw7r). Wait here for
+        // the login-shell import started at app launch so the environment we snapshot
+        // below is the one a terminal would have. A no-op on a terminal launch (no
+        // import was needed) and, on a Dock launch, almost always already settled —
+        // the probe has had the whole window-creation time to run.
+        LoginEnvironment.waitUntilReady()
         // The inherited environment, overlaid with the terminal type of the pty we
         // just created and any per-spawn entry (only opencode's opt-in bypass today).
         // Built HERE in the parent, so the child touches nothing but pre-built buffers.
