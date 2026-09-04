@@ -73,22 +73,41 @@ function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promi
   });
 }
 
-async function waitHealthy(httpBase: string, timeoutMs: number): Promise<void> {
+/** One health probe: null when it answered, else why it did not.
+ *
+ *  The Swift core serves /api/health; the Rust core serves both /health and
+ *  /api/health. Probing both keeps the harness core-agnostic (the divergence
+ *  itself is a parity item). */
+async function probeHealth(httpBase: string): Promise<string | null> {
+  let lastError = "never probed";
+  for (const path of ["/api/health", "/health"]) {
+    try {
+      const res = await fetch(`${httpBase}${path}`);
+      if (res.ok) return null;
+      lastError = `HTTP ${res.status} on ${path}`;
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  return lastError;
+}
+
+/** Wait for the core to answer, giving up early when `abort` says the wait is
+ *  pointless — a core that has already exited is never going to answer, and the
+ *  reason it exited is the error worth reporting. */
+async function waitHealthy(
+  httpBase: string,
+  timeoutMs: number,
+  abort?: () => string | null,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "never probed";
   while (Date.now() < deadline) {
-    // The Swift core serves /api/health; the Rust core serves both /health and
-    // /api/health. Probing both keeps the harness core-agnostic (the divergence
-    // itself is a parity item).
-    for (const path of ["/api/health", "/health"]) {
-      try {
-        const res = await fetch(`${httpBase}${path}`);
-        if (res.ok) return;
-        lastError = `HTTP ${res.status} on ${path}`;
-      } catch (e) {
-        lastError = e instanceof Error ? e.message : String(e);
-      }
-    }
+    const why = await probeHealth(httpBase);
+    if (why === null) return;
+    lastError = why;
+    const stop = abort?.();
+    if (stop) throw new Error(`${stop} (last probe: ${lastError})`);
     await sleep(200);
   }
   throw new Error(`core at ${httpBase} never became healthy (${lastError})`);
@@ -267,6 +286,20 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   if (port === 4280 || port === 4281) {
     throw new Error(`refusing to drive port ${port}: that is a developer's live app / sidecar`);
   }
+  const httpBase = `http://127.0.0.1:${port}`;
+  // Somebody else's core on this port answers every probe below, so the suite
+  // would boot a child that cannot bind, not notice, measure a daemon it does
+  // not own, and then go red the moment that daemon's owner stops it. Measured
+  // here: two agents ran the rust suite on 4300 in different worktrees, and the
+  // second one reported 16 scenarios failing with ECONNREFUSED. A score against
+  // a core you did not boot is not a measurement.
+  if ((await probeHealth(httpBase)) === null) {
+    throw new Error(
+      `something is already serving ${httpBase} — refusing to drive a core this run ` +
+        `did not boot. Pick another port with JUANCODE_CONFORMANCE_PORT, or point ` +
+        `JUANCODE_CONFORMANCE_URL at it deliberately.`,
+    );
+  }
   const skipBuild = opts.skipBuild ?? process.env.JUANCODE_CONFORMANCE_SKIP_BUILD === "1";
   const buildTimeoutMs = opts.buildTimeoutMs ?? 20 * 60_000;
 
@@ -297,9 +330,10 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   let exited = false;
   child.on("exit", () => (exited = true));
 
-  const httpBase = `http://127.0.0.1:${port}`;
   try {
-    await waitHealthy(httpBase, 60_000);
+    await waitHealthy(httpBase, 60_000, () =>
+      exited ? `the core exited before it answered on ${httpBase}` : null,
+    );
   } catch (e) {
     stopGroup(child);
     throw new Error(`${e instanceof Error ? e.message : String(e)}\ncore output:\n${log.join("")}`);
