@@ -164,10 +164,16 @@
     },
     {
       "expectNone": {
-        "type": "queue"
+        "type": "queue",
+        "sessionId": "$session",
+        "items": {
+          "$some": {
+            "text": "nowhere"
+          }
+        }
       },
       "withinMs": 600,
-      "note": "a refused edit is not a change, so it does not push a snapshot"
+      "note": "a refused edit is not a change, so no snapshot may ever carry its text. Asserted about content and not about silence: a queue frame in this window is not by itself a violation, because the busy window the earlier BUSY lines bought has elapsed by now and the core legitimately broadcasts the head going pending -> inFlight."
     }
   ]
 }

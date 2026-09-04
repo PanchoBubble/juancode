@@ -109,7 +109,7 @@ Knobs:
 | `JUANCODE_CONFORMANCE_CORE`       | Which core to build and boot: `swift` (default) or `rust`         |
 | `JUANCODE_CONFORMANCE_URL`        | Drive a core that is already running instead of booting one       |
 | `JUANCODE_CONFORMANCE_LABEL`      | Name for that core in the report (`swift`, `rust`, …)             |
-| `JUANCODE_CONFORMANCE_PORT`       | Port for a core we boot (default 4295; never 4280/4281)           |
+| `JUANCODE_CONFORMANCE_PORT`       | Port for a core we boot: `0` picks a free one (default 4295)      |
 | `JUANCODE_CONFORMANCE_SKIP_BUILD` | `1` when the core binary is already built                         |
 | `JUANCODE_CONFORMANCE_REPORT`     | Write the run report here (`.md` for prose, `.json` for a status) |
 | `JUANCODE_CONFORMANCE_STATUS`     | Also write a status JSON here, whatever the report is             |
@@ -124,6 +124,21 @@ the repo root, because that is where the suite runs.
 sidecar; driving them would create, resize and kill their real sessions. The
 booted core gets its own port, sqlite dir, oracle control dir, unix socket and
 fake provider binaries, and `startCore` refuses those two ports outright.
+
+**`JUANCODE_CONFORMANCE_PORT=0` is the setting to use on a shared machine.** The
+suite binds `127.0.0.1:0`, reads back the port the kernel gave it, and hands that
+one number to both the core boot and the clients, so two agents running the suite
+from two worktrees cannot land on each other. The port is picked _after_ the
+build, because a port reserved before a multi-minute `cargo build` is a port
+somebody else can take while it compiles.
+
+A port a caller names is still honoured — CI pins one per job, and a developer
+with a debugger attached wants to know the number — and for that case the boot
+first probes the port and refuses the run if anything already answers a health
+check there. Without that refusal the spawned child cannot bind, exits, and
+`waitHealthy` is satisfied by the squatter: the suite then scores a daemon it
+does not own and goes red the moment that daemon's owner stops it, which is
+exactly what two agents sharing 4300 measured (juancode-kr1n).
 
 The two cores read different variables for the same thing, and `startCore` knows
 it: the Rust daemon takes its port from `JUANCODED_PORT` and its socket from

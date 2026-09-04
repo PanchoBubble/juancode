@@ -23,43 +23,69 @@
   ],
   "scenarios": {
     "handshake": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "create": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "create-guards": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "attach-scrollback": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "input-ack": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "resize": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "screen-stream": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "activity-notify": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "activity-changes": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "queue": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "exit-codes": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "unresumable": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "errors": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "tracked-prs": {
       "status": "skipped",
@@ -70,53 +96,83 @@
       "note": "core does not advertise the \"editor\" capability"
     },
     "adopt-external": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "dispatch-correlation": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "skip-permissions": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "session-meta": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "grid-owner": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "restart-fresh": {
       "status": "skipped",
       "note": "core does not advertise the \"restartFresh\" capability"
     },
     "spawn-model": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "seeded-input": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "transcript": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "queue-edit": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "transcript-activity": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "orphan-reap": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "spawn-preset": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "reaper": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "isolate-worktree": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     },
     "stuck": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 5,
+      "passes": 5
     }
   }
 }
