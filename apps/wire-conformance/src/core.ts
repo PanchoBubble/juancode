@@ -18,6 +18,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -253,10 +254,54 @@ export function coreName(raw = process.env.JUANCODE_CONFORMANCE_CORE): CoreName 
   return found;
 }
 
+/** The default port for a core we boot, and the two ports a boot must never touch. */
+export const DEFAULT_PORT = 4295;
+const DEV_PORTS = [4280, 4281];
+
+/** Which port a boot should use, from the environment.
+ *
+ *  `0` means "ask the kernel for a free one", which is the only setting under which
+ *  two runs on one machine cannot collide. A fixed port is still honoured, because CI
+ *  pins one per job and a developer attaching a debugger wants to know the number. */
+export function conformancePort(raw = process.env.JUANCODE_CONFORMANCE_PORT): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_PORT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(
+      `JUANCODE_CONFORMANCE_PORT=${raw} is not a port (0 for an ephemeral one, or 1-65535)`,
+    );
+  }
+  return n;
+}
+
+/** A port the kernel says is free: bind 127.0.0.1:0, read back what we were given,
+ *  release it and hand the number to the core.
+ *
+ *  There is a window between the release and the core's bind, so this is not a lock —
+ *  but it draws from the ephemeral range (49152+ here), which nothing pins by hand,
+ *  instead of from the handful of numbers every agent's README tells it to try. The
+ *  pre-flight probe still guards a port a caller named. */
+export function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.on("error", reject);
+    probe.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const addr = probe.address();
+      if (addr === null || typeof addr === "string") {
+        probe.close(() => reject(new Error("could not read back an ephemeral port")));
+        return;
+      }
+      const { port } = addr;
+      probe.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
 export interface StartOptions {
   /** Which core to build and boot. Defaults to JUANCODE_CONFORMANCE_CORE. */
   core?: CoreName;
-  /** Port for a core we boot ourselves. Never 4280/4281 (a dev machine's app/sidecar). */
+  /** Port for a core we boot ourselves, or 0 for an ephemeral one. Never 4280/4281
+   *  (a dev machine's app/sidecar). Defaults to JUANCODE_CONFORMANCE_PORT. */
   port?: number;
   /** Skip the build (the binary is already built, e.g. a previous CI step). */
   skipBuild?: boolean;
@@ -282,28 +327,37 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
 
   const name = opts.core ?? coreName();
   const recipe = RECIPES[name];
-  const port = opts.port ?? Number(process.env.JUANCODE_CONFORMANCE_PORT ?? 4295);
-  if (port === 4280 || port === 4281) {
-    throw new Error(`refusing to drive port ${port}: that is a developer's live app / sidecar`);
+  const requested = opts.port ?? conformancePort();
+  if (DEV_PORTS.includes(requested)) {
+    throw new Error(
+      `refusing to drive port ${requested}: that is a developer's live app / sidecar`,
+    );
   }
-  const httpBase = `http://127.0.0.1:${port}`;
-  // Somebody else's core on this port answers every probe below, so the suite
+  // Somebody else's core on the port answers every probe below, so the suite
   // would boot a child that cannot bind, not notice, measure a daemon it does
   // not own, and then go red the moment that daemon's owner stops it. Measured
   // here: two agents ran the rust suite on 4300 in different worktrees, and the
   // second one reported 16 scenarios failing with ECONNREFUSED. A score against
   // a core you did not boot is not a measurement.
-  if ((await probeHealth(httpBase)) === null) {
+  //
+  // Only for a port a caller named: an ephemeral one is picked below, from the
+  // range nothing pins by hand, and has nothing to collide with.
+  if (requested !== 0 && (await probeHealth(`http://127.0.0.1:${requested}`)) === null) {
     throw new Error(
-      `something is already serving ${httpBase} — refusing to drive a core this run ` +
-        `did not boot. Pick another port with JUANCODE_CONFORMANCE_PORT, or point ` +
-        `JUANCODE_CONFORMANCE_URL at it deliberately.`,
+      `something is already serving http://127.0.0.1:${requested} — refusing to drive a ` +
+        `core this run did not boot. Use JUANCODE_CONFORMANCE_PORT=0 for a free port, ` +
+        `name another one, or point JUANCODE_CONFORMANCE_URL at it deliberately.`,
     );
   }
   const skipBuild = opts.skipBuild ?? process.env.JUANCODE_CONFORMANCE_SKIP_BUILD === "1";
   const buildTimeoutMs = opts.buildTimeoutMs ?? 20 * 60_000;
 
   const exe = await recipe.resolve(skipBuild, buildTimeoutMs);
+
+  // After the build on purpose: a cargo or swift build is minutes long, and a port
+  // reserved before it is a port somebody else can take while we compile.
+  const port = requested === 0 ? await freePort() : requested;
+  const httpBase = `http://127.0.0.1:${port}`;
 
   const dataDir = mkdtempSync(join(tmpdir(), "juancode-conformance-data-"));
   const oracleDir = mkdtempSync(join(tmpdir(), "juancode-conformance-oracle-"));

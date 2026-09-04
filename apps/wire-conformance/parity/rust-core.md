@@ -5,7 +5,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 - Spec revision: 1.7.0 (protocol v1)
 - Status source: a real conformance run
-- Attempts behind each verdict: not recorded
+- Attempts behind each verdict: 5 per scenario
 - As of: 2026-09-04
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, spawnModel, spawnPreset, stuck
 - Unmet scenarios: 3 of 31
@@ -35,34 +35,34 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 ## Full scenario list
 
-- handshake: yes - Capability handshake
-- create: yes - create replies created then attached
-- create-guards: yes - create guards and the no-grid create
-- attach-scrollback: yes - attach replays scrollback
-- input-ack: yes - input and inputAck ordering
-- resize: yes - resize acks: applied, denied, and unknown session
-- screen-stream: yes - rendered-screen stream
-- activity-notify: yes - activity transitions and the notify flag
-- activity-changes: yes - settle-edge change rollup
-- queue: yes - queue snapshots
-- exit-codes: yes - exit codes and the dead-session attach
-- unresumable: yes - unresumable reactivate
-- errors: yes - error frames and tolerated junk
+- handshake: 5/5 - Capability handshake
+- create: 5/5 - create replies created then attached
+- create-guards: 5/5 - create guards and the no-grid create
+- attach-scrollback: 5/5 - attach replays scrollback
+- input-ack: 5/5 - input and inputAck ordering
+- resize: 5/5 - resize acks: applied, denied, and unknown session
+- screen-stream: 5/5 - rendered-screen stream
+- activity-notify: 5/5 - activity transitions and the notify flag
+- activity-changes: 5/5 - settle-edge change rollup
+- queue: 5/5 - queue snapshots
+- exit-codes: 5/5 - exit codes and the dead-session attach
+- unresumable: 5/5 - unresumable reactivate
+- errors: 5/5 - error frames and tolerated junk
 - tracked-prs: n/a - tracked-PR fan-out
 - editor-terminal: n/a - editor and terminal ptys
-- adopt-external: yes - adopting an external conversation
-- dispatch-correlation: yes - dispatch correlation and dedup
-- skip-permissions: yes - flipping skip-permissions
-- session-meta: yes - meta edits are broadcast, not only snapshotted on attach
-- grid-owner: yes - who owns the shared grid, and when it is let go
+- adopt-external: 5/5 - adopting an external conversation
+- dispatch-correlation: 5/5 - dispatch correlation and dedup
+- skip-permissions: 5/5 - flipping skip-permissions
+- session-meta: 5/5 - meta edits are broadcast, not only snapshotted on attach
+- grid-owner: 5/5 - who owns the shared grid, and when it is let go
 - restart-fresh: n/a - restarting a session as a fresh conversation
-- spawn-model: yes - the model a create pins
-- seeded-input: yes - a create's initialInput is delivered and submitted
-- transcript: yes - transcript replay and live batches
-- queue-edit: yes - editing a queued message in place
-- transcript-activity: yes - activity inferred from the CLI's own transcript
-- orphan-reap: yes - killing a session reaps the helpers it spawned
-- spawn-preset: yes - the preset a create names
-- reaper: yes - an idle session goes dormant, and the pane you protect does not
-- isolate-worktree: yes - the isolation a create asks for
-- stuck: yes - the stuck-session advisory
+- spawn-model: 5/5 - the model a create pins
+- seeded-input: 5/5 - a create's initialInput is delivered and submitted
+- transcript: 5/5 - transcript replay and live batches
+- queue-edit: 5/5 - editing a queued message in place
+- transcript-activity: 5/5 - activity inferred from the CLI's own transcript
+- orphan-reap: 5/5 - killing a session reaps the helpers it spawned
+- spawn-preset: 5/5 - the preset a create names
+- reaper: 5/5 - an idle session goes dormant, and the pane you protect does not
+- isolate-worktree: 5/5 - the isolation a create asks for
+- stuck: 5/5 - the stuck-session advisory
