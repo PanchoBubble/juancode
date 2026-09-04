@@ -662,13 +662,17 @@ private let MAX_PR_FILES = 300
 
 /// Load an existing PR's diff via `gh pr diff`, parsed into the same per-file wire
 /// shape `getDiff` produces so it drops straight into the ChangesPanel (juancode-49w).
+/// Deliberately NOT `--patch`: that emits a mailbox patch *series*, one patch per
+/// commit, so a file touched in N commits parses into N same-path `DiffFile`s —
+/// duplicate `ForEach` ids (blank reserved rows in the diff list) and per-commit
+/// rather than net add/delete counts. The plain form is the PR's net diff.
 /// Throws `GhError` (gh missing / not authed / no such PR) rather than returning a
 /// `git: false` shape, since here the failure is about gh/the PR, not the cwd.
 public func getPrDiff(_ cwd: String, number: Int) async throws -> DiffResult {
     let r: ProcessResult
     do {
         r = try await ProcessRunner.capture(
-            ghBin(), ["pr", "diff", String(number), "--patch"], cwd: cwd, maxBytes: MAX_BUFFER)
+            ghBin(), ["pr", "diff", String(number)], cwd: cwd, maxBytes: MAX_BUFFER)
     } catch {
         throw GhError(ghErrorReason(error))
     }

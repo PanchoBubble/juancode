@@ -153,7 +153,36 @@ public func parseMultiFileDiff(_ patch: String) -> [DiffFile] {
         // else: preamble before the first file header — skip.
     }
     if let c = current { chunks.append(c) }
-    return chunks.compactMap(diffFile(fromChunk:))
+    return coalesceByPath(chunks.compactMap(diffFile(fromChunk:)))
+}
+
+/// Fold same-path entries into their first occurrence, in first-seen order. A
+/// mailbox patch series (`git format-patch`, `gh pr diff --patch`) carries one
+/// chunk per commit, so a file touched by several commits parses into several
+/// same-path `DiffFile`s — which downstream means duplicate SwiftUI `ForEach` ids
+/// (blank reserved rows) and counts that describe only the first commit. Bodies
+/// concatenate (the hunk parser skips the repeated file headers) and counts sum.
+private func coalesceByPath(_ files: [DiffFile]) -> [DiffFile] {
+    var index: [String: Int] = [:]
+    var out: [DiffFile] = []
+    for f in files {
+        guard let i = index[f.path] else {
+            index[f.path] = out.count
+            out.append(f)
+            continue
+        }
+        let prev = out[i]
+        out[i] = DiffFile(
+            path: prev.path,
+            oldPath: prev.oldPath ?? f.oldPath,
+            status: prev.status,
+            additions: prev.additions + f.additions,
+            deletions: prev.deletions + f.deletions,
+            binary: prev.binary || f.binary,
+            diff: prev.diff.isEmpty || f.diff.isEmpty ? prev.diff : prev.diff + "\n" + f.diff,
+            truncated: prev.truncated || f.truncated)
+    }
+    return out
 }
 
 /// Build one `DiffFile` from a single file's chunk (its `diff --git` header

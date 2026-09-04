@@ -190,6 +190,46 @@ final class DiffParseTests: XCTestCase {
         XCTAssertEqual(files[0].deletions, 1)
     }
 
+    /// A mailbox patch series (one patch per commit) repeats a file's chunk once per
+    /// commit that touched it. Those must fold into one entry: duplicates downstream
+    /// are duplicate `ForEach` ids, which render as blank rows in the diff list.
+    func testParseMultiFileDiffCoalescesRepeatedPaths() {
+        let patch = """
+        From aaa Mon Sep 17 00:00:00 2001
+        Subject: [PATCH 1/2] first
+
+        diff --git a/dup.txt b/dup.txt
+        --- a/dup.txt
+        +++ b/dup.txt
+        @@ -1 +1,2 @@
+         one
+        +two
+        diff --git a/solo.txt b/solo.txt
+        --- a/solo.txt
+        +++ b/solo.txt
+        @@ -1 +1 @@
+        -x
+        +y
+        From bbb Mon Sep 17 00:00:00 2001
+        Subject: [PATCH 2/2] second
+
+        diff --git a/dup.txt b/dup.txt
+        --- a/dup.txt
+        +++ b/dup.txt
+        @@ -1,2 +1,3 @@
+         one
+         two
+        +three
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.map(\.path), ["dup.txt", "solo.txt"])
+        // Counts sum across the commits rather than describing only the first.
+        XCTAssertEqual(files[0].additions, 2)
+        XCTAssertEqual(files[0].deletions, 0)
+        // Both commits' hunks survive in the merged body.
+        XCTAssertEqual(parseUnifiedDiff(files[0].diff).count, 2)
+    }
+
     // MARK: - commentRangeLabel
 
     func testRangeLabel() {
