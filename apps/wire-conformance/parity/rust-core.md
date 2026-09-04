@@ -5,6 +5,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 
 - Spec revision: 1.7.0 (protocol v1)
 - Status source: a real conformance run
+- Attempts behind each verdict: not recorded
 - As of: 2026-09-04
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, stuck
 - Unmet scenarios: 5 of 31

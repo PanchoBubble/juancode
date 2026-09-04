@@ -25,7 +25,8 @@ import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
 import { renderRunMarkdown, toStatusFile, writeText, type RunReport } from "./report.ts";
 import {
   makeWorkspace,
-  runScenario,
+  repeatCount,
+  runScenarioRepeatedly,
   skipReason,
   type Outcome,
   type RunContext,
@@ -35,6 +36,13 @@ import { loadProtocol, loadScenarios, type Requirement } from "./spec.ts";
 
 const spec = loadProtocol();
 const scenarios = loadScenarios();
+/** Attempts per scenario, all inside the one boot below. A single green run has
+ *  twice been reported as the gate and turned out not to be repeatable, so the
+ *  number is a knob rather than a habit: CI sets it to 3. */
+const repeat = repeatCount();
+/** Room for the slowest scenario, once per attempt. The base is the old flat
+ *  budget: an attempt is a whole scenario, so N of them need N times as long. */
+const SCENARIO_TIMEOUT_MS = 120_000;
 
 let core: CoreUnderTest;
 let workspace: Workspace;
@@ -83,6 +91,7 @@ afterAll(async () => {
     specRevision: spec.specRevision,
     protocolVersion,
     capabilities: ctx?.capabilities ?? [],
+    repeat,
     outcomes,
   };
   const at = new Date().toISOString().slice(0, 10);
@@ -145,26 +154,23 @@ describe(`wire protocol v${spec.protocolVersion}`, () => {
   });
 
   for (const scenario of scenarios) {
-    it(`${scenario.id}: ${scenario.title}`, async (t) => {
-      const reason = skipReason(scenario, ctx);
-      if (reason) {
-        outcomes.push({ status: "skipped", scenarioId: scenario.id, reason });
-        t.skip(reason);
-        return;
-      }
-      const started = Date.now();
-      try {
-        await runScenario(scenario, ctx);
-        outcomes.push({ status: "passed", scenarioId: scenario.id, ms: Date.now() - started });
-      } catch (e) {
-        outcomes.push({
-          status: "failed",
-          scenarioId: scenario.id,
-          ms: Date.now() - started,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        throw e;
-      }
-    });
+    it(
+      `${scenario.id}: ${scenario.title}`,
+      { timeout: SCENARIO_TIMEOUT_MS * repeat },
+      async (t) => {
+        const reason = skipReason(scenario, ctx);
+        if (reason) {
+          outcomes.push({ status: "skipped", scenarioId: scenario.id, reason });
+          t.skip(reason);
+          return;
+        }
+        const outcome = await runScenarioRepeatedly(scenario, ctx, repeat);
+        outcomes.push(outcome);
+        // The outcome is recorded before the throw so a failure still reaches the
+        // report and the status file: an unrepeatable scenario has to be visible in
+        // the artifact CI uploads, not only in the test log.
+        if (outcome.status === "failed") throw new Error(outcome.error);
+      },
+    );
   }
 });

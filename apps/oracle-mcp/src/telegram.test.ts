@@ -777,7 +777,11 @@ describe("handleUpdate — voice messages", () => {
 });
 
 describe("startDispatchResultRelay", () => {
-  const flush = () => new Promise((r) => setTimeout(r, 10));
+  // A negative assertion can only be settled for, never waited on: there is no
+  // event to wait for when the point is that nothing was relayed. Positive waits
+  // use vi.waitFor instead, because the relay's handler touches the filesystem and
+  // a fixed 10ms lost that race on CI often enough to block merges.
+  const settle = () => new Promise((r) => setTimeout(r, 250));
 
   it("is a no-op without a bot token", () => {
     expect(startDispatchResultRelay(null)).toBeNull();
@@ -812,8 +816,7 @@ describe("startDispatchResultRelay", () => {
         error: "bad path",
         at: 1,
       });
-      await flush();
-      expect(send).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
       expect(send.mock.calls[0]![0]).toBe(7);
       expect(send.mock.calls[0]![1]).toContain("bad path");
 
@@ -826,7 +829,7 @@ describe("startDispatchResultRelay", () => {
         error: null,
         at: 2,
       });
-      await flush();
+      await settle();
       expect(send).toHaveBeenCalledTimes(1);
 
       // A success for a dispatch queued here IS relayed as a start confirmation.
@@ -839,8 +842,7 @@ describe("startDispatchResultRelay", () => {
         error: null,
         at: 3,
       });
-      await flush();
-      expect(send).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
       expect(send.mock.calls[1]![1]).toContain("s-2");
 
       stop!();

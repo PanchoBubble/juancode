@@ -11,8 +11,10 @@ let package = Package(
         .library(name: "JuancodeServer", targets: ["JuancodeServer"]),
         .library(name: "JuancodeClient", targets: ["JuancodeClient"]),
         .executable(name: "juancode-smoke", targets: ["Smoke"]),
-        // Headless server runner — boots the embedded WS+HTTP server without the
-        // GUI, so apps/web can drive the native backend (u34.3 verification).
+        // Headless server runner — answers port 4280 without the GUI. Boots the
+        // embedded WS+HTTP server on the swift core (u34.3 verification), or with
+        // `--core rust` relays to the `juancoded` daemon so the oracle sidecar is
+        // not blind while the desktop app is closed (juancode-eko6).
         .executable(name: "juancode-serve", targets: ["Serve"]),
         // The native SwiftUI app (juancode-u34.4): the local shell AND the host
         // of the embedded server. Run with `swift run juancode`.
@@ -108,9 +110,12 @@ let package = Package(
             name: "Smoke",
             dependencies: ["JuancodeCore"]
         ),
+        // `JuancodeClient` as well as the server, for the rust serve mode
+        // (juancode-eko6): `--core rust` fronts the `juancoded` daemon with the same
+        // `CoreProxyServer` relay the shell boots, and that needs `RustCoreClient`.
         .executableTarget(
             name: "Serve",
-            dependencies: ["JuancodeServer"]
+            dependencies: ["JuancodeServer", "JuancodeClient"]
         ),
         // SwiftUI shell (juancode-u34.4): NavigationSplitView sidebar + SwiftTerm
         // session view (an in-process subscriber to the registry — no WS hop) +
