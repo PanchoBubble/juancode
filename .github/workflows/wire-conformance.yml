@@ -69,6 +69,14 @@ jobs:
           # Already built above; and never 4280/4281, which are a developer's app.
           JUANCODE_CONFORMANCE_CORE: swift
           JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
+          # Three attempts at every scenario, all inside the one boot above. A
+          # single green run has twice been reported as the gate and turned out
+          # not to be repeatable (juancode-g2kl, juancode-p5vb: tracked-prs was
+          # 20 of 20 one day and 2 of 6 the next), so the suite measures instead
+          # of trusting. Not three whole jobs: the build plus boot dominates the
+          # wall clock, and repeating inside one boot also exercises the
+          # scenario-after-scenario ordering a fresh boot per run hides.
+          JUANCODE_CONFORMANCE_REPEAT: "3"
           JUANCODE_CONFORMANCE_PORT: "4295"
           JUANCODE_CONFORMANCE_LABEL: swift
           # Anchored at the workspace: the suite resolves a relative path from
