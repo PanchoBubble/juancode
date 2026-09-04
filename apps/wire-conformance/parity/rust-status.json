@@ -18,7 +18,8 @@
     "transcript",
     "reaper",
     "spawnModel",
-    "spawnPreset"
+    "spawnPreset",
+    "stuck"
   ],
   "scenarios": {
     "handshake": {
@@ -112,6 +113,9 @@
       "status": "passed"
     },
     "isolate-worktree": {
+      "status": "passed"
+    },
+    "stuck": {
       "status": "passed"
     }
   }

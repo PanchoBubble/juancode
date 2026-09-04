@@ -1,0 +1,113 @@
+{
+  "id": "stuck",
+  "title": "the stuck-session advisory",
+  "asserts": "a session whose CLI writes the same tool call with identical arguments three times in a row is advised about, unsolicited and without anyone subscribing, and the advisory is exactly that - the session keeps running, keeps its pty and answers input afterwards, because the core notifies and never enforces.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "stuck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "transcript"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT hello\r"
+      },
+      "note": "one ordinary turn first, so the file exists and the core can bind it"
+    },
+    {
+      "sleep": 6000,
+      "note": "a core's first bind attempt lands on the spawn banner, before the file exists, so it backs off for BIND_RETRY; this outlasts that back-off"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO nudge\r"
+      },
+      "note": "output is what makes a core read the transcript, so this is what gets the bind done and the opening turn read as backlog"
+    },
+    {
+      "sleep": 1500
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "LOOP ls\r"
+      },
+      "note": "three identical Bash calls with a tool result between each, which is the shortest run the detector advises on; no prompt is written, because a prompt would reset the chain"
+    },
+    {
+      "expect": {
+        "type": "stuck",
+        "sessionId": "$session",
+        "kind": "repeat",
+        "run": 3,
+        "advice": {
+          "$type": "string"
+        }
+      },
+      "timeoutMs": 10000,
+      "note": "unsolicited: there is no subscribeStuck, for the same reason there is no subscribeActivity"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO alive\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "alive"
+        }
+      },
+      "ignore": [
+        "activity",
+        "sessionMeta",
+        "gridChange",
+        "transcript",
+        "stuck"
+      ],
+      "timeoutMs": 10000,
+      "note": "the whole point: an advisory changes nothing. The session was not killed, not slept and not typed into, and it still answers"
+    }
+  ]
+}

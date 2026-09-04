@@ -15,7 +15,9 @@ use tracing::{info, warn};
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
-use juancoded_state::{ReaperConfig, ReaperProbes, SessionReaper, SessionsApi, StoreService};
+use juancoded_state::{
+    ReaperConfig, ReaperProbes, SessionReaper, SessionsApi, StallPolicy, StoreService, StuckWatch,
+};
 
 use crate::conn;
 use crate::identity::{self, DaemonIdentity};
@@ -47,6 +49,9 @@ pub struct CoreHandles {
     /// filed about — 19 live sessions, none of them ever dormant. Its two knobs are at
     /// the daemon's boot defaults until a client sends `setReaperPolicy`.
     pub reaper: Option<Arc<SessionReaper>>,
+    /// The stuck-session detector. Advisory only: it broadcasts
+    /// `SessionEvent::Stuck` and nothing in this process acts on it.
+    pub stuck: Option<Arc<StuckWatch>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -69,18 +74,31 @@ impl CoreHandles {
         // The reaper reads the transcripts hub directly for its size probe: the hub
         // already holds every binding it has resolved, so one call per sweep replaces a
         // path resolution per session and nothing has to shell out to `stat`.
+        // The same probe seam the reaper gets, on purpose: the stuck detector's stall
+        // half must not invent a second definition of liveness (juancode-qb5).
+        let probes = ReaperProbes::live(loader.services().resolve::<TranscriptsService>().ok());
         let reaper = Some(Arc::new(SessionReaper::new(
             Arc::clone(&sessions),
             queue.clone(),
-            ReaperProbes::live(loader.services().resolve::<TranscriptsService>().ok()),
+            probes.clone(),
             ReaperConfig::from_env(),
         )));
+        let stuck = {
+            let bus_sessions = Arc::clone(&sessions);
+            Some(Arc::new(StuckWatch::new(
+                Arc::clone(&sessions),
+                probes,
+                StallPolicy::default(),
+                Arc::new(move |id: &str, alert| bus_sessions.publish_stuck(id, alert)),
+            )))
+        };
         Self {
             sessions,
             contributions: loader.contributions().clone(),
             queue,
             transcripts,
             reaper,
+            stuck,
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
@@ -169,8 +187,14 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
             Arc::clone(&handles.sessions),
             plane,
             transcript_pump::PUMP_TICK,
+            handles.stuck.clone(),
         )
     });
+    // And the fourth, which is the only one that changes nothing: the stall sweep
+    // notices a session claiming to work with nothing behind it and says so. It never
+    // kills, sleeps or types — the reaper is the thing that acts, and it refuses to
+    // touch exactly these sessions.
+    let _stuck = handles.stuck.as_ref().map(|watch| watch.spawn());
     // And the third: a session goes dormant because it has been verifiably idle, not
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.

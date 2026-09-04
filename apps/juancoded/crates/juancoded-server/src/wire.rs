@@ -16,7 +16,7 @@ use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as Contribution
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
-use juancoded_state::ClientId;
+use juancoded_state::{ClientId, StuckAlert};
 use juancoded_vt::wire::RowUpdate;
 
 use crate::identity::DaemonIdentity;
@@ -76,6 +76,7 @@ pub const CAPABILITIES: &[&str] = &[
     // capability a client trusts and the core drops is worse than one it never had.
     "spawnModel",
     "spawnPreset",
+    "stuck",
 ];
 
 /// One queued occurrence on the wire.
@@ -578,6 +579,18 @@ pub enum ServerMessage {
         contribution: String,
         outcome: ActivationOutcome,
     },
+    /// A session looks like it is going nowhere: the same tool call repeated, or a
+    /// claim to be working with no transcript record and no output behind it.
+    ///
+    /// Advisory, and unsolicited — there is no `subscribeStuck`, for the same reason
+    /// there is no `subscribeActivity`: whoever is connected is who needs telling. A
+    /// client that does not render it drops it, and nothing changes: the daemon has
+    /// already decided to do nothing about it.
+    Stuck {
+        session_id: String,
+        alert: StuckAlert,
+        dispatch_id: Option<String>,
+    },
     Unresumable {
         session_id: String,
         reason: String,
@@ -702,6 +715,27 @@ impl ServerMessage {
                         "additions": c.additions,
                         "deletions": c.deletions,
                     });
+                }
+                if let Some(d) = dispatch_id {
+                    v["dispatchId"] = json!(d);
+                }
+                v
+            }
+            Self::Stuck {
+                session_id,
+                alert,
+                dispatch_id,
+            } => {
+                let mut v = json!({
+                    "type": "stuck",
+                    "sessionId": session_id,
+                    "kind": alert.kind.as_str(),
+                    "run": alert.run,
+                    "quietMs": alert.quiet_ms,
+                    "advice": alert.advice,
+                });
+                if let Some(tool) = &alert.tool {
+                    v["tool"] = json!(tool);
                 }
                 if let Some(d) = dispatch_id {
                     v["dispatchId"] = json!(d);
@@ -966,6 +1000,11 @@ mod tests {
                     "reaper",
                     "spawnModel",
                     "spawnPreset",
+                    // Server-to-client only: `stuck` gates a frame this core SENDS,
+                    // unsolicited, so there is no client message to decode. The lie it
+                    // could tell instead is advertising it and never broadcasting,
+                    // which is what the conformance scenario catches.
+                    "stuck",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

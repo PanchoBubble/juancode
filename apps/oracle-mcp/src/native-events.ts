@@ -50,8 +50,69 @@ export interface SessionActivityEvent {
   dispatchId?: string;
 }
 
+/** A stuck-session advisory (juancode-1vo0): the daemon noticed a session going
+ *  nowhere — the same tool call repeated with identical canonicalised arguments, or a
+ *  claim to be working with no transcript record and no output behind it.
+ *
+ *  Advisory only. The daemon has already decided to do nothing about it: nothing is
+ *  killed, nothing is typed into the pty, and `advice` is a sentence for a human. It
+ *  is broadcast unsolicited, like `activity`, so there is nothing to subscribe to.
+ *
+ *  Only the rust core sends it (wire capability `stuck`); the Swift core has no
+ *  transcript seam, so under that backend this never arrives and nothing breaks. */
+export interface SessionStuckEvent {
+  sessionId: string;
+  kind: "repeat" | "stall";
+  /** The tool a repeat run is on; absent for a stall. */
+  tool?: string;
+  /** Consecutive identical calls; 0 for a stall. */
+  run: number;
+  /** How long the session has been dormant while claiming to work; 0 for a repeat. */
+  quietMs: number;
+  /** The whole message. Arguments in it are already head-truncated server-side. */
+  advice: string;
+  dispatchId?: string;
+}
+
+/** Parse a raw WS message object into a SessionStuckEvent, or null if it isn't one.
+ *  Lenient like the rest of this module: a malformed frame is dropped, not thrown. */
+export function parseStuckEvent(msg: Record<string, unknown>): SessionStuckEvent | null {
+  if (msg.type !== "stuck") return null;
+  if (typeof msg.sessionId !== "string" || !msg.sessionId) return null;
+  if (msg.kind !== "repeat" && msg.kind !== "stall") return null;
+  if (typeof msg.advice !== "string" || !msg.advice) return null;
+  const ev: SessionStuckEvent = {
+    sessionId: msg.sessionId,
+    kind: msg.kind,
+    run: typeof msg.run === "number" ? msg.run : 0,
+    quietMs: typeof msg.quietMs === "number" ? msg.quietMs : 0,
+    advice: msg.advice,
+  };
+  if (typeof msg.tool === "string" && msg.tool) ev.tool = msg.tool;
+  if (typeof msg.dispatchId === "string" && msg.dispatchId) ev.dispatchId = msg.dispatchId;
+  return ev;
+}
+
 type SessionEventListener = (ev: SessionActivityEvent) => void;
 const sessionEventListeners: SessionEventListener[] = [];
+
+type StuckListener = (ev: SessionStuckEvent) => void;
+const stuckListeners: StuckListener[] = [];
+
+/** Subscribe to stuck-session advisories. Listener errors are isolated. */
+export function onSessionStuck(listener: StuckListener): void {
+  stuckListeners.push(listener);
+}
+
+function emitStuckEvent(ev: SessionStuckEvent): void {
+  for (const listener of stuckListeners) {
+    try {
+      listener(ev);
+    } catch (e) {
+      console.warn("oracle-mcp stuck listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
 
 /** Subscribe to native session activity events. Listener errors are isolated. */
 export function onSessionEvent(listener: SessionEventListener): void {
@@ -293,6 +354,11 @@ function handleMessage(raw: string): void {
   if (msg.type === "screen") {
     const frame = parseScreenFrame(msg);
     if (frame) emitScreenFrame(frame);
+    return;
+  }
+  if (msg.type === "stuck") {
+    const ev = parseStuckEvent(msg);
+    if (ev) emitStuckEvent(ev);
     return;
   }
   if (msg.type !== "activity") return;

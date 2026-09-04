@@ -33,7 +33,8 @@
       "isolateWorktree",
       "queueEdit",
       "transcript",
-      "reaper"
+      "reaper",
+      "stuck"
     ],
     "gates": {
       "queue": [
@@ -102,6 +103,9 @@
       "reaper": [
         "setReaperPolicy",
         "setReaperProtectedIds"
+      ],
+      "stuck": [
+        "stuck"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -485,6 +489,21 @@
       ],
       "optional": [],
       "capability": "terminal"
+    },
+    "stuck": {
+      "required": [
+        "sessionId",
+        "kind",
+        "run",
+        "quietMs",
+        "advice"
+      ],
+      "optional": [
+        "tool",
+        "dispatchId"
+      ],
+      "capability": "stuck",
+      "notes": "A session looks like it is going nowhere: kind repeat is the same tool called run times in a row with identical canonicalised arguments, kind stall is a session claiming to work with no transcript record and no output for quietMs. Advisory and unsolicited - there is nothing to subscribe to and nothing acts on it, the core does not kill, sleep or type. advice is the whole human-readable sentence, arguments already head-truncated; a client that renders nothing but advice is a complete client. tool is present on a repeat only. Only a core with the transcript seam can produce it, which is why it is gated."
     },
     "unresumable": {
       "required": [

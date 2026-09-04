@@ -87,6 +87,9 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         queue,
         transcripts,
         reaper,
+        // The stuck detector broadcasts on the session bus and answers no frame, so a
+        // connection needs the handle for nothing.
+        stuck: _,
         bus,
         identity,
     } = handles;
@@ -318,6 +321,15 @@ fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<Serve
         } => outbound.push(ServerMessage::Exit {
             session_id,
             exit_code,
+        }),
+        SessionEvent::Stuck {
+            session_id,
+            alert,
+            dispatch_id,
+        } => outbound.push(ServerMessage::Stuck {
+            session_id,
+            alert,
+            dispatch_id,
         }),
         SessionEvent::Meta { session_id, meta } => outbound.push(ServerMessage::SessionMeta {
             session_id,

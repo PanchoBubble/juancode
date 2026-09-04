@@ -21,6 +21,7 @@
 #   MOVE <row> <col> position the cursor (1-based)
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
 #   TRANSCRIPT <text> append a turn to claude's own jsonl (the transcript plane's source)
+#   LOOP <text>      append three identical tool calls to that jsonl (a stuck run)
 #   SPAWN            leave a helper running in the session's process group
 #   EXIT <code>      exit with that status
 #
@@ -152,6 +153,30 @@ while IFS= read -r line; do
     # Printed AFTER the file is written: the output is what marks the session dirty,
     # and a pump that polled first would read a file the turn has not reached yet.
     printf 'transcript %s\r\n' "$arg"
+    ;;
+  LOOP)
+    # An agent going in circles: the same tool, the same arguments, three times over,
+    # which is the shortest run the repeat detector advises on. Written as three
+    # separate assistant requests with a tool result between them, because that is how
+    # claude writes a loop and the detector has to count across the results.
+    #
+    # No turnStart is written: a prompt would reset the chain, which is exactly the
+    # rule under test elsewhere and would make this scenario count to one.
+    #
+    # <text> is embedded in JSON unquoted, so scenarios keep it to plain words.
+    if [ -n "$TRANSCRIPT_FILE" ]; then
+      at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      n=1
+      while [ "$n" -le 3 ]; do
+        TRANSCRIPT_TURN=$((TRANSCRIPT_TURN + 1))
+        printf '{"type":"assistant","timestamp":"%s","requestId":"loop-%s","message":{"role":"assistant","model":"fake-model","content":[{"type":"tool_use","id":"loopcall-%s","name":"Bash","input":{"command":"%s"}}]}}\n' \
+          "$at" "$TRANSCRIPT_TURN" "$TRANSCRIPT_TURN" "$arg" >>"$TRANSCRIPT_FILE"
+        printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"loopcall-%s","content":"same answer"}]}}\n' \
+          "$at" "$TRANSCRIPT_TURN" >>"$TRANSCRIPT_FILE"
+        n=$((n + 1))
+      done
+    fi
+    printf 'loop %s\r\n' "$arg"
     ;;
   SPAWN)
     # The helper a real CLI leaves behind: a build, a test run, a language server.

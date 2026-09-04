@@ -7,8 +7,8 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - Attempts behind each verdict: not recorded
 - As of: 2026-09-04
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, spawnModel, spawnPreset
-- Unmet scenarios: 3 of 30
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, spawnModel, spawnPreset, stuck
+- Unmet scenarios: 3 of 31
 
 ## What is not satisfied yet (3)
 
@@ -65,3 +65,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - spawn-preset: yes - the preset a create names
 - reaper: yes - an idle session goes dormant, and the pane you protect does not
 - isolate-worktree: yes - the isolation a create asks for
+- stuck: yes - the stuck-session advisory
