@@ -84,10 +84,14 @@ describe("telegram observe stores", () => {
       expect(await lookupOutbound(2, 33)).toBeNull();
     });
 
+    // Each record is a whole-file read-modify-write of an array that grows to the
+    // cap, so filling it is quadratic in file I/O by construction. That is fine at
+    // the one-message-at-a-time rate this is really used at, but 505 of them in a
+    // row do not fit the 5s default on a CI runner.
     it("caps the log, dropping the oldest entries", async () => {
       for (let i = 0; i < OUTBOUND_CAP + 5; i++) await recordOutbound(ref(i));
       expect(await lookupOutbound(1, 0)).toBeNull();
       expect(await lookupOutbound(1, OUTBOUND_CAP + 4)).not.toBeNull();
-    });
+    }, 60_000);
   });
 });
