@@ -381,7 +381,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     public func trackedPrs() async -> [TrackedPr] { [] }
 
-    public func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {
+    public func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
+                        adoptSessionId: String?) async -> TrackedPr? {
         NSLog("juancode: refused to track PR #\(pr.number) — the \(backendName) core has no trackedPrs capability")
         return nil
     }

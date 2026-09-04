@@ -176,7 +176,12 @@ public protocol CoreClient: AnyObject, Sendable {
 
     /// Start tracking `pr`, spawning its driving agent session (wire `trackPr`).
     /// Nil when it is already tracked or the spawn failed.
-    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr?
+    ///
+    /// `adoptSessionId` tracks it in that existing session instead of spawning one —
+    /// nothing is spawned and no worktree is made; nil also when that session can't
+    /// be brought up or already drives another tracked PR.
+    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
+                 adoptSessionId: String?) async -> TrackedPr?
 
     /// Stop tracking, leaving the agent session alone (wire `untrackPr`).
     func untrackPr(_ trackedId: String) async
@@ -233,6 +238,11 @@ public protocol CoreClient: AnyObject, Sendable {
 }
 
 public extension CoreClient {
+    /// Track `pr` the default way: spawn a dedicated agent session for it.
+    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {
+        await trackPr(pr, cwd: cwd, cols: cols, rows: rows, adoptSessionId: nil)
+    }
+
     /// Trail entries carrying no extra fields, matching `SessionActivityLogging`.
     func logSessionEvent(_ event: String, sessionId: String, project: String) {
         logSessionEvent(event, sessionId: sessionId, project: project, fields: [:])

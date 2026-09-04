@@ -2473,6 +2473,28 @@ final class AppModel {
         }
     }
 
+    /// Track a PR **in a session that already exists** — the session-row context
+    /// menu's "Track PR #N in This Session". The usual Track spawns a dedicated
+    /// agent on its own worktree; here the session is already standing on the
+    /// branch that opened the PR, so it adopts the watch contract instead and the
+    /// poll loop drives that conversation from then on.
+    func trackPrInSession(_ pr: PullRequest, cwd: String, sessionId: String) {
+        if let reason = unavailable(.trackedPrs) {
+            errorMessage = "Can't track PR #\(pr.number). \(reason)"
+            return
+        }
+        let grid = TerminalGrid.spawn
+        Task {
+            guard await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows,
+                                     adoptSessionId: sessionId) != nil else {
+                errorMessage = "Couldn't track PR #\(pr.number) in that session."
+                return
+            }
+            selection = sessionId
+            focusTerminal()
+        }
+    }
+
     /// Stop tracking a PR (forwarded to the engine). Leaves its agent session
     /// alone (the user may still want it); just drops it from the watch list.
     func untrackPr(_ id: String) {

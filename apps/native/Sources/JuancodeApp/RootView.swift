@@ -1410,6 +1410,18 @@ struct SidebarView: View {
                 Button("Open PR #\(pr.number) on GitHub") {
                     if let u = URL(string: pr.url) { NSWorkspace.shared.open(u) }
                 }
+                // Track it right here instead of handing it to a freshly spawned
+                // agent on its own worktree: this session already wrote the branch,
+                // so it keeps the context and takes the watch contract.
+                let root = model.repoRoot(forSession: meta)
+                if model.trackedPr(cwd: root, number: pr.number) == nil {
+                    Button("Track PR #\(pr.number) in This Session") {
+                        model.trackPrInSession(pr, cwd: root, sessionId: meta.id)
+                    }
+                    .disabled(!model.supports(.trackedPrs))
+                    .help(model.unavailable(.trackedPrs)
+                        ?? "Watch this PR from this session — auto-fix review comments & CI, escalate decisions")
+                }
             }
             if let tracked = model.trackedPr(forSession: meta.id) {
                 Divider()

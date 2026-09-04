@@ -312,7 +312,8 @@ final class FakeCore: CoreClient, @unchecked Sendable {
     func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty { unreached() }
     func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty { unreached() }
     func trackedPrs() async -> [TrackedPr] { [] }
-    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? { nil }
+    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
+                 adoptSessionId: String?) async -> TrackedPr? { nil }
     func untrackPr(_ trackedId: String) async {}
     func resolveTrackNotification(trackedId: String, notificationId: String) async {}
     func subscribeTrackedPrs(

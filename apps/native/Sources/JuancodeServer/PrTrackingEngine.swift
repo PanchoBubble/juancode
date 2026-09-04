@@ -160,10 +160,19 @@ public actor PrTrackingEngine {
     /// on-screen terminal size so the agent's alt-screen boots matching the pane
     /// it renders in (the "fresh session opens short" fix); the default is the
     /// roomy background size used when no view is driving the spawn.
+    ///
+    /// `adoptSessionId` tracks the PR *in an existing session* instead: no worktree,
+    /// no spawn — the session the user is already sitting in (typically the one whose
+    /// branch opened the PR) picks up the watch contract and receives the poll loop's
+    /// fix prompts from then on.
     @discardableResult
-    public func track(_ pr: PullRequest, cwd: String, cols: Int = 120, rows: Int = 32) async -> TrackedPr? {
+    public func track(_ pr: PullRequest, cwd: String, cols: Int = 120, rows: Int = 32,
+                      adoptSessionId: String? = nil) async -> TrackedPr? {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard tracked[key] == nil else { return nil }
+        if let adoptSessionId {
+            return await adopt(pr, cwd: cwd, key: key, sessionId: adoptSessionId)
+        }
         // The agent works the PR on its own worktree, checked out on the PR's branch,
         // so it never touches your main checkout and several tracked PRs can run at
         // once (juancode-4bpz). The entry stays keyed by the REPO cwd — that's the
@@ -193,6 +202,53 @@ public actor PrTrackingEngine {
         // Resolve the repo's owner/name off-actor (a `gh` round-trip) so track()
         // stays snappy; webhook matching only needs it eventually, and a missed
         // resolve here is backfilled on the next poll.
+        Task { [weak self] in
+            guard let nwo = await getRepoNwo(cwd) else { return }
+            await self?.setRepoNwo(key, nwo)
+        }
+        return entry
+    }
+
+    /// Track `pr` in a session that already exists (juancode: "Track PR in this
+    /// session" from a session row). The session is already standing on the PR's
+    /// branch — its own checkout or worktree — so this skips both the worktree
+    /// creation and the spawn and only hands it the watch contract. From there it is
+    /// an ordinary tracked PR: the poll loop injects fixes and escalates decisions
+    /// into it exactly as it would into a spawned tracker.
+    ///
+    /// Returns nil when the session can't be brought up, or when it already drives
+    /// another tracked PR — one session, one watch contract, or the poll loop would
+    /// feed two PRs' fixes into the same conversation.
+    private func adopt(_ pr: PullRequest, cwd: String, key: String,
+                       sessionId: String) async -> TrackedPr? {
+        guard !tracked.values.contains(where: { $0.sessionId == sessionId }) else { return nil }
+        // Asleep (or offline after a restart) is fine — the same lazy revive the
+        // poll loop uses brings it back; only a session that can't come up at all
+        // fails the adoption.
+        var revived = false
+        if registry.get(sessionId) == nil {
+            _ = await reviveSession(sessionId, registry: registry, store: store, log: activityLog)
+            revived = true
+        }
+        guard let session = registry.get(sessionId) else { return nil }
+        activityLog.log("trackAdopt", sessionId: sessionId, project: cwd,
+                        fields: ["pr": "\(pr.number)", "branch": pr.branch,
+                                 "revived": "\(revived)"])
+        let seed = trackSeedPrompt(number: pr.number, title: pr.title, branch: pr.branch,
+                                   url: pr.url)
+        if !seed.isEmpty {
+            // A just-revived session hasn't rendered its TUI yet, so the seed has to
+            // wait for the boot the way a spawn's does; a live one is mid-conversation
+            // and takes the straight-in paste.
+            if revived { session.autoSubmit(seed) } else { session.submit(seed) }
+        }
+        let entry = TrackedPr(
+            number: pr.number, title: pr.title, branch: pr.branch, url: pr.url,
+            cwd: cwd, sessionId: sessionId)
+        tracked[key] = entry
+        persist()
+        broadcastTracked()
+        startLoop()
         Task { [weak self] in
             guard let nwo = await getRepoNwo(cwd) else { return }
             await self?.setRepoNwo(key, nwo)

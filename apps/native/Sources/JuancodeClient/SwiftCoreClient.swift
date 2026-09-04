@@ -208,8 +208,10 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
 
     public func trackedPrs() async -> [TrackedPr] { await state.prTracking.list() }
 
-    public func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {
-        await state.prTracking.track(pr, cwd: cwd, cols: cols, rows: rows)
+    public func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
+                        adoptSessionId: String?) async -> TrackedPr? {
+        await state.prTracking.track(pr, cwd: cwd, cols: cols, rows: rows,
+                                     adoptSessionId: adoptSessionId)
     }
 
     public func untrackPr(_ trackedId: String) async {

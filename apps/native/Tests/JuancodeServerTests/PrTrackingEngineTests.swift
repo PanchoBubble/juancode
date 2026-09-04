@@ -19,6 +19,8 @@ final class PrTrackingEngineTests: XCTestCase {
 
     override func tearDownWithError() throws {
         defaults.removePersistentDomain(forName: suiteName)
+        for path in scripts { try? FileManager.default.removeItem(atPath: path) }
+        scripts = []
     }
 
     private static let legacyKey = "juancode.trackedPrs.v1"
@@ -230,5 +232,86 @@ final class PrTrackingEngineTests: XCTestCase {
         await engine.untrack(pr.id)
         XCTAssertEqual(announcements.value, 2)
         off()
+    }
+
+    // MARK: - adopt an existing session (Track PR in This Session)
+
+    private struct FakeResolver: BinaryResolver {
+        let path: String
+        func command(for provider: ProviderId) -> String { path }
+    }
+
+    private var scripts: [String] = []
+
+    /// A CLI stand-in that boots and then holds the pty open, so a created session
+    /// is live for the length of the test without a real agent.
+    private func makeScript() -> String {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("juancode-adopt-test-\(UUID().uuidString).sh")
+        try! "#!/bin/bash\nprintf 'READY\\n'\ncat\n".write(to: url, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        scripts.append(url.path)
+        return url.path
+    }
+
+    private func fakeRegistry() -> SessionRegistry {
+        SessionRegistry(env: SessionEnvironment(resolver: FakeResolver(path: makeScript()),
+                                                discoverCliSessionId: { _, _, _ in nil }))
+    }
+
+    private static func samplePullRequest(_ number: Int, branch: String = "feat") -> PullRequest {
+        PullRequest(number: number, title: "PR \(number)",
+                    url: "https://github.com/owner/repo/pull/\(number)", branch: branch,
+                    draft: false, checks: .passing, author: "someone")
+    }
+
+    func testAdoptTracksInTheGivenSessionWithoutSpawningAnother() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let registry = fakeRegistry()
+        let session = try registry.create(provider: .claude,
+                                          cwd: FileManager.default.temporaryDirectory.path,
+                                          cols: 80, rows: 24)
+        defer { session.kill() }
+        let engine = PrTrackingEngine(registry: registry, store: store,
+                                      legacyDefaultsSuite: suiteName)
+        let cwd = Self.ghostCwd()
+        let entry = await engine.track(Self.samplePullRequest(4), cwd: cwd,
+                                       adoptSessionId: session.id)
+        XCTAssertEqual(entry?.sessionId, session.id)
+        XCTAssertEqual(registry.all().count, 1, "adoption spawns nothing")
+        let list = await engine.list()
+        XCTAssertEqual(list.map(\.sessionId), [session.id])
+    }
+
+    func testAdoptRefusesASessionAlreadyDrivingATrackedPr() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let registry = fakeRegistry()
+        let session = try registry.create(provider: .claude,
+                                          cwd: FileManager.default.temporaryDirectory.path,
+                                          cols: 80, rows: 24)
+        defer { session.kill() }
+        let engine = PrTrackingEngine(registry: registry, store: store,
+                                      legacyDefaultsSuite: suiteName)
+        let cwd = Self.ghostCwd()
+        _ = await engine.track(Self.samplePullRequest(4), cwd: cwd, adoptSessionId: session.id)
+        // One session, one watch contract: a second PR here would feed two PRs'
+        // fix prompts into the same conversation.
+        let second = await engine.track(Self.samplePullRequest(5, branch: "other"), cwd: cwd,
+                                        adoptSessionId: session.id)
+        XCTAssertNil(second)
+        let list = await engine.list()
+        XCTAssertEqual(list.map(\.number), [4])
+    }
+
+    func testAdoptFailsWhenTheSessionCannotBeBroughtUp() async throws {
+        let store = try GRDBStore(inMemory: true)
+        let registry = fakeRegistry()
+        let engine = PrTrackingEngine(registry: registry, store: store,
+                                      legacyDefaultsSuite: suiteName)
+        let entry = await engine.track(Self.samplePullRequest(9), cwd: Self.ghostCwd(),
+                                       adoptSessionId: "no-such-session")
+        XCTAssertNil(entry)
+        let list = await engine.list()
+        XCTAssertTrue(list.isEmpty, "a failed adoption tracks nothing")
     }
 }
