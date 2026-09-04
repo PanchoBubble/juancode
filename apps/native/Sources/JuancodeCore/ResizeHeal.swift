@@ -93,7 +93,10 @@ public final class TerminalResizeHeal: @unchecked Sendable {
     /// A grid apply happened: heal once the output settles. Re-arming while already
     /// armed only reschedules the timer.
     public func arm() {
-        lock.withLock { policy.arm() }
+        // `arm()`'s "was a fresh arm" is informational (the timer is scheduled
+        // either way), but it travels out through `withLock`'s return value, which
+        // no `@discardableResult` on the policy covers.
+        _ = lock.withLock { policy.arm() }
         schedule()
     }
 

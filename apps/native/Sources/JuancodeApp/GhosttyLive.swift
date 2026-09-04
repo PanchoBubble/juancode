@@ -587,14 +587,36 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         }
 
         func completeReveal() {
-            // Re-seed before asserting the grid: the seed is encoded at the model's
-            // current dimensions, and `flushSurfaceGrid` may change them.
-            resumeStreaming()
+            // Assert the grid BEFORE seeding. `Session.resize` writes the pty winsize
+            // and the model's grid in the same synchronous call, so once the flush
+            // returns the seed is encoded at the grid this surface is at. Seeding
+            // first meant seeding at whatever grid the pty had while we were hidden —
+            // the grid was released on hide, so a remote viewer (web / phone) may have
+            // driven it to its own size — and the seed paints the model's rows at
+            // absolute positions. The flush then takes the grid back, but the CLI only
+            // redraws the regions it owns and leaves every row it believes is already
+            // correct exactly as the mis-placed seed left it: fragments of older rows
+            // spliced through the input box.
             lastSent = nil
-            flushSurfaceGrid()
+            let gridChanged = flushSurfaceGrid()
+            resumeStreaming()
+            // A CLI that is streaming through the reveal keeps emitting for the grid it
+            // had before the flush, which lands mis-wrapped exactly like a drag that
+            // hits mid-stream — so heal the same way: one clean repaint from the model
+            // once its output goes quiet.
+            if gridChanged { heal.arm() }
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
                 guard let self, !self.sizingFrozen else { return }
                 self.repairWakeDrift()
+                // Unconditionally, in every branch: a reveal whose surface grid never
+                // changed arms no heal and fires no drift nudge, so nothing else would
+                // ever replace a seed encoded at the grid the pty had while we were
+                // hidden. The model's rows are the frame the CLI actually drew, and
+                // the repaint clears the visible screen before painting them, so it
+                // also wipes rows below the model's screen that no CLI redraw touches.
+                if let g = self.lastSurfaceGrid {
+                    self.scheduleRepaint(matching: g, afterMs: self.nudgeSettleMs)
+                }
             }
         }
 
