@@ -10,6 +10,7 @@
 pub mod activity;
 pub mod changes;
 pub mod model;
+pub mod preset;
 pub mod proc;
 pub mod provider;
 pub mod pty;
@@ -21,6 +22,7 @@ pub use activity::{
 };
 pub use changes::ChangeStat;
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
+pub use preset::{preset_needs_body, Preset, PresetError, PresetStore};
 pub use proc::{descendant_count, tree_cpu_time_ms};
 pub use provider::{
     bin_override, resolve_bin, resolve_provider_bin, IdSource, ProviderSpec, Providers,

@@ -72,6 +72,10 @@ pub const CAPABILITIES: &[&str] = &[
     "queueEdit",
     "transcript",
     "reaper",
+    // Both only ever advertised once the flag actually reaches the CLI's argv: a
+    // capability a client trusts and the core drops is worse than one it never had.
+    "spawnModel",
+    "spawnPreset",
     "stuck",
 ];
 
@@ -128,6 +132,14 @@ pub enum ClientMessage {
         rows: Option<u16>,
         initial_input: Option<String>,
         skip_permissions: Option<bool>,
+        /// Pin the CLI to one model for this spawn. Absent and empty are the same
+        /// thing — the CLI's own default — so a client that always sends the key does
+        /// not get a bare `--model` with nothing behind it.
+        model: Option<String>,
+        /// Name a per-spawn instruction set the core resolves against its own preset
+        /// directory. Absent and empty are the same thing; a name the core cannot
+        /// resolve is answered with `error` rather than dropped.
+        preset: Option<String>,
         /// Spawn in a fresh git worktree off `cwd` rather than in `cwd`. Absent and
         /// `false` are the same thing; `true` is a promise, so a core that cannot
         /// keep it answers `error` rather than starting in the shared tree.
@@ -281,6 +293,10 @@ struct RawClient {
     initial_input: Option<String>,
     #[serde(rename = "skipPermissions", default)]
     skip_permissions: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    preset: Option<String>,
     #[serde(rename = "isolateWorktree", default)]
     isolate_worktree: Option<bool>,
     #[serde(rename = "cliSessionId", default)]
@@ -334,6 +350,8 @@ impl ClientMessage {
                 rows: raw.rows,
                 initial_input: raw.initial_input,
                 skip_permissions: raw.skip_permissions,
+                model: raw.model,
+                preset: raw.preset,
                 isolate_worktree: raw.isolate_worktree,
                 dispatch_id: raw.dispatch_id,
             }),
@@ -840,10 +858,32 @@ mod tests {
                 rows: None,
                 initial_input: None,
                 skip_permissions: None,
+                model: None,
+                preset: None,
                 isolate_worktree: None,
                 dispatch_id: None,
             }
         );
+    }
+
+    #[test]
+    fn create_decodes_the_model_pin_and_the_preset_name() {
+        let msg = ClientMessage::decode(
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","model":"opus","preset":"review"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::Create { model: Some(m), preset: Some(p), .. }
+                    if m == "opus" && p == "review"
+            ),
+            "{msg:?}"
+        );
+        // Both are advertised, so a client that sends them is entitled to have them
+        // reach the CLI rather than be accepted and dropped.
+        assert!(CAPABILITIES.contains(&"spawnModel"));
+        assert!(CAPABILITIES.contains(&"spawnPreset"));
     }
 
     #[test]
@@ -958,6 +998,8 @@ mod tests {
                     "queueEdit",
                     "transcript",
                     "reaper",
+                    "spawnModel",
+                    "spawnPreset",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,

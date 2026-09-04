@@ -17,6 +17,8 @@
     "queueEdit",
     "transcript",
     "reaper",
+    "spawnModel",
+    "spawnPreset",
     "stuck"
   ],
   "scenarios": {
@@ -87,8 +89,7 @@
       "note": "core does not advertise the \"restartFresh\" capability"
     },
     "spawn-model": {
-      "status": "skipped",
-      "note": "core does not advertise the \"spawnModel\" capability"
+      "status": "passed"
     },
     "seeded-input": {
       "status": "passed"
@@ -106,8 +107,7 @@
       "status": "passed"
     },
     "spawn-preset": {
-      "status": "skipped",
-      "note": "core does not advertise the \"spawnPreset\" capability"
+      "status": "passed"
     },
     "reaper": {
       "status": "passed"

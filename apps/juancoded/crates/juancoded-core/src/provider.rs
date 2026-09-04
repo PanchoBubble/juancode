@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::model::ProviderId;
+use crate::preset::Preset;
 
 /// Per-session knobs that influence the spawned CLI's argv.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub struct SpawnOptions {
     /// Pin the CLI to a model. `None` = the CLI's own default. Model *names*
     /// differ per CLI; we forward whatever was asked for and let it validate.
     pub model: Option<String>,
+    /// A per-spawn instruction set, already resolved by `PresetStore`. `None` = none.
+    /// One name, three mechanisms — see [`Preset`] for why each provider takes a
+    /// different half of it.
+    pub preset: Option<Preset>,
 }
 
 /// Where a provider's resumable conversation id comes from.
@@ -83,6 +88,41 @@ fn model_args(model: &Option<String>) -> Vec<String> {
     }
 }
 
+/// claude's `--append-system-prompt <body>`: the one true append of the three, and
+/// the only mechanism where juancode supplies the prose. Empty when no preset, or when
+/// a body somehow did not resolve — `PresetStore::resolve` refuses for claude before we
+/// ever get here, so the `None` branch is belt, not a silent drop.
+fn claude_preset_args(preset: &Option<Preset>) -> Vec<String> {
+    match preset.as_ref().and_then(|p| p.body.as_deref()) {
+        Some(body) if !body.is_empty() => {
+            vec!["--append-system-prompt".to_string(), body.to_string()]
+        }
+        _ => vec![],
+    }
+}
+
+/// codex's `--profile <name>`, which layers `$CODEX_HOME/<name>.config.toml` on the
+/// user's base config. We forward the name and let codex validate it, exactly as with
+/// `--model`: the file is the user's to write, and inventing one for them is the
+/// shadow-config move the prime directive forbids.
+fn codex_preset_args(preset: &Option<Preset>) -> Vec<String> {
+    match preset.as_ref().map(|p| p.name.as_str()) {
+        Some(name) if !name.is_empty() => vec!["--profile".to_string(), name.to_string()],
+        _ => vec![],
+    }
+}
+
+/// opencode's `--agent <name>`, naming an agent defined in the user's own config.
+/// Note this SELECTS rather than appends: unlike claude's flag it replaces the agent's
+/// prompt wholesale, which is opencode's model of the concept and not something we can
+/// paper over.
+fn opencode_preset_args(preset: &Option<Preset>) -> Vec<String> {
+    match preset.as_ref().map(|p| p.name.as_str()) {
+        Some(name) if !name.is_empty() => vec!["--agent".to_string(), name.to_string()],
+        _ => vec![],
+    }
+}
+
 fn no_env(_: &SpawnOptions) -> HashMap<String, String> {
     HashMap::new()
 }
@@ -98,12 +138,17 @@ pub const CLAUDE: ProviderSpec = ProviderSpec {
         let mut a = vec!["--session-id".to_string(), juancode_id.to_string()];
         a.extend(claude_perm_args(opts.skip_permissions));
         a.extend(model_args(&opts.model));
+        a.extend(claude_preset_args(&opts.preset));
         a
     },
+    // The preset rides on resume too: all three mechanisms are per-invocation flags,
+    // not state the conversation carries, so a resumed session without it would
+    // quietly lose its instruction set halfway through.
     resume_args: |cli_session_id, opts| {
         let mut a = vec!["--resume".to_string(), cli_session_id.to_string()];
         a.extend(claude_perm_args(opts.skip_permissions));
         a.extend(model_args(&opts.model));
+        a.extend(claude_preset_args(&opts.preset));
         a
     },
     spawn_env: no_env,
@@ -122,6 +167,7 @@ pub const CODEX: ProviderSpec = ProviderSpec {
             a.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
         a.extend(model_args(&opts.model));
+        a.extend(codex_preset_args(&opts.preset));
         a
     },
     resume_args: |cli_session_id, opts| {
@@ -130,6 +176,7 @@ pub const CODEX: ProviderSpec = ProviderSpec {
             a.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
         a.extend(model_args(&opts.model));
+        a.extend(codex_preset_args(&opts.preset));
         a.push(cli_session_id.to_string());
         a
     },
@@ -144,10 +191,15 @@ pub const OPENCODE: ProviderSpec = ProviderSpec {
     // `--session <id>` continues an EXISTING conversation only — there is no flag
     // to pin a new one — so a fresh session starts clean and the id is read out of
     // opencode's own database.
-    start_args: |_, opts| model_args(&opts.model),
+    start_args: |_, opts| {
+        let mut a = model_args(&opts.model);
+        a.extend(opencode_preset_args(&opts.preset));
+        a
+    },
     resume_args: |cli_session_id, opts| {
         let mut a = vec!["--session".to_string(), cli_session_id.to_string()];
         a.extend(model_args(&opts.model));
+        a.extend(opencode_preset_args(&opts.preset));
         a
     },
     // opencode's TUI has no skip-permissions flag (only `opencode run` does), so
@@ -422,6 +474,7 @@ fn cache() -> &'static BinCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::Preset;
 
     #[test]
     fn claude_pins_the_session_id_and_keeps_bypass_opt_in() {
@@ -432,7 +485,7 @@ mod tests {
         );
         let bypass = SpawnOptions {
             skip_permissions: true,
-            model: None,
+            ..Default::default()
         };
         assert_eq!(
             (CLAUDE.start_args)("abc", &bypass),
@@ -447,8 +500,8 @@ mod tests {
     #[test]
     fn claude_resume_forwards_a_pinned_model() {
         let opts = SpawnOptions {
-            skip_permissions: false,
             model: Some("opus".into()),
+            ..Default::default()
         };
         assert_eq!(
             (CLAUDE.resume_args)("sid", &opts),
@@ -459,6 +512,93 @@ mod tests {
                 "opus".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn one_preset_name_becomes_three_different_mechanisms() {
+        // The body is claude's alone; the other two get the name, because they are
+        // selecting a definition the user already wrote.
+        let opts = SpawnOptions {
+            preset: Some(Preset {
+                name: "review".into(),
+                body: Some("BODY".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            (CLAUDE.start_args)("abc", &opts),
+            vec![
+                "--session-id".to_string(),
+                "abc".to_string(),
+                "--append-system-prompt".to_string(),
+                "BODY".to_string()
+            ]
+        );
+        assert_eq!(
+            (CODEX.start_args)("abc", &opts),
+            vec!["--profile".to_string(), "review".to_string()]
+        );
+        assert_eq!(
+            (OPENCODE.start_args)("abc", &opts),
+            vec!["--agent".to_string(), "review".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_preset_rides_on_resume_too() {
+        // All three mechanisms are per-invocation flags, so a resume without them is
+        // a session that quietly lost its instruction set halfway through.
+        let opts = SpawnOptions {
+            preset: Some(Preset {
+                name: "review".into(),
+                body: Some("BODY".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            (CLAUDE.resume_args)("sid", &opts),
+            vec![
+                "--resume".to_string(),
+                "sid".to_string(),
+                "--append-system-prompt".to_string(),
+                "BODY".to_string()
+            ]
+        );
+        assert_eq!(
+            (CODEX.resume_args)("sid", &opts),
+            vec![
+                "resume".to_string(),
+                "--profile".to_string(),
+                "review".to_string(),
+                "sid".to_string()
+            ]
+        );
+        assert_eq!(
+            (OPENCODE.resume_args)("sid", &opts),
+            vec![
+                "--session".to_string(),
+                "sid".to_string(),
+                "--agent".to_string(),
+                "review".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn no_preset_means_no_flag_on_any_of_the_three() {
+        let plain = SpawnOptions::default();
+        for args in [
+            (CLAUDE.start_args)("abc", &plain),
+            (CODEX.start_args)("abc", &plain),
+            (OPENCODE.start_args)("abc", &plain),
+            (CLAUDE.resume_args)("sid", &plain),
+            (CODEX.resume_args)("sid", &plain),
+            (OPENCODE.resume_args)("sid", &plain),
+        ] {
+            for flag in ["--append-system-prompt", "--profile", "--agent"] {
+                assert!(!args.iter().any(|a| a == flag), "{args:?} carries {flag}");
+            }
+        }
     }
 
     #[test]
@@ -479,7 +619,7 @@ mod tests {
 
         let bypass = SpawnOptions {
             skip_permissions: true,
-            model: None,
+            ..Default::default()
         };
         // Still nothing for the two CLIs that have a flag — the directive holds.
         assert!((CLAUDE.spawn_env)(&bypass).is_empty());

@@ -7,10 +7,10 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - Attempts behind each verdict: not recorded
 - As of: 2026-09-04
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, stuck
-- Unmet scenarios: 5 of 31
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, spawnModel, spawnPreset, stuck
+- Unmet scenarios: 3 of 31
 
-## What is not satisfied yet (5)
+## What is not satisfied yet (3)
 
 ### tracked-prs
 
@@ -32,20 +32,6 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: restartFresh, pty
 - Why: core does not advertise the "restartFresh" capability
 - Asserts: an exited session can be restarted as a brand-new CLI conversation under the same juancode id: the core starts the CLI instead of resuming it, pins a new conversation id, and answers `attached` for the id the client already knows, so the pane it is bound to survives. It serves a session `reactivate` refuses as unresumable, which is why it is a message of its own.
-
-### spawn-model
-
-- Status: n/a
-- Needs: spawnModel, pty
-- Why: core does not advertise the "spawnModel" capability
-- Asserts: a create that names a model spawns the CLI pinned to it, and one that does not leaves the CLI on its own default. Without this a client cannot honour a model setting, and an Oracle dispatch line that asks for a model silently runs on whatever the provider defaults to.
-
-### spawn-preset
-
-- Status: n/a
-- Needs: spawnPreset, pty
-- Why: core does not advertise the "spawnPreset" capability
-- Asserts: a create that names a preset spawns the CLI with the mechanism that provider actually offers - claude's --append-system-prompt carrying the resolved body, and nothing at all when no preset was asked for - while a name the core cannot resolve is refused rather than dropped. Without this a client cannot offer a per-session instruction set, and a preset the core swallows looks identical to one it applied.
 
 ## Full scenario list
 
@@ -70,13 +56,13 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - session-meta: yes - meta edits are broadcast, not only snapshotted on attach
 - grid-owner: yes - who owns the shared grid, and when it is let go
 - restart-fresh: n/a - restarting a session as a fresh conversation
-- spawn-model: n/a - the model a create pins
+- spawn-model: yes - the model a create pins
 - seeded-input: yes - a create's initialInput is delivered and submitted
 - transcript: yes - transcript replay and live batches
 - queue-edit: yes - editing a queued message in place
 - transcript-activity: yes - activity inferred from the CLI's own transcript
 - orphan-reap: yes - killing a session reaps the helpers it spawned
-- spawn-preset: n/a - the preset a create names
+- spawn-preset: yes - the preset a create names
 - reaper: yes - an idle session goes dormant, and the pane you protect does not
 - isolate-worktree: yes - the isolation a create asks for
 - stuck: yes - the stuck-session advisory

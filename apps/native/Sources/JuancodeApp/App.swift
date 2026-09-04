@@ -232,6 +232,14 @@ struct JuancodeApp: App {
     @State private var shortcuts = Shortcuts()
 
     init() {
+        // FIRST line of the app: on a Dock/Finder/launchd launch, start importing the
+        // user's login-shell environment on a background thread, so the agents we
+        // spawn get their PATH, API keys and MCP credentials instead of launchd's
+        // fourteen-variable stub (juancode-aw7r). Returns immediately; the probe costs
+        // seconds and everything below is time it gets for free. A terminal launch
+        // detects that and does nothing. See LoginEnvironment.
+        LoginEnvironment.importAtLaunch()
+
         // Lift/cap the fd limit before anything opens a descriptor (DB, server,
         // ptys), so a low inherited limit can't make forkpty fail with EMFILE.
         configureFileDescriptorLimit()
