@@ -21,12 +21,19 @@ export interface RunReport {
   specRevision: string;
   protocolVersion: number | null;
   capabilities: string[];
+  /** Attempts each scenario was asked for (JUANCODE_CONFORMANCE_REPEAT). */
+  repeat: number;
   outcomes: Outcome[];
 }
 
 export interface ScenarioStatus {
   status: Status;
   note?: string;
+  /** How many attempts the verdict is based on, and how many of them passed.
+   *  Absent on a file written before the counts existed, or seeded by reading a
+   *  core rather than running it; such a verdict renders as a bare mark. */
+  attempts?: number;
+  passes?: number;
 }
 
 export interface StatusFile {
@@ -54,10 +61,15 @@ export function toStatusFile(report: RunReport, measuredAt: string): StatusFile 
   for (const o of report.outcomes) {
     scenarios[o.scenarioId] =
       o.status === "passed"
-        ? { status: "passed" }
+        ? { status: "passed", attempts: o.attempts, passes: o.passes }
         : o.status === "skipped"
           ? { status: "skipped", note: o.reason }
-          : { status: "failed", note: firstLine(o.error) };
+          : {
+              status: "failed",
+              note: firstLine(o.error),
+              attempts: o.attempts,
+              passes: o.passes,
+            };
   }
   return {
     core: report.core,
@@ -77,7 +89,9 @@ export function toStatusFile(report: RunReport, measuredAt: string): StatusFile 
  * Only the CLAIM is compared: the spec revision, the protocol version, the
  * advertised capabilities and each scenario's verdict. The measurement date moves
  * every day and a failure note carries a temp path, so comparing those would fail
- * a run that agrees about everything that matters. */
+ * a run that agrees about everything that matters. The attempt counts are left out
+ * for the same reason: CI measures each scenario three times and a developer
+ * re-measuring locally once agrees with it about every verdict. */
 export function statusDifferences(committed: StatusFile, measured: StatusFile): string[] {
   const diffs: string[] = [];
   if (committed.specRevision !== measured.specRevision) {
@@ -119,6 +133,35 @@ const MARK: Record<Status, string> = {
   unknown: "not measured",
 };
 
+/** A verdict plus how many measurements it rests on: "3/3", or "NO (1/3)".
+ *
+ *  A ratio rather than a bare "yes" because a checked-in checklist is read as the
+ *  gate, and twice a one-run green has been reported as one and turned out not to
+ *  be repeatable. A file measured once still reads honestly, as 1/1. */
+export function mark(status: Status, attempts?: number, passes?: number): string {
+  if (attempts === undefined || passes === undefined) return MARK[status];
+  if (status === "passed") return `${passes}/${attempts}`;
+  if (status === "failed") return `${MARK.failed} (${passes}/${attempts})`;
+  return MARK[status];
+}
+
+/** How many attempts the verdicts in a status file rest on, for the header. One
+ *  number when the whole file was measured in one run, which is the normal case. */
+function attemptsBehind(status: StatusFile): string {
+  const counts = new Set(
+    Object.values(status.scenarios)
+      .map((st) => st.attempts)
+      .filter((n): n is number => typeof n === "number"),
+  );
+  if (counts.size === 0) return "not recorded";
+  if (counts.size === 1) return `${[...counts][0]} per scenario`;
+  return `${Math.min(...counts)} to ${Math.max(...counts)} per scenario`;
+}
+
+function markOf(st: ScenarioStatus | undefined): string {
+  return st ? mark(st.status, st.attempts, st.passes) : "never measured";
+}
+
 export function renderRunMarkdown(report: RunReport, at: string): string {
   const counts = { passed: 0, failed: 0, skipped: 0 };
   for (const o of report.outcomes) counts[o.status] += 1;
@@ -129,6 +172,7 @@ export function renderRunMarkdown(report: RunReport, at: string): string {
     `- Core: ${report.url}`,
     `- Capabilities: ${report.capabilities.join(", ") || "none advertised"}`,
     `- Run at: ${at}`,
+    `- Attempts per scenario: ${report.repeat} (JUANCODE_CONFORMANCE_REPEAT)`,
     `- Result: ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped`,
     "",
     "## Scenarios",
@@ -137,7 +181,8 @@ export function renderRunMarkdown(report: RunReport, at: string): string {
   for (const o of report.outcomes) {
     const detail =
       o.status === "failed" ? firstLine(o.error) : o.status === "skipped" ? o.reason : "";
-    lines.push(`- ${o.scenarioId}: ${MARK[o.status]}${detail ? ` - ${oneLine(detail)}` : ""}`);
+    const verdict = o.status === "skipped" ? MARK.skipped : mark(o.status, o.attempts, o.passes);
+    lines.push(`- ${o.scenarioId}: ${verdict}${detail ? ` - ${oneLine(detail)}` : ""}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -153,6 +198,7 @@ export function renderParityMarkdown(scenarios: Scenario[], status: StatusFile):
     "",
     `- Spec revision: ${status.specRevision} (protocol v${status.protocolVersion ?? "?"})`,
     `- Status source: ${status.source === "measured" ? "a real conformance run" : "reading the core's source"}`,
+    `- Attempts behind each verdict: ${attemptsBehind(status)}`,
     `- As of: ${status.measuredAt}`,
     `- Capabilities the core advertises: ${status.capabilities.join(", ") || "none"}`,
     `- Unmet scenarios: ${unmet.length} of ${scenarios.length}`,
@@ -169,7 +215,7 @@ export function renderParityMarkdown(scenarios: Scenario[], status: StatusFile):
       lines.push(
         `### ${s.id}`,
         "",
-        `- Status: ${st ? MARK[st.status] : "never measured"}`,
+        `- Status: ${markOf(st)}`,
         `- Needs: ${needs}`,
         `- Why: ${oneLine(st?.note ?? "never measured")}`,
         `- Asserts: ${oneLine(s.asserts)}`,
@@ -180,7 +226,7 @@ export function renderParityMarkdown(scenarios: Scenario[], status: StatusFile):
   lines.push("## Full scenario list", "");
   for (const s of scenarios) {
     const st = status.scenarios[s.id];
-    lines.push(`- ${s.id}: ${st ? MARK[st.status] : "never measured"} - ${oneLine(s.title)}`);
+    lines.push(`- ${s.id}: ${markOf(st)} - ${oneLine(s.title)}`);
   }
   lines.push("");
   return lines.join("\n");
