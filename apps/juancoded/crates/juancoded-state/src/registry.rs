@@ -49,6 +49,7 @@ use juancoded_vt::Snapshot;
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
 use crate::reaper::ReapProbe;
+use crate::stuck::StuckAlert;
 
 /// How long between scrollback flushes for a session that keeps producing output. A
 /// hard-killed daemon loses at most this much history; a write per chunk would put a
@@ -96,6 +97,19 @@ pub enum SessionEvent {
         owner: Option<ClientId>,
         cols: u16,
         rows: u16,
+    },
+    /// A session looks like it is going nowhere: the same tool call over and over, or
+    /// a claim to be working with nothing behind it. See [`crate::stuck`].
+    ///
+    /// Purely advisory. Nothing in the daemon acts on it — no kill, no sleep, no input
+    /// — and a consumer that ignores it loses nothing but a Telegram message. It is on
+    /// this bus rather than a channel of its own because the sidecar already holds one
+    /// socket for exactly this class of thing, and a second one would be a second
+    /// reconnect story for a heuristic.
+    Stuck {
+        session_id: String,
+        alert: StuckAlert,
+        dispatch_id: Option<String>,
     },
 }
 
@@ -1493,6 +1507,27 @@ impl SessionRegistry {
         if let Some(armed) = step.armed {
             self.arm_settle(id, &live, armed);
         }
+    }
+
+    /// Announce a stuck-session advisory for `id`.
+    ///
+    /// It reads the session's row only to carry its `dispatch_id`, so an advisory
+    /// about a dispatched agent routes back to the chat that dispatched it the same
+    /// way its activity does. A session that has gone away is dropped: there is nobody
+    /// left to advise.
+    pub fn publish_stuck(&self, id: &str, alert: StuckAlert) {
+        let Some(live) = self.get(id) else {
+            return;
+        };
+        let dispatch_id = {
+            let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            meta.dispatch_id.clone()
+        };
+        let _ = self.inner.events.send(SessionEvent::Stuck {
+            session_id: id.to_string(),
+            alert,
+            dispatch_id,
+        });
     }
 
     fn broadcast_activity(

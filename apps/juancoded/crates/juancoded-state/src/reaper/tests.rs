@@ -636,6 +636,10 @@ mod sweep {
             true
         }
 
+        fn publish_stuck(&self, _id: &str, _alert: crate::stuck::StuckAlert) {
+            unreachable!("the reaper does not advise; the stuck watch does")
+        }
+
         fn kill(&self, id: &str) -> Result<(), StateError> {
             self.calls.lock().unwrap().push(format!("kill:{id}"));
             self.killed.lock().unwrap().push(id.to_string());

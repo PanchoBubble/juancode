@@ -58,7 +58,12 @@ import {
 import { dispatchOriginChat } from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
-import { onSessionEvent, type SessionActivityEvent } from "./native-events.ts";
+import {
+  onSessionEvent,
+  onSessionStuck,
+  type SessionActivityEvent,
+  type SessionStuckEvent,
+} from "./native-events.ts";
 import { makeTranscriber } from "./transcribe.ts";
 
 /** Telegram's hard per-message character cap. We chunk below it to stay safe. */
@@ -255,10 +260,19 @@ export interface BridgeState {
   lastList: Map<number, string[]>;
   activity: Map<string, LiveActivity>;
   lastNotified: Map<string, string>;
+  /** `chatId:sessionId` → when a stuck advisory was last sent there. The daemon caps
+   *  and cools these down already; this second gate exists because a chat can observe
+   *  many sessions and the daemon's cooldown is per session, not per reader. */
+  lastStuck: Map<string, number>;
 }
 
 export function newBridgeState(): BridgeState {
-  return { lastList: new Map(), activity: new Map(), lastNotified: new Map() };
+  return {
+    lastList: new Map(),
+    activity: new Map(),
+    lastNotified: new Map(),
+    lastStuck: new Map(),
+  };
 }
 
 /** The side-effecting collaborators the update handler needs. Injected so the handler
@@ -808,6 +822,68 @@ export async function notifySessionEvent(
   }
 }
 
+/** How long a chat is left alone about one session after a stuck advisory. */
+export const STUCK_COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * Relay one stuck-session advisory (juancode-1vo0) to the chats observing that
+ * session, plus the chat a dispatch came from.
+ *
+ * The daemon has already decided to do nothing about it — no kill, no input, no
+ * change to the session at all — so this is the entire user-visible effect of the
+ * detector, and the message says what was observed rather than what to do. The reply
+ * hint is the usual one: steering is the human's, exactly as it is for a needs-input
+ * ping, and nothing here or upstream writes into the prompt box.
+ */
+export async function notifyStuckEvent(
+  ev: SessionStuckEvent,
+  deps: TelegramDeps,
+  state: BridgeState,
+  now: number = Date.now(),
+): Promise<void> {
+  const chats = [...(await deps.observers.chatsFor(ev.sessionId))];
+  if (ev.dispatchId) {
+    const origin = await deps.originChat(ev.dispatchId);
+    if (origin !== null && !chats.includes(origin)) chats.push(origin);
+  }
+  if (chats.length === 0) return;
+
+  let title = ev.sessionId.slice(0, 8);
+  let project = "";
+  try {
+    const s = (await deps.sessions()).find((x) => x.id === ev.sessionId);
+    if (s) {
+      title = s.title;
+      project = projectName(s.cwd);
+    }
+  } catch {
+    // Native app unreachable — advise with the id slice rather than staying silent.
+  }
+  const header = project ? `${title} — ${project}` : title;
+  const text = `🔁 ${header}\n${ev.advice}\n↩️ Reply to this message to steer it.`;
+
+  for (const chatId of chats) {
+    const key = `${chatId}:${ev.sessionId}`;
+    const last = state.lastStuck.get(key);
+    if (last !== undefined && now - last < STUCK_COOLDOWN_MS) continue;
+    state.lastStuck.set(key, now);
+    try {
+      const mid = await deps.send(chatId, text);
+      if (mid !== null) {
+        await deps.outbound.record({
+          chatId,
+          messageId: mid,
+          sessionId: ev.sessionId,
+          title,
+          at: now,
+        });
+      }
+    } catch (e) {
+      console.warn("telegram stuck notify failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 // ── Telegram HTTP API ────────────────────────────────────────────────────────
 
 const apiBase = (token: string) => `https://api.telegram.org/bot${token}`;
@@ -963,6 +1039,7 @@ export function startTelegramBridge(
   config: TelegramConfig | null = readTelegramConfig(),
   deps?: TelegramDeps,
   subscribe: (listener: (ev: SessionActivityEvent) => void) => void = onSessionEvent,
+  subscribeStuck: (listener: (ev: SessionStuckEvent) => void) => void = onSessionStuck,
 ): AbortController | null {
   if (!config) {
     console.log("telegram bridge disabled (set TELEGRAM_BOT_TOKEN to enable)");
@@ -980,6 +1057,11 @@ export function startTelegramBridge(
   subscribe((ev) => {
     void notifySessionEvent(ev, resolved, state).catch((e) =>
       console.error("telegram session notify failed:", e instanceof Error ? e.message : e),
+    );
+  });
+  subscribeStuck((ev) => {
+    void notifyStuckEvent(ev, resolved, state).catch((e) =>
+      console.error("telegram stuck notify failed:", e instanceof Error ? e.message : e),
     );
   });
   console.log(

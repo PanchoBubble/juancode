@@ -115,6 +115,10 @@
     },
     "isolate-worktree": {
       "status": "passed"
+    },
+    "stuck": {
+      "status": "skipped",
+      "note": "core does not advertise the \"stuck\" capability"
     }
   }
 }

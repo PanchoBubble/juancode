@@ -22,6 +22,7 @@ use crate::reaper::ReapProbe;
 use crate::registry::{
     AdoptRequest, Attached, CreateRequest, SessionEvent, SessionRegistry, StateError,
 };
+use crate::stuck::StuckAlert;
 
 /// What consumers of the `sessions` key may do. Everything the wire protocol needs
 /// and nothing more: no pty handle, no grid, no store.
@@ -115,6 +116,15 @@ pub trait SessionsApi: Send + Sync {
     /// Called before `kill`, so the exited row carries the flag and a client can tell
     /// "slept, wake me on demand" from a crash.
     fn mark_dormant(&self, id: &str) -> bool;
+
+    /// Broadcast a stuck-session advisory (see [`crate::stuck`]).
+    ///
+    /// On the trait for the same reason `reap_probe` is: the watch holds an
+    /// `Arc<dyn SessionsApi>` and nothing else, and the registry owns the only bus a
+    /// client is listening to. It is a *write* on a read-shaped trait and that is
+    /// deliberate — it is the one thing the detector does, and everything it does is
+    /// advisory: no implementation of this may kill, sleep, resize or type.
+    fn publish_stuck(&self, id: &str, alert: StuckAlert);
 }
 
 /// `ctx.resolve::<SessionsService>()` yields `Arc<dyn SessionsApi>`.
@@ -253,6 +263,10 @@ impl SessionsApi for SessionRegistry {
 
     fn mark_dormant(&self, id: &str) -> bool {
         SessionRegistry::mark_dormant(self, id)
+    }
+
+    fn publish_stuck(&self, id: &str, alert: StuckAlert) {
+        SessionRegistry::publish_stuck(self, id, alert)
     }
 }
 

@@ -2,7 +2,7 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-08-29",
+  "measuredAt": "2026-09-04",
   "specRevision": "1.7.0",
   "protocolVersion": 1,
   "capabilities": [
@@ -16,7 +16,8 @@
     "isolateWorktree",
     "queueEdit",
     "transcript",
-    "reaper"
+    "reaper",
+    "stuck"
   ],
   "scenarios": {
     "handshake": {
@@ -112,6 +113,9 @@
       "status": "passed"
     },
     "isolate-worktree": {
+      "status": "passed"
+    },
+    "stuck": {
       "status": "passed"
     }
   }

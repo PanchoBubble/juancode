@@ -5,12 +5,14 @@ import {
   isAllowed,
   newBridgeState,
   notifySessionEvent,
+  notifyStuckEvent,
   parseAllowedUserIds,
   parseCallbackQuery,
   parseTextMessage,
   parseVoiceMessage,
   readTelegramConfig,
   startDispatchResultRelay,
+  STUCK_COOLDOWN_MS,
   type TelegramDeps,
   type TgUpdate,
 } from "./telegram.ts";
@@ -850,5 +852,85 @@ describe("startDispatchResultRelay", () => {
       if (prevIds === undefined) delete process.env.ALLOWED_USER_IDS;
       else process.env.ALLOWED_USER_IDS = prevIds;
     }
+  });
+});
+
+describe("notifyStuckEvent", () => {
+  const observers = (chats: number[]) => ({
+    list: vi.fn(async () => [] as string[]),
+    add: vi.fn(async () => {}),
+    remove: vi.fn(async () => 1),
+    chatsFor: vi.fn(async () => chats),
+  });
+
+  it("relays the daemon's advice verbatim to observer chats", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    await notifyStuckEvent(
+      {
+        sessionId: "aaaa-1111",
+        kind: "repeat",
+        tool: "Bash",
+        run: 5,
+        quietMs: 0,
+        advice: "This session has called `Bash` 5 times in a row with identical arguments ({}).",
+      },
+      deps,
+      state,
+    );
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(1);
+    expect(sends[0]![1]).toContain("fix tests — juancode");
+    expect(sends[0]![1]).toContain("called `Bash` 5 times in a row");
+    expect(deps.outbound.record).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 100, sessionId: "aaaa-1111" }),
+    );
+  });
+
+  it("also reaches the chat a dispatch came from, once", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      originChat: vi.fn(async () => 100),
+    });
+    await notifyStuckEvent(
+      {
+        sessionId: "aaaa-1111",
+        kind: "stall",
+        run: 0,
+        quietMs: 660_000,
+        advice: "no transcript record and no output",
+        dispatchId: "d1",
+      },
+      deps,
+      newBridgeState(),
+    );
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("leaves a chat alone about the same session until the cooldown passes", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    const ev = {
+      sessionId: "aaaa-1111",
+      kind: "stall" as const,
+      run: 0,
+      quietMs: 660_000,
+      advice: "wedged",
+    };
+    await notifyStuckEvent(ev, deps, state, 0);
+    await notifyStuckEvent(ev, deps, state, STUCK_COOLDOWN_MS - 1);
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    await notifyStuckEvent(ev, deps, state, STUCK_COOLDOWN_MS);
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+  });
+
+  it("sends nothing when nobody is watching", async () => {
+    const deps = makeDeps();
+    await notifyStuckEvent(
+      { sessionId: "aaaa-1111", kind: "repeat", run: 3, quietMs: 0, advice: "x" },
+      deps,
+      newBridgeState(),
+    );
+    expect(deps.send).not.toHaveBeenCalled();
   });
 });

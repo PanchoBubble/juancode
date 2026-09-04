@@ -14,6 +14,7 @@ pub mod plugins;
 pub mod reaper;
 pub mod registry;
 pub mod service;
+pub mod stuck;
 
 pub use grid::{ClientId, ResizeOutcome};
 pub use reaper::{ReapProbe, ReaperConfig, ReaperProbes, SessionReaper, SleepReason};
@@ -22,6 +23,7 @@ pub use registry::{
     StateError, UNRESUMABLE_REASON,
 };
 pub use service::{SessionsApi, SessionsService, StoreService};
+pub use stuck::{StallPolicy, StuckAlert, StuckKind, StuckWatch};
 
 /// Re-exported so the wire layer can speak about queued messages without taking a
 /// dependency on the store crate that happens to define them.

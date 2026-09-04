@@ -7,9 +7,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - As of: 2026-08-29
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel, spawnPreset, isolateWorktree
-- Unmet scenarios: 4 of 30
+- Unmet scenarios: 5 of 31
 
-## What is not satisfied yet (4)
+## What is not satisfied yet (5)
 
 ### transcript
 
@@ -38,6 +38,13 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: reaper, sessionMeta, pty
 - Why: core does not advertise the "reaper" capability
 - Asserts: a core that advertises `reaper` honours the two frames a client steers it with. A session left alone for the idle window is flagged dormant on the wire (a sessionMeta carrying dormant: true) and only then killed, so the row a client keeps says "slept, wake me on demand" rather than "died"; a session the client has declared protected survives the same window untouched, because sleeping the pane somebody is looking at is visible work vanishing under them; and reactivate brings it back with the flag cleared, which is the one click that has to make the moon go away. The live-session ceiling travels on the same frame and is driven here, but which session it evicts is asserted in the core's own suite, where the session set is controlled - a conformance run shares one daemon with every scenario before it, so an LRU order over that daemon's whole session list is not a fact this file can pin.
+
+### stuck
+
+- Status: n/a
+- Needs: stuck, pty
+- Why: core does not advertise the "stuck" capability
+- Asserts: a session whose CLI writes the same tool call with identical arguments three times in a row is advised about, unsolicited and without anyone subscribing, and the advisory is exactly that - the session keeps running, keeps its pty and answers input afterwards, because the core notifies and never enforces.
 
 ## Full scenario list
 
@@ -71,3 +78,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - spawn-preset: yes - the preset a create names
 - reaper: n/a - an idle session goes dormant, and the pane you protect does not
 - isolate-worktree: yes - the isolation a create asks for
+- stuck: n/a - the stuck-session advisory

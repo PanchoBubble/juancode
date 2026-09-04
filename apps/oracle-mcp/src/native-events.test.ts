@@ -6,6 +6,7 @@ import {
   onSessionEvent,
   onSessionScreen,
   parseScreenFrame,
+  parseStuckEvent,
   startActivityListener,
   stopActivityListener,
   type ScreenFrame,
@@ -266,5 +267,55 @@ describe("screen stream over the shared native WS", () => {
 
     unsub();
     await until(() => received.some((m) => m.type === "unsubscribeScreen"));
+  });
+});
+
+describe("parseStuckEvent", () => {
+  const frame = {
+    type: "stuck",
+    sessionId: "aaaa",
+    kind: "repeat",
+    tool: "Bash",
+    run: 5,
+    quietMs: 0,
+    advice: "called `Bash` 5 times in a row",
+    dispatchId: "d1",
+  };
+
+  it("reads a repeat advisory whole", () => {
+    expect(parseStuckEvent(frame)).toEqual({
+      sessionId: "aaaa",
+      kind: "repeat",
+      tool: "Bash",
+      run: 5,
+      quietMs: 0,
+      advice: "called `Bash` 5 times in a row",
+      dispatchId: "d1",
+    });
+  });
+
+  it("reads a stall advisory, which carries no tool", () => {
+    const ev = parseStuckEvent({
+      type: "stuck",
+      sessionId: "aaaa",
+      kind: "stall",
+      run: 0,
+      quietMs: 660000,
+      advice: "wedged",
+    });
+    expect(ev).toEqual({
+      sessionId: "aaaa",
+      kind: "stall",
+      run: 0,
+      quietMs: 660000,
+      advice: "wedged",
+    });
+  });
+
+  it("drops anything that is not one", () => {
+    expect(parseStuckEvent({ ...frame, type: "activity" })).toBeNull();
+    expect(parseStuckEvent({ ...frame, kind: "wedged" })).toBeNull();
+    expect(parseStuckEvent({ ...frame, sessionId: "" })).toBeNull();
+    expect(parseStuckEvent({ ...frame, advice: 7 })).toBeNull();
   });
 });

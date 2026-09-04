@@ -57,6 +57,7 @@ use tracing::{debug, warn};
 use juancoded_cordis::services::transcripts::TranscriptsApi;
 use juancoded_persistence::{SessionStore, TranscriptRow};
 use juancoded_state::registry::SessionEvent;
+use juancoded_state::stuck::StuckWatch;
 use juancoded_state::SessionsApi;
 use juancoded_transcripts::BindRequest;
 
@@ -143,11 +144,21 @@ pub struct Pump {
     /// its own first batch (`reset: true`) for exactly this reason. Everything after it
     /// is the CLI writing as it works, which is the signal.
     fresh: HashSet<String>,
+    /// The stuck detector, when the daemon built one. Fed from the same live batch the
+    /// activity detector gets, and for the same reason: this is the one place that
+    /// knows which records are new writing rather than backlog.
+    stuck: Option<Arc<StuckWatch>>,
 }
 
 impl Pump {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Also feed the stuck detector every live batch.
+    pub fn with_stuck(mut self, watch: Arc<StuckWatch>) -> Self {
+        self.stuck = Some(watch);
+        self
     }
 
     /// Read whatever one session's transcript has grown by, and store it.
@@ -225,6 +236,11 @@ impl Pump {
             );
         } else {
             sessions.on_transcript(session, &records);
+            // Same batch, same `fresh` exclusion: a backlog read must not raise an
+            // advisory about a run that ended before anyone was watching.
+            if let Some(watch) = &self.stuck {
+                watch.on_transcript(session, records.iter().map(|r| &r.event));
+            }
         }
         if let Err(error) = plane.store.append_transcript(session, &rows, plane.keep) {
             // The batch is already on the bus, so a live watcher has it; what is lost is
@@ -272,10 +288,14 @@ pub fn spawn_pump(
     sessions: Arc<dyn SessionsApi>,
     plane: TranscriptPlane,
     tick: Duration,
+    stuck: Option<Arc<StuckWatch>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut events = sessions.subscribe();
         let mut pump = Pump::new();
+        if let Some(watch) = stuck {
+            pump = pump.with_stuck(watch);
+        }
         pump.backfill(&sessions, &plane);
         let mut dirty: HashSet<String> = HashSet::new();
         let mut ticker = tokio::time::interval(tick);
@@ -323,6 +343,7 @@ fn mark(event: SessionEvent, dirty: &mut HashSet<String>) {
         // about this plane at all.
         SessionEvent::Activity { .. }
         | SessionEvent::GridChange { .. }
+        | SessionEvent::Stuck { .. }
         | SessionEvent::QueueChanged { .. } => {}
     }
 }
