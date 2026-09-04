@@ -233,7 +233,7 @@ final class GitHubModel {
         if includeDiff { loadDiff(cwd: cwd, pr: pr, force: true) }
     }
 
-    /// Fetch the PR's diff (`gh pr diff --patch`, split into per-file `DiffFile`s)
+    /// Fetch the PR's diff (`gh pr diff`, split into per-file `DiffFile`s)
     /// for the detail's Diff tab. Off-main; cached per PR and coalesced so re-opening
     /// the tab is instant. A failed fetch leaves the cache empty so the tab retries.
     /// `force` refetches over a cached diff (the freshness tick, a manual refresh);
