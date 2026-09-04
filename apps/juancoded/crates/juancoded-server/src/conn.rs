@@ -73,11 +73,7 @@ static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// viewer's resize is applied rather than denied by a connection nobody is holding, and
 /// the sessions it declared off-limits, so a pane nobody is looking at any more stops
 /// being un-reapable forever.
-fn release(
-    sessions: &Arc<dyn SessionsApi>,
-    reaper: Option<&Arc<SessionReaper>>,
-    client: ClientId,
-) {
+fn release(sessions: &Arc<dyn SessionsApi>, reaper: Option<&Arc<SessionReaper>>, client: ClientId) {
     sessions.release_client(client);
     if let Some(reaper) = reaper {
         reaper.release_client(client);
@@ -546,6 +542,8 @@ fn handle_client_message(
             rows,
             initial_input,
             skip_permissions,
+            model,
+            preset,
             isolate_worktree,
             dispatch_id,
         } => {
@@ -563,7 +561,11 @@ fn handle_client_message(
                 cols,
                 rows,
                 skip_permissions: skip_permissions.unwrap_or(false),
-                model: None,
+                // An empty string reads as no pin and no preset, so a client that
+                // always sends both keys gets the CLI's own default rather than a
+                // bare `--model` and a preset name with nothing behind it.
+                model: model.filter(|m| !m.is_empty()),
+                preset: preset.filter(|p| !p.is_empty()),
                 isolate_worktree: isolate_worktree.unwrap_or(false),
                 dispatch_id,
                 owner: client,
@@ -1076,6 +1078,7 @@ mod tests {
                 rows: 24,
                 skip_permissions: false,
                 model: None,
+                preset: None,
                 isolate_worktree: false,
                 dispatch_id: None,
                 owner: 1,
@@ -1181,6 +1184,7 @@ mod tests {
                     rows: 24,
                     skip_permissions: false,
                     model: None,
+                    preset: None,
                     isolate_worktree: false,
                     dispatch_id: None,
                     owner: 1,
