@@ -7,7 +7,13 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { WireClient, readServerInfo, WireProtocolError, type Frame } from "./client.ts";
+import {
+  WireClient,
+  readServerInfo,
+  WireProtocolError,
+  type Frame,
+  type SessionScope,
+} from "./client.ts";
 import { matchValue, readBindings, resolveVars, type Vars } from "./match.ts";
 import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
 import type { Requirement, Scenario, Step } from "./spec.ts";
@@ -139,10 +145,24 @@ export interface RunContext {
   available: Requirement[];
 }
 
+/** What one scenario did in one core boot.
+ *
+ *  `attempts` and `passes` are on the verdict rather than beside it because a
+ *  score reported off a single run has twice turned out not to be repeatable
+ *  (juancode-g2kl, juancode-p5vb): a report that cannot say HOW MANY times a
+ *  scenario was measured cannot be read as a gate. A single measurement is still
+ *  honest, it just reads as 1/1. */
 export type Outcome =
-  | { status: "passed"; scenarioId: string; ms: number }
+  | { status: "passed"; scenarioId: string; ms: number; attempts: number; passes: number }
   | { status: "skipped"; scenarioId: string; reason: string }
-  | { status: "failed"; scenarioId: string; ms: number; error: string };
+  | {
+      status: "failed";
+      scenarioId: string;
+      ms: number;
+      attempts: number;
+      passes: number;
+      error: string;
+    };
 
 /** Why a scenario cannot run against this core / in this environment, or null. */
 export function skipReason(scenario: Scenario, ctx: RunContext): string | null {
@@ -165,14 +185,80 @@ export function clientVar(name: string): string {
   return `client${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
+/** Which scenario attempt claimed each session id, for the whole suite process.
+ *
+ *  Module-level because that is the scope of the problem: the frames a scenario
+ *  has to ignore are the ones about sessions an EARLIER scenario created, and no
+ *  single scenario can know those ids. */
+const sessionOwners = new Map<string, string>();
+
+/** The session ids a frame announces as belonging to whoever asked for them.
+ *
+ *  Replies only. `created` answers a `create` or an `adoptExternal`, `editorReady`
+ *  and `terminalReady` answer an `openEditor` / `openTerminal`. An `activity`
+ *  broadcast is deliberately NOT an announcement: a connection receives those for
+ *  every session in the core, so claiming from one would adopt exactly the frames
+ *  this scoping exists to filter out. */
+export function announcedSessionIds(frame: Frame): string[] {
+  const ids: string[] = [];
+  if (frame.type === "created") {
+    const session = frame.session as Record<string, unknown> | undefined;
+    if (typeof session?.id === "string") ids.push(session.id);
+  }
+  if (frame.type === "editorReady" && typeof frame.editorId === "string") ids.push(frame.editorId);
+  if (frame.type === "terminalReady" && typeof frame.terminalId === "string") {
+    ids.push(frame.terminalId);
+  }
+  return ids;
+}
+
+/** The session a frame is about, or undefined for one that names none (`serverInfo`,
+ *  a `trackedPrs` list, an `error` with no session). A frame naming no session is
+ *  never foreign: there is nothing to attribute it to. */
+export function frameSessionId(frame: Frame): string | undefined {
+  for (const key of ["sessionId", "editorId", "terminalId"]) {
+    const value = frame[key];
+    if (typeof value === "string") return value;
+  }
+  const session = frame.session as Record<string, unknown> | undefined;
+  return typeof session?.id === "string" ? session.id : undefined;
+}
+
+/** The ownership filter for one attempt at one scenario.
+ *
+ *  Foreign means KNOWN to belong to another attempt, never merely unrecognised: a
+ *  session's own `activity` can beat its `created` reply (see the note in
+ *  17-dispatch-correlation), so treating unknown ids as foreign would silently
+ *  drop frames a step is waiting for and turn this fix into a timeout. */
+export function makeSessionScope(runKey: string): SessionScope & { owned: Set<string> } {
+  const owned = new Set<string>();
+  return {
+    owned,
+    claim(frame: Frame) {
+      for (const id of announcedSessionIds(frame)) {
+        owned.add(id);
+        sessionOwners.set(id, runKey);
+      }
+    },
+    isForeign(frame: Frame) {
+      const id = frameSessionId(frame);
+      if (id === undefined || owned.has(id)) return false;
+      const owner = sessionOwners.get(id);
+      return owner !== undefined && owner !== runKey;
+    },
+  };
+}
+
 /** Drive one scenario. Throws on the first assertion that fails. */
 export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<void> {
   const ignore = scenario.ignore ?? [];
   const clients = new Map<string, WireClient>();
-  const vars: Vars = seedVars(ctx.workspace, scenario.id, bumpAttempt(scenario.id));
+  const attempt = bumpAttempt(scenario.id);
+  const vars: Vars = seedVars(ctx.workspace, scenario.id, attempt);
+  const scope = makeSessionScope(`${scenario.id}#${attempt}`);
 
   const open = async (name: string, keep = false): Promise<WireClient> => {
-    const client = await WireClient.connect(ctx.wsUrl, name);
+    const client = await WireClient.connect(ctx.wsUrl, name, { scope });
     clients.set(name, client);
     // Every connection starts with the handshake; consume it here so scenarios
     // only spell it out when the handshake itself is what they assert.
@@ -208,8 +294,65 @@ export async function runScenario(scenario: Scenario, ctx: RunContext): Promise<
       }
     }
   } finally {
-    await cleanup(clients);
+    await cleanup(clients, scope.owned);
   }
+}
+
+/** How many times each scenario runs inside ONE core boot.
+ *
+ *  Repeating inside one boot rather than as N whole CI jobs is deliberate: the
+ *  build plus boot dominates the wall clock, and a fresh boot per run hides the
+ *  sequence-of-scenarios ordering that late frames from a previous scenario come
+ *  out of. So N attempts cost N times the transcripts and nothing else. */
+export function repeatCount(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.JUANCODE_CONFORMANCE_REPEAT;
+  if (raw === undefined || raw.trim() === "") return 1;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `JUANCODE_CONFORMANCE_REPEAT must be a positive integer, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
+/** Run one scenario `repeat` times and report a single verdict.
+ *
+ *  All N attempts have to pass. Stops at the first failure, because the verdict is
+ *  already decided and a scenario that fails once is not a scenario whose remaining
+ *  attempts are interesting. `attempts` is therefore what the gate ASKED for rather
+ *  than how many ran, so a ratio reads against the bar it had to clear; the error
+ *  message names the attempt that stopped it. */
+export async function runScenarioRepeatedly(
+  scenario: Scenario,
+  ctx: RunContext,
+  repeat: number,
+): Promise<Outcome> {
+  const started = Date.now();
+  let passes = 0;
+  for (let attempt = 1; attempt <= repeat; attempt++) {
+    try {
+      await runScenario(scenario, ctx);
+      passes += 1;
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      return {
+        status: "failed",
+        scenarioId: scenario.id,
+        ms: Date.now() - started,
+        attempts: repeat,
+        passes,
+        error: repeat > 1 ? `attempt ${attempt} of ${repeat}: ${detail}` : detail,
+      };
+    }
+  }
+  return {
+    status: "passed",
+    scenarioId: scenario.id,
+    ms: Date.now() - started,
+    attempts: repeat,
+    passes,
+  };
 }
 
 interface StepContext {
@@ -284,7 +427,11 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     return;
   }
   if ("descendant" in step) {
-    await probeDescendant(step.descendant, resolveVars(step.pidFile, s.vars) as string, step.withinMs);
+    await probeDescendant(
+      step.descendant,
+      resolveVars(step.pidFile, s.vars) as string,
+      step.withinMs,
+    );
     return;
   }
   throw new Error(`unrecognised step: ${JSON.stringify(step)}`);
@@ -359,31 +506,51 @@ async function probeDescendant(
   );
 }
 
-/** Kill every session a scenario created, so the next scenario's connection does
- *  not inherit their activity broadcasts, then close the sockets. */
-async function cleanup(clients: Map<string, WireClient>): Promise<void> {
-  const sessionIds = new Set<string>();
-  for (const client of clients.values()) {
-    for (const frame of client.frames) {
-      if (frame.type === "created") {
-        const session = frame.session as Record<string, unknown> | undefined;
-        if (typeof session?.id === "string") sessionIds.add(session.id);
-      }
-      if (frame.type === "editorReady" && typeof frame.editorId === "string") {
-        sessionIds.add(frame.editorId);
-      }
-      if (frame.type === "terminalReady" && typeof frame.terminalId === "string") {
-        sessionIds.add(frame.terminalId);
-      }
-    }
-  }
+/** Kill every session a scenario created and WAIT for the core to say they are
+ *  gone, so the next scenario's connection does not inherit their broadcasts.
+ *
+ *  The waiting is the point. This used to sleep a flat 400ms, which is a guess
+ *  rather than a barrier: when the core took longer than that to reap a pty, the
+ *  `exit` landed on whichever connection was open next — the next scenario's,
+ *  mid-assertion (juancode-a3ck). A missed `exit` is no longer a failure either,
+ *  because a frame about a retired session now reads as foreign, so the deadline
+ *  here only bounds how long the suite is willing to be tidy. */
+async function cleanup(
+  clients: Map<string, WireClient>,
+  sessionIds: Set<string>,
+  timeoutMs = 4_000,
+): Promise<void> {
   // A scenario may have closed one connection deliberately; kill through whichever
   // is still open, or the sessions it created outlive the run.
   const first = [...clients.values()].find((c) => !c.isClosed);
-  if (first) {
+  if (first && sessionIds.size) {
     for (const id of sessionIds) first.send({ type: "kill", sessionId: id });
-    // Give the core a moment to reap the ptys before the socket goes away.
-    await sleep(sessionIds.size ? 400 : 0);
+    await waitForExits(clients, sessionIds, timeoutMs);
   }
   for (const client of clients.values()) client.close();
+}
+
+/** Block until every id has an `exit` on some connection, or the deadline. Reads
+ *  the whole recorded stream rather than the cursor: a scenario that asserted its
+ *  own `exit` has already consumed it, and that still counts as reaped. */
+async function waitForExits(
+  clients: Map<string, WireClient>,
+  sessionIds: Set<string>,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const exited = (): boolean => {
+    const seen = new Set<string>();
+    for (const client of clients.values()) {
+      for (const frame of client.frames) {
+        if (frame.type === "exit" && typeof frame.sessionId === "string") seen.add(frame.sessionId);
+      }
+    }
+    return [...sessionIds].every((id) => seen.has(id));
+  };
+  while (!exited()) {
+    if (Date.now() >= deadline) return;
+    if ([...clients.values()].every((c) => c.isClosed)) return;
+    await sleep(20);
+  }
 }

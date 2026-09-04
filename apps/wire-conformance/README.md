@@ -115,6 +115,7 @@ Knobs:
 | `JUANCODE_CONFORMANCE_STATUS`     | Also write a status JSON here, whatever the report is             |
 | `JUANCODE_CONFORMANCE_KEEP`       | `1` keeps the booted core's temp data dir for inspection          |
 | `JUANCODE_CONFORMANCE_RUN_TOKEN`  | Pin the per-run id stamp; two runs sharing one collide on purpose |
+| `JUANCODE_CONFORMANCE_REPEAT`     | Attempts per scenario inside one boot (default 1; CI uses 3)      |
 
 A relative report or status path is resolved from this package's directory, not
 the repo root, because that is where the suite runs.
@@ -143,6 +144,34 @@ So the runner stamps them: `conformance-<scenario>-<run token>-<attempt>`, uniqu
 per attempt and identical for every step of one attempt. Per attempt rather than
 per process, because running the whole spec more than once inside a single boot is
 how repeatability gets measured at all.
+
+## Repeating the whole spec inside one boot
+
+```
+JUANCODE_CONFORMANCE_REPEAT=5 JUANCODE_CONFORMANCE_CORE=rust JUANCODE_CONFORMANCE_PORT=4300 \
+pnpm --filter @juancode/wire-conformance test:conformance
+```
+
+Every scenario runs five times against the same core; a scenario passes only if
+all five attempts passed, and the report says `handshake: 5/5` rather than a bare
+`yes`. A spec measured once still reads honestly, as `1/1`.
+
+Why a knob and not a habit: twice a conformance score has been reported off a
+single run and turned out not to be repeatable (juancode-g2kl on the Rust side,
+juancode-p5vb on the Swift side, where `tracked-prs` was 20 of 20 one day and 2
+of 6 the next). The macOS CI job therefore runs with `REPEAT=3`, so a flake at
+p5vb's 1-in-3 rate is red on nearly every push instead of one push in three.
+
+Inside one boot rather than as N whole jobs, because the build plus the boot
+dominates the wall clock, and repeating in one boot also exercises the
+scenario-after-scenario ordering a fresh boot per run hides. That ordering is
+where a scenario used to be failed by a frame that was not its own: an `exit`
+from the previous scenario's killed session, reaped while the next scenario's
+socket was the one open. A scenario now asserts only about the sessions it
+created — the driver tells each connection which ids are its own, and a frame
+about anybody else's session is skipped rather than failed — and cleanup waits
+for the `exit` of every session it kills instead of sleeping a flat 400ms
+(juancode-a3ck).
 
 ## The parity checklist
 
@@ -183,19 +212,19 @@ Golden transcripts need a reproducible pty child, so the scenarios do not drive
 `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN`. It reads
 one command per line off the pty and prints exactly what was asked for:
 
-| Command            | Effect                                                        |
-| ------------------ | ------------------------------------------------------------- |
-| `ECHO <text>`      | print the text                                                |
-| `BUSY`             | print the working footer, so the session reads as busy        |
-| `PROMPT`           | print a yes/no question on the bottom row (waiting for input) |
-| `CLEAR`            | erase the screen, which ends a busy turn                      |
-| `ALT` / `MAIN`     | enter / leave the alternate screen buffer                     |
-| `HIDE` / `SHOW`    | hide / show the cursor                                        |
-| `MOVE <row> <col>` | position the cursor                                           |
-| `TITLE <text>`     | set an OSC 2 window title, the way a CLI names its session    |
-| `TRANSCRIPT <text>`| append one turn to claude's own jsonl (the transcript plane)   |
-| `SPAWN`            | leave a helper running in the session's process group         |
-| `EXIT <code>`      | exit with that status                                         |
+| Command             | Effect                                                        |
+| ------------------- | ------------------------------------------------------------- |
+| `ECHO <text>`       | print the text                                                |
+| `BUSY`              | print the working footer, so the session reads as busy        |
+| `PROMPT`            | print a yes/no question on the bottom row (waiting for input) |
+| `CLEAR`             | erase the screen, which ends a busy turn                      |
+| `ALT` / `MAIN`      | enter / leave the alternate screen buffer                     |
+| `HIDE` / `SHOW`     | hide / show the cursor                                        |
+| `MOVE <row> <col>`  | position the cursor                                           |
+| `TITLE <text>`      | set an OSC 2 window title, the way a CLI names its session    |
+| `TRANSCRIPT <text>` | append one turn to claude's own jsonl (the transcript plane)  |
+| `SPAWN`             | leave a helper running in the session's process group         |
+| `EXIT <code>`       | exit with that status                                         |
 
 `TRANSCRIPT` is the odd one out: it writes a file rather than painting a screen.
 The transcript plane does not read the pty, it reads the CLI's own store, so a

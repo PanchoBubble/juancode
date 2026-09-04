@@ -59,10 +59,9 @@ final class GitTests: XCTestCase {
     override func setUp() {
         super.setUp()
         dir = mkdtemp("juancode-git-")
-        // git init -q; config user.email/name — same setup as TS beforeEach.
-        try? runGit(["init", "-q"])
-        try? runGit(["config", "user.email", "test@example.com"])
-        try? runGit(["config", "user.name", "Test"])
+        // git init -q; config user.email/name — same setup as TS beforeEach,
+        // plus signing off so no commit here reaches for the developer's gpg.
+        try? TempGitRepo.initialize(at: dir)
     }
 
     override func tearDown() {
@@ -453,7 +452,7 @@ final class GitTests: XCTestCase {
     func testPushCurrentSetsUpstreamOnFirstPush() async throws {
         let remote = mkdtemp("juancode-remote-")
         defer { rmrf(remote) }
-        try runGit(["init", "-q", "--bare", remote], cwd: remote)
+        try TempGitRepo.initializeBare(at: remote)
         try runGit(["remote", "add", "origin", remote])
         writeFile(join(dir, "a.txt"), "one\n")
         _ = try await commitAll(dir, "init")

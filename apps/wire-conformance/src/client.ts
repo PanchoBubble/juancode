@@ -22,6 +22,28 @@ export interface WaitOptions {
 
 export class WireProtocolError extends Error {}
 
+/** Which sessions the scenario driving this connection is asserting about.
+ *
+ *  A connection is told about EVERY session the core has, not only the ones the
+ *  scenario created: the next scenario's socket is the one open when the previous
+ *  scenario's killed pty is finally reaped, so its `exit` lands mid-assertion and
+ *  fails a step about a session the scenario has never heard of (juancode-a3ck).
+ *  A scenario asserts about ITS sessions; a frame about somebody else's is noise
+ *  by definition, and the driver is the only thing that knows which is which. */
+export interface SessionScope {
+  /** Record the session ids a frame announces as this scenario's own. Called for
+   *  every frame as it arrives, so ownership is known before anything matches. */
+  claim(frame: Frame): void;
+  /** True when a frame is about a session a DIFFERENT scenario created. */
+  isForeign(frame: Frame): boolean;
+}
+
+export interface ConnectOptions {
+  timeoutMs?: number;
+  /** Ownership filter; without one, every frame is this connection's business. */
+  scope?: SessionScope;
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export class WireClient {
@@ -34,15 +56,21 @@ export class WireClient {
   private socket: WebSocket;
   private cursor = 0;
   private closed = false;
+  private scope?: SessionScope;
 
-  private constructor(name: string, url: string, socket: WebSocket) {
+  private constructor(name: string, url: string, socket: WebSocket, scope?: SessionScope) {
     this.name = name;
     this.url = url;
     this.socket = socket;
+    this.scope = scope;
     socket.on("message", (data) => {
       const text = data.toString();
       try {
-        this.frames.push(JSON.parse(text) as Frame);
+        const frame = JSON.parse(text) as Frame;
+        this.frames.push(frame);
+        // At arrival, not at match time: a session is this scenario's from the
+        // moment the core answers, so its later `exit` is never read as foreign.
+        this.scope?.claim(frame);
       } catch {
         this.undecodable.push(text);
       }
@@ -52,9 +80,10 @@ export class WireClient {
     });
   }
 
-  static async connect(url: string, name = "a", timeoutMs = 10_000): Promise<WireClient> {
+  static async connect(url: string, name = "a", opts: ConnectOptions = {}): Promise<WireClient> {
+    const { timeoutMs = 10_000, scope } = opts;
     const socket = new WebSocket(url);
-    const client = new WireClient(name, url, socket);
+    const client = new WireClient(name, url, socket, scope);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`connect to ${url} timed out`)), timeoutMs);
       socket.once("open", () => {
@@ -82,9 +111,17 @@ export class WireClient {
     this.socket.send(text);
   }
 
-  /** The frame at an absolute index (0 = the first frame the core ever sent). */
+  /** True when this frame is about a session some other scenario created. */
+  private isForeign(frame: Frame): boolean {
+    return this.scope?.isForeign(frame) ?? false;
+  }
+
+  /** The frame at an absolute index (0 = the first frame the core ever sent),
+   *  counting only frames this scenario owns. "serverInfo is frame 0" is an
+   *  assertion about what this connection is told in reply to its own arrival; a
+   *  broadcast about a session another scenario is still reaping does not move it. */
   frameAt(index: number): Frame | undefined {
-    return this.frames[index];
+    return this.frames.filter((f) => !this.isForeign(f))[index];
   }
 
   /** Advance the cursor past everything already received (used between phases). */
@@ -104,7 +141,9 @@ export class WireClient {
       const index = this.frames.findIndex((f) => f.type === "serverInfo");
       if (index >= 0) {
         const before = this.frames.slice(0, index);
-        const early = before.find((f) => SOLICITED_TYPES.includes(String(f.type)));
+        const early = before.find(
+          (f) => SOLICITED_TYPES.includes(String(f.type)) && !this.isForeign(f),
+        );
         if (early) {
           throw new WireProtocolError(
             `[${this.name}] ${String(early.type)} arrived before the serverInfo handshake`,
@@ -132,6 +171,10 @@ export class WireClient {
       while (this.cursor < this.frames.length) {
         const frame = this.frames[this.cursor] as Frame;
         this.cursor += 1;
+        // Before matching, not after: an earlier scenario's late `exit` is neither
+        // a verdict on this step nor allowed to satisfy it, and a matcher that
+        // names no session (`{ "type": "exit" }`) would otherwise accept it.
+        if (this.isForeign(frame)) continue;
         const result = matchValue(frame, matcher, vars);
         if (result.ok) return frame;
         const type = typeof frame.type === "string" ? frame.type : "<untyped>";
@@ -165,6 +208,12 @@ export class WireClient {
     for (;;) {
       while (this.cursor < this.frames.length) {
         const frame = this.frames[this.cursor] as Frame;
+        // A negative assertion must not be satisfied-or-broken by another
+        // scenario's session either: "no exit for MY session" is the claim.
+        if (this.isForeign(frame)) {
+          this.cursor += 1;
+          continue;
+        }
         const result = matchValue(frame, matcher, vars);
         if (result.ok) {
           throw new WireProtocolError(
