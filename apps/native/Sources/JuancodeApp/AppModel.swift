@@ -32,6 +32,10 @@ private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 /// UserDefaults key for the user's custom sidebar project (folder) order — cwds.
 private let projectOrderKey = "juancode.projectOrder"
 
+/// UserDefaults key for the projects the user removed from the sidebar (folder
+/// cwds). Removal only hides the folder — its sessions keep running.
+private let hiddenProjectsKey = "juancode.hiddenProjects"
+
 /// UserDefaults key for the user's manual within-project session order:
 /// project cwd → ordered session ids (a plist-safe [String: [String]]).
 private let sessionOrderKey = "juancode.sessionOrder"
@@ -1395,6 +1399,30 @@ final class AppModel {
         didSet { UserDefaults.standard.set(projectOrder, forKey: projectOrderKey) }
     }
 
+    /// Projects the user removed from the sidebar (folder cwds). Purely a display
+    /// filter: the sessions stay alive and reachable (jump palette, Telegram), and
+    /// starting a new session in the folder brings it back. Persisted.
+    var hiddenProjects: Set<String> = Set(
+        (UserDefaults.standard.array(forKey: hiddenProjectsKey) as? [String]) ?? []
+    ) {
+        didSet { UserDefaults.standard.set(Array(hiddenProjects), forKey: hiddenProjectsKey) }
+    }
+
+    func isProjectHidden(_ cwd: String) -> Bool { hiddenProjects.contains(cwd) }
+
+    /// Hide one project's folder from the sidebar. Animated so the section slides
+    /// out instead of vanishing mid-frame.
+    func hideProject(_ cwd: String) {
+        withAnimation(.easeOut(duration: 0.18)) { _ = hiddenProjects.insert(cwd) }
+    }
+
+    /// Bring a removed project back. Also called on session creation, so a folder
+    /// you start work in can never stay invisible.
+    func unhideProject(_ cwd: String) {
+        guard hiddenProjects.contains(cwd) else { return }
+        withAnimation(.easeOut(duration: 0.18)) { _ = hiddenProjects.remove(cwd) }
+    }
+
     /// User's manual within-project session order: project cwd → ordered session
     /// ids. Sessions not listed rest where the default sort puts them; sessions
     /// needing attention bubble above this order temporarily without rewriting it
@@ -1611,6 +1639,10 @@ final class AppModel {
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
                 worktreeName: String? = nil, dispatchId: String? = nil) async -> (any LiveSession)? {
+        // A folder you're starting work in must not stay hidden — the new session
+        // would land in a section nobody can see.
+        unhideProject(cwd)
+        unhideProject(projectCwd(for: cwd))
         do {
             var workCwd = cwd
             var worktreePath: String? = nil

@@ -650,7 +650,9 @@ struct SidebarView: View {
         let byCwd = Dictionary(grouping: filtered, by: {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
-        return byCwd.map { cwd, sessions in
+        // Projects the user removed from the sidebar drop out here — the folder and
+        // its rows, not the sessions themselves (restorable from the footer below).
+        return byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions in
             // Within a project: only sessions waiting on a reply bubble to the top;
             // the rest hold the user's drag order, with unplaced ones resting where
             // the stable sort puts them (live newest-first, dead sinking —
@@ -1077,6 +1079,30 @@ struct SidebarView: View {
                 .help(budgetHelp(budget)
                     + (total.costUsd != nil ? " · estimated cost" : ""))
             }
+            // Removed projects live here, not lost: one menu to bring any of them
+            // back. Without this the ellipsis "Remove project" would be one-way.
+            if !model.hiddenProjects.isEmpty {
+                Divider()
+                Menu {
+                    ForEach(model.hiddenProjects.sorted(), id: \.self) { cwd in
+                        Button((cwd as NSString).lastPathComponent.isEmpty ? cwd
+                               : (cwd as NSString).lastPathComponent) {
+                            model.unhideProject(cwd)
+                        }
+                    }
+                    Divider()
+                    Button("Restore all") {
+                        for cwd in model.hiddenProjects { model.unhideProject(cwd) }
+                    }
+                } label: {
+                    Text("Removed projects (\(model.hiddenProjects.count))")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .help("Bring a project you removed back into the sidebar")
+            }
             if archivedCount > 0 {
                 Divider()
                 Toggle(isOn: $showArchived) {
@@ -1493,8 +1519,10 @@ private struct FolderHeader: View {
     let collapsed: Bool
     let toggle: () -> Void
     @State private var showingAgentPicker = false
+    @State private var showingProjectMenu = false
     @State private var plusHovering = false
     @State private var ghHovering = false
+    @State private var menuHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
     /// the cost stays discoverable without crowding the header (juancode-341).
@@ -1546,6 +1574,10 @@ private struct FolderHeader: View {
     /// to delete (their row only offers "Resume"), so they're excluded.
     private var closableSessions: [SessionMeta] {
         group.sessions.filter { !model.isExternal($0.id) }
+    }
+
+    private var closeAllLabel: String {
+        "Close all \(closableSessions.count) session\(closableSessions.count == 1 ? "" : "s")"
     }
 
     /// Per-project spend rollup (juancode-qoc): summed estimated cost across this
@@ -1676,6 +1708,59 @@ private struct FolderHeader: View {
                     .clickCursor()
                     .onHover { ghHovering = $0 }
                 }
+                // Per-project overflow menu. A popover of plain buttons for the same
+                // reason the agent picker is one: native Menu rows get neither the
+                // pointing-hand cursor nor a reliable first click here.
+                Button { showingProjectMenu = true } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.appHairline(menuHovering ? 0.14 : 0)))
+                }
+                .buttonStyle(.plain)
+                .help("More actions for \(group.name)")
+                .clickCursor()
+                .onHover { menuHovering = $0 }
+                .popover(isPresented: $showingProjectMenu, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !closableSessions.isEmpty {
+                            Button {
+                                model.closeSessions(closableSessions.map(\.id))
+                                showingProjectMenu = false
+                            } label: {
+                                Text(closeAllLabel)
+                                    .foregroundStyle(.red)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close every session juancode owns in this project")
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .clickCursor()
+                        }
+                        Button {
+                            model.hideProject(group.cwd)
+                            showingProjectMenu = false
+                        } label: {
+                            Text("Remove project")
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Hide this project from the sidebar — its sessions keep running")
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .clickCursor()
+                    }
+                    .frame(minWidth: 200)
+                    .padding(4)
+                    .fixesPopoverFirstClick()
+                }
             }
             // Line 2: quiet metadata cluster — a single 10pt style, semantic color only
             // where it's a signal. Only rendered when something is present.
@@ -1782,9 +1867,11 @@ private struct FolderHeader: View {
         .padding(.horizontal, -10)
         .contextMenu {
             if !closableSessions.isEmpty {
-                Button("Close All \(closableSessions.count) Session\(closableSessions.count == 1 ? "" : "s")",
-                       role: .destructive) { model.closeSessions(closableSessions.map(\.id)) }
+                Button(closeAllLabel, role: .destructive) {
+                    model.closeSessions(closableSessions.map(\.id))
+                }
             }
+            Button("Remove project") { model.hideProject(group.cwd) }
         }
         // No `loadPrs` here: PRs are fetched when you ask for them (the PRs button,
         // or a folder section scrolling into view in the GitHub tab). Every project
