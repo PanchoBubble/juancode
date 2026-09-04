@@ -162,7 +162,7 @@ mod imp {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            out.extend(text.split_ascii_whitespace().filter_map(|t| t.parse().ok()));
+            out.extend(text.split_ascii_whitespace().filter_map(|t| t.parse::<u32>().ok()));
         }
         out
     }
