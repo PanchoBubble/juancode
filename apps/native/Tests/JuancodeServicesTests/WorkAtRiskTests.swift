@@ -252,9 +252,7 @@ final class WorkAtRiskTests: XCTestCase {
     func testProbeReportsDirtyFileCount() async throws {
         let dir = mkdtemp("juancode-war-")
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        try runGit(["init", "-q"], cwd: dir)
-        try runGit(["config", "user.email", "t@e.com"], cwd: dir)
-        try runGit(["config", "user.name", "T"], cwd: dir)
+        try TempGitRepo.initialize(at: dir)
         try "one\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
                           atomically: true, encoding: .utf8)
         try runGit(["add", "-A"], cwd: dir)
@@ -283,10 +281,8 @@ final class WorkAtRiskTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: remote)
             try? FileManager.default.removeItem(atPath: dir)
         }
-        try runGit(["init", "-q", "--bare"], cwd: remote)
-        try runGit(["init", "-q"], cwd: dir)
-        try runGit(["config", "user.email", "t@e.com"], cwd: dir)
-        try runGit(["config", "user.name", "T"], cwd: dir)
+        try TempGitRepo.initializeBare(at: remote)
+        try TempGitRepo.initialize(at: dir)
         try runGit(["remote", "add", "origin", remote], cwd: dir)
         try "one\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
                           atomically: true, encoding: .utf8)
