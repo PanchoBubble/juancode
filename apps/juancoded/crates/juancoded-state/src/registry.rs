@@ -40,6 +40,7 @@ use juancoded_core::activity::{
 };
 use juancoded_core::changes::{self, ChangeStat};
 use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
+use juancoded_core::preset::PresetStore;
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
 use juancoded_core::worktree;
@@ -107,6 +108,10 @@ pub struct CreateRequest {
     pub rows: u16,
     pub skip_permissions: bool,
     pub model: Option<String>,
+    /// The name of a per-spawn instruction set, resolved against juancode's own
+    /// preset directory before anything is spawned. `None` = none, and a name that
+    /// resolves to nothing is an error rather than a session started without it.
+    pub preset: Option<String>,
     /// Run in a fresh git worktree off `cwd` instead of in `cwd` itself. Several
     /// agents are routinely dispatched into one checkout at once, and this is the
     /// only thing keeping them off each other's files, so it is never best-effort:
@@ -151,6 +156,9 @@ pub enum StateError {
     NotADirectory(String),
     /// Isolation was asked for and could not be given. Carries git's own reason.
     Worktree(String),
+    /// A `create.preset` name the core could not turn into an instruction set.
+    /// Carries the store's own reason.
+    Preset(String),
     DispatchAlreadyProcessed(String),
     /// A dead session with no CLI conversation id to resume from.
     Unresumable(String),
@@ -165,6 +173,7 @@ impl std::fmt::Display for StateError {
             Self::NotRunning => write!(f, "Session is not running"),
             Self::NotADirectory(cwd) => write!(f, "\"{cwd}\" is not an existing directory"),
             Self::Worktree(why) => write!(f, "{why}"),
+            Self::Preset(why) => write!(f, "Preset rejected: {why}"),
             Self::DispatchAlreadyProcessed(id) => {
                 write!(f, "Dispatch {id} was already processed")
             }
@@ -400,9 +409,13 @@ impl SessionRegistry {
                 ring.bytes = bytes;
                 ring.saved_grid = Some((cols, rows_));
             }
+            // Neither the model nor the preset survives a restart, which is what
+            // the Swift core's revive does too: both are per-spawn knobs, and the
+            // session store never carried either one.
             let opts = SpawnOptions {
                 skip_permissions: meta.skip_permissions,
                 model: None,
+                preset: None,
             };
             sessions.insert(
                 meta.id.clone(),
@@ -498,6 +511,18 @@ impl SessionRegistry {
             return Err(StateError::NotADirectory(req.cwd.clone()));
         }
 
+        // Resolved BEFORE the worktree below, so a preset the core cannot make sense
+        // of costs an error frame and not an orphaned worktree.
+        // Refused rather than dropped: a session that silently started without the
+        // instruction set it was asked for looks exactly like one that has it.
+        let preset = match req.preset.as_deref().filter(|p| !p.is_empty()) {
+            Some(name) => Some(
+                PresetStore::resolve(name, req.provider)
+                    .map_err(|e| StateError::Preset(e.to_string()))?,
+            ),
+            None => None,
+        };
+
         let id = uuid::Uuid::new_v4().to_string();
         // Isolation, if it was asked for, before anything is inserted anywhere: a
         // refusal here costs nothing but the dispatch claim above, and the caller is
@@ -523,6 +548,7 @@ impl SessionRegistry {
         let opts = SpawnOptions {
             skip_permissions: req.skip_permissions,
             model: req.model.clone(),
+            preset,
         };
         let (program, args) = self.program_for(req.provider, &id, &opts, None)?;
 
@@ -804,7 +830,9 @@ impl SessionRegistry {
             InputDecision::Delivered(_) => {
                 // A keystroke that reached the pty. Not liveness — see `LiveSignals` —
                 // but the one thing that protects a prompt typed and not yet sent.
-                live.signals.last_input_ms.store(now_ms(), Ordering::Relaxed);
+                live.signals
+                    .last_input_ms
+                    .store(now_ms(), Ordering::Relaxed);
                 Ok(())
             }
             InputDecision::Refused(why) => Err(StateError::Spawn(why)),
@@ -1379,7 +1407,9 @@ impl SessionRegistry {
         live.signals
             .output_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        live.signals.last_output_ms.store(now_ms(), Ordering::Relaxed);
+        live.signals
+            .last_output_ms
+            .store(now_ms(), Ordering::Relaxed);
         // The bus feeds the grid: one listener, one grid, one lock. Emitting first
         // means the screen the activity classifier re-reads already includes this
         // chunk, which is the only ordering that makes settle correct.

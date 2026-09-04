@@ -717,6 +717,7 @@ mod tests {
                 rows: 24,
                 skip_permissions: false,
                 model: None,
+                preset: None,
                 isolate_worktree: false,
                 dispatch_id: None,
                 owner: 1,

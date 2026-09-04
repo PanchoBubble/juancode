@@ -88,6 +88,7 @@ fn request(provider: ProviderId, cwd: &str) -> CreateRequest {
         rows: 40,
         skip_permissions: false,
         model: None,
+        preset: None,
         isolate_worktree: false,
         dispatch_id: None,
         owner: 1,
