@@ -16,7 +16,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { FIXTURES, makeLogRing, startCore, type CoreUnderTest } from "./core.ts";
 import { renderRunMarkdown, toStatusFile, type RunReport } from "./report.ts";
-import { guardCore, type Outcome, type RunContext } from "./runner.ts";
+import { guardCore, runScenarioRepeatedly, type Outcome, type RunContext } from "./runner.ts";
 import type { Scenario } from "./spec.ts";
 
 const FAKE_CORE = join(FIXTURES, "fake-core.mjs");
@@ -145,5 +145,121 @@ describe("the core log ring", () => {
     ring.push("ab");
     ring.push("cd");
     expect(ring.text()).toBe("abcd");
+  });
+});
+
+// The same death, but under a repeat pass — which is the shape CI actually runs
+// both cores in now (JUANCODE_CONFORMANCE_REPEAT=3 on the Swift job since it was
+// written, on the Rust job since juancode-jyl9's own core turned out to be the one
+// that dies). A death on attempt 2 of 3 has a partial pass in hand, and the failure
+// mode worth guarding against is that partial averaging into a green verdict: 1/3
+// is not a measurement of a core that is no longer running.
+
+/** A single-attempt driver for `runScenarioRepeatedly`, backed by the real health
+ *  endpoint, that kills the core on a chosen attempt.
+ *
+ *  Global attempt count rather than per-scenario, because the interesting attempt
+ *  is "the second one of the second scenario" and only the caller knows where that
+ *  falls. The kill is inside the driver for lack of anywhere else to stand: the
+ *  attempts happen inside the repeat loop, so a test body cannot get between two of
+ *  them. */
+function attemptDriver(core: CoreUnderTest, killAtAttempt: number) {
+  let attempts = 0;
+  const run = async (): Promise<void> => {
+    attempts += 1;
+    if (attempts === killAtAttempt) {
+      expect(core.pid).not.toBeNull();
+      process.kill(core.pid as number, "SIGKILL");
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const res = await fetch(`${core.httpBase}/api/health`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  };
+  return { run, attempts: () => attempts };
+}
+
+describe("a core that dies on attempt 2 of 3", () => {
+  let core: CoreUnderTest | undefined;
+  afterAll(async () => {
+    await core?.stop();
+  });
+
+  it("is unmeasured with no partial credit, not a pass averaged from attempt 1", async () => {
+    const repeat = 3;
+    core = await startCore({ core: "rust", exe: FAKE_CORE, port: 0 });
+    // Attempt 5 overall = the second attempt at the second scenario: the first
+    // scenario gets its full 3, so the report has a real 3/3 to sit next to.
+    const driver = attemptDriver(core, 5);
+    const guard = guardCore(core, (s, c, r) => runScenarioRepeatedly(s, c, r, driver.run));
+
+    const outcomes = [
+      await guard.run(scenario("01-repeats-clean"), ctx, repeat),
+      await guard.run(scenario("02-dies-mid-repeat"), ctx, repeat),
+      await guard.run(scenario("03-never-ran"), ctx, repeat),
+    ];
+
+    expect(outcomes.map((o) => o.status)).toEqual(["passed", "unmeasured", "unmeasured"]);
+    // Attempt 3 of scenario 02 was never paid for, and neither was scenario 03.
+    expect(driver.attempts()).toBe(5);
+
+    const death = guard.death;
+    expect(death).not.toBeNull();
+    if (!death) return;
+    expect(death.signal).toBe("SIGKILL");
+    expect(death.afterScenarioId).toBe("01-repeats-clean");
+    expect(death.discoveredBy).toBe("02-dies-mid-repeat");
+    expect(death.log).toContain("fake-core: booting");
+
+    const report: RunReport = {
+      core: "fake",
+      url: core.wsUrl,
+      specRevision: "test",
+      protocolVersion: 1,
+      capabilities: [],
+      repeat,
+      outcomes,
+      coreDeath: death,
+    };
+    const md = renderRunMarkdown(report, "2026-09-07");
+    expect(md).toContain("Attempts per scenario: 3");
+    expect(md).toContain("## The core died mid-run");
+    expect(md).toContain("Died after: 01-repeats-clean");
+    expect(md).toContain("Noticed by: 02-dies-mid-repeat");
+    expect(md).toContain("1 passed, 0 failed, 0 skipped, 2 unmeasured (the core died)");
+    // The scenario that died reads as unmeasured, and specifically NOT as the 1/3
+    // its one surviving attempt would otherwise have earned it.
+    expect(md).toContain("02-dies-mid-repeat: unmeasured (core died)");
+    expect(md).not.toContain("02-dies-mid-repeat: 1/3");
+
+    const status = toStatusFile(report, "2026-09-07");
+    expect(status.scenarios["01-repeats-clean"]).toMatchObject({
+      status: "passed",
+      attempts: 3,
+      passes: 3,
+    });
+    expect(status.scenarios["02-dies-mid-repeat"]?.status).toBe("unmeasured");
+    // No "1/3" survives into the committed-claim comparison either: a scenario the
+    // core was alive for one third of is not a scenario that was measured.
+    expect(status.scenarios["02-dies-mid-repeat"]?.attempts).toBeUndefined();
+    expect(status.scenarios["02-dies-mid-repeat"]?.passes).toBeUndefined();
+  }, 60_000);
+});
+
+describe("the repeat loop", () => {
+  it("reports the attempt that stopped it and stops there", async () => {
+    // No process here: this is the arithmetic the guard above depends on, stated
+    // on its own so a change to it fails loudly rather than through a death test.
+    let attempts = 0;
+    const outcome = await runScenarioRepeatedly(scenario("07-flaky"), ctx, 3, async () => {
+      attempts += 1;
+      if (attempts === 2) throw new Error("gone");
+    });
+
+    expect(attempts).toBe(2);
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") return;
+    expect(outcome.attempts).toBe(3);
+    expect(outcome.passes).toBe(1);
+    expect(outcome.error).toContain("attempt 2 of 3");
   });
 });

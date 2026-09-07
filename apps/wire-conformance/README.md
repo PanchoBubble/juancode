@@ -174,8 +174,13 @@ all five attempts passed, and the report says `handshake: 5/5` rather than a bar
 Why a knob and not a habit: twice a conformance score has been reported off a
 single run and turned out not to be repeatable (juancode-g2kl on the Rust side,
 juancode-p5vb on the Swift side, where `tracked-prs` was 20 of 20 one day and 2
-of 6 the next). The macOS CI job therefore runs with `REPEAT=3`, so a flake at
-p5vb's 1-in-3 rate is red on nearly every push instead of one push in three.
+of 6 the next). Both CI conformance jobs therefore run with `REPEAT=3`, so a
+flake at p5vb's 1-in-3 rate is red on nearly every push instead of one push in
+three. The Rust job was the one scored on a single pass until 2026-09-07, which
+had it backwards: the only mid-run core death anyone has seen was that core (see
+below), and it is a required check on `main`, so a one-pass score was the
+load-bearing number. Three attempts cost it ~2 minutes and leave it inside the
+Swift job's wall clock, so nothing waits longer for it.
 
 Inside one boot rather than as N whole jobs, because the build plus the boot
 dominates the wall clock, and repeating in one boot also exercises the
@@ -232,6 +237,13 @@ Exactly one scenario goes red for a death: the one that discovered it, whose
 failure message carries the exit status, the signal and the core's log. The rest
 report as skipped. A run showing eight red scenarios for one process death is
 reporting a score it never took.
+
+A death lands the same way part-way through a repeat pass, which is now the only
+way CI runs: a scenario whose attempt 1 passed and whose attempt 2 hit a dead
+core is `unmeasured`, and its 1/3 goes nowhere. A partial pass is not a
+measurement of a core that is no longer running, so the repeat loop returns the
+failure that lets the guard latch rather than the pass it could have averaged
+(`death.test.ts`, "a core that dies on attempt 2 of 3").
 
 `src/death.test.ts` covers this end to end against `fixtures/fake-core.mjs` — a
 real process, a real `SIGKILL` between two scenarios, and assertions on the

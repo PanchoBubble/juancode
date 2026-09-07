@@ -328,17 +328,26 @@ export function repeatCount(env: NodeJS.ProcessEnv = process.env): number {
  *  already decided and a scenario that fails once is not a scenario whose remaining
  *  attempts are interesting. `attempts` is therefore what the gate ASKED for rather
  *  than how many ran, so a ratio reads against the bar it had to clear; the error
- *  message names the attempt that stopped it. */
+ *  message names the attempt that stopped it.
+ *
+ *  A partial pass is deliberately NOT a pass: attempt 1 of 3 succeeding and attempt
+ *  2 dying is a failure carrying 1/3, which is what lets `guardCore` above turn it
+ *  into one `unmeasured` verdict instead of averaging a dead core into a green run.
+ *
+ *  `runOne` is injectable for the same reason `guardCore`'s is: the death path has
+ *  to be measurable against a real process that really goes away, and a golden
+ *  transcript is not what that is testing. */
 export async function runScenarioRepeatedly(
   scenario: Scenario,
   ctx: RunContext,
   repeat: number,
+  runOne: (scenario: Scenario, ctx: RunContext) => Promise<void> = runScenario,
 ): Promise<Outcome> {
   const started = Date.now();
   let passes = 0;
   for (let attempt = 1; attempt <= repeat; attempt++) {
     try {
-      await runScenario(scenario, ctx);
+      await runOne(scenario, ctx);
       passes += 1;
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);

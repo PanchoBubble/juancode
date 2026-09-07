@@ -165,6 +165,16 @@ jobs:
           # independent even on a self-hosted runner that shares a host.
           JUANCODE_CONFORMANCE_CORE: rust
           JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
+          # Three, like the Swift job, and for one more reason on top of its own:
+          # the only mid-run core death anyone has seen was this core, once in six
+          # passes of the spec (juancode-jyl9). Scoring it on a single pass sampled
+          # the flakiest core the least, while being a required check on main. Three
+          # is free here rather than a tradeoff: this job runs ~4m at three attempts
+          # against the Swift job's ~4m45, so it stays off the critical path and adds
+          # nothing to how long a PR waits. Six would catch a 1-in-6 death 67% of the
+          # time instead of 42%, but it makes this job the slowest one on every PR to
+          # chase a flake that a required check already samples three times per merge.
+          JUANCODE_CONFORMANCE_REPEAT: "3"
           JUANCODE_CONFORMANCE_PORT: "4300"
           JUANCODE_CONFORMANCE_LABEL: rust
           JUANCODE_CONFORMANCE_REPORT: ${{ github.workspace }}/conformance-rust.md
