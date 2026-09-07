@@ -41,6 +41,34 @@ jobs:
           pnpm --filter @juancode/wire-conformance parity
           git diff --exit-code -- apps/wire-conformance/parity
 
+  cross-target:
+    name: cross-target compile (linux)
+    # Nothing on a macOS dev machine ever type-checks the cfg(target_os = "linux")
+    # arm of juancoded-core/src/proc.rs, and for six days it held a hard E0283 that
+    # no local build could see. The Rust conformance job below does compile it, but
+    # only as a side effect on its way to booting a core, so the failure reads as
+    # "conformance broke" and it dies behind a pnpm install. This job exists to say
+    # the one thing plainly: the tree does not compile for Linux.
+    #
+    # ubuntu-24.04 rather than ubuntu-latest on purpose: --target x86_64-unknown-linux-gnu
+    # is only free while the runner is natively x86_64, and rusqlite is bundled, so a
+    # runner-arch flip would turn this into a real cross-compile needing a C toolchain.
+    #
+    # The mirror gap is knowingly left open: the cfg(target_os = "macos") arm is
+    # compiled by no CI job at all, only by every local build on this all-Mac team.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: cargo --version && rustc --version && rustc -vV | grep host
+
+      - name: Type-check the whole workspace for Linux
+        working-directory: apps/juancoded
+        run: |
+          rustup target add x86_64-unknown-linux-gnu
+          cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu
+
   conformance-swift:
     name: conformance vs the Swift core
     runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
