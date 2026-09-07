@@ -221,12 +221,35 @@ public enum SessionSleepReason: String, Sendable {
     case idleReap = "idle_reap"
     /// The live-session ceiling: least-recently-active session evicted to bound RAM.
     case liveCap = "live_cap"
-    /// Process exit (app quit). Cannot honour the reap policy — the ptys are our
-    /// children and die with us — so it is labelled instead of pretending to be one.
+    /// Process exit (app quit) of a session that was idle at the time. Cannot honour
+    /// the reap policy — the ptys are our children and die with us — so it is
+    /// labelled instead of pretending to be one.
     case quit
+    /// Process exit while the agent was mid-turn. Same kill, different loss: the
+    /// turn was aborted.
+    case quitBusy = "quit_busy"
+    /// Process exit on a pending permission prompt. Worse than `quitBusy` to
+    /// recover from: the tool call never ran and a resume will not re-render the
+    /// menu, because an unanswered prompt is not in the transcript.
+    case quitWaitingInput = "quit_waiting_input"
     /// Someone asked for it: the sleep command / menu action.
     case manual
     /// A caller that has not been taught to say. Kept so the bare `markDormant()`
     /// overload stays source-compatible with embedders.
     case unspecified
+
+    /// True when the pty died with an unfinished turn, so waking the session is a
+    /// recovery rather than a convenience.
+    ///
+    /// The distinction is what a post-mortem needs and what the bare `dormant` line
+    /// could never give: `idleReap` and `liveCap` mean the policy proved nothing was
+    /// lost, while the two `quit*` work cases mean a turn was cut off and somebody
+    /// has to pick it back up. `manual` and `unspecified` are conservative falses —
+    /// a caller that did not say is not evidence that work was in flight.
+    public var workInFlight: Bool {
+        switch self {
+        case .quitBusy, .quitWaitingInput: return true
+        case .idleReap, .liveCap, .quit, .manual, .unspecified: return false
+        }
+    }
 }

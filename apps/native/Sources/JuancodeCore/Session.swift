@@ -236,6 +236,10 @@ public final class Session: @unchecked Sendable {
     /// into idle — a turn boundary is when search wants the latest scrollback.
     /// Guarded by `lock`.
     private var prevPersistActivity: SessionActivity?
+    /// Set the instant `handleExit` starts, so the teardown's own synthetic idle
+    /// transition cannot erase the durable mid-turn marker on the way out. See
+    /// `maybePersistMidTurn`.
+    private var exiting = false
     /// Last value written by `maybePersistMidTurn`, so only a real busy edge spends a
     /// write. Guarded by `lock`.
     private var persistedMidTurn = false
@@ -619,6 +623,12 @@ public final class Session: @unchecked Sendable {
             _meta.exitCode = Int(code)
             _meta.updatedAt = nowMs()
         }
+        // Before the reset: it transitions the detector to idle, and an idle
+        // transition is what clears the durable mid-turn marker. Erasing it here
+        // would erase it on exactly the deaths it exists to describe — the quit that
+        // killed a mid-turn agent runs this path for every session, so the marker the
+        // next boot reads to offer a Continue was being wiped by the teardown itself.
+        lock.withLock { exiting = true }
         detector.reset()
         stopTitleWatch()
         stopActivityTailIfNeeded()
@@ -649,6 +659,11 @@ public final class Session: @unchecked Sendable {
         guard persistEnabled else { return }
         let busy = state == .busy
         let changed = lock.withLock { () -> Bool in
+            // Once the pty is gone the marker is a record of how the session died,
+            // not live state, so the exit path leaves it exactly as the last real
+            // edge left it: true for an agent cut off mid-turn, false for one that
+            // had already finished.
+            guard !exiting else { return false }
             guard persistedMidTurn != busy else { return false }
             persistedMidTurn = busy
             return true

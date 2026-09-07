@@ -3,6 +3,7 @@ import AppKit
 import Darwin
 import JuancodeClient
 import JuancodeCore
+import JuancodeServices
 
 /// A bare SPM executable launches with background (accessory) activation, so its
 /// window never appears and it isn't in the Dock. Promote it to a regular
@@ -70,6 +71,15 @@ private final class QuitLatch: @unchecked Sendable {
     func requestQuit() -> Bool {
         lock.lock()
         defer { fired = true; lock.unlock() }
+        return fired
+    }
+
+    /// Whether a terminal signal (Ctrl-C in the launching terminal, a SIGTERM from
+    /// a rebuild script) is what started this quit. The confirm-on-quit gate reads
+    /// it to stay out of the way: nobody is at a modal alert in that case, and
+    /// blocking there would leave the process alive after the user pressed Ctrl-C.
+    var wasSignalled: Bool {
+        lock.lock(); defer { lock.unlock() }
         return fired
     }
 }
@@ -189,7 +199,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for sub in view.subviews { markNeedsDisplay(sub) }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window must NOT quit. Quitting tears down every live pty (see
+    /// `applicationShouldTerminate`), so returning `true` here made ⌘W a silent
+    /// "interrupt every running agent" — and the app has no other way back to those
+    /// ptys, since they are children of this process. The window reopens from the
+    /// Dock; ⌘Q is the deliberate way out, and it now asks first (below).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// True once a graceful shutdown has been kicked off, so a second terminate
     /// (e.g. macOS re-asking, or a SIGTERM landing mid-drain) doesn't start another.
@@ -203,6 +218,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// after we reply and force-kills any straggler, so a wedged CLI can't hang quit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let core = AppEnv.core, !terminating else { return .terminateNow }
+        // Quitting kills every live pty whatever the agent was doing, so when turns
+        // are in flight make the user say so once. Only for an interactive quit: a
+        // signal-driven one (Ctrl-C in the terminal that launched us, a SIGTERM from
+        // a rebuild) must never block on an alert nobody is there to answer.
+        if !quitLatch.wasSignalled {
+            let inFlight = core.liveSessions()
+                .filter(\.isRunning)
+                .map(\.activity)
+                .filter { SessionQuitSleep.reason(for: $0).workInFlight }
+            if !inFlight.isEmpty, !confirmQuitInterruptingWork(count: inFlight.count) {
+                return .terminateCancel
+            }
+        }
         terminating = true
         // Stop the launch sweep first: it spawns a `--resume` every few hundred ms, and
         // one that lands during the drain below is a pty nothing is left to reap.
@@ -212,6 +240,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
         }
         return .terminateLater
+    }
+
+    /// Modal "N agents are still working" gate. Returns true to go ahead and quit.
+    /// The conversations stay resumable either way, so this is a warning and not a
+    /// block — the point is that losing a batch of in-flight turns should take one
+    /// deliberate click rather than a reflex ⌘Q.
+    @MainActor private func confirmQuitInterruptingWork(count: Int) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = count == 1
+            ? "1 agent is still working"
+            : "\(count) agents are still working"
+        alert.informativeText = """
+            Quitting kills their CLI processes mid-turn. The conversations stay \
+            resumable and juancode will offer to continue them, but the work in \
+            flight is lost and has to be picked back up.
+            """
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     func applicationWillTerminate(_ notification: Notification) {

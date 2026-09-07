@@ -145,8 +145,23 @@ public final class AppState: @unchecked Sendable {
         // Labelled `quit`, not left bare: this path kills every live pty whatever
         // the agent was doing, and an unlabelled bulk sleep here is exactly what
         // read as a 25-session reap in the log (oracle-qb5).
+        // The reason is per session, not a flat `.quit`: this path kills a mid-turn
+        // agent and a session nobody has touched in an hour with the same signal, and
+        // a log that spells both the same way is exactly what made the original
+        // incident unreadable. `workInFlight` is the roll-up a post-mortem greps for.
         for session in live {
-            session.markDormant(reason: .quit, audit: ["activity": session.activity.rawValue])
+            let reason = SessionQuitSleep.reason(for: session.activity)
+            session.markDormant(reason: reason, audit: [
+                "activity": session.activity.rawValue,
+                "workInFlight": "\(reason.workInFlight)",
+            ])
+            // A session holding a permission prompt has unfinished business the
+            // durable busy marker would miss: `Session.maybePersistMidTurn` only
+            // latches `.busy`, so without this the next boot restores a pane whose
+            // tool call never ran and offers nothing — and the prompt itself cannot
+            // come back, since an unanswered menu is not in the transcript. A
+            // mid-turn session already carries its own marker.
+            if session.activity == .waitingInput { store.setMidTurn(session.id, true) }
         }
         UserDefaults.standard.set(live.map(\.id), forKey: Self.sleptOnQuitKey)
         let group = DispatchGroup()

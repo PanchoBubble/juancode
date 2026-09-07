@@ -466,6 +466,36 @@ public struct SessionReaperProbes: Sendable {
     }
 }
 
+/// Classifies the sleep a process-exit path is about to impose, from the session's
+/// live activity at that moment.
+///
+/// App quit is the one path that CANNOT honour the reap policy: the ptys are
+/// children of this process, so they die with it whatever the agent was doing. The
+/// honest fix is therefore not "spare the busy ones" but "record which ones were
+/// busy" — a bulk quit-sleep of 25 sessions wrote the same flat `quit` reason for
+/// the mid-turn agents and the quiet ones, so an interrupted batch still read
+/// identically to a clean one after the fact.
+///
+/// Lives here next to the reaper rather than in the app layer because both callers
+/// need it off the main actor: `AppState.shutdownGracefully` stamps each session,
+/// and the quit gate asks the same question of the whole batch first.
+public enum SessionQuitSleep {
+    /// The reason to stamp on a session being slept by process exit.
+    public static func reason(for activity: SessionActivity) -> SessionSleepReason {
+        switch activity {
+        case .idle: return .quit
+        case .busy: return .quitBusy
+        case .waitingInput: return .quitWaitingInput
+        }
+    }
+
+    /// Whether quitting right now would abort work — the signal the confirm-on-quit
+    /// gate needs. True when any session is mid-turn or holding a permission prompt.
+    public static func wouldInterruptWork(_ activities: [SessionActivity]) -> Bool {
+        activities.contains { reason(for: $0).workInFlight }
+    }
+}
+
 /// Caches `resolveTranscriptFile` results so each sweep stats a known path
 /// instead of re-scanning the CLI's transcript directories.
 /// `@unchecked Sendable`: the map is only touched under `lock`.
