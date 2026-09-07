@@ -136,6 +136,17 @@ pub trait SessionStore: Send + Sync {
     fn delete(&self, id: &str) -> Result<()>;
     /// Every CLI conversation id we already own, so an adopt cannot duplicate one.
     fn used_cli_session_ids(&self) -> Result<Vec<String>>;
+    /// Record that a conversation was explicitly forgotten, so nothing adopts it
+    /// back. Idempotent, and a no-op for a session that never had a CLI id.
+    ///
+    /// Separate from `delete` rather than folded into it, because the two have
+    /// different callers: a client's delete means "forget this", and the retention
+    /// sweep means "this project has too much history". Only the first one is a
+    /// promise that the conversation stays gone.
+    fn forget_cli_session(&self, cli_session_id: &str, session_id: &str) -> Result<()>;
+    /// The conversation ids a client has forgotten, so `adopt_external` can refuse
+    /// one instead of minting a fresh session for it.
+    fn forgotten_cli_session_ids(&self) -> Result<Vec<String>>;
 
     fn save_scrollback(&self, id: &str, cols: u16, rows: u16, bytes: &[u8]) -> Result<()>;
     fn scrollback(&self, id: &str) -> Result<Option<Scrollback>>;
@@ -329,6 +340,22 @@ impl SessionStore for SqliteStore {
         let conn = self.conn();
         let mut stmt =
             conn.prepare("SELECT cli_session_id FROM sessions WHERE cli_session_id IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn forget_cli_session(&self, cli_session_id: &str, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO forgotten_cli_sessions (cli_session_id, session_id, at) \
+             VALUES (?1,?2,?3) ON CONFLICT(cli_session_id) DO NOTHING",
+            params![cli_session_id, session_id, juancoded_core::model::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    fn forgotten_cli_session_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT cli_session_id FROM forgotten_cli_sessions")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -746,6 +773,46 @@ mod tests {
             .collect();
         assert_eq!(texts, ["first", "third"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_forgotten_conversation_stays_forgotten_after_its_row_is_gone() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut m = meta("s1", "/tmp/a", 1);
+        m.cli_session_id = Some("conv-1".into());
+        store.upsert(&m).unwrap();
+        assert_eq!(store.used_cli_session_ids().unwrap(), vec!["conv-1"]);
+
+        store.forget_cli_session("conv-1", "s1").unwrap();
+        store.delete("s1").unwrap();
+
+        // The row is gone, so the id is "unused" again — which is precisely why the
+        // tombstone has to be somewhere else.
+        assert!(store.used_cli_session_ids().unwrap().is_empty());
+        assert_eq!(store.forgotten_cli_session_ids().unwrap(), vec!["conv-1"]);
+    }
+
+    #[test]
+    fn forgetting_the_same_conversation_twice_is_one_tombstone() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.forget_cli_session("conv-1", "s1").unwrap();
+        store.forget_cli_session("conv-1", "s2").unwrap();
+        assert_eq!(store.forgotten_cli_session_ids().unwrap(), vec!["conv-1"]);
+    }
+
+    /// The distinction the whole table rests on: a project trimmed for space has not
+    /// been forgotten, and its conversations must stay adoptable.
+    #[test]
+    fn the_retention_sweep_leaves_no_tombstones() {
+        let store = SqliteStore::in_memory().unwrap();
+        for (i, id) in ["p1", "p2", "p3"].iter().enumerate() {
+            let mut m = exited(id, "/tmp/proj", i as i64 + 1);
+            m.cli_session_id = Some(format!("conv-{id}"));
+            store.upsert(&m).unwrap();
+        }
+        let pruned = store.prune_project("/tmp/proj", 1).unwrap();
+        assert_eq!(pruned.len(), 2, "{pruned:?}");
+        assert!(store.forgotten_cli_session_ids().unwrap().is_empty());
     }
 
     #[test]

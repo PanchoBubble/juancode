@@ -2,8 +2,8 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-08-29",
-  "specRevision": "1.7.0",
+  "measuredAt": "2026-09-07",
+  "specRevision": "1.8.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -23,73 +23,119 @@
   ],
   "scenarios": {
     "handshake": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "create": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "create-guards": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "attach-scrollback": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "input-ack": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "resize": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "screen-stream": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "activity-notify": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "activity-changes": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "queue": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "exit-codes": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "unresumable": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "errors": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "tracked-prs": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "editor-terminal": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "adopt-external": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "dispatch-correlation": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "skip-permissions": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "session-meta": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "grid-owner": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "restart-fresh": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "spawn-model": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "seeded-input": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "transcript": {
       "status": "skipped",
@@ -104,21 +150,35 @@
       "note": "core does not advertise the \"transcript\" capability"
     },
     "orphan-reap": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "spawn-preset": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "reaper": {
       "status": "skipped",
       "note": "core does not advertise the \"reaper\" capability"
     },
     "isolate-worktree": {
-      "status": "passed"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "stuck": {
       "status": "skipped",
       "note": "core does not advertise the \"stuck\" capability"
+    },
+    "session-list": {
+      "status": "skipped",
+      "note": "core does not advertise the \"sessionList\" capability"
+    },
+    "session-delete": {
+      "status": "skipped",
+      "note": "core does not advertise the \"sessionDelete\" capability"
     }
   }
 }

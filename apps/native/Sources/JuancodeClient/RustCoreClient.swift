@@ -18,14 +18,20 @@ import JuancodeServices
 /// UI gate is a visible bug) or answers empty, and the UI reads the same list to
 /// grey the affordance out with the reason. Nothing here silently succeeds.
 ///
-/// **The mirror is not the core's store.** The daemon owns its own SQLite at
-/// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`) and
-/// is its only writer. Protocol v1 has no "list sessions" frame — the desktop got
-/// that from REST endpoints the daemon does not serve — so the sidebar, the search
-/// index and the retention cap read a desktop-side mirror at
-/// `<dataDir>/juancode-rust.db`, fed from `created`/`attached`/`sessionMeta`/`exit`.
-/// It is deliberately a different file from the Swift core's `juancode.db`: one
-/// writer per file, and no schema drift between two cores.
+/// **The mirror is a cache of the core's store.** The daemon owns its own SQLite at
+/// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`) and is
+/// its only writer, so the sidebar, the search index and the retention cap read a
+/// desktop-side mirror at `<dataDir>/juancode-rust.db` instead. It is deliberately a
+/// different file from the Swift core's `juancode.db`: one writer per file, and no
+/// schema drift between two cores.
+///
+/// What makes it a cache rather than a tally is `listSessions`. The mirror used to be
+/// fed only from `created`/`attached`/`sessionMeta`/`exit`, which are all deltas that
+/// reach a client only while it is connected — so a fresh launch started empty and
+/// filled in as sessions were touched, and the sidebar looked like it had lost every
+/// project (28 sessions against the daemon's 379, measured 2026-08-24, juancode-75c5).
+/// Now the handshake asks for the whole list and `backfill` reconciles the mirror
+/// against it, deletions included; the deltas keep it current afterwards.
 public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecked Sendable {
     /// Where the daemon is, for error text and the active-core badge.
     public let baseURL: String
@@ -56,6 +62,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// callbacks need `self` before the socket is open, so `self` has to be complete
     /// before the handshake can be waited on.
     private var handshake: WireConnection.Handshake?
+    /// Signalled once a `sessions` snapshot has been applied to the mirror, so boot
+    /// can wait for the sidebar's rows the way it already waits for the handshake.
+    /// Nil once the wait is over: a later snapshot (a reconnect) has nobody to wake.
+    private var backfillWaiter: DispatchSemaphore?
 
     /// Serialises lifecycle requests: `create`, `reactivate` and
     /// `setSkipPermissions` all answer with an uncorrelated `created` + `attached`
@@ -120,10 +130,39 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             timeout: timeout, expectedVersion: WireProtocol.version)
         lock.withLock { handshake = landed }
 
+        // Ask for the whole list before anything reads the mirror. Bounded, and a
+        // timeout is not fatal: the snapshot lands whenever it lands and the sidebar
+        // catches up, which is strictly better than the old behaviour of never
+        // asking. Waiting at all is what makes a launch show the daemon's history
+        // rather than an empty sidebar that fills in as sessions are touched.
+        if landed.capabilities.contains(Self.sessionListCapability) {
+            let waiter = DispatchSemaphore(value: 0)
+            lock.withLock { backfillWaiter = waiter }
+            connection.send(["type": "listSessions"])
+            if waiter.wait(timeout: .now() + Self.backfillTimeout) == .timedOut {
+                NSLog("juancode: rust core did not answer listSessions within "
+                      + "\(Int(Self.backfillTimeout * 1000))ms; the sidebar will fill in late")
+            }
+            lock.withLock { backfillWaiter = nil }
+        }
+
         // Re-adopt what the daemon may still be running. An `attach` for a session
         // it does not have answers one error frame and costs nothing.
         for id in orphans { probe(id) }
     }
+
+    /// The capability behind `listSessions`/`sessions`, spelled once.
+    ///
+    /// A string rather than a `CoreCapability` case because the enum is the list the
+    /// Settings screen renders and a gated button reads its excuse from, and there is
+    /// no button here: a client either restores its sidebar from the core or does not.
+    static let sessionListCapability = "sessionList"
+    /// The capability behind `deleteSession`/`sessionDeleted`, same reasoning.
+    static let sessionDeleteCapability = "sessionDelete"
+    /// How long boot waits for the first `sessions` snapshot. Long enough for the
+    /// daemon to serialise a few hundred rows, short enough that an unresponsive core
+    /// costs a late sidebar rather than a launch.
+    private static let backfillTimeout: TimeInterval = 5.0
 
     /// Serve the address every remote client knows (4280) for a launch on this
     /// core, so the oracle sidecar is not blind in rust mode.
@@ -131,10 +170,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// The daemon already speaks the wire protocol, but it serves only `/health`,
     /// `/api/health` and `/ws`: the sidecar's `GET /api/sessions`,
     /// `DELETE /api/sessions/:id` and `POST /api/pr-webhook` have nothing to answer
-    /// them there, and protocol v1 has no frame that would let it list its own
-    /// sessions (juancode-3l2p). So `/ws` is relayed to the daemon verbatim and the
-    /// session reads come off this mirror, which is the only thing on the machine
-    /// that has them.
+    /// them there. So `/ws` is relayed to the daemon verbatim and the session reads
+    /// come off this mirror — which is now the daemon's own list, backfilled on the
+    /// handshake, rather than only what this desktop happened to watch arrive.
     ///
     /// Best-effort, like the Swift core's embedded server: a taken port leaves the
     /// local shell fully working.
@@ -310,7 +348,31 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         mirror.update(meta, scrollback: scrollback)
     }
 
-    public func deleteSession(_ id: String) { _ = mirror.delete(id) }
+    /// Forget a session: the daemon's row and worktree as well as this mirror's row.
+    ///
+    /// Dropping the mirror row on its own is what this used to do, and it is the bug
+    /// juancode-lxe3 is about: the daemon kept its own row, so the session came back
+    /// the next time anything listed or adopted, and the worktree it owned was left
+    /// for a sweep to find. Local-only is still the honest answer on a core with no
+    /// `sessionDelete` — the alternative is a delete button that does nothing.
+    public func deleteSession(_ id: String) {
+        // Local first, then the frame. The caller reads its session list back
+        // immediately — the sidebar refresh is the next statement after this — so
+        // waiting for the daemon's answer to drop the row would leave the deleted
+        // session on screen until something else happened to refresh. `forget` is
+        // idempotent, so the broadcast that follows costs nothing here and is what
+        // does the work on every OTHER client.
+        forget(id)
+        guard supportsSessionDelete else {
+            NSLog("juancode: the \(backendName) core has no sessionDelete capability — "
+                  + "\(id) is forgotten locally only; the core keeps its own row")
+            return
+        }
+        connection.send(["type": "deleteSession", "sessionId": id])
+    }
+
+    /// Whether the connected core can really forget a session.
+    var supportsSessionDelete: Bool { info.has(Self.sessionDeleteCapability) }
 
     public func storedScrollback(_ id: String) -> [UInt8]? { mirror.getScrollback(id) }
 
@@ -587,6 +649,20 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             let handle = upsert(meta, running: meta.status == .running)
             handle.apply(meta: meta)
 
+        case "sessions":
+            guard let raw = body["sessions"] as? [Any] else { return }
+            backfill(raw.compactMap(Self.decodeMeta))
+
+        case "sessionDeleted":
+            guard let id = sessionId else { return }
+            let tree = body["worktreePath"] as? String
+            if let tree, body["worktreeRemoved"] as? Bool == false {
+                // The one thing worth saying about a failed reap: the directory a
+                // human now has to remove by hand.
+                NSLog("juancode: the rust core could not remove \(id)'s worktree at \(tree)")
+            }
+            forget(id)
+
         case "unresumable":
             let reason = body["reason"] as? String ?? "unresumable"
             if let id = sessionId { lock.withLock { _ = probing.remove(id) } }
@@ -641,6 +717,13 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                                  "cols": grid.cols, "rows": grid.rows])
             }
             resendReaperPolicy()
+            // And re-read the list. A reconnect is a new connection to a core that
+            // may have restarted, pruned or been driven by somebody else while this
+            // socket was down, and every delta that happened in the gap is one this
+            // client was not there to hear.
+            if info.has(Self.sessionListCapability) {
+                connection.send(["type": "listSessions"])
+            }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
         }
@@ -674,6 +757,67 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if !isNew { handle.apply(meta: meta) }
         if isNew { for l in listeners { l(handle) } }
         return handle
+    }
+
+    /// Reconcile the mirror against a `sessions` snapshot: the whole list, so rows
+    /// the core does not have go too.
+    ///
+    /// No handles and no `onSessionCreated`. A handle is a pane's live connection to
+    /// a pty; the sidebar reads rows out of the mirror, and minting several hundred
+    /// handles for sessions nobody has opened would announce every session in the
+    /// daemon's history as newly created. A pane's handle is made when something
+    /// attaches, which is where it always was.
+    ///
+    /// Only rows we hold no handle for are deleted. A session created on this
+    /// connection a moment ago is legitimately absent from a snapshot the daemon
+    /// serialised before it existed, and dropping it would be this client losing its
+    /// own live session to a race it started.
+    private func backfill(_ metas: [SessionMeta]) {
+        let known = Set(metas.map(\.id))
+        var inserted = 0
+        var updated = 0
+        for meta in metas {
+            guard let existing = mirror.get(meta.id) else {
+                mirror.insert(meta)
+                inserted += 1
+                continue
+            }
+            // The steady state after the first backfill: every row already right, so
+            // a reconnect costs reads and no writes. Each write here is its own
+            // transaction, and a few hundred needless ones is a visible boot pause.
+            guard existing != meta else { continue }
+            mirror.updateMeta(meta, reindexTitleFts: existing.title != meta.title)
+            updated += 1
+        }
+        let live = lock.withLock { Set(handles.keys) }
+        var dropped = 0
+        for row in mirror.list() where !known.contains(row.id) && !live.contains(row.id) {
+            if mirror.delete(row.id) { dropped += 1 }
+        }
+        NSLog("juancode: backfilled the rust mirror from the core — "
+              + "\(metas.count) sessions listed, \(inserted) new, \(updated) refreshed, "
+              + "\(dropped) dropped")
+        // Whoever is waiting on boot is waiting for exactly this.
+        lock.withLock { backfillWaiter }?.signal()
+    }
+
+    /// Drop everything this client holds for a session the core has forgotten.
+    ///
+    /// Idempotent, and called from both ends: the local delete runs it before the
+    /// frame goes out, and the `sessionDeleted` broadcast runs it again when the
+    /// daemon confirms. Dropping a row that is already gone is a no-op, and the
+    /// alternative — only trusting the broadcast — leaves the row on screen for the
+    /// round trip.
+    private func forget(_ id: String) {
+        let handle = lock.withLock { () -> RemoteLiveSession? in
+            seedFailureReporters[id] = nil
+            _ = probing.remove(id)
+            return handles.removeValue(forKey: id)
+        }
+        // The pane is told the pty is gone, which is the truthful half of a delete it
+        // can render; the row it would read back is already going.
+        handle?.apply(exitCode: nil)
+        _ = mirror.delete(id)
     }
 
     /// Ask the core about a session we have an id for but no handle. `attach` is the

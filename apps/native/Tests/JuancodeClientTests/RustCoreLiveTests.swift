@@ -123,7 +123,10 @@ final class RustCoreLiveTests: XCTestCase {
         XCTAssertEqual(session.meta.provider, .claude)
         // The row reached the desktop mirror, which is what the sidebar reads.
         XCTAssertEqual(core.session(session.id)?.id, session.id)
-        XCTAssertEqual(core.sessions().map(\.id), [session.id])
+        // `contains` rather than an equality: on a `sessionList` core the mirror is
+        // backfilled from the daemon's whole history on the handshake, and this
+        // daemon is shared with every test above.
+        XCTAssertTrue(core.sessions().contains { $0.id == session.id })
         XCTAssertEqual(core.liveSessions().count, 1)
 
         let echoed = expectation(description: "the pty echoed our input back")
@@ -208,6 +211,95 @@ final class RustCoreLiveTests: XCTestCase {
         }
         wait(for: [ran], timeout: 60)
         wait(for: [seedFailed], timeout: 1)
+    }
+
+    /// juancode-75c5, as the client sees it: a second client, connecting after the
+    /// session exists, starts with it already in its mirror.
+    ///
+    /// This is the whole bug. Every other frame that carries a row — `created`,
+    /// `attached`, `sessionMeta`, `exit` — only ever reaches a client that was
+    /// already connected, so before `listSessions` a fresh launch started with an
+    /// empty sidebar and filled in as sessions were touched.
+    func testAFreshClientsMirrorIsBackfilledFromTheCore() throws {
+        try XCTSkipUnless(core.info.has(RustCoreClient.sessionListCapability),
+                          "this daemon has no sessionList capability")
+        let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
+                                      cols: 80, rows: 24,
+                                      opts: SpawnOptions(skipPermissions: true, model: nil),
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: nil, onSeedFailure: nil)
+        defer { session.kill() }
+
+        let secondMirror = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("juancode-rust-backfill-\(UUID().uuidString).db")
+        defer {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: secondMirror + suffix)
+            }
+        }
+        let fresh = try RustCoreClient.connect(
+            baseURL: core.baseURL, mirrorPath: secondMirror, timeout: 5)
+        defer { fresh.shutdown() }
+
+        // No waiting: `connect` does not return until the snapshot has been applied,
+        // which is what makes the sidebar right on the first read rather than late.
+        XCTAssertTrue(fresh.sessions().contains { $0.id == session.id },
+                      "a client that never saw the create still knows the session: "
+                      + "\(fresh.sessions().count) rows")
+        XCTAssertEqual(fresh.session(session.id)?.cwd, core.session(session.id)?.cwd)
+        // Rows, not handles: several hundred sessions of history must not announce
+        // themselves as newly created panes.
+        XCTAssertTrue(fresh.liveSessions().isEmpty,
+                      "the backfill makes no handles: \(fresh.liveSessions().count)")
+        print("backfilled mirror: \(fresh.sessions().count) sessions")
+    }
+
+    /// juancode-lxe3: a delete that reaches the daemon, so the session does not come
+    /// back the next time anything asks the core what it holds.
+    func testDeletingASessionForgetsItInTheCoreAndNotJustLocally() throws {
+        try XCTSkipUnless(core.info.has(RustCoreClient.sessionDeleteCapability),
+                          "this daemon has no sessionDelete capability")
+        let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
+                                      cols: 80, rows: 24,
+                                      opts: SpawnOptions(skipPermissions: true, model: nil),
+                                      worktreePath: nil, dispatchId: nil,
+                                      initialInput: nil, onSeedFailure: nil)
+        let id = session.id
+        let core = core!
+        core.deleteSession(id)
+
+        // Locally it is gone at once, which is what the caller needs: `AppModel`
+        // refreshes the sidebar on the next statement after this.
+        XCTAssertNil(core.session(id), "the row goes without waiting for the round trip")
+        XCTAssertNil(core.liveSession(id), "and so does the handle")
+
+        // The half that used to be missing: ask the core itself, over a connection
+        // with no memory of this session. Polled rather than asked once, because the
+        // local drop is optimistic and the frame is still in flight.
+        var mirrors: [String] = []
+        defer {
+            for path in mirrors {
+                for suffix in ["", "-wal", "-shm"] {
+                    try? FileManager.default.removeItem(atPath: path + suffix)
+                }
+            }
+        }
+        var stillThere = true
+        for attempt in 0..<15 {
+            let path = (NSTemporaryDirectory() as NSString)
+                .appendingPathComponent("juancode-rust-deleted-\(UUID().uuidString).db")
+            mirrors.append(path)
+            let fresh = try RustCoreClient.connect(
+                baseURL: core.baseURL, mirrorPath: path, timeout: 5)
+            stillThere = fresh.sessions().contains { $0.id == id }
+            fresh.shutdown()
+            if !stillThere {
+                print("the core had forgotten the session on attempt \(attempt + 1)")
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        XCTAssertFalse(stillThere, "the daemon kept a row the client asked it to delete")
     }
 
     /// On a `sessionMeta` core, a title the CLI sets for itself reaches the app

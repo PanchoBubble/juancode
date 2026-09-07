@@ -19,7 +19,7 @@ pub mod stuck;
 pub use grid::{ClientId, ResizeOutcome};
 pub use reaper::{ReapProbe, ReaperConfig, ReaperProbes, SessionReaper, SleepReason};
 pub use registry::{
-    AdoptRequest, Attached, CreateRequest, RegistryConfig, SessionEvent, SessionRegistry,
+    AdoptRequest, Attached, CreateRequest, Deleted, RegistryConfig, SessionEvent, SessionRegistry,
     StateError, UNRESUMABLE_REASON,
 };
 pub use service::{SessionsApi, SessionsService, StoreService};

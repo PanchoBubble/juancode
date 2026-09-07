@@ -175,6 +175,12 @@ impl SessionsApi for FakeChild {
     fn ids(&self) -> Vec<String> {
         vec!["fake".into()]
     }
+    fn sessions(&self) -> Vec<SessionMeta> {
+        vec![]
+    }
+    fn delete(&self, _id: &str) -> Result<juancoded_state::Deleted, StateError> {
+        Err(StateError::NotFound)
+    }
     fn grid(&self, _id: &str) -> Option<(u16, u16)> {
         Some((80, 24))
     }

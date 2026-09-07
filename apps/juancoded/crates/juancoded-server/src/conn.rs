@@ -335,6 +335,22 @@ fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<Serve
             session_id,
             session: meta,
         }),
+        SessionEvent::Deleted {
+            session_id,
+            worktree_path,
+            worktree_removed,
+        } => {
+            // The byte carry goes with the row: nothing will ever complete a partial
+            // UTF-8 sequence for a session that no longer exists, and a later session
+            // is never handed this id.
+            fanout.attached.remove(&session_id);
+            fanout.carries.remove(&session_id);
+            outbound.push(ServerMessage::SessionDeleted {
+                session_id,
+                worktree_path,
+                worktree_removed,
+            });
+        }
         // Deliberately no frame. This announces the registry's own store-backed queue,
         // and the wire's queue is the addressable one mounted as the `queue` service:
         // sending both would put two different lists under one frame type, and the one
@@ -739,6 +755,24 @@ fn handle_client_message(
 
         ClientMessage::Kill { session_id } => {
             if let Err(e) = sessions.kill(&session_id) {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id),
+                    message: e.to_string(),
+                });
+            }
+        }
+
+        ClientMessage::ListSessions => {
+            outbound.push(ServerMessage::Sessions {
+                sessions: sessions.sessions(),
+            });
+        }
+
+        ClientMessage::DeleteSession { session_id } => {
+            // The frame is broadcast by the registry rather than pushed here: a
+            // delete has to reach every connection, and a client that hears about its
+            // own delete twice is a client that dropped the row twice.
+            if let Err(e) = sessions.delete(&session_id) {
                 outbound.push(ServerMessage::Error {
                     session_id: Some(session_id),
                     message: e.to_string(),

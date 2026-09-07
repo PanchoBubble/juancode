@@ -1,0 +1,216 @@
+{
+  "id": "session-delete",
+  "title": "forgetting a session, and the worktree that goes with it",
+  "asserts": "a core that advertises `sessionDelete` makes a session stop existing, which `kill` never did: the row is gone from the store, so a later attach is an error and a `listSessions` no longer names it, and the worktree an isolated create made is reaped and reported. A killed session is still history to attach to and replay - that is the difference this scenario pins, and the reason the reap is on the delete path and not on the exit edge, since the work in a worktree routinely outlives the agent that did it. Without the frame a rust-mode delete dropped the client's own row while the daemon kept its own, so the session came back on the next list or adopt and its `<repo>-worktrees/<8hex>` tree was left for a sweep to find (juancode-lxe3, juancode-oe30).",
+  "capabilities": [
+    "sessionDelete",
+    "sessionList",
+    "isolateWorktree"
+  ],
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit",
+    "queue"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "a plain session first: the delete has to work with no worktree in the picture"
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "plain": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$plain"
+      }
+    },
+    {
+      "send": {
+        "type": "deleteSession",
+        "sessionId": "$plain"
+      },
+      "note": "deleted while it is still running: the core kills the pty on the way, so a client does not have to sequence the two"
+    },
+    {
+      "expect": {
+        "type": "sessionDeleted",
+        "sessionId": "$plain",
+        "worktreePath": {
+          "$absent": true
+        },
+        "worktreeRemoved": {
+          "$absent": true
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "both keys omitted, not null: this session never had a tree, and \"nothing to reap\" must not read like \"the reap is pending\""
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$plain",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "the assertion that separates delete from kill: a killed session is still attachable and replays its scrollback"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$plain"
+      },
+      "timeoutMs": 15000,
+      "note": "there is nothing left to come back for"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true
+      },
+      "note": "now the half juancode-oe30 is about: a session with a tree of its own"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "worktreePath": {
+            "$regex": "-worktrees/[0-9a-f]{8}$"
+          }
+        }
+      },
+      "bind": {
+        "isolated": "session.id",
+        "tree": "session.worktreePath"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$isolated"
+      }
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$isolated"
+      },
+      "note": "kill first, so the exit edge gets its chance to reap the tree and must not take it"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$isolated"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange",
+        "queue"
+      ]
+    },
+    {
+      "expectNone": {
+        "type": "sessionDeleted",
+        "sessionId": "$isolated"
+      },
+      "withinMs": 2000,
+      "note": "an exit is not a delete: the row survives it, and so does the tree"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$isolated",
+            "worktreePath": "$tree"
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "still listed after the kill, with the path a reaper reads"
+    },
+    {
+      "send": {
+        "type": "deleteSession",
+        "sessionId": "$isolated"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionDeleted",
+        "sessionId": "$isolated",
+        "worktreePath": "$tree",
+        "worktreeRemoved": true
+      },
+      "timeoutMs": 20000,
+      "note": "the tree is named and reported removed. A core that dropped the row and left the directory would answer worktreeRemoved: false and be caught here rather than by a `pnpm loose` sweep weeks later"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$every": {
+            "id": {
+              "$not": "$isolated"
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "and it is out of the core's own list, which is what stops it coming back the next time any client asks"
+    },
+    {
+      "send": {
+        "type": "deleteSession",
+        "sessionId": "no-such-session"
+      },
+      "note": "a delete for something this core does not have"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "no-such-session"
+      },
+      "timeoutMs": 15000,
+      "note": "answered rather than dropped: a client that asked to forget a session it thought existed has learned something"
+    }
+  ]
+}

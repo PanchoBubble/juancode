@@ -140,6 +140,25 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (session_id, seq)
     );
     "#,
+    // 5: conversations a client has explicitly forgotten.
+    //
+    // A tombstone rather than nothing, because deleting a session's row makes its
+    // `cli_session_id` unused again, and an unused conversation id is exactly what
+    // `adopt_external` looks for: a delete would be undone by the next adopt or
+    // discovery pass over the same CLI store (juancode-lxe3). The row is the id, not
+    // the session, because the session is the thing that was thrown away and the
+    // conversation is what must not come back.
+    //
+    // Retention pruning deliberately does NOT write here. "This project has too much
+    // history" is not "forget this conversation", and tombstoning a pruned row would
+    // make a whole project's worth of CLI conversations permanently un-adoptable.
+    r#"
+    CREATE TABLE forgotten_cli_sessions (
+        cli_session_id TEXT PRIMARY KEY,
+        session_id     TEXT NOT NULL,
+        at             INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

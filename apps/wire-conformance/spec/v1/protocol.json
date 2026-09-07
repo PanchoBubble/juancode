@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.7.0",
+  "specRevision": "1.8.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -34,7 +34,9 @@
       "queueEdit",
       "transcript",
       "reaper",
-      "stuck"
+      "stuck",
+      "sessionList",
+      "sessionDelete"
     ],
     "gates": {
       "queue": [
@@ -106,6 +108,14 @@
       ],
       "stuck": [
         "stuck"
+      ],
+      "sessionList": [
+        "listSessions",
+        "sessions"
+      ],
+      "sessionDelete": [
+        "deleteSession",
+        "sessionDeleted"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -207,6 +217,20 @@
         "sessionId"
       ],
       "optional": []
+    },
+    "listSessions": {
+      "required": [],
+      "optional": [],
+      "capability": "sessionList",
+      "notes": "Ask what this core holds. Answered with one `sessions` frame carrying every session, and it is not a subscription: `created`, `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks this once on the handshake and keeps up from the broadcasts. It exists because protocol v1 had no way to ask: the desktop got the list from REST routes (/api/sessions) that the Rust daemon does not serve, so its mirror held only what arrived over the wire while it happened to be connected - 28 sessions against the daemon's 379, measured 2026-08-24 (juancode-3l2p, juancode-75c5)."
+    },
+    "deleteSession": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [],
+      "capability": "sessionDelete",
+      "notes": "Forget a session: kill its pty, drop its row, keep its CLI conversation from being adopted back, and reap the worktree it owned. A type of its own rather than a flag on `kill`, per ADDITIVE_FIELDS: a core that did not know the flag would answer by killing the session and keeping the row, which is a different operation from the one the client asked for, and an unknown type is ignored whole so the client can see the silence. Answered with a `sessionDeleted` broadcast, or an `error` for a session this core does not have (juancode-lxe3, juancode-oe30)."
     },
     "subscribeQueue": {
       "required": [
@@ -457,6 +481,25 @@
       "capability": "sessionMeta",
       "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta — replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
     },
+    "sessions": {
+      "required": [
+        "sessions"
+      ],
+      "optional": [],
+      "capability": "sessionList",
+      "notes": "Every session this core holds, oldest first, in answer to `listSessions`. Replace wholesale: it is a snapshot and never a patch, so a client's list after applying it is exactly this list, and a row the client holds that is not in here is a row this core does not have. That deletion half is why the frame carries everything rather than a page. Metas only and deliberately no scrollback: a session's scrollback is routinely tens of kilobytes, and hundreds of them in one frame would be a multi-megabyte handshake for bytes a sidebar never draws. Scrollback stays on `attached`."
+    },
+    "sessionDeleted": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "worktreePath",
+        "worktreeRemoved"
+      ],
+      "capability": "sessionDelete",
+      "notes": "A session was forgotten. Broadcast to every connection and not just the one that asked, because a row another client is still drawing is the same rot from the other side. Never a substitute for `exit`: an exit says the process is gone and the row is still there to attach to and replay, this says there is nothing to come back for, and a client drops the row. `worktreePath` and `worktreeRemoved` travel together and are both omitted for a session that never had a tree, so \"there was nothing to reap\" cannot read like \"the reap is pending\"; a failed reap reports the path with `worktreeRemoved: false`, because the directory a human has to remove by hand is the one thing worth saying."
+    },
     "queue": {
       "required": [
         "sessionId",
@@ -590,7 +633,8 @@
     "A cursor-only change (show/hide, a move with no cell damage) is not guaranteed its own screen frame; it rides the next frame that carries damage.",
     "A new server frame is additive within a protocol version: a client ignores a `type` it does not know, exactly as a core ignores an unknown client `type`. So gridChange and sessionMeta arrived in v1 without a version bump, gated by capability strings a client feature-detects rather than by a new version. A version bump is for a change that alters or removes what an existing frame already means.",
     "ADDITIVE_FIELDS: a new OPTIONAL FIELD on an existing frame is additive within a version too, but it fails differently from a new frame type. A core that does not implement the field still runs the frame without it and answers exactly as it would have, so the field may only be added when ignoring it leaves a defensible default (create.model falls back to the CLI's own model), and it carries a capability string so a client can tell \"this core honours it\" from \"this core will drop it\". An operation whose ignored form would be a DIFFERENT operation gets a frame type of its own instead, because an unknown type is ignored whole and the client can see the silence: that is why restarting a session as a fresh conversation is `restartFresh` and not a `fresh` flag on `reactivate`, which an old core would answer by resuming the conversation the client asked to discard.",
-    "CATALOGUE_IS_THE_UNION: this file catalogues the PROTOCOL, which is the union of what the cores speak, not the surface of any one of them. A message only one core implements is listed here like any other, and its capability gate is what says which: `drift.test.ts` reads each core's own source, works out the messages its advertised capability list entails, and requires that core to implement exactly those and nothing off this catalogue. So a core that advertises a capability must answer every frame the gate names (no empty promises), and a frame either core speaks must be described here (no drift) - but a core is never asked to grow a decode case, or an encoder it would never use, for a capability it does not advertise. The rule this replaced made the catalogue a mirror of WireProtocol.swift, which left `editQueued` and the transcript frames implemented, advertised and unlistable, and therefore unmeasurable: a golden transcript may only reference catalogued types, so the only planes with no scenario were the ones only one core had."
+    "CATALOGUE_IS_THE_UNION: this file catalogues the PROTOCOL, which is the union of what the cores speak, not the surface of any one of them. A message only one core implements is listed here like any other, and its capability gate is what says which: `drift.test.ts` reads each core's own source, works out the messages its advertised capability list entails, and requires that core to implement exactly those and nothing off this catalogue. So a core that advertises a capability must answer every frame the gate names (no empty promises), and a frame either core speaks must be described here (no drift) - but a core is never asked to grow a decode case, or an encoder it would never use, for a capability it does not advertise. The rule this replaced made the catalogue a mirror of WireProtocol.swift, which left `editQueued` and the transcript frames implemented, advertised and unlistable, and therefore unmeasurable: a golden transcript may only reference catalogued types, so the only planes with no scenario were the ones only one core had.",
+    "SESSION_LIST_IS_A_SNAPSHOT: a `sessions` frame is the complete list, replaced wholesale, and a client reconciles deletions against it - a row it holds that the frame does not list is a row the core does not have. That is the half a delta stream cannot supply: `created`, `sessionMeta` and `exit` only ever add or amend, so a client fed by those alone converges on a superset of the truth and never learns what went away. It is not a subscription either, and a core sends exactly one per `listSessions`: what changes afterwards changes through the deltas, and a second unsolicited snapshot would race whatever the client asks for next."
   ],
   "decisions": {
     "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire — so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",

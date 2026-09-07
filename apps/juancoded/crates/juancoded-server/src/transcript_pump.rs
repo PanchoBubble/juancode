@@ -338,6 +338,12 @@ fn mark(event: SessionEvent, dirty: &mut HashSet<String>) {
         SessionEvent::Exit { session_id, .. } => {
             dirty.insert(session_id);
         }
+        // The opposite of every arm above: there is nothing left to read a transcript
+        // for, and the store row a poll would append to is gone. Un-marking rather
+        // than ignoring, because an exit usually arrives first and has just marked it.
+        SessionEvent::Deleted { session_id, .. } => {
+            dirty.remove(&session_id);
+        }
         // Activity is derived from the same bytes that already marked the session, a
         // grid change moves no transcript, and the store queue's notification is not
         // about this plane at all.
