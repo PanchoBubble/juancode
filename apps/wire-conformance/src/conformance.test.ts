@@ -24,12 +24,13 @@ import { startCore, type CoreUnderTest } from "./core.ts";
 import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
 import { renderRunMarkdown, toStatusFile, writeText, type RunReport } from "./report.ts";
 import {
+  guardCore,
   makeWorkspace,
   repeatCount,
-  runScenarioRepeatedly,
   skipReason,
   type Outcome,
   type RunContext,
+  type SuiteGuard,
   type Workspace,
 } from "./runner.ts";
 import { loadProtocol, loadScenarios, type Requirement } from "./spec.ts";
@@ -45,6 +46,10 @@ const repeat = repeatCount();
 const SCENARIO_TIMEOUT_MS = 120_000;
 
 let core: CoreUnderTest;
+/** Turns "the core process went away" into one reported death plus a tail of
+ *  unmeasured scenarios, instead of one ECONNREFUSED failure per remaining
+ *  scenario and a conformance score nobody measured (juancode-jyl9). */
+let guard: SuiteGuard;
 let workspace: Workspace;
 let ctx: RunContext;
 let protocolVersion: number | null = null;
@@ -67,6 +72,7 @@ function detectAvailable(): Requirement[] {
 
 beforeAll(async () => {
   core = await startCore();
+  guard = guardCore(core);
   workspace = makeWorkspace();
   const probe = await WireClient.connect(core.wsUrl, "probe");
   const first = await probe.waitFor({ type: "serverInfo" }, { timeoutMs: 10_000, ignore: ["*"] });
@@ -93,6 +99,7 @@ afterAll(async () => {
     capabilities: ctx?.capabilities ?? [],
     repeat,
     outcomes,
+    coreDeath: guard?.death ?? null,
   };
   const at = new Date().toISOString().slice(0, 10);
   const summary = renderRunMarkdown(report, at);
@@ -164,12 +171,25 @@ describe(`wire protocol v${spec.protocolVersion}`, () => {
           t.skip(reason);
           return;
         }
-        const outcome = await runScenarioRepeatedly(scenario, ctx, repeat);
+        const outcome = await guard.run(scenario, ctx, repeat);
         outcomes.push(outcome);
         // The outcome is recorded before the throw so a failure still reaches the
         // report and the status file: an unrepeatable scenario has to be visible in
         // the artifact CI uploads, not only in the test log.
         if (outcome.status === "failed") throw new Error(outcome.error);
+        if (outcome.status === "unmeasured") {
+          const death = guard.death;
+          // Exactly one test goes red for a dead core: the scenario that found it.
+          // The rest read as skipped, because a run that reports eight failures for
+          // one process death is reporting a score it never took.
+          if (death && death.discoveredBy === scenario.id) {
+            throw new Error(
+              `${outcome.reason}\nexit status: ${death.code ?? "none"}, ` +
+                `signal: ${death.signal ?? "none"}\ncore output:\n${death.log}`,
+            );
+          }
+          t.skip(outcome.reason);
+        }
       },
     );
   }

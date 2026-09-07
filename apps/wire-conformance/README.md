@@ -188,6 +188,55 @@ about anybody else's session is skipped rather than failed — and cleanup waits
 for the `exit` of every session it kills instead of sleeping a flat 400ms
 (juancode-a3ck).
 
+## When the core dies mid-run
+
+A core process that goes away between two scenarios used to be invisible. The
+harness printed the core's stdout only when the BOOT health probe failed, so a
+death at scenario 25 left no core log at all — just `connect ECONNREFUSED` on
+every scenario from there to the end of the file, and a report that scored the
+core 25 of 33 (juancode-jyl9, seen once in six `REPEAT` passes over the Rust core
+on 2026-09-04).
+
+Three things changed, all in the harness:
+
+- The core's stdout and stderr are kept in a byte-bounded ring (64KB) for the
+  **whole run**, not just the boot.
+- A scenario failure asks the core whether it is still alive. Two refused health
+  probes 250ms apart, so a core busy enough to drop one connection is not
+  declared dead.
+- The first `no` latches. That scenario and every scenario after it are reported
+  `unmeasured`, not `failed`, and none of them opens another socket.
+
+The report then names the death instead of burying it:
+
+```
+- Result: 24 passed, 0 failed, 3 skipped, 6 unmeasured (the core died)
+
+## The core died mid-run
+
+- Died after: 24-transcript
+- Noticed by: 25-queue-edit
+- How: the core was killed by SIGKILL
+- Exit status: none, signal: SIGKILL
+
+### Core output
+...the last 8KB the core printed...
+```
+
+`unmeasured` is a distinct status everywhere it lands: in the status JSON (with
+no attempt counts — a `0/6` would read as six measurements that came back
+negative), in the parity checklist, and in `statusDifferences`, so a run whose
+core died cannot quietly agree with a committed parity claim.
+
+Exactly one scenario goes red for a death: the one that discovered it, whose
+failure message carries the exit status, the signal and the core's log. The rest
+report as skipped. A run showing eight red scenarios for one process death is
+reporting a score it never took.
+
+`src/death.test.ts` covers this end to end against `fixtures/fake-core.mjs` — a
+real process, a real `SIGKILL` between two scenarios, and assertions on the
+report. It does not wait for the flake.
+
 ## The parity checklist
 
 ```

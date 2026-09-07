@@ -7,12 +7,16 @@
 
 import { writeFileSync } from "node:fs";
 
-import type { Outcome } from "./runner.ts";
+import type { CoreDeathRecord, Outcome } from "./runner.ts";
 import type { Scenario } from "./spec.ts";
 
 /** "unknown" is for a status file seeded by reading a core rather than running the
- *  suite against it: honest about not having measured, and counted as unmet. */
-export type Status = "passed" | "failed" | "skipped" | "unknown";
+ *  suite against it: honest about not having measured, and counted as unmet.
+ *
+ *  "unmeasured" is the run-time cousin: the suite tried, but the core process was
+ *  already gone. Both are unmet, and neither is a statement about the core's
+ *  conformance — which is the whole difference from "failed". */
+export type Status = "passed" | "failed" | "skipped" | "unknown" | "unmeasured";
 
 export interface RunReport {
   /** Short core name, e.g. "swift" or "rust". */
@@ -24,6 +28,9 @@ export interface RunReport {
   /** Attempts each scenario was asked for (JUANCODE_CONFORMANCE_REPEAT). */
   repeat: number;
   outcomes: Outcome[];
+  /** Set when the core process went away mid-run. Everything from here on is
+   *  `unmeasured`, and this is where its last output is printed. */
+  coreDeath?: CoreDeathRecord | null;
 }
 
 export interface ScenarioStatus {
@@ -64,12 +71,16 @@ export function toStatusFile(report: RunReport, measuredAt: string): StatusFile 
         ? { status: "passed", attempts: o.attempts, passes: o.passes }
         : o.status === "skipped"
           ? { status: "skipped", note: o.reason }
-          : {
-              status: "failed",
-              note: firstLine(o.error),
-              attempts: o.attempts,
-              passes: o.passes,
-            };
+          : o.status === "unmeasured"
+            ? // No attempt counts: the scenario never ran, and a "0/3" would read as
+              // three measurements that came back negative.
+              { status: "unmeasured", note: firstLine(o.reason) }
+            : {
+                status: "failed",
+                note: firstLine(o.error),
+                attempts: o.attempts,
+                passes: o.passes,
+              };
   }
   return {
     core: report.core,
@@ -131,6 +142,7 @@ const MARK: Record<Status, string> = {
   failed: "NO",
   skipped: "n/a",
   unknown: "not measured",
+  unmeasured: "unmeasured (core died)",
 };
 
 /** A verdict plus how many measurements it rests on: "3/3", or "NO (1/3)".
@@ -162,9 +174,42 @@ function markOf(st: ScenarioStatus | undefined): string {
   return st ? mark(st.status, st.attempts, st.passes) : "never measured";
 }
 
+/** How much of the core's dying words to put in a markdown report. The ring holds
+ *  more; this is what a reader will actually scroll past. */
+const DEATH_LOG_CHARS = 8000;
+
+/** The section a mid-run death gets. Its own heading because it explains every
+ *  `unmeasured` below it, and because the core's last output is the thing the
+ *  reader came for — before this existed, a death left no core log at all. */
+function deathSection(death: CoreDeathRecord): string[] {
+  const tail = death.log.length > DEATH_LOG_CHARS ? death.log.slice(-DEATH_LOG_CHARS) : death.log;
+  return [
+    "## The core died mid-run",
+    "",
+    "The core process went away while the suite was running, so the scenarios after",
+    "it are **unmeasured**, not failed: nothing about the core's conformance was",
+    "observed for them.",
+    "",
+    `- Died after: ${death.afterScenarioId ?? "boot (no scenario had finished)"}`,
+    `- Noticed by: ${death.discoveredBy}`,
+    `- How: ${death.reason}`,
+    `- Exit status: ${death.code ?? "none"}, signal: ${death.signal ?? "none"}`,
+    "",
+    "### Core output",
+    "",
+    "```",
+    tail.trimEnd() || "(the core printed nothing)",
+    "```",
+    "",
+  ];
+}
+
 export function renderRunMarkdown(report: RunReport, at: string): string {
-  const counts = { passed: 0, failed: 0, skipped: 0 };
+  const counts = { passed: 0, failed: 0, skipped: 0, unmeasured: 0 };
   for (const o of report.outcomes) counts[o.status] += 1;
+  const result =
+    `${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped` +
+    (counts.unmeasured ? `, ${counts.unmeasured} unmeasured (the core died)` : "");
   const lines: string[] = [
     `# Wire conformance run: ${report.core}`,
     "",
@@ -173,15 +218,22 @@ export function renderRunMarkdown(report: RunReport, at: string): string {
     `- Capabilities: ${report.capabilities.join(", ") || "none advertised"}`,
     `- Run at: ${at}`,
     `- Attempts per scenario: ${report.repeat} (JUANCODE_CONFORMANCE_REPEAT)`,
-    `- Result: ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped`,
-    "",
-    "## Scenarios",
+    `- Result: ${result}`,
     "",
   ];
+  if (report.coreDeath) lines.push(...deathSection(report.coreDeath));
+  lines.push("## Scenarios", "");
   for (const o of report.outcomes) {
     const detail =
-      o.status === "failed" ? firstLine(o.error) : o.status === "skipped" ? o.reason : "";
-    const verdict = o.status === "skipped" ? MARK.skipped : mark(o.status, o.attempts, o.passes);
+      o.status === "failed"
+        ? firstLine(o.error)
+        : o.status === "skipped" || o.status === "unmeasured"
+          ? o.reason
+          : "";
+    const verdict =
+      o.status === "skipped" || o.status === "unmeasured"
+        ? MARK[o.status]
+        : mark(o.status, o.attempts, o.passes);
     lines.push(`- ${o.scenarioId}: ${verdict}${detail ? ` - ${oneLine(detail)}` : ""}`);
   }
   lines.push("");

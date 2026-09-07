@@ -16,6 +16,7 @@ import {
 } from "./client.ts";
 import { matchValue, readBindings, resolveVars, type Vars } from "./match.ts";
 import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
+import type { CoreDeath } from "./core.ts";
 import type { Requirement, Scenario, Step } from "./spec.ts";
 
 /** Per-run scratch space the scenarios address through bound variables. */
@@ -162,7 +163,12 @@ export type Outcome =
       attempts: number;
       passes: number;
       error: string;
-    };
+    }
+  /** The core was gone, so nothing about this scenario was measured. Distinct from
+   *  "failed" because it says nothing about the core's conformance: when the daemon
+   *  dies at scenario 25, reporting the eight scenarios after it as failures scores
+   *  the core 25/33 for one process death (juancode-jyl9). */
+  | { status: "unmeasured"; scenarioId: string; reason: string };
 
 /** Why a scenario cannot run against this core / in this environment, or null. */
 export function skipReason(scenario: Scenario, ctx: RunContext): string | null {
@@ -352,6 +358,83 @@ export async function runScenarioRepeatedly(
     ms: Date.now() - started,
     attempts: repeat,
     passes,
+  };
+}
+
+/** The part of a booted core a suite run needs in order to notice it is gone.
+ *
+ *  An interface rather than `CoreUnderTest` so the guard can be driven by a stub. */
+export interface SuiteCore {
+  death(): Promise<CoreDeath | null>;
+}
+
+/** A death, plus where in the run it happened. */
+export interface CoreDeathRecord extends CoreDeath {
+  /** The last scenario that finished before the death was noticed, or null when
+   *  nothing had finished yet. This is the "after X" the report prints. */
+  afterScenarioId: string | null;
+  /** The scenario whose failure exposed the death. Unmeasured like the rest, but
+   *  it is the one the run reports as the failure, so a dead core is still red. */
+  discoveredBy: string;
+}
+
+export interface SuiteGuard {
+  /** Non-null once the core has been found dead. */
+  readonly death: CoreDeathRecord | null;
+  /** Run one scenario, unless the core is already gone. */
+  run(scenario: Scenario, ctx: RunContext, repeat: number): Promise<Outcome>;
+}
+
+/** Wrap the scenario driver so one process death reads as one process death.
+ *
+ *  Without this, a core that goes away mid-run turns every remaining scenario into
+ *  a `connect ECONNREFUSED` failure and the run reports a conformance score it
+ *  never measured (juancode-jyl9: six scenarios "failed" for one death). So: a
+ *  failure asks the core whether it is still there, and the first time the answer
+ *  is no the guard latches — everything after is `unmeasured`, and nothing after
+ *  pays for a connection attempt.
+ *
+ *  Only asked AFTER a failure. A healthy run costs no extra probes, and a core busy
+ *  enough to refuse one connection is not latched dead by a passing scenario. */
+export function guardCore(
+  core: SuiteCore,
+  runOne: (
+    scenario: Scenario,
+    ctx: RunContext,
+    repeat: number,
+  ) => Promise<Outcome> = runScenarioRepeatedly,
+): SuiteGuard {
+  let death: CoreDeathRecord | null = null;
+  let lastFinished: string | null = null;
+
+  const unmeasured = (scenarioId: string, d: CoreDeathRecord): Outcome => ({
+    status: "unmeasured",
+    scenarioId,
+    reason: `${d.reason} after ${d.afterScenarioId ?? "boot"}, so this scenario never ran`,
+  });
+
+  return {
+    get death() {
+      return death;
+    },
+    async run(scenario, ctx, repeat) {
+      if (death) return unmeasured(scenario.id, death);
+      const outcome = await runOne(scenario, ctx, repeat);
+      if (outcome.status === "failed") {
+        const found = await core.death();
+        if (found) {
+          const record: CoreDeathRecord = {
+            ...found,
+            afterScenarioId: lastFinished,
+            discoveredBy: scenario.id,
+          };
+          death = record;
+          return unmeasured(scenario.id, record);
+        }
+      }
+      lastFinished = scenario.id;
+      return outcome;
+    },
   };
 }
 
