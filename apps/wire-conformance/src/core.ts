@@ -35,6 +35,21 @@ export const FIXTURES = join(PKG_ROOT, "fixtures");
 export const CORE_NAMES = ["swift", "rust"] as const;
 export type CoreName = (typeof CORE_NAMES)[number];
 
+/** How a core went away, and what it said on the way out.
+ *
+ *  The log is the whole point. A core that dies mid-run used to leave nothing
+ *  behind: the boot probe printed the core's output on a boot failure and nowhere
+ *  else, so the death between scenario 24 and 25 in juancode-jyl9 was six
+ *  ECONNREFUSED messages and no core log at all. */
+export interface CoreDeath {
+  /** One line a human can read: "killed by SIGKILL", "exited with status 101". */
+  reason: string;
+  code: number | null;
+  signal: string | null;
+  /** Tail of the core's stdout+stderr for the whole run, not just boot. */
+  log: string;
+}
+
 export interface CoreUnderTest {
   /** Label used in the parity report ("swift", "rust", or whatever was passed in). */
   label: string;
@@ -46,7 +61,46 @@ export interface CoreUnderTest {
   dataDir: string | null;
   /** Whether the suite booted this core (and may therefore stop it). */
   owned: boolean;
+  /** The core process, when we booted it. Exposed so a test can kill it. */
+  pid: number | null;
+  /** Bounded tail of the core's own output so far. Empty for a core we did not boot. */
+  log(): string;
+  /** Non-null once the core is gone: how it died, plus everything it printed.
+   *
+   *  Costs health probes, so it is asked only once something has already gone wrong. */
+  death(): Promise<CoreDeath | null>;
   stop(): Promise<void>;
+}
+
+/** How much of the core's output to keep. Bounded because a core under a repeat
+ *  pass can print for minutes, and unbounded is how a harness ends up holding a
+ *  whole run's stdout in memory. The tail is the part that explains a death. */
+export const LOG_LIMIT_BYTES = 64 * 1024;
+
+/** A byte-bounded tail of everything written to it.
+ *
+ *  Bounded by BYTES rather than by chunks: the old boot-only ring kept the last 200
+ *  chunks, so a core logging one 8KB line at a time held 1.6MB and a core logging a
+ *  byte at a time held 200 bytes. Neither of those is a size. */
+export function makeLogRing(limit = LOG_LIMIT_BYTES): {
+  push(chunk: string): void;
+  text(): string;
+} {
+  let buf = "";
+  return {
+    push(chunk: string) {
+      buf += chunk;
+      if (buf.length > limit) buf = buf.slice(buf.length - limit);
+    },
+    text: () => buf,
+  };
+}
+
+/** One line naming how a process ended. */
+export function describeExit(code: number | null, signal: string | null): string {
+  if (signal) return `the core was killed by ${signal}`;
+  if (code === null) return "the core exited for an unknown reason";
+  return `the core exited with status ${code}`;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -91,6 +145,19 @@ async function probeHealth(httpBase: string): Promise<string | null> {
     }
   }
   return lastError;
+}
+
+/** Two failed probes 250ms apart, or null if either answered.
+ *
+ *  Twice on purpose. One refused connection is what a mid-run death gives off, but
+ *  it is also what a core busy enough to drop a listen-backlog entry gives off, and
+ *  latching "the core died" on that would turn one slow scenario into an unmeasured
+ *  tail. A process that is actually gone refuses both. */
+async function confirmUnreachable(httpBase: string): Promise<string | null> {
+  const first = await probeHealth(httpBase);
+  if (first === null) return null;
+  await sleep(250);
+  return await probeHealth(httpBase);
 }
 
 /** Wait for the core to answer, giving up early when `abort` says the wait is
@@ -306,6 +373,10 @@ export interface StartOptions {
   /** Skip the build (the binary is already built, e.g. a previous CI step). */
   skipBuild?: boolean;
   buildTimeoutMs?: number;
+  /** Boot this executable instead of building a core. Skips the recipe's build
+   *  entirely; the isolation environment still applies. Exists so the harness's own
+   *  death handling can be tested against a process it is allowed to kill. */
+  exe?: string;
 }
 
 /** Attach to a running core, or build and boot one. */
@@ -321,6 +392,21 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
       httpBase,
       dataDir: null,
       owned: false,
+      pid: null,
+      // Somebody else's process: we do not hold its stdout, so all we can report
+      // about its death is that it stopped answering.
+      log: () => "",
+      death: async () => {
+        const why = await confirmUnreachable(httpBase);
+        return why === null
+          ? null
+          : {
+              reason: `the core stopped answering ${httpBase} (${why})`,
+              code: null,
+              signal: null,
+              log: "",
+            };
+      },
       stop: async () => {},
     };
   }
@@ -352,7 +438,7 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   const skipBuild = opts.skipBuild ?? process.env.JUANCODE_CONFORMANCE_SKIP_BUILD === "1";
   const buildTimeoutMs = opts.buildTimeoutMs ?? 20 * 60_000;
 
-  const exe = await recipe.resolve(skipBuild, buildTimeoutMs);
+  const exe = opts.exe ?? (await recipe.resolve(skipBuild, buildTimeoutMs));
 
   // After the build on purpose: a cargo or swift build is minutes long, and a port
   // reserved before it is a port somebody else can take while we compile.
@@ -374,23 +460,24 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
     // spawned without ever signalling anything else on the machine.
     detached: true,
   });
-  const log: string[] = [];
-  const record = (d: Buffer) => {
-    log.push(d.toString());
-    if (log.length > 200) log.shift();
-  };
+  // Kept for the WHOLE run, not just the boot. This ring is the only record of
+  // what a core said before it went away mid-suite.
+  const ring = makeLogRing();
+  const record = (d: Buffer) => ring.push(d.toString());
   child.stdout?.on("data", record);
   child.stderr?.on("data", record);
-  let exited = false;
-  child.on("exit", () => (exited = true));
+  // A holder rather than a bare `let`: the exit lands on a callback, and the
+  // narrowing TypeScript does to a captured `let` would type it away.
+  const state: { exit: { code: number | null; signal: string | null } | null } = { exit: null };
+  child.on("exit", (code, signal) => (state.exit = { code, signal }));
 
   try {
     await waitHealthy(httpBase, 60_000, () =>
-      exited ? `the core exited before it answered on ${httpBase}` : null,
+      state.exit ? `the core exited before it answered on ${httpBase}` : null,
     );
   } catch (e) {
     stopGroup(child);
-    throw new Error(`${e instanceof Error ? e.message : String(e)}\ncore output:\n${log.join("")}`);
+    throw new Error(`${e instanceof Error ? e.message : String(e)}\ncore output:\n${ring.text()}`);
   }
 
   return {
@@ -399,8 +486,34 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
     httpBase,
     dataDir,
     owned: true,
+    pid: child.pid ?? null,
+    log: () => ring.text(),
+    death: async () => {
+      const exit = state.exit;
+      if (exit) {
+        return {
+          reason: describeExit(exit.code, exit.signal),
+          code: exit.code,
+          signal: exit.signal,
+          log: ring.text(),
+        };
+      }
+      // No exit event yet — ask the socket instead. A core that refuses a
+      // connection is gone whether or not node has reaped it.
+      const why = await confirmUnreachable(httpBase);
+      if (why === null) return null;
+      const late = state.exit as { code: number | null; signal: string | null } | null;
+      return {
+        reason: late
+          ? describeExit(late.code, late.signal)
+          : `the core stopped answering ${httpBase} (${why})`,
+        code: late?.code ?? null,
+        signal: late?.signal ?? null,
+        log: ring.text(),
+      };
+    },
     stop: async () => {
-      if (!exited) stopGroup(child);
+      if (!state.exit) stopGroup(child);
       await sleep(300);
       if (process.env.JUANCODE_CONFORMANCE_KEEP !== "1") {
         rmSync(dataDir, { recursive: true, force: true });
