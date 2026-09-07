@@ -617,6 +617,14 @@ mod sweep {
             self.probes.lock().unwrap().iter().map(|p| p.id.clone()).collect()
         }
 
+        fn sessions(&self) -> Vec<SessionMeta> {
+            unimplemented!("the reaper reads probes, never rows")
+        }
+
+        fn delete(&self, _id: &str) -> Result<crate::registry::Deleted, StateError> {
+            unimplemented!("the reaper sleeps sessions, it never forgets one")
+        }
+
         fn is_running(&self, id: &str) -> bool {
             self.reap_probe(id).map(|p| p.running).unwrap_or(false)
         }

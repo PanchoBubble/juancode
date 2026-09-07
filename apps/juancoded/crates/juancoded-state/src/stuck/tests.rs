@@ -601,6 +601,14 @@ impl SessionsApi for Fake {
             .collect()
     }
 
+    fn sessions(&self) -> Vec<SessionMeta> {
+        unimplemented!("the stuck watch reads probes, never rows")
+    }
+
+    fn delete(&self, _id: &str) -> Result<crate::registry::Deleted, StateError> {
+        unimplemented!("the stuck watch is advisory: it never forgets a session")
+    }
+
     fn reap_probe(&self, id: &str) -> Option<ReapProbe> {
         self.probes
             .lock()

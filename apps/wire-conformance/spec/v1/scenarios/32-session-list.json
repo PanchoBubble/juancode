@@ -1,0 +1,168 @@
+{
+  "id": "session-list",
+  "title": "a client that just arrived is told what the core already holds",
+  "asserts": "a core that advertises `sessionList` answers `listSessions` with every session it has, to a connection that was not there when they were made. That is the half no delta stream can supply: `created`, `sessionMeta` and `exit` only reach a client that was already connected, so a client fed by those alone starts empty and fills in only as sessions are touched - which under the Rust core meant a sidebar holding 28 sessions against the daemon's 379, and read as having lost every project (juancode-75c5). The frame is a snapshot and not a subscription, so it lists the session created before the connection opened, it lists exited sessions too because history is the thing being restored, and it is answered exactly once per ask.",
+  "capabilities": [
+    "sessionList"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit",
+    "queue"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "live": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$live"
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "a second session, killed below, so the list has to carry history and not just what is running"
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "dead": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$dead"
+      }
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$dead"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$dead"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange",
+        "queue"
+      ]
+    },
+    {
+      "open": "b",
+      "note": "the client this scenario is about: it was not connected for either create, so everything above is history it was never told"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$live",
+            "cwd": "$cwd",
+            "status": "running"
+          }
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000,
+      "note": "a session b never saw created, with the row a sidebar draws from: not an id, the whole meta"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "on": "b",
+      "note": "asked again, because the assertion below is about one answer per ask"
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$dead",
+            "status": "exited"
+          }
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000,
+      "note": "history, not just the live set: restoring the sidebar is the whole point, and an exited session is a row somebody still wants to read"
+    },
+    {
+      "expectNone": {
+        "type": "sessions"
+      },
+      "on": "b",
+      "withinMs": 2000,
+      "note": "one snapshot per ask. A second unsolicited one would race whatever b asks for next, and there is nothing to send between them: the deltas are what carry a change"
+    },
+    {
+      "close": "b"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$live"
+      },
+      "note": "this scenario's own cleanup"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$live"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange",
+        "queue"
+      ]
+    }
+  ]
+}

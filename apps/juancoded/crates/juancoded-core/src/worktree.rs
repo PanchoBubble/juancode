@@ -10,13 +10,12 @@
 //! checkouts and a session started under one has to be recognisable to the other:
 //! sibling `<repo>-worktrees/<name>` directory, branch `juancode/<name>`.
 //!
-//! Nothing here removes one. That is the Swift core's rule too: a worktree outlives
-//! the session that made it, because the work in it usually outlives the agent, and
-//! it is reaped when the SESSION is deleted (`DELETE /api/sessions/:id` removes
-//! `worktreePath`) or by the desktop's worktree sweep. This daemon has no session
-//! delete route yet, so today an isolated session's tree is only ever removed by hand
-//! or by that sweep; `SessionMeta::worktree_path` is what a reaper will read when
-//! there is one (juancode-yiho).
+//! A worktree outlives the session that made it, because the work in it usually
+//! outlives the agent. So nothing on a timer removes one, and neither does an exit:
+//! `remove` below is only ever reached from the session-DELETE path, which is the
+//! Swift core's rule too (`DELETE /api/sessions/:id` reads `worktreePath` and calls
+//! `removeWorktree`). `SessionMeta::worktree_path` is what the reaper reads
+//! (juancode-oe30).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -88,6 +87,80 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
     let path = dir.to_string_lossy().to_string();
     link_node_modules(&root, &path);
     Ok(CreatedWorktree { path, branch })
+}
+
+/// Remove a worktree `create` made, and its directory. The branch is left alone, so
+/// committed work survives being forgotten.
+///
+/// A port of `removeWorktree` in `Git.swift`, including both things that are not
+/// obvious. It runs from the repo's MAIN worktree, because git refuses to remove the
+/// worktree you are standing in, and it `--force`s past uncommitted changes, because
+/// the only caller is a session being deleted and a refusal there would leave a tree
+/// nothing else will ever come back for.
+///
+/// A path that is already gone is `Ok`: the two states a caller cares about are "the
+/// tree is there" and "the tree is not", and a delete that fails because someone
+/// removed the directory by hand would report a leak that does not exist. The
+/// administrative entry git keeps for a missing worktree is pruned on the way past.
+pub fn remove(worktree_path: &str) -> Result<(), WorktreeError> {
+    let dir = Path::new(worktree_path);
+    if !dir.exists() {
+        // `git worktree list` still names it until something prunes it, and a stale
+        // entry blocks a later `worktree add` at the same path. The prune has to run
+        // somewhere that still exists, and the missing tree is not it, so this is the
+        // one place that inverts the layout `create` chose rather than asking git.
+        if let Some(root) = repo_of_worktree(worktree_path) {
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(&root)
+                .output();
+        }
+        return Ok(());
+    }
+    // Falling back to the tree itself is what the Swift core does. `worktree remove`
+    // run from inside the target refuses, which is an honest error rather than a
+    // silent no-op, so the fallback cannot turn a leak into a reported success.
+    let from = main_worktree(worktree_path).unwrap_or_else(|| worktree_path.to_string());
+    let out = Command::new("git")
+        .args(["worktree", "remove", "--force", worktree_path])
+        .current_dir(&from)
+        .output()
+        .map_err(|e| WorktreeError(format!("Failed to remove worktree: {e}")))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let why = if why.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            why
+        };
+        return Err(WorktreeError(format!("Failed to remove worktree: {why}")));
+    }
+    Ok(())
+}
+
+/// The repo a `<parent>/<repo>-worktrees/<name>` path belongs to: `<parent>/<repo>`.
+/// The inverse of [`siblings_dir`], and only ever a fallback for a tree that is
+/// already gone — while it exists, git itself is asked.
+fn repo_of_worktree(worktree_path: &str) -> Option<String> {
+    let dir = Path::new(worktree_path).parent()?;
+    let name = dir.file_name()?.to_string_lossy().to_string();
+    let repo = name.strip_suffix("-worktrees")?;
+    let root = dir.parent()?.join(repo);
+    root.is_dir().then(|| root.to_string_lossy().to_string())
+}
+
+/// The main worktree of the repo `cwd` belongs to: the first entry `git worktree
+/// list --porcelain` prints, which is the one holding the real `.git` directory.
+fn main_worktree(cwd: &str) -> Option<String> {
+    let listing = git(cwd, &["worktree", "list", "--porcelain"])?;
+    let first = listing
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))?;
+    let first = first.trim();
+    if first.is_empty() {
+        return None;
+    }
+    Some(first.to_string())
 }
 
 /// The ref a fresh session worktree branches from: the repo's default branch as
@@ -397,6 +470,60 @@ mod tests {
         let err =
             create(root.to_str().unwrap(), "taken").expect_err("the branch is already claimed");
         assert!(err.0.starts_with("Failed to create worktree"), "{}", err.0);
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn removing_a_worktree_takes_the_directory_and_leaves_the_branch() {
+        let (parent, root) = repo("reaped");
+        let made = create(root.to_str().unwrap(), "reaped01").expect("a worktree");
+        assert!(Path::new(&made.path).is_dir());
+
+        remove(&made.path).expect("the tree is removable");
+        assert!(
+            !Path::new(&made.path).exists(),
+            "the directory is what a `pnpm loose` sweep finds: {}",
+            made.path
+        );
+        // Committed work outlives the session, which is the whole reason the branch
+        // is spared: reaping the tree must not be a way to lose a commit.
+        assert!(
+            git(
+                root.to_str().unwrap(),
+                &["rev-parse", "--verify", "--quiet", &made.branch]
+            )
+            .is_some_and(|out| !out.trim().is_empty()),
+            "the branch must survive"
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The `--force`: an agent that was killed mid-edit leaves a dirty tree, and a
+    /// removal that refused there would leak exactly the trees this exists to reap.
+    #[test]
+    fn a_dirty_worktree_is_still_reaped() {
+        let (parent, root) = repo("dirty");
+        let made = create(root.to_str().unwrap(), "dirty001").expect("a worktree");
+        std::fs::write(Path::new(&made.path).join("committed.txt"), "half done\n").unwrap();
+        std::fs::write(Path::new(&made.path).join("untracked.txt"), "new\n").unwrap();
+
+        remove(&made.path).expect("uncommitted changes are not a reason to keep it");
+        assert!(!Path::new(&made.path).exists());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The 27 rows on this machine whose tree somebody already removed by hand. A
+    /// delete that failed on them would report a leak that is not there.
+    #[test]
+    fn a_tree_that_is_already_gone_is_not_an_error() {
+        let (parent, root) = repo("vanished");
+        let made = create(root.to_str().unwrap(), "vanish01").expect("a worktree");
+        std::fs::remove_dir_all(&made.path).unwrap();
+
+        remove(&made.path).expect("already gone is the state the caller wanted");
+        // And the administrative entry went with it, so the path is reusable.
+        let listing = git(root.to_str().unwrap(), &["worktree", "list", "--porcelain"]).unwrap();
+        assert!(!listing.contains(&made.path), "{listing}");
         std::fs::remove_dir_all(&parent).ok();
     }
 

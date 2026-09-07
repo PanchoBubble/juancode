@@ -99,6 +99,24 @@ pub enum SessionEvent {
         cols: u16,
         rows: u16,
     },
+    /// A session was forgotten: its pty is dead, its row is out of the store, and
+    /// whatever worktree it owned has been reaped. Every consumer hears it, because a
+    /// row a client keeps showing after the daemon has dropped it is the mirror rot
+    /// juancode-75c5 is about.
+    ///
+    /// Distinct from `Exit`, and never a substitute for it. An exit says the process
+    /// is gone and the row is still there to attach to and replay; this says there is
+    /// nothing left to come back for.
+    Deleted {
+        session_id: String,
+        /// The tree that was removed, when there was one. `None` covers both a
+        /// session that never had one and a removal that failed — `worktree_removed`
+        /// is what tells those apart.
+        worktree_path: Option<String>,
+        /// Whether the reap succeeded, for a session that had a tree. `None` when
+        /// there was no tree to reap.
+        worktree_removed: Option<bool>,
+    },
     /// A session looks like it is going nowhere: the same tool call over and over, or
     /// a claim to be working with nothing behind it. See [`crate::stuck`].
     ///
@@ -149,6 +167,17 @@ pub struct AdoptRequest {
     pub cols: u16,
     pub rows: u16,
     pub owner: ClientId,
+}
+
+/// What a delete did, for the frame that reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deleted {
+    pub session_id: String,
+    /// The tree the row named, when it had one. Reported even on a failed reap, so
+    /// the path a human has to remove by hand reaches the client.
+    pub worktree_path: Option<String>,
+    /// Whether the reap succeeded. `None` when there was no tree.
+    pub worktree_removed: Option<bool>,
 }
 
 /// The payload of an `attached` frame, plus the exit a client that missed it is owed.
@@ -456,6 +485,22 @@ impl SessionRegistry {
         self.lock_sessions().keys().cloned().collect()
     }
 
+    /// Every session this daemon holds, oldest first.
+    ///
+    /// Read out of the live map rather than the store, so it is the same rows every
+    /// other frame carries: hydration already put the store's whole history in there,
+    /// and a reader that went back to SQLite would answer with a row whose status the
+    /// map has since moved on from.
+    pub fn sessions(&self) -> Vec<SessionMeta> {
+        let mut rows: Vec<SessionMeta> = self
+            .lock_sessions()
+            .values()
+            .map(|live| live.meta.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .collect();
+        rows.sort_by_key(|m| (m.created_at, m.id.clone()));
+        rows
+    }
+
     pub fn meta(&self, id: &str) -> Option<SessionMeta> {
         let live = self.get(id)?;
         let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -647,6 +692,22 @@ impl SessionRegistry {
             .used_cli_session_ids()
             .map_err(|e| StateError::Store(e.to_string()))?;
         if used.iter().any(|u| u == &req.cli_session_id) {
+            return Ok(None);
+        }
+        // A conversation somebody deleted is not an un-owned conversation waiting to
+        // be picked up. Its row is gone, so `used_cli_session_ids` no longer covers
+        // it, and without this the next adopt — or the discovery pass that feeds one
+        // — hands the deleted session straight back (juancode-lxe3).
+        let forgotten = self
+            .inner
+            .store
+            .forgotten_cli_session_ids()
+            .map_err(|e| StateError::Store(e.to_string()))?;
+        if forgotten.iter().any(|f| f == &req.cli_session_id) {
+            debug!(
+                conversation = %req.cli_session_id,
+                "refusing to adopt a conversation a client forgot"
+            );
             return Ok(None);
         }
         if !std::path::Path::new(&req.cwd).is_dir() {
@@ -1063,6 +1124,85 @@ impl SessionRegistry {
             .pty
             .stop(id)
             .map_err(|e| StateError::Spawn(e.to_string()))
+    }
+
+    /// Forget a session for good: kill its pty, drop its row and its scrollback, keep
+    /// its conversation from being adopted back, and reap the worktree it owned.
+    ///
+    /// The counterpart of `create`, and the one place a worktree is removed. A tree
+    /// outlives its session on purpose — the work in it usually outlives the agent —
+    /// so nothing on a timer may reap one, and an exit must not either. Deleting the
+    /// session is the only statement that means "nobody is coming back for this"
+    /// (juancode-oe30), which is also why it is here rather than in the reaper.
+    ///
+    /// Ordering is load-bearing. The pty dies first, because `git worktree remove`
+    /// on a tree an agent is still writing to would race it. The row goes next, so a
+    /// daemon killed between the two comes back with no session pointing at a tree
+    /// that is half gone. The reap is last and its failure is reported rather than
+    /// thrown: a tree that could not be removed is a directory to clean up by hand,
+    /// not a reason to keep a session the client has already dropped.
+    pub fn delete(&self, id: &str) -> Result<Deleted, StateError> {
+        // The store, not the map, is the authority on existence: a row hydration
+        // could not build is still a row a client is entitled to delete.
+        let meta = match self.meta(id) {
+            Some(meta) => Some(meta),
+            None => self
+                .inner
+                .store
+                .get(id)
+                .map_err(|e| StateError::Store(e.to_string()))?,
+        };
+        let Some(meta) = meta else {
+            return Err(StateError::NotFound);
+        };
+
+        // Best effort: a session whose pty is already dead is the normal case.
+        if let Some(live) = self.get(id) {
+            let running = live.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+            if running {
+                if let Err(e) = self.inner.pty.stop(id) {
+                    warn!(session = id, error = %e, "could not stop the pty before deleting");
+                }
+            }
+        }
+        self.lock_sessions().remove(id);
+        self.inner.terminal.close(id);
+        self.inner
+            .store
+            .delete(id)
+            .map_err(|e| StateError::Store(e.to_string()))?;
+        if let Some(conversation) = &meta.cli_session_id {
+            if let Err(e) = self.inner.store.forget_cli_session(conversation, id) {
+                warn!(session = id, error = %e, "could not tombstone the conversation");
+            }
+        }
+
+        let worktree_removed = meta.worktree_path.as_ref().map(|path| {
+            match worktree::remove(path) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(session = id, tree = %path, error = %e.0, "could not reap the worktree");
+                    false
+                }
+            }
+        });
+        let deleted = Deleted {
+            session_id: id.to_string(),
+            worktree_path: meta.worktree_path.clone(),
+            worktree_removed,
+        };
+        let _ = self.inner.events.send(SessionEvent::Deleted {
+            session_id: deleted.session_id.clone(),
+            worktree_path: deleted.worktree_path.clone(),
+            worktree_removed,
+        });
+        debug!(
+            session = id,
+            worktree = ?deleted.worktree_path,
+            reaped = ?worktree_removed,
+            "forgot a session"
+        );
+        Ok(deleted)
     }
 
     // MARK: - dormancy

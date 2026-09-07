@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 use crate::grid::{ClientId, ResizeOutcome};
 use crate::reaper::ReapProbe;
 use crate::registry::{
-    AdoptRequest, Attached, CreateRequest, SessionEvent, SessionRegistry, StateError,
+    AdoptRequest, Attached, CreateRequest, Deleted, SessionEvent, SessionRegistry, StateError,
 };
 use crate::stuck::StuckAlert;
 
@@ -29,6 +29,13 @@ use crate::stuck::StuckAlert;
 pub trait SessionsApi: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent>;
     fn ids(&self) -> Vec<String>;
+    /// Every session this core holds, oldest first — the answer to `listSessions`.
+    ///
+    /// Beside `ids` rather than replacing it: the callers that walk sessions to find
+    /// the ones with a claimed grid or a transcript to poll want ids and nothing
+    /// else, and building a `SessionMeta` per session on every tick to throw the
+    /// rest away would be a lock per row for a field.
+    fn sessions(&self) -> Vec<SessionMeta>;
     fn meta(&self, id: &str) -> Option<SessionMeta>;
     fn is_running(&self, id: &str) -> bool;
     fn activity(&self, id: &str) -> Option<SessionActivity>;
@@ -79,6 +86,10 @@ pub trait SessionsApi: Send + Sync {
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
+    /// Forget a session: kill it, drop its row, keep its conversation from being
+    /// adopted back, and reap the worktree it owned. The counterpart of `create`,
+    /// and the only path that removes a worktree.
+    fn delete(&self, id: &str) -> Result<Deleted, StateError>;
 
     /// Records one session's CLI has newly appended to its own transcript.
     ///
@@ -152,6 +163,10 @@ impl SessionsApi for SessionRegistry {
 
     fn ids(&self) -> Vec<String> {
         SessionRegistry::ids(self)
+    }
+
+    fn sessions(&self) -> Vec<SessionMeta> {
+        SessionRegistry::sessions(self)
     }
 
     fn meta(&self, id: &str) -> Option<SessionMeta> {
@@ -255,6 +270,10 @@ impl SessionsApi for SessionRegistry {
 
     fn kill(&self, id: &str) -> Result<(), StateError> {
         SessionRegistry::kill(self, id)
+    }
+
+    fn delete(&self, id: &str) -> Result<Deleted, StateError> {
+        SessionRegistry::delete(self, id)
     }
 
     fn reap_probe(&self, id: &str) -> Option<ReapProbe> {

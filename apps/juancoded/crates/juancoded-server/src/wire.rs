@@ -53,6 +53,23 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// daemon's own boot defaults — which is the honest shape: the capability is about the
 /// frames, not about whether anything sleeps.
 ///
+/// `sessionList` and `sessionDelete` are the pair protocol v1 went without, and they
+/// are two capabilities rather than one because they are two promises. `sessionList`
+/// says a client can ask what this core holds and be told all of it, which is what
+/// turns the desktop's `juancode-rust.db` from a running tally of what happened to
+/// arrive over the wire into a cache of the daemon's own store: without it a fresh
+/// client is never told about the 379 sessions the daemon has, so the sidebar starts
+/// empty and fills in only as sessions are touched (juancode-75c5). `sessionDelete`
+/// says a client can make a session stop existing — the pty, the row, the
+/// conversation's adoptability and the worktree — which `kill` never did and could
+/// not, because a killed session is still a row to attach to (juancode-lxe3).
+///
+/// Both are advertised on the same terms every other name here is: the frames answer,
+/// and the delete really does all four things. `sessionDelete` in particular is the
+/// kind of capability that must not be advertised early — a client that switches its
+/// delete button on and gets a row dropped locally while the daemon keeps its own is
+/// worse off than one whose button was greyed out.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -77,6 +94,8 @@ pub const CAPABILITIES: &[&str] = &[
     "spawnModel",
     "spawnPreset",
     "stuck",
+    "sessionList",
+    "sessionDelete",
 ];
 
 /// One queued occurrence on the wire.
@@ -186,6 +205,20 @@ pub enum ClientMessage {
         seq: Option<i64>,
     },
     Kill {
+        session_id: String,
+    },
+    /// What this core holds, all of it, once. Not a subscription: `created`,
+    /// `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks
+    /// this on the handshake and keeps up from the broadcasts afterwards.
+    ListSessions,
+    /// Forget a session: kill its pty, drop its row, keep its conversation from
+    /// being adopted back, and reap the worktree it owned.
+    ///
+    /// Not a flag on `kill`, and the ADDITIVE_FIELDS rule is why: a core that did not
+    /// know the flag would answer the frame by killing the session and keeping the
+    /// row, which is a different operation from the one the client asked for. A type
+    /// of its own is ignored whole, and the client can see the silence.
+    DeleteSession {
         session_id: String,
     },
     SubscribeScreen {
@@ -393,6 +426,10 @@ impl ClientMessage {
             "kill" => Ok(Self::Kill {
                 session_id: need_session()?,
             }),
+            "listSessions" => Ok(Self::ListSessions),
+            "deleteSession" => Ok(Self::DeleteSession {
+                session_id: need_session()?,
+            }),
             "subscribeScreen" => Ok(Self::SubscribeScreen {
                 session_id: need_session()?,
             }),
@@ -528,6 +565,34 @@ pub enum ServerMessage {
     /// nothing to fetch between revisions because there are no deltas to fetch.
     Queue {
         snapshot: QueueSnapshot,
+    },
+    /// Every session this core holds, oldest first — the answer to `listSessions`.
+    ///
+    /// Replace wholesale. It is a snapshot and not a patch, so a client's list after
+    /// applying it is exactly this list: a row it holds that is not in here is a row
+    /// this core does not have, which is the deletion half of the reconciliation and
+    /// the reason the frame carries everything rather than a page.
+    ///
+    /// Metas only, deliberately: no scrollback. `attached.scrollback` is per session
+    /// and routinely tens of kilobytes, and 379 of them in one frame would be a
+    /// multi-megabyte handshake for bytes a sidebar never draws.
+    Sessions {
+        sessions: Vec<SessionMeta>,
+    },
+    /// A session was forgotten. Broadcast to every connection, not just the one that
+    /// asked, because a row another client is still showing is the same rot from the
+    /// other side.
+    ///
+    /// Never a substitute for `exit`: an exit says the process is gone and the row is
+    /// still there to attach to and replay, this says there is nothing to come back
+    /// for. A client drops the row.
+    SessionDeleted {
+        session_id: String,
+        /// The tree the row named, when it had one, and whether it was reaped.
+        /// Reported even on a failure, so the path a human has to remove by hand
+        /// reaches somewhere a human will see it.
+        worktree_path: Option<String>,
+        worktree_removed: Option<bool>,
     },
     /// A session's persisted row changed out of band: a title the CLI set for itself,
     /// a conversation id discovered after the spawn, a permission-mode flip. Carries
@@ -756,6 +821,26 @@ impl ServerMessage {
             } => json!({
                 "type": "sessionMeta", "sessionId": session_id, "session": session,
             }),
+            Self::Sessions { sessions } => json!({
+                "type": "sessions", "sessions": sessions,
+            }),
+            Self::SessionDeleted {
+                session_id,
+                worktree_path,
+                worktree_removed,
+            } => {
+                let mut v = json!({ "type": "sessionDeleted", "sessionId": session_id });
+                // Omitted rather than null for a session that never had a tree: the
+                // two keys travel together, and "there was nothing to reap" must not
+                // read like "the reap is still pending".
+                if let Some(path) = worktree_path {
+                    v["worktreePath"] = json!(path);
+                }
+                if let Some(removed) = worktree_removed {
+                    v["worktreeRemoved"] = json!(removed);
+                }
+                v
+            }
             Self::GridChange {
                 session_id,
                 owner,
@@ -887,6 +972,65 @@ mod tests {
     }
 
     #[test]
+    fn the_list_and_delete_frames_decode_and_are_advertised() {
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"listSessions"}"#).unwrap(),
+            ClientMessage::ListSessions
+        );
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"deleteSession","sessionId":"s1"}"#).unwrap(),
+            ClientMessage::DeleteSession {
+                session_id: "s1".into()
+            }
+        );
+        // A delete without a session is a frame that would forget nothing, and it is
+        // refused rather than answered.
+        assert!(ClientMessage::decode(r#"{"type":"deleteSession"}"#).is_err());
+        assert!(CAPABILITIES.contains(&"sessionList"));
+        assert!(CAPABILITIES.contains(&"sessionDelete"));
+    }
+
+    #[test]
+    fn the_sessions_frame_carries_whole_rows_and_no_scrollback() {
+        let frame = ServerMessage::Sessions {
+            sessions: vec![meta()],
+        }
+        .to_value();
+        assert_eq!(frame["type"], "sessions");
+        assert_eq!(frame["sessions"][0]["id"], "s1");
+        assert_eq!(frame["sessions"][0]["cwd"], "/tmp");
+        assert!(
+            frame["sessions"][0].get("scrollback").is_none(),
+            "the sidebar draws rows, not bytes: {frame}"
+        );
+    }
+
+    /// A session that never had a worktree and one whose reap failed must not read
+    /// the same: the first has nothing to clean up, the second names a directory.
+    #[test]
+    fn a_delete_reports_the_tree_it_reaped_and_omits_the_keys_when_there_was_none() {
+        let plain = ServerMessage::SessionDeleted {
+            session_id: "s1".into(),
+            worktree_path: None,
+            worktree_removed: None,
+        }
+        .to_value();
+        assert_eq!(plain["type"], "sessionDeleted");
+        assert_eq!(plain["sessionId"], "s1");
+        assert!(plain.get("worktreePath").is_none(), "{plain}");
+        assert!(plain.get("worktreeRemoved").is_none(), "{plain}");
+
+        let failed = ServerMessage::SessionDeleted {
+            session_id: "s2".into(),
+            worktree_path: Some("/repo-worktrees/abc12345".into()),
+            worktree_removed: Some(false),
+        }
+        .to_value();
+        assert_eq!(failed["worktreePath"], "/repo-worktrees/abc12345");
+        assert_eq!(failed["worktreeRemoved"], false);
+    }
+
+    #[test]
     fn input_and_resize_carry_an_optional_seq() {
         let with_seq =
             ClientMessage::decode(r#"{"type":"input","sessionId":"s","data":"x","seq":7}"#)
@@ -958,6 +1102,9 @@ mod tests {
             // exact failure this capability was added to end.
             r#"{"type":"setReaperPolicy","minutes":30}"#,
             r#"{"type":"setReaperProtectedIds","sessionIds":["s"]}"#,
+            // And for the pair protocol v1 went without.
+            r#"{"type":"listSessions"}"#,
+            r#"{"type":"deleteSession","sessionId":"s"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1000,6 +1147,8 @@ mod tests {
                     "reaper",
                     "spawnModel",
                     "spawnPreset",
+                    "sessionList",
+                    "sessionDelete",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,

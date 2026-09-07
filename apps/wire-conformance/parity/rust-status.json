@@ -2,8 +2,8 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-09-04",
-  "specRevision": "1.7.0",
+  "measuredAt": "2026-09-07",
+  "specRevision": "1.8.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -19,73 +19,75 @@
     "reaper",
     "spawnModel",
     "spawnPreset",
-    "stuck"
+    "stuck",
+    "sessionList",
+    "sessionDelete"
   ],
   "scenarios": {
     "handshake": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "create": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "create-guards": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "attach-scrollback": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "input-ack": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "resize": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "screen-stream": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "activity-notify": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "activity-changes": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "queue": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "exit-codes": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "unresumable": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "errors": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "tracked-prs": {
       "status": "skipped",
@@ -97,28 +99,28 @@
     },
     "adopt-external": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "dispatch-correlation": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "skip-permissions": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "session-meta": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "grid-owner": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "restart-fresh": {
       "status": "skipped",
@@ -126,53 +128,63 @@
     },
     "spawn-model": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "seeded-input": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "transcript": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "queue-edit": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "transcript-activity": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "orphan-reap": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "spawn-preset": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "reaper": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "isolate-worktree": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
     },
     "stuck": {
       "status": "passed",
-      "attempts": 5,
-      "passes": 5
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-list": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-delete": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     }
   }
 }
