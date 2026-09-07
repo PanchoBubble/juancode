@@ -1,0 +1,240 @@
+name: main-red
+
+# main was failing from 2026-08-29 to 2026-09-04 and nothing said so (juancode-4pmw).
+# A red main blocked nothing: six agent PRs inherited the failures and none could be
+# judged on its own CI until main was fixed. This workflow is the mouth.
+#
+# Two sinks, deliberately:
+#   1. A GitHub issue labelled `ci-main-red`, opened on the first red and closed
+#      automatically on the first green. This one needs no secret, so it always
+#      works, and unlike a chat ping it does not scroll away: an open issue is a
+#      state, and six days of it is impossible to not notice.
+#   2. Telegram, reusing the bot the oracle sidecar already talks to. Skipped with
+#      a loud log line, never a failure, when the secrets are absent.
+#
+# Triggered off wire-conformance rather than living inside it so that a failure in
+# the notifier can never turn a green CI run red, and so that a run cancelled by
+# the concurrency group (which happens on every back-to-back push to main) does not
+# read as a failure.
+
+on:
+  workflow_run:
+    workflows: [wire-conformance]
+    types: [completed]
+    branches: [main]
+  # For testing the body and the sinks without waiting for a real red main.
+  workflow_dispatch:
+    inputs:
+      conclusion:
+        description: "Pretend the last wire-conformance run on main ended like this"
+        type: choice
+        default: failure
+        options: [failure, success]
+      dry_run:
+        description: "Print what would be sent instead of opening an issue or pinging Telegram"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+  # An explicit permissions block sets every scope it does not list to none, so
+  # without this the two `gh` calls that read the finished run (`gh run list` and
+  # the .../actions/runs/N/jobs API) 403 and the notifier reports nothing.
+  actions: read
+
+concurrency:
+  group: main-red
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LABEL: ci-main-red
+      REPO: ${{ github.repository }}
+      SERVER: ${{ github.server_url }}
+    steps:
+      # workflow_run carries the finished run; workflow_dispatch fakes one from the
+      # latest real run on main so the message body is the same code path either way.
+      - name: What happened on main
+        id: run
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            latest="$(gh run list --repo "$REPO" --workflow wire-conformance.yml \
+              --branch main --limit 1 --json databaseId,headSha,url \
+              --jq '.[0] | [.databaseId, .headSha, .url] | @tsv')"
+            run_id="$(printf '%s' "$latest" | cut -f1)"
+            head_sha="$(printf '%s' "$latest" | cut -f2)"
+            run_url="$(printf '%s' "$latest" | cut -f3)"
+            conclusion="${{ inputs.conclusion }}"
+            dry_run="${{ inputs.dry_run }}"
+          else
+            run_id="${{ github.event.workflow_run.id }}"
+            head_sha="${{ github.event.workflow_run.head_sha }}"
+            run_url="${{ github.event.workflow_run.html_url }}"
+            conclusion="${{ github.event.workflow_run.conclusion }}"
+            dry_run=false
+          fi
+
+          # cancelled/skipped/neutral are not evidence either way. The concurrency
+          # group on wire-conformance cancels the previous run on every back-to-back
+          # push to main, so treating cancelled as red would cry wolf constantly.
+          case "$conclusion" in
+            failure|timed_out|startup_failure) state=red ;;
+            success) state=green ;;
+            *) state=unknown ;;
+          esac
+
+          {
+            echo "state=$state"
+            echo "conclusion=$conclusion"
+            echo "run_id=$run_id"
+            echo "run_url=$run_url"
+            echo "head_sha=$head_sha"
+            echo "short_sha=${head_sha:0:8}"
+            echo "dry_run=$dry_run"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "wire-conformance run $run_id on main -> $conclusion ($state)"
+
+      - name: Which jobs failed
+        id: jobs
+        if: steps.run.outputs.state == 'red'
+        run: |
+          set -euo pipefail
+          failed="$(gh api --paginate \
+            "repos/$REPO/actions/runs/${{ steps.run.outputs.run_id }}/jobs" \
+            --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "- **" + .name + "** (" + (.conclusion // "?") + ")"' \
+            || true)"
+          [ -n "$failed" ] || failed="- (could not read the job list; see the run)"
+          {
+            echo "failed<<EOF"
+            echo "$failed"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$failed"
+
+      - name: Find the open red-main issue
+        id: issue
+        run: |
+          set -euo pipefail
+          gh label create "$LABEL" --repo "$REPO" --color b60205 \
+            --description "main is failing CI right now" 2>/dev/null || true
+          number="$(gh issue list --repo "$REPO" --label "$LABEL" --state open \
+            --limit 1 --json number --jq '.[0].number // ""')"
+          created=""
+          if [ -n "$number" ]; then
+            created="$(gh issue view "$number" --repo "$REPO" --json createdAt --jq .createdAt)"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "created=$created" >> "$GITHUB_OUTPUT"
+
+      - name: Compose the message
+        id: msg
+        if: steps.run.outputs.state != 'unknown'
+        env:
+          FAILED_JOBS: ${{ steps.jobs.outputs.failed }}
+        run: |
+          set -euo pipefail
+          state="${{ steps.run.outputs.state }}"
+          sha="${{ steps.run.outputs.short_sha }}"
+          url="${{ steps.run.outputs.run_url }}"
+          created="${{ steps.issue.outputs.created }}"
+
+          red_for=""
+          if [ -n "$created" ]; then
+            since=$(date -u -d "$created" +%s 2>/dev/null || echo "")
+            if [ -n "$since" ]; then
+              hours=$(( ( $(date -u +%s) - since ) / 3600 ))
+              red_for=" Red for ${hours}h."
+            fi
+          fi
+
+          if [ "$state" = red ]; then
+            title="main is red: wire-conformance failing on $sha"
+            body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+              "\`wire-conformance\` failed on \`main\` at commit \`$sha\`.${red_for}" \
+              "$FAILED_JOBS" \
+              "Run: $url" \
+              "This issue closes itself on the next green run of \`wire-conformance\` on \`main\`. While it is open, every PR branched off \`main\` is inheriting these failures, so a red PR check is not necessarily that PR's fault.")"
+            telegram="🔴 main is red — $sha${red_for}"$'\n'"$url"
+          else
+            title="main is green again"
+            body="Green again at \`$sha\`. Run: $url"
+            telegram="🟢 main is green again — $sha"$'\n'"$url"
+          fi
+
+          for name in title body telegram; do
+            eval "value=\$$name"
+            { echo "$name<<JUANCODE_EOF"; echo "$value"; echo "JUANCODE_EOF"; } >> "$GITHUB_OUTPUT"
+          done
+          echo "$title"
+          echo "$body"
+
+      - name: Dry run only
+        if: steps.run.outputs.dry_run == 'true'
+        env:
+          TITLE: ${{ steps.msg.outputs.title }}
+          BODY: ${{ steps.msg.outputs.body }}
+          TEXT: ${{ steps.msg.outputs.telegram }}
+        run: |
+          echo "DRY RUN - nothing sent."
+          echo "state: ${{ steps.run.outputs.state }}"
+          echo "open issue: ${{ steps.issue.outputs.number }}"
+          echo "--- issue title ---"; printf '%s\n' "$TITLE"
+          echo "--- issue body ---";  printf '%s\n' "$BODY"
+          echo "--- telegram ---";    printf '%s\n' "$TEXT"
+
+      # First red opens the issue; every later red comments on the same one, so the
+      # thread is the history of how long this went on.
+      - name: Open or update the issue
+        if: steps.run.outputs.state == 'red' && steps.run.outputs.dry_run != 'true'
+        env:
+          NUMBER: ${{ steps.issue.outputs.number }}
+          TITLE: ${{ steps.msg.outputs.title }}
+          BODY: ${{ steps.msg.outputs.body }}
+        run: |
+          set -euo pipefail
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --repo "$REPO" --body "$BODY"
+          else
+            gh issue create --repo "$REPO" --label "$LABEL" --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Close the issue on green
+        if: steps.run.outputs.state == 'green' && steps.issue.outputs.number != '' && steps.run.outputs.dry_run != 'true'
+        env:
+          NUMBER: ${{ steps.issue.outputs.number }}
+          BODY: ${{ steps.msg.outputs.body }}
+        run: |
+          gh issue close "$NUMBER" --repo "$REPO" --reason completed --comment "$BODY"
+
+      # Best effort, never fatal: the notifier going quiet must not be reported as
+      # a CI failure of its own, or we are back where we started.
+      - name: Telegram
+        if: steps.run.outputs.state != 'unknown' && steps.run.outputs.dry_run != 'true'
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: ${{ steps.msg.outputs.telegram }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning title=Telegram not configured::main-red could not ping Telegram."
+            echo "Add repository secrets TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+            echo "(Settings > Secrets and variables > Actions). Only the repo owner can."
+            echo "TELEGRAM_BOT_TOKEN is the same bot the oracle sidecar uses"
+            echo "(apps/oracle-mcp readTelegramConfig); TELEGRAM_CHAT_ID is the chat to"
+            echo "post into, which the oracle does not store — read it from getUpdates."
+            exit 0
+          fi
+          curl -sS --fail-with-body -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true" \
+            -o /dev/null
+          echo "Telegram notified."
