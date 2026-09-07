@@ -58,9 +58,21 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
     // real problem better than a mkdir error would.
     let _ = std::fs::create_dir_all(&worktrees_dir);
     let dir = worktrees_dir.join(name);
+    // `--no-track` so a branch cut from `origin/main` does not take main as its
+    // upstream, which would aim a later `git push` at main.
+    let mut args = vec![
+        "worktree".to_string(),
+        "add".to_string(),
+        "--no-track".to_string(),
+        "-b".to_string(),
+        branch.clone(),
+        dir.to_string_lossy().to_string(),
+    ];
+    if let Some(base) = base_ref(repo_cwd) {
+        args.push(base);
+    }
     let out = Command::new("git")
-        .args(["worktree", "add", "-b", &branch])
-        .arg(&dir)
+        .args(&args)
         .current_dir(repo_cwd)
         .output()
         .map_err(|e| WorktreeError(format!("Failed to create worktree: {e}")))?;
@@ -76,6 +88,56 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
     let path = dir.to_string_lossy().to_string();
     link_node_modules(&root, &path);
     Ok(CreatedWorktree { path, branch })
+}
+
+/// The ref a fresh session worktree branches from: the repo's default branch as
+/// `origin` has it, refreshed first, so a new agent starts from what everyone else
+/// has rather than from whatever the main checkout happens to have open. Mirrors
+/// `worktreeBaseRef` in the Swift core, including the fallbacks: the local branch
+/// when there is no remote or the fetch fails, and `None` (branch off HEAD, the old
+/// behaviour) when the repo has no default branch at all.
+fn base_ref(repo_cwd: &str) -> Option<String> {
+    let base = default_base_branch(repo_cwd)?;
+    let short = base.strip_prefix("origin/").unwrap_or(&base).to_string();
+    // Best effort: offline, or no remote, still leaves us the local ref.
+    let fetched = Command::new("git")
+        .args(["fetch", "origin", &short])
+        .current_dir(repo_cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    // A local-only `main` can become `origin/main` once the fetch has run.
+    if fetched && !base.starts_with("origin/") {
+        let remote = format!("origin/{short}");
+        if git(repo_cwd, &["rev-parse", "--verify", "--quiet", &remote])
+            .is_some_and(|out| !out.trim().is_empty())
+        {
+            return Some(remote);
+        }
+    }
+    Some(base)
+}
+
+/// The repo's default branch: `origin/HEAD` when the remote has published one, else
+/// the first of main/master/develop that exists as a remote or local ref. Same order
+/// as `defaultBaseBranch` in the Swift core, so both cores pick the same base.
+fn default_base_branch(cwd: &str) -> Option<String> {
+    if let Some(head) = git(cwd, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+        let head = head.trim();
+        if !head.is_empty() && head != "origin/HEAD" {
+            return Some(head.to_string());
+        }
+    }
+    for name in ["main", "master", "develop"] {
+        for r#ref in [format!("origin/{name}"), name.to_string()] {
+            if git(cwd, &["rev-parse", "--verify", "--quiet", &r#ref])
+                .is_some_and(|out| !out.trim().is_empty())
+            {
+                return Some(r#ref);
+            }
+        }
+    }
+    None
 }
 
 /// The top level of the work tree `cwd` sits in, or `None` when it is not one (or
@@ -249,6 +311,73 @@ mod tests {
         assert!(Path::new(&made.path).join("committed.txt").is_file());
         // The point of the whole feature: a different tree from the one asked about.
         assert_ne!(made.path, root.to_string_lossy());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// Reading a ref that is not HEAD, for the base-branch tests.
+    fn sha(cwd: &Path, r#ref: &str) -> String {
+        git(cwd.to_str().unwrap(), &["rev-parse", r#ref])
+            .expect("rev-parse")
+            .trim()
+            .to_string()
+    }
+
+    /// The point of basing off the default branch: an agent dispatched while the main
+    /// checkout sits on a feature branch must not inherit that branch's work.
+    #[test]
+    fn a_worktree_starts_at_the_default_branch_not_the_checked_out_head() {
+        let (parent, root) = repo("basemain");
+        let main = sha(&root, "main");
+        run(&root, &["checkout", "-q", "-b", "feature/wip"]);
+        std::fs::write(root.join("wip.txt"), "half done\n").unwrap();
+        run(&root, &["add", "wip.txt"]);
+        run(&root, &["commit", "--quiet", "-m", "wip"]);
+
+        let made = create(root.to_str().unwrap(), "basemain").expect("a worktree");
+        let at = sha(Path::new(&made.path), "HEAD");
+        assert_eq!(at, main, "the worktree must start at main");
+        assert!(!Path::new(&made.path).join("wip.txt").exists());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// With a remote, the base is what origin has NOW: fetched before branching, so a
+    /// worktree is never cut from a local `main` that is days behind. The new branch
+    /// must also have no upstream, or a later push would aim at main.
+    #[test]
+    fn the_base_is_fetched_from_origin_before_branching() {
+        let (parent, root) = repo("fetched");
+        let remote = parent.join("remote.git");
+        run(&parent, &["init", "--bare", "--quiet", "remote.git"]);
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "--quiet", "-u", "origin", "main"]);
+
+        // Someone else lands on main; this checkout has not fetched it.
+        let other = parent.join("other");
+        run(
+            &parent,
+            &["clone", "--quiet", remote.to_str().unwrap(), "other"],
+        );
+        std::fs::write(other.join("theirs.txt"), "landed\n").unwrap();
+        run(&other, &["add", "theirs.txt"]);
+        run(&other, &["commit", "--quiet", "-m", "theirs"]);
+        run(&other, &["push", "--quiet", "origin", "main"]);
+        let landed = sha(&other, "HEAD");
+        assert_ne!(landed, sha(&root, "main"), "local main must be behind");
+
+        let made = create(root.to_str().unwrap(), "fetched1").expect("a worktree");
+        let wt = Path::new(&made.path);
+        assert_eq!(
+            sha(wt, "HEAD"),
+            landed,
+            "must start at a freshly fetched origin/main"
+        );
+        assert!(
+            git(made.path.as_str(), &["rev-parse", "--abbrev-ref", "@{u}"]).is_none(),
+            "the session branch must not track origin/main"
+        );
         std::fs::remove_dir_all(&parent).ok();
     }
 

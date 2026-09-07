@@ -389,12 +389,38 @@ public func detectAgentWorktree(_ cwd: String, childPid: pid_t) async -> String?
     }?.path
 }
 
+/// The ref a fresh session worktree branches from: the repo's default branch,
+/// refreshed from `origin` first, so a new agent starts from what everyone else has
+/// rather than from whatever the main checkout happens to have open. Prefers the
+/// remote-tracking ref (`origin/main`) and falls back to the local branch when there
+/// is no remote or the fetch fails (offline). Nil when the repo has no default branch
+/// at all — a fresh repo with one unnamed commit, say — and the caller should then
+/// branch off HEAD as before. Never throws.
+public func worktreeBaseRef(_ repoCwd: String) async -> String? {
+    guard let base = await defaultBaseBranch(repoCwd) else { return nil }
+    let short = base.hasPrefix("origin/") ? String(base.dropFirst("origin/".count)) : base
+    // Best effort and time-bounded: being offline (or having no remote) must not stop
+    // a session being isolated, it just means the local ref is the freshest we have.
+    let fetched = (try? await ProcessRunner.capture(
+        "git", ["fetch", "origin", short], cwd: repoCwd, timeout: 10))?.ok == true
+    // A local-only `main` can become `origin/main` once the fetch has run.
+    if fetched, !base.hasPrefix("origin/"),
+       let out = try? await git(repoCwd, ["rev-parse", "--verify", "--quiet", "origin/\(short)"]),
+       !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return "origin/\(short)"
+    }
+    return base
+}
+
 /// Create a fresh linked worktree off the repo containing `repoCwd`, checked out
 /// on a new `juancode/<name>` branch, so a session can work the repo in parallel
 /// without sharing the main working tree. The worktree lives in a sibling
 /// `<repo>-worktrees/<name>` directory (discoverable, doesn't clutter the repo).
-/// Throws a clean message if `repoCwd` isn't a git work tree or the repo has no
-/// commit yet to branch from.
+/// The new branch starts at the repo's default branch as `origin` has it (see
+/// `worktreeBaseRef`), not at the main checkout's HEAD — otherwise an agent
+/// dispatched while you happen to be on a feature branch inherits that branch's
+/// half-finished work. Throws a clean message if `repoCwd` isn't a git work tree or
+/// the repo has no commit yet to branch from.
 public func createWorktree(_ repoCwd: String, _ name: String) async throws -> CreatedWorktree {
     let root: String
     do {
@@ -418,8 +444,12 @@ public func createWorktree(_ repoCwd: String, _ name: String) async throws -> Cr
     let dir = dirURL.path
     // mkdirSync(dirname(dir), { recursive: true }) → create the `<repo>-worktrees` parent.
     try? FileManager.default.createDirectory(at: worktreesDir, withIntermediateDirectories: true)
+    // `--no-track` so a branch cut from `origin/main` doesn't take main as its
+    // upstream — that would aim a later `git push` at main.
+    var add = ["worktree", "add", "--no-track", "-b", branch, dir]
+    if let base = await worktreeBaseRef(repoCwd) { add.append(base) }
     do {
-        _ = try await gitStrict(repoCwd, ["worktree", "add", "-b", branch, dir])
+        _ = try await gitStrict(repoCwd, add)
     } catch {
         throw GitError(gitErr(error, "Failed to create worktree"))
     }

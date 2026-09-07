@@ -271,6 +271,73 @@ final class GitTests: XCTestCase {
         XCTAssertFalse(after.contains(where: { resolvePath($0.path) == resolvePath(wt.path) }))
     }
 
+    /// A session isolated to start new work must branch off the repo's default
+    /// branch, not off whatever the main checkout has open — otherwise dispatching an
+    /// agent while you sit on a feature branch hands it that branch's half-done work.
+    func testCreateWorktreeBranchesFromDefaultBranchNotCheckedOutHead() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try runGit(["branch", "-M", "main"])
+        let mainSha = try runGit(["rev-parse", "main"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Somebody's in-progress branch, checked out in the main tree.
+        try runGit(["checkout", "-q", "-b", "feature/wip"])
+        writeFile(join(dir, "wip.txt"), "half done\n")
+        _ = try await commitAll(dir, "wip")
+        let wipSha = try runGit(["rev-parse", "HEAD"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let wt = try await createWorktree(dir, "basemain")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+
+        let at = try runGit(["rev-parse", "HEAD"], cwd: wt.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(at, mainSha, "the worktree must start at main")
+        XCTAssertNotEqual(at, wipSha)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: join(wt.path, "wip.txt")))
+    }
+
+    /// With a remote, "the default branch" means what origin has now: the base is
+    /// fetched first, so a worktree isn't cut from a local `main` that's days behind.
+    /// And the new branch must have no upstream — a branch cut from `origin/main` that
+    /// tracked it would aim a later push at main.
+    func testCreateWorktreeFetchesOriginBeforeBranching() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try runGit(["branch", "-M", "main"])
+        let remote = mkdtemp("juancode-remote-")
+        defer { rmrf(remote) }
+        try TempGitRepo.initializeBare(at: remote)
+        try runGit(["remote", "add", "origin", remote])
+        try runGit(["push", "-q", "-u", "origin", "main"])
+
+        // Someone else pushes to main; this checkout hasn't fetched it.
+        let other = mkdtemp("juancode-clone-")
+        defer { rmrf(other) }
+        try runGit(["clone", "-q", remote, other], cwd: NSTemporaryDirectory())
+        try runGit(["config", "user.email", "test@example.com"], cwd: other)
+        try runGit(["config", "user.name", "Test"], cwd: other)
+        try runGit(["config", "commit.gpgsign", "false"], cwd: other)
+        writeFile(join(other, "theirs.txt"), "landed\n")
+        try runGit(["add", "-A"], cwd: other)
+        try runGit(["commit", "-qm", "theirs"], cwd: other)
+        try runGit(["push", "-q", "origin", "main"], cwd: other)
+        let landed = try runGit(["rev-parse", "HEAD"], cwd: other)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stale = try runGit(["rev-parse", "main"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotEqual(landed, stale, "the local main must genuinely be behind")
+
+        let wt = try await createWorktree(dir, "freshbase")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+
+        let at = try runGit(["rev-parse", "HEAD"], cwd: wt.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(at, landed, "the worktree must start at origin/main, freshly fetched")
+        XCTAssertNil(try? runGit(["rev-parse", "--abbrev-ref", "@{u}"], cwd: wt.path),
+                     "the session branch must not track origin/main")
+    }
+
     // MARK: - createWorktree(checkingOut:) — the PR-tracker's worktree (juancode-4bpz)
 
     /// The ordinary case: the PR's branch exists locally and nothing else has it
