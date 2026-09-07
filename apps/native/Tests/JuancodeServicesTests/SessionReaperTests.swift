@@ -135,6 +135,98 @@ final class SessionReaperTests: XCTestCase {
         )
     }
 
+    // MARK: - the incident timeline (oracle-qb5 / juancode-0f64 regression guards)
+
+    /// The 843d8826 timeline from `session-activity.log`, replayed against the pure
+    /// policy: spawned 11:32:51, flipping busy/idle up to 11:42:47, killed 11:42:56.
+    ///
+    /// This one PASSES unchanged — deliberately. The incident report blamed the
+    /// streak for expiring while the session was working, and the point of pinning
+    /// the timeline here is that the policy never could have done that: nine seconds
+    /// of idle cannot serve a 30-minute window, whatever the baseline says. The kills
+    /// came from the app-quit path, which never consults this policy at all
+    /// (`AppState.shutdownGracefully`). Keeping the guard means a future change that
+    /// *does* make the policy trigger-happy fails here first.
+    func testBusyNineSecondsBeforeTheKillIsNowhereNearEligible() {
+        let busyAt = t0
+        let killAt = busyAt + 9_000
+        // Even with a baseline as old as the session's whole life, a busy sample is a
+        // hard reset and the following idle sample restarts the streak from now.
+        var stale = baseAtT0
+        stale.idleSinceMs = t0 - 10 * windowMs
+        stale.quietSamples = 100
+        XCTAssertEqual(evaluate(idleSample(activity: .busy), baseline: stale, nowMs: busyAt),
+                       .notIdle)
+        // One second later it reads idle again: a FRESH baseline, not eligibility.
+        let restarted = SessionReapPolicy.Baseline(idleSinceMs: busyAt + 1_000,
+                                                   descendantCount: 3, cpuTimeMs: 10_000)
+        XCTAssertEqual(evaluate(idleSample(), baseline: nil, nowMs: busyAt + 1_000),
+                       .holding(restarted))
+        // And at the kill instant the streak is 8s old against a 30-minute window,
+        // on one observed sample.
+        XCTAssertEqual(evaluate(idleSample(), baseline: restarted, nowMs: killAt),
+                       holding(restarted, sampledAt: killAt))
+    }
+
+    /// An autonomous dispatched agent never receives pty input, so `lastInputMs`
+    /// stays at spawn time forever. That must not on its own make it reapable while
+    /// it is demonstrably working — the activity, transcript and CPU signals still
+    /// rule, and this reaper keys on output rather than input precisely so a session
+    /// nobody types into is not treated as a session nobody is using.
+    func testDispatchedAgentWithNoHumanInputIsStillSparedWhileBusy() {
+        let neverTyped = t0 - 6 * 60 * 60 * 1000 // spawned six hours ago, no keystrokes
+        XCTAssertEqual(
+            evaluate(idleSample(activity: .busy, lastInputMs: neverTyped),
+                     baseline: baseAtT0, nowMs: t0 + windowMs),
+            .notIdle
+        )
+        XCTAssertEqual(
+            evaluate(idleSample(activity: .waitingInput, lastInputMs: neverTyped),
+                     baseline: baseAtT0, nowMs: t0 + windowMs),
+            .notIdle
+        )
+        // Idle, never typed into, but its transcript kept growing across the window:
+        // still spared, and input age never entered into it.
+        var size = 1_000
+        let verdict = walk(spanMs: windowMs) { now in
+            size += 512
+            return idleSample(lastInputMs: neverTyped, transcriptSizeBytes: size,
+                              lastOutputMs: now)
+        }
+        XCTAssertNotEqual(verdict, .eligible)
+    }
+
+    // MARK: - quit-sleep classification (the path that actually issued the kills)
+
+    func testQuitSleepFlagsBusyAndWaitingInputAsWorkInFlight() {
+        XCTAssertEqual(SessionQuitSleep.reason(for: .busy), .quitBusy)
+        XCTAssertEqual(SessionQuitSleep.reason(for: .waitingInput), .quitWaitingInput)
+        XCTAssertTrue(SessionQuitSleep.reason(for: .busy).workInFlight)
+        XCTAssertTrue(SessionQuitSleep.reason(for: .waitingInput).workInFlight)
+    }
+
+    func testQuitSleepOfAnIdleSessionLosesNothing() {
+        XCTAssertEqual(SessionQuitSleep.reason(for: .idle), .quit)
+        XCTAssertFalse(SessionQuitSleep.reason(for: .idle).workInFlight)
+        // The reaper's own reasons are the whole point of the distinction: they mean
+        // the policy proved nothing was in flight.
+        XCTAssertFalse(SessionSleepReason.idleReap.workInFlight)
+        XCTAssertFalse(SessionSleepReason.liveCap.workInFlight)
+        // And a caller that did not say is not evidence that work was lost.
+        XCTAssertFalse(SessionSleepReason.manual.workInFlight)
+        XCTAssertFalse(SessionSleepReason.unspecified.workInFlight)
+    }
+
+    func testWouldInterruptWorkDetectsAnyUnfinishedTurnInTheBatch() {
+        XCTAssertFalse(SessionQuitSleep.wouldInterruptWork([]))
+        XCTAssertFalse(SessionQuitSleep.wouldInterruptWork([.idle, .idle]))
+        // One busy agent among two dozen idle ones still means work is lost — the
+        // shape of the original incident, where the count was what nobody saw.
+        XCTAssertTrue(SessionQuitSleep.wouldInterruptWork(
+            Array(repeating: .idle, count: 24) + [.busy]))
+        XCTAssertTrue(SessionQuitSleep.wouldInterruptWork([.idle, .waitingInput]))
+    }
+
     // MARK: - streak lifecycle
 
     func testFirstIdleSweepCapturesBaseline() {
