@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.8.0",
+  "specRevision": "1.9.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -36,7 +36,8 @@
       "reaper",
       "stuck",
       "sessionList",
-      "sessionDelete"
+      "sessionDelete",
+      "sessionSleep"
     ],
     "gates": {
       "queue": [
@@ -116,6 +117,9 @@
       "sessionDelete": [
         "deleteSession",
         "sessionDeleted"
+      ],
+      "sessionSleep": [
+        "sleepSession"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -217,6 +221,14 @@
         "sessionId"
       ],
       "optional": []
+    },
+    "sleepSession": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [],
+      "capability": "sessionSleep",
+      "notes": "Put a session to sleep on purpose: the core flags its row `dormant` and only then kills the CLI tree, so the ~300MB comes back and the row it leaves behind is a conversation to return to rather than one that died. No reply, for the same reason `setReaperPolicy` has none: the effect IS the `sessionMeta` carrying `dormant: true` followed by the session's `exit`, in that order, and a core that flagged after the kill would leave a row every client renders as a crash. A session with no live pty is answered with `error` and not flagged, because `dormant` is the set a global play revives and a relabelled crash would be woken as if somebody had paused it. Waking is `reactivate`, which already clears the flag on every path that respawns a pty - see the `sleepAndWake` decision for why there is no second frame for that half."
     },
     "listSessions": {
       "required": [],
@@ -645,6 +657,6 @@
     "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here.",
     "restartFresh grid": "restartFresh takes cols/rows like attach and reactivate rather than reusing the grid the session died at: the client that asks for the restart is the one about to render it, and the CLI wraps its first turn at the spawn width forever.",
     "contributions": "The Rust core decodes `subscribeContributions`, `unsubscribeContributions` and `activateContribution` and encodes `contributions` and `contributionResult`, and they are deliberately absent from this catalogue, because it withholds the `contributions` capability: nothing renders a descriptor yet, and advertising it would promise chrome nothing draws. Under CATALOGUE_IS_THE_UNION an unadvertised frame is not on the wire as far as any feature-detecting client is concerned, so it is not catalogued either - which is why `drift.test.ts` carries the five type names in one explicit list with this reason attached. The day the capability is advertised, that list is what makes the suite go red until this file describes them.",
-    "sleepAndWake": "Sleeping a session has no frame of its own, and waking it has no frame beyond reactivate. A reap is not a command a client sends; it is something the core decides, and what a client needs to see is the outcome - a sessionMeta carrying dormant: true, followed by the session's exit. Waking is reactivate, which already answers with the woken row. A dedicated sleep/wake pair would be a second way to say what kill and reactivate already say, and a second way for the two to disagree."
+    "sleepAndWake": "Half of this reversed, and the other half did not. Sleeping now has `sleepSession` (capability `sessionSleep`), because the argument that a reap is only ever the core's decision was wrong: the desktop has a global pause, and with no frame to ask with it degraded to a plain `kill` plus a `dormant` flag written onto its OWN mirror row, so the core could not tell five sessions somebody paused from five somebody ended - and its reaper, its boot-time rehydrate and any liveness accounting after them all read the kill (juancode-nizo). A client asking to sleep is not the same statement as a client killing, and the row has to carry the difference. Waking is still `reactivate` and deliberately gets no frame of its own: it already answers with the woken row and every path that respawns a pty clears the flag through it, so a `wakeSession` beside it would be a second spelling of one operation and a second thing to keep in agreement."
   }
 }

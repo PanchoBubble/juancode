@@ -811,9 +811,12 @@ impl SessionReaper {
         None
     }
 
-    /// Flag dormant, then kill — in that order, so the exited row the pty's death
-    /// finalises already carries `dormant = true` and a client can tell "slept, wake me
-    /// on demand" from a crash.
+    /// One reaped session: say why on the evidence that decided it, then hand the
+    /// flag-then-kill pair to [`SessionsApi::sleep`], which owns that order.
+    ///
+    /// The audit line is the reaper's own and stays here: a client that hits pause
+    /// leaves the same row behind but has no streak and no sampled signals to report,
+    /// which is exactly why the reason travels with the log rather than with the sleep.
     fn sleep(&self, id: &str, reason: SleepReason, audit: impl FnOnce() -> String) {
         info!(
             event = "session_sleep",
@@ -822,11 +825,8 @@ impl SessionReaper {
             evidence = %audit(),
             "sleeping a session"
         );
-        if !self.sessions.mark_dormant(id) {
-            debug!(session = %id, "the dormant flag was already set");
-        }
-        if let Err(e) = self.sessions.kill(id) {
-            warn!(session = %id, error = %e, "could not kill a session being slept");
+        if let Err(e) = self.sessions.sleep(id) {
+            warn!(session = %id, error = %e, "could not sleep a session");
         }
     }
 

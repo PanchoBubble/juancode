@@ -213,18 +213,35 @@ final class RemoteLiveSessionTests: XCTestCase {
         XCTAssertTrue(transport.kills.isEmpty)
     }
 
-    /// Sleep has no frame: it degrades to a kill plus the dormant flag, which is
-    /// what dormant means — pty gone, row resumable.
-    func testMarkDormantKillsAndFlagsTheRow() {
-        let transport = FakeTransport()
+    /// A core that speaks `sleepSession` is ASKED to sleep the session, and not
+    /// killed: the flag has to land on the core's own row, or the core cannot tell a
+    /// session the user paused from one the user ended, and its reaper, its restore
+    /// plan and its liveness accounting all read the kill (juancode-nizo).
+    func testMarkDormantAsksACoreThatSpeaksTheSleepFrame() {
+        let transport = FakeTransport(capabilities: ["sessionSleep"])
         let session = handle(transport)
         let metaEdits = Recorder<SessionMeta>()
         _ = session.onMetaChange { metaEdits.record($0) }
 
         session.markDormant()
-        XCTAssertEqual(transport.kills, ["s1"])
+        XCTAssertEqual(transport.sleeps, ["s1"])
+        XCTAssertTrue(transport.kills.isEmpty, "a pause is not a kill")
         XCTAssertTrue(session.meta.dormant)
         XCTAssertEqual(metaEdits.all.last?.dormant, true)
+        XCTAssertEqual(transport.persisted.last?.meta.dormant, true)
+    }
+
+    /// And on a core without the frame it is still a pause, degraded: the kill plus
+    /// the flag on the desktop's own mirror row. Worse than asking, better than a
+    /// button that does nothing.
+    func testMarkDormantFallsBackToAKillWithoutTheFrame() {
+        let transport = FakeTransport(capabilities: [])
+        let session = handle(transport)
+
+        session.markDormant()
+        XCTAssertEqual(transport.kills, ["s1"])
+        XCTAssertTrue(transport.sleeps.isEmpty)
+        XCTAssertTrue(session.meta.dormant)
         XCTAssertEqual(transport.persisted.last?.meta.dormant, true)
     }
 
@@ -327,6 +344,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
     private var recordedInputs: [String] = []
     private var recordedResizes: [(cols: Int, rows: Int)] = []
     private var recordedKills: [String] = []
+    private var recordedSleeps: [String] = []
     private var recordedPersists: [(meta: SessionMeta, scrollback: [UInt8]?)] = []
 
     init(capabilities: Set<String> = ["inputAck", "resizeAck", "screen", "adoptExternal"]) {
@@ -336,6 +354,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
     var inputs: [String] { lock.withLock { recordedInputs } }
     var resizes: [(cols: Int, rows: Int)] { lock.withLock { recordedResizes } }
     var kills: [String] { lock.withLock { recordedKills } }
+    var sleeps: [String] { lock.withLock { recordedSleeps } }
     var persisted: [(meta: SessionMeta, scrollback: [UInt8]?)] { lock.withLock { recordedPersists } }
 
     func supports(_ capability: CoreCapability) -> Bool { capabilities.contains(capability.rawValue) }
@@ -350,6 +369,15 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
 
     func sendKill(sessionId: String) {
         lock.withLock { recordedKills.append(sessionId) }
+    }
+
+    /// Keyed on the raw capability string, the way `RustCoreClient` keys it: there is
+    /// no `CoreCapability` case for `sessionSleep`, because the Swift core sleeps a
+    /// session with no frame at all.
+    func sendSleep(sessionId: String) -> Bool {
+        guard capabilities.contains("sessionSleep") else { return false }
+        lock.withLock { recordedSleeps.append(sessionId) }
+        return true
     }
 
     func persist(_ meta: SessionMeta, scrollback: [UInt8]?) {

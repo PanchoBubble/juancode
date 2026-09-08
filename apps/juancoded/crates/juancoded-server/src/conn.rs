@@ -762,6 +762,23 @@ fn handle_client_message(
             }
         }
 
+        ClientMessage::SleepSession { session_id } => {
+            // The dormant row and the `exit` behind it are broadcast by the registry,
+            // so there is nothing to push on success: a client hears the same two
+            // frames whether the sweep slept the session or it asked for it.
+            //
+            // A session whose pty is already gone is refused rather than flagged.
+            // Dormancy is the row that says "there is a conversation here, wake me";
+            // stamping it onto one that crashed, or onto one the user killed, would
+            // put those rows in the set a global play revives.
+            if let Err(e) = sessions.sleep(&session_id) {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id),
+                    message: e.to_string(),
+                });
+            }
+        }
+
         ClientMessage::ListSessions => {
             outbound.push(ServerMessage::Sessions {
                 sessions: sessions.sessions(),
@@ -1557,5 +1574,65 @@ mod tests {
             snapshots(&frames).is_empty(),
             "nothing was queued, so there is no snapshot to send"
         );
+    }
+
+    /// The pause frame, and the row it must leave behind.
+    ///
+    /// A `kill` and a `sleepSession` both end the pty; the only thing that tells the
+    /// two apart afterwards is `dormant` on the daemon's own row, which is why the
+    /// desktop writing that flag onto its private mirror instead was a pause this core
+    /// could not see (juancode-nizo).
+    #[tokio::test]
+    async fn sleeping_a_session_broadcasts_a_dormant_row() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let id = rig.session();
+        fanout.attached.insert(id.clone());
+
+        let frames = rig.step(
+            ClientMessage::SleepSession {
+                session_id: id.clone(),
+            },
+            &mut fanout,
+        );
+        assert!(
+            frames.iter().any(|f| matches!(
+                f,
+                ServerMessage::SessionMeta { session, .. } if session.id == id && session.dormant
+            )),
+            "no dormant row went out: {frames:?}"
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{frames:?}"
+        );
+        assert!(rig.sessions().meta(&id).expect("the row stays").dormant);
+    }
+
+    /// A frame for a session this core has no live pty for is refused, and refused
+    /// without flagging anything: a `dormant` row is the set a global play revives, so
+    /// a crash relabelled as asleep would be woken as if the user had paused it.
+    #[test]
+    fn sleeping_a_session_that_is_not_running_answers_an_error() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+
+        let frames = rig.step(
+            ClientMessage::SleepSession {
+                session_id: "no-such-session".into(),
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::Error {
+            session_id,
+            message,
+        }] = &frames[..]
+        else {
+            panic!("expected one error, got {frames:?}");
+        };
+        assert_eq!(session_id.as_deref(), Some("no-such-session"));
+        assert_eq!(message, "Session is not running");
     }
 }

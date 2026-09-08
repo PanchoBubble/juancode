@@ -2,8 +2,8 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-09-07",
-  "specRevision": "1.8.0",
+  "measuredAt": "2026-09-08",
+  "specRevision": "1.9.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -17,6 +17,7 @@
     "queueEdit",
     "transcript",
     "reaper",
+    "sessionSleep",
     "spawnModel",
     "spawnPreset",
     "stuck",
@@ -182,6 +183,11 @@
       "passes": 3
     },
     "session-delete": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-sleep": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

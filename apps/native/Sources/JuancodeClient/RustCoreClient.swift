@@ -159,6 +159,15 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     static let sessionListCapability = "sessionList"
     /// The capability behind `deleteSession`/`sessionDeleted`, same reasoning.
     static let sessionDeleteCapability = "sessionDelete"
+    /// The capability behind `sleepSession`.
+    ///
+    /// A string rather than a `CoreCapability` case for the same reason `reaper` is:
+    /// the enum is the list whose every name the Swift core advertises, and the Swift
+    /// core sleeps a session in-process with no frame at all. A case here would make
+    /// the capability panel report "cannot sleep a session" for the one core that
+    /// always could. There is no gated button either — a pause on a core without the
+    /// frame still pauses, it just leaves a row that reads as a kill.
+    static let sessionSleepCapability = "sessionSleep"
     /// How long boot waits for the first `sessions` snapshot. Long enough for the
     /// daemon to serialise a few hundred rows, short enough that an unresponsive core
     /// costs a late sidebar rather than a launch.
@@ -568,6 +577,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     func sendKill(sessionId: String) {
         connection.send(["type": "kill", "sessionId": sessionId])
+    }
+
+    func sendSleep(sessionId: String) -> Bool {
+        guard info.has(Self.sessionSleepCapability) else { return false }
+        connection.send(["type": "sleepSession", "sessionId": sessionId])
+        return true
     }
 
     func persist(_ meta: SessionMeta, scrollback: [UInt8]?) {
