@@ -12,6 +12,7 @@ use axum::routing::get;
 use axum::Router;
 use tracing::{info, warn};
 
+use juancoded_cordis::services::pty::{PtySpawnApi, PtySpawnService};
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
@@ -52,6 +53,14 @@ pub struct CoreHandles {
     /// The stuck-session detector. Advisory only: it broadcasts
     /// `SessionEvent::Stuck` and nothing in this process acts on it.
     pub stuck: Option<Arc<StuckWatch>>,
+    /// The `pty` service, for the editor and shell panes a connection opens. `None`
+    /// when the tree mounted none, and `openEditor` / `openTerminal` then answer with
+    /// an error rather than a pane that never paints.
+    ///
+    /// Reached through the same key the registry uses, deliberately: an ephemeral pty
+    /// is not a session, but it is still a child of this daemon, and going around the
+    /// service would put it outside the index that ends every child on shutdown.
+    pub pty: Option<Arc<dyn PtySpawnApi>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -71,6 +80,7 @@ impl CoreHandles {
             .zip(loader.services().resolve::<StoreService>().ok())
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
         let queue = loader.services().resolve::<QueueService>().ok();
+        let pty = loader.services().resolve::<PtySpawnService>().ok();
         // The reaper reads the transcripts hub directly for its size probe: the hub
         // already holds every binding it has resolved, so one call per sweep replaces a
         // path resolution per session and nothing has to shell out to `stat`.
@@ -99,6 +109,7 @@ impl CoreHandles {
             transcripts,
             reaper,
             stuck,
+            pty,
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,

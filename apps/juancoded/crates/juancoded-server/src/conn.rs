@@ -29,6 +29,7 @@ use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
+use crate::ephemeral::EphemeralPtys;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
@@ -90,6 +91,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         // The stuck detector broadcasts on the session bus and answers no frame, so a
         // connection needs the handle for nothing.
         stuck: _,
+        pty,
         bus,
         identity,
     } = handles;
@@ -161,6 +163,9 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         carries: HashMap::new(),
         oob: oob_tx,
     };
+    // Tab-scoped, so it lives here rather than in the tree: the editor and shell
+    // panes this client opened die with the socket that opened them.
+    let mut ephemeral = EphemeralPtys::new(pty, fanout.oob.clone());
     let mut screens: HashMap<String, ScreenStreamer> = HashMap::new();
     let mut ticker = tokio::time::interval(SCREEN_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -203,6 +208,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                 client,
                                 &mut fanout,
                                 &mut screens,
+                                &mut ephemeral,
                                 &mut reply,
                             ),
                             Err(e) => {
@@ -277,13 +283,16 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
 
         for msg in outbound {
             if tx.send(Message::Text(msg.to_json().into())).await.is_err() {
+                ephemeral.close_all();
                 release(&sessions, reaper.as_ref(), client);
                 return;
             }
         }
     }
-    // The socket is gone: drop this client's grid claims so the next viewer's resize
-    // is applied rather than denied by a connection nobody is holding.
+    // The socket is gone: end the panes it owned, and drop this client's grid claims
+    // so the next viewer's resize is applied rather than denied by a connection nobody
+    // is holding.
+    ephemeral.close_all();
     release(&sessions, reaper.as_ref(), client);
 }
 
@@ -552,6 +561,7 @@ fn handle_client_message(
     client: ClientId,
     fanout: &mut Fanout,
     screens: &mut HashMap<String, ScreenStreamer>,
+    ephemeral: &mut EphemeralPtys,
     outbound: &mut Vec<ServerMessage>,
 ) {
     let Tree {
@@ -739,7 +749,12 @@ fn handle_client_message(
             data,
             seq,
         } => {
-            if let Err(e) = sessions.input(&session_id, data.as_bytes()) {
+            // An editor or shell pane is addressed by the same frame as a session, so
+            // the id is looked for here first. Ids are uuids from two generators that
+            // cannot collide, so the order is about who answers, not about ambiguity.
+            if ephemeral.holds(&session_id) {
+                ephemeral.input(&session_id, data.as_bytes());
+            } else if let Err(e) = sessions.input(&session_id, data.as_bytes()) {
                 debug!(session = session_id, error = %e, "input went nowhere");
             }
             // Acked after the write attempt either way: the ack means the frame was
@@ -755,28 +770,72 @@ fn handle_client_message(
             rows,
             seq,
         } => {
-            let outcome = sessions.resize(&session_id, client, cols, rows);
+            // A session's grid is arbitrated between its viewers; an ephemeral pty's
+            // is not, because it has exactly one. So an ephemeral resize is never
+            // denied and never has an owner to report — there is nobody to lose to.
+            let (applied, denied, owner) = if ephemeral.holds(&session_id) {
+                (ephemeral.resize(&session_id, cols, rows), false, None)
+            } else {
+                let outcome = sessions.resize(&session_id, client, cols, rows);
+                (outcome.applied, outcome.denied, outcome.owner)
+            };
             if let Some(seq) = seq {
                 outbound.push(ServerMessage::ResizeAck {
                     session_id,
                     seq,
                     cols,
                     rows,
-                    applied: outcome.applied,
-                    denied: outcome.denied,
-                    owner: outcome.owner,
+                    applied,
+                    denied,
+                    owner,
                 });
             }
         }
 
         ClientMessage::Kill { session_id } => {
-            if let Err(e) = sessions.kill(&session_id) {
+            if ephemeral.holds(&session_id) {
+                // The `exit` comes from the pty's own pump, exactly as it would if the
+                // editor had quit on its own, so there is nothing to push here.
+                ephemeral.kill(&session_id);
+            } else if let Err(e) = sessions.kill(&session_id) {
                 outbound.push(ServerMessage::Error {
                     session_id: Some(session_id),
                     message: e.to_string(),
                 });
             }
         }
+
+        ClientMessage::OpenEditor {
+            cwd,
+            file,
+            cols,
+            rows,
+        } => match ephemeral.open_editor(&cwd, &file, cols, rows) {
+            Ok(editor_id) => outbound.push(ServerMessage::EditorReady { editor_id }),
+            Err(e) => outbound.push(ServerMessage::Error {
+                session_id: None,
+                message: format!("Failed to open editor: {e}"),
+            }),
+        },
+
+        ClientMessage::OpenTerminal {
+            cwd,
+            cols,
+            rows,
+            request_id,
+        } => match ephemeral.open_terminal(&cwd, cols, rows) {
+            // The client's own id, echoed rather than regenerated: it is the only
+            // thing that tells two simultaneous opens apart, and a core that made up
+            // its own would answer both with something neither client asked for.
+            Ok(terminal_id) => outbound.push(ServerMessage::TerminalReady {
+                terminal_id,
+                request_id,
+            }),
+            Err(e) => outbound.push(ServerMessage::Error {
+                session_id: None,
+                message: format!("Failed to open terminal: {e}"),
+            }),
+        },
 
         ClientMessage::SleepSession { session_id } => {
             // The dormant row and the `exit` behind it are broadcast by the registry,
@@ -1048,6 +1107,7 @@ mod tests {
     ) -> Vec<ServerMessage> {
         let mut reply = Vec::new();
         let mut screens = HashMap::new();
+        let mut ephemeral = EphemeralPtys::new(handles.pty.clone(), fanout.oob.clone());
         handle_client_message(
             msg,
             &Tree {
@@ -1060,6 +1120,7 @@ mod tests {
             1,
             fanout,
             &mut screens,
+            &mut ephemeral,
             &mut reply,
         );
         reply
@@ -1223,6 +1284,13 @@ mod tests {
         handles: CoreHandles,
         events: tokio::sync::broadcast::Receiver<SessionEvent>,
         published: Arc<std::sync::Mutex<Vec<QueueSnapshot>>>,
+        /// This connection's editor and shell panes, held across steps because that is
+        /// what they are: an `openTerminal` in one frame and the `resize` that
+        /// addresses it in the next are the same pane.
+        ephemeral: EphemeralPtys,
+        /// Where the ephemeral pumps put their `output` and `exit` frames — the side
+        /// channel the real loop drains in its own select arm.
+        oob: tokio::sync::mpsc::UnboundedReceiver<ServerMessage>,
         _listener: juancoded_cordis::Effect,
     }
 
@@ -1235,12 +1303,27 @@ mod tests {
             let listener = handles.bus.on::<QueueChanged, _>("test.queue", move |s| {
                 sink.lock().unwrap().push(s.clone());
             });
+            let (oob_tx, oob) = tokio::sync::mpsc::unbounded_channel();
             Self {
+                ephemeral: EphemeralPtys::with_commands(
+                    handles.pty.clone(),
+                    oob_tx,
+                    crate::ephemeral::testing::cat_commands(),
+                ),
                 handles,
                 events,
                 published,
+                oob,
                 _listener: listener,
             }
+        }
+
+        /// Wait for one frame the pumps owe this client, or give up.
+        ///
+        /// A real pty is a real process: its first bytes and its exit arrive when the
+        /// scheduler says so, not when the frame that started it returns.
+        async fn awaited(&mut self, within: Duration) -> Option<ServerMessage> {
+            tokio::time::timeout(within, self.oob.recv()).await.ok()?
         }
 
         fn sessions(&self) -> &Arc<dyn SessionsApi> {
@@ -1292,6 +1375,7 @@ mod tests {
                 1,
                 fanout,
                 &mut screens,
+                &mut self.ephemeral,
                 &mut reply,
             );
             let mut ahead = Vec::new();
@@ -1650,5 +1734,174 @@ mod tests {
         };
         assert_eq!(session_id.as_deref(), Some("no-such-session"));
         assert_eq!(message, "Session is not running");
+    }
+
+    /// The whole reason `terminalReady` carries a `requestId`.
+    ///
+    /// A client can have several opens in flight — a tab strip opening three shells at
+    /// once, a phone and a desktop on one daemon — and two `terminalReady` frames
+    /// carrying only a fresh id each give it no way to say which pane either belongs
+    /// to. Echoing the client's own id is what makes them tellable apart.
+    #[tokio::test]
+    async fn two_terminals_opened_at_once_are_told_apart_by_their_request_ids() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+
+        let mut ready = Vec::new();
+        for req in ["req-a", "req-b"] {
+            ready.extend(rig.step(
+                ClientMessage::OpenTerminal {
+                    cwd: "/tmp".into(),
+                    cols: 80,
+                    rows: 24,
+                    request_id: req.into(),
+                },
+                &mut fanout,
+            ));
+        }
+
+        let pairs: Vec<(String, String)> = ready
+            .iter()
+            .filter_map(|f| match f {
+                ServerMessage::TerminalReady {
+                    terminal_id,
+                    request_id,
+                } => Some((request_id.clone(), terminal_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pairs.len(), 2, "one ready per open: {ready:?}");
+        assert_eq!(pairs[0].0, "req-a");
+        assert_eq!(pairs[1].0, "req-b");
+        assert_ne!(pairs[0].1, pairs[1].1, "two opens, two ptys");
+    }
+
+    /// An ephemeral pty is addressed by the frames a session is addressed by, which is
+    /// the whole point of handing the client an id for it: `resize` acks it, `input`
+    /// reaches it, its bytes come back as `output` under that id, and `kill` ends it
+    /// with an `exit` under the same one.
+    #[tokio::test]
+    async fn a_shell_pty_answers_the_same_frames_a_session_does() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+
+        let opened = rig.step(
+            ClientMessage::OpenTerminal {
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                request_id: "req".into(),
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::TerminalReady { terminal_id, .. }] = &opened[..] else {
+            panic!("expected one terminalReady, got {opened:?}");
+        };
+        let id = terminal_id.clone();
+
+        // Unarbitrated: one tab owns this pane, so there is nobody to be denied by and
+        // no owner to report.
+        let acked = rig.step(
+            ClientMessage::Resize {
+                session_id: id.clone(),
+                cols: 100,
+                rows: 30,
+                seq: Some(1),
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::ResizeAck {
+            session_id,
+            seq,
+            cols,
+            rows,
+            applied,
+            denied,
+            owner,
+        }] = &acked[..]
+        else {
+            panic!("expected one resizeAck, got {acked:?}");
+        };
+        assert_eq!(
+            (session_id.as_str(), *seq, *cols, *rows),
+            (id.as_str(), 1, 100, 30)
+        );
+        assert!(*applied, "the pty is live, so the grid reached it");
+        assert!(!*denied);
+        assert_eq!(*owner, None);
+
+        rig.step(
+            ClientMessage::Input {
+                session_id: id.clone(),
+                data: "ping\n".into(),
+                seq: None,
+            },
+            &mut fanout,
+        );
+        let echoed = rig
+            .awaited(Duration::from_secs(5))
+            .await
+            .expect("the pty echoed what it was written");
+        let ServerMessage::Output { session_id, data } = &echoed else {
+            panic!("expected output, got {echoed:?}");
+        };
+        assert_eq!(session_id, &id, "bytes arrive under the pty's own id");
+        assert!(data.contains("ping"), "{data:?}");
+
+        rig.step(
+            ClientMessage::Kill {
+                session_id: id.clone(),
+            },
+            &mut fanout,
+        );
+        let exit = loop {
+            let frame = rig
+                .awaited(Duration::from_secs(5))
+                .await
+                .expect("a killed pty exits");
+            if let ServerMessage::Exit { .. } = frame {
+                break frame;
+            }
+        };
+        let ServerMessage::Exit {
+            session_id,
+            exit_code,
+        } = &exit
+        else {
+            unreachable!()
+        };
+        assert_eq!(session_id, &id);
+        assert!(exit_code.is_some(), "an exit reports a code, not silence");
+    }
+
+    /// The path in an `openEditor` comes from a client, and the editor runs as whoever
+    /// runs the daemon. `cwd` is the confinement, so a file outside it is refused
+    /// rather than opened.
+    #[tokio::test]
+    async fn an_editor_will_not_open_a_file_outside_the_directory_it_was_given() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+
+        let frames = rig.step(
+            ClientMessage::OpenEditor {
+                cwd: "/tmp".into(),
+                file: "../etc/passwd".into(),
+                cols: 80,
+                rows: 24,
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::Error {
+            session_id,
+            message,
+        }] = &frames[..]
+        else {
+            panic!("expected one error, got {frames:?}");
+        };
+        assert_eq!(session_id.as_deref(), None, "no pane, so no id to blame");
+        assert!(
+            message.contains("outside the working directory"),
+            "{message}"
+        );
     }
 }

@@ -19,6 +19,8 @@
     "reaper",
     "sessionSleep",
     "restartFresh",
+    "editor",
+    "terminal",
     "spawnModel",
     "spawnPreset",
     "stuck",
@@ -96,8 +98,9 @@
       "note": "core does not advertise the \"trackedPrs\" capability"
     },
     "editor-terminal": {
-      "status": "skipped",
-      "note": "core does not advertise the \"editor\" capability"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "adopt-external": {
       "status": "passed",
