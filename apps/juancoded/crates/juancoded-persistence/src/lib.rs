@@ -53,21 +53,15 @@ pub struct QueuedMessage {
     pub created_at: i64,
 }
 
-/// One watched pull request. Stored here so the watch list survives a restart; the
-/// poll loop that drives it is a later ticket.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackedPr {
-    pub id: String,
-    pub number: i64,
-    pub title: String,
-    pub url: String,
-    pub branch: String,
-    pub cwd: String,
-    pub session_id: Option<String>,
-    pub state: String,
-    pub checks: String,
-    pub created_at: i64,
-}
+/// One watched pull request, as the tracked-PR engine holds it. Stored here so the
+/// watch list, its open decisions and its diff baseline all survive a restart.
+///
+/// The domain type rather than a row shape of its own: the engine and the store would
+/// otherwise need a mapping between two structs that carry the same facts, and the
+/// only thing a second struct could add is a way for them to disagree. `state` and
+/// `checks` are still columns, derived on write, because they are what makes the table
+/// readable by a human with a sqlite prompt.
+pub use juancoded_core::pr::TrackedPr;
 
 /// Where this core's DB lives.
 ///
@@ -477,12 +471,20 @@ impl SessionStore for SqliteStore {
     }
 
     fn upsert_tracked_pr(&self, pr: &TrackedPr) -> Result<()> {
+        // Both JSON, for the reason `transcript_records.record` is: a set of seen
+        // comment ids has no column shape, and a column per notification field would
+        // have to be migrated every time the engine's contract grows.
+        let notifications = serde_json::to_string(&pr.notifications)?;
+        let baseline = serde_json::to_string(&pr.baseline)?;
         self.conn().execute(
             "INSERT INTO tracked_prs (id, number, title, url, branch, cwd, session_id, state, \
-             checks, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+             checks, created_at, repo_nwo, last_polled_at, notifications, baseline) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) \
              ON CONFLICT(id) DO UPDATE SET number=excluded.number, title=excluded.title, \
              url=excluded.url, branch=excluded.branch, cwd=excluded.cwd, \
-             session_id=excluded.session_id, state=excluded.state, checks=excluded.checks",
+             session_id=excluded.session_id, state=excluded.state, checks=excluded.checks, \
+             repo_nwo=excluded.repo_nwo, last_polled_at=excluded.last_polled_at, \
+             notifications=excluded.notifications, baseline=excluded.baseline",
             params![
                 pr.id,
                 pr.number,
@@ -491,9 +493,13 @@ impl SessionStore for SqliteStore {
                 pr.branch,
                 pr.cwd,
                 pr.session_id,
-                pr.state,
-                pr.checks,
+                pr.state().as_str(),
+                pr.baseline.checks.as_str(),
                 pr.created_at,
+                pr.repo_nwo,
+                pr.last_polled_at,
+                notifications,
+                baseline,
             ],
         )?;
         Ok(())
@@ -508,10 +514,17 @@ impl SessionStore for SqliteStore {
     fn tracked_prs(&self) -> Result<Vec<TrackedPr>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, number, title, url, branch, cwd, session_id, state, checks, created_at \
-             FROM tracked_prs ORDER BY created_at ASC",
+            "SELECT id, number, title, url, branch, cwd, session_id, created_at, repo_nwo, \
+             last_polled_at, notifications, baseline FROM tracked_prs ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |r| {
+            // `state` and `checks` are deliberately not read back: both are derived
+            // from the baseline and the open decisions, and reading a stored copy is
+            // how a row starts disagreeing with itself. A payload that will not parse
+            // costs the watch its history — the next poll re-baselines and emits
+            // nothing — rather than costing the whole load its rows.
+            let notifications: String = r.get(10)?;
+            let baseline: String = r.get(11)?;
             Ok(TrackedPr {
                 id: r.get(0)?,
                 number: r.get(1)?,
@@ -520,9 +533,11 @@ impl SessionStore for SqliteStore {
                 branch: r.get(4)?,
                 cwd: r.get(5)?,
                 session_id: r.get(6)?,
-                state: r.get(7)?,
-                checks: r.get(8)?,
-                created_at: r.get(9)?,
+                created_at: r.get(7)?,
+                repo_nwo: r.get(8)?,
+                last_polled_at: r.get(9)?,
+                notifications: serde_json::from_str(&notifications).unwrap_or_default(),
+                baseline: serde_json::from_str(&baseline).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -875,7 +890,7 @@ mod tests {
     #[test]
     fn tracked_prs_survive_and_untrack_cleanly() {
         let store = SqliteStore::in_memory().unwrap();
-        let pr = TrackedPr {
+        let mut pr = TrackedPr {
             id: "t1".into(),
             number: 4242,
             title: "fixture".into(),
@@ -883,12 +898,48 @@ mod tests {
             branch: "main".into(),
             cwd: "/repo".into(),
             session_id: Some("s1".into()),
-            state: "watching".into(),
-            checks: "none".into(),
+            repo_nwo: None,
+            baseline: Default::default(),
+            notifications: Vec::new(),
+            last_polled_at: None,
             created_at: 5,
         };
         store.upsert_tracked_pr(&pr).unwrap();
         assert_eq!(store.tracked_prs().unwrap(), vec![pr.clone()]);
+
+        // The two things a restart must not lose: an open decision nobody has dealt
+        // with, and the baseline that stops the next poll replaying old activity as new.
+        pr.notifications
+            .push(juancoded_core::pr::TrackNotification {
+                id: "n1".into(),
+                pr_number: 4242,
+                message: "@somebody requested changes".into(),
+                created_at: 6,
+            });
+        pr.baseline.baselined = true;
+        pr.baseline.checks = juancoded_core::pr::PrChecks::Failing;
+        pr.baseline.seen_comment_ids.insert("c1".into());
+        pr.repo_nwo = Some("owner/repo".into());
+        pr.last_polled_at = Some(7);
+        store.upsert_tracked_pr(&pr).unwrap();
+        let back = store.tracked_prs().unwrap();
+        assert_eq!(back, vec![pr.clone()]);
+        assert_eq!(
+            back[0].state(),
+            juancoded_core::pr::TrackState::NeedsDecision,
+            "the badge is derived, so it comes back from the decision rather than a column"
+        );
+        let stored_state: String = store
+            .conn()
+            .query_row("SELECT state FROM tracked_prs WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            stored_state, "needs_decision",
+            "the column is still written, for whoever opens the file with sqlite3"
+        );
+
         store.untrack_pr("t1").unwrap();
         assert!(store.tracked_prs().unwrap().is_empty());
     }

@@ -153,6 +153,73 @@ final class CoreBackendTests: XCTestCase {
         XCTAssertEqual(booted.selection.active, .swift)
     }
 
+    // MARK: - Tracked PRs over the wire
+
+    /// The wire's tracked-PR row is not this struct, and the gap is where a client
+    /// gets it wrong: the daemon sends the DERIVED `state` and a flat `checks`, while
+    /// `TrackedPr` keeps a whole diff baseline and derives `state` from it. So the
+    /// decode has to put `checks` back where it came from, or every row a rust core
+    /// reports reads as "watching" however red its CI is.
+    func testTheWireTrackedPrRowDecodesBackIntoADerivableRow() {
+        let rows: [[String: Any]] = [
+            [
+                "id": "/w/repo#4242",
+                "number": 4242,
+                "title": "conformance fixture PR",
+                "branch": "main",
+                "url": "https://example.invalid/pr/4242",
+                "cwd": "/w/repo",
+                "sessionId": "s-1",
+                "state": "fixing",
+                "checks": "failing",
+                "notifications": [],
+                "lastPolledAt": 1_700_000_000_000,
+            ],
+            [
+                "id": "/w/repo#99",
+                "number": 99,
+                "title": "needs a human",
+                "branch": "feature",
+                "url": "https://example.invalid/pr/99",
+                "cwd": "/w/repo",
+                "sessionId": NSNull(),
+                "state": "needs_decision",
+                "checks": "passing",
+                "notifications": [
+                    ["id": "n-1", "prNumber": 99, "message": "@somebody requested changes",
+                     "createdAt": 5],
+                ],
+            ],
+        ]
+        let decoded = RustCoreClient.decodeTrackedPrs(rows)
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0].id, "/w/repo#4242", "the id is the cwd#number key, not a field")
+        XCTAssertEqual(decoded[0].sessionId, "s-1")
+        XCTAssertEqual(decoded[0].snapshot.checks, .failing)
+        XCTAssertEqual(decoded[0].state, .fixing, "derived, and it has to match what the core sent")
+        XCTAssertEqual(decoded[0].lastPolledAt, 1_700_000_000_000)
+
+        XCTAssertEqual(decoded[1].sessionId, "", "a null session is empty, not a dropped row")
+        XCTAssertEqual(decoded[1].notifications.map(\.message), ["@somebody requested changes"])
+        XCTAssertEqual(decoded[1].state, .needsDecision, "an open decision outranks green CI")
+        XCTAssertNil(decoded[1].lastPolledAt, "never polled is absent, not zero")
+    }
+
+    /// A row missing what a watch IS gets dropped, and a row with an unknown `checks`
+    /// spelling is kept: a newer core's colour must not cost the client the whole list.
+    func testAnUnreadableTrackedPrRowIsDroppedRatherThanFatal() {
+        let decoded = RustCoreClient.decodeTrackedPrs([
+            ["number": 1, "cwd": "/w/repo", "checks": "something-new"],
+            ["cwd": "/w/repo"],
+            ["number": 2],
+        ])
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].snapshot.checks, .none)
+        XCTAssertEqual(decoded[0].state, .watching)
+        XCTAssertTrue(RustCoreClient.decodeTrackedPrs("not a list").isEmpty)
+        XCTAssertNil(RustCoreClient.decodeTrackNotification(["id": "n-1"]))
+    }
+
     // MARK: - Capability gating
 
     /// What the rust daemon advertises as of 2026-08-21, measured against a booted

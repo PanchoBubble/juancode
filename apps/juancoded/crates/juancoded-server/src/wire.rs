@@ -16,6 +16,7 @@ use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as Contribution
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
+use juancoded_core::pr::{TrackNotification, TrackedPr};
 use juancoded_state::{ClientId, StuckAlert};
 use juancoded_vt::wire::RowUpdate;
 
@@ -24,9 +25,11 @@ use crate::identity::DaemonIdentity;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// What the Rust core implements today, and nothing more. Deliberately shorter than
-/// the Swift core's list: no `trackedPrs`. Clients feature-detect off this, so a name
-/// here that the core does not answer is worse than an omission — it turns a hidden
-/// button into a broken one.
+/// the Swift core's list only in that it is longer: `trackedPrs` was the last name the
+/// Swift core had and this one did not, so what remains withheld is `contributions`,
+/// which no core advertises. Clients feature-detect off this, so a name here that the
+/// core does not answer is worse than an omission — it turns a hidden button into a
+/// broken one.
 ///
 /// `queue` is advertised now on exactly the terms it was withheld on. It was absent
 /// while every frame decoded and every snapshot went out but nothing typed a queued
@@ -104,6 +107,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// deliberately is NOT is a session — no row, no store, no `listSessions`, no reaper —
 /// and no capability here claims otherwise.
 ///
+/// `trackedPrs` says a client can hand this core a pull request to watch and get the
+/// whole watch list back, replaced wholesale, whenever it moves. It is the surface that
+/// simply disappeared under `JUANCODE_CORE=rust`: no shepherd session, no watch list,
+/// and the Oracle relay's tracked-PR path talking to nothing (juancode-4lnv). Advertised
+/// because the frames do the whole job rather than the list half of it — tracking spawns
+/// the agent that works the PR and seeds it with the fix-or-escalate contract, a poll
+/// loop diffs the PR's `gh` activity and types the fixes into that session, and the
+/// changes it will not make on its own come back as `trackNotification`. A core that
+/// advertised this with only the list behind it would give a client a Track button that
+/// files a row and watches nothing.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -127,6 +141,7 @@ pub const CAPABILITIES: &[&str] = &[
     "restartFresh",
     "editor",
     "terminal",
+    "trackedPrs",
     // Both only ever advertised once the flag actually reaches the CLI's argv: a
     // capability a client trusts and the core drops is worse than one it never had.
     "spawnModel",
@@ -361,6 +376,43 @@ pub enum ClientMessage {
     UnsubscribeTranscript {
         session_id: String,
     },
+    /// Watch the tracked-PR list: the whole watch list now, and the whole list again
+    /// whenever it changes, until the socket closes.
+    ///
+    /// One subscribe per connection, and no `unsubscribeTrackedPrs` in protocol v1 — the
+    /// list is one small snapshot per change for the whole daemon, not a per-session
+    /// stream, so there is nothing a client would need to turn off short of closing.
+    SubscribeTrackedPrs,
+    /// Start watching a pull request: spawn the agent that will work it, seed it with
+    /// the PR context and the fix-or-escalate contract, and start polling.
+    ///
+    /// `cwd` is the REPO, not a worktree: it is half the identity of a watch (with the
+    /// PR number), and the agent's own tree is this core's business rather than the
+    /// client's. `pr` is the PR row the client is already holding; only the four fields
+    /// a watch is made of are read off it, so a client sending the whole `gh` row is
+    /// neither wrong nor charged for it.
+    ///
+    /// Answered by the new `trackedPrs` list rather than by a reply of its own, and
+    /// answered on the bus so every subscriber hears it: two clients looking at one
+    /// daemon must not disagree about what is being watched. A PR already tracked is a
+    /// no-op — the watch that exists is the one that was asked for — and a no-op
+    /// publishes nothing, so the client's list is already right.
+    TrackPr {
+        cwd: String,
+        pr: TrackPrInput,
+    },
+    /// Stop watching the PR whose `TrackedPr::key` is `tracked_id`. The agent's session
+    /// is left alone: the watch is over, the conversation is not.
+    UntrackPr {
+        tracked_id: String,
+    },
+    /// Dismiss a surfaced decision once the human has dealt with it. Addressed by the
+    /// notification's own id, because a PR can have several open at once and "the
+    /// latest" is not something two clients would agree on.
+    ResolveTrackNotification {
+        tracked_id: String,
+        notification_id: String,
+    },
     /// Watch the contribution list: the complete set now, and again on every change,
     /// until `unsubscribeContributions` or the socket closes.
     SubscribeContributions,
@@ -465,6 +517,31 @@ struct RawClient {
     file: Option<String>,
     #[serde(rename = "requestId", default)]
     request_id: Option<String>,
+    #[serde(default)]
+    pr: Option<TrackPrInput>,
+    #[serde(rename = "trackedId", default)]
+    tracked_id: Option<String>,
+    #[serde(rename = "notificationId", default)]
+    notification_id: Option<String>,
+}
+
+/// The PR a `trackPr` names, reduced to what a watch is made of.
+///
+/// The client sends its whole `gh` row — draft, check counts, assignees, review
+/// requests — and every field not here is ignored on purpose rather than stored: the
+/// poll re-reads all of it from `gh` within the minute, so keeping a client's copy
+/// would only create a second answer to "what is the CI saying" that nothing refreshes.
+/// `deny_unknown_fields` is deliberately NOT set, which is what makes that safe: a
+/// client that grows a field must not have its track refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TrackPrInput {
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub branch: String,
 }
 
 impl ClientMessage {
@@ -593,6 +670,18 @@ impl ClientMessage {
                 // An absent list is an empty one: "protect nothing" and "I sent no
                 // list" mean the same thing to a set that is replaced wholesale.
                 session_ids: raw.session_ids.unwrap_or_default(),
+            }),
+            "subscribeTrackedPrs" => Ok(Self::SubscribeTrackedPrs),
+            "trackPr" => Ok(Self::TrackPr {
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                pr: raw.pr.ok_or("missing pr")?,
+            }),
+            "untrackPr" => Ok(Self::UntrackPr {
+                tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
+            }),
+            "resolveTrackNotification" => Ok(Self::ResolveTrackNotification {
+                tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
+                notification_id: raw.notification_id.ok_or("missing notificationId")?,
             }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
             "unsubscribeContributions" => Ok(Self::UnsubscribeContributions),
@@ -792,6 +881,28 @@ pub enum ServerMessage {
         alert: StuckAlert,
         dispatch_id: Option<String>,
     },
+    /// The whole tracked-PR watch list, replaced wholesale. Sent once in answer to
+    /// `subscribeTrackedPrs`, and after that only when the list this connection would
+    /// send differs from the one it was last sent.
+    ///
+    /// That last clause is the contract and not an optimisation. The poll runs whether
+    /// or not GitHub moved, so "nothing changed" is the common case rather than the rare
+    /// one; an identical list carries no information, and a redundant one races whatever
+    /// the client asked for next — which is how a client that untracks a PR gets
+    /// answered by a snapshot that still lists it as watched. See
+    /// TRACKED_PRS_ARE_CHANGES in the spec.
+    TrackedPrs {
+        tracked: Vec<TrackedPrWire>,
+    },
+    /// One escalation on a tracked PR: a change the agent was told not to apply on its
+    /// own. A ping a client can alert on without diffing the list, unsolicited like
+    /// `activity` — the list frame carries the same notification, so a client that does
+    /// not render this loses nothing but the alert.
+    TrackNotification {
+        tracked_id: String,
+        pr_number: i64,
+        notification: TrackNotification,
+    },
     Unresumable {
         session_id: String,
         reason: String,
@@ -800,6 +911,68 @@ pub enum ServerMessage {
         session_id: Option<String>,
         message: String,
     },
+}
+
+/// One tracked PR on the wire: a hand-built mirror of [`TrackedPr`] reduced to what a
+/// client renders.
+///
+/// `PartialEq` is load-bearing rather than a convenience: this is the shape a connection
+/// compares to decide whether the list moved, and it has to be the WIRE shape. The
+/// engine's row carries `repoNwo` and a diff baseline that no client can see, so
+/// comparing rows instead would push a frame every time the repo identity was
+/// backfilled and every time a poll advanced a baseline without changing a single thing
+/// on screen.
+///
+/// `state` is spelled the Swift core's way — `needs_decision`, snake-cased on the wire
+/// where the enum is not — because a client written against that core reads that and
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedPrWire {
+    pub id: String,
+    pub number: i64,
+    pub title: String,
+    pub branch: String,
+    pub url: String,
+    pub cwd: String,
+    pub session_id: Option<String>,
+    pub state: &'static str,
+    pub checks: &'static str,
+    pub notifications: Vec<TrackNotification>,
+    pub last_polled_at: Option<i64>,
+}
+
+impl From<&TrackedPr> for TrackedPrWire {
+    fn from(pr: &TrackedPr) -> Self {
+        Self {
+            id: pr.id.clone(),
+            number: pr.number,
+            title: pr.title.clone(),
+            branch: pr.branch.clone(),
+            url: pr.url.clone(),
+            cwd: pr.cwd.clone(),
+            session_id: pr.session_id.clone(),
+            state: pr.state().as_str(),
+            checks: pr.baseline.checks.as_str(),
+            notifications: pr.notifications.clone(),
+            last_polled_at: pr.last_polled_at,
+        }
+    }
+}
+
+fn tracked_pr(pr: &TrackedPrWire) -> Value {
+    json!({
+        "id": pr.id,
+        "number": pr.number,
+        "title": pr.title,
+        "branch": pr.branch,
+        "url": pr.url,
+        "cwd": pr.cwd,
+        "sessionId": pr.session_id,
+        "state": pr.state,
+        "checks": pr.checks,
+        "notifications": pr.notifications,
+        "lastPolledAt": pr.last_polled_at,
+    })
 }
 
 impl ServerMessage {
@@ -1024,6 +1197,20 @@ impl ServerMessage {
             }
             Self::Unresumable { session_id, reason } => json!({
                 "type": "unresumable", "sessionId": session_id, "reason": reason,
+            }),
+            Self::TrackedPrs { tracked } => json!({
+                "type": "trackedPrs",
+                "tracked": tracked.iter().map(tracked_pr).collect::<Vec<_>>(),
+            }),
+            Self::TrackNotification {
+                tracked_id,
+                pr_number,
+                notification,
+            } => json!({
+                "type": "trackNotification",
+                "trackedId": tracked_id,
+                "prNumber": pr_number,
+                "notification": notification,
             }),
             Self::Error {
                 session_id,
@@ -1262,6 +1449,14 @@ mod tests {
             // remove.
             r#"{"type":"openEditor","cwd":"/tmp","file":"a.txt","cols":80,"rows":24}"#,
             r#"{"type":"openTerminal","cwd":"/tmp","cols":80,"rows":24,"requestId":"r"}"#,
+            // And for `trackedPrs`, all four of them: a client feature-detecting off
+            // the capability draws a Track button, a watch list and a Dismiss on a
+            // decision, and any one of them reaching `Unknown` is a control that does
+            // nothing and says nothing.
+            r#"{"type":"subscribeTrackedPrs"}"#,
+            r#"{"type":"trackPr","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
+            r#"{"type":"untrackPr","trackedId":"/tmp#7"}"#,
+            r#"{"type":"resolveTrackNotification","trackedId":"/tmp#7","notificationId":"n-1"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1310,6 +1505,7 @@ mod tests {
                     "restartFresh",
                     "editor",
                     "terminal",
+                    "trackedPrs",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,
@@ -1615,9 +1811,12 @@ mod tests {
             .map(|c| c.as_str().unwrap().into())
             .collect();
         assert!(caps.contains(&"screen".to_string()));
-        // Not implemented yet — and the list must not claim otherwise.
         assert!(caps.contains(&"queue".to_string()));
-        assert!(!caps.contains(&"trackedPrs".to_string()));
+        assert!(caps.contains(&"trackedPrs".to_string()));
+        // Not implemented yet — and the list must not claim otherwise. The daemon side
+        // of `contributions` is complete, but nothing renders a descriptor, so the
+        // capability stays withheld until something draws the chrome it promises.
+        assert!(!caps.contains(&"contributions".to_string()));
         // Staleness is decidable from frame 0 or not at all: by the time a client
         // has drawn a session list it has already believed the daemon.
         assert_eq!(v["daemon"]["pid"], std::process::id());

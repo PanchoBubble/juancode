@@ -159,6 +159,29 @@ const MIGRATIONS: &[&str] = &[
         at             INTEGER NOT NULL
     );
     "#,
+    // 6: what a tracked PR needs beyond its identity, now that something polls it.
+    //
+    // Migration 1 gave the table the row a sidebar draws — number, title, branch, the
+    // session driving it — because that was all the watch list was. A poller needs two
+    // more things, and both have to survive a restart to be worth having:
+    //
+    //   * `notifications`: decisions the agent refused to make on its own. Losing them
+    //     on a restart loses the only record that a human was asked for something.
+    //   * `baseline`: which comments and reviews have already been reacted to, and the
+    //     last CI colour seen. Without it every restart re-baselines, so the poll after
+    //     one is blind to whatever moved while the daemon was down.
+    //
+    // Both are JSON for the reason `transcript_records.record` is: a set of seen ids has
+    // no column shape, and a column per notification field would need a migration every
+    // time the engine's contract grows. `repo_nwo` is the identity an inbound GitHub
+    // event carries, backfilled by the poll for rows written before it existed, and
+    // `last_polled_at` is what the wire list is ordered by.
+    r#"
+    ALTER TABLE tracked_prs ADD COLUMN repo_nwo       TEXT;
+    ALTER TABLE tracked_prs ADD COLUMN last_polled_at INTEGER;
+    ALTER TABLE tracked_prs ADD COLUMN notifications  TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE tracked_prs ADD COLUMN baseline       TEXT NOT NULL DEFAULT '{}';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

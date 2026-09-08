@@ -21,6 +21,7 @@
     "restartFresh",
     "editor",
     "terminal",
+    "trackedPrs",
     "spawnModel",
     "spawnPreset",
     "stuck",
@@ -94,8 +95,9 @@
       "passes": 3
     },
     "tracked-prs": {
-      "status": "skipped",
-      "note": "core does not advertise the \"trackedPrs\" capability"
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     },
     "editor-terminal": {
       "status": "passed",
