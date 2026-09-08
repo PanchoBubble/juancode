@@ -703,6 +703,15 @@ mod sweep {
         ) -> Result<Option<Attached>, StateError> {
             unimplemented!()
         }
+        fn restart_fresh(
+            &self,
+            _i: &str,
+            _o: ClientId,
+            _c: u16,
+            _r: u16,
+        ) -> Result<Attached, StateError> {
+            unimplemented!()
+        }
         fn set_skip_permissions(
             &self,
             _i: &str,

@@ -205,6 +205,15 @@ impl SessionsApi for FakeChild {
     ) -> Result<Option<Attached>, StateError> {
         unimplemented!()
     }
+    fn restart_fresh(
+        &self,
+        _id: &str,
+        _o: ClientId,
+        _c: u16,
+        _r: u16,
+    ) -> Result<Attached, StateError> {
+        unimplemented!()
+    }
     fn set_skip_permissions(
         &self,
         _id: &str,

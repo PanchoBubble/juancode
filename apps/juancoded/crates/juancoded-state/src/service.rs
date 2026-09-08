@@ -66,6 +66,17 @@ pub trait SessionsApi: Send + Sync {
         cols: u16,
         rows: u16,
     ) -> Result<Option<Attached>, StateError>;
+    /// Restart an exited session as a brand-new CLI conversation under the same
+    /// juancode id. Separate from `reactivate` because it needs no resumable id and
+    /// has no `Unresumable` leg: it starts the CLI instead of resuming it. Refuses a
+    /// session whose pty is still up.
+    fn restart_fresh(
+        &self,
+        id: &str,
+        owner: ClientId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Attached, StateError>;
     fn set_skip_permissions(
         &self,
         id: &str,
@@ -243,6 +254,16 @@ impl SessionsApi for SessionRegistry {
         rows: u16,
     ) -> Result<Option<Attached>, StateError> {
         SessionRegistry::reactivate(self, id, owner, cols, rows)
+    }
+
+    fn restart_fresh(
+        &self,
+        id: &str,
+        owner: ClientId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Attached, StateError> {
+        SessionRegistry::restart_fresh(self, id, owner, cols, rows)
     }
 
     fn set_skip_permissions(

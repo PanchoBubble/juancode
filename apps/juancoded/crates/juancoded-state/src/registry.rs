@@ -205,6 +205,10 @@ pub enum StateError {
     DispatchAlreadyProcessed(String),
     /// A dead session with no CLI conversation id to resume from.
     Unresumable(String),
+    /// A restart-as-fresh asked of a session whose pty is still up. Refused rather
+    /// than honoured: the restart throws the running conversation away, and a client
+    /// that believes the session is dead should be told it is not.
+    StillRunning,
     Spawn(String),
     Store(String),
 }
@@ -221,6 +225,10 @@ impl std::fmt::Display for StateError {
                 write!(f, "Dispatch {id} was already processed")
             }
             Self::Unresumable(reason) => write!(f, "{reason}"),
+            Self::StillRunning => write!(
+                f,
+                "Session is still running; kill it before restarting fresh"
+            ),
             Self::Spawn(why) => write!(f, "{why}"),
             Self::Store(why) => write!(f, "{why}"),
         }
@@ -292,6 +300,11 @@ struct Revival {
     provider: ProviderId,
     cwd: String,
     resume: Option<String>,
+    /// The id handed to `start_args` when there is nothing to resume. Ordinarily the
+    /// juancode id, which is what a pinned-id provider takes as its conversation id;
+    /// a fresh restart passes a new pin instead, so the session keeps the id its
+    /// client knows while the conversation behind it does not.
+    start_id: String,
     cols: u16,
     rows: u16,
 }
@@ -356,6 +369,17 @@ impl Ring {
             last_flush: Instant::now(),
             saved_grid: None,
         }
+    }
+
+    /// Throw the history away. Only a restart that abandons the conversation calls
+    /// this: every other path keeps the ring, because every other path is still the
+    /// same conversation. Dirty with no saved grid, so the next flush rewrites the
+    /// stored row rather than deciding nothing changed and leaving the old bytes
+    /// behind for the next `attach` to replay.
+    fn reset(&mut self) {
+        self.bytes.clear();
+        self.dirty = true;
+        self.saved_grid = None;
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -836,11 +860,72 @@ impl SessionRegistry {
                 provider,
                 cwd,
                 resume: Some(cli_session_id),
+                start_id: id.to_string(),
                 cols,
                 rows,
             },
         )?;
         self.attach(id, owner, cols, rows).map(Some)
+    }
+
+    /// Restart an exited session as a brand-new CLI conversation in place: same
+    /// juancode id, same row, same pane, a different conversation behind it.
+    ///
+    /// The difference from `reactivate` is the whole point of it being its own call.
+    /// A revive hands the CLI `--resume <id>` and needs one to exist; this starts the
+    /// CLI, so it needs nothing, and it serves exactly the session `reactivate`
+    /// refuses as unresumable — a codex or opencode session that ended before it ever
+    /// wrote an id down. There is no `Unresumable` leg here for that reason.
+    ///
+    /// A pinned-id provider is given a FRESH pin rather than the juancode id it was
+    /// created with: claude refuses `--session-id` for a conversation it has already
+    /// written, so reusing it would turn every second restart into a spawn failure.
+    /// The juancode id does not move, which is what keeps the client's pane bound.
+    ///
+    /// The prior scrollback goes with the conversation, in memory and in the store.
+    pub fn restart_fresh(
+        &self,
+        id: &str,
+        owner: ClientId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Attached, StateError> {
+        let live = self.get(id).ok_or(StateError::NotFound)?;
+        if live.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return Err(StateError::StillRunning);
+        }
+        let (provider, cwd) = {
+            let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            (meta.provider, meta.cwd.clone())
+        };
+        let pins = Providers::spec(provider).pins_session_id();
+        let fresh_pin = uuid::Uuid::new_v4().to_string();
+        // Written before the spawn, not after it: `respawn` runs id discovery for a
+        // provider that has none, and discovery is a no-op for a row that still
+        // carries the id of the conversation being thrown away.
+        self.edit_meta(id, &live, |meta| {
+            meta.cli_session_id = pins.then(|| fresh_pin.clone());
+            true
+        });
+        // The byte history goes with the conversation: carrying it would leave the
+        // pane replaying a transcript the CLI on the other end has never heard of.
+        live.scrollback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset();
+        self.respawn(
+            id,
+            &live,
+            Revival {
+                provider,
+                cwd,
+                resume: None,
+                start_id: if pins { fresh_pin } else { id.to_string() },
+                cols,
+                rows,
+            },
+        )?;
+        self.attach(id, owner, cols, rows)
     }
 
     /// Flip a live session's permission mode by restarting the CLI in place: same
@@ -882,6 +967,7 @@ impl SessionRegistry {
                 provider,
                 cwd,
                 resume: cli_session_id,
+                start_id: id.to_string(),
                 cols,
                 rows,
             },
@@ -1463,11 +1549,12 @@ impl SessionRegistry {
             provider,
             cwd,
             resume,
+            start_id,
             cols,
             rows,
         } = revival;
         let opts = live.opts.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let (program, args) = self.program_for(provider, id, &opts, resume.as_deref())?;
+        let (program, args) = self.program_for(provider, &start_id, &opts, resume.as_deref())?;
         // Retire whatever pty the session is still holding, or the spawn below
         // refuses the session key as already taken.
         self.retire_pty(id, live);
