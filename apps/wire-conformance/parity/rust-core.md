@@ -7,17 +7,12 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
 - As of: 2026-09-08
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, restartFresh, editor, terminal, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
-- Unmet scenarios: 1 of 34
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, restartFresh, editor, terminal, trackedPrs, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
+- Unmet scenarios: 0 of 34
 
-## What is not satisfied yet (1)
+## What is not satisfied yet (0)
 
-### tracked-prs
-
-- Status: n/a
-- Needs: trackedPrs, pty, git
-- Why: core does not advertise the "trackedPrs" capability
-- Asserts: subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, a refresh that moved nothing pushes nothing, and untracking pushes the list back — always the complete set, replaced wholesale.
+Nothing: this core passes every scenario in the spec.
 
 ## Full scenario list
 
@@ -34,7 +29,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - exit-codes: 3/3 - exit codes and the dead-session attach
 - unresumable: 3/3 - unresumable reactivate
 - errors: 3/3 - error frames and tolerated junk
-- tracked-prs: n/a - tracked-PR fan-out
+- tracked-prs: 3/3 - tracked-PR fan-out
 - editor-terminal: 3/3 - editor and terminal ptys
 - adopt-external: 3/3 - adopting an external conversation
 - dispatch-correlation: 3/3 - dispatch correlation and dedup

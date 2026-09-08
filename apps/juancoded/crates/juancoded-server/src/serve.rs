@@ -24,6 +24,7 @@ use crate::conn;
 use crate::identity::{self, DaemonIdentity};
 use crate::queue_delivery;
 use crate::seed::SeedTiming;
+use crate::tracked_prs::{self, TrackedPrs};
 use crate::transcript_pump::{self, TranscriptPlane};
 
 /// What a connection needs from the booted tree: the sessions it drives, the chrome the
@@ -61,6 +62,10 @@ pub struct CoreHandles {
     /// is not a session, but it is still a child of this daemon, and going around the
     /// service would put it outside the index that ends every child on shutdown.
     pub pty: Option<Arc<dyn PtySpawnApi>>,
+    /// The tracked-PR engine. `None` when the tree mounted no `store` for a watch list
+    /// to survive in: a watch that is forgotten on restart is not a watch, so the frames
+    /// refuse rather than accept a track this core cannot keep.
+    pub tracked_prs: Option<Arc<TrackedPrs>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -102,6 +107,14 @@ impl CoreHandles {
                 Arc::new(move |id: &str, alert| bus_sessions.publish_stuck(id, alert)),
             )))
         };
+        // One engine for the daemon, not one per connection: a PR is polled because
+        // somebody is watching it, not because somebody has a socket open. Every
+        // connection subscribes to this one and drives it through the same frames.
+        let tracked_prs = loader
+            .services()
+            .resolve::<StoreService>()
+            .ok()
+            .map(|store| TrackedPrs::new(Arc::clone(&sessions), store, tracked_prs::POLL_INTERVAL));
         Self {
             sessions,
             contributions: loader.contributions().clone(),
@@ -110,6 +123,7 @@ impl CoreHandles {
             reaper,
             stuck,
             pty,
+            tracked_prs,
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
@@ -206,6 +220,13 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     // kills, sleeps or types — the reaper is the thing that acts, and it refuses to
     // touch exactly these sessions.
     let _stuck = handles.stuck.as_ref().map(|watch| watch.spawn());
+    // And the fifth, which starts only if something is already being watched: the poll
+    // loop belongs to the watch list rather than to the daemon, so a restart with a
+    // restored watch list resumes polling and one with an empty list spawns nothing
+    // until a client tracks a PR.
+    if let Some(tracked) = handles.tracked_prs.as_ref() {
+        tracked.start_if_tracking();
+    }
     // And the third: a session goes dormant because it has been verifiably idle, not
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.

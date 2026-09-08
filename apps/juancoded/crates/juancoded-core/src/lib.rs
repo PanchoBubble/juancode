@@ -9,7 +9,9 @@
 
 pub mod activity;
 pub mod changes;
+pub mod gh;
 pub mod model;
+pub mod pr;
 pub mod preset;
 pub mod proc;
 pub mod provider;
@@ -22,6 +24,11 @@ pub use activity::{
 };
 pub use changes::ChangeStat;
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
+pub use pr::{
+    auto_fix_prompt, classify_pr_activity, derive_track_state, stalled_ci_fix_reason,
+    track_seed_prompt, BranchWorktree, PrActivity, PrBaseline, PrChecks, PrClassification,
+    PrComment, PrReview, TrackEvent, TrackNotification, TrackState, TrackedPr,
+};
 pub use preset::{preset_needs_body, Preset, PresetError, PresetStore};
 pub use proc::{descendant_count, tree_cpu_time_ms};
 pub use provider::{

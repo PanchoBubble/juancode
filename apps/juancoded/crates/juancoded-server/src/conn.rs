@@ -33,9 +33,10 @@ use crate::ephemeral::EphemeralPtys;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
+use crate::tracked_prs::{TrackRequest, TrackedPrChange, TrackedPrs};
 use crate::transcript_pump::TranscriptPlane;
 use crate::utf8::Utf8Stream;
-use crate::wire::{ClientMessage, ServerMessage};
+use crate::wire::{ClientMessage, ServerMessage, TrackedPrWire};
 
 /// Per-connection state the event fan-out reads: which sessions this client is
 /// attached to, whose steering queue it is watching, and the UTF-8 carry per session
@@ -53,6 +54,17 @@ struct Fanout {
     /// `None` means it is not watching, which is every client that does not know the
     /// surface exists.
     contribution_revision: Option<u64>,
+    /// The tracked-PR list this connection was last SENT, once it asked to watch.
+    /// `None` means it is not watching.
+    ///
+    /// The list itself rather than a revision, because this is the comparison that
+    /// decides whether a frame goes out at all: the engine publishes after every
+    /// mutation and after every poll pass, and only a list that differs from the one
+    /// this client is already holding is worth a frame (TRACKED_PRS_ARE_CHANGES). The
+    /// poll runs whether or not GitHub moved, so the identical case is the common one,
+    /// and a redundant snapshot races whatever the client asked for next — an untrack
+    /// answered by a list that still lists the PR.
+    tracked_prs: Option<Vec<TrackedPrWire>>,
     carries: HashMap<String, Utf8Stream>,
     /// Frames a background task owes this client, out of band from the request that
     /// started it. Seeded delivery is the only one today: it outlives the create it
@@ -92,6 +104,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         // connection needs the handle for nothing.
         stuck: _,
         pty,
+        tracked_prs,
         bus,
         identity,
     } = handles;
@@ -154,12 +167,29 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         }
     }
 
+    // Subscribed for the length of the connection, and gated on the watch below rather
+    // than on the subscription: a receiver created when the `subscribeTrackedPrs` frame
+    // arrives could miss a change published between the snapshot it answers with and its
+    // own first `recv`, and the frame that change would have carried is the whole list.
+    // A tree that mounted no store has no engine, so a channel of our own stands in —
+    // its sender held here so `recv` pends forever instead of reporting a closed bus on
+    // every pass of the loop.
+    let (_tracked_idle, mut tracked_rx) = match tracked_prs.as_ref() {
+        Some(engine) => (None, engine.subscribe()),
+        None => {
+            let (tx, rx) = tokio::sync::broadcast::channel::<TrackedPrChange>(1);
+            (Some(tx), rx)
+        }
+    };
+    let mut tracked_bus_live = true;
+
     let (oob_tx, mut oob_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut fanout = Fanout {
         attached: HashSet::new(),
         queue_watchers: HashSet::new(),
         transcript_watchers: HashSet::new(),
         contribution_revision: None,
+        tracked_prs: None,
         carries: HashMap::new(),
         oob: oob_tx,
     };
@@ -179,6 +209,23 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                 // into, not a fact about a session everyone is owed.
                 if fanout.queue_watchers.contains(&snapshot.session) {
                     outbound.push(ServerMessage::Queue { snapshot });
+                }
+            }
+
+            tracked = tracked_rx.recv(), if tracked_bus_live => {
+                match tracked {
+                    Ok(change) => push_tracked(change, &mut fanout, &mut outbound),
+                    Err(RecvError::Lagged(n)) => {
+                        // Survivable by construction, which is the other reason the list
+                        // is never a delta: the next publish is the whole list again.
+                        debug!(dropped = n, "connection lagged behind the tracked-PR bus");
+                    }
+                    // Unreachable: the engine is an `Arc` this connection holds, and a
+                    // tree without one gets the stand-in sender above. The guard is
+                    // still worth having, because a closed broadcast returns
+                    // immediately every time it is polled — an unreachable case that
+                    // spins a core is worse than one that disables an arm.
+                    Err(RecvError::Closed) => tracked_bus_live = false,
                 }
             }
 
@@ -204,6 +251,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     queue: queue.as_ref(),
                                     transcripts: transcripts.as_ref(),
                                     reaper: reaper.as_ref(),
+                                    tracked_prs: tracked_prs.as_ref(),
                                 },
                                 client,
                                 &mut fanout,
@@ -381,6 +429,50 @@ fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<Serve
     }
 }
 
+/// The frames this connection owes for one tracked-PR change.
+///
+/// The list is gated on a watch AND on having moved; the notification only on the
+/// watch. That asymmetry is the point of having two changes: a notification is an event
+/// that happened once, so re-sending it is not a possibility, while a list is a value,
+/// and the only interesting thing about a new one is whether it differs from the one
+/// this client is holding.
+fn push_tracked(change: TrackedPrChange, fanout: &mut Fanout, outbound: &mut Vec<ServerMessage>) {
+    let Some(sent) = fanout.tracked_prs.as_mut() else {
+        return;
+    };
+    match change {
+        TrackedPrChange::List(list) => {
+            let tracked: Vec<TrackedPrWire> = list.iter().map(Into::into).collect();
+            if &tracked == sent {
+                return;
+            }
+            *sent = tracked.clone();
+            outbound.push(ServerMessage::TrackedPrs { tracked });
+        }
+        TrackedPrChange::Notification {
+            tracked_id,
+            pr_number,
+            notification,
+        } => outbound.push(ServerMessage::TrackNotification {
+            tracked_id,
+            pr_number,
+            notification,
+        }),
+    }
+}
+
+/// A daemon whose tree mounted no store, and therefore no watch list.
+///
+/// Its own message rather than silence, and not the `queue-unavailable` shape either:
+/// retrying will never help, and a client that heard nothing would leave a Track button
+/// spinning on a PR this core is never going to watch.
+fn tracked_unavailable() -> ServerMessage {
+    ServerMessage::Error {
+        session_id: None,
+        message: "tracked-prs-unavailable".into(),
+    }
+}
+
 /// Fold every event already queued on the bus into frames, splitting them by whether
 /// they may overtake the reply the handler is about to send: a grid change describes
 /// the state the reply is about, so it goes ahead of it; everything else follows.
@@ -553,6 +645,9 @@ struct Tree<'a> {
     /// error rather than silently doing nothing, which is the failure the no-op
     /// `setReaperIdleWindow` on the Swift client was.
     reaper: Option<&'a Arc<SessionReaper>>,
+    /// `None` when the tree mounted no store for a watch list to live in. The
+    /// tracked-PR frames then say so rather than accepting a track nothing keeps.
+    tracked_prs: Option<&'a Arc<TrackedPrs>>,
 }
 
 fn handle_client_message(
@@ -570,6 +665,7 @@ fn handle_client_message(
         queue,
         transcripts,
         reaper,
+        tracked_prs,
     } = *tree;
     let attached = &mut fanout.attached;
     match msg {
@@ -1069,6 +1165,69 @@ fn handle_client_message(
             reaper.set_protected(client, session_ids.into_iter().collect());
         }
 
+        // ── Tracked PRs (juancode-4lnv) ───────────────────────────────────────────
+        ClientMessage::SubscribeTrackedPrs => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
+            };
+            // Idempotent, like `subscribeQueue`: a second subscribe from one connection
+            // is not a second snapshot. An empty list is still a snapshot, though —
+            // silence would leave a client unable to tell "nothing is tracked" from
+            // "this core did not answer".
+            if fanout.tracked_prs.is_some() {
+                return;
+            }
+            let tracked: Vec<TrackedPrWire> = engine.list().iter().map(Into::into).collect();
+            fanout.tracked_prs = Some(tracked.clone());
+            outbound.push(ServerMessage::TrackedPrs { tracked });
+        }
+
+        ClientMessage::TrackPr { cwd, pr } => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
+            };
+            // Backgrounded, and nothing is replied here. Tracking creates a worktree (a
+            // fetch among the git it runs) and spawns a CLI, so a handler that waited
+            // would hold this connection's whole loop — no output, no acks — for as long
+            // as the network took. The answer is the new list, published on the bus so
+            // every subscriber gets it rather than only the client that asked: two
+            // clients on one daemon must not disagree about what is being watched.
+            let engine = Arc::clone(engine);
+            let req = TrackRequest {
+                cwd,
+                number: pr.number,
+                title: pr.title,
+                url: pr.url,
+                branch: pr.branch,
+                owner: client,
+            };
+            tokio::spawn(async move { engine.track(req).await });
+        }
+
+        ClientMessage::UntrackPr { tracked_id } => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
+            };
+            // An id that is not tracked is silence, not an error: a client holding a
+            // stale row and a client that untracked twice both want the same thing, and
+            // the list they are already holding says it.
+            engine.untrack(&tracked_id);
+        }
+
+        ClientMessage::ResolveTrackNotification {
+            tracked_id,
+            notification_id,
+        } => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
+            };
+            engine.resolve_notification(&tracked_id, &notification_id);
+        }
+
         ClientMessage::Unknown { r#type } => debug!(r#type, "ignoring unimplemented message"),
     }
 }
@@ -1091,6 +1250,7 @@ mod tests {
             queue_watchers: HashSet::new(),
             transcript_watchers: HashSet::new(),
             contribution_revision: None,
+            tracked_prs: None,
             carries: HashMap::new(),
             // Nothing in these tests reads the side channel; the receiver is dropped
             // and a send on it is the no-op a departed client already gets.
@@ -1116,6 +1276,7 @@ mod tests {
                 queue: handles.queue.as_ref(),
                 transcripts: handles.transcripts.as_ref(),
                 reaper: handles.reaper.as_ref(),
+                tracked_prs: handles.tracked_prs.as_ref(),
             },
             1,
             fanout,
@@ -1291,6 +1452,7 @@ mod tests {
         /// Where the ephemeral pumps put their `output` and `exit` frames — the side
         /// channel the real loop drains in its own select arm.
         oob: tokio::sync::mpsc::UnboundedReceiver<ServerMessage>,
+        tracked: tokio::sync::broadcast::Receiver<TrackedPrChange>,
         _listener: juancoded_cordis::Effect,
     }
 
@@ -1304,6 +1466,11 @@ mod tests {
                 sink.lock().unwrap().push(s.clone());
             });
             let (oob_tx, oob) = tokio::sync::mpsc::unbounded_channel();
+            let tracked = handles
+                .tracked_prs
+                .as_ref()
+                .expect("the test tree mounts a store, so it has a watch list")
+                .subscribe();
             Self {
                 ephemeral: EphemeralPtys::with_commands(
                     handles.pty.clone(),
@@ -1314,6 +1481,7 @@ mod tests {
                 events,
                 published,
                 oob,
+                tracked,
                 _listener: listener,
             }
         }
@@ -1324,6 +1492,32 @@ mod tests {
         /// scheduler says so, not when the frame that started it returns.
         async fn awaited(&mut self, within: Duration) -> Option<ServerMessage> {
             tokio::time::timeout(within, self.oob.recv()).await.ok()?
+        }
+
+        fn tracked_prs(&self) -> &Arc<TrackedPrs> {
+            self.handles
+                .tracked_prs
+                .as_ref()
+                .expect("the test tree mounts a watch list")
+        }
+
+        /// The tracked-PR frames the loop's own select arm would have produced, waiting
+        /// up to a second for the first one.
+        ///
+        /// A wait rather than a drain, because `trackPr` is deliberately answered by a
+        /// background task — it makes a worktree and spawns a CLI — so the frame arrives
+        /// after the handler has already returned. That is the shape of the real thing,
+        /// not a test artefact.
+        async fn tracked_frames(&mut self, fanout: &mut Fanout) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            let first = tokio::time::timeout(Duration::from_secs(1), self.tracked.recv()).await;
+            if let Ok(Ok(change)) = first {
+                push_tracked(change, fanout, &mut out);
+            }
+            while let Ok(change) = self.tracked.try_recv() {
+                push_tracked(change, fanout, &mut out);
+            }
+            out
         }
 
         fn sessions(&self) -> &Arc<dyn SessionsApi> {
@@ -1371,6 +1565,7 @@ mod tests {
                     queue: self.handles.queue.as_ref(),
                     transcripts: self.handles.transcripts.as_ref(),
                     reaper: self.handles.reaper.as_ref(),
+                    tracked_prs: self.handles.tracked_prs.as_ref(),
                 },
                 1,
                 fanout,
@@ -1903,5 +2098,149 @@ mod tests {
             message.contains("outside the working directory"),
             "{message}"
         );
+    }
+
+    /// A git repo with one commit, for the tracked-PR test below: tracking makes a
+    /// worktree off it, and a path that is not a repo would measure the fallback rather
+    /// than the thing.
+    fn tracked_pr_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("juancoded-wire-pr-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["add", "-A"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .output()
+                .expect("git");
+        }
+        std::fs::write(root.join("f.txt"), "base\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "f.txt"])
+            .current_dir(&root)
+            .output()
+            .expect("git");
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("git");
+        root
+    }
+
+    /// The wire half of scenario 14, and every clause of it.
+    ///
+    /// Subscribing answers with the whole watch list, empty included. Tracking spawns
+    /// the driving session and pushes a replacement list. A poll pass that learned
+    /// nothing pushes NOTHING — the clause that matters most, because a daemon that
+    /// re-announces an unchanged list turns every poll into desktop churn and races
+    /// whatever the client asks for next. Untracking pushes the list back.
+    #[tokio::test]
+    async fn the_tracked_pr_list_goes_out_whole_and_only_when_it_moved() {
+        std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let root = tracked_pr_repo();
+        let cwd = root.to_string_lossy().to_string();
+
+        let subscribed = wire.step(ClientMessage::SubscribeTrackedPrs, &mut fanout);
+        let [ServerMessage::TrackedPrs { tracked }] = &subscribed[..] else {
+            panic!("expected one empty list, got {subscribed:?}");
+        };
+        assert!(
+            tracked.is_empty(),
+            "an empty watch list is still a snapshot: silence would leave a client guessing"
+        );
+
+        // A second subscribe is not a second snapshot.
+        assert!(wire
+            .step(ClientMessage::SubscribeTrackedPrs, &mut fanout)
+            .is_empty());
+
+        let sent = wire.step(
+            ClientMessage::TrackPr {
+                cwd: cwd.clone(),
+                pr: crate::wire::TrackPrInput {
+                    number: 4242,
+                    title: "conformance fixture PR".into(),
+                    url: "https://example.invalid/pr/4242".into(),
+                    branch: "main".into(),
+                },
+            },
+            &mut fanout,
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{sent:?}"
+        );
+        let frames = wire.tracked_frames(&mut fanout).await;
+        let [ServerMessage::TrackedPrs { tracked }] = &frames[..] else {
+            panic!("expected one replacement list, got {frames:?}");
+        };
+        let [entry] = &tracked[..] else {
+            panic!("the whole set, which is one PR: {tracked:?}");
+        };
+        assert_eq!(entry.number, 4242);
+        assert_eq!(
+            entry.cwd, cwd,
+            "keyed by the repo, not by the agent's worktree"
+        );
+        assert_eq!(entry.state, "watching");
+        assert!(entry.notifications.is_empty());
+        let session = entry.session_id.clone().expect("a driving session");
+        assert!(
+            wire.sessions().meta(&session).is_some(),
+            "the list names a session this core really has"
+        );
+        let tracked_id = entry.id.clone();
+
+        // The poll pass. `gh` is pointed at /usr/bin/false, so it finds nothing — and a
+        // list that did not change is not re-announced.
+        wire.tracked_prs().poll_once().await;
+        assert!(
+            wire.tracked_frames(&mut fanout).await.is_empty(),
+            "an unchanged list must not be pushed again"
+        );
+
+        let sent = wire.step(ClientMessage::UntrackPr { tracked_id }, &mut fanout);
+        assert!(
+            !sent
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{sent:?}"
+        );
+        let frames = wire.tracked_frames(&mut fanout).await;
+        let [ServerMessage::TrackedPrs { tracked }] = &frames[..] else {
+            panic!("expected the list back, got {frames:?}");
+        };
+        assert!(tracked.is_empty(), "{tracked:?}");
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// A connection that never subscribed hears nothing about the watch list, however
+    /// much it moves — the same rule output and the queue follow.
+    #[tokio::test]
+    async fn a_connection_that_did_not_subscribe_is_not_sent_the_list() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        wire.tracked_prs().untrack("nothing-tracked-under-this-id");
+        assert!(wire.tracked_frames(&mut fanout).await.is_empty());
+        assert!(fanout.tracked_prs.is_none());
     }
 }

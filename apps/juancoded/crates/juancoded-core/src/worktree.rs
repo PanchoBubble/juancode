@@ -20,6 +20,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::pr::BranchWorktree;
+
 /// A worktree this core made, and the branch checked out in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedWorktree {
@@ -87,6 +89,95 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
     let path = dir.to_string_lossy().to_string();
     link_node_modules(&root, &path);
     Ok(CreatedWorktree { path, branch })
+}
+
+/// Create `<repo>-worktrees/<name>` with an **existing** branch checked out, for
+/// working a branch somebody else pushed — a PR's head branch.
+///
+/// A port of `createWorktree(_:_:checkingOut:)`. Unlike [`create`], which starts a
+/// fresh `juancode/<name>` branch, this has to cope with a branch that may not be
+/// local yet and may already be checked out. In order: fetch it if it is unknown,
+/// check it out normally, fall back to tracking `origin/<branch>`, and finally fall
+/// back to a **detached** checkout at its head — git allows one worktree per branch,
+/// so a branch already open elsewhere can only be read detached. `branch` in the
+/// result is `None` in that last case, so the caller can tell the agent it has no
+/// branch to commit onto rather than let it discover that mid-fix.
+pub fn create_on_branch(
+    repo_cwd: &str,
+    name: &str,
+    branch: &str,
+) -> Result<BranchWorktree, WorktreeError> {
+    let root = repo_root(repo_cwd).ok_or_else(|| {
+        WorktreeError("Not a git repository — can't isolate this session in a worktree.".into())
+    })?;
+    let worktrees_dir = siblings_dir(&root);
+    let _ = std::fs::create_dir_all(&worktrees_dir);
+    // A previous tracking run may have left `<name>` behind — worktrees outlive the
+    // session that made them — and `git worktree add` refuses an existing directory.
+    let mut dir = worktrees_dir.join(name);
+    let mut suffix = 2;
+    while dir.exists() {
+        dir = worktrees_dir.join(format!("{name}-{suffix}"));
+        suffix += 1;
+    }
+    let dir = dir.to_string_lossy().to_string();
+
+    // A PR branch pushed by somebody else may not exist locally at all. Best-effort:
+    // being offline must not stop the worktree being made, since the detached fallback
+    // still has whatever remote-tracking ref is already here.
+    let local = format!("refs/heads/{branch}");
+    let have_local = git(repo_cwd, &["rev-parse", "--verify", "--quiet", &local])
+        .is_some_and(|out| !out.trim().is_empty());
+    if !have_local {
+        let _ = Command::new("git")
+            .args(["fetch", "origin", branch])
+            .current_dir(repo_cwd)
+            .output();
+    }
+
+    if have_local && worktree_add(repo_cwd, &["worktree", "add", &dir, branch]) {
+        link_node_modules(&root, &dir);
+        return Ok(BranchWorktree {
+            path: dir,
+            branch: Some(branch.to_string()),
+        });
+    }
+    let remote = format!("origin/{branch}");
+    if !have_local
+        && worktree_add(
+            repo_cwd,
+            &["worktree", "add", "--track", "-b", branch, &dir, &remote],
+        )
+    {
+        link_node_modules(&root, &dir);
+        return Ok(BranchWorktree {
+            path: dir,
+            branch: Some(branch.to_string()),
+        });
+    }
+    // Already checked out elsewhere, or the branch resolves but cannot be attached:
+    // detached at whichever ref does resolve.
+    for r#ref in [branch, remote.as_str()] {
+        if worktree_add(repo_cwd, &["worktree", "add", "--detach", &dir, r#ref]) {
+            link_node_modules(&root, &dir);
+            return Ok(BranchWorktree {
+                path: dir,
+                branch: None,
+            });
+        }
+    }
+    Err(WorktreeError(format!(
+        "Couldn't create a worktree for branch {branch}."
+    )))
+}
+
+fn worktree_add(repo_cwd: &str, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo_cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Remove a worktree `create` made, and its directory. The branch is left alone, so
@@ -384,6 +475,52 @@ mod tests {
         assert!(Path::new(&made.path).join("committed.txt").is_file());
         // The point of the whole feature: a different tree from the one asked about.
         assert_ne!(made.path, root.to_string_lossy());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The PR case: an existing branch, checked out attached when it is free.
+    #[test]
+    fn a_pr_worktree_checks_out_the_branch_it_was_given() {
+        let (parent, root) = repo("prbranch");
+        run(&root, &["branch", "feature"]);
+        let made = create_on_branch(root.to_str().unwrap(), "pr-7", "feature").expect("a worktree");
+        assert_eq!(made.branch.as_deref(), Some("feature"));
+        assert!(made.path.ends_with("/repo-worktrees/pr-7"), "{}", made.path);
+        assert_eq!(
+            git(&made.path, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .expect("rev-parse")
+                .trim(),
+            "feature"
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// A branch already checked out elsewhere is the common case for the repo's OWN
+    /// default branch, and git allows one worktree per branch. Detached at its head is
+    /// still a usable tree, and `branch: None` is what tells the agent it has to make
+    /// its own branch before it can push.
+    #[test]
+    fn a_branch_open_elsewhere_falls_back_to_a_detached_tree() {
+        let (parent, root) = repo("prdetached");
+        let made = create_on_branch(root.to_str().unwrap(), "pr-9", "main").expect("a worktree");
+        assert_eq!(
+            made.branch, None,
+            "main is checked out in the repo itself, so this one cannot attach"
+        );
+        assert_eq!(
+            git(&made.path, &["rev-parse", "HEAD"])
+                .expect("rev-parse")
+                .trim(),
+            sha(&root, "main"),
+            "detached, but at the branch's head rather than at nothing"
+        );
+        // A second run for the same PR does not fight the directory the first left.
+        let again = create_on_branch(root.to_str().unwrap(), "pr-9", "main").expect("a worktree");
+        assert!(
+            again.path.ends_with("/repo-worktrees/pr-9-2"),
+            "{}",
+            again.path
+        );
         std::fs::remove_dir_all(&parent).ok();
     }
 

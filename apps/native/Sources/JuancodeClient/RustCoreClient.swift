@@ -11,12 +11,13 @@ import JuancodeServices
 /// Two things about this class are worth reading before the code.
 ///
 /// **It never pretends.** The daemon advertises what it implements in
-/// `serverInfo.capabilities`, and today that is `inputAck`, `resizeAck`, `screen`
-/// and `adoptExternal` — no `queue`, `trackedPrs`, `editor`, `terminal`,
-/// `sessionMeta` or `gridOwner`. Every member backed by a capability the connected
-/// core lacks either throws `CoreCapabilityError` (so a caller that got past the
-/// UI gate is a visible bug) or answers empty, and the UI reads the same list to
-/// grey the affordance out with the reason. Nothing here silently succeeds.
+/// `serverInfo.capabilities` — the authoritative list is `CAPABILITIES` in
+/// `juancoded-server/src/wire.rs`, and this client reads the one the connected core
+/// actually sent rather than a copy of it. `editor` and `terminal` are the notable
+/// absences today. Every member backed by a capability the connected core lacks either
+/// throws `CoreCapabilityError` (so a caller that got past the UI gate is a visible
+/// bug) or answers empty, and the UI reads the same list to grey the affordance out
+/// with the reason. Nothing here silently succeeds.
 ///
 /// **The mirror is a cache of the core's store.** The daemon owns its own SQLite at
 /// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`) and is
@@ -85,6 +86,19 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     private var reaperWindowMinutes: Int?
     private var reaperProtectedIds: Set<String>?
     private var connectionListeners: [Int: @Sendable (Bool, String?) -> Void] = [:]
+    /// The tracked-PR watch list as the daemon last sent it, or nil while this
+    /// connection has never been sent one. Nil and empty are different answers: the
+    /// daemon sends the whole list on subscribe, so empty means "nothing is watched"
+    /// and nil means "we have not been told yet".
+    private var trackedList: [TrackedPr]?
+    private var trackedListeners: [Int: @Sendable (TrackedPrEvent) -> Void] = [:]
+    /// Whether `subscribeTrackedPrs` has been sent on THIS socket. The subscription is
+    /// per connection on the daemon's side, so a reconnect has to send it again.
+    private var trackedSubscribed = false
+    /// One-shot waiters for the next `trackedPrs` frame: what `trackedPrs()` and
+    /// `trackPr` wait on, since the daemon answers both with the list on the bus
+    /// rather than with a reply of their own.
+    private var trackedWaiters: [FrameWaiter] = []
 
     /// The grid an attach we initiate uses when no pane has sized the session yet.
     /// Matches the daemon's own default so a discovery attach cannot narrow a
@@ -172,6 +186,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// daemon to serialise a few hundred rows, short enough that an unresponsive core
     /// costs a late sidebar rather than a launch.
     private static let backfillTimeout: TimeInterval = 5.0
+    /// How long a read of the watch list waits for the daemon's answer.
+    private static let trackedListTimeout: TimeInterval = 5.0
+    /// How long `trackPr` waits for the PR to appear in the list. Generous, because
+    /// tracking fetches a branch and boots a CLI before the row exists.
+    private static let trackTimeout: TimeInterval = 45.0
 
     /// Serve the address every remote client knows (4280) for a launch on this
     /// core, so the oracle sidecar is not blind in rust mode.
@@ -450,24 +469,134 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     // MARK: - Tracked PRs (capability: trackedPrs)
 
-    public func trackedPrs() async -> [TrackedPr] { [] }
+    /// One subscription per connection, sent once and again after a reconnect. The
+    /// daemon answers it with the whole list, which is what fills `trackedList`.
+    private func ensureTrackedSubscription() {
+        guard supports(.trackedPrs) else { return }
+        let send: Bool = lock.withLock {
+            guard !trackedSubscribed else { return false }
+            trackedSubscribed = true
+            return true
+        }
+        if send { connection.send(["type": "subscribeTrackedPrs"]) }
+    }
+
+    /// Wait for the next `trackedPrs` frame. `false` when the budget ran out first.
+    ///
+    /// A wait rather than a round trip because the tracked-PR frames are deliberately
+    /// answered by a list on the bus: every subscriber has to hear the same list, so
+    /// two clients on one daemon cannot disagree about what is being watched. The frame
+    /// handler writes `trackedList` before it wakes anybody, so a caller reads the
+    /// cache once this returns.
+    private func awaitTrackedFrame(timeout: TimeInterval) async -> Bool {
+        let waiter = FrameWaiter()
+        lock.withLock { trackedWaiters.append(waiter) }
+        // Cancelled as soon as the frame lands. `FrameWaiter` is one-shot, so the
+        // expiry a cancelled `Nap` still runs into cannot wake anybody twice.
+        let expiry = Task { [weak waiter] in
+            await Nap.ms(Int(timeout * 1000))
+            waiter?.expire()
+        }
+        let landed = await waiter.landed()
+        expiry.cancel()
+        lock.withLock { trackedWaiters.removeAll { $0 === waiter } }
+        return landed
+    }
+
+    public func trackedPrs() async -> [TrackedPr] {
+        guard supports(.trackedPrs) else { return [] }
+        ensureTrackedSubscription()
+        if let known = lock.withLock({ trackedList }) { return known }
+        _ = await awaitTrackedFrame(timeout: Self.trackedListTimeout)
+        return lock.withLock { trackedList } ?? []
+    }
 
     public func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
                         adoptSessionId: String?) async -> TrackedPr? {
-        NSLog("juancode: refused to track PR #\(pr.number) — the \(backendName) core has no trackedPrs capability")
+        guard supports(.trackedPrs) else {
+            NSLog("juancode: refused to track PR #\(pr.number) — the \(backendName) core has no trackedPrs capability")
+            return nil
+        }
+        if let adoptSessionId {
+            // Protocol v1's `trackPr` carries no session to adopt into, so there is no
+            // frame for this and inventing one client-side would mean spawning a second
+            // agent for a PR the user asked to be watched by the session they are
+            // already sitting in. Refused rather than silently turned into a spawn.
+            NSLog("juancode: cannot track PR #\(pr.number) in session \(adoptSessionId) — "
+                  + "the \(backendName) core has no wire frame for tracking in an existing session")
+            return nil
+        }
+        // The list this track produces is the answer, so the subscription has to be in
+        // place before the frame goes out. `cols`/`rows` have nowhere to go: protocol
+        // v1's `trackPr` carries no grid, so the daemon spawns the agent at its own
+        // default — which is the same 120x40 a create with no viewport gets, so the
+        // agent's first turn is not wrapped narrow either way.
+        ensureTrackedSubscription()
+        connection.send([
+            "type": "trackPr",
+            "cwd": cwd,
+            "pr": [
+                "number": pr.number,
+                "title": pr.title,
+                "url": pr.url,
+                "branch": pr.branch,
+            ],
+        ])
+        // Tracking makes a worktree (a fetch among the git it runs) and spawns a CLI,
+        // so the list takes seconds rather than milliseconds. Every list until the
+        // deadline is looked at, because another client's untrack can put one on the
+        // bus first. A timeout is not a failure to track — the list lands whenever it
+        // lands and every subscriber gets it — it only means this call cannot name the
+        // row, which is the same nil an already-tracked PR answers with.
+        let deadline = Date().addingTimeInterval(Self.trackTimeout)
+        let id = TrackedPr.key(cwd: cwd, number: pr.number)
+        while true {
+            if let entry = lock.withLock({ trackedList })?.first(where: { $0.id == id }) {
+                return entry
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0, await awaitTrackedFrame(timeout: remaining) else { break }
+        }
+        NSLog("juancode: the \(backendName) core did not report PR #\(pr.number) as tracked within "
+              + "\(Int(Self.trackTimeout))s")
         return nil
     }
 
-    public func untrackPr(_ trackedId: String) async {}
+    public func untrackPr(_ trackedId: String) async {
+        guard supports(.trackedPrs) else { return }
+        connection.send(["type": "untrackPr", "trackedId": trackedId])
+    }
 
-    public func resolveTrackNotification(trackedId: String, notificationId: String) async {}
+    public func resolveTrackNotification(trackedId: String, notificationId: String) async {
+        guard supports(.trackedPrs) else { return }
+        connection.send(["type": "resolveTrackNotification", "trackedId": trackedId,
+                         "notificationId": notificationId])
+    }
 
     public func subscribeTrackedPrs(
         _ onEvent: @escaping @Sendable (TrackedPrEvent) -> Void) async -> @Sendable () -> Void {
-        // The wire replies with the whole list on subscribe; an empty list is the
-        // honest equivalent, and it keeps the panel's "nothing tracked" state right.
-        onEvent(.trackedPrs([]))
-        return {}
+        guard supports(.trackedPrs) else {
+            // The wire replies with the whole list on subscribe; an empty list is the
+            // honest equivalent, and it keeps the panel's "nothing tracked" state right.
+            onEvent(.trackedPrs([]))
+            return {}
+        }
+        let (token, known) = lock.withLock { () -> (Int, [TrackedPr]?) in
+            let t = nextListenerToken
+            nextListenerToken += 1
+            trackedListeners[t] = onEvent
+            return (t, trackedList)
+        }
+        ensureTrackedSubscription()
+        // Handed the current list immediately when this connection already has one.
+        // When it does not, the hand-over IS the daemon's answer to the subscribe just
+        // sent — the listener is already registered, so it arrives there rather than
+        // being awaited here and then delivered twice.
+        if let known { onEvent(.trackedPrs(known)) }
+        return { [weak self] in
+            guard let self else { return }
+            lock.withLock { self.trackedListeners[token] = nil }
+        }
     }
 
     // MARK: - Presence, diagnostics, lifecycle
@@ -707,8 +836,31 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             }
             pendingResult { $0.failure = CoreRemoteError(message: message, sessionId: sessionId) }
 
-        case "inputAck", "screen", "queue", "editorReady", "terminalReady",
-             "trackedPrs", "trackNotification":
+        case "trackedPrs":
+            let list = Self.decodeTrackedPrs(body["tracked"])
+            let (listeners, waiters) = lock.withLock {
+                // Written before anybody is woken: a waiter reads this cache.
+                trackedList = list
+                let waiting = trackedWaiters
+                trackedWaiters.removeAll()
+                return (Array(trackedListeners.values), waiting)
+            }
+            // Replace wholesale: the frame is the complete watch list and never a
+            // delta, so a subscriber's whole job is to drop what it was holding.
+            for l in listeners { l(.trackedPrs(list)) }
+            for w in waiters { w.arrived() }
+
+        case "trackNotification":
+            guard let trackedId = body["trackedId"] as? String,
+                  let prNumber = body["prNumber"] as? Int,
+                  let notification = Self.decodeTrackNotification(body["notification"])
+            else { return }
+            for l in lock.withLock({ Array(trackedListeners.values) }) {
+                l(.trackNotification(trackedId: trackedId, prNumber: prNumber,
+                                     notification: notification))
+            }
+
+        case "inputAck", "screen", "queue", "editorReady", "terminalReady":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
             break
@@ -739,6 +891,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             if info.has(Self.sessionListCapability) {
                 connection.send(["type": "listSessions"])
             }
+            // And re-subscribe to the watch list, which is also per connection. The
+            // list is dropped rather than kept across the gap: the daemon may have
+            // untracked a merged PR while this socket was down, and a stale list is a
+            // sidebar row for a PR nobody is watching.
+            let resubscribe: Bool = lock.withLock {
+                guard trackedSubscribed || !trackedListeners.isEmpty else { return false }
+                trackedSubscribed = false
+                trackedList = nil
+                return true
+            }
+            if resubscribe { ensureTrackedSubscription() }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
         }
@@ -885,6 +1048,44 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         waiter.settleIfDone()
     }
 
+    /// Read the wire's tracked-PR rows back into `TrackedPr`.
+    ///
+    /// Hand-rolled rather than `Codable`, because the wire shape is not this struct:
+    /// it carries the derived `state` and a flat `checks` where the struct keeps a
+    /// whole diff baseline, and the baseline is the daemon's business — this side
+    /// never diffs anything. So `checks` is put back into the snapshot it came out of
+    /// and everything else is left at its default, which makes the struct's own
+    /// derived `state` come out equal to the string the daemon sent: both cores derive
+    /// it from the same two inputs.
+    static func decodeTrackedPrs(_ raw: Any?) -> [TrackedPr] {
+        guard let rows = raw as? [[String: Any]] else { return [] }
+        return rows.compactMap { row in
+            guard let number = row["number"] as? Int,
+                  let cwd = row["cwd"] as? String else { return nil }
+            let checks = PrChecks(rawValue: row["checks"] as? String ?? "") ?? .none
+            return TrackedPr(
+                number: number,
+                title: row["title"] as? String ?? "",
+                branch: row["branch"] as? String ?? "",
+                url: row["url"] as? String ?? "",
+                cwd: cwd,
+                sessionId: row["sessionId"] as? String ?? "",
+                snapshot: PrTrackSnapshot(checks: checks, baselined: true),
+                notifications: (row["notifications"] as? [Any] ?? [])
+                    .compactMap(decodeTrackNotification),
+                lastPolledAt: row["lastPolledAt"] as? Int)
+        }
+    }
+
+    static func decodeTrackNotification(_ raw: Any?) -> TrackNotification? {
+        guard let row = raw as? [String: Any],
+              let id = row["id"] as? String,
+              let prNumber = row["prNumber"] as? Int,
+              let message = row["message"] as? String else { return nil }
+        return TrackNotification(id: id, prNumber: prNumber, message: message,
+                                 createdAt: row["createdAt"] as? Int ?? 0)
+    }
+
     static func decodeMeta(_ raw: Any?) -> SessionMeta? {
         guard let raw, JSONSerialization.isValidJSONObject(["session": raw]),
               let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
@@ -908,6 +1109,45 @@ public struct CoreRemoteError: LocalizedError {
     }
 
     public var errorDescription: String? { message }
+}
+
+/// A one-shot "the frame arrived, or the wait ran out" handoff.
+///
+/// One-shot is the whole contract: the frame and the expiry race, and the loser must
+/// not be able to resume a continuation the winner already used. `DispatchSemaphore` is
+/// what the lifecycle waiter beside this uses, and it cannot be: its `wait` is
+/// unavailable from an async context, and the tracked-PR reads are async all the way
+/// down.
+private final class FrameWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var outcome: Bool?
+
+    /// `true` when a frame arrived, `false` when the budget ran out.
+    func landed() async -> Bool {
+        await withCheckedContinuation { c in
+            let settled: Bool? = lock.withLock {
+                if let outcome { return outcome }
+                continuation = c
+                return nil
+            }
+            if let settled { c.resume(returning: settled) }
+        }
+    }
+
+    func arrived() { settle(true) }
+    func expire() { settle(false) }
+
+    private func settle(_ value: Bool) {
+        let waiting: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard outcome == nil else { return nil }
+            outcome = value
+            let taken = continuation
+            continuation = nil
+            return taken
+        }
+        waiting?.resume(returning: value)
+    }
 }
 
 /// One in-flight lifecycle request. `created` then `attached` is the reply pair;
