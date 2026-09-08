@@ -670,6 +670,15 @@ impl SessionsApi for Fake {
     ) -> Result<Option<Attached>, StateError> {
         unimplemented!()
     }
+    fn restart_fresh(
+        &self,
+        _id: &str,
+        _owner: crate::grid::ClientId,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<Attached, StateError> {
+        unimplemented!()
+    }
     fn set_skip_permissions(
         &self,
         _id: &str,

@@ -7,10 +7,10 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
 - As of: 2026-09-08
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
-- Unmet scenarios: 3 of 34
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, restartFresh, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
+- Unmet scenarios: 2 of 34
 
-## What is not satisfied yet (3)
+## What is not satisfied yet (2)
 
 ### tracked-prs
 
@@ -25,13 +25,6 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: editor, terminal, resizeAck, pty
 - Why: core does not advertise the "editor" capability
 - Asserts: an editor or shell pty is addressable over the same input/resize/kill/output messages as a session, and terminalReady echoes the client's requestId so a client with several pending opens can tell them apart.
-
-### restart-fresh
-
-- Status: n/a
-- Needs: restartFresh, pty
-- Why: core does not advertise the "restartFresh" capability
-- Asserts: an exited session can be restarted as a brand-new CLI conversation under the same juancode id: the core starts the CLI instead of resuming it, pins a new conversation id, and answers `attached` for the id the client already knows, so the pane it is bound to survives. It serves a session `reactivate` refuses as unresumable, which is why it is a message of its own.
 
 ## Full scenario list
 
@@ -55,7 +48,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - skip-permissions: 3/3 - flipping skip-permissions
 - session-meta: 3/3 - meta edits are broadcast, not only snapshotted on attach
 - grid-owner: 3/3 - who owns the shared grid, and when it is let go
-- restart-fresh: n/a - restarting a session as a fresh conversation
+- restart-fresh: 3/3 - restarting a session as a fresh conversation
 - spawn-model: 3/3 - the model a create pins
 - seeded-input: 3/3 - a create's initialInput is delivered and submitted
 - transcript: 3/3 - transcript replay and live batches

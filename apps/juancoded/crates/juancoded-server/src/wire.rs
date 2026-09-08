@@ -80,6 +80,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Advertised because the frame does the whole thing: the row goes dormant BEFORE the
 /// pty dies, it is persisted, and `reactivate` clears it.
 ///
+/// `restartFresh` says a client can restart an exited session as a brand-new CLI
+/// conversation without losing the pane it is bound to. It is not `reactivate` with a
+/// flag: a revive hands the CLI `--resume <id>` and refuses a session that never wrote
+/// one, and the case this serves IS that refusal — a codex or opencode session that
+/// ended before its id landed had nothing but a dead replay-only pane. Advertised
+/// because the frame does the whole thing: a pinned-id provider gets a fresh pin, the
+/// juancode id and its row do not move, the abandoned conversation's scrollback goes
+/// with it, and a session whose pty is still up is refused rather than restarted.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -100,6 +109,7 @@ pub const CAPABILITIES: &[&str] = &[
     "transcript",
     "reaper",
     "sessionSleep",
+    "restartFresh",
     // Both only ever advertised once the flag actually reaches the CLI's argv: a
     // capability a client trusts and the core drops is worse than one it never had.
     "spawnModel",
@@ -184,6 +194,20 @@ pub enum ClientMessage {
     /// Revive a session whose pty is gone. Distinct from `attach`, which only ever
     /// reads: only a reactivate can answer `unresumable`.
     Reactivate {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Restart an exited session as a brand-new CLI conversation under the same
+    /// juancode id, answering `attached` for the id the client already knows.
+    ///
+    /// Not a flag on `reactivate`, and not only because of ADDITIVE_FIELDS: the two
+    /// answer differently. A revive needs a conversation to resume and says
+    /// `unresumable` when there is none; this needs nothing and has no such leg,
+    /// which is the entire reason it exists — the session a revive gives up on is the
+    /// one worth restarting. A live session is answered `error` rather than
+    /// restarted, because a restart throws a conversation away.
+    RestartFresh {
         session_id: String,
         cols: u16,
         rows: u16,
@@ -422,6 +446,11 @@ impl ClientMessage {
                 rows: raw.rows.ok_or("missing rows")?,
             }),
             "reactivate" => Ok(Self::Reactivate {
+                session_id: need_session()?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+            }),
+            "restartFresh" => Ok(Self::RestartFresh {
                 session_id: need_session()?,
                 cols: raw.cols.ok_or("missing cols")?,
                 rows: raw.rows.ok_or("missing rows")?,
@@ -1139,6 +1168,9 @@ mod tests {
             // And for `sessionSleep`: a pause that fell through to `Unknown` would
             // kill nothing and say nothing, which is worse than the kill it replaced.
             r#"{"type":"sleepSession","sessionId":"s"}"#,
+            // And for `restartFresh`: falling through to `Unknown` would leave a
+            // client that asked for a fresh conversation staring at a dead pane.
+            r#"{"type":"restartFresh","sessionId":"s","cols":80,"rows":24}"#,
         ] {
             assert!(
                 !matches!(
@@ -1184,6 +1216,7 @@ mod tests {
                     "sessionList",
                     "sessionDelete",
                     "sessionSleep",
+                    "restartFresh",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,

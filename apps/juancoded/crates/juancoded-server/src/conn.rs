@@ -701,6 +701,22 @@ fn handle_client_message(
             }),
         },
 
+        // No `unresumable` leg and no scrollback to replay: a fresh conversation needs
+        // neither a resumable id nor the history it is leaving behind. The `attached`
+        // that comes back carries the id the client already knows, so the pane the
+        // restart was asked for survives it.
+        ClientMessage::RestartFresh {
+            session_id,
+            cols,
+            rows,
+        } => match sessions.restart_fresh(&session_id, client, cols, rows) {
+            Ok(payload) => push_attached(&session_id, payload, attached, outbound),
+            Err(e) => outbound.push(ServerMessage::Error {
+                session_id: Some(session_id),
+                message: e.to_string(),
+            }),
+        },
+
         ClientMessage::SetSkipPermissions {
             session_id,
             skip_permissions,
