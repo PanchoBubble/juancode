@@ -21,10 +21,6 @@ private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
-/// Ids the global pause is holding asleep. Survives a quit so play still knows what
-/// to revive; see `AppModel.pausedSessionIds`.
-private let pausedSessionsKey = "juancode.pausedSessions"
-
 /// UserDefaults key for the idle-session sleep window driving the `SessionReaper`,
 /// in minutes (`0` = never / disabled). Key name predates the reaper.
 private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
@@ -513,6 +509,9 @@ final class AppModel {
     /// Its parallel lanes. Unstructured, so `cancelGlobalResume` cancels them itself —
     /// cancelling the parent task alone wouldn't reach them.
     @ObservationIgnored var globalResumeLanes: [Task<Void, Never>] = []
+    /// Cancel handle for the paused-set watch that repaints the toolbar when the
+    /// phone pauses or plays.
+    @ObservationIgnored private var pausedBookWatch: (() -> Void)?
 
     /// Restore candidates already revived once this run, so re-opening one within the
     /// same run (after it exits again, say) doesn't re-announce a restore.
@@ -598,6 +597,15 @@ final class AppModel {
             Task { @MainActor in self?.revealSession(id) }
         }
         agentNotifier.start()
+        // The desktop's own pause becomes THE pause for this launch: a `pauseAll`
+        // arriving over /ws from the phone runs this code, not a second
+        // implementation of the same rule that could drift from it.
+        core.globalPause.driver = DesktopGlobalPause(model: self)
+        // ...and a pause taken remotely has to reach the toolbar button, which reads
+        // the book through `isGloballyPaused`.
+        pausedBookWatch = core.globalPause.onChange { _ in
+            Task { @MainActor [weak self] in self?.refresh() }
+        }
         subscribeTrackedMirror()
         restoreTrackedIssues()
         restoreRecurringTasks()
@@ -1299,18 +1307,19 @@ final class AppModel {
     /// free to idle-sleep as usual.
     @ObservationIgnored private var keepAwakeToken: NSObjectProtocol?
 
-    /// Sessions the global pause button put to sleep, so play knows exactly which
-    /// rows to bring back. Persisted: quitting while paused is common (that is half
-    /// of why you paused), and losing the set would strand every one of them asleep
-    /// with no way to tell them from a session you slept yourself.
+    /// Sessions the global pause put to sleep, so play knows exactly which rows to
+    /// bring back. Persisted: quitting while paused is common (that is half of why
+    /// you paused), and losing the set would strand every one of them asleep with no
+    /// way to tell them from a session you slept yourself.
+    ///
+    /// The set itself lives on `core.globalPause`, not here (juancode-tnxx). It used
+    /// to be a `Set` on this model behind `UserDefaults`, which made it desktop-only:
+    /// a `pauseAll` from the phone had nowhere to record what it slept, and a play
+    /// from the phone had no set to revive. One book per launch, and the `/ws`
+    /// surface publishes it as `pauseState`, so both surfaces read the same thing.
     ///
     /// Non-empty *is* the paused state — see `isGloballyPaused`.
-    var pausedSessionIds: Set<String> =
-        Set(UserDefaults.standard.stringArray(forKey: pausedSessionsKey) ?? []) {
-        didSet {
-            UserDefaults.standard.set(Array(pausedSessionIds), forKey: pausedSessionsKey)
-        }
-    }
+    var pausedSessionIds: Set<String> { core.globalPause.paused }
 
     /// True while a global pause is in effect. Drives the toolbar button's pause/play
     /// face and its badge count.

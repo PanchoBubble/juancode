@@ -42,8 +42,9 @@ what keeps the spec from becoming documentation.
 
 ### The catalogue is the union, and the gate says which core
 
-The two cores do not implement the same set. The Swift core has `trackedPrs`; both
-have `restartFresh`, `spawnModel`, `spawnPreset`, `editor` and `terminal`; the
+The two cores do not implement the same set. The Swift core has `trackedPrs` and
+`globalPause`; both have `restartFresh`, `spawnModel`, `spawnPreset`, `editor` and
+`terminal`; the
 Rust core has `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`,
 `sessionDelete` and `sessionSleep`. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then

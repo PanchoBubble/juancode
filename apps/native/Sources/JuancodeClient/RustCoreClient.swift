@@ -160,6 +160,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             lock.withLock { backfillWaiter = nil }
         }
 
+        // Answer a remote pause without a desktop, the same way `AppState` does for
+        // the Swift core. Replaced by the model's own pause when the app comes up.
+        globalPause.driver = RemoteGlobalPause(core: self, book: globalPause)
+
         // Re-adopt what the daemon may still be running. An `attach` for a session
         // it does not have answers one error frame and costs nothing.
         for id in orphans { probe(id) }
@@ -211,7 +215,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             searchSessions: { [weak self] q, limit in self?.searchSessions(q, limit: limit) ?? [] },
             kill: { [weak self] id in self?.kill(id) },
             deleteSession: { [weak self] id in self?.deleteSession(id) },
-            backendName: backendName)
+            backendName: backendName,
+            globalPause: globalPause)
         let upstream = baseURL
         Task.detached {
             do {
@@ -224,6 +229,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     }
 
     // MARK: - Handshake
+
+    /// This launch's paused set. The daemon has no frame for a global pause and no
+    /// row that distinguishes "the pause slept this" from the four other things that
+    /// set `dormant`, so the book lives on the desktop side of the wire — one
+    /// instance, shared by the local UI and by the `/ws` surface the proxy serves.
+    public let globalPause = GlobalPauseBook()
 
     public var info: CoreServerInfo {
         let landed = lock.withLock { handshake }

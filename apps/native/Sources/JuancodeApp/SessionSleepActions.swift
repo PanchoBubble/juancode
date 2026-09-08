@@ -56,10 +56,13 @@ extension AppModel {
         cancelGlobalResume()
         let targets = GlobalPause.targets(pauseCandidates())
         guard !targets.isEmpty else { return 0 }
+        // Recorded before a single pty dies: a session killed before the record
+        // landed is one nothing remembers pausing, and it puts `pauseState` ahead of
+        // the exits on the wire instead of racing them. Union, not assignment, so
+        // pausing again after a partial play (some rows woken by hand) does not drop
+        // the ones still asleep from the set.
+        core.globalPause.record(targets)
         for id in targets { sleepSession(id) }
-        // Union, not assignment: pausing again after a partial play (some rows woken
-        // by hand) must not drop the ones still asleep from the set.
-        pausedSessionIds.formUnion(targets)
         core.logSessionEvent("globalPause", sessionId: "-", project: "-",
                              fields: ["count": "\(targets.count)"])
         refresh()
@@ -73,13 +76,14 @@ extension AppModel {
     /// bound exists to avoid, while a single lane leaves the last row dead a minute in.
     func resumeAllSessions() {
         cancelGlobalResume()
-        let ordered = GlobalPause.revivals(paused: pausedSessionIds,
+        // Read and clear in one step: the button must read "paused" for exactly as
+        // long as the pause is in effect, a revival that fails leaves a sleeping row
+        // the user can click rather than a pause that never lifts, and a `pauseAll`
+        // racing in from the phone must not have its set half-consumed by this play.
+        let recorded = core.globalPause.take()
+        let ordered = GlobalPause.revivals(paused: recorded,
                                            present: pauseCandidates(),
                                            focus: selection)
-        // Clear up front: the button must read "paused" for exactly as long as the
-        // pause is in effect, and a revival that fails leaves a sleeping row the user
-        // can click — not a pause that never lifts.
-        pausedSessionIds = []
         guard !ordered.isEmpty else { refresh(); return }
         core.logSessionEvent("globalResume", sessionId: "-", project: "-",
                              fields: ["count": "\(ordered.count)"])
@@ -132,10 +136,24 @@ extension AppModel {
     var pausedSessionCount: Int { pausedSessionIds.count }
 }
 
-/// Lane bounds for a global play. Same shape and the same reason as the launch
-/// sweep's `LaunchRevive`: a play after pausing forty sessions is the same forty
-/// `--resume` processes the launch sweep spreads out.
-private enum GlobalResume {
-    static let lanes = 4
-    static let gapMs = 150
+/// The desktop's pause, as the thing a remote `pauseAll` runs.
+///
+/// The whole point of installing this on `core.globalPause` is that there is one
+/// pause per launch. With the app up, a phone hitting pause sleeps exactly what the
+/// toolbar button sleeps — the sidebar's rule about editor panes and not-yet-adopted
+/// external rows included — because it is the same method, not a second one that
+/// happens to agree today.
+final class DesktopGlobalPause: GlobalPauseDriver, @unchecked Sendable {
+    private weak var model: AppModel?
+
+    init(model: AppModel) { self.model = model }
+
+    @discardableResult
+    func pauseAll() async -> Int {
+        await MainActor.run { model?.pauseAllSessions() ?? 0 }
+    }
+
+    func resumeAll() async {
+        await MainActor.run { model?.resumeAllSessions() }
+    }
 }

@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.9.0",
+  "specRevision": "1.10.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -37,7 +37,8 @@
       "stuck",
       "sessionList",
       "sessionDelete",
-      "sessionSleep"
+      "sessionSleep",
+      "globalPause"
     ],
     "gates": {
       "queue": [
@@ -120,6 +121,11 @@
       ],
       "sessionSleep": [
         "sleepSession"
+      ],
+      "globalPause": [
+        "pauseAll",
+        "resumeAll",
+        "pauseState"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -378,6 +384,18 @@
       "optional": [],
       "capability": "reaper",
       "notes": "The sessions this client says must never be slept: the pane it has open and the active Oracle. Replaces this connection's whole set - never a patch - and an empty list clears it. Scoped to the connection, so a client that goes away stops protecting a pane nobody is looking at; a core that kept it would make those sessions permanently un-reapable."
+    },
+    "pauseAll": {
+      "required": [],
+      "optional": [],
+      "capability": "globalPause",
+      "notes": "Sleep every live agent session at once and record the set, so a later `resumeAll` revives exactly it. The remote half of the desktop's pause button, on the surface that wants it most: the reason to pause everything is that you are walking away from the Mac. No reply of its own, for the reason `sleepSession` has none - the effect IS the `pauseState` carrying the new set, followed by each slept session's `sessionMeta` (`dormant: true`) and `exit`, in that order. The set lands before a single pty dies, the same ordering rule `sleepSession` follows for the dormant flag and for the same reason: a process killed before the record landed is a session nothing remembers pausing, and a client would see the exits race the state they are supposed to explain. Two rows are deliberately left out of the set: one already asleep, which is the user's own sleep and not this pause's to wake, and one that exited on its own, which a play must never resurrect - the same refusal `sleepSession` makes when there is no live pty, for the same reason. Editor and terminal panes are left running: they hold no conversation to resume, so sleeping one loses the buffer and a play brings back an empty shell."
+    },
+    "resumeAll": {
+      "required": [],
+      "optional": [],
+      "capability": "globalPause",
+      "notes": "Revive exactly the set the last `pauseAll` recorded, then clear it. Read-and-clear in one step, so a pause landing mid-play cannot have its set half-consumed, and so a revival that fails leaves a sleeping row somebody can click rather than a pause that never lifts. A session in the set that came back on its own meanwhile is skipped, and a session that is not in the set is never woken. Answered like `pauseAll`: `pauseState` with the now-empty set, then each revived session's `attached`. Not spelled `wakeAll` beside a `sleepAll`, because the per-session halves are already `sleepSession` and `reactivate` - see the `sleepAndWake` decision."
     }
   },
   "serverMessages": {
@@ -491,7 +509,7 @@
       ],
       "optional": [],
       "capability": "sessionMeta",
-      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta — replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
+      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta \u2014 replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
     },
     "sessions": {
       "required": [
@@ -591,6 +609,14 @@
       ],
       "optional": [],
       "capability": "trackedPrs"
+    },
+    "pauseState": {
+      "required": [
+        "paused"
+      ],
+      "optional": [],
+      "capability": "globalPause",
+      "notes": "The set a global pause is holding asleep, sorted. Sent once right after `serverInfo` to a connection that arrives while a pause is IN EFFECT, so a client joining mid-pause starts from the truth rather than assuming nothing is paused - and not sent at all when the set is empty, the same rule `gridChange` follows for an unclaimed grid: a connect-time snapshot is for state that exists, and to a client whose button starts out reading \"pause\" no frame and the empty set say the same thing. and broadcast to every connection whenever the set changes - whichever surface changed it, which is the point: the desktop button and a remote `pauseAll` write the same set. Always complete; replace wholesale. Empty means no pause is in effect. It is NOT the set of `dormant` rows: dormancy has four other producers (the idle reaper, the live-session cap, a graceful quit, a per-session `sleepSession`), so a play driven off `dormant` would wake sessions somebody slept themselves weeks ago."
     }
   },
   "enums": {
@@ -649,8 +675,8 @@
     "SESSION_LIST_IS_A_SNAPSHOT: a `sessions` frame is the complete list, replaced wholesale, and a client reconciles deletions against it - a row it holds that the frame does not list is a row the core does not have. That is the half a delta stream cannot supply: `created`, `sessionMeta` and `exit` only ever add or amend, so a client fed by those alone converges on a superset of the truth and never learns what went away. It is not a subscription either, and a core sends exactly one per `listSessions`: what changes afterwards changes through the deltas, and a second unsolicited snapshot would race whatever the client asks for next."
   ],
   "decisions": {
-    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire — so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
-    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side — the core knows both the pid and the cwd — and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
+    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire \u2014 so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
+    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
     "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
     "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",

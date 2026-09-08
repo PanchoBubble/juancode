@@ -167,8 +167,34 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
     deliver: vi.fn(async () => {}),
     queue: vi.fn(async () => {}),
     transcribe: vi.fn(async () => "transcribed text"),
+    pause: {
+      supported: () => true,
+      paused: () => [],
+      all: () => true,
+      resume: () => true,
+    },
     ...overrides,
   };
+}
+
+/** A `pause` collaborator whose set moves when the frame is "sent", so the handlers
+ *  can be driven the way the real endpoint drives them: the answer to a pause is the
+ *  `pauseState` that follows it, never a reply to the frame itself. */
+function fakePause(
+  { supported = true, start = [] as string[], after = null as string[] | null } = {},
+) {
+  let paused: string[] | null = start;
+  const all = vi.fn(() => {
+    if (!supported) return false;
+    if (after) paused = after;
+    return true;
+  });
+  const resume = vi.fn(() => {
+    if (!supported) return false;
+    paused = [];
+    return true;
+  });
+  return { supported: () => supported, paused: () => paused, all, resume };
 }
 
 const voiceMsg = (
@@ -934,5 +960,71 @@ describe("notifyStuckEvent", () => {
       newBridgeState(),
     );
     expect(deps.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("/pauseall and /playall", () => {
+  const msg = (text: string): TgUpdate => ({
+    update_id: 1,
+    message: { message_id: 1, from: { id: 7 }, chat: { id: 100 }, text },
+  });
+  const allowed = new Set([7]);
+
+  it("pauses, and reports the set the endpoint published rather than a guess", async () => {
+    const pause = fakePause({ start: [], after: ["a", "b"] });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/pauseall"), allowed, deps, newBridgeState());
+    expect(pause.all).toHaveBeenCalledOnce();
+    const sent = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(sent).toContain("Paused 2 sessions");
+  });
+
+  it("counts only what this pause slept, not what was already asleep", async () => {
+    // "a" was asleep before the command; only "b" is this pause's doing.
+    const pause = fakePause({ start: ["a"], after: ["a", "b"] });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/pauseall"), allowed, deps, newBridgeState());
+    const sent = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(sent).toContain("Paused 1 session.");
+    expect(sent).toContain("all 2");
+  });
+
+  it("says nothing was live rather than claiming a pause that slept nobody", async () => {
+    const pause = fakePause({ start: [], after: [] });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/pauseall"), allowed, deps, newBridgeState());
+    const sent = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(sent).toContain("Nothing live to pause");
+  });
+
+  it("plays back exactly the set the endpoint is holding", async () => {
+    const pause = fakePause({ start: ["a", "b", "c"] });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/playall"), allowed, deps, newBridgeState());
+    expect(pause.resume).toHaveBeenCalledOnce();
+    const sent = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(sent).toContain("Waking 3 sessions");
+  });
+
+  it("does not send a resumeAll when nothing is paused", async () => {
+    const pause = fakePause({ start: [] });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/playall"), allowed, deps, newBridgeState());
+    expect(pause.resume).not.toHaveBeenCalled();
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]).toContain("Nothing is paused");
+  });
+
+  // A core with no such frame is told about, not sent a frame nothing answers: the
+  // whole reason the capability is on the handshake is so a client can say why.
+  it("says so on a core without the capability instead of sending into the dark", async () => {
+    const pause = fakePause({ supported: false });
+    const deps = makeDeps({ pause });
+    await handleUpdate(msg("/pauseall"), allowed, deps, newBridgeState());
+    await handleUpdate(msg("/playall"), allowed, deps, newBridgeState());
+    expect(pause.all).not.toHaveBeenCalled();
+    expect(pause.resume).not.toHaveBeenCalled();
+    for (const call of (deps.send as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(call[1]).toContain("no global pause");
+    }
   });
 });

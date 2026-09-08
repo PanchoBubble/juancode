@@ -80,6 +80,23 @@ public enum ClientMessage: Sendable {
     case subscribeScreen(sessionId: String)
     /// Stop the live screen stream for a session (the client closed that view).
     case unsubscribeScreen(sessionId: String)
+    // ── Global pause (juancode-nizo / juancode-tnxx) ─────────────────────────────
+    /// Sleep every live agent session at once and remember the set, so a play
+    /// revives exactly it. The remote half of the desktop's pause button, for the
+    /// surface you actually want it on: the reason to pause everything is that you
+    /// are walking away from the Mac.
+    ///
+    /// No reply of its own, for the reason `sleepSession` has none: the effect IS
+    /// the `pauseState` carrying the new set, followed by each session's
+    /// `sessionMeta` (`dormant: true`) and `exit`. A session already asleep is left
+    /// out of the set rather than added to it — it is the user's own sleep, not this
+    /// pause's to wake — and so is a session that exited on its own.
+    case pauseAll
+    /// Revive exactly the set the last pause recorded, and clear it. Sessions that
+    /// came back on their own meanwhile are skipped, and one that is not in the set
+    /// is never woken: a play that resurrected a crashed session would be the same
+    /// mistake as reading a kill for a sleep.
+    case resumeAll
     case openEditor(cwd: String, file: String, cols: Int, rows: Int)
     case openTerminal(cwd: String, cols: Int, rows: Int, requestId: String)
     // ── Tracked-PR registry (juancode-bt2) — keep beside the PR server messages ──
@@ -179,6 +196,10 @@ extension ClientMessage: Decodable {
             self = .subscribeScreen(sessionId: try c.decode(String.self, forKey: .sessionId))
         case "unsubscribeScreen":
             self = .unsubscribeScreen(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "pauseAll":
+            self = .pauseAll
+        case "resumeAll":
+            self = .resumeAll
         case "openEditor":
             self = .openEditor(cwd: try c.decode(String.self, forKey: .cwd),
                                file: try c.decode(String.self, forKey: .file),
@@ -220,7 +241,19 @@ public enum WireProtocol {
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
-                                      "isolateWorktree"]
+                                      "isolateWorktree", "globalPause"]
+
+    /// Capabilities that describe what this ENDPOINT serves a remote client, not
+    /// what the app can ask a core for.
+    ///
+    /// `globalPause` is the only one so far. The desktop's pause button does not go
+    /// through a core frame on either core — it goes through `CoreClient.globalPause`,
+    /// the book both surfaces share — so a `CoreCapability` case for it would have
+    /// the settings panel report "global pause unavailable" on the Rust core, which
+    /// pauses perfectly well. The string exists for the phone, which genuinely cannot
+    /// send `pauseAll` to an endpoint that does not serve it. Same reasoning as the
+    /// `sessionSleep` / `reaper` string constants on `RustCoreClient`, mirrored.
+    public static let remoteOnlyCapabilities: Set<String> = ["globalPause"]
 }
 
 public enum ServerMessage: Sendable {
@@ -289,6 +322,12 @@ public enum ServerMessage: Sendable {
     /// on `subscribeQueue` and after every change (queued, delivered, cancelled).
     /// Always the complete ordered list; replace wholesale.
     case queue(sessionId: String, items: [QueuedMessage])
+    /// The set a global pause is currently holding asleep (juancode-tnxx) — sent
+    /// once per connection right after `serverInfo`, and broadcast to every
+    /// connection whenever the set changes, whichever surface changed it. Always the
+    /// complete set; replace wholesale. Empty means no pause is in effect, which is
+    /// what a client renders its button off: non-empty *is* the paused state.
+    case pauseState(paused: [String])
     case editorReady(editorId: String)
     case terminalReady(terminalId: String, requestId: String)
     case unresumable(sessionId: String, reason: String)
@@ -361,6 +400,8 @@ extension ServerMessage: Encodable {
         case tracked, trackedId, prNumber, notification
         // Per-session message queue (oracle-cj3 / juancode-r82).
         case items
+        // Global pause (juancode-tnxx).
+        case paused
         // Rendered-screen stream (juancode-a2h.3).
         case reset, cursorX, cursorY, cursorVisible, alt, lines
         // Settle-edge change rollup + dispatch correlation on `activity`.
@@ -440,6 +481,11 @@ extension ServerMessage: Encodable {
             try c.encode("queue", forKey: .type)
             try c.encode(sessionId, forKey: .sessionId)
             try c.encode(items, forKey: .items)
+        case let .pauseState(paused):
+            try c.encode("pauseState", forKey: .type)
+            // Sorted so two connections that ask at different moments cannot render
+            // the same set in two orders, and a golden transcript can assert on it.
+            try c.encode(paused.sorted(), forKey: .paused)
         case let .editorReady(editorId):
             try c.encode("editorReady", forKey: .type)
             try c.encode(editorId, forKey: .editorId)

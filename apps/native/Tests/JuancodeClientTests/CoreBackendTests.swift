@@ -236,7 +236,8 @@ final class CoreBackendTests: XCTestCase {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen", "adoptExternal",
                                            "sessionMeta", "gridOwner", "isolateWorktree"])
         XCTAssertEqual(core.missingCapabilities,
-                       [.queue, .trackedPrs, .editor, .terminal, .restartFresh, .spawnModel])
+                       [.queue, .trackedPrs, .editor, .terminal, .restartFresh, .spawnModel,
+                        .spawnPreset])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -255,7 +256,7 @@ final class CoreBackendTests: XCTestCase {
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .editor, .terminal, .adoptExternal,
                         .sessionMeta, .gridOwner, .restartFresh, .spawnModel,
-                        .isolateWorktree])
+                        .spawnPreset, .isolateWorktree])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, so
@@ -270,8 +271,10 @@ final class CoreBackendTests: XCTestCase {
         }
         let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
         XCTAssertEqual(core.missingCapabilities, [])
-        XCTAssertEqual(Set(WireProtocol.capabilities),
-                       Set(CoreCapability.allCases.map(\.rawValue)))
+        XCTAssertEqual(Set(WireProtocol.capabilities).subtracting(WireProtocol.remoteOnlyCapabilities),
+                       Set(CoreCapability.allCases.map(\.rawValue)),
+                       "every capability the Swift core advertises is one the app can ask for, "
+                       + "except the ones that only describe what the endpoint serves a remote client")
     }
 
     /// The error a caller that got past a gate sees: it names the capability and
@@ -333,6 +336,8 @@ final class CoreBackendTests: XCTestCase {
 /// would need a core traps: reaching one from a capability test is a test bug.
 final class FakeCore: CoreClient, @unchecked Sendable {
     let info: CoreServerInfo
+    // Real, not a trap: the book is state a caller reads, not a core round trip.
+    let globalPause = GlobalPauseBook(storage: .memory())
 
     init(capabilities: [String], daemon: DaemonIdentity? = nil) {
         self.info = CoreServerInfo(protocolVersion: WireProtocol.version,

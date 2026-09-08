@@ -52,6 +52,13 @@ final class WebSocketConnection: @unchecked Sendable {
 
     private let lock = NSLock()
     private var subscriptions: [String: () -> Void] = [:]
+    /// WHICH pty object each subscription is on. A revive spawns a new `Session`
+    /// under the same id, and a subscription keyed on the id alone would look
+    /// satisfied while pointing at the dead one — no output, and no `exit`, which is
+    /// the frame a client waits on. `reactivate` used to work around this by
+    /// unsubscribing by hand before reviving; a global play revives out of band, so
+    /// there is nothing to do the workaround (juancode-tnxx).
+    private var subscribedPtys: [String: ObjectIdentifier] = [:]
     private var activityWatchers: [() -> Void] = []
     /// Message-queue subscriptions, one per session this tab is watching
     /// (oracle-cj3 / juancode-r82). The queue itself persists; only the fan-out is
@@ -102,7 +109,19 @@ final class WebSocketConnection: @unchecked Sendable {
     func start() {
         for s in state.registry.all() { watchSession(s) }
         let off = state.registry.onCreate { [weak self] s in self?.watchSession(s) }
-        lock.withLock { activityWatchers.append(off) }
+        // The paused set, before anything else can change it: a client that connects
+        // mid-pause has to start from the truth. Only when there IS a pause, which is
+        // the rule `gridChange` follows for an unclaimed grid — a connect-time
+        // snapshot is for state that exists, and "no frame" and "the empty set" say
+        // the same thing to a client whose button starts out reading "pause".
+        let pausedNow = state.globalPause.paused
+        if !pausedNow.isEmpty { send(.pauseState(paused: Array(pausedNow))) }
+        // Filed with the activity watchers, which is where this connection's
+        // non-per-session cancel handles already live, so `close` tears it down.
+        let pauseOff = state.globalPause.onChange { [weak self] ids in
+            self?.send(.pauseState(paused: Array(ids)))
+        }
+        lock.withLock { activityWatchers.append(off); activityWatchers.append(pauseOff) }
     }
 
     private func watchSession(_ s: Session) {
@@ -119,7 +138,8 @@ final class WebSocketConnection: @unchecked Sendable {
                          activityWatchers + metaWatchers + gridWatchers,
                          Array(queueWatchers.values),
                          Array(screenStreams.values), openedEditors, openedTerminals, trackedPrsUnsub)
-                subscriptions.removeAll(); activityWatchers.removeAll(); queueWatchers.removeAll()
+                subscriptions.removeAll(); subscribedPtys.removeAll()
+                activityWatchers.removeAll(); queueWatchers.removeAll()
                 metaWatchers.removeAll(); gridWatchers.removeAll()
                 screenStreams.removeAll()
                 openedEditors.removeAll(); openedTerminals.removeAll()
@@ -223,8 +243,18 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     private func subscribe(_ id: String) {
-        if lock.withLock({ subscriptions[id] != nil }) { return }
         guard let pty = resolvePty(id) else { return }
+        let token = ObjectIdentifier(pty)
+        var stale: (() -> Void)?
+        let alreadyOnThisPty = lock.withLock { () -> Bool in
+            if subscribedPtys[id] == token { return true }
+            stale = subscriptions.removeValue(forKey: id)
+            subscribedPtys[id] = token
+            return false
+        }
+        if alreadyOnThisPty { return }
+        // Non-nil only when a previous pty under this id is being replaced.
+        stale?()
         let offOut = pty.subscribeBytes { [weak self] bytes in
             self?.outputCoalescer.append(id, bytes)
         }
@@ -238,7 +268,10 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     private func unsubscribe(_ id: String) {
-        lock.withLock { subscriptions.removeValue(forKey: id) }?()
+        lock.withLock {
+            subscribedPtys.removeValue(forKey: id)
+            return subscriptions.removeValue(forKey: id)
+        }?()
     }
 
     /// Repaint an overflowed session (its incremental output was dropped to keep
@@ -501,6 +534,17 @@ final class WebSocketConnection: @unchecked Sendable {
                 subscribe(sessionId)
                 send(.error(sessionId: sessionId, message: "Failed to change permissions: \(errMsg(error))"))
             }
+
+        // ── Global pause (juancode-tnxx) ──────────────────────────────────────────
+        case .pauseAll:
+            // Through the book's driver, never inline: with the desktop up that
+            // driver IS the toolbar button's pause, which is what makes "the phone
+            // pauses the same set the button does" true by construction instead of
+            // by two implementations agreeing.
+            _ = await state.globalPause.driver?.pauseAll()
+
+        case .resumeAll:
+            await state.globalPause.driver?.resumeAll()
 
         case let .openEditor(cwd, file, cols, rows):
             do {

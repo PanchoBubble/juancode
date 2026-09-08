@@ -1,0 +1,215 @@
+{
+  "id": "global-pause",
+  "title": "pause everything from somewhere else, and play back exactly that set",
+  "asserts": "a core that advertises `globalPause` lets a client that is not the desktop sleep every live agent at once and bring back exactly that set. `pauseAll` answers with a `pauseState` naming the sessions it slept - no reply of its own, the same shape `sleepSession` has, because the set IS the answer - and each of them then exits, so the RAM the pause was taken for actually comes back. What the set does NOT contain is the load-bearing half: a session that exited on its own before the pause is not in it and is not woken by the play, which is the same refusal `sleepSession` makes for a session with no live pty and for the same reason - a crashed row resurrected by a global play is indistinguishable from one somebody paused, and reviving it is the bug this whole ticket is about. A session already asleep when the pause lands is excluded by the identical rule (`targets` filters on liveness, not on the dormant flag), so it stays the user's own sleep rather than becoming this pause's to wake. `resumeAll` clears the set before it revives anything, so the state a client renders its button off stops saying \"paused\" the moment the play starts and a revival that fails leaves a clickable sleeping row rather than a pause that never lifts.",
+  "capabilities": [
+    "globalPause"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "exit",
+    "queue",
+    "pauseState"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "two sessions, because everything this frame promises is about which of them the set contains"
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "live": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$live",
+        "session": {
+          "dormant": false,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "dead": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$dead",
+        "session": {
+          "dormant": false,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$dead"
+      },
+      "note": "this one ends before the pause is taken, which is the row a play must never resurrect"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$dead"
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "pauseAll"
+      }
+    },
+    {
+      "expect": {
+        "type": "pauseState",
+        "paused": {
+          "$contains": "$live",
+          "$notContains": "$dead"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "the set, and what is missing from it - published BEFORE any pty dies, so a client is never told about a kill it has no record of a pause for. The live agent is in; the one that ended on its own is not, because a play driven off anything broader would wake it as if somebody had paused it"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$live"
+      },
+      "timeoutMs": 20000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue",
+        "pauseState"
+      ],
+      "note": "and the CLI tree is actually freed - a pause that left the process running would not give back the ~300MB it is taken for"
+    },
+    {
+      "send": {
+        "type": "resumeAll"
+      }
+    },
+    {
+      "expect": {
+        "type": "pauseState",
+        "paused": {
+          "$notContains": "$live"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "cleared before a single pty respawns: the button must read \"paused\" for exactly as long as the pause is in effect"
+    },
+    {
+      "sleep": 8000,
+      "note": "a play is real `--resume` processes spread over bounded lanes, not a flag flip; this outlasts one spawn"
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$live",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$live",
+        "session": {
+          "id": "$live",
+          "dormant": false,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "exactly the session the pause took is awake again, and its dormant flag is cleared - waking is `reactivate` under the hood, which clears it on every path that respawns a pty"
+    },
+    {
+      "send": {
+        "type": "attach",
+        "sessionId": "$dead",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$dead",
+        "session": {
+          "id": "$dead",
+          "status": "exited"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "and the one that was never in the set is still dead. \"Exactly that set\" is only a promise if this row stays down"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$dead"
+      },
+      "timeoutMs": 10000,
+      "note": "an attach to a row with no pty replays its exit; consumed here so the cleanup below cannot mistake it for the woken session's"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$live"
+      },
+      "note": "this scenario's own cleanup, and one more assertion in disguise: the kill only produces an exit if the client is subscribed to the pty the PLAY spawned. A revive makes a new session object under the old id, so a subscription keyed on the id alone still points at the dead one - which is silence where a client is waiting for output and for this exit"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$live"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue",
+        "pauseState"
+      ]
+    }
+  ]
+}
