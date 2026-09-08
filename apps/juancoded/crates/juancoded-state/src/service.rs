@@ -128,6 +128,26 @@ pub trait SessionsApi: Send + Sync {
     /// "slept, wake me on demand" from a crash.
     fn mark_dormant(&self, id: &str) -> bool;
 
+    /// Put a session to sleep: flag the row dormant, then kill the CLI tree.
+    ///
+    /// A method rather than two calls at each site, because the ORDER is the contract.
+    /// Flagging after the kill leaves the exited row the pty's death finalises looking
+    /// like a crash, which is the whole difference `dormant` exists to carry. Both the
+    /// idle reaper and the client's own `sleepSession` frame come through here, so a
+    /// session the user paused and a session the sweep judged idle leave the same row
+    /// behind and neither can drift from the other.
+    ///
+    /// `NotRunning` for a session whose pty is already gone, rather than a flag on a
+    /// dead row: dormancy promises there is a conversation to come back to, and
+    /// relabelling a crashed session as asleep is a worse answer than refusing.
+    fn sleep(&self, id: &str) -> Result<(), StateError> {
+        if !self.is_running(id) {
+            return Err(StateError::NotRunning);
+        }
+        self.mark_dormant(id);
+        self.kill(id)
+    }
+
     /// Broadcast a stuck-session advisory (see [`crate::stuck`]).
     ///
     /// On the trait for the same reason `reap_probe` is: the watch holds an

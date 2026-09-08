@@ -2,8 +2,8 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-09-07",
-  "specRevision": "1.8.0",
+  "measuredAt": "2026-09-08",
+  "specRevision": "1.9.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -179,6 +179,10 @@
     "session-delete": {
       "status": "skipped",
       "note": "core does not advertise the \"sessionDelete\" capability"
+    },
+    "session-sleep": {
+      "status": "skipped",
+      "note": "core does not advertise the \"sessionSleep\" capability"
     }
   }
 }

@@ -1,0 +1,267 @@
+{
+  "id": "session-sleep",
+  "title": "pausing a session, and the row that says so",
+  "asserts": "a core that advertises `sessionSleep` lets a client put a session to sleep on purpose, and leaves behind a row that is distinguishable from a kill. The flag lands on the wire BEFORE the pty dies - a `sessionMeta` carrying `dormant: true`, then the `exit` - so the exited row the death finalises reads \"slept, wake me on demand\" rather than \"died\"; the core's OWN snapshot says the same thing, which is the half a client cannot supply for itself and the whole reason the frame exists (the desktop's global pause used to send a plain `kill` and write `dormant` onto its private mirror row, so the core, its reaper and its boot-time rehydrate all saw five paused agents as five ended ones - juancode-nizo); a `reactivate` wakes exactly the session it names and clears only that flag, leaving the rest of the paused set asleep, which is what makes \"play brings back what pause took\" a promise rather than a hope; and a session whose pty is already gone is refused with an `error` instead of flagged, because a crash relabelled as asleep is a row a global play would wake as if somebody had paused it.",
+  "capabilities": [
+    "sessionSleep",
+    "sessionMeta",
+    "sessionList"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "exit",
+    "queue"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "two sessions, because half of what a pause promises is about the one it did NOT wake"
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "woken": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$woken",
+        "session": {
+          "dormant": false,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "asleep": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$asleep",
+        "session": {
+          "dormant": false,
+          "status": "running"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "sleepSession",
+        "sessionId": "$woken"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$woken",
+        "session": {
+          "id": "$woken",
+          "dormant": true,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "the flag first, while the pty is still alive. Flagging after the kill leaves an exited row that every client renders as a crash, which is the one thing dormant exists to prevent"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$woken"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ],
+      "note": "and only then is the CLI process tree freed, which is the point of pausing rather than leaving it running"
+    },
+    {
+      "send": {
+        "type": "sleepSession",
+        "sessionId": "$asleep"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$asleep",
+        "session": {
+          "id": "$asleep",
+          "dormant": true,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$asleep"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ]
+    },
+    {
+      "send": {
+        "type": "sleepSession",
+        "sessionId": "$asleep"
+      },
+      "note": "asked again, now that the pty is gone"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$asleep"
+      },
+      "timeoutMs": 10000,
+      "note": "refused, not flagged a second time. A row that already says asleep must not be the answer to every later ask either: the interesting case is the one below, where a row that never slept must not start"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "note": "the daemon's own snapshot, which is the whole difference from a flag a client wrote into its private mirror"
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$woken",
+            "dormant": true,
+            "status": "exited"
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "exited AND dormant, in the core's own list: this is what a restore plan and a liveness accounting read, and with a plain kill both of them read \"ended\""
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "note": "asked again, because the assertion below is about the other session"
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$asleep",
+            "dormant": true,
+            "status": "exited"
+          }
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "reactivate",
+        "sessionId": "$woken",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$woken",
+        "session": {
+          "id": "$woken",
+          "dormant": false,
+          "status": "running"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "one wake and the moon clears; waking is reactivate and deliberately has no frame of its own"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$woken",
+            "dormant": false,
+            "status": "running"
+          },
+          "$every": {
+            "$not": {
+              "id": "$asleep",
+              "dormant": false
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "exactly the one that was woken. The second clause is the \"exactly\": no row for the session nobody woke may claim it is awake, or a play after a pause brings back sessions the pause never took"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$woken"
+      },
+      "note": "this scenario's own cleanup: it woke a session, so it ends it"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$woken"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ]
+    }
+  ]
+}

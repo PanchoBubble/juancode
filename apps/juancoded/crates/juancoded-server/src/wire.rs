@@ -70,6 +70,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// delete button on and gets a row dropped locally while the daemon keeps its own is
 /// worse off than one whose button was greyed out.
 ///
+/// `sessionSleep` says a client can put a session to sleep on purpose and have the
+/// daemon's own row say so. It is the frame the desktop's global pause was missing: with
+/// no way to ask, pause degraded to a plain `kill` plus a `dormant` flag written onto
+/// the DESKTOP's mirror row, so this core could not tell five agents somebody paused
+/// from five somebody ended. Every consumer of that row read a kill — the reaper, the
+/// rehydrate this daemon does at boot, and any liveness accounting after it — which is
+/// how "pause everything and walk away" came back as five dead sessions (juancode-nizo).
+/// Advertised because the frame does the whole thing: the row goes dormant BEFORE the
+/// pty dies, it is persisted, and `reactivate` clears it.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -89,6 +99,7 @@ pub const CAPABILITIES: &[&str] = &[
     "queueEdit",
     "transcript",
     "reaper",
+    "sessionSleep",
     // Both only ever advertised once the flag actually reaches the CLI's argv: a
     // capability a client trusts and the core drops is worse than one it never had.
     "spawnModel",
@@ -205,6 +216,23 @@ pub enum ClientMessage {
         seq: Option<i64>,
     },
     Kill {
+        session_id: String,
+    },
+    /// Put a session to sleep: flag its row dormant, then kill the CLI tree. The
+    /// pty's ~300MB comes back and the row stays a conversation to return to.
+    ///
+    /// Not a flag on `kill`, and the ADDITIVE_FIELDS rule is why: a core that did not
+    /// know the flag would answer the frame by killing the session and leaving a row
+    /// that reads as a crash — the exact failure this frame exists to end. A type of
+    /// its own is ignored whole, and a client that feature-detects `sessionSleep` can
+    /// see the silence and fall back to a kill it knows is one.
+    ///
+    /// No reply, for the same reason `setReaperPolicy` has none: the effect IS the
+    /// `sessionMeta` carrying `dormant: true` and the `exit` that follows it, in that
+    /// order. Waking it up is `reactivate`, which every path that respawns a pty
+    /// already clears the flag through; a `wakeSession` beside it would be a second
+    /// spelling of one operation.
+    SleepSession {
         session_id: String,
     },
     /// What this core holds, all of it, once. Not a subscription: `created`,
@@ -424,6 +452,9 @@ impl ClientMessage {
                 seq: raw.seq,
             }),
             "kill" => Ok(Self::Kill {
+                session_id: need_session()?,
+            }),
+            "sleepSession" => Ok(Self::SleepSession {
                 session_id: need_session()?,
             }),
             "listSessions" => Ok(Self::ListSessions),
@@ -1105,6 +1136,9 @@ mod tests {
             // And for the pair protocol v1 went without.
             r#"{"type":"listSessions"}"#,
             r#"{"type":"deleteSession","sessionId":"s"}"#,
+            // And for `sessionSleep`: a pause that fell through to `Unknown` would
+            // kill nothing and say nothing, which is worse than the kill it replaced.
+            r#"{"type":"sleepSession","sessionId":"s"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1149,6 +1183,7 @@ mod tests {
                     "spawnPreset",
                     "sessionList",
                     "sessionDelete",
+                    "sessionSleep",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,

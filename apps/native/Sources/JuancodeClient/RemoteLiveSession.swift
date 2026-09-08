@@ -12,6 +12,10 @@ protocol RemoteSessionTransport: AnyObject, Sendable {
     /// Send a `resize`, returning the seq the matching `resizeAck` will carry.
     func sendResize(sessionId: String, cols: Int, rows: Int) -> Int
     func sendKill(sessionId: String)
+    /// Ask the core to put a session to sleep: it flags its OWN row dormant and only
+    /// then kills the pty. `false` when the connected core does not advertise
+    /// `sessionSleep`, and the caller falls back to a kill it knows is one.
+    func sendSleep(sessionId: String) -> Bool
     /// Write a row (and optionally its scrollback) into the desktop's mirror store.
     func persist(_ meta: SessionMeta, scrollback: [UInt8]?)
 }
@@ -30,8 +34,9 @@ protocol RemoteSessionTransport: AnyObject, Sendable {
 ///    the connected core has not implemented it: `submit`/`insert`/`autoSubmit`
 ///    deliver a bracketed paste with no land check against the core's headless VT
 ///    model and therefore no retry, `kickQueue` is inert without the `queue`
-///    capability, `markDormant` degrades to a kill, `setTitle`/`setArchived` write
-///    the desktop's mirror row only.
+///    capability, `setTitle`/`setArchived` write the desktop's mirror row only.
+///    `markDormant` was in this list and is not any more: it has the `sleepSession`
+///    frame now, and only falls back to a kill on a core that does not advertise it.
 /// 3. Absent by decision: `childPid` is nil for good — a pid from another process
 ///    is not addressable — which the one caller (agent-worktree detection) already
 ///    handles by falling back to the session cwd.
@@ -224,15 +229,23 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
 
     func kill() { transport.sendKill(sessionId: id) }
 
-    /// There is no sleep frame on the wire (the Swift core serves it over REST), so
-    /// this is a kill plus the dormant flag on the mirror row: the pty goes, the row
-    /// stays resumable, which is what dormant means.
+    /// Put this session to sleep: pty gone, row still a conversation to come back to.
     /// The reason is a local diagnostic (it goes to the app's own activity log);
-    /// a remote session can only ask the server to sleep it.
+    /// a remote session can only ask the core to sleep it.
     func markDormant(reason: SessionSleepReason, audit: [String: String]) {
         markDormant()
     }
 
+    /// Asks the core with `sleepSession` so the flag lands on the core's OWN row, and
+    /// falls back to a plain kill only on a core that has no such frame.
+    ///
+    /// The fallback is the bug this used to be. With no frame to ask with, a pause was
+    /// a `kill` plus `dormant` written onto the desktop's private mirror row, so the
+    /// core could not tell five sessions somebody paused from five somebody ended —
+    /// and its reaper, its boot-time rehydrate and every liveness accounting behind
+    /// them read the kill (juancode-nizo). The mirror row is still written here, and
+    /// still first: it is what the sidebar redraws from this instant, and on the frame
+    /// path the core's own `sessionMeta` arrives moments later saying the same thing.
     func markDormant() {
         let (row, bytes) = lock.withLock { () -> (SessionMeta, [UInt8]) in
             storedMeta.dormant = true
@@ -241,7 +254,9 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         }
         transport.persist(row, scrollback: bytes)
         notifyMeta(row)
-        transport.sendKill(sessionId: id)
+        if !transport.sendSleep(sessionId: id) {
+            transport.sendKill(sessionId: id)
+        }
     }
 
     /// Mirror-row only: the core owns its own row and has no frame to set a title
