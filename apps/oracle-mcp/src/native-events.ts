@@ -278,6 +278,77 @@ function emitScreenFrame(frame: ScreenFrame): void {
   }
 }
 
+// ── Global pause (juancode-tnxx) ─────────────────────────────────────────────
+// The phone's half of the desktop's pause button. The native endpoint owns the
+// paused set and publishes it as `pauseState` — once right after `serverInfo`, and
+// again on every change whichever surface made it — so this module never keeps a
+// tally of its own, it just mirrors the last frame it was sent.
+
+/** Capabilities the connected endpoint advertised, from its `serverInfo`. Empty
+ *  until the handshake lands (and again after a disconnect), so a caller that
+ *  feature-detects on it fails closed. */
+let nativeCapabilities: string[] = [];
+
+/** The set the endpoint says a play would revive right now. Null means we have not
+ *  been told yet — distinct from an empty set, which means "no pause is in effect". */
+let pausedSessionIds: string[] | null = null;
+
+type PauseListener = (paused: string[]) => void;
+const pauseListeners: PauseListener[] = [];
+
+/** Whether this endpoint can pause and play everything at once. False on a core
+ *  with no such frame, and false before the handshake — the caller should say so
+ *  rather than send a frame into the dark. */
+export function supportsGlobalPause(): boolean {
+  return nativeCapabilities.includes("globalPause");
+}
+
+/** The sessions a play would revive, or null before the endpoint has said. */
+export function pausedSessions(): string[] | null {
+  return pausedSessionIds;
+}
+
+/** Watch the paused set. Fires on every `pauseState`, including the snapshot that
+ *  lands on connect. Listener errors are isolated. */
+export function onPauseState(listener: PauseListener): void {
+  pauseListeners.push(listener);
+}
+
+/** Sleep every live agent session on the endpoint. Fire-and-forget: the answer is
+ *  the `pauseState` frame that follows, not a reply to this. Returns false when the
+ *  endpoint cannot serve it, so a caller can say why nothing happened. */
+export function pauseAllSessions(): boolean {
+  if (!supportsGlobalPause()) return false;
+  sendToNative({ type: "pauseAll" });
+  return true;
+}
+
+/** Revive exactly the set the last pause recorded. Same fire-and-forget shape. */
+export function resumeAllSessions(): boolean {
+  if (!supportsGlobalPause()) return false;
+  sendToNative({ type: "resumeAll" });
+  return true;
+}
+
+/** Parse a `pauseState` frame into its id list, or null if it is not one. Lenient
+ *  like the rest of this module: a malformed frame is dropped, not thrown. */
+export function parsePauseState(msg: Record<string, unknown>): string[] | null {
+  if (msg.type !== "pauseState") return null;
+  if (!Array.isArray(msg.paused)) return null;
+  return msg.paused.filter((id): id is string => typeof id === "string");
+}
+
+function emitPauseState(paused: string[]): void {
+  pausedSessionIds = paused;
+  for (const listener of pauseListeners) {
+    try {
+      listener(paused);
+    } catch (e) {
+      console.warn("oracle-mcp pause listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
     try {
@@ -328,6 +399,10 @@ function connect(): void {
 
   sock.on("close", () => {
     if (ws === sock) ws = null;
+    // Fail closed until the next handshake: an endpoint that went away is not one
+    // whose capabilities or paused set we still know.
+    nativeCapabilities = [];
+    pausedSessionIds = null;
     scheduleReconnect();
   });
 
@@ -349,6 +424,17 @@ function handleMessage(raw: string): void {
   try {
     msg = JSON.parse(raw);
   } catch {
+    return;
+  }
+  if (msg.type === "serverInfo") {
+    nativeCapabilities = Array.isArray(msg.capabilities)
+      ? msg.capabilities.filter((c): c is string => typeof c === "string")
+      : [];
+    return;
+  }
+  if (msg.type === "pauseState") {
+    const paused = parsePauseState(msg);
+    if (paused) emitPauseState(paused);
     return;
   }
   if (msg.type === "screen") {

@@ -70,6 +70,10 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
         CoreServerInfo(protocolVersion: WireProtocol.version, capabilities: WireProtocol.capabilities)
     }
 
+    /// The core's own book, so the local UI and the embedded server share one paused
+    /// set rather than each keeping a tally of the other's pauses.
+    public var globalPause: GlobalPauseBook { state.globalPause }
+
     // MARK: - Session lifecycle
 
     @discardableResult

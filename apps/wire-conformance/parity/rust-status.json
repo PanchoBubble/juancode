@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-08",
-  "specRevision": "1.9.0",
+  "specRevision": "1.10.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -198,6 +198,10 @@
       "status": "passed",
       "attempts": 3,
       "passes": 3
+    },
+    "global-pause": {
+      "status": "skipped",
+      "note": "core does not advertise the \"globalPause\" capability"
     }
   }
 }

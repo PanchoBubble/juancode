@@ -61,6 +61,10 @@ import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply }
 import {
   onSessionEvent,
   onSessionStuck,
+  pauseAllSessions,
+  pausedSessions,
+  resumeAllSessions,
+  supportsGlobalPause,
   type SessionActivityEvent,
   type SessionStuckEvent,
 } from "./native-events.ts";
@@ -324,6 +328,17 @@ export interface TelegramDeps {
   /** Transcribe a Telegram voice/audio file to text (local whisper CLI). Throws on
    *  download or transcription failure so the handler can reply with a clear error. */
   transcribe: (fileId: string) => Promise<string>;
+  /** Global pause over the native `/ws` (juancode-tnxx): sleep every live agent at
+   *  once, or revive exactly the set the last pause recorded. `supported` is the
+   *  endpoint's advertised `globalPause` capability — a core without it is told
+   *  about rather than sent a frame nothing answers. `paused` is the last
+   *  `pauseState` the endpoint published, null before it has said. */
+  pause: {
+    supported: () => boolean;
+    paused: () => string[] | null;
+    all: () => boolean;
+    resume: () => boolean;
+  };
 }
 
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
@@ -349,6 +364,12 @@ function defaultDeps(token: string): TelegramDeps {
     deliver: deliverReply,
     queue: queueMessages,
     transcribe: makeTranscriber(token),
+    pause: {
+      supported: supportsGlobalPause,
+      paused: pausedSessions,
+      all: pauseAllSessions,
+      resume: resumeAllSessions,
+    },
   };
 }
 
@@ -358,6 +379,8 @@ const HELP_TEXT = [
   "/status — your observed sessions right now",
   "/observe <n|id> — get pinged when a session needs input or finishes",
   "/unobserve [n|id] — stop observing one (or all) sessions",
+  "/pauseall — sleep every live agent (frees their RAM, keeps the conversations)",
+  "/playall — bring back exactly the sessions /pauseall slept",
   "/new — start a fresh Oracle thread",
   "",
   "Anything else goes to the Oracle. Send a voice note and it's transcribed",
@@ -437,6 +460,14 @@ export async function handleUpdate(
     await handleStatusCommand(chatId, deps, state);
     return;
   }
+  if (command === "/pauseall") {
+    await handlePauseCommand(chatId, deps);
+    return;
+  }
+  if (command === "/playall") {
+    await handlePlayCommand(chatId, deps);
+    return;
+  }
   if (command === "/observe" || command.startsWith("/observe ")) {
     await handleObserveCommand(chatId, text.slice("/observe".length).trim(), deps, state);
     return;
@@ -447,6 +478,75 @@ export async function handleUpdate(
   }
 
   await runOracleTurn(chatId, messageId, text, deps);
+}
+
+/** Sleep every live agent session from the phone — the remote half of the desktop's
+ *  pause button, and the surface you actually want it on: the reason to pause
+ *  everything is that you are walking away from the Mac.
+ *
+ *  The count is read back from the `pauseState` the endpoint publishes rather than
+ *  guessed here, so the number in the reply is the set a `/playall` would revive and
+ *  not a hope about what the frame did. */
+async function handlePauseCommand(chatId: number, deps: TelegramDeps): Promise<void> {
+  if (!deps.pause.supported()) {
+    await deps.send(chatId, "⚠️ This core has no global pause. Use the desktop button.");
+    return;
+  }
+  const before = deps.pause.paused() ?? [];
+  if (!deps.pause.all()) {
+    await deps.send(chatId, "⚠️ Could not reach the desktop to pause.");
+    return;
+  }
+  const after = await settledPauseState(deps);
+  const slept = after.filter((id) => !before.includes(id)).length;
+  await deps.send(
+    chatId,
+    slept === 0
+      ? `⏸ Nothing live to pause${after.length ? ` (${after.length} already asleep).` : "."}`
+      : `⏸ Paused ${slept} session${slept === 1 ? "" : "s"}. /playall brings ${
+          after.length === 1 ? "it" : `all ${after.length}`
+        } back.`,
+  );
+}
+
+/** Revive exactly the set the last pause recorded. */
+async function handlePlayCommand(chatId: number, deps: TelegramDeps): Promise<void> {
+  if (!deps.pause.supported()) {
+    await deps.send(chatId, "⚠️ This core has no global pause. Use the desktop button.");
+    return;
+  }
+  const before = deps.pause.paused() ?? [];
+  if (before.length === 0) {
+    await deps.send(chatId, "▶️ Nothing is paused.");
+    return;
+  }
+  if (!deps.pause.resume()) {
+    await deps.send(chatId, "⚠️ Could not reach the desktop to play.");
+    return;
+  }
+  await settledPauseState(deps);
+  await deps.send(
+    chatId,
+    `▶️ Waking ${before.length} session${before.length === 1 ? "" : "s"}. ` +
+      "Each one resumes its conversation, so give them a moment.",
+  );
+}
+
+/** Wait briefly for the endpoint's next `pauseState`, then report what it says.
+ *
+ *  `pauseAll`/`resumeAll` have no reply of their own — the state frame IS the answer,
+ *  the same shape `sleepSession` has — so a reply sent immediately would quote the
+ *  set from before the frame landed. Bounded: a slow or silent endpoint costs a
+ *  slightly stale count, never a hung command. */
+async function settledPauseState(deps: TelegramDeps, timeoutMs = 1500): Promise<string[]> {
+  const started = deps.pause.paused();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    const now = deps.pause.paused();
+    if (now !== started) return now ?? [];
+  }
+  return deps.pause.paused() ?? [];
 }
 
 /** The shared "one message to the Oracle" turn: working indicator, backend call,

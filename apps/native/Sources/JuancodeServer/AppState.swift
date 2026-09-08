@@ -22,6 +22,12 @@ public final class AppState: @unchecked Sendable {
     /// Idle-session reaper (juancode-lgq) — kills verifiably idle CLI process
     /// trees to free RAM, leaving each session dormant and resumable on demand.
     public let sessionReaper: SessionReaper
+    /// The paused set a global pause is holding asleep, and the driver that puts
+    /// sessions there (juancode-tnxx). One book per launch: the toolbar button and a
+    /// remote `pauseAll` both go through it, so a pause taken on the phone is the set
+    /// the desktop plays and the other way round.
+    public let globalPause: GlobalPauseBook
+
     /// Rolling on-disk session activity log (`Config.logsDir`) — the durable
     /// lifecycle/seed/activity trail for debugging frozen sessions after the fact.
     public let activityLog: SessionActivityLog
@@ -45,8 +51,9 @@ public final class AppState: @unchecked Sendable {
     /// open session as plain dead rows.
     private static let sleptOnQuitKey = "juancode.sleptOnQuit"
 
-    public init(store: GRDBStore) {
+    public init(store: GRDBStore, globalPauseStorage: GlobalPauseBook.Storage = .dataDir()) {
         self.store = store
+        self.globalPause = GlobalPauseBook(storage: globalPauseStorage)
         let activityLog = SessionActivityLog()
         self.activityLog = activityLog
         // The queue persists into the same store, so it survives restarts / reconnects.
@@ -82,6 +89,11 @@ public final class AppState: @unchecked Sendable {
         // sessions being restored right now, and taking them clears the column so a
         // stale marker can't offer to continue two launches later.
         midTurnOrphanIds = store.takeMidTurnIds().intersection(orphans)
+        // A core answers a remote pause on its own, so a phone talking to a headless
+        // launch is not left with a button that does nothing. The desktop replaces
+        // this with the model's own pause when it comes up.
+        globalPause.driver = RegistryGlobalPause(registry: registry, store: store,
+                                                 book: globalPause, log: activityLog)
         // Enforce the per-project retention cap on the persisted history (juancode-477).
         // Nothing is live this early, so no ids need protecting.
         store.enforceSessionCap()

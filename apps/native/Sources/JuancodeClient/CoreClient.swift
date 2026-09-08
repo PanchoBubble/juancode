@@ -32,6 +32,18 @@ public protocol CoreClient: AnyObject, Sendable {
     /// same feature detection remote clients do over `serverInfo`.
     var info: CoreServerInfo { get }
 
+    // MARK: - Global pause (wire: pauseAll, resumeAll, pauseState)
+
+    /// The set a global pause is holding asleep, shared by every surface this launch
+    /// serves (juancode-tnxx).
+    ///
+    /// On the protocol so there is exactly one book per launch: the desktop's pause
+    /// button and a `pauseAll` arriving over `/ws` from the phone both read and write
+    /// this object, which is what makes a play from either surface revive the set the
+    /// other one paused. It is not derived from `meta.dormant` — see `GlobalPauseBook`
+    /// for why that set is too broad to play from.
+    var globalPause: GlobalPauseBook { get }
+
     // MARK: - Session lifecycle (wire: create, reactivate, adoptExternal, setSkipPermissions, kill)
 
     /// Spawn a new agent session (wire `create`). Blocking: resolves the CLI

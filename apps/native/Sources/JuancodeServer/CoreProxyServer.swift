@@ -45,19 +45,34 @@ public enum CoreProxyServer {
         public let deleteSession: @Sendable (String) -> Void
         /// Name of the core behind the relay, for the 501 bodies ("rust").
         public let backendName: String
+        /// This launch's paused set (juancode-tnxx), when something can act on it.
+        ///
+        /// The one thing on this relay that is neither answered by the daemon nor
+        /// read off the mirror: a global pause is a decision about WHICH rows count
+        /// as agent sessions and what a play brings back, and the daemon has no frame
+        /// for it and no row that separates "the pause slept this" from the four
+        /// other producers of `dormant`. So the two frames are answered here, by the
+        /// same book and the same driver the desktop's own button uses.
+        ///
+        /// Nil, or a book with no driver installed, means nothing can serve a pause
+        /// on this launch — the frames are relayed like any other unimplemented type
+        /// and `globalPause` is never advertised.
+        public let globalPause: GlobalPauseBook?
 
         public init(sessions: @escaping @Sendable () -> [SessionMeta],
                     session: @escaping @Sendable (String) -> SessionMeta?,
                     searchSessions: @escaping @Sendable (String, Int) -> [SearchHit],
                     kill: @escaping @Sendable (String) -> Void,
                     deleteSession: @escaping @Sendable (String) -> Void,
-                    backendName: String) {
+                    backendName: String,
+                    globalPause: GlobalPauseBook? = nil) {
             self.sessions = sessions
             self.session = session
             self.searchSessions = searchSessions
             self.kill = kill
             self.deleteSession = deleteSession
             self.backendName = backendName
+            self.globalPause = globalPause
         }
     }
 
@@ -90,7 +105,8 @@ public enum CoreProxyServer {
         let upstream = try websocketURL(base: upstreamBaseURL)
         return Application(
             router: buildRouter(source: source, upstreamBaseURL: upstreamBaseURL),
-            server: .http1WebSocketUpgrade(webSocketRouter: buildWSRouter(upstream: upstream)),
+            server: .http1WebSocketUpgrade(
+                webSocketRouter: buildWSRouter(upstream: upstream, globalPause: source.globalPause)),
             configuration: .init(address: .hostname(host, port: port), serverName: "juancode")
         )
     }
@@ -119,7 +135,15 @@ public enum CoreProxyServer {
 
     // MARK: - WebSocket relay (/ws)
 
-    static func buildWSRouter(upstream: URL) -> Router<BasicWebSocketRequestContext> {
+    /// One frame on its way to the client, so the upstream pump and the paused-set
+    /// broadcast cannot write to the same socket at once.
+    enum Downlink: Sendable {
+        case text(String)
+        case binary([UInt8])
+    }
+
+    static func buildWSRouter(upstream: URL,
+                              globalPause: GlobalPauseBook?) -> Router<BasicWebSocketRequestContext> {
         let wsRouter = Router(context: BasicWebSocketRequestContext.self)
         wsRouter.ws("/ws") { inbound, outbound, _ in
             let session = URLSession(configuration: .ephemeral)
@@ -129,9 +153,31 @@ public enum CoreProxyServer {
                 task.cancel(with: .goingAway, reason: nil)
                 session.invalidateAndCancel()
             }
+            // Two producers reach this socket now — the daemon's frames and this
+            // process's own `pauseState` — so they are funnelled through one stream
+            // that a single writer task drains, exactly as `JuancodeServer` does.
+            let (stream, cont) = AsyncStream<Downlink>.makeStream()
+            let writer = Task {
+                for await frame in stream {
+                    switch frame {
+                    case .text(let text): try? await outbound.writeTextMessage(text)
+                    case .binary(let bytes): try? await outbound.writeBinaryMessage(ByteBuffer(bytes: bytes))
+                    }
+                }
+            }
+            // Broadcast the set for as long as this connection lives, so a pause taken
+            // on the desktop reaches a phone that is only watching.
+            let unwatch = servedPause(globalPause)?.onChange { ids in
+                cont.yield(.text(pauseStateFrame(ids)))
+            }
+            defer {
+                unwatch?()
+                cont.finish()
+                writer.cancel()
+            }
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await pumpUpstream(task, to: outbound) }
-                group.addTask { await pumpDownstream(inbound, to: task) }
+                group.addTask { await pumpUpstream(task, to: cont, globalPause: globalPause) }
+                group.addTask { await pumpDownstream(inbound, to: task, globalPause: globalPause) }
                 // Whichever direction dies first takes the connection with it: a
                 // half-open relay would leave the sidecar holding a socket that
                 // looks alive and never reconnects.
@@ -144,17 +190,41 @@ public enum CoreProxyServer {
         return wsRouter
     }
 
+    /// The book only when something can actually act on it. A book whose driver was
+    /// never installed must not make the relay advertise `globalPause`: an advertised
+    /// capability nothing serves is worse than an absent one, because a client stops
+    /// guarding the affordance on the strength of that string.
+    static func servedPause(_ book: GlobalPauseBook?) -> GlobalPauseBook? {
+        guard let book, book.driver != nil else { return nil }
+        return book
+    }
+
+    static func pauseStateFrame(_ ids: Set<String>) -> String {
+        ServerMessage.pauseState(paused: Array(ids)).jsonString()
+    }
+
     /// Daemon → client. Ends on the first receive failure, which is also how an
     /// unreachable daemon surfaces: `resume()` never confirms the handshake.
     private static func pumpUpstream(_ task: URLSessionWebSocketTask,
-                                     to outbound: WebSocketOutboundWriter) async {
+                                     to cont: AsyncStream<Downlink>.Continuation,
+                                     globalPause: GlobalPauseBook?) async {
         while !Task.isCancelled {
             do {
                 switch try await task.receive() {
                 case .string(let text):
-                    try await outbound.writeTextMessage(text)
+                    // The daemon's own `serverInfo` still reaches the client, with one
+                    // capability added: this endpoint answers `pauseAll`/`resumeAll`
+                    // itself, and the list has to describe what the endpoint speaks or
+                    // feature detection is wrong about the surface it is talking to.
+                    if let book = servedPause(globalPause),
+                       let rewritten = withGlobalPauseAdvertised(text) {
+                        cont.yield(.text(rewritten))
+                        cont.yield(.text(pauseStateFrame(book.paused)))
+                    } else {
+                        cont.yield(.text(text))
+                    }
                 case .data(let data):
-                    try await outbound.writeBinaryMessage(ByteBuffer(bytes: data))
+                    cont.yield(.binary(Array(data)))
                 @unknown default:
                     continue
                 }
@@ -167,13 +237,42 @@ public enum CoreProxyServer {
         }
     }
 
-    /// Client → daemon.
+    /// `serverInfo` with `globalPause` appended, or nil when the frame is anything
+    /// else. Rebuilt from the parsed object rather than string-spliced so a daemon
+    /// that grows a field does not lose it here.
+    static func withGlobalPauseAdvertised(_ text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              obj["type"] as? String == "serverInfo" else { return nil }
+        var caps = obj["capabilities"] as? [String] ?? []
+        guard !caps.contains(globalPauseCapability) else { return nil }
+        caps.append(globalPauseCapability)
+        obj["capabilities"] = caps
+        guard let out = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    static let globalPauseCapability = "globalPause"
+
+    /// Client → daemon, minus the two frames this process answers itself.
     private static func pumpDownstream(_ inbound: WebSocketInboundStream,
-                                       to task: URLSessionWebSocketTask) async {
+                                       to task: URLSessionWebSocketTask,
+                                       globalPause: GlobalPauseBook?) async {
         do {
             for try await message in inbound.messages(maxSize: maxFrameSize) {
                 switch message {
                 case .text(let text):
+                    if let driver = servedPause(globalPause)?.driver,
+                       let type = frameType(text), type == "pauseAll" || type == "resumeAll" {
+                        // Detached: a pause sleeps every live agent and a play spawns
+                        // real `--resume` processes, and neither may hold the socket's
+                        // read loop while it does.
+                        Task.detached {
+                            if type == "pauseAll" { _ = await driver.pauseAll() }
+                            else { await driver.resumeAll() }
+                        }
+                        continue
+                    }
                     try await task.send(.string(text))
                 case .binary(let buffer):
                     try await task.send(.data(Data(buffer: buffer)))
@@ -183,6 +282,14 @@ public enum CoreProxyServer {
             NSLog("juancode: core relay stopped forwarding to the daemon: \(error)")
             return
         }
+    }
+
+    /// The `type` discriminator of a wire frame, or nil when it is not one.
+    static func frameType(_ text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return obj["type"] as? String
     }
 
     // MARK: - REST (the subset a core with no AppState can honestly answer)

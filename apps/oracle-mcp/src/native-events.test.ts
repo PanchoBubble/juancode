@@ -3,12 +3,17 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import {
   ScreenMirror,
+  onPauseState,
   onSessionEvent,
   onSessionScreen,
+  parsePauseState,
   parseScreenFrame,
   parseStuckEvent,
+  pauseAllSessions,
+  pausedSessions,
   startActivityListener,
   stopActivityListener,
+  supportsGlobalPause,
   type ScreenFrame,
   type SessionActivityEvent,
 } from "./native-events.ts";
@@ -317,5 +322,88 @@ describe("parseStuckEvent", () => {
     expect(parseStuckEvent({ ...frame, kind: "wedged" })).toBeNull();
     expect(parseStuckEvent({ ...frame, sessionId: "" })).toBeNull();
     expect(parseStuckEvent({ ...frame, advice: 7 })).toBeNull();
+  });
+});
+
+describe("parsePauseState", () => {
+  it("reads the set, and drops anything that is not one", () => {
+    expect(parsePauseState({ type: "pauseState", paused: ["a", "b"] })).toEqual(["a", "b"]);
+    expect(parsePauseState({ type: "pauseState", paused: [] })).toEqual([]);
+    expect(parsePauseState({ type: "activity", paused: ["a"] })).toBeNull();
+    expect(parsePauseState({ type: "pauseState" })).toBeNull();
+  });
+
+  it("keeps only the ids, so one junk entry does not poison the set", () => {
+    expect(parsePauseState({ type: "pauseState", paused: ["a", 7, null, "b"] })).toEqual(["a", "b"]);
+  });
+});
+
+// The endpoint owns the paused set and publishes it; this module mirrors the last
+// frame it was sent and never keeps a tally of its own.
+describe("global pause over the shared native WS", () => {
+  let wss: WebSocketServer;
+  let server: WsSocket | null = null;
+  let received: Record<string, unknown>[];
+  const prev = process.env.JUANCODE_API;
+
+  beforeEach(async () => {
+    received = [];
+    server = null;
+    wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss.on("connection", (sock) => {
+      server = sock;
+      sock.on("message", (data) => received.push(JSON.parse(data.toString())));
+    });
+    await new Promise<void>((resolve) => wss.on("listening", () => resolve()));
+    process.env.JUANCODE_API = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    stopActivityListener();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    if (prev === undefined) delete process.env.JUANCODE_API;
+    else process.env.JUANCODE_API = prev;
+  });
+
+  const until = async (cond: () => boolean) => {
+    const deadline = Date.now() + 2000;
+    while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(cond()).toBe(true);
+  };
+
+  it("fails closed before the handshake, then follows what the endpoint publishes", async () => {
+    const seen: string[][] = [];
+    onPauseState((p) => seen.push(p));
+    // Nothing sent, nothing claimed: a client that guessed here would offer a button
+    // on a core with no frame behind it.
+    expect(supportsGlobalPause()).toBe(false);
+    expect(pauseAllSessions()).toBe(false);
+
+    startActivityListener();
+    await until(() => server !== null);
+    server!.send(
+      JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: ["globalPause"] }),
+    );
+    await until(() => supportsGlobalPause());
+
+    server!.send(JSON.stringify({ type: "pauseState", paused: ["s1", "s2"] }));
+    await until(() => (pausedSessions() ?? []).length === 2);
+    expect(seen.at(-1)).toEqual(["s1", "s2"]);
+
+    expect(pauseAllSessions()).toBe(true);
+    await until(() => received.some((m) => m.type === "pauseAll"));
+  });
+
+  it("says nothing about a core that does not advertise the capability", async () => {
+    startActivityListener();
+    await until(() => server !== null);
+    server!.send(
+      JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: ["screen"] }),
+    );
+    // Give the frame a beat to land before asserting on the absence of an effect.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(supportsGlobalPause()).toBe(false);
+    expect(pauseAllSessions()).toBe(false);
+    expect(received.some((m) => m.type === "pauseAll")).toBe(false);
   });
 });
