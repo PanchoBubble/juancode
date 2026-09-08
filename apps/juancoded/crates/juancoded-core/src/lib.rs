@@ -25,8 +25,8 @@ pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionSt
 pub use preset::{preset_needs_body, Preset, PresetError, PresetStore};
 pub use proc::{descendant_count, tree_cpu_time_ms};
 pub use provider::{
-    bin_override, resolve_bin, resolve_provider_bin, IdSource, ProviderSpec, Providers,
-    SpawnOptions,
+    bin_override, editor_command_string, resolve_bin, resolve_editor_command, resolve_provider_bin,
+    shell_command, IdSource, ProviderSpec, Providers, SpawnOptions,
 };
 pub use pty::{PtyEvent, PtyHandle, SpawnSpec};
 pub use worktree::{CreatedWorktree, WorktreeError};

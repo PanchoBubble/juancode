@@ -466,9 +466,115 @@ impl BinCache {
     }
 }
 
+/// The editor command string, from the one precedence every editor path shares:
+/// `JUANCODE_EDITOR` (the documented knob) wins, then the unix `$VISUAL`/`$EDITOR`
+/// convention, then nvim. Blank counts as unset, so an exported-but-empty `EDITOR`
+/// does not shadow the default. Mirrors `editorCommandString` in Providers.swift.
+///
+/// The environment is a parameter rather than read here, because the precedence is
+/// the only thing worth testing about this and `std::env::set_var` in a test would
+/// be racing every other test in the binary.
+pub fn editor_command_string(env: &dyn Fn(&str) -> Option<String>) -> String {
+    for key in ["JUANCODE_EDITOR", "VISUAL", "EDITOR"] {
+        if let Some(value) = env(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    "nvim".to_string()
+}
+
+/// Resolve the editor command into an absolute binary plus its leading args.
+///
+/// Split naively on whitespace — enough for the single-binary case and for a flag
+/// like `"code -w"` — and the binary goes through [`resolve_bin`], so a daemon
+/// launched with a stripped PATH still finds an editor the user's terminal would.
+/// `None` when nothing resolves: a caller refuses the spawn rather than handing back
+/// a dead pane.
+pub fn resolve_editor_command() -> Option<(String, Vec<String>)> {
+    let raw = editor_command_string(&|key| std::env::var(key).ok());
+    let mut parts = raw.split_whitespace().map(String::from);
+    let cmd = parts.next().unwrap_or_else(|| "nvim".to_string());
+    Some((resolve_bin(&cmd, None)?, parts.collect()))
+}
+
+/// The interactive shell an `openTerminal` spawns: `$SHELL`, or zsh, launched `-i`
+/// so it sources the user's rc files. Mirrors `shellCommand()` in EphemeralPty.swift.
+pub fn shell_command(env: &dyn Fn(&str) -> Option<String>) -> (String, Vec<String>) {
+    let shell = env("SHELL").unwrap_or_default();
+    let shell = shell.trim();
+    let shell = if shell.is_empty() { "/bin/zsh" } else { shell };
+    (shell.to_string(), vec!["-i".to_string()])
+}
+
 fn cache() -> &'static BinCache {
     static CACHE: OnceLock<BinCache> = OnceLock::new();
     CACHE.get_or_init(BinCache::default)
+}
+
+#[cfg(test)]
+mod editor_and_shell {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    /// One precedence, shared by every editor path: the documented knob, then the unix
+    /// convention, then nvim.
+    #[test]
+    fn the_editor_precedence_is_juancode_then_visual_then_editor() {
+        assert_eq!(
+            editor_command_string(&env(&[
+                ("JUANCODE_EDITOR", "hx"),
+                ("VISUAL", "vim"),
+                ("EDITOR", "vi")
+            ])),
+            "hx"
+        );
+        assert_eq!(
+            editor_command_string(&env(&[("VISUAL", "vim"), ("EDITOR", "vi")])),
+            "vim"
+        );
+        assert_eq!(editor_command_string(&env(&[("EDITOR", "vi")])), "vi");
+        assert_eq!(editor_command_string(&env(&[])), "nvim");
+    }
+
+    /// An exported-but-empty `EDITOR` is the common shape of "unset", and it must not
+    /// shadow the default with a spawn of nothing.
+    #[test]
+    fn a_blank_setting_counts_as_unset() {
+        assert_eq!(
+            editor_command_string(&env(&[("JUANCODE_EDITOR", "   "), ("VISUAL", "vim")])),
+            "vim"
+        );
+        assert_eq!(editor_command_string(&env(&[("EDITOR", "")])), "nvim");
+    }
+
+    /// `-i` is the whole point: the shell an `openTerminal` gives the user has to be
+    /// the one their rc files configure, not a bare non-interactive one.
+    #[test]
+    fn the_shell_is_the_users_own_launched_interactive() {
+        assert_eq!(
+            shell_command(&env(&[("SHELL", "/bin/bash")])),
+            ("/bin/bash".to_string(), vec!["-i".to_string()])
+        );
+        assert_eq!(
+            shell_command(&env(&[])),
+            ("/bin/zsh".to_string(), vec!["-i".to_string()])
+        );
+        assert_eq!(
+            shell_command(&env(&[("SHELL", "  ")])),
+            ("/bin/zsh".to_string(), vec!["-i".to_string()])
+        );
+    }
 }
 
 #[cfg(test)]

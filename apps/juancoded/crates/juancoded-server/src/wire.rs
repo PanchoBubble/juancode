@@ -24,9 +24,9 @@ use crate::identity::DaemonIdentity;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// What the Rust core implements today, and nothing more. Deliberately shorter than
-/// the Swift core's list: no `trackedPrs`, no `editor`/`terminal`. Clients
-/// feature-detect off this, so a name here that the core does not answer is worse than
-/// an omission — it turns a hidden button into a broken one.
+/// the Swift core's list: no `trackedPrs`. Clients feature-detect off this, so a name
+/// here that the core does not answer is worse than an omission — it turns a hidden
+/// button into a broken one.
 ///
 /// `queue` is advertised now on exactly the terms it was withheld on. It was absent
 /// while every frame decoded and every snapshot went out but nothing typed a queued
@@ -89,6 +89,21 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// juancode id and its row do not move, the abandoned conversation's scrollback goes
 /// with it, and a session whose pty is still up is refused rather than restarted.
 ///
+/// `editor` and `terminal` say a client can open a non-agent pty beside its sessions
+/// and drive it over the frames it already speaks. Two capabilities rather than one
+/// because they are two frames and a core may honestly have either: `editor` is the
+/// nvim pane and terminal click-to-open, `terminal` is the shell pane, and only the
+/// latter carries a `requestId` for the client to correlate on. Both were withheld
+/// while the frames did not exist, which is why the panes simply vanished under
+/// `JUANCODE_CORE=rust` instead of failing — the desktop had feature-detected them
+/// away, which is the system working (juancode-gwxh).
+///
+/// They are advertised on the same terms as everything else here: the pty is real, it
+/// is addressable by id over `input` / `resize` / `kill`, its bytes come back as
+/// `output` under that id, and killing it produces an `exit`. What an ephemeral pty
+/// deliberately is NOT is a session — no row, no store, no `listSessions`, no reaper —
+/// and no capability here claims otherwise.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -110,6 +125,8 @@ pub const CAPABILITIES: &[&str] = &[
     "reaper",
     "sessionSleep",
     "restartFresh",
+    "editor",
+    "terminal",
     // Both only ever advertised once the flag actually reaches the CLI's argv: a
     // capability a client trusts and the core drops is worse than one it never had.
     "spawnModel",
@@ -241,6 +258,36 @@ pub enum ClientMessage {
     },
     Kill {
         session_id: String,
+    },
+    /// Open the user's editor on one file, as a pty of its own.
+    ///
+    /// `cwd` is a confinement, not a hint: the file is resolved against it and refused
+    /// if it lands outside, because the path comes from a client and the editor runs
+    /// as whoever runs the daemon.
+    ///
+    /// Answered with `editorReady { editorId }`, and that id is the handle for
+    /// everything after: `input`, `resize`, `kill`, and the `output` / `exit` frames
+    /// that come back under it. No `requestId`, unlike `openTerminal` — the desktop
+    /// opens one editor pane at a time and the Swift core never carried one, so adding
+    /// it here would be this core inventing a field the spec does not have.
+    OpenEditor {
+        cwd: String,
+        file: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Open an interactive shell in `cwd`, as a pty of its own.
+    ///
+    /// `requestId` is required and echoed back verbatim in `terminalReady`. It is the
+    /// whole reason that frame is shaped differently from `editorReady`: a client can
+    /// have several opens in flight — a tab strip opening three shells, a phone and a
+    /// desktop on one daemon — and `terminalReady { terminalId }` alone gives it no way
+    /// to say which of its pending panes the id belongs to.
+    OpenTerminal {
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        request_id: String,
     },
     /// Put a session to sleep: flag its row dormant, then kill the CLI tree. The
     /// pty's ~300MB comes back and the row stays a conversation to return to.
@@ -414,6 +461,10 @@ struct RawClient {
     max_live: Option<usize>,
     #[serde(rename = "sessionIds", default)]
     session_ids: Option<Vec<String>>,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(rename = "requestId", default)]
+    request_id: Option<String>,
 }
 
 impl ClientMessage {
@@ -485,6 +536,18 @@ impl ClientMessage {
             }),
             "sleepSession" => Ok(Self::SleepSession {
                 session_id: need_session()?,
+            }),
+            "openEditor" => Ok(Self::OpenEditor {
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                file: raw.file.ok_or("missing file")?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+            }),
+            "openTerminal" => Ok(Self::OpenTerminal {
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                cols: raw.cols.ok_or("missing cols")?,
+                rows: raw.rows.ok_or("missing rows")?,
+                request_id: raw.request_id.ok_or("missing requestId")?,
             }),
             "listSessions" => Ok(Self::ListSessions),
             "deleteSession" => Ok(Self::DeleteSession {
@@ -606,6 +669,19 @@ pub enum ServerMessage {
     Exit {
         session_id: String,
         exit_code: Option<i32>,
+    },
+    /// The editor pty is up. `editorId` is a session id everywhere it matters: the
+    /// client addresses it with `input`, `resize` and `kill`, and its bytes come back
+    /// as `output` under that id.
+    EditorReady {
+        editor_id: String,
+    },
+    /// The shell pty is up, and `requestId` is the client's own, echoed back
+    /// unchanged. Without it a client with two opens in flight has two `terminalReady`
+    /// frames and no way to say which pane either belongs to.
+    TerminalReady {
+        terminal_id: String,
+        request_id: String,
     },
     Activity {
         session_id: String,
@@ -820,6 +896,15 @@ impl ServerMessage {
                 exit_code,
             } => json!({
                 "type": "exit", "sessionId": session_id, "exitCode": exit_code,
+            }),
+            Self::EditorReady { editor_id } => json!({
+                "type": "editorReady", "editorId": editor_id,
+            }),
+            Self::TerminalReady {
+                terminal_id,
+                request_id,
+            } => json!({
+                "type": "terminalReady", "terminalId": terminal_id, "requestId": request_id,
             }),
             Self::Activity {
                 session_id,
@@ -1171,6 +1256,12 @@ mod tests {
             // And for `restartFresh`: falling through to `Unknown` would leave a
             // client that asked for a fresh conversation staring at a dead pane.
             r#"{"type":"restartFresh","sessionId":"s","cols":80,"rows":24}"#,
+            // And for the two ephemeral panes. An `openTerminal` without its
+            // `requestId` is rejected rather than answered with a made-up one: the id
+            // is the client's, and inventing one is exactly the ambiguity it exists to
+            // remove.
+            r#"{"type":"openEditor","cwd":"/tmp","file":"a.txt","cols":80,"rows":24}"#,
+            r#"{"type":"openTerminal","cwd":"/tmp","cols":80,"rows":24,"requestId":"r"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1217,6 +1308,8 @@ mod tests {
                     "sessionDelete",
                     "sessionSleep",
                     "restartFresh",
+                    "editor",
+                    "terminal",
                     // Server-to-client only: `stuck` gates a frame this core SENDS,
                     // unsolicited, so there is no client message to decode. The lie it
                     // could tell instead is advertising it and never broadcasting,

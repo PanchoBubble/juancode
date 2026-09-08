@@ -7,10 +7,10 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
 - As of: 2026-09-08
-- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, restartFresh, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
-- Unmet scenarios: 2 of 34
+- Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, restartFresh, editor, terminal, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
+- Unmet scenarios: 1 of 34
 
-## What is not satisfied yet (2)
+## What is not satisfied yet (1)
 
 ### tracked-prs
 
@@ -18,13 +18,6 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Needs: trackedPrs, pty, git
 - Why: core does not advertise the "trackedPrs" capability
 - Asserts: subscribing returns the whole watch list, tracking a PR spawns its driving session and pushes a replacement list, a refresh that moved nothing pushes nothing, and untracking pushes the list back — always the complete set, replaced wholesale.
-
-### editor-terminal
-
-- Status: n/a
-- Needs: editor, terminal, resizeAck, pty
-- Why: core does not advertise the "editor" capability
-- Asserts: an editor or shell pty is addressable over the same input/resize/kill/output messages as a session, and terminalReady echoes the client's requestId so a client with several pending opens can tell them apart.
 
 ## Full scenario list
 
@@ -42,7 +35,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - unresumable: 3/3 - unresumable reactivate
 - errors: 3/3 - error frames and tolerated junk
 - tracked-prs: n/a - tracked-PR fan-out
-- editor-terminal: n/a - editor and terminal ptys
+- editor-terminal: 3/3 - editor and terminal ptys
 - adopt-external: 3/3 - adopting an external conversation
 - dispatch-correlation: 3/3 - dispatch correlation and dedup
 - skip-permissions: 3/3 - flipping skip-permissions

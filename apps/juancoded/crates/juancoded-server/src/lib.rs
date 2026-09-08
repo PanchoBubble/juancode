@@ -7,6 +7,7 @@
 //! remote clients already use it.
 
 pub mod conn;
+pub mod ephemeral;
 pub mod identity;
 pub mod owner;
 pub mod queue_delivery;
