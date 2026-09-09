@@ -8,6 +8,7 @@
 
 pub mod conn;
 pub mod ephemeral;
+pub mod global_pause;
 pub mod identity;
 pub mod owner;
 pub mod queue_delivery;

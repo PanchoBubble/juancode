@@ -182,6 +182,24 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE tracked_prs ADD COLUMN notifications  TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE tracked_prs ADD COLUMN baseline       TEXT NOT NULL DEFAULT '{}';
     "#,
+    // 7: the set a global pause is holding asleep.
+    //
+    // A table of its own rather than a column on `sessions`, because it is not a fact
+    // about a session: `dormant` already says "asleep", and it has five producers (the
+    // idle reaper, the live-session cap, a shutdown, a per-session `sleepSession` and
+    // this pause). A play driven off `dormant` would wake sessions somebody slept
+    // themselves weeks ago, so the pause needs its own record of WHICH rows it took.
+    // Narrowing it back into a query over a persisted sleep reason is juancode-7dc5.
+    //
+    // No foreign key to `sessions`: a paused row that gets deleted while the pause is
+    // in effect should drop out of the set silently, and a cascade would need the
+    // sessions row to still exist at write time, which a rehydrate cannot promise.
+    // The play filters on what the registry actually holds anyway.
+    r#"
+    CREATE TABLE global_pause (
+        session_id TEXT PRIMARY KEY
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

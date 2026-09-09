@@ -166,6 +166,17 @@ pub trait SessionStore: Send + Sync {
     fn untrack_pr(&self, tracked_id: &str) -> Result<()>;
     fn tracked_prs(&self) -> Result<Vec<TrackedPr>>;
 
+    /// The sessions a global pause is currently holding asleep, sorted.
+    ///
+    /// Persisted for the reason the tracked-PR list is: quitting while paused is half
+    /// of why anyone pauses, and a set lost on restart strands every one of those rows
+    /// asleep with nothing to tell them apart from a sleep somebody asked for.
+    fn paused_sessions(&self) -> Result<Vec<String>>;
+
+    /// Replace the paused set wholesale. The set IS the value — there are no deltas —
+    /// so a partial write is the one shape a play must never read.
+    fn set_paused_sessions(&self, ids: &[String]) -> Result<()>;
+
     /// Claim a dispatch id. `false` means someone already claimed it, which is how a
     /// dispatch delivered twice starts one session instead of two.
     fn claim_dispatch(&self, dispatch_id: &str, session_id: Option<&str>) -> Result<bool>;
@@ -508,6 +519,29 @@ impl SessionStore for SqliteStore {
     fn untrack_pr(&self, tracked_id: &str) -> Result<()> {
         self.conn()
             .execute("DELETE FROM tracked_prs WHERE id = ?1", params![tracked_id])?;
+        Ok(())
+    }
+
+    fn paused_sessions(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT session_id FROM global_pause ORDER BY session_id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn set_paused_sessions(&self, ids: &[String]) -> Result<()> {
+        let mut conn = self.conn();
+        // One transaction, because the delete and the insert are one value: a reader
+        // that landed between them would see a pause that had been lifted.
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM global_pause", [])?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO global_pause (session_id) VALUES (?1)")?;
+            for id in ids {
+                stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

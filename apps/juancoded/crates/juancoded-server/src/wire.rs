@@ -118,6 +118,21 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// advertised this with only the list behind it would give a client a Track button that
 /// files a row and watches nothing.
 ///
+/// `globalPause` says a client that is not the desktop can sleep every live agent at
+/// once and bring back exactly that set. It is the half of juancode-nizo that only the
+/// Swift endpoint could serve: the frames existed, but a `JUANCODE_CORE=rust` client
+/// reached them through `CoreProxyServer`, so a phone talking to a headless juancoded —
+/// which is the whole reason to pause everything, since you are walking away from the
+/// Mac — had no pause at all (juancode-uchf).
+///
+/// Advertised because the set is real and so is what it leaves out: `pauseAll` records
+/// the sessions it slept BEFORE a single pty dies and each one then actually exits, so
+/// the RAM comes back; a session that ended on its own is not in the set and a play
+/// never resurrects it; and `resumeAll` clears the set before it revives anything, so a
+/// revival that fails leaves a clickable sleeping row rather than a pause that never
+/// lifts. A core that advertised this over a flag flip would give a client a pause
+/// button that frees nothing.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -138,6 +153,7 @@ pub const CAPABILITIES: &[&str] = &[
     "transcript",
     "reaper",
     "sessionSleep",
+    "globalPause",
     "restartFresh",
     "editor",
     "terminal",
@@ -321,6 +337,31 @@ pub enum ClientMessage {
     SleepSession {
         session_id: String,
     },
+    /// Sleep every live agent session at once and record the set, so a later
+    /// [`Self::ResumeAll`] revives exactly it.
+    ///
+    /// No reply of its own, for the reason `sleepSession` has none: the effect IS the
+    /// [`ServerMessage::PauseState`] carrying the new set, followed by each slept
+    /// session's `sessionMeta` (`dormant: true`) and `exit`, in that order. The set
+    /// lands before a single pty dies, so a client is never told about a kill it has no
+    /// record of a pause for.
+    ///
+    /// Two rows are deliberately left out: one already asleep, which is the user's own
+    /// sleep and not this pause's to wake, and one that exited on its own, which a play
+    /// must never resurrect. Editor and shell panes are left running — they hold no
+    /// conversation to resume, so sleeping one loses the buffer.
+    PauseAll,
+    /// Revive exactly the set the last [`Self::PauseAll`] recorded, then clear it.
+    ///
+    /// Read-and-clear in one step, and the clear is published first: a pause landing
+    /// mid-play cannot have its set half-consumed, and a revival that fails leaves a
+    /// sleeping row somebody can click rather than a pause that never lifts. A session
+    /// in the set that came back on its own meanwhile is skipped, and one that is not in
+    /// the set is never woken.
+    ///
+    /// Not spelled `wakeAll` beside a `sleepAll`, because the per-session halves are
+    /// already `sleepSession` and `reactivate`.
+    ResumeAll,
     /// What this core holds, all of it, once. Not a subscription: `created`,
     /// `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks
     /// this on the handshake and keeps up from the broadcasts afterwards.
@@ -614,6 +655,8 @@ impl ClientMessage {
             "sleepSession" => Ok(Self::SleepSession {
                 session_id: need_session()?,
             }),
+            "pauseAll" => Ok(Self::PauseAll),
+            "resumeAll" => Ok(Self::ResumeAll),
             "openEditor" => Ok(Self::OpenEditor {
                 cwd: raw.cwd.ok_or("missing cwd")?,
                 file: raw.file.ok_or("missing file")?,
@@ -803,6 +846,23 @@ pub enum ServerMessage {
     /// multi-megabyte handshake for bytes a sidebar never draws.
     Sessions {
         sessions: Vec<SessionMeta>,
+    },
+    /// The set a global pause is holding asleep, sorted.
+    ///
+    /// Sent once right after `serverInfo` to a connection that arrives while a pause is
+    /// IN EFFECT, so a client joining mid-pause starts from the truth rather than
+    /// assuming nothing is paused — and not at all when the set is empty, the same rule
+    /// `gridChange` follows for an unclaimed grid: to a client whose button starts out
+    /// reading "pause", no frame and the empty set say the same thing. Broadcast to
+    /// every connection whenever the set changes, whichever surface changed it, which is
+    /// the point.
+    ///
+    /// Always complete; replace wholesale. Empty means no pause is in effect. It is NOT
+    /// the set of `dormant` rows: dormancy has four other producers here (the idle
+    /// reaper, the live-session cap, a shutdown, a per-session `sleepSession`), so a
+    /// play driven off it would wake sessions somebody slept themselves weeks ago.
+    PauseState {
+        paused: Vec<String>,
     },
     /// A session was forgotten. Broadcast to every connection, not just the one that
     /// asked, because a row another client is still showing is the same rot from the
@@ -1141,6 +1201,9 @@ impl ServerMessage {
             }),
             Self::Sessions { sessions } => json!({
                 "type": "sessions", "sessions": sessions,
+            }),
+            Self::PauseState { paused } => json!({
+                "type": "pauseState", "paused": paused,
             }),
             Self::SessionDeleted {
                 session_id,
@@ -1502,6 +1565,7 @@ mod tests {
                     "sessionList",
                     "sessionDelete",
                     "sessionSleep",
+                    "globalPause",
                     "restartFresh",
                     "editor",
                     "terminal",

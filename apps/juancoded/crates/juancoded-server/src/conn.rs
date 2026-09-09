@@ -30,6 +30,7 @@ use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEv
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
 use crate::ephemeral::EphemeralPtys;
+use crate::global_pause::GlobalPause;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
@@ -105,6 +106,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         stuck: _,
         pty,
         tracked_prs,
+        global_pause,
         bus,
         identity,
     } = handles;
@@ -165,6 +167,29 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
             release(&sessions, reaper.as_ref(), client);
             return;
         }
+    }
+
+    // Subscribed BEFORE the snapshot below, so a pause taken between the two is a
+    // duplicate state frame rather than a missed one. The set is a value and it is
+    // always complete, so a client that replaces what it holds twice ends up right.
+    let mut pause_rx = global_pause.subscribe();
+    // Then the pause in effect, if there is one. Not sent at all when the set is empty,
+    // the rule `gridChange` above already follows for an unclaimed grid: to a client
+    // whose button starts out reading "pause", no frame and the empty set say the same
+    // thing.
+    let paused_now = global_pause.paused();
+    if !paused_now.is_empty()
+        && tx
+            .send(Message::Text(
+                ServerMessage::PauseState { paused: paused_now }
+                    .to_json()
+                    .into(),
+            ))
+            .await
+            .is_err()
+    {
+        release(&sessions, reaper.as_ref(), client);
+        return;
     }
 
     // Subscribed for the length of the connection, and gated on the watch below rather
@@ -252,6 +277,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     transcripts: transcripts.as_ref(),
                                     reaper: reaper.as_ref(),
                                     tracked_prs: tracked_prs.as_ref(),
+                                    global_pause: &global_pause,
                                 },
                                 client,
                                 &mut fanout,
@@ -328,6 +354,9 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                 }
             }
         }
+
+        // Ahead of whatever else this pass produced, always: see `prepend_pause`.
+        prepend_pause(&mut pause_rx, &mut outbound);
 
         for msg in outbound {
             if tx.send(Message::Text(msg.to_json().into())).await.is_err() {
@@ -503,6 +532,37 @@ fn drain_bus(
     }
 }
 
+/// Fold every paused-set change already published into frames, in FRONT of the pass
+/// that is about to be flushed.
+///
+/// In front, not behind, and that is the ordering contract of the frame rather than a
+/// tidiness preference: a pause records and publishes its set before the first pty
+/// dies, so anything pending here is older than any `exit` this pass is carrying, and a
+/// client that saw the exits first would be told about a kill it has no record of a
+/// pause for. Two channels feeding one `select!` have no order of their own, so the
+/// order is imposed here instead of hoped for.
+///
+/// A lagged receiver is survivable by construction: the next publish is the whole set
+/// again, so a dropped one costs a client a frame it would have replaced anyway.
+fn prepend_pause(
+    pause: &mut tokio::sync::broadcast::Receiver<Vec<String>>,
+    outbound: &mut Vec<ServerMessage>,
+) {
+    let mut ahead = Vec::new();
+    loop {
+        match pause.try_recv() {
+            Ok(paused) => ahead.push(ServerMessage::PauseState { paused }),
+            Err(TryRecvError::Lagged(n)) => {
+                debug!(dropped = n, "connection lagged behind the pause bus");
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        }
+    }
+    if !ahead.is_empty() {
+        outbound.splice(0..0, ahead);
+    }
+}
+
 /// Who already drives which session's grid, for a connection that just arrived.
 ///
 /// Only a claimed grid on a live session: a client starts out assuming the grid is
@@ -648,6 +708,9 @@ struct Tree<'a> {
     /// `None` when the tree mounted no store for a watch list to live in. The
     /// tracked-PR frames then say so rather than accepting a track nothing keeps.
     tracked_prs: Option<&'a Arc<TrackedPrs>>,
+    /// The paused set. Not optional: a pause needs only the registry, and the store is
+    /// what it survives a restart on rather than what it needs to work.
+    global_pause: &'a Arc<GlobalPause>,
 }
 
 fn handle_client_message(
@@ -666,6 +729,7 @@ fn handle_client_message(
         transcripts,
         reaper,
         tracked_prs,
+        global_pause,
     } = *tree;
     let attached = &mut fanout.attached;
     match msg {
@@ -947,6 +1011,29 @@ fn handle_client_message(
                     session_id: Some(session_id),
                     message: e.to_string(),
                 });
+            }
+        }
+
+        // No reply of their own, for the reason `sleepSession` has none: the
+        // `pauseState` IS the answer, and it is broadcast rather than pushed here so
+        // every surface hears the same set from the same place at the same time.
+        ClientMessage::PauseAll => {
+            // Synchronous, and the sleeps in order behind the publish: a kill is cheap,
+            // and "the set lands before the first pty dies" is a rule this keeps by
+            // construction rather than by scheduling.
+            global_pause.pause_all();
+        }
+
+        ClientMessage::ResumeAll => {
+            // The clear is published by `take_for_resume` before it returns, so the
+            // button stops reading "paused" the moment the play starts.
+            let revivals = global_pause.take_for_resume();
+            if !revivals.is_empty() {
+                // Off this connection's task: a revival is a real CLI spawn, and a play
+                // over a big pause would otherwise stop this socket reading for seconds
+                // — including the attach the client sends the moment it sees the state.
+                let book = Arc::clone(global_pause);
+                tokio::spawn(async move { book.revive_all(revivals).await });
             }
         }
 
@@ -1277,6 +1364,7 @@ mod tests {
                 transcripts: handles.transcripts.as_ref(),
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
+                global_pause: &handles.global_pause,
             },
             1,
             fanout,
@@ -1453,6 +1541,8 @@ mod tests {
         /// channel the real loop drains in its own select arm.
         oob: tokio::sync::mpsc::UnboundedReceiver<ServerMessage>,
         tracked: tokio::sync::broadcast::Receiver<TrackedPrChange>,
+        /// The paused-set changes the loop folds in ahead of everything else.
+        pause: tokio::sync::broadcast::Receiver<Vec<String>>,
         _listener: juancoded_cordis::Effect,
     }
 
@@ -1471,6 +1561,7 @@ mod tests {
                 .as_ref()
                 .expect("the test tree mounts a store, so it has a watch list")
                 .subscribe();
+            let pause = handles.global_pause.subscribe();
             Self {
                 ephemeral: EphemeralPtys::with_commands(
                     handles.pty.clone(),
@@ -1482,6 +1573,7 @@ mod tests {
                 published,
                 oob,
                 tracked,
+                pause,
                 _listener: listener,
             }
         }
@@ -1566,6 +1658,7 @@ mod tests {
                     transcripts: self.handles.transcripts.as_ref(),
                     reaper: self.handles.reaper.as_ref(),
                     tracked_prs: self.handles.tracked_prs.as_ref(),
+                    global_pause: &self.handles.global_pause,
                 },
                 1,
                 fanout,
@@ -1579,7 +1672,24 @@ mod tests {
             ahead.extend(reply);
             ahead.extend(behind);
             ahead.extend(self.forwarded(fanout));
+            // Last, and it goes to the FRONT: the same rule the loop applies at its
+            // flush, so a test sees the set ahead of the exits it caused.
+            prepend_pause(&mut self.pause, &mut ahead);
             ahead
+        }
+
+        /// Wait for a session's pty to actually die.
+        ///
+        /// A kill is asynchronous and every rule the pause follows is a predicate on
+        /// liveness, so a test that asserted before the reap would be asserting the
+        /// wrong state. Polled rather than read off the bus, because `step` needs those
+        /// events to build the frames it returns.
+        async fn wait_for_exit(&self, id: &str) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while self.handles.sessions.is_running(id) {
+                assert!(std::time::Instant::now() < deadline, "no exit for {id}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
 
         /// The queue frames the loop's own select arm would have produced.
@@ -1929,6 +2039,117 @@ mod tests {
         };
         assert_eq!(session_id.as_deref(), Some("no-such-session"));
         assert_eq!(message, "Session is not running");
+    }
+
+    /// The paused set in `frames`, or a panic naming what came instead.
+    fn pause_state(frames: &[ServerMessage]) -> Vec<String> {
+        frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMessage::PauseState { paused } => Some(paused.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no pauseState in {frames:?}"))
+    }
+
+    /// `pauseAll` answers with the set and nothing else, and what the set leaves out is
+    /// the load-bearing half: a row that ended on its own is not in it, so the play
+    /// cannot resurrect it as if somebody had paused it.
+    #[tokio::test]
+    async fn pausing_answers_with_the_set_and_omits_the_row_that_already_ended() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let live = rig.session();
+        let dead = rig.session();
+        rig.sessions().kill(&dead).expect("the second one ends");
+        rig.wait_for_exit(&dead).await;
+
+        let frames = rig.step(ClientMessage::PauseAll, &mut fanout);
+
+        assert_eq!(pause_state(&frames), vec![live]);
+        assert!(
+            !pause_state(&frames).contains(&dead),
+            "a crashed row woken by a global play is indistinguishable from a paused one"
+        );
+        // Ahead of everything else in the batch. The set is recorded before the first
+        // pty dies, so a client is never told about a kill it has no record of a pause
+        // for — and an `exit` consumed ahead of the state is exactly that.
+        assert!(
+            matches!(frames.first(), Some(ServerMessage::PauseState { .. })),
+            "the set must lead the batch: {frames:?}"
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{frames:?}"
+        );
+    }
+
+    /// The identical rule from the other side: `targets` filters on liveness and not on
+    /// the dormant flag, so a session the user slept themselves stays their sleep.
+    #[tokio::test]
+    async fn a_session_already_asleep_is_not_taken_over_by_the_pause() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let live = rig.session();
+        let asleep = rig.session();
+        rig.step(
+            ClientMessage::SleepSession {
+                session_id: asleep.clone(),
+            },
+            &mut fanout,
+        );
+        rig.wait_for_exit(&asleep).await;
+        assert!(rig.sessions().meta(&asleep).expect("the row stays").dormant);
+
+        let frames = rig.step(ClientMessage::PauseAll, &mut fanout);
+
+        assert_eq!(pause_state(&frames), vec![live]);
+    }
+
+    /// `resumeAll` clears the set BEFORE it revives anything, so the button stops
+    /// reading "paused" the moment the play starts — and a revival that fails leaves a
+    /// clickable sleeping row rather than a pause that never lifts.
+    ///
+    /// The fake CLI here writes no conversation id, so every revival in this test IS a
+    /// failure, which is the leg worth asserting: the pause still lifts.
+    #[tokio::test]
+    async fn a_resume_lifts_the_pause_even_when_the_revival_cannot_happen() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let id = rig.session();
+        let paused = rig.step(ClientMessage::PauseAll, &mut fanout);
+        assert_eq!(pause_state(&paused), vec![id.clone()]);
+        rig.wait_for_exit(&id).await;
+
+        let played = rig.step(ClientMessage::ResumeAll, &mut fanout);
+
+        assert!(
+            pause_state(&played).is_empty(),
+            "the pause has to lift before a single pty respawns: {played:?}"
+        );
+        assert!(rig.handles.global_pause.paused().is_empty());
+    }
+
+    /// Nothing live is not a pause, and an empty set is not a frame: a client whose
+    /// button starts out reading "pause" learns nothing from being told so.
+    #[tokio::test]
+    async fn pausing_with_nothing_live_says_nothing() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let only = rig.session();
+        rig.sessions().kill(&only).expect("it ends");
+        rig.wait_for_exit(&only).await;
+
+        let frames = rig.step(ClientMessage::PauseAll, &mut fanout);
+
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, ServerMessage::PauseState { .. })),
+            "{frames:?}"
+        );
     }
 
     /// The whole reason `terminalReady` carries a `requestId`.

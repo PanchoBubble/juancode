@@ -21,6 +21,7 @@ use juancoded_state::{
 };
 
 use crate::conn;
+use crate::global_pause::GlobalPause;
 use crate::identity::{self, DaemonIdentity};
 use crate::queue_delivery;
 use crate::seed::SeedTiming;
@@ -66,6 +67,11 @@ pub struct CoreHandles {
     /// to survive in: a watch that is forgotten on restart is not a watch, so the frames
     /// refuse rather than accept a track this core cannot keep.
     pub tracked_prs: Option<Arc<TrackedPrs>>,
+    /// The paused set and the pause that fills it. One per daemon, never per
+    /// connection: the whole promise of the frames is that a pause taken from the phone
+    /// is the set the desktop plays, so both read this object. Always present — a pause
+    /// needs only the registry, and the store leg is what makes it survive a restart.
+    pub global_pause: Arc<GlobalPause>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -115,6 +121,12 @@ impl CoreHandles {
             .resolve::<StoreService>()
             .ok()
             .map(|store| TrackedPrs::new(Arc::clone(&sessions), store, tracked_prs::POLL_INTERVAL));
+        // Same store, and `None` only costs the pause its persistence: the frames work
+        // over the registry alone, so a tree with no store still answers a phone.
+        let global_pause = GlobalPause::new(
+            Arc::clone(&sessions),
+            loader.services().resolve::<StoreService>().ok(),
+        );
         Self {
             sessions,
             contributions: loader.contributions().clone(),
@@ -124,6 +136,7 @@ impl CoreHandles {
             stuck,
             pty,
             tracked_prs,
+            global_pause,
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
