@@ -276,8 +276,10 @@ struct CoreFallbackSheet: View {
                 + "started under the rust core is not listed here.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Start the daemon with `cargo run -p juancoded` (or set JUANCODE_RUST_CORE_URL "
-                + "to where it is listening), then relaunch.")
+            Text("`scripts/dev-daemon.sh agent install` keeps a daemon running across app "
+                + "quits, logout and reboot, so this does not happen again. For one launch, "
+                + "`scripts/dev-app.sh` starts one that lives as long as its terminal. Either "
+                + "way, relaunch afterwards — the core is chosen once, at boot.")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)

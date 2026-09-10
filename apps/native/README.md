@@ -281,6 +281,25 @@ JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control di
 scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
 ```
 
+### Starting the Rust daemon
+
+Everything about the daemon is reachable from the repo root, and nothing needs `cargo
+run -p juancoded` in a terminal you then cannot close:
+
+```sh
+pnpm daemon:status                       # what is running, who owns it, is it stale
+pnpm daemon:restart                      # onto the current build (ends its ptys, asks first)
+pnpm daemon:stop                         # end it (asks first)
+pnpm daemon:agent install                # keep it running across app quits, logout and reboot
+pnpm daemon:agent status                 # installed? loaded? running? on whose checkout?
+scripts/dev-daemon.sh …                  # the same thing without pnpm
+```
+
+`scripts/dev-daemon.sh` forwards to `apps/native/scripts/juancoded.sh` (lifetime) and
+`apps/native/scripts/juancoded-agent.sh` (the LaunchAgent). You do not need any of
+them for an ordinary terminal launch: `scripts/dev-app.sh` starts a daemon itself when
+the selected core is rust, and reaps it when the app exits.
+
 ### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
 
 On the Swift core there is nothing to manage: the core is in-process and launches and
@@ -352,11 +371,66 @@ it prints the path, so it starts the daemon **unowned** — no trap and no watch
 tells you to stop it yourself. The next full `dev-app.sh` claims that daemon if the
 build still matches, and claiming it also arms its watchdog.
 
+### Keeping the daemon across logins (the LaunchAgent)
+
+`dev-app.sh` only covers a terminal launch. Launch from the Dock, or log out and back
+in, and nothing starts the daemon: the app comes up on the **Swift** core with an
+unreachable-daemon reason in the badge. `apps/native/scripts/juancoded-agent.sh`
+installs a LaunchAgent — label `com.juanone.juancoded`, plist in
+`~/Library/LaunchAgents`, logs in `~/.juancode/logs/juancoded{,.error}.log`, matching
+the `com.juanone.beads-dolt` agent already on this machine — that closes that gap.
+
+```sh
+pnpm daemon:agent install    # write the plist, bootstrap the job, report what came up
+pnpm daemon:agent status     # installed? loaded? running? whose checkout? what build?
+pnpm daemon:agent restart    # onto the current build — ENDS ITS PTYS, asks first
+pnpm daemon:agent stop       # stop it; it returns at the next login
+pnpm daemon:agent uninstall  # bootout + remove the plist (ends its ptys, asks first)
+```
+
+**It runs `juancoded.sh serve`, not the binary.** launchd hands a job
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin` and about six variables — measured on this machine
+from `launchctl print`. This daemon **spawns claude/codex/opencode**, so that
+environment is not cosmetic: it is the prime directive broken. `serve` therefore
+re-execs itself through `$SHELL -lic` and lets the daemon inherit that (61 variables
+and the real `PATH` here, versus 6). `-lic` and not `-lc` for the reason already
+measured for the app's own import in `JuancodeCore/LoginEnvironment.swift`: the keys
+and tool dirs come from `.zshrc`, which only `-i` sources. It costs 1.5-5s, once per
+start.
+
+**Nothing restarts it because the build moved on.** Restarting the daemon ends every
+pty it owns, so a supervisor that helpfully restarted after a `cargo build` would
+silently kill five running agents. So `serve` never builds; a launchd daemon on an
+older build than the checkout is **warned about on every app launch and left running**
+(the `launchd` case in `juancoded.sh`'s `cmd_ensure`, and the `staleBuild` warning in
+the core badge); and moving it onto a new build is `pnpm daemon:agent restart`, which
+counts the live sessions and asks. `juancoded.sh restart` and `dev-app.sh
+--restart-daemon` both refuse a launchd-managed daemon and send you there.
+
+What each plist key does:
+
+| key                            | on a crash              | at logout                        | on `launchctl stop`         |
+| ------------------------------ | ----------------------- | -------------------------------- | --------------------------- |
+| `RunAtLoad`                    | —                       | starts again at the next login   | —                           |
+| `KeepAlive.SuccessfulExit`     | restarts (nonzero exit) | —                                | stays stopped (exits 0)     |
+| `ThrottleInterval` 10          | floor on the retry rate | —                                | —                           |
+| `ExitTimeOut` 30               | —                       | 30s to flush SQLite before KILL  | 30s to flush before KILL    |
+| `ProcessType` `Interactive`    | —                       | —                                | not background-throttled    |
+
+`gui/<uid>`, not `user/<uid>`: it is an Aqua agent, so it goes at logout with the
+session whose ptys it holds, and comes back at login.
+
+**The plist names one checkout.** There is one agent per machine and its
+`ProgramArguments` carry the absolute path of the checkout that installed it, so
+`status` says so when you are standing in a different worktree, and `install` from
+another worktree asks before repointing it.
+
 `scripts/daemon-lifecycle-check.sh` is the end-to-end proof, on its own port (4390) and
 its own data dir so it cannot touch anything real: it launches and quits (no daemon
 left), launches and `SIGKILL`s the launch (the daemon self-exits), and starts a foreign
 daemon then launches and quits over it (it survives, and never self-exits, because
-nobody claimed it). A sleeper stands in for the app — the lifetime is a contract
+nobody claimed it), and marks a daemon `managed=launchd` and stale and checks the
+launch neither claims nor reaps nor restarts it. A sleeper stands in for the app — the lifetime is a contract
 between the launch shell, `juancoded.sh` and `juancoded`, and the real app would need a
 window server and would fight the running instance for `:4280`.
 

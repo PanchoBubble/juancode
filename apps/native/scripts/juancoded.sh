@@ -47,13 +47,32 @@
 # another worktree, and that one is holding real ptys. Only the exact pid this launch
 # recorded is ever signalled.
 #
+# THE FOURTH KIND OF DAEMON: launchd's
+#
+# A daemon started by the LaunchAgent (`juancoded-agent.sh install`, label
+# com.juanone.juancoded) is a fifth state beside ours/unowned/foreign/none, and it has
+# to be, because everything above assumes the daemon's lifetime belongs to a launch
+# shell. launchd's does not. It is recorded as `managed=launchd` in the ownership file
+# by `juancoded.sh serve`, and the two rules for it are absolute:
+#
+#   * it is NEVER claimed. Claiming it would arm the trap in dev-app.sh, and the app
+#     quitting would then end a daemon launchd immediately restarts empty — five live
+#     agents killed by closing a window.
+#   * it is NEVER restarted because the build moved on. A stale launchd daemon is
+#     WARNED about, on every launch, and left running. Restarting it is a human
+#     command (`juancoded-agent.sh restart`) that counts the ptys first.
+#
 # Usage:
 #   juancoded.sh ensure [token]  # build, then start (owned by `token`) or report foreign
 #   juancoded.sh reap <token>    # end the daemon `token` owns: TERM, grace, then KILL
 #   juancoded.sh status          # what is running, who owns it, does it match the checkout
 #   juancoded.sh stop            # end whatever is running, after confirming
 #   juancoded.sh restart         # stop, then start an unowned one
+#   juancoded.sh serve           # run the daemon in the FOREGROUND, owned by launchd
 #   juancoded.sh build-id        # print the checkout's build identity
+#
+# See also `juancoded-agent.sh`, which installs/removes the LaunchAgent that runs
+# `serve`.
 #
 # Env:
 #   JUANCODE_CONFIG=debug|release   which profile to build and run (matches dev-app.sh)
@@ -61,12 +80,18 @@
 #   JUANCODE_SKIP_DAEMON_BUILD=1    skip cargo (test harnesses only — reintroduces the bug)
 #   JUANCODE_OWNER_GRACE_SECONDS=N  how long an ORPHANED daemon keeps serving before it
 #                                   ends itself (default 120; 0 disables the watchdog)
+#   JUANCODE_LOGIN_ENV=0            `serve` only: do NOT re-exec through `$SHELL -lic`
+#                                   first. Only safe when the caller's environment is
+#                                   already a login shell's.
 set -euo pipefail
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPTS/../../.." && pwd)"
+SELF="$SCRIPTS/juancoded.sh"
 MANIFEST="$ROOT/apps/juancoded/Cargo.toml"
 CONFIG="${JUANCODE_CONFIG:-debug}"
+# Shared with juancoded-agent.sh, which installs the plist that carries it.
+AGENT_LABEL="com.juanone.juancoded"
 
 # Mirrors `juancoded_persistence::db_path()` exactly. Two spellings of the same
 # default in two languages is a drift waiting to happen; this one is the copy, and
@@ -137,15 +162,23 @@ describe_running() {
   printf '  owns %s child process(es)\n' "$(child_count "$pid")" >&2
 }
 
-# Whoever is listening, is it ours? Answers on stdout: `ours`, `unowned`, `foreign`
-# or `none`. A recorded owner whose own process is gone counts as unowned — a launch
+# Whoever is listening, is it ours? Answers on stdout: `ours`, `launchd`, `unowned`
+# or `foreign`. A recorded owner whose own process is gone counts as unowned — a launch
 # that was SIGKILLed never ran its trap, and its claim must not strand the daemon
 # forever.
+#
+# `launchd` is checked before anything else about the record, and deliberately does not
+# depend on `alive "$owner_pid"`: that record names pid 1, which a non-root `kill -0`
+# reports as unsignalable, so the generic path below would read launchd's daemon as
+# UNOWNED and adopt it. Adopting it is the one outcome this whole file exists to
+# prevent.
 ownership() {
   local pid="$1" token="$2"
-  local owner_daemon owner_token owner_pid
+  local owner_daemon owner_token owner_pid owner_managed
   owner_daemon="$(own_get daemon_pid)"; owner_token="$(own_get token)"; owner_pid="$(own_get owner_pid)"
+  owner_managed="$(own_get managed)"
   [ "$owner_daemon" = "$pid" ] || { printf 'foreign'; return; }
+  [ "$owner_managed" = "launchd" ] && { printf 'launchd'; return; }
   [ -n "$token" ] && [ "$owner_token" = "$token" ] && { printf 'ours'; return; }
   if [ -z "$owner_token" ] || ! alive "$owner_pid"; then printf 'unowned'; else printf 'foreign'; fi
 }
@@ -161,6 +194,27 @@ claim() {
     printf 'daemon_pid=%s\n' "$pid"
     printf 'token=%s\n' "$token"
     printf 'owner_pid=%s\n' "$owner_pid"
+  } > "$OWN_FILE.tmp"
+  mv -f "$OWN_FILE.tmp" "$OWN_FILE"
+}
+
+# The same record, for the daemon launchd is about to become (see `cmd_serve`). Written
+# BEFORE the exec, so the pid it names is the pid the daemon will have.
+#
+# `owner_pid=1` is not a placeholder. juancoded's own watchdog drops any owner pid <= 1
+# on purpose (`Claim::owner_of` in owner.rs: launchd is what a process gets reparented
+# TO, so a record naming it names an owner that cannot be waited on), which is exactly
+# the reading we want — launchd's daemon has no launch shell to outlive, so the
+# self-exit countdown must never arm for it. `cmd_serve` also passes
+# JUANCODE_OWNER_GRACE_SECONDS=0, so that is true from two directions.
+claim_launchd() {
+  local pid="$1"
+  mkdir -p "$DATA_DIR"
+  {
+    printf 'daemon_pid=%s\n' "$pid"
+    printf 'token=%s\n' "$AGENT_LABEL"
+    printf 'owner_pid=1\n'
+    printf 'managed=launchd\n'
   } > "$OWN_FILE.tmp"
   mv -f "$OWN_FILE.tmp" "$OWN_FILE"
 }
@@ -233,12 +287,24 @@ build_daemon() {
 
 # Which core this launch will actually use, decided the same way CoreBoot does:
 # JUANCODE_CORE wins, else the persisted Settings choice, else swift.
+#
+# Two defaults domains, because this repo builds the app under two bundle identifiers —
+# `dev.juancode.app` (apps/native/scripts/dev-app.sh and package-app.sh) and
+# `com.juanone.juancode` (scripts/bundle-app.sh) — and UserDefaults is per-identifier.
+# Reading only one of them is a way to flip the setting to rust in the app, relaunch,
+# and have this script decide there was nothing to start: the exact symptom of
+# juancode-k0bq, from the other end. First domain that has an answer wins; `rust`
+# anywhere is enough, since the cost of starting a daemon the app then ignores is one
+# idle process and the cost of not starting one is the Swift-core fallback.
 selected_core() {
-  local core="${JUANCODE_CORE:-}"
+  local core="${JUANCODE_CORE:-}" domain
   if [ -z "$core" ]; then
-    core="$(defaults read dev.juancode.app juancode.core.backend 2>/dev/null || echo swift)"
+    for domain in dev.juancode.app com.juanone.juancode; do
+      core="$(defaults read "$domain" juancode.core.backend 2>/dev/null || true)"
+      [ -n "$core" ] && break
+    done
   fi
-  printf '%s' "$core"
+  printf '%s' "${core:-swift}"
 }
 
 start_daemon() {
@@ -304,6 +370,8 @@ cmd_status() {
   say "daemon running:"
   describe_running "$pid"
   case "$(ownership "$pid" "")" in
+    launchd) say "  owner: launchd ($AGENT_LABEL) — it survives logout and app quits"
+             say "         no launch claims or reaps it; \`juancoded-agent.sh restart\` is the only restart" ;;
     unowned) say "  owner: nobody — nothing will reap it when an app exits" ;;
     *)       say "  owner: launch $(own_get token) (shell pid $(own_get owner_pid), $(alive "$(own_get owner_pid)" && echo alive || echo gone))" ;;
   esac
@@ -333,7 +401,10 @@ cmd_status() {
 # every launch, and a prompt there is a launch that hangs.
 #
 # Prints one machine-readable line on stdout for the caller's trap:
-#   started <pid> | claimed <pid> | foreign <pid> | none
+#   started <pid> | claimed <pid> | launchd <pid> | foreign <pid> | none
+#
+# Only `started` and `claimed` arm a trap. `launchd` and `foreign` both mean "connect
+# to it, touch nothing"; `none` means the Swift core, or JUANCODE_DAEMON=off.
 cmd_ensure() {
   local token="${1:-}" owner_pid="${2:-0}"
   if [ "${JUANCODE_DAEMON:-}" = "off" ]; then
@@ -353,6 +424,25 @@ cmd_ensure() {
   if [ -n "$pid" ] && alive "$pid" && healthy; then
     local theirs; theirs="$(run_get build_id)"
     case "$(ownership "$pid" "$token")" in
+      launchd)
+        # launchd's, and therefore not this launch's to claim, reap or replace. The app
+        # connects to it; the trap in dev-app.sh never arms (it arms on started/claimed
+        # only), so quitting the app leaves it and its ptys exactly where they are.
+        say "the daemon on :$PORT is managed by launchd ($AGENT_LABEL), pid $pid."
+        say "  not claimed and not reaped — launchd owns its lifetime, not this launch"
+        if [ "$theirs" = "$want" ]; then
+          say "  build $theirs (matches this checkout), $(child_count "$pid") live session(s)"
+        elif [ -z "$theirs" ]; then
+          warn "  build UNSTAMPED — it cannot be matched against this checkout's $want."
+          warn "  Nothing here restarts it. \`$SCRIPTS/juancoded-agent.sh restart\` does, deliberately."
+        else
+          warn "  build $theirs — THIS CHECKOUT BUILDS $want. THE DAEMON IS STALE."
+          warn "  Nothing here restarts it: that would end $(child_count "$pid") live pty session(s)."
+          warn "  When you are ready to lose them: \`$SCRIPTS/juancoded-agent.sh restart\`"
+        fi
+        printf 'launchd %s\n' "$pid"
+        return 0
+        ;;
       ours|unowned)
         if [ "$theirs" = "$want" ]; then
           claim "$pid" "$token" "$owner_pid"
@@ -401,12 +491,86 @@ cmd_reap() {
   [ -n "$token" ] || return 0
   local pid; pid="$(own_get daemon_pid)"
   [ -n "$pid" ] || return 0
+  # Belt and braces: a launch never holds launchd's token, so the check below would
+  # already refuse. Said explicitly because this is the signal that must never be sent.
+  if [ "$(own_get managed)" = "launchd" ]; then
+    say "daemon pid $pid is managed by launchd — not reaping it"
+    return 0
+  fi
   if [ "$(own_get token)" != "$token" ]; then
     say "daemon pid $pid is owned by launch $(own_get token) now, not $token — leaving it"
     return 0
   fi
   alive "$pid" || { rm -f "$OWN_FILE"; return 0; }
   end_daemon "$pid" "the app that started it exited"
+}
+
+# What the LaunchAgent runs. Stays in the FOREGROUND: launchd tracks the process it
+# spawned, so a daemon put into the background here would look to launchd like a job
+# that exited immediately and be restarted forever.
+#
+# THE ENVIRONMENT IS THE WHOLE DIFFICULTY. launchd hands a job a stripped environment —
+# PATH is roughly /usr/bin:/bin:/usr/sbin:/sbin and nothing exported from .zshrc is
+# there. For most daemons that is cosmetic. For this one it is fatal: juancoded SPAWNS
+# claude/codex/opencode, and juancode's prime directive is that those processes see the
+# user's real shell environment (PATH, MCP config, keys). So `serve` re-execs itself
+# through `$SHELL -lic` first and lets the daemon inherit THAT.
+#
+# `-lic` and not `-lc`, for the reason already measured on this machine for the app's
+# own import (JuancodeCore/LoginEnvironment.swift): `-lc` reports ~16 variables and
+# none of the keys, because those are exported from .zshrc, which only `-i` sources.
+# It costs 1.5-5.1s. That is paid once at login, and once per crash restart.
+#
+# DELIBERATELY NO cargo build HERE. Every other path in this file builds first, because
+# a stale binary is the bug they exist for. This one must not:
+#   * launchd starts it at login, where a build failure would mean no core at all and a
+#     multi-second delay on every login;
+#   * KeepAlive restarts it after a crash, and a cargo build in a restart loop is a
+#     laptop that gets hot and never recovers.
+# A launchd daemon therefore goes stale, and that is handled by SAYING SO on every app
+# launch (see the `launchd` case in cmd_ensure) rather than by restarting it — a
+# restart kills every pty it owns.
+cmd_serve() {
+  if [ -z "${JUANCODE_LOGIN_ENV_DONE:-}" ] && [ "${JUANCODE_LOGIN_ENV:-1}" != "0" ]; then
+    local shell="${SHELL:-/bin/zsh}"
+    if [ -x "$shell" ]; then
+      say "importing the login environment via $shell -lic (the daemon spawns the agent CLIs)"
+      export JUANCODE_LOGIN_ENV_DONE=1
+      # `-c` with trailing words: $0 is the name, $1 the first argument. Building the
+      # command with the path interpolated into the script text would break on any
+      # path containing a quote.
+      exec "$shell" -lic 'exec "$1" serve' juancoded-serve "$SELF"
+    fi
+    warn "\$SHELL=$shell is not executable; starting with launchd's stripped environment."
+    warn "Agent CLIs spawned by this daemon may not find their PATH or their keys."
+  fi
+
+  if [ ! -x "$BIN" ]; then
+    warn "no daemon binary at $BIN"
+    warn "Build it once, then \`launchctl kickstart gui/$(id -u)/$AGENT_LABEL\`:"
+    warn "  cargo build --manifest-path $MANIFEST -p juancoded"
+    # Exit 0, on purpose, and this is the one counter-intuitive line in the file. The
+    # LaunchAgent's KeepAlive is SuccessfulExit=false: a NONZERO exit is a crash and
+    # gets restarted. Exiting nonzero here would put launchd into a restart loop over a
+    # missing file that no amount of restarting creates. Exit 0 means "there is nothing
+    # to run", and launchd leaves it alone until a human kickstarts it.
+    exit 0
+  fi
+
+  mkdir -p "$DATA_DIR"
+  # Before the exec, so the pid in the record is the pid the daemon will have.
+  claim_launchd "$$"
+  say "starting $BIN in the foreground under launchd ($AGENT_LABEL), pid $$"
+  say "  port $PORT, data dir $DATA_DIR"
+  say "  build $(build_id)"
+  export JUANCODE_BUILD_ID="${JUANCODE_BUILD_ID:-$(build_id)}"
+  # The self-exit watchdog is the wrong mechanism here and must be off: it ends a
+  # daemon whose OWNING LAUNCH has died, and this daemon has no owning launch. launchd
+  # is the supervisor. 0 is the documented switch (owner.rs: DEFAULT_GRACE).
+  export JUANCODE_OWNER_GRACE_SECONDS=0
+  # No JUANCODE_OWNER_PID: declaring an owner is what arms the countdown.
+  unset JUANCODE_OWNER_PID
+  exec "$BIN"
 }
 
 cmd_stop() {
@@ -416,8 +580,13 @@ cmd_stop() {
     rm -f "$RUN_FILE" "$OWN_FILE"
     return 0
   fi
+  local managed=""; [ "$(ownership "$pid" "")" = "launchd" ] && managed=1
   if confirm_end "$pid" "you asked to stop it."; then
     end_daemon "$pid" "asked to stop"
+    # SIGTERM takes juancoded through its orderly shutdown and it exits 0, which the
+    # agent's KeepAlive (SuccessfulExit=false) reads as "meant it" — so it stays
+    # stopped now, and comes back at the next login because RunAtLoad is set.
+    [ -n "$managed" ] && say "launchd will start it again at your next login (or \`juancoded-agent.sh start\`)"
   else
     say "left it running"
   fi
@@ -428,6 +597,14 @@ cmd_restart() {
   local want; want="$(build_id)"
   local pid; pid="$(run_get pid)"
   if [ -n "$pid" ] && alive "$pid"; then
+    # A launchd-managed daemon must not be replaced by an unowned one: launchd is still
+    # watching that slot, and the next login would start a second daemon that cannot
+    # bind the port. That restart belongs to the agent script, which restarts the JOB.
+    if [ "$(ownership "$pid" "")" = "launchd" ]; then
+      warn "daemon pid $pid is managed by launchd ($AGENT_LABEL)."
+      warn "Restart the job, not the process: \`$SCRIPTS/juancoded-agent.sh restart\`"
+      return 1
+    fi
     confirm_end "$pid" "you asked to restart it onto build $want." || { say "left it running"; return 0; }
     end_daemon "$pid" "restarting onto build $want"
   fi
@@ -441,6 +618,7 @@ case "${1:-ensure}" in
   status)   cmd_status ;;
   stop)     cmd_stop ;;
   restart)  cmd_restart ;;
+  serve)    cmd_serve ;;
   build-id) build_id; printf '\n' ;;
-  *) warn "unknown command: $1 (want: ensure|reap|status|stop|restart|build-id)"; exit 2 ;;
+  *) warn "unknown command: $1 (want: ensure|reap|status|stop|restart|serve|build-id)"; exit 2 ;;
 esac

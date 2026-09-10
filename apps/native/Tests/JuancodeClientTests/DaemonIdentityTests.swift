@@ -87,7 +87,11 @@ final class DaemonIdentityTests: XCTestCase {
         let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
         XCTAssertEqual(warnings.map(\.kind), [.staleBuild])
         XCTAssertTrue(warnings[0].headline.contains("old111"), warnings[0].headline)
-        XCTAssertTrue(warnings[0].detail.contains("--restart-daemon"), warnings[0].detail)
+        // The command it names has to be one that works whatever is keeping the daemon
+        // alive. `dev-app.sh --restart-daemon` refuses a launchd-managed daemon (it would
+        // be replaced by an unowned one that fights launchd for the port), so the warning
+        // names the forwarder that redirects instead.
+        XCTAssertTrue(warnings[0].detail.contains("dev-daemon.sh restart"), warnings[0].detail)
     }
 
     /// With nothing stamped — a daemon somebody started by hand — the binary's mtime
