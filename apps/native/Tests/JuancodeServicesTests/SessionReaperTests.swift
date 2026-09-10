@@ -578,7 +578,7 @@ final class SessionReaperTests: XCTestCase {
 
     private func waitForIdle(_ session: Session) async {
         for _ in 0..<100 where session.activity != .idle {
-            try? await Task.sleep(for: .milliseconds(100))
+            await Nap.ms(100)
         }
         XCTAssertEqual(session.activity, .idle)
     }
@@ -615,7 +615,7 @@ final class SessionReaperTests: XCTestCase {
 
         // The normal exit path persists scrollback + exited status underneath.
         for _ in 0..<100 where store.get(session.id)?.status != .exited {
-            try? await Task.sleep(for: .milliseconds(100))
+            await Nap.ms(100)
         }
         XCTAssertEqual(store.get(session.id)?.status, .exited)
         XCTAssertEqual(store.get(session.id)?.dormant, true)
