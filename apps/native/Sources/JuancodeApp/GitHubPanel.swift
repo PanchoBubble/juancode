@@ -320,13 +320,22 @@ final class GitHubModel {
     /// "Send to agent" on a tracked PR: queue the comment-task prompt on the
     /// tracking session via its message queue (idle-edge delivery, same as
     /// `submitReview`) and flash a transient confirmation on the item.
+    ///
+    /// The confirmation flashes only once the core has confirmed the queue write. It
+    /// used to flash on the way past, which under the rust core meant a "Queued" badge
+    /// over a message nothing had queued (juancode-rzl7).
     func sendToAgent(appModel: AppModel, cwd: String, pr: PullRequest, prompt: String, itemId: String) {
         guard let t = appModel.trackedPr(cwd: cwd, number: pr.number) else {
             actionError = "PR #\(pr.number) isn't tracked — use Track & send."
             return
         }
-        appModel.queuePrompt(sessionId: t.sessionId, text: prompt)
-        flashQueued(itemId)
+        Task {
+            guard await appModel.queuePrompt(sessionId: t.sessionId, text: prompt) else {
+                actionError = "Nothing was sent to the agent for PR #\(pr.number)."
+                return
+            }
+            flashQueued(itemId)
+        }
     }
 
     /// "Track & send" on an untracked PR: start tracking (spawns the seeded
@@ -336,7 +345,9 @@ final class GitHubModel {
             if await appModel.trackPrAndQueue(pr, cwd: cwd, prompt: prompt) {
                 flashQueued(itemId)
             } else {
-                actionError = "Couldn't track PR #\(pr.number) — the agent session failed to spawn."
+                // Either the spawn or the queue write; `errorMessage` carries which, so
+                // this does not claim one of them.
+                actionError = "Couldn't hand PR #\(pr.number) to an agent — nothing was sent."
             }
         }
     }
@@ -352,17 +363,25 @@ final class GitHubModel {
         let feedback = composeReviewFeedback(staged)
         guard !feedback.isEmpty else { return }
         let prompt = diffReviewPrompt(number: pr.number, url: pr.url, feedback: feedback)
+        // The basket is discarded only after the hand-off is confirmed, on both
+        // branches. Discarding it first is how staged review notes used to disappear
+        // into a queue write that never happened (juancode-rzl7).
         if let t = appModel.trackedPr(cwd: cwd, number: pr.number) {
-            appModel.queuePrompt(sessionId: t.sessionId, text: prompt)
-            appModel.discardComments(key)
-            flashQueued(key)
+            Task {
+                guard await appModel.queuePrompt(sessionId: t.sessionId, text: prompt) else {
+                    actionError = "Review not sent for PR #\(pr.number) — your notes are still staged."
+                    return
+                }
+                appModel.discardComments(key)
+                flashQueued(key)
+            }
         } else {
             Task {
                 if await appModel.trackPrAndQueue(pr, cwd: cwd, prompt: prompt) {
                     appModel.discardComments(key)
                     flashQueued(key)
                 } else {
-                    actionError = "Couldn't track PR #\(pr.number) — the agent session failed to spawn."
+                    actionError = "Review not sent for PR #\(pr.number) — your notes are still staged."
                 }
             }
         }

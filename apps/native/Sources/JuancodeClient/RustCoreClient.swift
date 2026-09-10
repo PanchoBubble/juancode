@@ -100,6 +100,29 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// rather than with a reply of their own.
     private var trackedWaiters: [FrameWaiter] = []
 
+    /// Each session's steering queue as the daemon last sent it, keyed by session id.
+    /// A missing key and an empty array are different answers: the daemon answers
+    /// `subscribeQueue` with the whole queue, so empty means "nothing is pending" and
+    /// missing means "this connection has not been told yet".
+    private var queueSnapshots: [String: [QueuedMessage]] = [:]
+    /// The revision the cached snapshot came at, so a snapshot that somehow arrives out
+    /// of order is dropped rather than allowed to un-do a newer one. Per session and
+    /// strictly increasing on the daemon's side; not a cursor, there is nothing to
+    /// fetch between two of them.
+    private var queueRevisions: [String: Int] = [:]
+    private var queueListeners: [String: [Int: MessageQueue.Listener]] = [:]
+    /// Sessions `subscribeQueue` has been sent for on THIS socket. Per connection on
+    /// the daemon's side, so a reconnect has to send them all again.
+    private var queueSubscribed: Set<String> = []
+    /// One-shot waiters for the next `queue` frame per session: what a first read waits
+    /// on, since the daemon answers a subscribe with the snapshot on the bus rather
+    /// than with a reply of its own.
+    private var queueFrameWaiters: [String: [FrameWaiter]] = [:]
+    /// Queue writes still waiting for the core's answer, per session. This is the list
+    /// that makes a failed write fail: a write stays here until a snapshot carries its
+    /// row, an `error` frame refuses it, or its budget runs out.
+    private var queueWrites: [String: [QueueWrite]] = [:]
+
     /// The grid an attach we initiate uses when no pane has sized the session yet.
     /// Matches the daemon's own default so a discovery attach cannot narrow a
     /// session's transcript.
@@ -195,6 +218,20 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// How long `trackPr` waits for the PR to appear in the list. Generous, because
     /// tracking fetches a branch and boots a CLI before the row exists.
     private static let trackTimeout: TimeInterval = 45.0
+    /// How long a queue write waits for the core's answer. Short, because the daemon
+    /// publishes the snapshot inside the same enqueue that mints the row, so this is
+    /// one round trip and not any real work — a budget that ran out means the write did
+    /// not happen, and the user is told so.
+    private static let queueWriteTimeout: TimeInterval = 5.0
+
+    /// The capability behind `editQueuedConfirmed`.
+    ///
+    /// A string rather than a `CoreCapability` case for the same reason `reaper` and
+    /// `sessionSleep` are: the enum is the list whose every name the Swift core
+    /// advertises, and the Swift core's in-process queue has no edit at all. A case
+    /// here would make the capability panel report a missing feature on both cores
+    /// while no surface offers one.
+    static let queueEditCapability = "queueEdit"
 
     /// Serve the address every remote client knows (4280) for a launch on this
     /// core, so the oracle sidecar is not blind in rust mode.
@@ -447,25 +484,239 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     // MARK: - Message queue (capability: queue)
 
-    @discardableResult
-    public func queueMessage(_ sessionId: String, text: String) -> QueuedMessage {
-        // Non-throwing by protocol shape, so this is the one place that can only log.
-        // Every caller is gated on `supports(.queue)`; reaching here is a UI bug.
-        NSLog("juancode: dropped a queued message — the \(backendName) core has no queue capability")
-        return QueuedMessage(text: text)
+    // The daemon's queue has always been real; this client was the part that was not.
+    // `queueMessage` used to log a line and hand back a `QueuedMessage` nobody held, so
+    // "Send to agent" and "Submit review" returned focus, cleared their baskets and
+    // archived their comments while the agent received nothing (juancode-rzl7). The
+    // phone could queue over the same daemon the whole time.
+    //
+    // The shape is the tracked-PR list's: one `subscribeQueue` per connection per
+    // session, and a cached snapshot the daemon replaces wholesale — there is no delta
+    // frame, so a client's whole job is to drop what it was holding. One thing is added
+    // on top of that, and it matters more than the caching: a write is not reported as
+    // done until the core has said it is done. `connection.send` is fire-and-forget
+    // over a socket that may be down, the daemon refuses a message addressed to a
+    // session it does not have (`queue-item-not-found`) and drops a whitespace-only one
+    // without a word. All three used to read as success.
+
+    /// One `subscribeQueue` per session per connection, so the snapshots this client
+    /// confirms writes against actually arrive. Idempotent on the daemon's side too.
+    private func ensureQueueSubscription(_ sessionId: String) {
+        guard supports(.queue) else { return }
+        let send: Bool = lock.withLock {
+            queueSubscribed.insert(sessionId).inserted
+        }
+        if send { connection.send(["type": "subscribeQueue", "sessionId": sessionId]) }
     }
 
-    public func queuedMessages(_ sessionId: String) -> [QueuedMessage] { [] }
+    /// The session's queue as the daemon last sent it, subscribing and waiting for the
+    /// baseline when this connection has never been told. Nil when nothing answered.
+    ///
+    /// A write needs this before it goes out, not after: the ids in the baseline are
+    /// what tell the row the daemon is about to mint apart from a row that was already
+    /// pending with the same text. Subscribing and writing in one breath would leave the
+    /// baseline racing the confirmation.
+    private func queueBaseline(_ sessionId: String) async -> [QueuedMessage]? {
+        if let known = lock.withLock({ queueSnapshots[sessionId] }) { return known }
+        let waiter = FrameWaiter()
+        lock.withLock { queueFrameWaiters[sessionId, default: []].append(waiter) }
+        ensureQueueSubscription(sessionId)
+        let expiry = Task { [weak waiter] in
+            await Nap.ms(Int(Self.queueWriteTimeout * 1000))
+            waiter?.expire()
+        }
+        let landed = await waiter.landed()
+        expiry.cancel()
+        lock.withLock {
+            queueFrameWaiters[sessionId]?.removeAll { $0 === waiter }
+            if queueFrameWaiters[sessionId]?.isEmpty == true { queueFrameWaiters[sessionId] = nil }
+        }
+        guard landed else { return nil }
+        return lock.withLock { queueSnapshots[sessionId] }
+    }
 
+    /// Queue a message and wait for the core to confirm the row exists.
+    ///
+    /// Throws rather than returns an optional so a caller cannot drop the answer by
+    /// accident, and throws on silence as well as on a refusal: a write nobody
+    /// confirmed has not happened, and reporting it as though it had is the whole bug.
+    public func queueMessageConfirmed(_ sessionId: String, text: String) async throws -> QueuedMessage {
+        guard supports(.queue) else { throw CoreCapabilityError(.queue, backend: backendName) }
+        // The daemon drops a whitespace-only message without a snapshot, deliberately —
+        // it is not a message. Refused here with a reason rather than sent to wait out
+        // the timeout on a frame that is never coming.
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "there was nothing to send: the message is empty")
+        }
+        guard isConnected else {
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "the \(backendName) core at \(baseURL) is not connected")
+        }
+        guard let baseline = await queueBaseline(sessionId) else {
+            throw QueueWriteError(
+                sessionId: sessionId,
+                reason: "the \(backendName) core did not answer subscribeQueue within "
+                    + "\(Int(Self.queueWriteTimeout))s, so nothing was queued")
+        }
+        let write = QueueWrite(text: text, knownIds: Set(baseline.map(\.id)))
+        lock.withLock { queueWrites[sessionId, default: []].append(write) }
+        connection.send(["type": "queueMessage", "sessionId": sessionId, "text": text])
+        let expiry = Task { [weak write] in
+            await Nap.ms(Int(Self.queueWriteTimeout * 1000))
+            write?.timeOut()
+        }
+        let answer = await write.answer()
+        expiry.cancel()
+        lock.withLock {
+            queueWrites[sessionId]?.removeAll { $0 === write }
+            if queueWrites[sessionId]?.isEmpty == true { queueWrites[sessionId] = nil }
+        }
+        switch answer {
+        case .queued(let item):
+            return item
+        case .refused(let code):
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "the \(backendName) core refused it (\(code))")
+        case .timedOut:
+            throw QueueWriteError(
+                sessionId: sessionId,
+                reason: "the \(backendName) core did not confirm it within "
+                    + "\(Int(Self.queueWriteTimeout))s")
+        }
+    }
+
+    /// Sync by protocol shape, which is the one thing this frame cannot be on a remote
+    /// core: the confirmation is a snapshot that arrives later. So this sends the frame
+    /// and hands back the row the DAEMON has not seen yet, and every caller in the app
+    /// uses `queueMessageConfirmed` instead — the gates in `AppModel` do.
+    ///
+    /// Kept because it is a protocol requirement, and loud rather than silent: the
+    /// returned id is this client's, not the daemon's, and nothing may treat it as a
+    /// receipt.
     @discardableResult
-    public func dequeueMessage(_ sessionId: String, messageId: String) -> Bool { false }
+    public func queueMessage(_ sessionId: String, text: String) -> QueuedMessage {
+        let optimistic = QueuedMessage(text: text)
+        guard supports(.queue) else {
+            NSLog("juancode: dropped a queued message — the \(backendName) core has no queue capability")
+            return optimistic
+        }
+        NSLog("juancode: queued a message for \(sessionId) without waiting for the "
+              + "\(backendName) core to confirm it — use queueMessageConfirmed")
+        ensureQueueSubscription(sessionId)
+        connection.send(["type": "queueMessage", "sessionId": sessionId, "text": text])
+        return optimistic
+    }
 
+    /// The cached snapshot. Empty and "never told" are different answers and this
+    /// signature can only give one of them, so the first read of a session subscribes
+    /// and says so in the log; the next one has the daemon's list. A caller that needs
+    /// the list rather than whatever is cached uses `subscribeQueue`, whose first
+    /// callback IS the daemon's snapshot.
+    public func queuedMessages(_ sessionId: String) -> [QueuedMessage] {
+        guard supports(.queue) else { return [] }
+        if let known = lock.withLock({ queueSnapshots[sessionId] }) { return known }
+        NSLog("juancode: no queue snapshot for \(sessionId) yet — subscribing; "
+              + "this read answers empty rather than unknown")
+        ensureQueueSubscription(sessionId)
+        return []
+    }
+
+    /// Cancel a pending row. The daemon's verdict is the next snapshot (a refusal is an
+    /// `error` frame with `queue-item-not-found`), so the `Bool` this signature owes a
+    /// caller can only say whether the row was still pending in the cache when the
+    /// frame went out — never that the core accepted it.
+    @discardableResult
+    public func dequeueMessage(_ sessionId: String, messageId: String) -> Bool {
+        guard supports(.queue) else { return false }
+        guard isConnected else {
+            NSLog("juancode: cannot dequeue \(messageId) — the \(backendName) core is not connected")
+            return false
+        }
+        let known = lock.withLock { queueSnapshots[sessionId] }
+        ensureQueueSubscription(sessionId)
+        connection.send(["type": "dequeueMessage", "sessionId": sessionId, "messageId": messageId])
+        return known?.contains { $0.id == messageId } ?? false
+    }
+
+    /// Rewrite a pending row's text in place, keeping its id and its slot in delivery
+    /// order (wire `editQueued`, capability `queueEdit`). Confirmed the same way a
+    /// queue is: the snapshot that carries the new text, or the refusal.
+    public func editQueuedConfirmed(_ sessionId: String, messageId: String,
+                                    text: String) async throws -> QueuedMessage {
+        guard supports(.queue), info.has(Self.queueEditCapability) else {
+            throw CoreOperationUnsupported(
+                operation: "Editing a queued message", backend: backendName,
+                detail: "this core does not advertise the queueEdit capability")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "an edit cannot blank a queued message")
+        }
+        guard isConnected else {
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "the \(backendName) core at \(baseURL) is not connected")
+        }
+        // An edit names a row, so it needs no baseline to tell rows apart: the
+        // confirmation is that id carrying the new text.
+        let write = QueueWrite(text: text, knownIds: [], editing: messageId)
+        lock.withLock { queueWrites[sessionId, default: []].append(write) }
+        connection.send(["type": "editQueued", "sessionId": sessionId,
+                         "messageId": messageId, "text": text])
+        let expiry = Task { [weak write] in
+            await Nap.ms(Int(Self.queueWriteTimeout * 1000))
+            write?.timeOut()
+        }
+        let answer = await write.answer()
+        expiry.cancel()
+        lock.withLock {
+            queueWrites[sessionId]?.removeAll { $0 === write }
+            if queueWrites[sessionId]?.isEmpty == true { queueWrites[sessionId] = nil }
+        }
+        switch answer {
+        case .queued(let item):
+            return item
+        case .refused(let code):
+            throw QueueWriteError(sessionId: sessionId,
+                                  reason: "the \(backendName) core refused the edit (\(code))")
+        case .timedOut:
+            throw QueueWriteError(
+                sessionId: sessionId,
+                reason: "the \(backendName) core did not confirm the edit within "
+                    + "\(Int(Self.queueWriteTimeout))s")
+        }
+    }
+
+    /// Watch a session's queue. The listener is handed the cached snapshot when this
+    /// connection already has one, and otherwise the daemon's answer to the
+    /// `subscribeQueue` this sends reaches it as the first callback — the same
+    /// hand-over rule `subscribeTrackedPrs` follows, and for the same reason: delivering
+    /// it here as well would deliver it twice.
+    ///
+    /// Cancelling drops the listener and leaves the per-connection subscription in
+    /// place. The cache it feeds is what a write is confirmed against, and a session
+    /// this app has queued to is one it will queue to again.
     @discardableResult
     public func subscribeQueue(_ sessionId: String,
                                _ listener: @escaping MessageQueue.Listener) -> @Sendable () -> Void {
-        // No snapshot and no callbacks: an empty queue that never changes is exactly
-        // what a core without the capability has.
-        {}
+        guard supports(.queue) else { return {} }
+        let (token, known) = lock.withLock { () -> (Int, [QueuedMessage]?) in
+            let t = nextListenerToken
+            nextListenerToken += 1
+            queueListeners[sessionId, default: [:]][t] = listener
+            return (t, queueSnapshots[sessionId])
+        }
+        ensureQueueSubscription(sessionId)
+        if let known { listener(known) }
+        return { [weak self] in
+            guard let self else { return }
+            lock.withLock {
+                self.queueListeners[sessionId]?[token] = nil
+                if self.queueListeners[sessionId]?.isEmpty == true {
+                    self.queueListeners[sessionId] = nil
+                }
+            }
+        }
     }
 
     // MARK: - Ephemeral ptys (capabilities: editor, terminal)
@@ -839,6 +1090,26 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 report(id, message)
                 return
             }
+            // A refused queue write is reported as an error frame for that session, and
+            // its codes are the daemon's own (`queue-item-not-found`,
+            // `queue-item-not-text`, `queue-unavailable`). It belongs to the write that
+            // is waiting on it and to nothing else: routed here rather than allowed to
+            // fail whatever lifecycle request happens to be in flight, and consumed
+            // rather than falling through, because a `queue-` code is never the answer
+            // to anything but a queue frame. The frame does not say WHICH write it
+            // answers, so a session with several in flight fails all of them — the safe
+            // direction, since the alternative is one of them reporting a success it
+            // cannot account for.
+            if let id = sessionId, message.hasPrefix("queue-"),
+               let refused = lock.withLock({ () -> [QueueWrite]? in
+                   guard let writes = queueWrites[id], !writes.isEmpty else { return nil }
+                   queueWrites[id] = nil
+                   return writes
+               }) {
+                NSLog("juancode: the rust core refused a queue write for \(id): \(message)")
+                for write in refused { write.refuse(message) }
+                return
+            }
             if let id = sessionId, lock.withLock({ probing.remove(id) }) != nil {
                 // A probe for a session the daemon does not have: expected, and not
                 // the answer to whatever lifecycle request may be in flight.
@@ -871,7 +1142,48 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                                      notification: notification))
             }
 
-        case "inputAck", "screen", "queue", "editorReady", "terminalReady":
+        case "queue":
+            guard let id = sessionId else { return }
+            let revision = body["revision"] as? Int ?? 0
+            let items = Self.decodeQueueItems(body["items"])
+            let (listeners, waiters, settled) = lock.withLock {
+                () -> ([MessageQueue.Listener], [FrameWaiter], [(QueueWrite, QueuedMessage)]) in
+                // A snapshot older than the one we hold is dropped whole: it is not a
+                // patch, so applying it would un-do a change we have already seen. The
+                // baseline comes at revision 0 for a queue nobody has written to, which
+                // is why the first snapshot is taken on a missing key rather than on a
+                // greater revision.
+                if let seen = queueRevisions[id], revision < seen { return ([], [], []) }
+                queueRevisions[id] = revision
+                queueSnapshots[id] = items
+                let waiting = queueFrameWaiters[id] ?? []
+                queueFrameWaiters[id] = nil
+                // Which in-flight writes this snapshot answers. A row answers a write
+                // when it carries that write's text and is not a row the write already
+                // knew about, and it answers at most one write: two identical messages
+                // in flight are two rows, and each write gets its own.
+                var claimed: Set<String> = []
+                var answers: [(QueueWrite, QueuedMessage)] = []
+                for write in queueWrites[id] ?? [] {
+                    let match = items.first { item in
+                        guard !claimed.contains(item.id) else { return false }
+                        if let edited = write.editing {
+                            return item.id == edited && item.text == write.text
+                        }
+                        return item.text == write.text && !write.knownIds.contains(item.id)
+                    }
+                    guard let match else { continue }
+                    claimed.insert(match.id)
+                    answers.append((write, match))
+                }
+                return (Array((queueListeners[id] ?? [:]).values), waiting, answers)
+            }
+            // Replace wholesale, exactly as for the tracked-PR list.
+            for l in listeners { l(items) }
+            for w in waiters { w.arrived() }
+            for (write, item) in settled { write.queued(item) }
+
+        case "inputAck", "screen", "editorReady", "terminalReady":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
             break
@@ -913,8 +1225,34 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return true
             }
             if resubscribe { ensureTrackedSubscription() }
+            // Same treatment for every queue subscription: per connection on the
+            // daemon's side, and the cached snapshot is dropped rather than kept,
+            // because the phone may have queued or the agent may have taken delivery
+            // while this socket was down. A stale snapshot is worse than none — it is
+            // what a write would be confirmed against.
+            let queues: [String] = lock.withLock {
+                let ids = Array(Set(queueSubscribed).union(queueListeners.keys))
+                queueSubscribed.removeAll()
+                queueSnapshots.removeAll()
+                queueRevisions.removeAll()
+                return ids
+            }
+            for id in queues { ensureQueueSubscription(id) }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
+            // Every queue write in flight fails now rather than waiting out its budget:
+            // the socket that would have carried the confirmation is gone, so the write
+            // is unconfirmable and the caller has to be told while the user is still
+            // looking at the thing they pressed.
+            let (orphaned, stranded) = lock.withLock { () -> ([QueueWrite], [FrameWaiter]) in
+                let writes = queueWrites.values.flatMap { $0 }
+                let waiters = queueFrameWaiters.values.flatMap { $0 }
+                queueWrites.removeAll()
+                queueFrameWaiters.removeAll()
+                return (writes, waiters)
+            }
+            for write in orphaned { write.refuse("the connection dropped: \(reason)") }
+            for waiter in stranded { waiter.expire() }
         }
         for l in listeners { l(up, reason) }
     }
@@ -1059,6 +1397,25 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         waiter.settleIfDone()
     }
 
+    /// Read a `queue` frame's rows back into `QueuedMessage`, in the order the frame
+    /// carried them — which is delivery order and the only order that means anything.
+    ///
+    /// The wire row is richer than the struct: it also says `state` (pending or in
+    /// flight), `source`, and a `kind` that may be `keys` rather than `text`. A `keys`
+    /// row holds a control sequence somebody sent from another surface, and its bytes
+    /// deliberately stay off the wire — so it is kept with its label as its text rather
+    /// than dropped. A dropped row would make this client report a shorter queue than
+    /// the core has, which is the class of lie this whole area is being fixed for.
+    static func decodeQueueItems(_ raw: Any?) -> [QueuedMessage] {
+        guard let rows = raw as? [[String: Any]] else { return [] }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? String else { return nil }
+            let text = (row["text"] as? String) ?? (row["label"] as? String) ?? ""
+            return QueuedMessage(id: id, text: text,
+                                 createdAt: row["createdAt"] as? Int ?? 0)
+        }
+    }
+
     /// Read the wire's tracked-PR rows back into `TrackedPr`.
     ///
     /// Hand-rolled rather than `Codable`, because the wire shape is not this struct:
@@ -1129,6 +1486,70 @@ public struct CoreRemoteError: LocalizedError {
 /// what the lifecycle waiter beside this uses, and it cannot be: its `wait` is
 /// unavailable from an async context, and the tracked-PR reads are async all the way
 /// down.
+/// One queue write waiting for the core's verdict.
+///
+/// Three answers and no fourth: the row appeared in a snapshot, the core refused it
+/// with a code, or nothing came before the budget ran out. Silence is deliberately an
+/// answer of its own and deliberately a failure — the bug this class exists for
+/// (juancode-rzl7) was a write that reported success while the core had never heard of
+/// it, so "we do not know" must never be spelled the same way as "it landed".
+///
+/// One-shot: whichever of the three lands first settles it, and the others are
+/// no-ops, so the refusal that arrives just after a timeout cannot resume twice.
+private final class QueueWrite: @unchecked Sendable {
+    enum Answer {
+        case queued(QueuedMessage)
+        case refused(String)
+        case timedOut
+    }
+
+    /// The text this write sent, which is how a snapshot's row is recognised as its
+    /// answer.
+    let text: String
+    /// The row ids the session's queue already held when this write went out, so a row
+    /// that was pending before cannot be mistaken for the row this write made.
+    let knownIds: Set<String>
+    /// Set for an `editQueued`, which names its row: the answer is that id carrying the
+    /// new text rather than any new row.
+    let editing: String?
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Answer, Never>?
+    private var settled: Answer?
+
+    init(text: String, knownIds: Set<String>, editing: String? = nil) {
+        self.text = text
+        self.knownIds = knownIds
+        self.editing = editing
+    }
+
+    func answer() async -> Answer {
+        await withCheckedContinuation { c in
+            let done: Answer? = lock.withLock {
+                if let settled { return settled }
+                continuation = c
+                return nil
+            }
+            if let done { c.resume(returning: done) }
+        }
+    }
+
+    func queued(_ item: QueuedMessage) { settle(.queued(item)) }
+    func refuse(_ code: String) { settle(.refused(code)) }
+    func timeOut() { settle(.timedOut) }
+
+    private func settle(_ answer: Answer) {
+        let waiting: CheckedContinuation<Answer, Never>? = lock.withLock {
+            guard settled == nil else { return nil }
+            settled = answer
+            let taken = continuation
+            continuation = nil
+            return taken
+        }
+        waiting?.resume(returning: answer)
+    }
+}
+
 private final class FrameWaiter: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Bool, Never>?

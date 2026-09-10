@@ -155,8 +155,24 @@ public protocol CoreClient: AnyObject, Sendable {
     // MARK: - Message queue (wire: queueMessage, dequeueMessage, queue, subscribeQueue)
 
     /// Queue a message for delivery on the session's next idle edge.
+    ///
+    /// Unconfirmed: the return value is a row, not a receipt. On a core in this process
+    /// those are the same thing; on a remote core they are not, and every caller that
+    /// tells the user something happened must use `queueMessageConfirmed` instead.
     @discardableResult
     func queueMessage(_ sessionId: String, text: String) -> QueuedMessage
+
+    /// Queue a message and do not return until the core has confirmed the row exists.
+    ///
+    /// The member every UI path uses, because the sync one above cannot fail on a
+    /// remote core and therefore cannot tell the truth there: a fire-and-forget frame
+    /// over a socket that may be down, addressed to a session the core may not have,
+    /// carrying text the core may drop. Under the rust core all three of those read as
+    /// success until juancode-rzl7, and "Send to agent" and "Submit review" cleared
+    /// their baskets over messages the agent never received.
+    ///
+    /// Throws on a refusal AND on silence. A write nobody confirmed has not happened.
+    func queueMessageConfirmed(_ sessionId: String, text: String) async throws -> QueuedMessage
 
     /// A session's pending queue, in delivery order (wire `queue`).
     func queuedMessages(_ sessionId: String) -> [QueuedMessage]
@@ -287,4 +303,32 @@ public enum TrackedPrEvent: Sendable {
     case trackedPrs([TrackedPr])
     /// A single needs-decision escalation (wire `trackNotification`).
     case trackNotification(trackedId: String, prNumber: Int, notification: TrackNotification)
+}
+
+/// Why a queue write did not happen.
+///
+/// Its own error type rather than a `Bool` return, so a caller cannot ignore it by
+/// accident: this exists because a queue write that had not happened used to answer
+/// exactly like one that had (juancode-rzl7).
+public struct QueueWriteError: LocalizedError {
+    public let sessionId: String
+    /// The core's own words when it refused, or ours when nothing answered at all.
+    public let reason: String
+
+    public init(sessionId: String, reason: String) {
+        self.sessionId = sessionId
+        self.reason = reason
+    }
+
+    public var errorDescription: String? { reason }
+}
+
+public extension CoreClient {
+    /// Confirmation for a core running in this process: `queueMessage` writes the row
+    /// through the persistence it shares with the delivering session, so the row that
+    /// comes back IS the confirmation and there is nothing to wait for. Overridden by
+    /// `RustCoreClient`, where the core is another process and the answer is a frame.
+    func queueMessageConfirmed(_ sessionId: String, text: String) async throws -> QueuedMessage {
+        queueMessage(sessionId, text: text)
+    }
 }
