@@ -151,13 +151,23 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         }
     }
 
-    /// Inert without the `queue` capability: there is no queue on the core to
-    /// flush. Callers are gated in the UI; this stays a no-op rather than a throw
-    /// because it is a hint, not an operation.
+    /// A hint, and on a remote core a hint with nothing to carry it — correctly, now
+    /// that the queue behind it is real (juancode-rzl7).
+    ///
+    /// There is no `kickQueue` frame: juancode-ysjc keeps the operation core-side and
+    /// the fourth verb it needs is that ticket's. What makes the absence harmless
+    /// rather than another silent drop is that the daemon does not need to be kicked.
+    /// Its delivery pump (`queue_delivery::PUMP_TICK`, 250ms) looks at every session
+    /// holding a pending row four times a second and delivers on the first tick the
+    /// session is running and not busy — so a message queued into an already-idle
+    /// session, which is exactly the case this call exists for, goes out a quarter of a
+    /// second later without anybody asking.
+    ///
+    /// The queue write itself is confirmed before a caller reports anything, in
+    /// `RustCoreClient.queueMessageConfirmed`. This call is not on that path and must
+    /// not be read as part of it.
     func kickQueue() {
         guard transport.supports(.queue) else { return }
-        // A core that grows the capability delivers on its own idle edge; there is
-        // no `kickQueue` frame, and juancode-ysjc keeps it core-side.
     }
 
     // MARK: - Grid

@@ -2514,24 +2514,38 @@ final class AppModel {
     /// idle-edge delivery `submitReview` uses, so a "Send to agent" never
     /// interrupts the agent mid-turn. Safe when the session isn't live: the
     /// queue holds the message and the next revival flushes it.
-    func queuePrompt(sessionId: String, text: String) {
+    ///
+    /// Returns false when the core did not confirm the write, having already put the
+    /// reason in `errorMessage`. Nothing was queued in that case, so a caller that
+    /// clears a basket or flashes a confirmation must do it only on true: under the
+    /// rust core this whole path used to report success over a message the daemon had
+    /// never heard of (juancode-rzl7).
+    @discardableResult
+    func queuePrompt(sessionId: String, text: String) async -> Bool {
         if let reason = unavailable(.queue) {
             // One gate for every "send to agent" path: pasting straight into the pty
             // instead would deliver mid-turn, which is exactly what the queue exists
             // to avoid.
             errorMessage = "Can't queue that message. \(reason)"
-            return
+            return false
         }
-        core.queueMessage(sessionId, text: text)
+        do {
+            _ = try await core.queueMessageConfirmed(sessionId, text: text)
+        } catch {
+            errorMessage = "Nothing was sent to the agent: \(error.localizedDescription)."
+            return false
+        }
         liveSession(sessionId)?.kickQueue()
+        return true
     }
 
     /// "Track & send" from the GitHub view: start tracking the PR (the engine
     /// spawns + seeds the agent session and returns the entry synchronously),
     /// then queue the prompt on that session. Unlike `trackPr` this does NOT
     /// jump to the spawned session — the user is reading the PR conversation
-    /// and just handed one comment off. Returns false when tracking failed
-    /// (spawn failure) and nothing was queued.
+    /// and just handed one comment off. Returns false when nothing was queued,
+    /// whether because tracking failed to spawn the session or because the core did
+    /// not confirm the queue write; `errorMessage` carries which.
     func trackPrAndQueue(_ pr: PullRequest, cwd: String, prompt: String) async -> Bool {
         if let reason = unavailable(.trackedPrs) {
             errorMessage = "Can't track PR #\(pr.number). \(reason)"
@@ -2539,14 +2553,12 @@ final class AppModel {
         }
         let grid = TerminalGrid.spawn
         if let entry = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows) {
-            queuePrompt(sessionId: entry.sessionId, text: prompt)
-            return true
+            return await queuePrompt(sessionId: entry.sessionId, text: prompt)
         }
         // `track` returns nil when already tracked (e.g. raced with another
         // surface) — fall back to the mirror's session.
         if let t = trackedPr(cwd: cwd, number: pr.number) {
-            queuePrompt(sessionId: t.sessionId, text: prompt)
-            return true
+            return await queuePrompt(sessionId: t.sessionId, text: prompt)
         }
         return false
     }
@@ -4263,6 +4275,12 @@ final class AppModel {
     /// mid-turn. The sent batch is archived (retrievable), the basket cleared, the
     /// change badge cleared, and focus returned to the terminal so you watch the agent
     /// respond. No-op without a live session.
+    ///
+    /// Every one of those happens only AFTER the core has confirmed the
+    /// queue write, and none of them if it refuses or if nothing answers (juancode-rzl7):
+    /// a cleared basket and archived comments over a review the agent never received is
+    /// the worst outcome this surface has, because the work looks filed. On a failure
+    /// the note says what the core said and the comments are exactly where they were.
     func submitReview(_ id: String) {
         guard let session = liveSession(id) else {
             gitNoteBySession[id] = GitNote(ok: false, text: "Session isn't live — can't send review.")
@@ -4275,13 +4293,25 @@ final class AppModel {
         let staged = comments(id)
         let prompt = composeReviewFeedback(staged)
         guard !prompt.isEmpty else { return }
-        core.queueMessage(id, text: prompt)
-        session.kickQueue()
-        // Archive instead of dropping, so a sent review stays retrievable.
-        if !staged.isEmpty { archivedCommentsBySession[id, default: []].append(contentsOf: staged) }
-        commentsBySession[id] = []
-        markChangesViewed(id)
-        focusTerminal()
+        Task {
+            do {
+                _ = try await core.queueMessageConfirmed(id, text: prompt)
+            } catch {
+                gitNoteBySession[id] = GitNote(
+                    ok: false,
+                    text: "Review not sent: \(error.localizedDescription). Your comments are still staged.")
+                return
+            }
+            session.kickQueue()
+            // Archive instead of dropping, so a sent review stays retrievable.
+            if !staged.isEmpty { archivedCommentsBySession[id, default: []].append(contentsOf: staged) }
+            // By id, not by clearing the basket: the confirmation is a round trip, and a
+            // comment staged while it was in flight was never in this batch.
+            let sent = Set(staged.map(\.id))
+            commentsBySession[id]?.removeAll { sent.contains($0.id) }
+            markChangesViewed(id)
+            focusTerminal()
+        }
     }
 
     /// Turn one AI review finding into a staged inline comment and drop it from the
