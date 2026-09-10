@@ -281,6 +281,25 @@ JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control di
 scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
 ```
 
+### Starting the Rust daemon
+
+Everything about the daemon is reachable from the repo root, and nothing needs `cargo
+run -p juancoded` in a terminal you then cannot close:
+
+```sh
+pnpm daemon:status                       # what is running, who owns it, is it stale
+pnpm daemon:restart                      # onto the current build (ends its ptys, asks first)
+pnpm daemon:stop                         # end it (asks first)
+pnpm daemon:agent install                # keep it running across app quits, logout and reboot
+pnpm daemon:agent status                 # installed? loaded? running? on whose checkout?
+scripts/dev-daemon.sh …                  # the same thing without pnpm
+```
+
+`scripts/dev-daemon.sh` forwards to `apps/native/scripts/juancoded.sh` (lifetime) and
+`apps/native/scripts/juancoded-agent.sh` (the LaunchAgent). You do not need any of
+them for an ordinary terminal launch: `scripts/dev-app.sh` starts a daemon itself when
+the selected core is rust, and reaps it when the app exits.
+
 ### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
 
 On the Swift core there is nothing to manage: the core is in-process and launches and
