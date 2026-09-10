@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prove, against real processes, that the daemon's lifetime is owned.
 #
-# Three scenarios, and each one is a bug that actually happened:
+# Four scenarios, and each one is a bug that actually happened:
 #
 #   1. QUIT      a launch that started a daemon reaps it. Zero juancoded left.
 #   2. SIGKILL   a launch that never got to run its trap does not strand one. The
@@ -9,6 +9,10 @@
 #   3. FOREIGN   a daemon somebody else started SURVIVES a launch and a quit. It is
 #                holding their ptys; adopting it would be a guess and ending it would
 #                be somebody else's work lost.
+#   4. LAUNCHD   a daemon the LaunchAgent started is not claimed and not reaped, and a
+#                STALE one is warned about rather than restarted. Claiming it would arm
+#                the trap, so quitting the app would end a daemon launchd restarts
+#                empty: five live agents lost to closing a window.
 #
 # WHY A SLEEPER INSTEAD OF THE APP. The lifetime is a contract between the launch
 # shell, juancoded.sh and juancoded; which binary sits in the foreground is irrelevant
@@ -194,9 +198,65 @@ else
 fi
 evidence
 
+# ------------------------------------------------------------- 4. launchd's daemon
+say "SCENARIO 4: a launchd-managed daemon is neither claimed nor reaped, even when stale"
+# The shape `juancoded.sh serve` leaves behind: a daemon with a `managed=launchd`
+# ownership record. Written by hand here rather than by actually installing the
+# LaunchAgent, because installing one would touch the developer's real
+# ~/Library/LaunchAgents and their real daemon; what is under test is the DECISION the
+# launch makes about such a record, which is all in juancoded.sh.
+#
+# This is the scenario that costs the most if it regresses. A launch that claimed this
+# daemon would arm the trap in dev-app.sh, so quitting the app would end a daemon
+# launchd then restarts EMPTY — every live agent gone because somebody closed a window.
+kill -TERM "$FOREIGN" 2>/dev/null || true
+wait_gone 20 || { fail "scenario 4: could not free :$JUANCODED_PORT"; exit 1; }
+"$BIN" >"$WORK/launchd.log" 2>&1 &
+MANAGED=$!
+STARTED_PIDS+=("$MANAGED")
+waited=0
+while [ -z "$(mine)" ]; do
+  [ "$waited" -ge 300 ] && { fail "scenario 4: the stand-in launchd daemon never bound"; exit 1; }
+  /bin/sleep 0.1
+  waited=$((waited + 1))
+done
+# `owner_pid=1` is what `serve` writes, and juancoded's own watchdog drops owners <= 1.
+{
+  printf 'daemon_pid=%s\n' "$MANAGED"
+  printf 'token=com.juanone.juancoded\n'
+  printf 'owner_pid=1\n'
+  printf 'managed=launchd\n'
+} > "$JUANCODED_DATA_DIR/juancoded.owner"
+# And make it STALE, so what is exercised is the build-mismatch path specifically: the
+# one where a supervisor might be tempted to "helpfully" restart.
+sed -i '' 's/^build_id=.*/build_id=an-older-build/' "$JUANCODED_DATA_DIR/juancoded.run"
+evidence
+VERDICT="$("$SCRIPTS/juancoded.sh" ensure "lifecycle-$$" "$$" 2>"$WORK/launchd-ensure.log")"
+sed 's/^/    /' "$WORK/launchd-ensure.log"
+case "$VERDICT" in
+  launchd*) pass "ensure reported \`$VERDICT\` — not claimed" ;;
+  *)        fail "ensure reported \`$VERDICT\`; a launchd-managed daemon must report launchd" ;;
+esac
+grep -q 'STALE' "$WORK/launchd-ensure.log" \
+  && pass "it said the daemon is stale" \
+  || fail "a stale launchd daemon was not reported as stale"
+# The ownership record must still say launchd: a claim would have overwritten it.
+[ "$(sed -n 's/^managed=//p' "$JUANCODED_DATA_DIR/juancoded.owner")" = "launchd" ] \
+  && pass "the ownership record still names launchd" \
+  || fail "the launch overwrote launchd's ownership record"
+# And the explicit reap — the thing the app's exit runs — must refuse.
+"$SCRIPTS/juancoded.sh" reap "lifecycle-$$" >>"$WORK/launchd-ensure.log" 2>&1 || true
+/bin/sleep 2
+if kill -0 "$MANAGED" 2>/dev/null; then
+  pass "a reap left it running"
+else
+  fail "the reap ended a launchd-managed daemon"
+fi
+evidence
+
 say "RESULT"
 if [ "$FAILURES" -eq 0 ]; then
-  printf 'all three scenarios hold\n'
+  printf 'all four scenarios hold\n'
 else
   printf '%s check(s) failed\n' "$FAILURES"
 fi

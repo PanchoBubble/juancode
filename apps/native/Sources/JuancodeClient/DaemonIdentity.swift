@@ -237,8 +237,9 @@ public extension DaemonIdentity {
                 headline: "daemon is build \(theirs), this app is \(mine)",
                 detail: "The daemon (pid \(pid)) was started from build \(theirs) and this app "
                     + "is build \(mine). It is serving an older checkout. Restart it with "
-                    + "`apps/native/scripts/dev-app.sh --restart-daemon`, which lists the live "
-                    + "sessions it would end first."))
+                    + "`scripts/dev-daemon.sh restart`, which lists the live sessions it would "
+                    + "end first — and, when launchd is the one keeping it alive, sends you to "
+                    + "`scripts/dev-daemon.sh agent restart` instead of quietly fighting it."))
         } else if let built = buildStamp, let now = binaryModifiedAt, now > built.addingTimeInterval(1) {
             found.append(DaemonWarning(
                 kind: .staleBuild,
@@ -246,8 +247,8 @@ public extension DaemonIdentity {
                 detail: "\(exePath ?? "The daemon binary") was rebuilt at "
                     + "\(Self.clock.string(from: now)), after the running daemon (pid \(pid)) "
                     + "started from the \(Self.clock.string(from: built)) build. Nothing you "
-                    + "compiled since then is running. `apps/native/scripts/dev-app.sh "
-                    + "--restart-daemon` restarts it and lists the live sessions that costs."))
+                    + "compiled since then is running. `scripts/dev-daemon.sh restart` "
+                    + "restarts it and lists the live sessions that costs."))
         }
 
         // Only worth saying when it changes something, and only when nothing stronger
@@ -266,7 +267,7 @@ public extension DaemonIdentity {
                     + "\(Self.clock.string(from: app.launchedAt)), so this launch did not start "
                     + "it. JUANCODE_* variables set on this launch line went to the app only — "
                     + "the daemon still has the environment it started with. "
-                    + "`apps/native/scripts/dev-app.sh --daemon-status` says who owns it."))
+                    + "`scripts/dev-daemon.sh status` says who owns it."))
         }
 
         if let mine = app.sessionsPerProject, let theirs = sessionsPerProject, mine != theirs {
