@@ -312,7 +312,7 @@ function buildServer(): McpServer {
     {
       title: "Search past session transcripts",
       description:
-        "Keyword-search everything said in past Claude Code sessions on this machine (all projects) and get back a COMPACT hit list: id, session, project, branch, timestamp, one-line snippet. Use for 'what did we decide about X', 'which session touched Y', 'have I hit this error before'. Full text is NOT returned — pass the ids you care about to oracle_session_excerpt. The index is built from the local transcript files and refreshes itself on each call.",
+        "Keyword-search everything said in past agent sessions on this machine — Claude Code and opencode, all projects — and get back a COMPACT hit list: id, agent, session, project, branch, timestamp, one-line snippet. Use for 'what did we decide about X', 'which session touched Y', 'have I hit this error before'. Every hit says which agent said it. Full text is NOT returned — pass the ids you care about to oracle_session_excerpt. The index is built from each agent's own local session store and refreshes itself on each call.",
       inputSchema: {
         query: z
           .string()
@@ -324,6 +324,10 @@ function buildServer(): McpServer {
           .optional()
           .describe("Only sessions whose working directory contains this substring, e.g. 'juancode'"),
         since: z.string().optional().describe("ISO timestamp lower bound, e.g. 2026-07-01"),
+        agents: z
+          .array(z.string())
+          .optional()
+          .describe("Only these agents, e.g. ['opencode']. Omit to search every agent."),
       },
     },
     async (args) => {
@@ -332,10 +336,11 @@ function buildServer(): McpServer {
           limit: args.limit,
           project: args.project,
           since: args.since,
+          agents: args.agents,
         });
         if (!hits.length) {
           return ok(
-            `No matches for "${args.query}" across ${refresh.filesScanned} transcript file(s). Try fewer or broader terms.`,
+            `No matches for "${args.query}" across ${refresh.filesScanned} indexed session(s). Try fewer or broader terms.`,
           );
         }
         return ok(JSON.stringify(hits, null, 2));

@@ -193,25 +193,40 @@ This is what lets the phone authenticate. In **Zero Trust → Access → Applica
 
 ## Session recall (`oracle_session_search` / `oracle_session_excerpt`)
 
-Claude Code already writes every session to `~/.claude/projects/<slug>/<sessionId>.jsonl`,
-so recall reads what is on disk instead of capturing anything new — no vector DB, no extra
-runtime, no always-on worker. `transcript-index.ts` keeps a SQLite FTS5 index at
-`~/.juancode/data/transcript-index.db` and refreshes it on every search, reading only the
-bytes appended since last time.
+Every agent already writes its sessions somewhere, so recall reads what is on disk
+instead of capturing anything new — no vector DB, no extra runtime, no always-on worker.
+`transcript-index.ts` keeps a SQLite FTS5 index at
+`~/.juancode/data/transcript-index.db` and refreshes it on every search.
+
+One store, several readers (an `IndexSource` each):
+
+| agent | source | incremental on |
+| --- | --- | --- |
+| `claude` | `~/.claude/projects/<slug>/<sessionId>.jsonl` | file mtime + size, reading only appended bytes |
+| `opencode` | `~/.local/share/opencode/opencode.db` (`message` + `part`) | `time_updated`, message and parts alike |
+
+Every row carries its `agent`, and every hit returns it, so an answer can say which agent
+said a thing. Rows are **never** merged across agents — two agents saying the same thing
+is a signal. `agents: ["opencode"]` narrows a search; omit it for all of them.
+
+The opencode DB is opened read-only and never written to (a live opencode session holds
+it in WAL mode); if a read-only open is refused, the reader falls back to a throwaway
+copy. opencode stores reasoning as plain text, so recall reaches the real thinking there,
+unlike Claude Code's transcripts.
 
 Two tools, on purpose:
 
 | tool | returns |
 | --- | --- |
-| `oracle_session_search` | compact hit list — id, session, project, branch, ts, one-line snippet |
+| `oracle_session_search` | compact hit list — id, agent, session, project, branch, ts, one-line snippet |
 | `oracle_session_excerpt` | full text for **one** id, optionally ±N surrounding turns |
 
 Dumping matches straight into context is what makes transcript recall expensive, so the
 hit list carries no bodies. Ask for the ids that look relevant, nothing more.
 
-First call builds the whole index (~9s for 940 files / 121k entries here); later calls
-refresh in ~100ms. Overrides: `JUANCODE_CLAUDE_PROJECTS_DIR`,
-`JUANCODE_TRANSCRIPT_INDEX_DB`.
+First call builds the whole index (~9s for 940 Claude files / 121k entries here, plus
+~4s for 3.3k opencode messages); later calls refresh in ~100ms. Overrides:
+`JUANCODE_CLAUDE_PROJECTS_DIR`, `JUANCODE_OPENCODE_DB`, `JUANCODE_TRANSCRIPT_INDEX_DB`.
 
 The index is **local only**. Transcripts contain confidential tool output, so nothing
 here fans out on its own — no web-console view, no Telegram surface. Callers decide what

@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
+  claudeSource,
   closeIndex,
   getExcerpt,
+  opencodeSource,
   openIndex,
   parseTranscriptLine,
   refreshIndex,
@@ -250,5 +253,223 @@ describe("getExcerpt", () => {
 
   it("returns undefined for an unknown id", () => {
     expect(getExcerpt(9999, 0, db)).toBeUndefined();
+  });
+});
+
+// ── opencode as a second source (juancode-eo4r) ─────────────────────────────
+// A fake store with the columns the reader actually touches, so the test does not
+// depend on a real opencode install.
+
+type FakePart = { type: string; text?: string; tool?: string; state?: unknown; filename?: string };
+
+function makeOpencodeDb(path: string): DatabaseSync {
+  const src = new DatabaseSync(path);
+  src.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+    CREATE TABLE message (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+    );
+    CREATE TABLE part (
+      id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+    );
+  `);
+  return src;
+}
+
+let partSeq = 0;
+
+function addMessage(
+  src: DatabaseSync,
+  opts: {
+    id: string;
+    session: string;
+    role: "user" | "assistant";
+    parts: FakePart[];
+    created?: number;
+    updated?: number;
+    cwd?: string;
+    partUpdated?: number;
+  },
+): void {
+  const created = opts.created ?? 1_780_000_000_000;
+  const updated = opts.updated ?? created;
+  src
+    .prepare("INSERT OR REPLACE INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)")
+    .run(
+      opts.id,
+      opts.session,
+      created,
+      updated,
+      JSON.stringify({ role: opts.role, ...(opts.cwd ? { path: { cwd: opts.cwd } } : {}) }),
+    );
+  for (const part of opts.parts) {
+    partSeq += 1;
+    src
+      .prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(`prt_${partSeq}`, opts.id, opts.session, created, opts.partUpdated ?? updated, JSON.stringify(part));
+  }
+}
+
+describe("opencodeSource", () => {
+  let ocPath: string;
+  let src: DatabaseSync;
+
+  beforeEach(() => {
+    ocPath = join(root, "opencode.db");
+    src = makeOpencodeDb(ocPath);
+    src.prepare("INSERT INTO session (id, directory) VALUES (?, ?)").run(
+      "ses_1",
+      "/Users/me/workdir/personal/juancode",
+    );
+  });
+
+  afterEach(() => {
+    src.close();
+  });
+
+  it("indexes opencode messages with agent provenance", () => {
+    addMessage(src, {
+      id: "msg_1",
+      session: "ses_1",
+      role: "user",
+      parts: [{ type: "text", text: "which port does the dolt server use" }],
+    });
+    addMessage(src, {
+      id: "msg_2",
+      session: "ses_1",
+      role: "assistant",
+      cwd: "/Users/me/workdir/personal/juancode",
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "the arlingclose container already owns 3307" },
+        { type: "text", text: "it listens on 3308" },
+      ],
+    });
+
+    const stats = refreshIndex(db, [opencodeSource(ocPath)]);
+    expect(stats.entriesAdded).toBe(2);
+
+    const [hit] = searchTranscripts("dolt", {}, db);
+    expect(hit).toMatchObject({
+      agent: "opencode",
+      sessionId: "ses_1",
+      role: "user",
+      // Falls back to session.directory when the message carries no cwd.
+      project: "personal/juancode",
+    });
+
+    // opencode keeps reasoning in full, so recall reaches it.
+    expect(searchTranscripts("arlingclose", {}, db)[0]?.agent).toBe("opencode");
+  });
+
+  it("skips messages with no prose and never indexes attachment data URIs", () => {
+    addMessage(src, { id: "msg_1", session: "ses_1", role: "assistant", parts: [{ type: "step-finish" }] });
+    addMessage(src, {
+      id: "msg_2",
+      session: "ses_1",
+      role: "user",
+      parts: [{ type: "file", filename: "screenshot.png" }],
+    });
+    expect(refreshIndex(db, [opencodeSource(ocPath)]).entriesAdded).toBe(1);
+    expect(searchTranscripts("screenshot.png", {}, db)).toHaveLength(1);
+  });
+
+  it("refreshes incrementally on time_updated, including late parts", () => {
+    addMessage(src, {
+      id: "msg_1",
+      session: "ses_1",
+      role: "user",
+      parts: [{ type: "text", text: "first opencode turn" }],
+      created: 1_000,
+      updated: 1_000,
+    });
+    expect(refreshIndex(db, [opencodeSource(ocPath)]).entriesAdded).toBe(1);
+    // Nothing new: the watermark holds.
+    expect(refreshIndex(db, [opencodeSource(ocPath)])).toMatchObject({ filesUpdated: 0, entriesAdded: 0 });
+
+    addMessage(src, {
+      id: "msg_2",
+      session: "ses_1",
+      role: "assistant",
+      parts: [{ type: "text", text: "second opencode turn" }],
+      created: 2_000,
+      updated: 2_000,
+    });
+    expect(refreshIndex(db, [opencodeSource(ocPath)]).entriesAdded).toBe(1);
+
+    // A part streamed in after its message row still pulls the message back in.
+    addMessage(src, {
+      id: "msg_2",
+      session: "ses_1",
+      role: "assistant",
+      parts: [{ type: "text", text: "second opencode turn" }, { type: "text", text: "a late addendum" }],
+      created: 2_000,
+      updated: 2_000,
+      partUpdated: 9_000,
+    });
+    expect(refreshIndex(db, [opencodeSource(ocPath)]).entriesAdded).toBe(1);
+    // Replaced, not duplicated: the same message read twice is one row.
+    expect(searchTranscripts("second", {}, db)).toHaveLength(1);
+    expect(searchTranscripts("addendum", {}, db)).toHaveLength(1);
+  });
+
+  it("groups excerpt context per opencode session", () => {
+    addMessage(src, { id: "m1", session: "ses_1", role: "user", parts: [{ type: "text", text: "turn one" }], created: 1 });
+    addMessage(src, { id: "m2", session: "ses_1", role: "assistant", parts: [{ type: "text", text: "the needle" }], created: 2 });
+    addMessage(src, { id: "m3", session: "ses_1", role: "user", parts: [{ type: "text", text: "turn three" }], created: 3 });
+    src.prepare("INSERT INTO session (id, directory) VALUES (?, ?)").run("ses_2", "/Users/me/other");
+    addMessage(src, { id: "m4", session: "ses_2", role: "user", parts: [{ type: "text", text: "unrelated" }], created: 4 });
+
+    refreshIndex(db, [opencodeSource(ocPath)]);
+    const [hit] = searchTranscripts("needle", {}, db);
+    expect(getExcerpt(hit!.id, 5, db)?.context?.map((c) => c.text)).toEqual(["turn one", "turn three"]);
+  });
+
+  it("survives a missing opencode DB", () => {
+    expect(refreshIndex(db, [opencodeSource(join(root, "absent.db"))])).toMatchObject({
+      filesScanned: 0,
+      entriesAdded: 0,
+    });
+  });
+
+  it("never writes to the opencode DB", () => {
+    addMessage(src, { id: "m1", session: "ses_1", role: "user", parts: [{ type: "text", text: "read only please" }] });
+    const before = statSync(ocPath).mtimeMs;
+    refreshIndex(db, [opencodeSource(ocPath)]);
+    expect(searchTranscripts("read only please", {}, db)).toHaveLength(1);
+    expect(statSync(ocPath).mtimeMs).toBe(before);
+  });
+});
+
+describe("agent provenance and filtering", () => {
+  it("tags claude entries and filters by agent, never merging across agents", () => {
+    writeTranscript("-p", "s", [line("user", "the same sentence in both agents")]);
+    const ocPath = join(root, "oc.db");
+    const src = makeOpencodeDb(ocPath);
+    src.prepare("INSERT INTO session (id, directory) VALUES (?, ?)").run("ses_1", "/Users/me/workdir/personal/juancode");
+    addMessage(src, {
+      id: "m1",
+      session: "ses_1",
+      role: "user",
+      parts: [{ type: "text", text: "the same sentence in both agents" }],
+    });
+    src.close();
+
+    refreshIndex(db, [claudeSource(root), opencodeSource(ocPath)]);
+
+    // Two agents saying the same thing is a signal, so both rows survive.
+    const all = searchTranscripts("sentence", {}, db);
+    expect(all).toHaveLength(2);
+    expect(new Set(all.map((h) => h.agent))).toEqual(new Set(["claude", "opencode"]));
+
+    expect(searchTranscripts("sentence", { agents: ["claude"] }, db).map((h) => h.agent)).toEqual(["claude"]);
+    expect(searchTranscripts("sentence", { agents: ["opencode"] }, db).map((h) => h.agent)).toEqual(["opencode"]);
+    // An empty list means "no filter", not "no agents".
+    expect(searchTranscripts("sentence", { agents: [] }, db)).toHaveLength(2);
+
+    const hit = searchTranscripts("sentence", { agents: ["opencode"] }, db)[0]!;
+    expect(getExcerpt(hit.id, 0, db)?.agent).toBe("opencode");
   });
 });
