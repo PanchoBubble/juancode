@@ -225,6 +225,7 @@ The `apps/web` panels are now ported to SwiftUI, keyed per work dir off `AppMode
 | `SearchPanel` / `StatusPanel` | FTS5 scrollback search; MCP/auth status                                                                   |
 | `EditorOverlay`               | in-app file editor modal (ephemeral pty)                                                                  |
 | `RootView`                    | tabbed right-side panel switching Changes/Issues, docks the bottom terminal                               |
+| `DispatchGraphPanel`          | read-only DAG of the work in flight: ticket → dispatch → session → branch → PR/CI (`DispatchGraph`)       |
 
 ## Oracle — global orchestrator (`juancode-wjg`)
 

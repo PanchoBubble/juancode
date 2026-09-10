@@ -100,6 +100,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showingHeavyQueue) {
             HeavyQueuePanel()
         }
+        .sheet(isPresented: $model.showingDispatchGraph) {
+            DispatchGraphPanel()
+        }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionView()
         }
@@ -499,6 +502,9 @@ private struct ToolsMenu: View {
                 toolButton("square.stack.3d.up", "Heavy Queue",
                            trailing: model.heavyQueue.isEmpty ? nil : "\(model.heavyQueue.total)") {
                     model.showingHeavyQueue = true
+                }
+                toolButton("point.3.filled.connected.trianglepath.dotted", "Dispatch Chains") {
+                    model.showingDispatchGraph = true
                 }
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }

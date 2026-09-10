@@ -324,6 +324,9 @@ final class AppModel {
     var showingRecurringTasks = false
     /// Heavy-command queue panel (juancode-ik11).
     var showingHeavyQueue = false
+    /// Read-only DAG of the work in flight (juancode-wn64): ticket → dispatch →
+    /// session → branch → PR/CI.
+    var showingDispatchGraph = false
     /// ⌘⇧K prompt-template palette (juancode-2vd): quick-insert saved prompts.
     var showingPromptPalette = false
     /// ⌘K session jump palette (juancode-dr0): fuzzy-find and switch sessions.
