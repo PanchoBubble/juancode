@@ -200,6 +200,21 @@ const MIGRATIONS: &[&str] = &[
         session_id TEXT PRIMARY KEY
     );
     "#,
+    // 8: whose idea the title was.
+    //
+    // A column on `sessions` and not a table of its own, unlike `global_pause` above:
+    // that one is a set the pause OWNS, with five other producers of `dormant` it must
+    // not be confused with, whereas this is a fact about one row — the name in it came
+    // from a person, so nothing derived may replace it.
+    //
+    // Persisted rather than kept in daemon memory, which is where the Swift core keeps
+    // the identical flag (`Session.titleIsManual`). The desktop's mirror is a cache and
+    // this daemon is the source of truth after a backfill, so a pin that died with the
+    // process would be re-lost on the first OSC title after every restart — and a
+    // restart is exactly when a resumed CLI repaints its window title.
+    r#"
+    ALTER TABLE sessions ADD COLUMN title_is_manual INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

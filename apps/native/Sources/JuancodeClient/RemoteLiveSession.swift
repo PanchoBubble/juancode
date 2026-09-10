@@ -16,6 +16,12 @@ protocol RemoteSessionTransport: AnyObject, Sendable {
     /// then kills the pty. `false` when the connected core does not advertise
     /// `sessionSleep`, and the caller falls back to a kill it knows is one.
     func sendSleep(sessionId: String) -> Bool
+    /// Ask the core to write the row's human-owned fields — its name, whether it is
+    /// archived — into its OWN store. A patch: nil means unchanged. `false` when the
+    /// connected core does not advertise `sessionEdit`, and the caller is left with
+    /// the mirror row it already wrote.
+    @discardableResult
+    func sendSetMeta(sessionId: String, title: String?, archived: Bool?) -> Bool
     /// Write a row (and optionally its scrollback) into the desktop's mirror store.
     func persist(_ meta: SessionMeta, scrollback: [UInt8]?)
 }
@@ -33,10 +39,12 @@ protocol RemoteSessionTransport: AnyObject, Sendable {
 /// 2. Degraded, because the operation is core-side by decision (juancode-ysjc) and
 ///    the connected core has not implemented it: `submit`/`insert`/`autoSubmit`
 ///    deliver a bracketed paste with no land check against the core's headless VT
-///    model and therefore no retry, `kickQueue` is inert without the `queue`
-///    capability, `setTitle`/`setArchived` write the desktop's mirror row only.
-///    `markDormant` was in this list and is not any more: it has the `sleepSession`
-///    frame now, and only falls back to a kill on a core that does not advertise it.
+///    model and therefore no retry, and `kickQueue` is inert without the `queue`
+///    capability. `markDormant` was in this list and is not any more: it has the
+///    `sleepSession` frame now, and only falls back to a kill on a core that does
+///    not advertise it. Nor are `setTitle`/`setArchived`, for the same reason and a
+///    sharper one — a mirror-only write there was not a degraded rename, it was one
+///    the core's own broadcasts undid seconds later (juancode-0yao).
 /// 3. Absent by decision: `childPid` is nil for good — a pid from another process
 ///    is not addressable — which the one caller (agent-worktree detection) already
 ///    handles by falling back to the session cwd.
@@ -259,8 +267,19 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         }
     }
 
-    /// Mirror-row only: the core owns its own row and has no frame to set a title
-    /// through, so a pinned title is a desktop-side fact under the rust core.
+    /// Rename the session, in the core's row and not only in ours.
+    ///
+    /// The mirror row is still written here, and still first: it is what the sidebar
+    /// redraws from this instant. But it is a CACHE, and writing only the cache was
+    /// the bug — the core adopts the CLI's OSC 0/2 window title and broadcasts the
+    /// row, and this client replaces its mirror row from every such broadcast, so a
+    /// rename under the rust core held until the CLI's next repaint and then flipped
+    /// back to whatever the CLI called the session (juancode-0yao). The frame is what
+    /// pins the name core-side, which is where the adoption happens and the only
+    /// place a pin could stop it.
+    ///
+    /// On a core with no `sessionEdit` the mirror-only write is what is left, and it
+    /// is still the honest answer: the alternative is a rename sheet that refuses.
     func setTitle(_ title: String) {
         let row = lock.withLock { () -> SessionMeta in
             storedMeta.title = title
@@ -269,8 +288,13 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         }
         transport.persist(row, scrollback: nil)
         notifyMeta(row)
+        transport.sendSetMeta(sessionId: id, title: title, archived: nil)
     }
 
+    /// Archive or unarchive, in the core's row and not only in ours. Same reasoning as
+    /// `setTitle`, minus the escape: nothing derives `archived`, but the core's boot
+    /// backfill replaces the whole mirror from the core's own list, so a flag written
+    /// only here came back cleared on the next launch.
     func setArchived(_ archived: Bool) {
         let row = lock.withLock { () -> SessionMeta in
             storedMeta.archived = archived
@@ -279,6 +303,7 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         }
         transport.persist(row, scrollback: nil)
         notifyMeta(row)
+        transport.sendSetMeta(sessionId: id, title: nil, archived: archived)
     }
 
     @discardableResult

@@ -186,6 +186,15 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// always could. There is no gated button either — a pause on a core without the
     /// frame still pauses, it just leaves a row that reads as a kill.
     static let sessionSleepCapability = "sessionSleep"
+    /// The capability behind `setMeta`.
+    ///
+    /// A string rather than a `CoreCapability` case for the same reason
+    /// `sessionSleep` is: the enum is the list whose every name the Swift core
+    /// advertises, and the Swift core renames a session in-process with no frame at
+    /// all. There is no gated button either — a rename on a core without the frame
+    /// still renames, it just does not survive the core's next broadcast, which is a
+    /// thing to log rather than a thing to grey out.
+    static let sessionEditCapability = "sessionEdit"
     /// How long boot waits for the first `sessions` snapshot. Long enough for the
     /// daemon to serialise a few hundred rows, short enough that an unresponsive core
     /// costs a late sidebar rather than a launch.
@@ -415,15 +424,26 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     public func storedScrollback(_ id: String) -> [UInt8]? { mirror.getScrollback(id) }
 
+    /// Rename a session, with or without a live handle for it.
+    ///
+    /// Both paths write the mirror row AND send the frame, and the frame is the half
+    /// that makes the rename last: the mirror is a cache the core's own `sessionMeta`
+    /// broadcasts and its boot backfill both replace, so a name written only here
+    /// survived until the CLI painted its next OSC window title (juancode-0yao). The
+    /// handle-less path is the common one for a rename — most renamed sessions are
+    /// ones nobody has a pane open on — so it cannot be the one that only writes the
+    /// cache.
     public func setTitle(_ id: String, title: String) {
         if let handle = lock.withLock({ handles[id] }) { handle.setTitle(title) } else {
             mirror.setTitle(id, title: title)
+            sendSetMeta(sessionId: id, title: title, archived: nil)
         }
     }
 
     public func setArchived(_ id: String, archived: Bool) {
         if let handle = lock.withLock({ handles[id] }) { handle.setArchived(archived) } else {
             mirror.setArchived(id, archived: archived)
+            sendSetMeta(sessionId: id, title: nil, archived: archived)
         }
     }
 
@@ -722,6 +742,23 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     func sendSleep(sessionId: String) -> Bool {
         guard info.has(Self.sessionSleepCapability) else { return false }
         connection.send(["type": "sleepSession", "sessionId": sessionId])
+        return true
+    }
+
+    /// A patch, so only the fields that were given are sent: a rename must not carry
+    /// an archive flag it does not know it is responsible for, and the core reads an
+    /// absent field as "leave it alone".
+    @discardableResult
+    func sendSetMeta(sessionId: String, title: String?, archived: Bool?) -> Bool {
+        guard info.has(Self.sessionEditCapability) else {
+            NSLog("juancode: the \(backendName) core has no sessionEdit capability — "
+                  + "\(sessionId) is renamed in the mirror only; the core keeps its own row")
+            return false
+        }
+        var frame: [String: Any] = ["type": "setMeta", "sessionId": sessionId]
+        if let title { frame["title"] = title }
+        if let archived { frame["archived"] = archived }
+        connection.send(frame)
         return true
     }
 

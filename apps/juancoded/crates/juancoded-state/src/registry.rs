@@ -1351,6 +1351,58 @@ impl SessionRegistry {
         })
     }
 
+    /// Write the parts of a session's row that belong to the person using it: its
+    /// name and whether it is archived. Both optional, and an absent field is left
+    /// alone — this is a patch, not a replacement, so a client that only has a rename
+    /// sheet does not have to send back an archive flag it never asked about.
+    ///
+    /// A title also PINS itself (`title_is_manual`), which is the whole point of the
+    /// call: without it the next OSC 0/2 escape the CLI paints walks straight over the
+    /// name (see [`Self::adopt_osc_title`]). The pin is one-way on purpose. Nothing
+    /// clears it, because everything that would — a resumed CLI's window title, a
+    /// title derived from the transcript — is exactly what it exists to refuse; a
+    /// person who wants the derived name back renames the session to it.
+    ///
+    /// A blank title is not a rename and is ignored, the same answer
+    /// [`Self::adopt_osc_title`] gives an empty escape: an unnamed row in a sidebar is
+    /// not something anybody asked for. `NotFound` is the only error — archiving and
+    /// renaming are facts about a row, not about a pty, so an exited session answers
+    /// them exactly as a live one does.
+    pub fn set_meta(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        archived: Option<bool>,
+    ) -> Result<(), StateError> {
+        let Some(live) = self.get(id) else {
+            return Err(StateError::NotFound);
+        };
+        let title = title.map(str::trim).filter(|t| !t.is_empty());
+        self.edit_meta(id, &live, |meta| {
+            let mut changed = false;
+            if let Some(title) = title {
+                // The pin lands even when the name did not move: renaming a session to
+                // the name the CLI happened to give it is still a person saying "this
+                // one, keep it", and a pass that only pinned on a diff would leave that
+                // rename open to the next repaint.
+                changed |= !meta.title_is_manual;
+                meta.title_is_manual = true;
+                if meta.title != title {
+                    meta.title = title.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(archived) = archived {
+                if meta.archived != archived {
+                    meta.archived = archived;
+                    changed = true;
+                }
+            }
+            changed
+        });
+        Ok(())
+    }
+
     // MARK: - internals
 
     fn get(&self, id: &str) -> Option<Arc<LiveSession>> {
@@ -1463,6 +1515,14 @@ impl SessionRegistry {
     /// Adopt the OSC 0/2 window title a CLI set for itself. A CLI that names its own
     /// session names it better than the directory basename the row started with, and
     /// the model parses the escape for free either way.
+    ///
+    /// Unless somebody renamed the session, in which case the escape is dropped on the
+    /// floor. This is the half that made a rename look like it never happened under
+    /// `JUANCODE_CORE=rust`: a CLI repaints its window title several times a turn, so
+    /// a name a person typed survived until the next repaint and then flipped back —
+    /// 29 sessions created on 2026-08-24 carried 27 distinct titles, so this fires
+    /// routinely rather than rarely (juancode-0yao). The title is still TAKEN either
+    /// way: leaving it in the terminal's slot would only hand it to the next caller.
     fn adopt_osc_title(&self, id: &str, live: &Arc<LiveSession>) {
         let Some(raw) = self.inner.terminal.take_title(id) else {
             return;
@@ -1472,7 +1532,7 @@ impl SessionRegistry {
             return;
         }
         self.edit_meta(id, live, |meta| {
-            if meta.title == title {
+            if meta.title_is_manual || meta.title == title {
                 return false;
             }
             meta.title = title;

@@ -257,6 +257,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         usage: usage.and_then(|u| serde_json::from_str::<SessionUsage>(&u).ok()),
         archived: row.get::<_, i64>("archived")? != 0,
         dormant: row.get::<_, i64>("dormant")? != 0,
+        title_is_manual: row.get::<_, i64>("title_is_manual")? != 0,
         kind: if kind == "editor" {
             SessionKind::Editor
         } else {
@@ -269,7 +270,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
 
 const SESSION_COLUMNS: &str = "id, provider, cwd, title, status, exit_code, created_at, \
      updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, \
-     kind, parent_session_id, dispatch_id";
+     title_is_manual, kind, parent_session_id, dispatch_id";
 
 impl SessionStore for SqliteStore {
     fn upsert(&self, meta: &SessionMeta) -> Result<()> {
@@ -288,15 +289,15 @@ impl SessionStore for SqliteStore {
         self.conn().execute(
             "INSERT INTO sessions (id, provider, cwd, title, status, exit_code, created_at, \
              updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, \
-             dormant, kind, parent_session_id, dispatch_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17) \
+             dormant, title_is_manual, kind, parent_session_id, dispatch_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) \
              ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, cwd=excluded.cwd, \
              title=excluded.title, status=excluded.status, exit_code=excluded.exit_code, \
              updated_at=excluded.updated_at, cli_session_id=excluded.cli_session_id, \
              skip_permissions=excluded.skip_permissions, worktree_path=excluded.worktree_path, \
              usage=excluded.usage, archived=excluded.archived, dormant=excluded.dormant, \
-             kind=excluded.kind, parent_session_id=excluded.parent_session_id, \
-             dispatch_id=excluded.dispatch_id",
+             title_is_manual=excluded.title_is_manual, kind=excluded.kind, \
+             parent_session_id=excluded.parent_session_id, dispatch_id=excluded.dispatch_id",
             params![
                 meta.id,
                 meta.provider.as_str(),
@@ -312,6 +313,7 @@ impl SessionStore for SqliteStore {
                 usage,
                 i64::from(meta.archived),
                 i64::from(meta.dormant),
+                i64::from(meta.title_is_manual),
                 kind,
                 meta.parent_session_id,
                 meta.dispatch_id,

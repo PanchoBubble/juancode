@@ -133,6 +133,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// lifts. A core that advertised this over a flag flip would give a client a pause
 /// button that frees nothing.
 ///
+/// `sessionEdit` says a client can write the two fields of a session row that belong
+/// to the person using it — its name and whether it is archived — and have this
+/// daemon's own row say so. Without it a rename under `JUANCODE_CORE=rust` went no
+/// further than the desktop's mirror, and the desktop's mirror is a cache: the next
+/// `sessionMeta` this core broadcast replaced the row, and the boot backfill replaced
+/// the whole list, so a new name held for as long as it took the CLI to repaint its
+/// window title and an archived session came back unarchived on the next launch
+/// (juancode-0yao). Advertised because the frame does the whole thing: the row is
+/// written here, persisted, pinned against `adopt_osc_title`, and broadcast.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -153,6 +163,7 @@ pub const CAPABILITIES: &[&str] = &[
     "transcript",
     "reaper",
     "sessionSleep",
+    "sessionEdit",
     "globalPause",
     "restartFresh",
     "editor",
@@ -362,6 +373,31 @@ pub enum ClientMessage {
     /// Not spelled `wakeAll` beside a `sleepAll`, because the per-session halves are
     /// already `sleepSession` and `reactivate`.
     ResumeAll,
+    /// Write the two fields of a session's row that belong to the person using it:
+    /// its name and whether it is archived. A patch, not a replacement — an absent
+    /// field is left alone, so a rename sheet does not have to send back an archive
+    /// flag it never asked about, and a blank title is not a rename and is ignored.
+    ///
+    /// One frame for both, and not two, because they are the same statement: this row
+    /// is mine to arrange. They are also the two fields with no other writer — every
+    /// other field on the row is derived by this core, and the derivations are what
+    /// this frame has to win against.
+    ///
+    /// Setting the title PINS it. That is the load-bearing half, not the write: the
+    /// desktop already wrote the new name into its own mirror and it still lost,
+    /// because a CLI repaints its OSC 0/2 window title several times a turn and this
+    /// core adopted every one of them and broadcast the row (juancode-0yao). A frame
+    /// that only set the title would be walked over by the same escape a second later.
+    ///
+    /// No reply, for the same reason `sleepSession` has none: the effect IS the
+    /// `sessionMeta` carrying the new row, which every connection hears including this
+    /// one. A session this core does not hold is answered with `error` — a rename that
+    /// went nowhere must not look like one that landed.
+    SetMeta {
+        session_id: String,
+        title: Option<String>,
+        archived: Option<bool>,
+    },
     /// What this core holds, all of it, once. Not a subscription: `created`,
     /// `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks
     /// this on the handshake and keeps up from the broadcasts afterwards.
@@ -564,6 +600,10 @@ struct RawClient {
     tracked_id: Option<String>,
     #[serde(rename = "notificationId", default)]
     notification_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -668,6 +708,11 @@ impl ClientMessage {
                 cols: raw.cols.ok_or("missing cols")?,
                 rows: raw.rows.ok_or("missing rows")?,
                 request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "setMeta" => Ok(Self::SetMeta {
+                session_id: need_session()?,
+                title: raw.title,
+                archived: raw.archived,
             }),
             "listSessions" => Ok(Self::ListSessions),
             "deleteSession" => Ok(Self::DeleteSession {
@@ -1503,6 +1548,9 @@ mod tests {
             // And for `sessionSleep`: a pause that fell through to `Unknown` would
             // kill nothing and say nothing, which is worse than the kill it replaced.
             r#"{"type":"sleepSession","sessionId":"s"}"#,
+            // And for `sessionEdit`: a rename that fell through to `Unknown` is the
+            // bug this frame exists to end, silently, one layer further out.
+            r#"{"type":"setMeta","sessionId":"s","title":"named"}"#,
             // And for `restartFresh`: falling through to `Unknown` would leave a
             // client that asked for a fresh conversation staring at a dead pane.
             r#"{"type":"restartFresh","sessionId":"s","cols":80,"rows":24}"#,
@@ -1565,6 +1613,7 @@ mod tests {
                     "sessionList",
                     "sessionDelete",
                     "sessionSleep",
+                    "sessionEdit",
                     "globalPause",
                     "restartFresh",
                     "editor",

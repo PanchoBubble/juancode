@@ -80,6 +80,16 @@ pub struct SessionUsage {
 /// `SessionMeta` — the session row every client renders. `skipPermissions`,
 /// `archived`, `dormant` and `kind` are always emitted (the Swift encoder does the
 /// same); the optionals are omitted when absent so older clients ignore them.
+///
+/// `title_is_manual` is the one field that is NOT on the wire, and it is here rather
+/// than in a map beside the registry because it travels with the row: it is persisted
+/// in the same upsert, restored by the same hydrate, and carried through
+/// `restart_fresh` by the same `SessionMeta`, so there is no second store to keep in
+/// agreement. It stays off the wire because no client acts on it — the pin's whole job
+/// is to stop THIS core adopting an OSC title over a name a person chose, and a client
+/// that was told about it could only mirror a decision it does not make (the Swift
+/// core keeps the identical flag private to `Session`, and would have nothing to put
+/// in the field).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
@@ -102,6 +112,10 @@ pub struct SessionMeta {
     pub usage: Option<SessionUsage>,
     pub archived: bool,
     pub dormant: bool,
+    /// The title came from a person, so nothing derived may replace it. Daemon-only:
+    /// see the type's doc comment for why it is a field and why it is not on the wire.
+    #[serde(skip)]
+    pub title_is_manual: bool,
     pub kind: SessionKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
@@ -133,6 +147,7 @@ impl SessionMeta {
             usage: None,
             archived: false,
             dormant: false,
+            title_is_manual: false,
             kind: SessionKind::Agent,
             parent_session_id: None,
             dispatch_id: None,
@@ -194,5 +209,8 @@ mod tests {
         assert_eq!(json["kind"], "agent");
         assert!(json.get("exitCode").is_none());
         assert!(json.get("cliSessionId").is_none());
+        // Daemon-only. A client cannot act on the pin, and a field it would have to
+        // ignore is a field the other core would have to invent something to put in.
+        assert!(json.get("titleIsManual").is_none());
     }
 }

@@ -116,6 +116,15 @@ impl SessionsApi for FakeChild {
     fn on_transcript(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
     fn publish_stuck(&self, _id: &str, _alert: juancoded_state::StuckAlert) {}
 
+    fn set_meta(
+        &self,
+        _id: &str,
+        _title: Option<&str>,
+        _archived: Option<bool>,
+    ) -> Result<(), StateError> {
+        unimplemented!()
+    }
+
     fn input(&self, _id: &str, data: &[u8]) -> Result<(), StateError> {
         self.writes.lock().unwrap().push(data.to_vec());
         let mut model = self.model.lock().unwrap();
