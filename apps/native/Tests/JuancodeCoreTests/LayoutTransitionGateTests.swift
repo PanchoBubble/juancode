@@ -18,7 +18,7 @@ import Foundation
     @Test func expiresAfterTheWindow() async throws {
         let g = LayoutTransitionGate()
         g.begin(for: .milliseconds(30))
-        try await Task.sleep(for: .milliseconds(90))
+        await Nap.ms(90)
         #expect(g.active == false)
     }
 

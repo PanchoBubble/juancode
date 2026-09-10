@@ -163,7 +163,7 @@ final class PrTrackingEngineTests: XCTestCase {
         XCTAssertEqual(matched, 0)
         let wrongNumber = await engine.ingestWebhook(repo: "owner/repo", number: 6)
         XCTAssertEqual(wrongNumber, 0)
-        try await Task.sleep(for: .milliseconds(150))
+        await Nap.ms(150)
         XCTAssertEqual(counter.value, 0)
     }
 
@@ -179,11 +179,11 @@ final class PrTrackingEngineTests: XCTestCase {
             let matched = await engine.ingestWebhook(repo: "owner/repo", number: 5)
             XCTAssertEqual(matched, 1)
         }
-        try await Task.sleep(for: .milliseconds(400))
+        await Nap.ms(400)
         XCTAssertEqual(counter.value, 1)
         // A later event (after the window) schedules its own refresh.
         await engine.ingestWebhook(repo: "OWNER/repo", number: 5)
-        try await Task.sleep(for: .milliseconds(400))
+        await Nap.ms(400)
         XCTAssertEqual(counter.value, 2)
     }
 
@@ -196,7 +196,7 @@ final class PrTrackingEngineTests: XCTestCase {
         await engine.setRefreshProbe { _ in counter.increment() }
         await engine.ingestWebhook(repo: "owner/repo", number: 5)
         await engine.untrack(pr.id)
-        try await Task.sleep(for: .milliseconds(250))
+        await Nap.ms(250)
         XCTAssertEqual(counter.value, 0)
     }
 
