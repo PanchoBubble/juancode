@@ -14,6 +14,29 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { oracleDir } from "./oracle.ts";
 
+/** What started a dispatch nobody typed: a cron schedule or a GitHub label
+ *  (juancode-chhr). Recorded here so Telegram can say where a session came from
+ *  and `/api/dispatches` can be filtered down to machine-started work. Absent on
+ *  a human dispatch (MCP tool, phone console, Telegram). */
+export interface TriggerOrigin {
+  kind: "schedule" | "label";
+  /** The trigger's config id — a schedule id, or `owner/repo#label`. */
+  id: string;
+  /** One human-readable line: the cron expression, or the labelled issue/PR. */
+  detail: string;
+}
+
+export function isTriggerOrigin(v: unknown): v is TriggerOrigin {
+  if (!v || typeof v !== "object") return false;
+  const r = v as Record<string, unknown>;
+  return (
+    (r.kind === "schedule" || r.kind === "label") &&
+    typeof r.id === "string" &&
+    r.id.length > 0 &&
+    typeof r.detail === "string"
+  );
+}
+
 /** One dispatch as this sidecar created it, plus its immediate outcome. */
 export interface DispatchRecord {
   dispatchId: string;
@@ -23,6 +46,10 @@ export interface DispatchRecord {
   worktree: boolean;
   /** The Telegram chat the dispatch originated from, or null (MCP/console). */
   telegramChatId: number | null;
+  /** Set when a trigger (cron schedule / GitHub label) started this dispatch
+   *  rather than a human. Optional so records written before triggers existed
+   *  still validate. */
+  trigger?: TriggerOrigin | null;
   /** The create's immediate outcome: acked live, queued offline, or rejected. */
   outcome: "started" | "queued" | "rejected";
   sessionId: string | null;
@@ -49,7 +76,8 @@ function isDispatchRecord(v: unknown): v is DispatchRecord {
     (r.outcome === "started" || r.outcome === "queued" || r.outcome === "rejected") &&
     (typeof r.sessionId === "string" || r.sessionId === null) &&
     (typeof r.error === "string" || r.error === null) &&
-    typeof r.at === "number"
+    typeof r.at === "number" &&
+    (r.trigger === undefined || r.trigger === null || isTriggerOrigin(r.trigger))
   );
 }
 
@@ -95,4 +123,10 @@ export async function listDispatches(limit = 50): Promise<DispatchRecord[]> {
  *  back-channel: a session event carrying this dispatchId notifies that chat. */
 export async function dispatchOriginChat(dispatchId: string): Promise<number | null> {
   return (await getDispatch(dispatchId))?.telegramChatId ?? null;
+}
+
+/** The trigger that started a dispatch, or null when a human did (or when this
+ *  sidecar never saw the dispatch). */
+export async function dispatchTriggerOrigin(dispatchId: string): Promise<TriggerOrigin | null> {
+  return (await getDispatch(dispatchId))?.trigger ?? null;
 }

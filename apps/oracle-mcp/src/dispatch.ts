@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { nativeApiBase, nativeWsUrl, oracleDir } from "./oracle.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
-import { recordDispatch } from "./dispatch-registry.ts";
+import { recordDispatch, type TriggerOrigin } from "./dispatch-registry.ts";
 
 export interface DispatchRequest {
   /** Absolute path of the target project / work dir. */
@@ -36,6 +36,10 @@ export interface DispatchRequest {
    *  dispatch registry so lifecycle events (needs input / finished) route back to
    *  that chat; never sent to the native app. */
   telegramChatId?: number | null;
+  /** Set when a trigger (cron schedule / GitHub label) asked for this dispatch
+   *  instead of a human. Recorded in the registry so Telegram can say where the
+   *  session came from; never sent to the native app. */
+  trigger?: TriggerOrigin | null;
 }
 
 export interface DispatchOutcome {
@@ -183,6 +187,7 @@ export async function dispatch(
       provider,
       worktree: opts.worktree ?? false,
       telegramChatId: opts.telegramChatId ?? null,
+      trigger: opts.trigger ?? null,
       outcome,
       sessionId,
       error,

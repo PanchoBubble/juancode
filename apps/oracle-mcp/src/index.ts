@@ -49,6 +49,8 @@ import {
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
+import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
+import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
 import { startActivityListener } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
@@ -495,10 +497,35 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
 
 // Recent dispatches with their durable outcomes + current session state, newest
 // first — the console/Oracle's answer to "what happened to my dispatches".
+// `?trigger=1` narrows it to the ones a cron schedule or GitHub label started.
 app.get("/api/dispatches", async (req: Request, res: Response) => {
   try {
     const limit = Number(req.query.limit);
-    res.json(await listDispatchStatuses(Number.isInteger(limit) && limit > 0 ? limit : 50));
+    const all = await listDispatchStatuses(Number.isInteger(limit) && limit > 0 ? limit : 50);
+    res.json(req.query.trigger === "1" ? all.filter((d) => d.request?.trigger) : all);
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// The trigger table as the sidecar currently reads it, plus each schedule's last
+// fire. Read-only: the config is a hand-edited file, and this is how you check the
+// sidecar agrees with what you wrote (`problems` lists anything it dropped).
+app.get("/api/triggers", async (_req: Request, res: Response) => {
+  try {
+    const config = await readTriggerConfig();
+    const state = await readScheduleState();
+    res.json({
+      configFile: triggerConfigFile(),
+      stateFile: triggerStateFile(),
+      killSwitch: triggersDisabledByEnv(),
+      enabled: config.enabled && !triggersDisabledByEnv(),
+      allowedProjects: config.allowedProjects,
+      repos: config.repos,
+      schedules: config.schedules.map((s) => ({ ...s, last: state[s.id] ?? null })),
+      labels: config.labels,
+      problems: config.problems,
+    });
   } catch (e) {
     sendErr(res, e);
   }
@@ -786,4 +813,7 @@ app.listen(port, host, () => {
   // Relay durable dispatch outcomes (failures + queued-dispatch starts) to Telegram,
   // so a dispatch rejected on the Mac is visible to whoever asked for it.
   startDispatchResultRelay();
+  // Cron-scheduled dispatches (juancode-chhr). Reads its table fresh every tick,
+  // so an empty/absent oracle-triggers.json just means nothing fires.
+  startScheduleTriggers();
 });

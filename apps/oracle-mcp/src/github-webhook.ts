@@ -4,10 +4,16 @@
 // Events are reduced to {repo, number} triggers and forwarded to the native
 // server's /api/pr-webhook; the native side re-fetches PR state itself, so the
 // payload body is never forwarded.
+//
+// The same verified event also drives label triggers (juancode-chhr): an issue or
+// PR gaining a configured label dispatches an agent session. That path adds no new
+// inbound auth and no new credential — it rides this HMAC check and hands off to
+// triggers.ts, which enforces the repo allow list and the kill switch.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import { nativeApiBase } from "./oracle.ts";
+import { handleLabelEvent, type LabelEvent } from "./triggers.ts";
 
 export type SignatureCheck = "ok" | "no-secret" | "unauthorized";
 
@@ -86,6 +92,37 @@ export function extractPrRefs(event: string, payload: unknown): PrRef[] {
 }
 
 /**
+ * Reduce a webhook event to the label trigger it implies: `pull_request` /
+ * `issues` with action `labeled`. Everything else — including a label REMOVED, and
+ * an already-labelled issue being edited — yields null, so a dispatch happens only
+ * on the transition into the label.
+ */
+export function extractLabelEvent(event: string, payload: unknown): LabelEvent | null {
+  if (event !== "pull_request" && event !== "issues") return null;
+  const body = asRecord(payload);
+  if (body?.action !== "labeled") return null;
+  const repo = asRecord(body?.repository)?.full_name;
+  const label = asRecord(body?.label)?.name;
+  if (typeof repo !== "string" || !repo) return null;
+  if (typeof label !== "string" || !label) return null;
+
+  const isPr = event === "pull_request";
+  const subject = asRecord(isPr ? body?.pull_request : body?.issue);
+  const number = subject?.number;
+  if (typeof number !== "number" || number <= 0) return null;
+  const head = asRecord(subject?.head)?.ref;
+  return {
+    repo,
+    label,
+    number,
+    title: typeof subject?.title === "string" ? subject.title : "",
+    branch: isPr && typeof head === "string" && head ? head : null,
+    url: typeof subject?.html_url === "string" ? subject.html_url : "",
+    isPr,
+  };
+}
+
+/**
  * Fire-and-forget forward of each trigger to the native server. Failures are
  * logged, never thrown — a webhook must not crash the sidecar.
  */
@@ -145,5 +182,13 @@ export function registerGithubWebhook(app: Express): void {
     if (event === "ping") return;
     const refs = extractPrRefs(event, payload);
     if (refs.length > 0) void forwardPrRefs(refs);
+    const labelled = extractLabelEvent(event, payload);
+    if (labelled) {
+      void handleLabelEvent(labelled).catch((e) =>
+        console.warn(
+          `github-webhook: label trigger for ${labelled.repo}#${labelled.number} failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+    }
   });
 }

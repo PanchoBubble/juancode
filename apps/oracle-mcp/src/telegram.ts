@@ -55,7 +55,11 @@ import {
   startDispatchResultsWatcher,
   type DispatchResultRecord,
 } from "./dispatch-results.ts";
-import { dispatchOriginChat } from "./dispatch-registry.ts";
+import {
+  dispatchOriginChat,
+  dispatchTriggerOrigin,
+  type TriggerOrigin,
+} from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
 import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
 import {
@@ -321,6 +325,10 @@ export interface TelegramDeps {
    *  session event carrying a dispatchId notifies the chat that asked for the
    *  work — observer subscription or not. Null when unknown. */
   originChat: (dispatchId: string) => Promise<number | null>;
+  /** The trigger that started a dispatch (cron schedule / GitHub label), so a
+   *  session nobody typed says where it came from. Optional — omitted in tests
+   *  that don't care. */
+  originTrigger?: (dispatchId: string) => Promise<TriggerOrigin | null>;
   /** Type text straight into a session's pty (waiting/idle sessions). */
   deliver: (sessionId: string, text: string) => Promise<void>;
   /** Queue text for in-order delivery on the session's next idle (busy sessions). */
@@ -361,6 +369,7 @@ function defaultDeps(token: string): TelegramDeps {
     },
     outbound: { record: recordOutbound, lookup: lookupOutbound },
     originChat: dispatchOriginChat,
+    originTrigger: dispatchTriggerOrigin,
     deliver: deliverReply,
     queue: queueMessages,
     transcribe: makeTranscriber(token),
@@ -892,6 +901,13 @@ export async function notifySessionEvent(
   }
 
   const header = project ? `${title} — ${project}` : title;
+  // A trigger-started session says so: nobody typed it, so "where did this come
+  // from" is the first thing the ping has to answer.
+  let via = "";
+  if (ev.dispatchId && deps.originTrigger) {
+    const origin = await deps.originTrigger(ev.dispatchId).catch(() => null);
+    if (origin) via = `\n⏱ started by ${origin.detail}`;
+  }
   const hint =
     kind === "needs_input"
       ? "↩️ Reply to this message to answer it."
@@ -899,7 +915,7 @@ export async function notifySessionEvent(
   // Mirror the desktop change badge into the finish ping: "finished its turn,
   // 3 files changed (+120/−44)" when the settled turn left unreviewed changes.
   const badge = kind === "finished" ? changesText(ev.changes) : null;
-  const text = `${notifyIcon(kind)} ${header}\n${notifyText(kind)}${badge ? `, ${badge}` : ""}\n${hint}`;
+  const text = `${notifyIcon(kind)} ${header}${via}\n${notifyText(kind)}${badge ? `, ${badge}` : ""}\n${hint}`;
 
   for (const chatId of chats) {
     const key = `${chatId}:${ev.sessionId}`;

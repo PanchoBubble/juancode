@@ -326,6 +326,95 @@ The event is a **trigger, not a payload** — the native side re-fetches PR stat
       reconciler picks it up within ~5 min (native app must have the secret in env).
 - [ ] Restart the sidecar: webhook path resumes.
 
+## Triggers: dispatches nobody typed (juancode-chhr)
+
+A **trigger** starts an agent session on its own — on a cron schedule, or when an
+issue/PR gains a configured GitHub label. Both go through the same `dispatch()` the
+phone console and Telegram use, so a triggered session is an ordinary pty in the
+native app: visible in the grid, observable from Telegram, recorded in the dispatch
+registry — just tagged with where it came from.
+
+### The table
+
+Hand-edit `~/.juancode/oracle/oracle-triggers.json` (or `$JUANCODE_ORACLE_DIR/…`).
+It is re-read on every tick and every webhook, so **no restart** is needed:
+
+```json
+{
+  "enabled": true,
+  "allowedProjects": ["/Users/you/workdir/personal/juancode"],
+  "repos": { "PanchoBubble/juancode": "/Users/you/workdir/personal/juancode" },
+  "schedules": [
+    {
+      "id": "nightly-ready",
+      "cron": "0 3 * * *",
+      "project": "/Users/you/workdir/personal/juancode",
+      "ticket": "juancode-42",
+      "worktree": true,
+      "telegramChatId": 12345678
+    },
+    {
+      "id": "weekday-loose-work",
+      "cron": "30 8 * * mon-fri",
+      "project": "/Users/you/workdir/personal/juancode",
+      "prompt": "Run pnpm loose and report anything uncommitted or unpushed."
+    }
+  ],
+  "labels": [
+    { "repo": "PanchoBubble/juancode", "label": "agent:fix", "worktree": true }
+  ]
+}
+```
+
+- `allowedProjects` is the **only** thing that makes a repo dispatchable by a
+  trigger, and it is fail-closed: empty or missing ⇒ nothing fires anywhere. A path
+  matches exactly or as a directory inside an allowed root (after `path.resolve`, so
+  `..` can't walk out).
+- A schedule needs a `prompt` **or** a `ticket`. A `ticket` gets a self-contained
+  seed prompt telling the fresh session to `bd show` it and work it end-to-end.
+- `cron` is the ordinary 5-field expression (`minute hour day month weekday`), with
+  `*`, lists, ranges, `*/step`, and `mon`/`jan` names, evaluated in the Mac's local
+  time. A bad expression drops that schedule and is reported in `problems`.
+- A label rule fires on the **transition into** the label (`labeled`), never on
+  removal or on an edit of an already-labelled issue. It resolves the local repo
+  from `project`, else the `repos` map; an unmapped repo simply doesn't fire.
+  Label dispatches default to `worktree: true` and, for a PR, the seed prompt tells
+  the agent to check the head branch out — the native `create` message has no branch
+  field yet, so the worktree starts on the default branch.
+- `provider` (`claude` / `codex` / `opencode`) and `telegramChatId` work exactly as
+  they do on `POST /api/dispatch`.
+
+### Kill switch
+
+`JUANCODE_TRIGGERS=0` (also `false` / `no` / `off`) in the sidecar's env disables
+**every** trigger — no schedule loop, no label dispatch — for when the machine is
+busy. `"enabled": false` in the config does the same without an env change; the env
+switch wins either way. Both are read at fire time.
+
+### Overlap and restarts
+
+- Each fire records the minute it fired in, plus its dispatchId/sessionId, in
+  `oracle-trigger-state.json` (separate from the config, so the sidecar never
+  rewrites what you wrote). A restart mid-minute cannot double-fire.
+- A schedule will not start a second run while its previous one is still `running`,
+  or while a previous run is still sitting in the offline dispatch mailbox. If the
+  native app can't be reached the tick **skips** rather than guessing.
+- A minute missed because the sidecar was down is **not** replayed later;
+  `lastFiredAt` in the state file is how you see it was missed.
+
+### Seeing them
+
+```sh
+curl -s 127.0.0.1:4281/api/triggers | jq          # the table as the sidecar read it, + problems
+curl -s '127.0.0.1:4281/api/dispatches?trigger=1' # only trigger-started dispatches
+```
+
+Telegram lifecycle pings for a triggered session carry a `⏱ started by …` line, so a
+message you didn't ask for says which schedule or label produced it.
+
+For label triggers the repo webhook must also send `issues` (for plain issues);
+`scripts/setup-github-webhook.sh` subscribes to it.
+
 ## 4. Add the connector on your phone
 
 In the Claude mobile app → **Settings → Connectors → Add custom connector**, enter:

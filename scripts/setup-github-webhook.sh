@@ -49,7 +49,7 @@ fi
 # Output shows only the hook id + url, never the config blob.
 jq -n --arg url "$URL" --arg secret "$JUANCODE_GH_WEBHOOK_SECRET" '{
   config: { url: $url, secret: $secret, content_type: "json" },
-  events: ["pull_request", "pull_request_review", "issue_comment", "check_suite"],
+  events: ["pull_request", "pull_request_review", "issue_comment", "check_suite", "issues"],
   active: true
 }' | gh api "repos/${NWO}/hooks" --input - \
   --jq '"created hook \(.id) -> \(.config.url)"'

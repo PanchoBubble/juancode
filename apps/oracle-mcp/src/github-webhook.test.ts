@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { checkSignature, extractPrRefs, forwardPrRefs } from "./github-webhook.ts";
+import {
+  checkSignature,
+  extractLabelEvent,
+  extractPrRefs,
+  forwardPrRefs,
+} from "./github-webhook.ts";
 
 const SECRET = "test-secret";
 
@@ -132,5 +137,58 @@ describe("forwardPrRefs", () => {
 
     await expect(forwardPrRefs([{ repo: "o/r", number: 1 }], "http://x")).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("o/r#1"));
+  });
+});
+
+describe("extractLabelEvent", () => {
+  const repository = { full_name: "PanchoBubble/juancode" };
+
+  it("reads a PR that gained a label, including its head branch", () => {
+    expect(
+      extractLabelEvent("pull_request", {
+        action: "labeled",
+        repository,
+        label: { name: "agent:fix" },
+        pull_request: {
+          number: 12,
+          title: "Flaky test",
+          html_url: "https://github.com/PanchoBubble/juancode/pull/12",
+          head: { ref: "fix/flake" },
+        },
+      }),
+    ).toEqual({
+      repo: "PanchoBubble/juancode",
+      label: "agent:fix",
+      number: 12,
+      title: "Flaky test",
+      branch: "fix/flake",
+      url: "https://github.com/PanchoBubble/juancode/pull/12",
+      isPr: true,
+    });
+  });
+
+  it("reads a plain issue that gained a label, with no branch", () => {
+    const ev = extractLabelEvent("issues", {
+      action: "labeled",
+      repository,
+      label: { name: "agent:triage" },
+      issue: { number: 4, title: "Crash on boot", html_url: "https://example.test/4" },
+    });
+    expect(ev).toMatchObject({ number: 4, branch: null, isPr: false, label: "agent:triage" });
+  });
+
+  it("ignores anything that is not a label being added", () => {
+    const base = {
+      repository,
+      label: { name: "agent:fix" },
+      pull_request: { number: 12, title: "t", html_url: "u", head: { ref: "b" } },
+    };
+    expect(extractLabelEvent("pull_request", { ...base, action: "unlabeled" })).toBeNull();
+    expect(extractLabelEvent("pull_request", { ...base, action: "opened" })).toBeNull();
+    expect(extractLabelEvent("issue_comment", { ...base, action: "labeled" })).toBeNull();
+    expect(extractLabelEvent("pull_request", { ...base, action: "labeled", label: {} })).toBeNull();
+    expect(
+      extractLabelEvent("pull_request", { ...base, action: "labeled", repository: {} }),
+    ).toBeNull();
   });
 });
