@@ -1037,6 +1037,28 @@ fn handle_client_message(
             }
         }
 
+        ClientMessage::SetMeta {
+            session_id,
+            title,
+            archived,
+        } => {
+            // Nothing to push on success: the registry broadcasts the row it wrote, so
+            // the acting connection hears the same `sessionMeta` every observer does
+            // and there is no second, privately-shaped answer to keep in agreement.
+            //
+            // A session this core does not hold is refused. Silence would be the worst
+            // of the three answers here — the desktop writes the new name into its own
+            // mirror before the frame goes out, so a rename that reached nobody looks
+            // exactly like one that landed until the next backfill takes it away again,
+            // which is the bug (juancode-0yao).
+            if let Err(e) = sessions.set_meta(&session_id, title.as_deref(), archived) {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id),
+                    message: e.to_string(),
+                });
+            }
+        }
+
         ClientMessage::ListSessions => {
             outbound.push(ServerMessage::Sessions {
                 sessions: sessions.sessions(),
@@ -2014,6 +2036,77 @@ mod tests {
             "{frames:?}"
         );
         assert!(rig.sessions().meta(&id).expect("the row stays").dormant);
+    }
+
+    /// The rename frame, and the row it has to leave behind.
+    ///
+    /// There is no reply to assert: the effect IS the `sessionMeta` every connection
+    /// hears, which is the point — the acting client and every observer are told the
+    /// same thing by the same frame, and there is no second, privately-shaped answer
+    /// that could disagree with it.
+    #[tokio::test]
+    async fn setting_a_title_broadcasts_the_row_and_pins_the_name() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let id = rig.session();
+        fanout.attached.insert(id.clone());
+
+        let frames = rig.step(
+            ClientMessage::SetMeta {
+                session_id: id.clone(),
+                title: Some("the refactor".into()),
+                archived: Some(true),
+            },
+            &mut fanout,
+        );
+        assert!(
+            frames.iter().any(|f| matches!(
+                f,
+                ServerMessage::SessionMeta { session, .. }
+                    if session.id == id && session.title == "the refactor" && session.archived
+            )),
+            "no renamed row went out: {frames:?}"
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{frames:?}"
+        );
+        let row = rig.sessions().meta(&id).expect("the row stays");
+        assert_eq!(row.title, "the refactor");
+        assert!(row.archived);
+        // The pin is the load-bearing half: without it the CLI's next window title
+        // takes the name back within seconds (juancode-0yao).
+        assert!(row.title_is_manual);
+    }
+
+    /// A rename addressed to nothing is refused. Silence is the worst of the three
+    /// answers: the desktop writes the new name into its own mirror before the frame
+    /// goes out, so a rename that reached nobody looks exactly like one that landed —
+    /// right up until the next backfill takes it away again.
+    #[test]
+    fn setting_meta_on_a_session_this_core_does_not_hold_answers_an_error() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+
+        let frames = rig.step(
+            ClientMessage::SetMeta {
+                session_id: "no-such-session".into(),
+                title: Some("named".into()),
+                archived: None,
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::Error {
+            session_id,
+            message,
+        }] = &frames[..]
+        else {
+            panic!("expected one error, got {frames:?}");
+        };
+        assert_eq!(session_id.as_deref(), Some("no-such-session"));
+        assert_eq!(message, "Session not found");
     }
 
     /// A frame for a session this core has no live pty for is refused, and refused

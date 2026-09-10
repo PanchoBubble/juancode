@@ -85,6 +85,15 @@ pub trait SessionsApi: Send + Sync {
         cols: u16,
         rows: u16,
     ) -> Result<Attached, StateError>;
+    /// Write the row's human-owned fields: the session's name and whether it is
+    /// archived. Both optional and absent means unchanged. A title pins itself
+    /// against the CLI's own OSC window title, which is the reason the call exists.
+    fn set_meta(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        archived: Option<bool>,
+    ) -> Result<(), StateError>;
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError>;
     /// A session's pending steering messages, in delivery order. The whole list, so
     /// a consumer replaces what it holds instead of patching it.
@@ -275,6 +284,15 @@ impl SessionsApi for SessionRegistry {
         rows: u16,
     ) -> Result<Attached, StateError> {
         SessionRegistry::set_skip_permissions(self, id, skip, owner, cols, rows)
+    }
+
+    fn set_meta(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        archived: Option<bool>,
+    ) -> Result<(), StateError> {
+        SessionRegistry::set_meta(self, id, title, archived)
     }
 
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError> {

@@ -245,11 +245,66 @@ final class RemoteLiveSessionTests: XCTestCase {
         XCTAssertEqual(transport.persisted.last?.meta.dormant, true)
     }
 
-    /// A pinned title and an archive flip are desktop-side facts on a core with no
-    /// frame to carry them: the mirror row is written and the UI is told, and
-    /// nothing is sent to the core pretending otherwise.
-    func testTitleAndArchiveWriteTheMirrorOnly() {
-        let transport = FakeTransport()
+    /// A rename reaches the core's own row, not only the desktop's mirror.
+    ///
+    /// The mirror write is not the assertion — it always happened. The frame is: the
+    /// mirror is a cache the core's own `sessionMeta` broadcasts replace, and the core
+    /// adopts the CLI's OSC window title several times a turn, so a rename that stopped
+    /// here lasted until the next repaint (juancode-0yao).
+    func testSetTitleAsksACoreThatSpeaksTheSetMetaFrame() {
+        let transport = FakeTransport(capabilities: ["sessionEdit"])
+        let session = handle(transport)
+        let metaEdits = Recorder<SessionMeta>()
+        _ = session.onMetaChange { metaEdits.record($0) }
+
+        session.setTitle("the refactor")
+        XCTAssertEqual(transport.metaWrites.count, 1)
+        XCTAssertEqual(transport.metaWrites.last?.title, "the refactor")
+        XCTAssertNil(
+            transport.metaWrites.last?.archived,
+            "a rename must not carry an archive flag it was not asked about")
+        XCTAssertEqual(session.meta.title, "the refactor")
+        XCTAssertEqual(metaEdits.all.last?.title, "the refactor")
+        XCTAssertEqual(transport.persisted.last?.meta.title, "the refactor")
+    }
+
+    /// Archiving is the same statement about the same row, and it needs the frame for
+    /// a narrower reason: nothing derives `archived`, but the core's boot backfill
+    /// replaces the whole mirror from the core's list, so a flag written only in the
+    /// mirror came back cleared on the next launch.
+    func testSetArchivedAsksACoreThatSpeaksTheSetMetaFrame() {
+        let transport = FakeTransport(capabilities: ["sessionEdit"])
+        let session = handle(transport)
+
+        session.setArchived(true)
+        XCTAssertEqual(transport.metaWrites.count, 1)
+        XCTAssertEqual(transport.metaWrites.last?.archived, true)
+        XCTAssertNil(transport.metaWrites.last?.title)
+        XCTAssertTrue(session.meta.archived)
+        XCTAssertEqual(transport.persisted.last?.meta.archived, true)
+    }
+
+    /// And on a core without the frame the mirror write is what is left. Degraded, and
+    /// still the honest answer: the alternative is a rename sheet that refuses.
+    func testSetMetaFallsBackToTheMirrorRowWithoutTheFrame() {
+        let transport = FakeTransport(capabilities: [])
+        let session = handle(transport)
+
+        session.setTitle("named anyway")
+        session.setArchived(true)
+        XCTAssertTrue(transport.metaWrites.isEmpty)
+        XCTAssertEqual(session.meta.title, "named anyway")
+        XCTAssertTrue(session.meta.archived)
+        XCTAssertEqual(transport.persisted.last?.meta.title, "named anyway")
+        XCTAssertEqual(transport.persisted.last?.meta.archived, true)
+    }
+
+    /// The frame did not replace the mirror write, and must not: the mirror row is
+    /// what the sidebar redraws from this instant, and the core's confirming
+    /// `sessionMeta` is a round trip away. The row is written first and the UI is
+    /// told, and neither write touches the scrollback.
+    func testTitleAndArchiveStillWriteTheMirrorRowFirst() {
+        let transport = FakeTransport(capabilities: ["sessionEdit"])
         let session = handle(transport)
         let metaEdits = Recorder<SessionMeta>()
         _ = session.onMetaChange { metaEdits.record($0) }
@@ -262,6 +317,7 @@ final class RemoteLiveSessionTests: XCTestCase {
         XCTAssertEqual(transport.persisted.count, 2)
         XCTAssertTrue(transport.persisted.allSatisfy { $0.scrollback == nil },
                       "a meta edit must not rewrite the scrollback")
+        XCTAssertEqual(transport.metaWrites.count, 2, "one frame per edit, no batching")
         XCTAssertTrue(transport.inputs.isEmpty)
         XCTAssertTrue(transport.kills.isEmpty)
     }
@@ -345,6 +401,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
     private var recordedResizes: [(cols: Int, rows: Int)] = []
     private var recordedKills: [String] = []
     private var recordedSleeps: [String] = []
+    private var recordedMetaWrites: [(title: String?, archived: Bool?)] = []
     private var recordedPersists: [(meta: SessionMeta, scrollback: [UInt8]?)] = []
 
     init(capabilities: Set<String> = ["inputAck", "resizeAck", "screen", "adoptExternal"]) {
@@ -355,6 +412,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
     var resizes: [(cols: Int, rows: Int)] { lock.withLock { recordedResizes } }
     var kills: [String] { lock.withLock { recordedKills } }
     var sleeps: [String] { lock.withLock { recordedSleeps } }
+    var metaWrites: [(title: String?, archived: Bool?)] { lock.withLock { recordedMetaWrites } }
     var persisted: [(meta: SessionMeta, scrollback: [UInt8]?)] { lock.withLock { recordedPersists } }
 
     func supports(_ capability: CoreCapability) -> Bool { capabilities.contains(capability.rawValue) }
@@ -377,6 +435,14 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
     func sendSleep(sessionId: String) -> Bool {
         guard capabilities.contains("sessionSleep") else { return false }
         lock.withLock { recordedSleeps.append(sessionId) }
+        return true
+    }
+
+    /// Keyed on the raw capability string too, for the same reason `sendSleep` is.
+    @discardableResult
+    func sendSetMeta(sessionId: String, title: String?, archived: Bool?) -> Bool {
+        guard capabilities.contains("sessionEdit") else { return false }
+        lock.withLock { recordedMetaWrites.append((title, archived)) }
         return true
     }
 

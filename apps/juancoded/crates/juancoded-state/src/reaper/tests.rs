@@ -722,6 +722,14 @@ mod sweep {
         ) -> Result<Attached, StateError> {
             unimplemented!()
         }
+        fn set_meta(
+            &self,
+            _id: &str,
+            _title: Option<&str>,
+            _archived: Option<bool>,
+        ) -> Result<(), StateError> {
+            unimplemented!()
+        }
         fn input(&self, _id: &str, _data: &[u8]) -> Result<(), StateError> {
             unimplemented!()
         }

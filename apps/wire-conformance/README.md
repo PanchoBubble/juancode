@@ -44,8 +44,8 @@ what keeps the spec from becoming documentation.
 
 The two cores do not implement the same set. Both have `restartFresh`, `spawnModel`,
 `spawnPreset`, `editor`, `terminal`, `trackedPrs` and `globalPause`; the Rust core has
-`queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete` and
-`sessionSleep` on top of that. The catalogue describes **all** of it, and a
+`queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
+`sessionSleep` and `sessionEdit` on top of that. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
 measured against the subset its own advertised capability list entails:
 

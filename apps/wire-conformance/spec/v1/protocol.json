@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.10.0",
+  "specRevision": "1.11.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -38,6 +38,7 @@
       "sessionList",
       "sessionDelete",
       "sessionSleep",
+      "sessionEdit",
       "globalPause"
     ],
     "gates": {
@@ -121,6 +122,9 @@
       ],
       "sessionSleep": [
         "sleepSession"
+      ],
+      "sessionEdit": [
+        "setMeta"
       ],
       "globalPause": [
         "pauseAll",
@@ -235,6 +239,17 @@
       "optional": [],
       "capability": "sessionSleep",
       "notes": "Put a session to sleep on purpose: the core flags its row `dormant` and only then kills the CLI tree, so the ~300MB comes back and the row it leaves behind is a conversation to return to rather than one that died. No reply, for the same reason `setReaperPolicy` has none: the effect IS the `sessionMeta` carrying `dormant: true` followed by the session's `exit`, in that order, and a core that flagged after the kill would leave a row every client renders as a crash. A session with no live pty is answered with `error` and not flagged, because `dormant` is the set a global play revives and a relabelled crash would be woken as if somebody had paused it. Waking is `reactivate`, which already clears the flag on every path that respawns a pty - see the `sleepAndWake` decision for why there is no second frame for that half."
+    },
+    "setMeta": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "title",
+        "archived"
+      ],
+      "capability": "sessionEdit",
+      "notes": "Write the two fields of a session's row that belong to the person using it: its name and whether it is archived. A patch, not a replacement - an absent field is left alone, so a rename sheet does not have to send back an archive flag it never asked about, and a blank title is not a rename and is dropped. One frame for both because they are the same statement (this row is mine to arrange) and because they are the two fields with no other writer: everything else on the row is derived by the core. Setting the title also PINS it, and the pin is the load-bearing half rather than the write. Before this frame existed the desktop wrote a rename into its OWN mirror row and sent nothing, which would only have been a rename other clients could not see - but a CLI repaints its OSC 0/2 window title several times a turn, the core adopts each one and broadcasts the row, and a mirror is a cache that takes the broadcast. So a new name held for a few seconds and flipped back, and an archived session came back unarchived on the next launch when the boot backfill replaced the whole list (29 sessions created under the Rust core on 2026-08-24 carried 27 distinct titles, so the adoption fires routinely - juancode-0yao). A frame that set the title without pinning it would be walked over by the same escape a second later. The pin is core-side state and deliberately not a field on `sessionMeta`: no client acts on it, its whole job is to stop the core that holds it adopting a title over a name a person chose, and the Swift core keeps the identical flag private to its `Session`. It is persisted, though, because the core outlives its clients and a relaunch is exactly when a resumed CLI repaints a window title. No reply, for the same reason `sleepSession` has none: the effect IS the `sessionMeta` carrying the new row, which every connection hears including the one that asked. A session the core does not hold is answered with `error` - a rename that reached nobody must not look like one that landed."
     },
     "listSessions": {
       "required": [],
@@ -680,7 +695,7 @@
     "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
     "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",
-    "setTitle / setArchived / releaseGrid": "Core-side operations with no client frame yet. A remote client can observe all three landing (sessionMeta, gridChange) but cannot cause them: a rename and an archive flip have no wire message and no REST route, and a grid release only happens when the owning connection closes. Filed rather than guessed at here.",
+    "setTitle / setArchived / releaseGrid": "Two thirds of this reversed. A rename and an archive flip now have `setMeta` (capability `sessionEdit`), because \"observe but not cause\" turned out not to be a smaller version of the operation - it was a broken one. The desktop wrote both into its own mirror row and sent nothing, and the core then replaced that row from its own store on the next `sessionMeta` and replaced the whole list on the next backfill, so a rename survived until the CLI's next OSC title and an archive survived until the next launch (juancode-0yao). An operation whose local half is undone by the core's own broadcasts is not a degraded operation, it is a write that silently does not happen. `releaseGrid` is still core-side with no frame: a grid is released when the owning connection closes, and the desktop's own case - a pane torn down while the connection stays open - is a real gap but a separate one (juancode-ysjc).",
     "restartFresh grid": "restartFresh takes cols/rows like attach and reactivate rather than reusing the grid the session died at: the client that asks for the restart is the one about to render it, and the CLI wraps its first turn at the spawn width forever.",
     "contributions": "The Rust core decodes `subscribeContributions`, `unsubscribeContributions` and `activateContribution` and encodes `contributions` and `contributionResult`, and they are deliberately absent from this catalogue, because it withholds the `contributions` capability: nothing renders a descriptor yet, and advertising it would promise chrome nothing draws. Under CATALOGUE_IS_THE_UNION an unadvertised frame is not on the wire as far as any feature-detecting client is concerned, so it is not catalogued either - which is why `drift.test.ts` carries the five type names in one explicit list with this reason attached. The day the capability is advertised, that list is what makes the suite go red until this file describes them.",
     "sleepAndWake": "Half of this reversed, and the other half did not. Sleeping now has `sleepSession` (capability `sessionSleep`), because the argument that a reap is only ever the core's decision was wrong: the desktop has a global pause, and with no frame to ask with it degraded to a plain `kill` plus a `dormant` flag written onto its OWN mirror row, so the core could not tell five sessions somebody paused from five somebody ended - and its reaper, its boot-time rehydrate and any liveness accounting after them all read the kill (juancode-nizo). A client asking to sleep is not the same statement as a client killing, and the row has to carry the difference. Waking is still `reactivate` and deliberately gets no frame of its own: it already answers with the woken row and every path that respawns a pty clears the flag through it, so a `wakeSession` beside it would be a second spelling of one operation and a second thing to keep in agreement."

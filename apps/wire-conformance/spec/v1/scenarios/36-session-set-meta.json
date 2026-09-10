@@ -1,0 +1,218 @@
+{
+  "id": "session-set-meta",
+  "title": "a name a person chose outlives the name the CLI keeps painting",
+  "asserts": "a core that advertises `sessionEdit` lets a client write the two fields of a session row that belong to the person using it - its name and whether it is archived - into the CORE's own row, and then defends the name against the core's own derivations. The write half alone is not the feature: before this frame existed the desktop wrote a rename into its private mirror and sent nothing, and that mirror is a cache, so the next `sessionMeta` the core broadcast put the CLI's name back and the next boot backfill replaced the whole list (juancode-0yao). So this scenario renames a session the CLI has ALREADY named, has the CLI paint another OSC 0/2 window title afterwards, and requires that neither the row nor any broadcast moves - a core that adopts the escape fails here even though its `setMeta` handler worked. Archiving is asserted the same way and for the same reason, minus the escape: nothing derives it, but the whole-list backfill is what used to take it away. The last third is the one a single connection cannot measure: a client that arrives afterwards, asks `listSessions` and is answered with the pinned name and the archive flag. That answer is the core's own store rather than anybody's cache, which is the only version of this that survives a reconnect - and a reconnect is where the bug was actually visible.",
+  "capabilities": [
+    "sessionEdit",
+    "sessionMeta",
+    "sessionList"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "queue",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session",
+        "session": {
+          "archived": false
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE named-by-the-cli\r"
+      },
+      "note": "the ordinary case first, and it has to keep working: a CLI that names its own session names it better than the directory basename the row started with. A core that passed the rest of this by never adopting a title at all would be a different bug"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "title": "named-by-the-cli"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "setMeta",
+        "sessionId": "$session",
+        "title": "named-by-a-person",
+        "archived": true
+      },
+      "note": "one frame for both fields, because they are the same statement: this row is mine to arrange"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "title": "named-by-a-person",
+          "archived": true,
+          "cwd": "$cwd"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the whole row, and no reply of its own: the effect IS the broadcast, so the client that asked and every observer are told the same thing by the same frame and there is no second answer that could disagree"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE named-by-the-cli-again\r"
+      },
+      "note": "and now the escape that used to win. A real CLI paints one of these several times a turn, which is why the rename appeared to hold for a few seconds and then flip back"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO settled\r"
+      },
+      "note": "a marker behind the escape. It is how the next step knows the title was PARSED rather than how long it was willing to wait for it: the bytes after an escape cannot reach the screen before the escape has been read"
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "settled"
+        }
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "output",
+        "activity",
+        "gridChange",
+        "queue"
+      ],
+      "note": "`sessionMeta` is deliberately NOT ignored here: a core that adopted the window title broadcasts the row before the bytes behind it, so an adoption fails this step by arriving, not by being looked for afterwards"
+    },
+    {
+      "expectNone": {
+        "type": "sessionMeta",
+        "sessionId": "$session"
+      },
+      "withinMs": 2000,
+      "note": "and nothing arrives late either. A core that adopts on a timer rather than on the chunk would slip past the step above"
+    },
+    {
+      "open": "b",
+      "note": "the reconnect, which is where the bug was actually visible: a fresh client asks for the whole list on its handshake and replaces what it holds with the answer, so a pin that lived only in the acting client's memory is exactly what that answer would overwrite"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "sessions",
+        "sessions": {
+          "$some": {
+            "id": "$session",
+            "title": "named-by-a-person",
+            "archived": true,
+            "status": "running"
+          }
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000,
+      "note": "the core's own snapshot, which is the half a client cannot supply for itself: the name and the archive flag are in the store the backfill reads, not in the mirror the backfill replaces"
+    },
+    {
+      "close": "b"
+    },
+    {
+      "send": {
+        "type": "setMeta",
+        "sessionId": "$session",
+        "archived": false
+      },
+      "note": "a patch, not a replacement: no title is sent, so the pinned name must not be disturbed by the field's absence"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "title": "named-by-a-person",
+          "archived": false
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "setMeta",
+        "sessionId": "no-such-session",
+        "title": "named"
+      },
+      "note": "a rename addressed to nothing"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "no-such-session"
+      },
+      "timeoutMs": 10000,
+      "note": "refused out loud. Silence is the worst of the three answers here: a client writes the new name into its own row before the frame goes out, so a rename that reached nobody looks exactly like one that landed - right up until the next backfill takes it away again"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      },
+      "note": "this scenario's own cleanup"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "gridChange",
+        "sessionMeta",
+        "queue"
+      ]
+    }
+  ]
+}
