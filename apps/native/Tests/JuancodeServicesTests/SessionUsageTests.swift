@@ -1,4 +1,5 @@
 import XCTest
+import JuancodeCore
 @testable import JuancodeServices
 
 final class SessionUsageTests: XCTestCase {
@@ -150,6 +151,64 @@ final class SessionUsageTests: XCTestCase {
         XCTAssertNil(u)
     }
 
+    // MARK: - context pressure (juancode-lncw)
+
+    /// Context occupancy is the NEWEST turn's input + cache tokens, not a sum: it is
+    /// what the next request has to re-send, so a later, smaller turn (a compaction)
+    /// must bring it back down while the cumulative totals keep climbing.
+    func testContextTracksTheNewestTurnNotTheSum() async {
+        let id = "aaaaaaaa-0000-0000-0000-000000000001"
+        let root = claudeFixture(id, [
+            assistant("m1", "r1", [
+                "input_tokens": 10,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 150_000,
+                "cache_creation_input_tokens": 5_000,
+            ]),
+        ])
+        var u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.contextTokens, 155_010)
+        XCTAssertEqual(u.contextWindow, 200_000)
+        XCTAssertEqual(u.contextPercent, 78)
+
+        // A compaction: the next turn re-sends far less.
+        appendRecords(claudeTranscript(root, id), [
+            assistant("m2", "r2", [
+                "input_tokens": 20,
+                "output_tokens": 40,
+                "cache_read_input_tokens": 12_000,
+                "cache_creation_input_tokens": 0,
+            ]),
+        ])
+        u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.contextTokens, 12_020, "context follows the newest turn")
+        XCTAssertEqual(u.inputTokens, 30, "the cumulative totals still only grow")
+        XCTAssertEqual(u.cacheReadTokens, 162_000)
+    }
+
+    func testLongContextModelReportsTheMillionTokenWindow() async {
+        let id = "aaaaaaaa-0000-0000-0000-000000000002"
+        let root = claudeFixture(id, [
+            assistant("m1", "r1", ["input_tokens": 400_000, "output_tokens": 10],
+                      "claude-opus-5[1m]"),
+        ])
+        let u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.contextWindow, 1_000_000)
+        XCTAssertEqual(u.contextPercent, 40)
+    }
+
+    func testUnknownModelReportsContextTokensButNoWindow() async {
+        let id = "aaaaaaaa-0000-0000-0000-000000000003"
+        let root = claudeFixture(id, [
+            assistant("m1", "r1", ["input_tokens": 500, "output_tokens": 10],
+                      "some-future-model"),
+        ])
+        let u = (await deriveClaudeUsage(id, root))!
+        XCTAssertEqual(u.contextTokens, 500)
+        XCTAssertNil(u.contextWindow)
+        XCTAssertNil(u.contextFraction)
+    }
+
     // MARK: - incremental polling (juancode-dfhg)
 
     /// Each poll folds only the newly appended turns into the running total, and a
@@ -217,6 +276,47 @@ final class SessionUsageTests: XCTestCase {
         XCTAssertEqual(u.outputTokens, 600)
         XCTAssertEqual(u.totalTokens, 5600)
         XCTAssertNil(u.costUsd)
+    }
+
+    /// Codex names both halves itself (`last_token_usage` + `model_context_window`),
+    /// so context needs no model lookup — and an older Codex that omits them just
+    /// reports no context rather than a wrong one.
+    func testCodexReadsContextFromItsOwnTokenCountEvent() async {
+        let id = "66666666-6666-6666-6666-66666666aaaa"
+        let root = codexFixture(id, [
+            ["type": "session_meta", "payload": ["id": id, "cwd": "/x"]],
+            [
+                "type": "event_msg",
+                "payload": [
+                    "type": "token_count",
+                    "info": [
+                        "total_token_usage": [
+                            "input_tokens": 5000, "cached_input_tokens": 4000,
+                            "output_tokens": 600, "total_tokens": 5600,
+                        ],
+                        "last_token_usage": ["input_tokens": 220_000, "output_tokens": 30],
+                        "model_context_window": 272_000,
+                    ],
+                ],
+            ],
+        ])
+        let u = (await deriveCodexUsage(id, root))!
+        XCTAssertEqual(u.contextTokens, 220_000)
+        XCTAssertEqual(u.contextWindow, 272_000)
+        XCTAssertEqual(u.contextPressure, .warn)
+    }
+
+    func testCodexWithoutContextFieldsStillReportsTokens() async {
+        let id = "66666666-6666-6666-6666-66666666bbbb"
+        let root = codexFixture(id, [
+            ["type": "session_meta", "payload": ["id": id, "cwd": "/x"]],
+            tokenCount(["input_tokens": 100, "cached_input_tokens": 0,
+                        "output_tokens": 10, "total_tokens": 110]),
+        ])
+        let u = (await deriveCodexUsage(id, root))!
+        XCTAssertEqual(u.totalTokens, 110)
+        XCTAssertNil(u.contextTokens)
+        XCTAssertNil(u.contextWindow)
     }
 
     func testReturnsNullWhenMatchingSessionHasNoTokenCount() async {

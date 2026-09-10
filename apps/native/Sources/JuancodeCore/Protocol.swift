@@ -44,6 +44,16 @@ public struct SessionUsage: Codable, Sendable, Equatable {
     /// input + output + cache read + cache write.
     public var totalTokens: Int
     public var costUsd: Double?
+    /// What the *live* conversation currently occupies of the model's window
+    /// (juancode-lncw): the newest billed turn's input + cache read + cache write,
+    /// which is exactly what the next request has to re-send. Distinct from the
+    /// cumulative `inputTokens`, which only ever grows. Nil until a turn lands, and
+    /// on providers whose transcript doesn't report it.
+    public var contextTokens: Int?
+    /// The window `contextTokens` is measured against, from `ModelPricing`. Nil for
+    /// a model we have no window for — the percentage is then not computable, which
+    /// is deliberately different from 0%.
+    public var contextWindow: Int?
 
     public init(
         inputTokens: Int,
@@ -51,7 +61,9 @@ public struct SessionUsage: Codable, Sendable, Equatable {
         cacheReadTokens: Int,
         cacheWriteTokens: Int,
         totalTokens: Int,
-        costUsd: Double?
+        costUsd: Double?,
+        contextTokens: Int? = nil,
+        contextWindow: Int? = nil
     ) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
@@ -59,7 +71,24 @@ public struct SessionUsage: Codable, Sendable, Equatable {
         self.cacheWriteTokens = cacheWriteTokens
         self.totalTokens = totalTokens
         self.costUsd = costUsd
+        self.contextTokens = contextTokens
+        self.contextWindow = contextWindow
     }
+
+    /// Share of the model's context window the live conversation holds (0…1+, it can
+    /// exceed 1 briefly before the CLI compacts). Nil when either half is unknown.
+    public var contextFraction: Double? {
+        guard let contextTokens, let contextWindow, contextWindow > 0 else { return nil }
+        return Double(contextTokens) / Double(contextWindow)
+    }
+
+    /// `contextFraction` as a whole percent, for labels. Nil when not computable.
+    public var contextPercent: Int? {
+        guard let f = contextFraction else { return nil }
+        return Int((f * 100).rounded())
+    }
+
+    public var contextPressure: ContextPressure { ContextPressure.of(contextFraction) }
 }
 
 public struct SessionMeta: Codable, Sendable, Equatable {

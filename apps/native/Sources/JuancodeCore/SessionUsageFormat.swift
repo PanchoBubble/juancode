@@ -22,15 +22,25 @@ public enum SessionUsageFormat {
         if usd < 0.01 { return "<$0.01" }
         return String(format: "$%.2f", usd)
     }
+
+    /// Context occupancy as "ctx 64%", or nil when the window isn't known
+    /// (juancode-lncw). Deliberately not clamped at 100%: a session that briefly
+    /// overshoots its window before the CLI compacts should say so.
+    public static func context(_ percent: Int?) -> String? {
+        guard let percent else { return nil }
+        return "ctx \(percent)%"
+    }
 }
 
 extension SessionUsage {
-    /// Compact "12.4k tok" label, with " · $0.42" appended when cost is known.
-    /// Nil when there's nothing worth showing (no tokens). Mirrors `UsageBadge`.
+    /// Compact "12.4k tok" label, with " · $0.42" appended when cost is known and
+    /// " · ctx 64%" when the context window is (juancode-lncw). Nil when there's
+    /// nothing worth showing (no tokens). Mirrors `UsageBadge`.
     public var badgeLabel: String? {
         guard totalTokens > 0 else { return nil }
         var s = "\(SessionUsageFormat.tokens(totalTokens)) tok"
         if let c = SessionUsageFormat.cost(costUsd) { s += " · \(c)" }
+        if let ctx = SessionUsageFormat.context(contextPercent) { s += " · \(ctx)" }
         return s
     }
 }
@@ -40,6 +50,10 @@ extension Array where Element == SessionMeta {
     /// only the sessions that report a cost (nil when none do) — so a mix of
     /// priced (Claude) and unpriced (Codex) sessions still shows the partial
     /// estimate. Returns nil when no session has usage. Mirrors `aggregateUsage`.
+    ///
+    /// Context deliberately does NOT aggregate: each session fills its own window,
+    /// so a summed occupancy (or a summed window) means nothing. The rollup keeps
+    /// both nil, which drops the "ctx" clause from the total's label.
     public func aggregateUsage() -> SessionUsage? {
         let withUsage = compactMap(\.usage)
         guard !withUsage.isEmpty else { return nil }

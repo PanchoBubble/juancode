@@ -6,6 +6,7 @@ import {
   newBridgeState,
   notifySessionEvent,
   notifyStuckEvent,
+  notifyUsageSample,
   parseAllowedUserIds,
   parseCallbackQuery,
   parseTextMessage,
@@ -180,9 +181,11 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
 /** A `pause` collaborator whose set moves when the frame is "sent", so the handlers
  *  can be driven the way the real endpoint drives them: the answer to a pause is the
  *  `pauseState` that follows it, never a reply to the frame itself. */
-function fakePause(
-  { supported = true, start = [] as string[], after = null as string[] | null } = {},
-) {
+function fakePause({
+  supported = true,
+  start = [] as string[],
+  after = null as string[] | null,
+} = {}) {
   let paused: string[] | null = start;
   const all = vi.fn(() => {
     if (!supported) return false;
@@ -883,6 +886,80 @@ describe("startDispatchResultRelay", () => {
   });
 });
 
+describe("notifyUsageSample", () => {
+  const observers = (chats: number[]) => ({
+    list: vi.fn(async () => [] as string[]),
+    add: vi.fn(async () => {}),
+    remove: vi.fn(async () => 1),
+    chatsFor: vi.fn(async () => chats),
+  });
+
+  const reading = (fraction: number, costUsd?: number) => ({
+    sessionId: "aaaa-1111",
+    totalTokens: 500_000,
+    contextTokens: Math.round(fraction * 200_000),
+    contextWindow: 200_000,
+    contextFraction: fraction,
+    ...(costUsd === undefined ? {} : { costUsd }),
+  });
+
+  it("warns an observer chat once per context crossing", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 });
+
+    await notifyUsageSample(reading(0.5), deps, state);
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+
+    await notifyUsageSample(reading(0.82, 4.2), deps, state);
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(1);
+    expect(sends[0]![1]).toContain("fix tests — juancode");
+    expect(sends[0]![1]).toContain("context 82% full");
+    expect(sends[0]![1]).toContain("$4.20");
+    expect(deps.outbound.record).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 100, sessionId: "aaaa-1111" }),
+    );
+
+    // Every later poll in the band is silent — the crossing already reported.
+    await notifyUsageSample(reading(0.9), deps, state);
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("reaches the chat a dispatch came from, once", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      originChat: vi.fn(async () => 100),
+    });
+    await notifyUsageSample(
+      { ...reading(0.95), dispatchId: "d1" },
+      deps,
+      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 }),
+    );
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("warns on a spend cap crossing too", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState({ contextFraction: 0, spendCapUsd: 5 });
+    await notifyUsageSample(reading(0.1, 4), deps, state);
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+    await notifyUsageSample(reading(0.1, 6), deps, state);
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(1);
+    expect(sends[0]![1]).toContain("$5.00 cap");
+  });
+
+  it("sends nothing when nobody is watching", async () => {
+    const deps = makeDeps();
+    await notifyUsageSample(
+      reading(0.99),
+      deps,
+      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 }),
+    );
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+  });
+});
+
 describe("notifyStuckEvent", () => {
   const observers = (chats: number[]) => ({
     list: vi.fn(async () => [] as string[]),
@@ -1011,7 +1088,9 @@ describe("/pauseall and /playall", () => {
     const deps = makeDeps({ pause });
     await handleUpdate(msg("/playall"), allowed, deps, newBridgeState());
     expect(pause.resume).not.toHaveBeenCalled();
-    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]).toContain("Nothing is paused");
+    expect((deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]).toContain(
+      "Nothing is paused",
+    );
   });
 
   // A core with no such frame is told about, not sent a frame nothing answers: the

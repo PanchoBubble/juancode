@@ -69,10 +69,18 @@ import {
   pausedSessions,
   resumeAllSessions,
   supportsGlobalPause,
+  onSessionUsage,
   type SessionActivityEvent,
   type SessionStuckEvent,
+  type SessionUsageSample,
 } from "./native-events.ts";
 import { makeTranscriber } from "./transcribe.ts";
+import {
+  readUsageAlertThresholds,
+  UsageAlertLatch,
+  usageAlertLine,
+  type UsageAlertThresholds,
+} from "./usage-alerts.ts";
 
 /** Telegram's hard per-message character cap. We chunk below it to stay safe. */
 const TELEGRAM_MAX_CHARS = 4096;
@@ -272,14 +280,21 @@ export interface BridgeState {
    *  and cools these down already; this second gate exists because a chat can observe
    *  many sessions and the daemon's cooldown is per session, not per reader. */
   lastStuck: Map<string, number>;
+  /** One-alert-per-crossing latch for cost/context thresholds (juancode-lncw).
+   *  Lives on the bridge state, not per chat: the crossing is a property of the
+   *  session, and every chat observing it hears about the same one. */
+  usageLatch: UsageAlertLatch;
 }
 
-export function newBridgeState(): BridgeState {
+export function newBridgeState(
+  thresholds: UsageAlertThresholds = readUsageAlertThresholds(),
+): BridgeState {
   return {
     lastList: new Map(),
     activity: new Map(),
     lastNotified: new Map(),
     lastStuck: new Map(),
+    usageLatch: new UsageAlertLatch(thresholds),
   };
 }
 
@@ -1000,6 +1015,67 @@ export async function notifyStuckEvent(
   }
 }
 
+/**
+ * Relay one cost/context threshold crossing (juancode-lncw) to the chats observing
+ * that session, plus the chat a dispatch came from.
+ *
+ * Read-only, like the stuck advisory: nothing here compacts a conversation, pauses a
+ * session or caps anything. It exists so a session that is about to hit a context
+ * wall — or has quietly run past a spend cap — says so before the wall, instead of
+ * the human finding out from a mid-task compaction.
+ *
+ * The latch (`state.usageLatch`) is what makes this once-per-crossing rather than
+ * once-per-poll, so there is no cooldown clock here: a second message for the same
+ * session only happens if it genuinely left the band and came back.
+ */
+export async function notifyUsageSample(
+  sample: SessionUsageSample,
+  deps: TelegramDeps,
+  state: BridgeState,
+  now: number = Date.now(),
+): Promise<void> {
+  const alert = state.usageLatch.consider(sample);
+  if (!alert) return;
+
+  const chats = [...(await deps.observers.chatsFor(sample.sessionId))];
+  if (alert.dispatchId) {
+    const origin = await deps.originChat(alert.dispatchId);
+    if (origin !== null && !chats.includes(origin)) chats.push(origin);
+  }
+  if (chats.length === 0) return;
+
+  let title = sample.sessionId.slice(0, 8);
+  let project = "";
+  try {
+    const s = (await deps.sessions()).find((x) => x.id === sample.sessionId);
+    if (s) {
+      title = s.title;
+      project = projectName(s.cwd);
+    }
+  } catch {
+    // Native app unreachable — warn with the id slice rather than staying silent.
+  }
+  const header = project ? `${title} — ${project}` : title;
+  const text = `${header}\n${usageAlertLine(alert)}\n↩️ Reply to this message to steer it.`;
+
+  for (const chatId of chats) {
+    try {
+      const mid = await deps.send(chatId, text);
+      if (mid !== null) {
+        await deps.outbound.record({
+          chatId,
+          messageId: mid,
+          sessionId: sample.sessionId,
+          title,
+          at: now,
+        });
+      }
+    } catch (e) {
+      console.warn("telegram usage notify failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 // ── Telegram HTTP API ────────────────────────────────────────────────────────
 
 const apiBase = (token: string) => `https://api.telegram.org/bot${token}`;
@@ -1156,6 +1232,7 @@ export function startTelegramBridge(
   deps?: TelegramDeps,
   subscribe: (listener: (ev: SessionActivityEvent) => void) => void = onSessionEvent,
   subscribeStuck: (listener: (ev: SessionStuckEvent) => void) => void = onSessionStuck,
+  subscribeUsage: (listener: (s: SessionUsageSample) => void) => void = onSessionUsage,
 ): AbortController | null {
   if (!config) {
     console.log("telegram bridge disabled (set TELEGRAM_BOT_TOKEN to enable)");
@@ -1178,6 +1255,11 @@ export function startTelegramBridge(
   subscribeStuck((ev) => {
     void notifyStuckEvent(ev, resolved, state).catch((e) =>
       console.error("telegram stuck notify failed:", e instanceof Error ? e.message : e),
+    );
+  });
+  subscribeUsage((sample) => {
+    void notifyUsageSample(sample, resolved, state).catch((e) =>
+      console.error("telegram usage notify failed:", e instanceof Error ? e.message : e),
     );
   });
   console.log(

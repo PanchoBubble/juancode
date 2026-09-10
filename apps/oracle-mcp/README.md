@@ -114,6 +114,26 @@ Environment variables (all optional):
 | `TELEGRAM_BOT_TOKEN` | _(unset)_ | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
 | `ALLOWED_USER_IDS` | _(empty)_ | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored. |
 | `JUANCODE_GH_WEBHOOK_SECRET` | _(unset)_ | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below. |
+| `JUANCODE_CONTEXT_ALERT_PERCENT` | `80` | Context-pressure line (percent of the model's window) that pings observing Telegram chats. `0` disables it. See "Cost + context alerts". |
+| `JUANCODE_SESSION_SPEND_CAP_USD` | _(unset)_ | Estimated spend on one session that pings observing chats, in USD. Unset/`0` ⇒ no spend alerts. |
+
+### Cost + context alerts (juancode-lncw)
+
+The native app derives per-session token/cost usage from the CLI's own transcripts
+and puts it on `SessionMeta.usage` — including **context pressure**: what the live
+conversation currently occupies of the model's context window (the newest turn's
+input + cache tokens), against a window from the price table in the Swift core. The
+sidecar reads that off the `sessionMeta` frames it already receives, so this adds
+nothing to the wire protocol and nothing to any request path.
+
+`usage-alerts.ts` latches **one alert per crossing**, not one per poll: a session that
+climbs past `JUANCODE_CONTEXT_ALERT_PERCENT` pings the chats observing it (plus the
+chat a dispatch came from) once, then stays quiet while it keeps filling. A compaction
+that drops it clear of the line re-arms the alert. A spend cap fires exactly once —
+an estimate only grows.
+
+Nothing here steers a session: no compaction, no pause, no cap enforcement. It exists
+so a wall is visible before you hit it.
 
 ### Telegram bridge (juancode-c6y)
 

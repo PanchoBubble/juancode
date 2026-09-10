@@ -88,6 +88,29 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.get(m.id)?.usage, usage)
     }
 
+    /// Context pressure rides in the same JSON blob as the tokens (juancode-lncw),
+    /// so a relaunch reads back what the session was actually holding — and a row
+    /// written before those fields existed still decodes, with them nil.
+    func testContextPressureRoundTripsAndOlderRowsStillDecode() {
+        let usage = SessionUsage(inputTokens: 10, outputTokens: 20, cacheReadTokens: 5,
+                                 cacheWriteTokens: 1, totalTokens: 36, costUsd: 0.0123,
+                                 contextTokens: 160_000, contextWindow: 200_000)
+        var m = meta("ctx", usage: usage)
+        store.insert(m)
+        store.update(m, scrollback: [])
+        let read = store.get(m.id)?.usage
+        XCTAssertEqual(read, usage)
+        XCTAssertEqual(read?.contextPercent, 80)
+
+        let legacy = meta("legacy", usage: SessionUsage(
+            inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+            cacheWriteTokens: 0, totalTokens: 2, costUsd: nil))
+        store.insert(legacy)
+        store.update(legacy, scrollback: [])
+        XCTAssertNil(store.get(legacy.id)?.usage?.contextTokens)
+        XCTAssertNil(store.get(legacy.id)?.usage?.contextWindow)
+    }
+
     func testDispatchIdRoundTrips() {
         // Dispatch correlation survives insert, meta update, and re-read; sessions
         // without one stay nil (interactive creates).

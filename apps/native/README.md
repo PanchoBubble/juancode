@@ -124,6 +124,17 @@ the prime directive).
 Title/usage polling is injected into `Session` via `SessionEnvironment` (the core
 stays dependency-free); use `SessionEnvironment.live(store:)` for the real seams.
 
+Usage carries two different things (juancode-lncw). `inputTokens`/`outputTokens`/cache
+and `costUsd` are cumulative — what the session has spent. `contextTokens` /
+`contextWindow` are the newest turn's occupancy of the model's context window — what
+is about to run out — so they are replaced on each turn, never summed, and a
+compaction visibly drops them. Both the per-MTok prices and the window sizes come
+from `ModelPricing` in `JuancodeCore`: the transcript seam is the only place a raw
+model id appears, so the table lives beside it rather than in the sidecar, which only
+relays the figures it is handed. The oracle sidecar turns a context/spend threshold
+crossing into a Telegram ping off the `sessionMeta` frames it already receives (see
+`apps/oracle-mcp/src/usage-alerts.ts`) — no new wire message, nothing in a request path.
+
 opencode is the one provider whose history isn't JSONL on disk: its sessions, titles,
 token/cost totals and message parts all live in `~/.local/share/opencode/opencode.db`,
 which `OpencodeStore` reads **read-only** (per-call connection, so a live opencode's WAL

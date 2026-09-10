@@ -93,6 +93,75 @@ export function parseStuckEvent(msg: Record<string, unknown>): SessionStuckEvent
   return ev;
 }
 
+/** A per-session usage reading (juancode-lncw), lifted off the `sessionMeta`
+ *  frames the endpoint already broadcasts on every usage poll — so this costs no
+ *  new wire message and nothing in any request path.
+ *
+ *  `contextTokens` is what the live conversation currently occupies of the model's
+ *  window (the newest turn's input + cache tokens), NOT the cumulative
+ *  `totalTokens`, which only grows. `contextWindow` comes from the price/window
+ *  table in the Swift core — the sidecar never sees a model id, so it never has to
+ *  keep a copy of that table. Either half can be absent (an unknown model, a core
+ *  with no usage seam), and then `contextFraction` is absent too rather than 0. */
+export interface SessionUsageSample {
+  sessionId: string;
+  totalTokens: number;
+  /** Estimated spend to date, absent when the model was unpriced. */
+  costUsd?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  /** contextTokens / contextWindow; absent when either half is. */
+  contextFraction?: number;
+  dispatchId?: string;
+}
+
+/** Pull the usage block off a `sessionMeta` frame, or null when the frame isn't one
+ *  / carries no usage yet. Lenient like the rest of this module: a malformed frame
+ *  is dropped, not thrown. */
+export function parseUsageSample(msg: Record<string, unknown>): SessionUsageSample | null {
+  if (msg.type !== "sessionMeta") return null;
+  const session = msg.session;
+  if (typeof session !== "object" || session === null) return null;
+  const meta = session as Record<string, unknown>;
+  const sessionId = typeof meta.id === "string" ? meta.id : "";
+  if (!sessionId) return null;
+  const usage = meta.usage;
+  if (typeof usage !== "object" || usage === null) return null;
+  const u = usage as Record<string, unknown>;
+  if (typeof u.totalTokens !== "number") return null;
+  const sample: SessionUsageSample = { sessionId, totalTokens: u.totalTokens };
+  if (typeof u.costUsd === "number") sample.costUsd = u.costUsd;
+  if (typeof u.contextTokens === "number") sample.contextTokens = u.contextTokens;
+  if (typeof u.contextWindow === "number" && u.contextWindow > 0) {
+    sample.contextWindow = u.contextWindow;
+  }
+  if (sample.contextTokens !== undefined && sample.contextWindow !== undefined) {
+    sample.contextFraction = sample.contextTokens / sample.contextWindow;
+  }
+  if (typeof meta.dispatchId === "string" && meta.dispatchId) sample.dispatchId = meta.dispatchId;
+  return sample;
+}
+
+type UsageListener = (sample: SessionUsageSample) => void;
+const usageListeners: UsageListener[] = [];
+
+/** Subscribe to per-session usage readings. Fires on every meta update that carries
+ *  usage — deciding which of those is worth a ping is the consumer's job
+ *  (`usage-alerts.ts` latches one alert per crossing). Listener errors are isolated. */
+export function onSessionUsage(listener: UsageListener): void {
+  usageListeners.push(listener);
+}
+
+function emitUsageSample(sample: SessionUsageSample): void {
+  for (const listener of usageListeners) {
+    try {
+      listener(sample);
+    } catch (e) {
+      console.warn("oracle-mcp usage listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 type SessionEventListener = (ev: SessionActivityEvent) => void;
 const sessionEventListeners: SessionEventListener[] = [];
 
@@ -445,6 +514,11 @@ function handleMessage(raw: string): void {
   if (msg.type === "stuck") {
     const ev = parseStuckEvent(msg);
     if (ev) emitStuckEvent(ev);
+    return;
+  }
+  if (msg.type === "sessionMeta") {
+    const sample = parseUsageSample(msg);
+    if (sample) emitUsageSample(sample);
     return;
   }
   if (msg.type !== "activity") return;

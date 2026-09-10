@@ -1691,8 +1691,11 @@ public final class Session: @unchecked Sendable {
         let (cliSessionId, provider) = lock.withLock { (_meta.cliSessionId, _meta.provider) }
         guard let cliSessionId else { return }
         guard let usage = await env.deriveUsage(provider, cliSessionId) else { return }
+        // Whole-value compare, not just the token total: a compaction can move
+        // context occupancy (juancode-lncw) on a poll where the totals happen to
+        // land the same, and the sidecar's threshold alert reads that field.
         let changed = lock.withLock { () -> Bool in
-            guard usage.totalTokens != (_meta.usage?.totalTokens ?? -1) else { return false }
+            guard usage != _meta.usage else { return false }
             _meta.usage = usage
             return true
         }

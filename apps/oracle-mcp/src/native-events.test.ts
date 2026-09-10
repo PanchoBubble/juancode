@@ -9,6 +9,7 @@ import {
   parsePauseState,
   parseScreenFrame,
   parseStuckEvent,
+  parseUsageSample,
   pauseAllSessions,
   pausedSessions,
   startActivityListener,
@@ -334,7 +335,10 @@ describe("parsePauseState", () => {
   });
 
   it("keeps only the ids, so one junk entry does not poison the set", () => {
-    expect(parsePauseState({ type: "pauseState", paused: ["a", 7, null, "b"] })).toEqual(["a", "b"]);
+    expect(parsePauseState({ type: "pauseState", paused: ["a", 7, null, "b"] })).toEqual([
+      "a",
+      "b",
+    ]);
   });
 });
 
@@ -405,5 +409,56 @@ describe("global pause over the shared native WS", () => {
     expect(supportsGlobalPause()).toBe(false);
     expect(pauseAllSessions()).toBe(false);
     expect(received.some((m) => m.type === "pauseAll")).toBe(false);
+  });
+});
+
+describe("parseUsageSample", () => {
+  const meta = (usage: Record<string, unknown> | null, extra: Record<string, unknown> = {}) => ({
+    type: "sessionMeta",
+    sessionId: "s1",
+    session: { id: "s1", title: "t", usage, ...extra },
+  });
+
+  it("lifts tokens, cost and context off a sessionMeta frame", () => {
+    const sample = parseUsageSample(
+      meta({
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: 150_000,
+        cacheWriteTokens: 0,
+        totalTokens: 150_030,
+        costUsd: 1.25,
+        contextTokens: 160_000,
+        contextWindow: 200_000,
+      }),
+    )!;
+    expect(sample.sessionId).toBe("s1");
+    expect(sample.totalTokens).toBe(150_030);
+    expect(sample.costUsd).toBe(1.25);
+    expect(sample.contextFraction).toBeCloseTo(0.8);
+  });
+
+  it("leaves the fraction absent when either half is missing", () => {
+    const noWindow = parseUsageSample(meta({ totalTokens: 5, contextTokens: 4 }))!;
+    expect(noWindow.contextFraction).toBeUndefined();
+    const zeroWindow = parseUsageSample(
+      meta({ totalTokens: 5, contextTokens: 4, contextWindow: 0 }),
+    )!;
+    expect(zeroWindow.contextWindow).toBeUndefined();
+    expect(zeroWindow.contextFraction).toBeUndefined();
+  });
+
+  it("carries the dispatch id so an alert can reach its chat", () => {
+    const sample = parseUsageSample(meta({ totalTokens: 1 }, { dispatchId: "d1" }))!;
+    expect(sample.dispatchId).toBe("d1");
+  });
+
+  it("drops frames that are not a sessionMeta carrying usage", () => {
+    expect(parseUsageSample({ type: "activity", sessionId: "s1" })).toBeNull();
+    expect(parseUsageSample(meta(null))).toBeNull();
+    expect(parseUsageSample(meta({ inputTokens: 3 }))).toBeNull();
+    expect(
+      parseUsageSample({ type: "sessionMeta", session: { usage: { totalTokens: 1 } } }),
+    ).toBeNull();
   });
 });

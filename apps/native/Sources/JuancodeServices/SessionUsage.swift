@@ -15,8 +15,14 @@ import JuancodeCore
 ///   - opencode tallies tokens *and* cost onto its session row as it goes, so
 ///     `OpencodeStore` just reads them (its cost is the CLI's own, not our estimate).
 ///
-/// Cost is a best-effort *estimate* from published per-MTok rates (below). For a
-/// model we don't have a price for — or Codex, which doesn't expose a per-token
+/// Alongside the cumulative totals each provider reports, the newest turn also
+/// gives *context pressure* (juancode-lncw): what the live conversation currently
+/// occupies of the model's window, which is what actually runs out. It is the
+/// newest turn's input + cache tokens (Codex names it outright), never a sum.
+///
+/// Cost is a best-effort *estimate* from published per-MTok rates (`ModelPricing`
+/// in JuancodeCore). For a
+/// model we have no price for — or Codex, which doesn't expose a per-token
 /// price (and is usually a subscription) — `costUsd` is nil and only tokens are
 /// shown. Subscription users pay nothing per token regardless, so the figure is
 /// labelled an estimate in the UI.
@@ -35,35 +41,6 @@ public struct UsageRoots {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
         self.opencodeDb = opencodeDb
-    }
-}
-
-/// Published input/output price per **million** tokens, by model-id match.
-private struct ModelPrice {
-    /// Matches against the transcript's model id (substring/prefix), case-insensitive.
-    let match: String
-    let inputPerMTok: Double
-    let outputPerMTok: Double
-}
-
-/// Current Claude pricing (USD per 1M tokens). Cache reads bill at ~0.1× input
-/// and cache writes at ~1.25× input (5-minute TTL, the default), applied below.
-/// Ordered most-specific first; the first match wins.
-private let MODEL_PRICES: [ModelPrice] = [
-    ModelPrice(match: "opus", inputPerMTok: 5, outputPerMTok: 25),
-    ModelPrice(match: "sonnet", inputPerMTok: 3, outputPerMTok: 15),
-    ModelPrice(match: "haiku", inputPerMTok: 1, outputPerMTok: 5),
-    ModelPrice(match: "fable|mythos", inputPerMTok: 10, outputPerMTok: 50),
-]
-
-private let CACHE_READ_MULT = 0.1
-private let CACHE_WRITE_MULT = 1.25
-
-private func priceFor(_ model: String) -> ModelPrice? {
-    // Mirrors `MODEL_PRICES.find((p) => p.match.test(model))` with case-insensitive
-    // regex matching; the last entry uses an alternation (`fable|mythos`).
-    return MODEL_PRICES.first { p in
-        model.range(of: p.match, options: [.regularExpression, .caseInsensitive]) != nil
     }
 }
 
@@ -105,6 +82,13 @@ private struct UsageAccumulator {
     var sawTurn = false
     /// `message.id` + `requestId` of every turn already counted.
     var seen: Set<String> = []
+    /// Context occupancy of the newest counted turn — its input + cache read +
+    /// cache write, i.e. what the next request has to re-send (juancode-lncw).
+    /// Replaced, never summed: the running total says what the session has spent,
+    /// this says how full it is right now.
+    var contextTokens: Int?
+    /// Window of the newest counted turn's model, nil for an unknown model.
+    var contextWindow: Int?
 
     /// The public projection: totals summed, cost dropped when any turn's model was
     /// un-priced, nil until a real assistant turn has been counted.
@@ -116,7 +100,9 @@ private struct UsageAccumulator {
             cacheReadTokens: cacheReadTokens,
             cacheWriteTokens: cacheWriteTokens,
             totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-            costUsd: costKnown ? costUsd : nil)
+            costUsd: costKnown ? costUsd : nil,
+            contextTokens: contextTokens,
+            contextWindow: contextWindow)
     }
 }
 
@@ -126,6 +112,12 @@ private struct CodexTotals {
     var outputTokens = 0
     var cacheReadTokens = 0
     var totalTokens = 0
+    /// From the same `token_count` event: what the last request sent, against the
+    /// window the event reports for the model (juancode-lncw). Codex names both, so
+    /// unlike Claude there is no model-id lookup involved — and when an older Codex
+    /// omits them both stay nil and the UI just shows tokens.
+    var contextTokens: Int?
+    var contextWindow: Int?
 
     var usage: SessionUsage {
         SessionUsage(
@@ -134,7 +126,9 @@ private struct CodexTotals {
             cacheReadTokens: cacheReadTokens,
             cacheWriteTokens: 0,
             totalTokens: totalTokens,
-            costUsd: nil)
+            costUsd: nil,
+            contextTokens: contextTokens,
+            contextWindow: contextWindow)
     }
 }
 
@@ -227,13 +221,15 @@ private func addClaudeTurn(_ rec: [String: Any], to acc: inout UsageAccumulator)
     acc.cacheReadTokens += cacheRead
     acc.cacheWriteTokens += cacheWrite
 
-    if let price = priceFor(model) {
-        acc.costUsd +=
-            (Double(input) * price.inputPerMTok
-                + Double(cacheRead) * price.inputPerMTok * CACHE_READ_MULT
-                + Double(cacheWrite) * price.inputPerMTok * CACHE_WRITE_MULT
-                + Double(output) * price.outputPerMTok)
-            / 1_000_000
+    // Context pressure: the newest turn wins outright. A compaction shrinks it back
+    // down, which is the whole point of tracking it separately from the totals.
+    acc.contextTokens = input + cacheRead + cacheWrite
+    acc.contextWindow = ModelPricing.contextWindow(for: model)
+
+    if let cost = ModelPricing.turnCost(
+        model: model, input: input, output: output,
+        cacheRead: cacheRead, cacheWrite: cacheWrite) {
+        acc.costUsd += cost
     } else {
         acc.costKnown = false  // an un-priced model means the total is only partial
     }
@@ -252,8 +248,8 @@ public func deriveCodexUsage(
             guard let payload = rec["payload"] as? [String: Any],
                   payload["type"] as? String == "token_count",
                   let info = payload["info"] as? [String: Any],
-                  let total = info["total_token_usage"] as? [String: Any] else { return nil }
-            latest = codexTotals(from: total)
+                  info["total_token_usage"] is [String: Any] else { return nil }
+            latest = codexTotals(from: info)
             return nil
         }
         if scan.fromStart { usageState.clearCodex(cliSessionId) }
@@ -269,7 +265,7 @@ public func deriveCodexUsage(
 
     for full in files {
         var isMatch = false
-        var total: [String: Any]? = nil
+        var info: [String: Any]? = nil
         await forEachRecord(full) { rec in
             let payload = rec["payload"] as? [String: Any]
             if rec["type"] as? String == "session_meta" {
@@ -280,15 +276,15 @@ public func deriveCodexUsage(
             // Cumulative tally; keep the latest. (When reading a cached file directly
             // we never see session_meta, but isMatch is already true.)
             if isMatch, payload?["type"] as? String == "token_count",
-               let info = payload?["info"] as? [String: Any],
-               let totalUsage = info["total_token_usage"] as? [String: Any] {
-                total = totalUsage
+               let infoBlock = payload?["info"] as? [String: Any],
+               infoBlock["total_token_usage"] is [String: Any] {
+                info = infoBlock
             }
             return nil
         }
         if isMatch {
             fileCache.set(cliSessionId, full)
-            guard let t = total else { return nil }  // matched the session but no turn has run yet
+            guard let t = info else { return nil }  // matched the session but no turn has run yet
             let totals = codexTotals(from: t)
             usageState.setCodex(cliSessionId, totals)
             return totals.usage
@@ -297,19 +293,29 @@ public func deriveCodexUsage(
     return nil
 }
 
-/// Read Codex's cumulative `total_token_usage` block into totals. Its
-/// `input_tokens` already includes the cached portion, so the cached tokens are
-/// subtracted out to report fresh input separately. Codex exposes no per-token
-/// price, so cost stays nil (see `CodexTotals.usage`).
-private func codexTotals(from total: [String: Any]) -> CodexTotals {
+/// Read a Codex `token_count` info block into totals. Its cumulative
+/// `total_token_usage.input_tokens` already includes the cached portion, so the
+/// cached tokens are subtracted out to report fresh input separately. Codex
+/// exposes no per-token price, so cost stays nil (see `CodexTotals.usage`).
+///
+/// `last_token_usage` (what the newest request actually sent) and
+/// `model_context_window` sit beside the cumulative block and give context
+/// pressure directly — both optional, so an older Codex just reports no context.
+private func codexTotals(from info: [String: Any]) -> CodexTotals {
+    let total = info["total_token_usage"] as? [String: Any] ?? [:]
     let cacheRead = intField(total, "cached_input_tokens")
     let input = max(0, intField(total, "input_tokens") - cacheRead)
     let output = intField(total, "output_tokens")
+    let window = intField(info, "model_context_window", -1)
+    let last = info["last_token_usage"] as? [String: Any]
+    let lastInput = last.map { intField($0, "input_tokens", -1) } ?? -1
     return CodexTotals(
         inputTokens: input,
         outputTokens: output,
         cacheReadTokens: cacheRead,
-        totalTokens: intField(total, "total_tokens", input + output + cacheRead))
+        totalTokens: intField(total, "total_tokens", input + output + cacheRead),
+        contextTokens: lastInput >= 0 ? lastInput : nil,
+        contextWindow: window > 0 ? window : nil)
 }
 
 public func deriveSessionUsage(

@@ -2691,6 +2691,10 @@ struct SessionRow: View {
             "cache read \(SessionUsageFormat.tokens(u.cacheReadTokens)) · write \(SessionUsageFormat.tokens(u.cacheWriteTokens))",
         ]
         if let c = SessionUsageFormat.cost(u.costUsd) { lines.append("est. cost \(c)") }
+        if let pct = u.contextPercent, let ctx = u.contextTokens, let win = u.contextWindow {
+            lines.append("context \(pct)% — "
+                + "\(SessionUsageFormat.tokens(ctx)) of \(SessionUsageFormat.tokens(win))")
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -2867,6 +2871,17 @@ private enum SidePanelTab: String, CaseIterable {
     case changes = "Changes", files = "Files", issues = "Issues"
 }
 
+/// Colour for a usage badge by how full the session's context window is
+/// (juancode-lncw). Secondary until the warn line so the ordinary case stays quiet;
+/// the tint IS the warning, there is no extra chrome.
+func pressureTint(_ pressure: ContextPressure) -> Color {
+    switch pressure {
+    case .ok: return .secondary
+    case .warn: return .orange
+    case .critical: return .red
+    }
+}
+
 struct SessionContainer: View {
     @Environment(AppModel.self) private var model
     let meta: SessionMeta
@@ -2906,7 +2921,7 @@ struct SessionContainer: View {
                 if let label = meta.usage?.badgeLabel {
                     Text(label)
                         .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(pressureTint(meta.usage?.contextPressure ?? .ok))
                         .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
                 }
                 // When this session's branch has an open PR, offer a one-click jump
