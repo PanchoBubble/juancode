@@ -233,12 +233,24 @@ build_daemon() {
 
 # Which core this launch will actually use, decided the same way CoreBoot does:
 # JUANCODE_CORE wins, else the persisted Settings choice, else swift.
+#
+# Two defaults domains, because this repo builds the app under two bundle identifiers —
+# `dev.juancode.app` (apps/native/scripts/dev-app.sh and package-app.sh) and
+# `com.juanone.juancode` (scripts/bundle-app.sh) — and UserDefaults is per-identifier.
+# Reading only one of them is a way to flip the setting to rust in the app, relaunch,
+# and have this script decide there was nothing to start: the exact symptom of
+# juancode-k0bq, from the other end. First domain that has an answer wins; `rust`
+# anywhere is enough, since the cost of starting a daemon the app then ignores is one
+# idle process and the cost of not starting one is the Swift-core fallback.
 selected_core() {
-  local core="${JUANCODE_CORE:-}"
+  local core="${JUANCODE_CORE:-}" domain
   if [ -z "$core" ]; then
-    core="$(defaults read dev.juancode.app juancode.core.backend 2>/dev/null || echo swift)"
+    for domain in dev.juancode.app com.juanone.juancode; do
+      core="$(defaults read "$domain" juancode.core.backend 2>/dev/null || true)"
+      [ -n "$core" ] && break
+    done
   fi
-  printf '%s' "$core"
+  printf '%s' "${core:-swift}"
 }
 
 start_daemon() {
