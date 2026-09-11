@@ -1,0 +1,115 @@
+{
+  "id": "usage",
+  "title": "token usage, cost and context pressure reach the session row",
+  "asserts": "a core that reads a CLI's transcript folds what each request spent onto SessionMeta.usage and broadcasts the row, so a client renders the token badge, the estimated spend and the context percentage without deriving anything itself. Cumulative counts only grow across requests; contextTokens is the newest request's input + cache, so it tracks what the window actually holds rather than what the session has spent in total. Without this every badge is blank, the sidebar spend total reads zero and a cost budget can never trip (juancode-8ti0).",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "transcript",
+    "sessionMeta"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "transcript",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "USAGE one\r"
+      },
+      "note": "one billed request on a model the price table knows: 1000 input, 200 output, 3000 cache read, 500 cache write"
+    },
+    {
+      "sleep": 6000,
+      "note": "same back-off as the transcript scenarios: the first bind attempt lands on the spawn banner, before the file exists"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO nudge\r"
+      },
+      "note": "output is what marks a session worth re-reading, so this is what gets the written turn polled"
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "id": "$session",
+          "usage": {
+            "inputTokens": 1000,
+            "outputTokens": 200,
+            "cacheReadTokens": 3000,
+            "cacheWriteTokens": 500,
+            "totalTokens": 4700,
+            "contextTokens": 4500,
+            "contextWindow": 200000,
+            "costUsd": {
+              "$gt": 0.00877,
+              "$lt": 0.00878
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "the four counts are the CLI's own numbers; totalTokens is their sum; contextTokens is input + cache read + cache write, which is what the next request has to re-send, and deliberately excludes the 200 tokens of output. costUsd is an estimate from the model's published rates - 1000 at $3/MTok, cache read at 0.1x, cache write at 1.25x, 200 output at $15/MTok - asserted as a band because it is a float"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "USAGE two\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "usage": {
+            "totalTokens": 9400,
+            "contextTokens": 4500,
+            "contextWindow": 200000,
+            "costUsd": {
+              "$gt": 0.01754,
+              "$lt": 0.01756
+            }
+          }
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "a second request adds to the totals and REPLACES the context reading: spend is a tally, occupancy is a level. A core that summed contextTokens would report 9000 here and tell a user the window was 4.5% fuller than it is - and would never come back down when the CLI compacts"
+    }
+  ]
+}

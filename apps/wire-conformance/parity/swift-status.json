@@ -193,6 +193,10 @@
     "session-set-meta": {
       "status": "skipped",
       "note": "core does not advertise the \"sessionEdit\" capability"
+    },
+    "usage": {
+      "status": "skipped",
+      "note": "core does not advertise the \"transcript\" capability"
     }
   }
 }

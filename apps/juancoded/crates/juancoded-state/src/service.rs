@@ -123,6 +123,14 @@ pub trait SessionsApi: Send + Sync {
     /// file written before anyone was watching is history, and must not be passed here.
     fn on_transcript(&self, id: &str, records: &[TranscriptRecord]);
 
+    /// Fold the same batch's token usage onto `SessionMeta.usage`.
+    ///
+    /// Beside `on_transcript` rather than inside it, because the two disagree about the
+    /// one batch that matters: history must not pulse a session busy, but it is still
+    /// tokens the session spent, so the caller passes EVERY batch here and only the live
+    /// ones there.
+    fn fold_usage(&self, id: &str, records: &[TranscriptRecord]);
+
     /// Persist every live session's newest bytes before the process goes away.
     ///
     /// On the trait because the daemon's shutdown path only ever holds a
@@ -321,6 +329,10 @@ impl SessionsApi for SessionRegistry {
 
     fn on_transcript(&self, id: &str, records: &[TranscriptRecord]) {
         SessionRegistry::on_transcript(self, id, records)
+    }
+
+    fn fold_usage(&self, id: &str, records: &[TranscriptRecord]) {
+        SessionRegistry::fold_usage(self, id, records)
     }
 
     fn flush_all(&self) -> usize {

@@ -8,9 +8,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Attempts behind each verdict: 3 per scenario
 - As of: 2026-09-10
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel, spawnPreset, isolateWorktree, globalPause
-- Unmet scenarios: 9 of 36
+- Unmet scenarios: 10 of 37
 
-## What is not satisfied yet (9)
+## What is not satisfied yet (10)
 
 ### transcript
 
@@ -75,6 +75,13 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Why: core does not advertise the "sessionEdit" capability
 - Asserts: a core that advertises `sessionEdit` lets a client write the two fields of a session row that belong to the person using it - its name and whether it is archived - into the CORE's own row, and then defends the name against the core's own derivations. The write half alone is not the feature: before this frame existed the desktop wrote a rename into its private mirror and sent nothing, and that mirror is a cache, so the next `sessionMeta` the core broadcast put the CLI's name back and the next boot backfill replaced the whole list (juancode-0yao). So this scenario renames a session the CLI has ALREADY named, has the CLI paint another OSC 0/2 window title afterwards, and requires that neither the row nor any broadcast moves - a core that adopts the escape fails here even though its `setMeta` handler worked. Archiving is asserted the same way and for the same reason, minus the escape: nothing derives it, but the whole-list backfill is what used to take it away. The last third is the one a single connection cannot measure: a client that arrives afterwards, asks `listSessions` and is answered with the pinned name and the archive flag. That answer is the core's own store rather than anybody's cache, which is the only version of this that survives a reconnect - and a reconnect is where the bug was actually visible.
 
+### usage
+
+- Status: n/a
+- Needs: transcript, sessionMeta, pty
+- Why: core does not advertise the "transcript" capability
+- Asserts: a core that reads a CLI's transcript folds what each request spent onto SessionMeta.usage and broadcasts the row, so a client renders the token badge, the estimated spend and the context percentage without deriving anything itself. Cumulative counts only grow across requests; contextTokens is the newest request's input + cache, so it tracks what the window actually holds rather than what the session has spent in total. Without this every badge is blank, the sidebar spend total reads zero and a cost budget can never trip (juancode-8ti0).
+
 ## Full scenario list
 
 - handshake: 3/3 - Capability handshake
@@ -113,3 +120,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - session-sleep: n/a - pausing a session, and the row that says so
 - global-pause: 3/3 - pause everything from somewhere else, and play back exactly that set
 - session-set-meta: n/a - a name a person chose outlives the name the CLI keeps painting
+- usage: n/a - token usage, cost and context pressure reach the session row

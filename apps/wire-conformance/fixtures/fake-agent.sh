@@ -21,6 +21,7 @@
 #   MOVE <row> <col> position the cursor (1-based)
 #   TITLE <text>     set an OSC 2 window title (how a real CLI names its session)
 #   TRANSCRIPT <text> append a turn to claude's own jsonl (the transcript plane's source)
+#   USAGE <text>     append a turn that cost tokens on a PRICED model to that jsonl
 #   LOOP <text>      append three identical tool calls to that jsonl (a stuck run)
 #   SPAWN            leave a helper running in the session's process group
 #   EXIT <code>      exit with that status
@@ -153,6 +154,25 @@ while IFS= read -r line; do
     # Printed AFTER the file is written: the output is what marks the session dirty,
     # and a pump that polled first would read a file the turn has not reached yet.
     printf 'transcript %s\r\n' "$arg"
+    ;;
+  USAGE)
+    # One turn that cost something, as claude records it: the same pair TRANSCRIPT
+    # writes, but with a `message.usage` block and a model the price table knows.
+    #
+    # The numbers are fixed so a scenario can assert on the arithmetic rather than on
+    # "some tokens appeared": 1000 input + 200 output + 3000 cache read + 500 cache
+    # write is 4700 tokens, 4500 of them still in the window, and $0.008775 on sonnet.
+    # `fake-model` is deliberately NOT used here - it is unpriced, which is what the
+    # rest of the fixtures want and the opposite of what this one measures.
+    if [ -n "$TRANSCRIPT_FILE" ]; then
+      TRANSCRIPT_TURN=$((TRANSCRIPT_TURN + 1))
+      at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      printf '{"type":"user","timestamp":"%s","promptId":"spend-%s","message":{"role":"user","content":"%s"}}\n' \
+        "$at" "$TRANSCRIPT_TURN" "$arg" >>"$TRANSCRIPT_FILE"
+      printf '{"type":"assistant","timestamp":"%s","requestId":"spend-%s","message":{"role":"assistant","model":"claude-sonnet-5","usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500},"content":[{"type":"text","text":"spent %s"}]}}\n' \
+        "$at" "$TRANSCRIPT_TURN" "$arg" >>"$TRANSCRIPT_FILE"
+    fi
+    printf 'usage %s\r\n' "$arg"
     ;;
   LOOP)
     # An agent going in circles: the same tool, the same arguments, three times over,

@@ -224,6 +224,11 @@ impl Pump {
             })
             .collect();
         let appended = rows.len();
+        // Tokens first, and unconditionally: unlike the activity pulse below, a backlog
+        // read is not history to the arithmetic — it is what a resumed conversation
+        // already spent, and skipping it would have the badge start every restored
+        // session at zero.
+        sessions.fold_usage(session, &records);
         // The preferred activity signal, and the reason this pump is on the liveness
         // path and not just the history one: a session whose tool call has gone
         // screen-quiet for minutes is still writing records, and the detector holds it
@@ -468,6 +473,94 @@ mod tests {
             .iter()
             .map(|r| r["kind"].as_str().unwrap_or("?").to_string())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_polled_transcript_lands_its_tokens_and_cost_on_the_session_row() {
+        // The seam parsed these numbers all along and nothing folded them, so every
+        // Rust-core session reported `usage: NULL`.
+        let scratch = Scratch::new("usage");
+        let cwd = scratch.cwd();
+        let (_loader, handles) = scratch.boot();
+        let plane = handles.transcripts.clone().expect("the plane mounted");
+        let session = create(&handles, &cwd);
+        assert!(handles.sessions.meta(&session).unwrap().usage.is_none());
+
+        let path = scratch.transcript_for(&session);
+        append(&path, &[PROMPT, CALL]);
+        let mut pump = Pump::new();
+        pump.poll_session(&handles.sessions, &plane, &session, Instant::now());
+
+        let usage = handles
+            .sessions
+            .meta(&session)
+            .unwrap()
+            .usage
+            .expect("the first request lands usage on the row");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (4, 9));
+        assert_eq!(usage.total_tokens, 13);
+        // opus: 4 input at $5/MTok plus 9 output at $25/MTok.
+        assert!(
+            (usage.cost_usd.unwrap() - 245e-6).abs() < 1e-12,
+            "{usage:?}"
+        );
+        assert_eq!(usage.context_tokens, Some(4));
+        assert_eq!(usage.context_window, Some(200_000));
+
+        // A second request adds to the totals and replaces the context reading.
+        append(&path, &[RESULT, DONE]);
+        pump.poll_session(&handles.sessions, &plane, &session, Instant::now());
+        let usage = handles.sessions.meta(&session).unwrap().usage.unwrap();
+        assert_eq!(usage.total_tokens, 16);
+        assert!(
+            (usage.cost_usd.unwrap() - 300e-6).abs() < 1e-12,
+            "{usage:?}"
+        );
+        assert_eq!(usage.context_tokens, Some(1));
+
+        // And a poll that reads nothing new must not move the row, or a badge would
+        // repaint twice a second for the life of every session.
+        let before = handles.sessions.meta(&session).unwrap();
+        pump.poll_session(&handles.sessions, &plane, &session, Instant::now());
+        assert_eq!(handles.sessions.meta(&session).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_daemon_resumes_the_tally_instead_of_restarting_it() {
+        // The transcript cursor is durable, so the second daemon only ever sees the
+        // records appended after the first one stopped. The row is the accumulator.
+        let scratch = Scratch::new("usage-restart");
+        let cwd = scratch.cwd();
+        let (loader, handles) = scratch.boot();
+        let plane = handles.transcripts.clone().expect("the plane mounted");
+        let session = create(&handles, &cwd);
+        let path = scratch.transcript_for(&session);
+        append(&path, &[PROMPT, CALL]);
+        Pump::new().poll_session(&handles.sessions, &plane, &session, Instant::now());
+        assert_eq!(
+            handles
+                .sessions
+                .meta(&session)
+                .unwrap()
+                .usage
+                .unwrap()
+                .total_tokens,
+            13
+        );
+        drop(plane);
+        drop(handles);
+        drop(loader);
+
+        let (_loader2, handles2) = scratch.boot();
+        let plane2 = handles2.transcripts.clone().expect("the plane mounted");
+        append(&path, &[RESULT, DONE]);
+        Pump::new().backfill(&handles2.sessions, &plane2);
+        let usage = handles2.sessions.meta(&session).unwrap().usage.unwrap();
+        assert_eq!(usage.total_tokens, 16, "13 restored plus 3 newly read");
+        assert!(
+            (usage.cost_usd.unwrap() - 300e-6).abs() < 1e-12,
+            "{usage:?}"
+        );
     }
 
     #[tokio::test]

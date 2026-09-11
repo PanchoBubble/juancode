@@ -744,6 +744,7 @@ mod sweep {
         }
         fn release_client(&self, _owner: ClientId) {}
         fn on_transcript(&self, _id: &str, _r: &[juancoded_transcripts::TranscriptRecord]) {}
+        fn fold_usage(&self, _id: &str, _r: &[juancoded_transcripts::TranscriptRecord]) {}
         fn flush_all(&self) -> usize {
             0
         }

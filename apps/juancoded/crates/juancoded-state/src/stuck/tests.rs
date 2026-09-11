@@ -723,6 +723,7 @@ impl SessionsApi for Fake {
         unreachable!("the stuck detector notifies; it never kills")
     }
     fn on_transcript(&self, _id: &str, _records: &[TranscriptRecord]) {}
+    fn fold_usage(&self, _id: &str, _records: &[TranscriptRecord]) {}
     fn flush_all(&self) -> usize {
         0
     }

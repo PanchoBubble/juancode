@@ -665,6 +665,8 @@ mod tests {
             cache_write_tokens: 4,
             total_tokens: 10,
             cost_usd: Some(0.5),
+            context_tokens: Some(4),
+            context_window: Some(200_000),
         });
         store.upsert(&m).unwrap();
         assert_eq!(store.get("s1").unwrap().as_ref(), Some(&m));

@@ -6,9 +6,9 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Spec revision: 1.11.0 (protocol v1)
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
-- As of: 2026-09-10
+- As of: 2026-09-11
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, sessionEdit, globalPause, restartFresh, editor, terminal, trackedPrs, spawnModel, spawnPreset, stuck, sessionList, sessionDelete
-- Unmet scenarios: 0 of 36
+- Unmet scenarios: 0 of 37
 
 ## What is not satisfied yet (0)
 
@@ -52,3 +52,4 @@ Nothing: this core passes every scenario in the spec.
 - session-sleep: 3/3 - pausing a session, and the row that says so
 - global-pause: 3/3 - pause everything from somewhere else, and play back exactly that set
 - session-set-meta: 3/3 - a name a person chose outlives the name the CLI keeps painting
+- usage: 3/3 - token usage, cost and context pressure reach the session row

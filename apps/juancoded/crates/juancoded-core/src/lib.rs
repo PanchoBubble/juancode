@@ -13,9 +13,11 @@ pub mod gh;
 pub mod model;
 pub mod pr;
 pub mod preset;
+pub mod pricing;
 pub mod proc;
 pub mod provider;
 pub mod pty;
+pub mod usage;
 pub mod worktree;
 
 pub use activity::{

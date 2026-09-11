@@ -114,6 +114,7 @@ impl SessionsApi for FakeChild {
     /// This fake has no activity detector, and the queue engine it stands in for
     /// classifies busy off `busy` below rather than off any transcript.
     fn on_transcript(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
+    fn fold_usage(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
     fn publish_stuck(&self, _id: &str, _alert: juancoded_state::StuckAlert) {}
 
     fn set_meta(

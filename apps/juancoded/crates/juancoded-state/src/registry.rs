@@ -43,6 +43,7 @@ use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, Se
 use juancoded_core::preset::PresetStore;
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
+use juancoded_core::usage::UsageFold;
 use juancoded_core::worktree;
 use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
@@ -337,6 +338,11 @@ struct LiveSignals {
 
 struct LiveSession {
     meta: Mutex<SessionMeta>,
+    /// What the transcript seam's `Usage` events are folded through. The running
+    /// totals live on `meta.usage` (a durable cursor means a restart resumes rather
+    /// than re-reads), so this holds only what the row cannot: the model of the
+    /// newest request, and whether every request so far had a price.
+    usage: Mutex<UsageFold>,
     /// `None` once the child is gone. The session row outlives its pty.
     pty: Mutex<Option<PtyHandle>>,
     scrollback: Mutex<Ring>,
@@ -487,6 +493,7 @@ impl SessionRegistry {
             sessions.insert(
                 meta.id.clone(),
                 Arc::new(LiveSession {
+                    usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
                     meta: Mutex::new(meta),
                     pty: Mutex::new(None),
                     scrollback: Mutex::new(ring),
@@ -656,6 +663,7 @@ impl SessionRegistry {
         meta.dispatch_id = req.dispatch_id.clone();
 
         let live = Arc::new(LiveSession {
+            usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
             meta: Mutex::new(meta.clone()),
             pty: Mutex::new(None),
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
@@ -760,6 +768,7 @@ impl SessionRegistry {
         meta.cli_session_id = Some(req.cli_session_id.clone());
 
         let live = Arc::new(LiveSession {
+            usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
             meta: Mutex::new(meta.clone()),
             pty: Mutex::new(None),
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
@@ -1824,6 +1833,45 @@ impl SessionRegistry {
         if let Some(armed) = step.armed {
             self.arm_settle(id, &live, armed);
         }
+    }
+
+    /// Fold a transcript batch's token usage onto the session row.
+    ///
+    /// Every batch, including the backlog the first bind reads: a resumed conversation's
+    /// earlier turns are part of what it has spent, and the activity detector's reason
+    /// for skipping that first batch — history must not pulse a session busy — says
+    /// nothing about arithmetic.
+    ///
+    /// An exited session is still folded. Its last turn's records usually arrive on the
+    /// final poll the exit itself triggers, and dropping them would lose the tokens of
+    /// exactly the turn a person is most likely to be looking at.
+    pub fn fold_usage(&self, id: &str, records: &[TranscriptRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let Some(live) = self.get(id) else {
+            return;
+        };
+        let mut fold = live.usage.lock().unwrap_or_else(|e| e.into_inner());
+        let next = {
+            let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+            fold.apply(meta.usage.as_ref(), records)
+        };
+        let Some(next) = next else {
+            return;
+        };
+        drop(fold);
+        // Through `edit_meta` like every other row change, so the persist and the
+        // `sessionMeta` broadcast a client's badge redraws from are the same two lines
+        // a rename goes through. It returns false when the row did not actually move,
+        // which is what keeps a poll that read nothing new off the bus.
+        self.edit_meta(id, &live, |meta| {
+            if meta.usage.as_ref() == Some(&next) {
+                return false;
+            }
+            meta.usage = Some(next);
+            true
+        });
     }
 
     /// Announce a stuck-session advisory for `id`.
