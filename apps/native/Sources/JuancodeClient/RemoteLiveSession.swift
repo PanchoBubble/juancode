@@ -11,6 +11,9 @@ protocol RemoteSessionTransport: AnyObject, Sendable {
     func sendInput(sessionId: String, text: String)
     /// Send a `resize`, returning the seq the matching `resizeAck` will carry.
     func sendResize(sessionId: String, cols: Int, rows: Int) -> Int
+    /// Send an `attach`, which is what joins this connection to a session's byte
+    /// stream. Answered with `attached`; no ack of its own.
+    func sendAttach(sessionId: String, cols: Int, rows: Int)
     func sendKill(sessionId: String)
     /// Ask the core to put a session to sleep: it flags its OWN row dormant and only
     /// then kills the pty. `false` when the connected core does not advertise
@@ -76,6 +79,14 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
     private var deniedGrid = false
     /// `resizeAck.owner` / `gridChange.owner` when the core sends one, else nil.
     private var owner: String?
+    /// Whether this connection has asked the core for this session's byte stream.
+    /// Attachment is per CONNECTION and per session, and only the client that
+    /// CREATED a session is attached to it for free — a session somebody else
+    /// created (an Oracle dispatch) reaches us as a broadcast row with no bytes
+    /// behind it, and stays a black pane until we ask. Set on the way out so a
+    /// resize storm sends one attach, and again on the way in so a create's own
+    /// `attached` counts (juancode-zrxy).
+    private var attachAsked = false
     /// Whether this connection is the owner, resolved against `serverInfo.clientId`.
     private let clientId: String?
 
@@ -177,10 +188,18 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
     /// grid is denied, which is the state the pane actually needs to know about.
     @discardableResult
     func resizeLocal(cols: Int, rows: Int) -> Bool {
-        let denied: Bool = lock.withLock {
+        let (denied, needsAttach): (Bool, Bool) = lock.withLock {
             requested = (cols, rows)
-            return deniedGrid
+            let first = running && !attachAsked
+            if first { attachAsked = true }
+            return (deniedGrid, first)
         }
+        // A mounting pane is the first moment we know we want this session's bytes,
+        // and the only frame that delivers them is `attach`. It is a superset of a
+        // resize — the core resizes to the grid we pass before it answers — but the
+        // resize still goes, so the `resizeAck` path that owns `acked` and grid
+        // arbitration is untouched.
+        if needsAttach { transport.sendAttach(sessionId: id, cols: cols, rows: rows) }
         _ = transport.sendResize(sessionId: id, cols: cols, rows: rows)
         return !denied
     }
@@ -365,6 +384,7 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
             scrollback = trimmed(bytes)
             storedMeta = meta
             running = meta.status == .running
+            attachAsked = true
             return Array(outputListeners.values)
         }
         // A late `attached` is a repaint of everything we know, which is what the

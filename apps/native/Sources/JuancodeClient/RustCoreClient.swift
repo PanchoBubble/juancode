@@ -986,6 +986,15 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         return seq
     }
 
+    func sendAttach(sessionId: String, cols: Int, rows: Int) {
+        // Booked as a probe for the same reason `probe` is: an attach WE initiate to
+        // join a session's byte stream is not the answer to a create or a reactivate
+        // that happens to be in flight, and must not fulfil its waiter.
+        lock.withLock { _ = probing.insert(sessionId) }
+        connection.send(["type": "attach", "sessionId": sessionId,
+                         "cols": cols, "rows": rows])
+    }
+
     func sendKill(sessionId: String) {
         connection.send(["type": "kill", "sessionId": sessionId])
     }

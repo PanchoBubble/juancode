@@ -132,6 +132,48 @@ final class RemoteLiveSessionTests: XCTestCase {
         XCTAssertEqual(session.appliedGrid()?.cols, 100, "a denied resize must not move the applied grid")
     }
 
+    /// Attachment is per connection, and only the client that CREATED a session is
+    /// attached to it for free. A session somebody else created — an Oracle dispatch —
+    /// reaches this client as a broadcast row with no bytes behind it, so the pane
+    /// that mounts for it has to ask. Without the ask it stayed black forever: the
+    /// core gates `output` on an attachment, and an idle CLI never emits the byte the
+    /// booting hint waits for (juancode-zrxy).
+    func testFirstResizeOnAnUnattachedSessionAsksForItsBytes() {
+        let transport = FakeTransport()
+        let session = handle(transport)
+        _ = session.resizeLocal(cols: 100, rows: 30)
+        XCTAssertEqual(transport.attaches.map { "\($0.cols)x\($0.rows)" }, ["100x30"],
+                       "the mounting pane's grid is what we attach at")
+        // The resize still goes: `attach` resizes core-side, but only `resizeAck`
+        // carries the applied grid and the ownership answer.
+        XCTAssertEqual(transport.resizes.map { "\($0.cols)x\($0.rows)" }, ["100x30"])
+
+        _ = session.resizeLocal(cols: 120, rows: 40)
+        _ = session.resizeLocal(cols: 121, rows: 41)
+        XCTAssertEqual(transport.attaches.count, 1, "a drag is not a reason to replay the scrollback")
+        XCTAssertEqual(transport.resizes.count, 3)
+    }
+
+    /// A session THIS client created is answered with `created` + `attached`, so it
+    /// is already on the byte stream and a mounting pane must not ask again.
+    func testAResizeAfterAnAttachedFrameDoesNotAskAgain() {
+        let transport = FakeTransport()
+        let session = handle(transport)
+        session.apply(attachedScrollback: [], meta: meta())
+        _ = session.resizeLocal(cols: 100, rows: 30)
+        XCTAssertTrue(transport.attaches.isEmpty)
+        XCTAssertEqual(transport.resizes.count, 1)
+    }
+
+    /// Nothing to join on a session with no pty: its pane renders the recorded
+    /// replay, and an attach would only invite the core's `replay_exit`.
+    func testAnExitedSessionIsNeverAttachedTo() {
+        let transport = FakeTransport()
+        let session = handle(transport, status: .exited)
+        _ = session.resizeLocal(cols: 100, rows: 30)
+        XCTAssertTrue(transport.attaches.isEmpty)
+    }
+
     func testGridChangeBroadcastTracksOwnership() {
         let transport = FakeTransport()
         let session = handle(transport)
@@ -399,6 +441,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
 
     private var recordedInputs: [String] = []
     private var recordedResizes: [(cols: Int, rows: Int)] = []
+    private var recordedAttaches: [(cols: Int, rows: Int)] = []
     private var recordedKills: [String] = []
     private var recordedSleeps: [String] = []
     private var recordedMetaWrites: [(title: String?, archived: Bool?)] = []
@@ -410,6 +453,7 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
 
     var inputs: [String] { lock.withLock { recordedInputs } }
     var resizes: [(cols: Int, rows: Int)] { lock.withLock { recordedResizes } }
+    var attaches: [(cols: Int, rows: Int)] { lock.withLock { recordedAttaches } }
     var kills: [String] { lock.withLock { recordedKills } }
     var sleeps: [String] { lock.withLock { recordedSleeps } }
     var metaWrites: [(title: String?, archived: Bool?)] { lock.withLock { recordedMetaWrites } }
@@ -423,6 +467,10 @@ final class FakeTransport: RemoteSessionTransport, @unchecked Sendable {
 
     func sendResize(sessionId: String, cols: Int, rows: Int) -> Int {
         lock.withLock { recordedResizes.append((cols, rows)); return recordedResizes.count }
+    }
+
+    func sendAttach(sessionId: String, cols: Int, rows: Int) {
+        lock.withLock { recordedAttaches.append((cols, rows)) }
     }
 
     func sendKill(sessionId: String) {
