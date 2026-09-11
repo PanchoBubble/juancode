@@ -1981,6 +1981,9 @@ private struct FolderPrs: View {
         }
     }
 
+    /// Fixed popover height: the header plus room for ~8 rows of list.
+    private static let popoverHeight: CGFloat = 360
+
     private var popover: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Search + viewer filters.
@@ -2003,41 +2006,42 @@ private struct FolderPrs: View {
             }
             .padding(8)
             Divider()
-            if !loaded {
-                // First open of this folder's PRs: the `gh` call starts on the click
-                // that opened this popover.
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading pull requests…")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            } else if unavailable {
-                Text(result?.error ?? "PRs unavailable")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            } else if list.isEmpty {
-                Text(query.isEmpty && !mineOnly && !assignedOnly ? "No open PRs" : "No matching PRs")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(list, id: \.number) { pr in
-                            PrRow(pr: pr, cwd: cwd) { showing = false }
-                            Divider()
+            // Every state fills the same fixed-height body. An intrinsically sized
+            // popover can only ever shrink: NSPopover sizes itself once, and a
+            // ScrollView accepts whatever height it is left with, so a filter that
+            // empties the list shrinks the window and the list coming back never
+            // grows it again (only a close/reopen did).
+            Group {
+                if !loaded {
+                    // First open of this folder's PRs: the `gh` call starts on the
+                    // click that opened this popover.
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading pull requests…")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                } else if unavailable {
+                    Text(result?.error ?? "PRs unavailable")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else if list.isEmpty {
+                    Text(query.isEmpty && !mineOnly && !assignedOnly ? "No open PRs" : "No matching PRs")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(list, id: \.number) { pr in
+                                PrRow(pr: pr, cwd: cwd) { showing = false }
+                                Divider()
+                            }
                         }
                     }
                 }
-                .frame(maxHeight: 320)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 320)
+        .frame(width: 320, height: Self.popoverHeight)
         // Instant filtering happens over the cached set above; these fire a
         // debounced, repo-scoped `gh` re-query in the background so matches beyond
         // the newest-50 firehose (e.g. your own older PRs) fold into the view.
