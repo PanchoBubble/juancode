@@ -211,6 +211,21 @@ public struct PullRequest: Codable, Sendable, Equatable {
     /// Logins (users) and slugs (teams) with a review requested on this PR — powers
     /// "your review is requested" triage.
     public var reviewRequests: [String]
+    /// Size of the PR's diff against its base, as gh reports it. Optional so a frame
+    /// from a client that predates these fields still decodes (the `trackPr` path
+    /// carries a whole `PullRequest` over the wire). Read `diffCounts`.
+    public var additions: Int?
+    public var deletions: Int?
+    public var changedFiles: Int?
+
+    /// The PR's diff size for the shared files/+/− badge, or nil when gh never
+    /// reported it (an older client's frame, or a PR GitHub hasn't sized yet).
+    public var diffCounts: DiffCounts? {
+        guard additions != nil || deletions != nil || changedFiles != nil else { return nil }
+        let counts = DiffCounts(files: changedFiles ?? 0, additions: additions ?? 0,
+                                deletions: deletions ?? 0)
+        return counts.isEmpty ? nil : counts
+    }
 
     /// The typed review verdict, or nil when absent/unrecognised.
     public var reviewDecisionKind: PrReviewDecision? {
@@ -221,13 +236,16 @@ public struct PullRequest: Codable, Sendable, Equatable {
                 draft: Bool, checks: PrChecks, author: String, assignees: [String] = [],
                 checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0,
                 createdAt: String? = nil, reviewDecision: String? = nil,
-                reviewRequests: [String] = []) {
+                reviewRequests: [String] = [], additions: Int? = nil,
+                deletions: Int? = nil, changedFiles: Int? = nil) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
         self.checkCount = checkCount; self.passedCount = passedCount
         self.unresolvedComments = unresolvedComments
         self.createdAt = createdAt; self.reviewDecision = reviewDecision
         self.reviewRequests = reviewRequests
+        self.additions = additions; self.deletions = deletions
+        self.changedFiles = changedFiles
     }
 }
 

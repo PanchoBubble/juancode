@@ -85,3 +85,43 @@ import Testing
                 == "1 file · +0 −0")
     }
 }
+
+/// The badge's number formatting (`compactCount`) and the PR-side `DiffCounts`
+/// rollup — one label renders both the working tree and a pull request, so the two
+/// have to agree on what "1.2k" means and on when there's nothing to show.
+@Suite struct CompactCountTests {
+    @Test func smallNumbersAreVerbatim() {
+        #expect(compactCount(0) == "0")
+        #expect(compactCount(7) == "7")
+        #expect(compactCount(999) == "999")
+    }
+
+    @Test func thousandsGetOneDecimalUntilTen() {
+        #expect(compactCount(1000) == "1k")
+        #expect(compactCount(1200) == "1.2k")
+        #expect(compactCount(9949) == "9.9k")
+        #expect(compactCount(9950) == "10k")
+        #expect(compactCount(12_400) == "12k")
+    }
+
+    @Test func millionsTakeOverBeforeAThousandK() {
+        #expect(compactCount(999_499) == "999k")
+        #expect(compactCount(999_500) == "1M")
+        #expect(compactCount(3_400_000) == "3.4M")
+    }
+
+    @Test func negativesKeepTheirSign() {
+        #expect(compactCount(-42) == "-42")
+        #expect(compactCount(-1500) == "-1.5k")
+    }
+
+    @Test func changeStatExposesItsCounts() {
+        let stat = ChangeStat(files: 3, additions: 120, deletions: 44, signature: "x")
+        #expect(stat.counts == DiffCounts(files: 3, additions: 120, deletions: 44))
+    }
+
+    @Test func allZeroCountsReadAsEmpty() {
+        #expect(DiffCounts(files: 0, additions: 0, deletions: 0).isEmpty)
+        #expect(!DiffCounts(files: 0, additions: 2, deletions: 0).isEmpty)
+    }
+}

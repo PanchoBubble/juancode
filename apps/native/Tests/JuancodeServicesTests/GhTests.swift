@@ -62,6 +62,40 @@ final class RollupChecksTests: XCTestCase {
     }
 }
 
+final class PrDiffSizeTests: XCTestCase {
+    func testCarriesGhsDiffSizeOntoTheWireShape() {
+        let out = parsePrs([
+            RawPr(number: 42, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: nil, author: nil,
+                  additions: 1200, deletions: 44, changedFiles: 9),
+        ])
+        XCTAssertEqual(out.first?.diffCounts,
+                       DiffCounts(files: 9, additions: 1200, deletions: 44))
+    }
+
+    func testNoDiffCountsWhenGhDidntReportThem() {
+        let out = parsePrs([
+            RawPr(number: 42, title: "t", url: "u", headRefName: "b", isDraft: false,
+                  statusCheckRollup: nil, author: nil),
+        ])
+        XCTAssertNil(out.first?.diffCounts,
+                     "an unsized PR must leave the badge hidden, not show +0 −0")
+    }
+
+    /// A client that predates the diff fields still sends a `PullRequest` over the
+    /// `trackPr` frame — decoding it must not fail.
+    func testDecodesAPayloadWithoutTheDiffFields() throws {
+        let json = """
+        {"number":7,"title":"t","url":"u","branch":"b","draft":false,"checks":"none",
+         "checkCount":0,"passedCount":0,"unresolvedComments":0,"author":"octocat",
+         "assignees":[],"reviewRequests":[]}
+        """
+        let pr = try JSONDecoder().decode(PullRequest.self, from: Data(json.utf8))
+        XCTAssertEqual(pr.number, 7)
+        XCTAssertNil(pr.diffCounts)
+    }
+}
+
 final class ParsePrsTests: XCTestCase {
     func testMapsGhFieldsOntoTheWireShapeAndRollsUpChecks() {
         let out = parsePrs([

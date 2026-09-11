@@ -1269,7 +1269,13 @@ struct SidebarView: View {
             // A minimal hairline between session rows for visual separation.
             .listRowSeparator(.visible)
             .listRowSeparatorTint(Color.appHairline(0.12))
-            .onAppear { if meta.worktreePath != nil { model.loadSessionPrContext(meta) } }
+            // Also for a tracked-PR row in the main checkout: its capsule now carries
+            // the PR's diff size, which lives on the cached PR list.
+            .onAppear {
+                if meta.worktreePath != nil || model.trackedPr(forSession: meta.id) != nil {
+                    model.loadSessionPrContext(meta)
+                }
+            }
             .contextMenu { rowContextMenu(meta) }
         // Pointing-hand + hover fill for the clickable (selectable) rows; external
         // rows aren't selectable, so they keep the default cursor and no hover fill.
@@ -1300,7 +1306,13 @@ struct SidebarView: View {
                     if model.showingGitHub { model.showingGitHub = false }
                 }
             }
-            .onAppear { if meta.worktreePath != nil { model.loadSessionPrContext(meta) } }
+            // Also for a tracked-PR row in the main checkout: its capsule now carries
+            // the PR's diff size, which lives on the cached PR list.
+            .onAppear {
+                if meta.worktreePath != nil || model.trackedPr(forSession: meta.id) != nil {
+                    model.loadSessionPrContext(meta)
+                }
+            }
             .contextMenu { rowContextMenu(meta) }
         // Selection accent + pointing-hand + hover fill for the clickable rows;
         // external rows can't be selected by tap, so they keep the default cursor
@@ -1498,6 +1510,7 @@ private struct SessionRowHost: View {
                    atRisk: !external && model.workAtRisk(forSession: meta) != nil,
                    worktreeBranch: meta.worktreePath != nil ? model.folderGitState(meta.cwd)?.branch : nil,
                    changeBadge: external ? nil : model.changeBadge(meta.id),
+                   prStat: external ? nil : model.prDiffCounts(forSession: meta),
                    onOpenChanges: external ? nil : { model.openChanges(for: meta.id) },
                    onResume: external ? { model.importExternalSession(meta.id) } : nil,
                    onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
@@ -2422,6 +2435,10 @@ struct SessionRow: View {
     /// last viewed — a compact "N files · +X −Y" review badge. Nil when clean /
     /// already reviewed.
     var changeBadge: ChangeStat? = nil
+    /// Size of the diff on this session's PR (tracked or the branch's own), when gh
+    /// has reported it — the same files/+/− badge the working tree gets, so a row
+    /// says how big the shipped change is, not just that one exists.
+    var prStat: DiffCounts? = nil
     /// Opens this session's Changes panel on the working tree (the badge's click target).
     var onOpenChanges: (() -> Void)? = nil
     /// Resume action for an external row; the row is otherwise non-interactive.
@@ -2589,13 +2606,13 @@ struct SessionRow: View {
     /// than the List's own row selection.
     private func changeBadgeCapsule(_ stat: ChangeStat, onOpen: @escaping () -> Void) -> some View {
         Button(action: onOpen) {
-            HStack(spacing: 3) {
-                Image(systemName: "doc.text.magnifyingglass").font(.system(size: 8))
-                Text(stat.summary).font(.system(size: 10, weight: .medium).monospacedDigit())
+            HStack(spacing: 4) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 8)).foregroundStyle(Color.accentColor)
+                DiffStatLabel(counts: stat.counts)
             }
             .padding(.horizontal, 5).padding(.vertical, 1)
             .background(Color.accentColor.opacity(0.18))
-            .foregroundStyle(Color.accentColor)
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -2613,13 +2630,16 @@ struct SessionRow: View {
         return Button {
             onOpenTrackedPr?(t)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
-                Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+            HStack(spacing: 4) {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                    Text("#\(t.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+                }
+                .foregroundStyle(trackColor(t.state))
+                if let prStat { DiffStatLabel(counts: prStat, size: 9) }
             }
             .padding(.horizontal, 5).padding(.vertical, 1)
             .background(trackColor(t.state).opacity(0.2))
-            .foregroundStyle(trackColor(t.state))
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -2634,12 +2654,15 @@ struct SessionRow: View {
         Button {
             onOpenBranchPr?()
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
-                Text("#\(pr.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+            HStack(spacing: 4) {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                    Text("#\(pr.number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+                }
+                .foregroundStyle(.secondary)
+                if let counts = prStat ?? pr.diffCounts { DiffStatLabel(counts: counts, size: 9) }
             }
             .padding(.horizontal, 5).padding(.vertical, 1)
-            .foregroundStyle(.secondary)
             .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 0.5))
             .clipShape(Capsule())
         }
@@ -3153,7 +3176,7 @@ struct SessionContainer: View {
     @ViewBuilder
     private var changeReviewBanner: some View {
         if let stat = model.changeBadge(meta.id) {
-            ChangeReviewBanner(summary: stat.summary) { model.openChanges(for: meta.id) }
+            ChangeReviewBanner(counts: stat.counts) { model.openChanges(for: meta.id) }
                 .padding(10)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }

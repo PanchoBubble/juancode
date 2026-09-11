@@ -1,3 +1,4 @@
+import JuancodeCore
 import SwiftUI
 
 /// An unobtrusive "review the agent's changes" nudge floated over the bottom of a
@@ -6,7 +7,7 @@ import SwiftUI
 /// the working tree. It floats as an overlay so it never reflows the pty grid — the
 /// terminal render stays intact.
 struct ChangeReviewBanner: View {
-    let summary: String
+    let counts: DiffCounts
     let onOpen: () -> Void
 
     var body: some View {
@@ -14,8 +15,8 @@ struct ChangeReviewBanner: View {
             HStack(spacing: 6) {
                 Image(systemName: "doc.text.magnifyingglass")
                     .font(.system(size: 11, weight: .semibold))
-                Text(summary)
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+                DiffStatLabel(counts: counts, size: 11, weight: .semibold)
                 Text("Review")
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 6).padding(.vertical, 1)

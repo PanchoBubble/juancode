@@ -25,6 +25,43 @@ public struct ChangeStat: Sendable, Equatable {
     public var summary: String {
         "\(files) file\(files == 1 ? "" : "s") · +\(additions) −\(deletions)"
     }
+
+    /// The three numbers alone, for the shared files/+/− badge.
+    public var counts: DiffCounts {
+        DiffCounts(files: files, additions: additions, deletions: deletions)
+    }
+}
+
+/// A files/additions/deletions triple with no provenance attached — what both the
+/// working tree (`ChangeStat`) and a pull request report, so one badge can render
+/// either.
+public struct DiffCounts: Sendable, Equatable {
+    public let files: Int
+    public let additions: Int
+    public let deletions: Int
+
+    public init(files: Int, additions: Int, deletions: Int) {
+        self.files = files; self.additions = additions; self.deletions = deletions
+    }
+
+    public var isEmpty: Bool { files == 0 && additions == 0 && deletions == 0 }
+}
+
+/// A count shortened to fit a badge: `938`, `1.2k`, `12k`, `3.4M`. One decimal
+/// below ten of a unit, whole numbers above — a glance, not a ledger.
+public func compactCount(_ n: Int) -> String {
+    let magnitude = abs(n)
+    if magnitude < 1000 { return "\(n)" }
+    let sign = n < 0 ? "-" : ""
+    func scaled(_ divisor: Double, _ suffix: String) -> String {
+        let v = Double(magnitude) / divisor
+        // 9.95 rather than 10: anything that would print as "10.0" belongs in the
+        // whole-number form.
+        let text = v < 9.95 ? String(format: "%.1f", v) : String(format: "%.0f", v)
+        return sign + (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + suffix
+    }
+    // 999_500 rounds to 1000k, which is a megabyte-shaped lie — hand it to M.
+    return magnitude < 999_500 ? scaled(1000, "k") : scaled(1_000_000, "M")
 }
 
 /// A deterministic fingerprint of a `git status --porcelain` name-status list.

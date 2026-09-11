@@ -25,10 +25,11 @@ public let ghPrListLimit = MAX_PRS
 /// The `gh pr list --json` fields we request. `assignees` powers the native
 /// "Assigned to me" filter (each element is `{ login }`); `createdAt`,
 /// `reviewDecision` and `reviewRequests` drive the row's age + review chips and the
-/// "needs you" triage group.
+/// "needs you" triage group; `additions`/`deletions`/`changedFiles` size the diff
+/// for the row's PR badge, so a shipped PR reads like the working tree does.
 private let FIELDS = """
 number,title,url,headRefName,isDraft,statusCheckRollup,author,assignees,\
-createdAt,reviewDecision,reviewRequests
+createdAt,reviewDecision,reviewRequests,additions,deletions,changedFiles
 """
 
 /// Resolve the `gh` binary like the user's terminal would, honouring the
@@ -61,6 +62,9 @@ struct RawPr: Decodable {
     var createdAt: String? = nil
     var reviewDecision: String? = nil
     var reviewRequests: [RawReviewRequest]? = nil
+    var additions: Int? = nil
+    var deletions: Int? = nil
+    var changedFiles: Int? = nil
 }
 
 struct RawPrAuthor: Decodable {
@@ -138,7 +142,8 @@ func parsePrs(_ raw: [RawPr]) -> [PullRequest] {
             passedCount: countPassedChecks(p.statusCheckRollup),
             createdAt: p.createdAt,
             reviewDecision: p.reviewDecision,
-            reviewRequests: (p.reviewRequests ?? []).compactMap(\.handle))
+            reviewRequests: (p.reviewRequests ?? []).compactMap(\.handle),
+            additions: p.additions, deletions: p.deletions, changedFiles: p.changedFiles)
     }
 }
 

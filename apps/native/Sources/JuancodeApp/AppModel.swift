@@ -2189,6 +2189,26 @@ final class AppModel {
         return branchPrs[branchPrKey(cwd: root, branch: branch)]?.pr
     }
 
+    /// Size of the diff on the PR attached to this session — the tracked one if
+    /// there is one, else the branch's own open PR — as `gh` reported it on the
+    /// cached list. Nil when no PR is attached, the list hasn't landed, or gh
+    /// didn't size it. Lets a row show a shipped change the same way it shows the
+    /// working tree's.
+    func prDiffCounts(forSession meta: SessionMeta) -> DiffCounts? {
+        let root = repoRoot(forSession: meta)
+        if let t = trackedPr(forSession: meta.id) {
+            let lists = [prs(root), prs(t.cwd)].compactMap { $0 }
+            for list in lists {
+                if let hit = list.prs.first(where: { $0.number == t.number }) {
+                    return hit.diffCounts
+                }
+            }
+            // Tracked but not in any loaded list — fall through to the branch lookup,
+            // which caches a direct per-branch `gh` answer.
+        }
+        return openPr(forSession: meta)?.diffCounts
+    }
+
     private func branchPrKey(cwd: String, branch: String) -> String { "\(cwd)\n\(branch)" }
 
     /// Load the git state + PR list a session header needs to decide whether its
