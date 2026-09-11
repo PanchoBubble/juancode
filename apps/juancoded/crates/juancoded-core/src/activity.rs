@@ -567,6 +567,17 @@ fn select_cursor(s: &str) -> bool {
     false
 }
 
+/// End of a `window`-byte slice starting at `start`, walked back to a char
+/// boundary. Screens carry box drawing and other multi-byte text, and a window
+/// that lands mid-character panics the whole activity pump.
+fn window_end(line: &str, start: usize, window: usize) -> usize {
+    let mut end = (start + window).min(line.len());
+    while end > start && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// `word` followed by a `?` within `window` characters, on the same line. The
 /// distance bound is what stops an unrelated question mark further down the screen
 /// from turning any mention of the word into a prompt.
@@ -576,7 +587,7 @@ fn near_question(s: &str, word: &str, window: usize) -> bool {
         let mut from = 0;
         while let Some(at) = line[from..].find(word) {
             let start = from + at + word.len();
-            let end = (start + window).min(line.len());
+            let end = window_end(line, start, window);
             if line[start..end].contains('?') {
                 return true;
             }
@@ -594,7 +605,7 @@ fn working_footer(screen: &str) -> bool {
         let mut from = 0;
         while let Some(at) = line[from..].find("esc") {
             let start = from + at + 3;
-            let end = (start + 40).min(line.len());
+            let end = window_end(line, start, 40);
             if line[start..end].contains("interrupt") {
                 return true;
             }
@@ -819,6 +830,18 @@ mod tests {
         assert!(!working_footer(&far));
         assert!(working_footer("esc to interrupt"));
         assert!(working_footer("ESCAPE to interrupt"));
+    }
+
+    #[test]
+    fn a_window_that_lands_mid_character_does_not_panic() {
+        // A markdown table the agent printed: "descriptions" carries an "esc", and
+        // 40 bytes on lands inside a box-drawing bar.
+        let table = "\u{2502} \u{2264} 700px \u{2502} descriptions hidden, icon 32px, title 14px \u{2502}";
+        assert!(!working_footer(table));
+        assert!(!near_question(table, "want", 40));
+        assert!(working_footer(
+            "\u{2502} descriptions \u{2502} esc to interrupt \u{2502}"
+        ));
     }
 
     #[test]
