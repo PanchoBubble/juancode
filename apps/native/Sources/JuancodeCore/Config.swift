@@ -232,6 +232,13 @@ public extension Config {
     /// daemon's own store: `juancoded` keeps that at
     /// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`)
     /// and is its only writer.
+    ///
+    /// One file per core means switching cores shows a different, shorter history —
+    /// each core only ever wrote its own. `scripts/backfill-rust-sessions.mjs` unions
+    /// the Swift history across (dry run by default, and it refuses to write while
+    /// anything holds the stores open). Merging the files is NOT the fix: the daemon
+    /// is a separate process that outlives the app, and two writers on one sqlite
+    /// file is a corruption risk.
     static func databasePath(for backend: CoreBackend) -> String {
         let name = backend == .swift ? "juancode.db" : "juancode-rust.db"
         return (dataDir as NSString).appendingPathComponent(name)
