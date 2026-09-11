@@ -1,20 +1,43 @@
 import Foundation
 import JuancodeCore
 
+/// Where an ephemeral pty's keystrokes go and who ends it.
+///
+/// Two things are one of these. A `PtyProcess` in this process, which is what the
+/// Swift core opens. And, on a core that lives in another process, a handle that
+/// writes the same three operations onto the wire under the id the daemon gave the
+/// pty — the pane cannot tell them apart, which is the point: `EditorOverlay`, the
+/// bottom terminal panel and the live surfaces are written against the pty, not
+/// against where it runs.
+public protocol EphemeralPtyBackend: AnyObject {
+    func write(_ bytes: [UInt8])
+    @discardableResult func resize(cols: Int, rows: Int) -> Bool
+    func kill()
+}
+
+extension PtyProcess: EphemeralPtyBackend {
+    public func kill() { terminate() }
+}
+
 /// An ephemeral pty: the user's real editor on one file, or a plain interactive
 /// shell. Mirrors `editor.ts` (`EditorPty`) + `terminal.ts` (`ShellPty`). Unlike
 /// a `Session` it is never persisted, titled, or resumed — it lives only while
 /// its pane is open, so the editor/shell loads the user's genuine config + env
 /// (inherited verbatim via `PtyProcess`'s `forkpty`+`execvp`) exactly as a normal
 /// terminal would. Output is fanned out as raw bytes, like `Session`.
+///
+/// The listener fan-out, the scrollback and the one-shot exit are here rather than
+/// in the backend because they are the same whether the child is ours or the
+/// daemon's: a remote pty differs only in where `write` lands and where the bytes
+/// come back from, which is what `receive` and `finish` are for.
 public final class EphemeralPty: @unchecked Sendable {
     public typealias OutputListener = @Sendable (_ bytes: [UInt8]) -> Void
     public typealias ExitListener = @Sendable (_ exitCode: Int?) -> Void
 
-    public let id = UUID().uuidString.lowercased()
+    public let id: String
 
     private let lock = NSLock()
-    private var proc: PtyProcess?
+    private var backend: (any EphemeralPtyBackend)?
     private var outputListeners: [Int: OutputListener] = [:]
     private var exitListeners: [Int: ExitListener] = [:]
     private var nextToken = 0
@@ -26,12 +49,36 @@ public final class EphemeralPty: @unchecked Sendable {
 
     /// Spawn `executable` with `args` in `cwd`. Returns nil if `forkpty` fails.
     init?(executable: String, args: [String], cwd: String, cols: Int, rows: Int) {
+        self.id = UUID().uuidString.lowercased()
         guard let proc = PtyProcess(
             executable: executable, args: args, cwd: cwd, cols: cols, rows: rows,
-            onData: { [weak self] bytes in self?.emitOutput(bytes) },
-            onExit: { [weak self] code in self?.handleExit(code) }
+            onData: { [weak self] bytes in self?.receive(bytes) },
+            onExit: { [weak self] code in self?.finish(exitCode: Int(code)) }
         ) else { return nil }
-        self.proc = proc
+        self.backend = proc
+    }
+
+    /// A pty whose child belongs to something else — a daemon this app is a client
+    /// of. `id` is the handle that names it to whoever owns it, and the owner is
+    /// responsible for calling `receive` with its bytes and `finish` when it ends.
+    public init(id: String, backend: any EphemeralPtyBackend) {
+        self.id = id
+        self.backend = backend
+    }
+
+    /// Bytes the pty produced, from whichever side read them.
+    public func receive(_ bytes: [UInt8]) { emitOutput(bytes) }
+
+    /// The pty is over. Idempotent, and deliberately: a remote pty can hear its own
+    /// `exit` frame and then have the socket drop under it, and a pane told twice
+    /// that it closed would tear itself down twice.
+    public func finish(exitCode: Int?) {
+        let listeners: [ExitListener] = lock.withLock {
+            guard alive else { return [] }
+            alive = false
+            return Array(exitListeners.values)
+        }
+        for l in listeners { l(exitCode) }
     }
 
     private func emitOutput(_ bytes: [UInt8]) {
@@ -42,13 +89,8 @@ public final class EphemeralPty: @unchecked Sendable {
         for l in listeners { l(bytes) }
     }
 
-    private func handleExit(_ code: Int32) {
-        lock.withLock { alive = false }
-        for l in lock.withLock({ Array(exitListeners.values) }) { l(Int(code)) }
-    }
-
     public func write(_ bytes: [UInt8]) {
-        if lock.withLock({ alive }) { proc?.write(bytes) }
+        if lock.withLock({ alive }) { backend?.write(bytes) }
     }
 
     public func write(_ text: String) { write(Array(text.utf8)) }
@@ -57,11 +99,11 @@ public final class EphemeralPty: @unchecked Sendable {
     @discardableResult
     public func resize(cols: Int, rows: Int) -> Bool {
         guard cols > 0, rows > 0, lock.withLock({ alive }) else { return false }
-        return proc?.resize(cols: cols, rows: rows) ?? false
+        return backend?.resize(cols: cols, rows: rows) ?? false
     }
 
     public func kill() {
-        if lock.withLock({ alive }) { proc?.terminate() }
+        if lock.withLock({ alive }) { backend?.kill() }
     }
 
     /// Subscribe to output bytes. With `replay: true` (default) the current

@@ -13,11 +13,10 @@ import JuancodeServices
 /// **It never pretends.** The daemon advertises what it implements in
 /// `serverInfo.capabilities` — the authoritative list is `CAPABILITIES` in
 /// `juancoded-server/src/wire.rs`, and this client reads the one the connected core
-/// actually sent rather than a copy of it. `editor` and `terminal` are the notable
-/// absences today. Every member backed by a capability the connected core lacks either
-/// throws `CoreCapabilityError` (so a caller that got past the UI gate is a visible
-/// bug) or answers empty, and the UI reads the same list to grey the affordance out
-/// with the reason. Nothing here silently succeeds.
+/// actually sent rather than a copy of it. Every member backed by a capability the
+/// connected core lacks either throws `CoreCapabilityError` (so a caller that got past
+/// the UI gate is a visible bug) or answers empty, and the UI reads the same list to
+/// grey the affordance out with the reason. Nothing here silently succeeds.
 ///
 /// **The mirror is a cache of the core's store.** The daemon owns its own SQLite at
 /// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`) and is
@@ -40,6 +39,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     private let connection: WireConnection
     private let mirror: GRDBStore
     private let activityLog: SessionActivityLog
+    /// The editor and shell panes this connection has open in the daemon. Not
+    /// sessions: no row, no mirror, no `listSessions` — they live exactly as long as
+    /// the pane that asked for them, or as long as the socket, whichever ends first.
+    private let ephemeral: RemoteEphemeralPtys
 
     private let lock = NSLock()
     private var handles: [String: RemoteLiveSession] = [:]
@@ -162,6 +165,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             url: url,
             onFrame: { [box] frame in box.value?.handle(frame: frame) },
             onConnectionChange: { [box] up, reason in box.value?.connectionChanged(up: up, reason: reason) })
+        let conn = self.connection
+        self.ephemeral = RemoteEphemeralPtys(send: { conn.send($0) })
         box.value = self
         let landed = try connection.connectAndWaitForHandshake(
             timeout: timeout, expectedVersion: WireProtocol.version)
@@ -741,12 +746,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     // MARK: - Ephemeral ptys (capabilities: editor, terminal)
 
+    /// The pane is handed back before the daemon has forked anything: see
+    /// `RemoteEphemeralPty` for why an open cannot be waited on here.
     public func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty {
-        throw CoreCapabilityError(.editor, backend: backendName)
+        guard supports(.editor) else { throw CoreCapabilityError(.editor, backend: backendName) }
+        return ephemeral.openEditor(cwd: cwd, file: file, cols: cols, rows: rows)
     }
 
     public func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty {
-        throw CoreCapabilityError(.terminal, backend: backendName)
+        guard supports(.terminal) else { throw CoreCapabilityError(.terminal, backend: backendName) }
+        return ephemeral.openTerminal(cwd: cwd, cols: cols, rows: rows)
     }
 
     // MARK: - Tracked PRs (capability: trackedPrs)
@@ -1052,7 +1061,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "output":
             guard let id = sessionId, let data = body["data"] as? String else { return }
-            handleFor(id)?.apply(output: Array(data.utf8))
+            // An ephemeral pane's bytes arrive on this frame under the pty's own id,
+            // which is not a session id and has no handle. Routed first, because the
+            // session lookup below would simply drop them.
+            let bytes = Array(data.utf8)
+            if ephemeral.output(id, bytes: bytes) { return }
+            handleFor(id)?.apply(output: bytes)
 
         case "activity":
             guard let id = sessionId,
@@ -1070,11 +1084,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "exit":
             guard let id = sessionId else { return }
+            let code = body["exitCode"] as? Int
+            if ephemeral.exited(id, code: code) { return }
             // Nothing more will be said about a seed for a session that is gone: the
             // daemon reports an exit during a delivery as the delivery's own failure,
             // which has already been routed by the time this arrives.
             lock.withLock { seedFailureReporters[id] = nil }
-            let code = body["exitCode"] as? Int
             if let handle = handleFor(id) {
                 handle.apply(exitCode: code)
             } else if var row = mirror.get(id) {
@@ -1122,6 +1137,18 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "error":
             let message = body["message"] as? String ?? "unknown core error"
+            // A refused open is the one error frame that names nothing at all: no
+            // session, and no requestId either, because the daemon answers a failed
+            // open before it has anything to call the pty. The message is what says
+            // which pane asked, and the pending open it belongs to is the oldest one.
+            if sessionId == nil, message.hasPrefix("Failed to open terminal") {
+                ephemeral.failOldestTerminal(reason: message)
+                return
+            }
+            if sessionId == nil, message.hasPrefix("Failed to open editor") {
+                ephemeral.failOldestEditor(reason: message)
+                return
+            }
             // A seed the daemon could not deliver is reported as an error frame for
             // that session, arriving long after the create it belongs to was acked. It
             // is nobody's answer, so it must reach the session's own reporter rather
@@ -1229,7 +1256,19 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             for w in waiters { w.arrived() }
             for (write, item) in settled { write.queued(item) }
 
-        case "inputAck", "screen", "editorReady", "terminalReady":
+        case "editorReady":
+            guard let id = body["editorId"] as? String else { return }
+            ephemeral.bindEditor(editorId: id)
+
+        case "terminalReady":
+            // Correlated on the requestId this client made up, never on arrival
+            // order: a tab strip can have three opens in flight and the ids come back
+            // in whatever order the daemon forked them.
+            guard let id = body["terminalId"] as? String,
+                  let requestId = body["requestId"] as? String else { return }
+            ephemeral.bindTerminal(requestId: requestId, terminalId: id)
+
+        case "inputAck", "screen":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
             break
@@ -1286,6 +1325,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             for id in queues { ensureQueueSubscription(id) }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
+            // The daemon's editor and shell ptys belong to the connection and die with
+            // it, so every open pane is already over. Told now rather than left
+            // painting a shell that will never answer another keystroke — and told
+            // before a reconnect, whose ids are a different id space.
+            ephemeral.closeAll(reason: reason)
             // Every queue write in flight fails now rather than waiting out its budget:
             // the socket that would have carried the confirmation is gone, so the write
             // is unconfirmable and the caller has to be told while the user is still

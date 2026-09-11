@@ -161,6 +161,35 @@ final class RustCoreLiveTests: XCTestCase {
         XCTAssertNotNil(core.storedScrollback(session.id))
     }
 
+    /// The bottom terminal panel, end to end against the daemon: a shell the desktop
+    /// does not own, driven over the frames a session uses, with the pty handed back
+    /// before the daemon has forked anything.
+    ///
+    /// The grid and the marker are written IMMEDIATELY, before `terminalReady` can
+    /// possibly have landed, because that is what a pane does — the held-then-flushed
+    /// path is the normal one here, not an edge case.
+    func testAShellPaneIsOpenedDrivenAndKilledAgainstTheDaemon() throws {
+        try XCTSkipUnless(core.supports(.terminal), "this daemon has no terminal capability")
+        let pty = try core.openTerminalPty(cwd: NSTemporaryDirectory(), cols: 80, rows: 24)
+        let marker = "juancode-vbs4-\(UUID().uuidString.prefix(8))"
+
+        // The pty's own echo is the proof both directions work: the bytes reached a
+        // real tty in the daemon and came back under the id it named.
+        let echoed = expectation(description: "the pty sent our marker back")
+        let cancel = pty.onOutput(replay: false) { bytes in
+            if String(decoding: bytes, as: UTF8.self).contains(marker) { echoed.fulfill() }
+        }
+        XCTAssertTrue(pty.resize(cols: 100, rows: 30))
+        pty.write("echo \(marker)\r")
+        wait(for: [echoed], timeout: 15)
+        cancel()
+
+        let exited = expectation(description: "the shell exited")
+        pty.onExit { _ in exited.fulfill() }
+        pty.kill()
+        wait(for: [exited], timeout: 15)
+    }
+
     /// A second client attaching to the same session is what grid arbitration is
     /// for, and on a `gridOwner` core the app can name who holds it.
     func testGridOwnershipIsVisibleWhenTheCoreAdvertisesIt() throws {
