@@ -160,6 +160,16 @@ public struct AppIdentity: Sendable, Equatable {
     /// `JUANCODE_SESSIONS_PER_PROJECT` in this process's environment, nil when unset.
     public let sessionsPerProject: Int?
 
+    /// The cap this launch would enforce: the environment when it says something,
+    /// and otherwise the default both cores share — 0, keep everything. Spelled here
+    /// rather than read from `Config` so the comparison stays a pure value type, and
+    /// kept as a named constant so the day the default moves, it moves in one place.
+    public static let defaultSessionsPerProject = 0
+
+    public var effectiveSessionsPerProject: Int {
+        sessionsPerProject ?? Self.defaultSessionsPerProject
+    }
+
     public init(launchedAt: Date, buildId: String?, sessionsPerProject: Int?) {
         self.launchedAt = launchedAt
         self.buildId = buildId
@@ -270,11 +280,21 @@ public extension DaemonIdentity {
                     + "`scripts/dev-daemon.sh status` says who owns it."))
         }
 
-        if let mine = app.sessionsPerProject, let theirs = sessionsPerProject, mine != theirs {
+        // An unset variable is not "no opinion": it is the default, and the default
+        // keeps everything. So the comparison is against the cap this launch would
+        // enforce, not only against one somebody typed — a daemon started before the
+        // default changed is still pruning, and saying nothing lets the app present
+        // its own (unlimited) default as if it applied to the rows on screen.
+        if let theirs = sessionsPerProject, theirs != app.effectiveSessionsPerProject {
+            let mine = app.effectiveSessionsPerProject
+            let source = app.sessionsPerProject == nil
+                ? "This app was launched with no JUANCODE_SESSIONS_PER_PROJECT, which means "
+                    + "\(describe(mine)), but "
+                : "This app was launched with JUANCODE_SESSIONS_PER_PROJECT=\(mine), but "
             found.append(DaemonWarning(
                 kind: .retentionMismatch,
-                headline: "retention is \(describe(theirs)), not the \(describe(mine)) you asked for",
-                detail: "This app was launched with JUANCODE_SESSIONS_PER_PROJECT=\(mine), but "
+                headline: "retention is \(describe(theirs)), not the \(describe(mine)) this app expects",
+                detail: source
                     + "the daemon reads that once at ITS start and is enforcing "
                     + "\(describe(theirs)) per project. It prunes to that as sessions exit, so "
                     + "rows you expect to keep can disappear. Only restarting the daemon "

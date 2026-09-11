@@ -155,12 +155,28 @@ final class DaemonIdentityTests: XCTestCase {
         XCTAssertTrue(warnings[0].headline.contains("unlimited"), warnings[0].headline)
     }
 
-    /// Nothing set on this launch line means nothing to disagree about: the daemon's
-    /// cap is simply the cap, and a warning would be noise.
-    func testNoRetentionInTheAppsEnvironmentIsNotAMismatch() {
+    /// The half that was silent, and the one that cost the sessions: nothing set on
+    /// this launch line is not "no opinion", it is the default, and the default keeps
+    /// everything. A daemon booted before that default changed is still pruning to
+    /// 40, and the app was presenting its own unlimited default as if it applied.
+    func testADaemonPruningUnderAnUnsetEnvironmentIsStillAMismatch() {
         let daemon = identity(buildId: "abc123", retention: 40)
         let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
                               buildId: "abc123", sessionsPerProject: nil)
+        let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
+        XCTAssertEqual(warnings.map(\.kind), [.retentionMismatch])
+        XCTAssertTrue(warnings[0].headline.contains("40 sessions"), warnings[0].headline)
+        XCTAssertTrue(warnings[0].detail.contains("no JUANCODE_SESSIONS_PER_PROJECT"),
+                      warnings[0].detail)
+    }
+
+    /// And the healthy case that has to stay quiet: both sides on the shared default
+    /// of "keep everything", with nobody having typed anything.
+    func testTheSharedDefaultOfKeepingEverythingIsNotAMismatch() {
+        let daemon = identity(buildId: "abc123", retention: 0)
+        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
+                              buildId: "abc123", sessionsPerProject: nil)
+        XCTAssertEqual(AppIdentity.defaultSessionsPerProject, 0)
         XCTAssertEqual(daemon.warnings(against: app, binaryModifiedAt: boot), [])
     }
 

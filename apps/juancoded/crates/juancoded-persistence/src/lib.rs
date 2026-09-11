@@ -80,9 +80,13 @@ pub fn db_path() -> PathBuf {
     dir.join("juancoded-rust.db")
 }
 
-/// How many sessions a project keeps. 0 means unlimited, matching the Swift core's
-/// `JUANCODE_SESSIONS_PER_PROJECT=0` escape hatch (the conformance suite sets it so a
-/// scenario's session is still there when the next step addresses it).
+/// How many sessions a project keeps. 0 means unlimited, and 0 is the default —
+/// the same default the Swift core has, for the same reason: the prune is a hard
+/// delete, and a cap nobody asked for has already cost people sessions they wanted.
+/// A default of 40 here meant that merely switching `JUANCODE_CORE=rust` enabled a
+/// destructive sweep the Swift core had deliberately turned off, and irreversibly:
+/// the desktop mirror follows whatever the daemon drops. A cap is opt-in on both
+/// cores now — set `JUANCODE_SESSIONS_PER_PROJECT` to a positive number for one.
 ///
 /// **This is daemon-scoped, and read exactly once, at daemon start.** The daemon
 /// outlives the app: setting `JUANCODE_SESSIONS_PER_PROJECT` on an app launch line
@@ -96,7 +100,7 @@ pub fn sessions_per_project() -> usize {
     std::env::var("JUANCODE_SESSIONS_PER_PROJECT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(40)
+        .unwrap_or(0)
 }
 
 /// How many transcript records a session keeps. 0 means unlimited.
@@ -901,6 +905,34 @@ mod tests {
         // The other project is untouched, which is what "per project" means.
         assert_eq!(store.prune_project("/proj/b", 5).unwrap().len(), 0);
         assert_eq!(store.all().unwrap().len(), 3 + 3);
+    }
+
+    /// The regression the default itself is: nobody asked for a cap, so nothing is
+    /// deleted. A default of 40 here made `JUANCODE_CORE=rust` a destructive switch
+    /// on its own, against history the Swift core had deliberately kept.
+    #[test]
+    fn the_default_cap_is_off_and_keeps_every_session() {
+        static ENV: Mutex<()> = Mutex::new(());
+        let _serialise = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var("JUANCODE_SESSIONS_PER_PROJECT").ok();
+        std::env::remove_var("JUANCODE_SESSIONS_PER_PROJECT");
+        let default_cap = sessions_per_project();
+        // An explicit cap is still honoured — the fix is the default, not the knob.
+        std::env::set_var("JUANCODE_SESSIONS_PER_PROJECT", "5");
+        let asked_for = sessions_per_project();
+        match restore {
+            Some(v) => std::env::set_var("JUANCODE_SESSIONS_PER_PROJECT", v),
+            None => std::env::remove_var("JUANCODE_SESSIONS_PER_PROJECT"),
+        }
+        assert_eq!(default_cap, 0, "an unasked-for cap is a silent hard delete");
+        assert_eq!(asked_for, 5);
+
+        let store = SqliteStore::in_memory().unwrap();
+        for i in 0..50 {
+            store.upsert(&exited(&format!("s{i}"), "/proj", i)).unwrap();
+        }
+        assert!(store.prune_project("/proj", default_cap).unwrap().is_empty());
+        assert_eq!(store.all().unwrap().len(), 50);
     }
 
     #[test]

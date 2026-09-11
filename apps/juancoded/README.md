@@ -242,6 +242,9 @@ A mismatch shows in the core badge as `rust · stale` rather than being invisibl
 `JUANCODE_SESSIONS_PER_PROJECT` is the one that bites: it is read **once, at daemon
 start**, so setting it on an app launch line does nothing until the daemon restarts.
 That is why the effective value goes out on the handshake instead of being inferred.
+It defaults to `0` — no cap, keep everything — the same default the Swift core has.
+It used to default to 40 here, which made switching `JUANCODE_CORE=rust` a hard delete
+of history the Swift core had deliberately kept, so a cap is opt-in on both cores now.
 
 `apps/native/scripts/juancoded.sh` (`ensure|reap|status|stop|restart`) owns the
 lifetime from the app side: a launch that starts a daemon owns it and reaps it when

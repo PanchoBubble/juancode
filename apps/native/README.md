@@ -371,7 +371,10 @@ effective retention on the `serverInfo` handshake, and a mismatch shows in the c
 badge as `rust · stale`, with the full reason in the badge popover and Settings →
 Core. **Retention in particular is daemon-scoped** — `JUANCODE_SESSIONS_PER_PROJECT`
 is read once, at daemon start, so setting it on an app launch line changes nothing
-until the daemon restarts, and the badge now says exactly that.
+until the daemon restarts, and the badge now says exactly that. It says it for an
+**unset** variable too: unset is not "no opinion", it is the shared default of keeping
+everything, so a daemon still pruning under an older default is reported rather than
+hidden behind the app's own assumption.
 
 The handshake carries the lifetime too: `serverInfo.daemon` reports `ownerState`
 (`owned` / `orphaned` / `unowned`), `ownerPid` and `ownerGraceMs`, so "nothing will
