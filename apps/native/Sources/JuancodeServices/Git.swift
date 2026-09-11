@@ -399,10 +399,7 @@ public func detectAgentWorktree(_ cwd: String, childPid: pid_t) async -> String?
 public func worktreeBaseRef(_ repoCwd: String) async -> String? {
     guard let base = await defaultBaseBranch(repoCwd) else { return nil }
     let short = base.hasPrefix("origin/") ? String(base.dropFirst("origin/".count)) : base
-    // Best effort and time-bounded: being offline (or having no remote) must not stop
-    // a session being isolated, it just means the local ref is the freshest we have.
-    let fetched = (try? await ProcessRunner.capture(
-        "git", ["fetch", "origin", short], cwd: repoCwd, timeout: 10))?.ok == true
+    let fetched = await refreshBase(repoCwd, short)
     // A local-only `main` can become `origin/main` once the fetch has run.
     if fetched, !base.hasPrefix("origin/"),
        let out = try? await git(repoCwd, ["rev-parse", "--verify", "--quiet", "origin/\(short)"]),
@@ -410,6 +407,79 @@ public func worktreeBaseRef(_ repoCwd: String) async -> String? {
         return "origin/\(short)"
     }
     return base
+}
+
+/// How long a create is willing to wait for the base-branch refresh before it
+/// branches off the ref it already has.
+///
+/// A `git fetch` with nothing to fetch still pays a full SSH handshake to the forge —
+/// measured at 1.8-2.3s against github.com, which was two thirds of the entire cost
+/// of starting an isolated session and the reason a worktree session felt slower than
+/// an ordinary one. The budget is set so a fetch that IS cheap (a local or on-LAN
+/// remote) is still waited for, and a handshake to the internet is not.
+private let baseFetchBudget: TimeInterval = 0.25
+
+/// How long a completed fetch counts as current for. The case this exists for is a
+/// burst: dispatching five agents used to pay the handshake five times, serially,
+/// to refresh the same branch.
+private let baseFetchTTL: TimeInterval = 60
+
+/// Bring `origin/<branch>` up to date, waiting at most `baseFetchBudget` for it.
+///
+/// `true` only when the fetch finished, successfully, inside the budget — the one
+/// case where the caller may conclude something about refs it did not have before.
+/// A fetch still running when the budget expires is deliberately left alone rather
+/// than cancelled: it is what makes the NEXT create current, so the freshness this
+/// exists for is not lost, it just stops being something a person waits through.
+/// Mirrors `refresh_base` in the rust core, budget and TTL included.
+private func refreshBase(_ repoCwd: String, _ branch: String) async -> Bool {
+    let clock = BaseFetchClock.shared
+    if await clock.isCurrent(repoCwd, branch) { return false }
+    await clock.start(repoCwd, branch)
+    let deadline = Date().addingTimeInterval(baseFetchBudget)
+    while Date() < deadline {
+        if await clock.isCurrent(repoCwd, branch) { return true }
+        await Nap.ms(5)
+    }
+    return false
+}
+
+/// When each repo's base branch was last fetched, and which fetches are still in the
+/// air, so a burst of creates in one repo pays for one refresh rather than one each.
+private actor BaseFetchClock {
+    static let shared = BaseFetchClock()
+
+    private var lastFetched: [String: Date] = [:]
+    private var inFlight: Set<String> = []
+
+    func isCurrent(_ repoCwd: String, _ branch: String) -> Bool {
+        guard let at = lastFetched[Self.key(repoCwd, branch)] else { return false }
+        return Date().timeIntervalSince(at) < baseFetchTTL
+    }
+
+    /// Start a refresh unless one is already running for this repo and branch.
+    func start(_ repoCwd: String, _ branch: String) {
+        let key = Self.key(repoCwd, branch)
+        guard !inFlight.contains(key) else { return }
+        inFlight.insert(key)
+        Task.detached {
+            // Best effort: being offline, or having no remote, must not stop a
+            // session being isolated — it just means the local ref is the freshest
+            // we have.
+            let ok = (try? await ProcessRunner.capture(
+                "git", ["fetch", "origin", branch], cwd: repoCwd, timeout: 10))?.ok == true
+            await BaseFetchClock.shared.settle(key, ok: ok)
+        }
+    }
+
+    private func settle(_ key: String, ok: Bool) {
+        inFlight.remove(key)
+        if ok { lastFetched[key] = Date() }
+    }
+
+    private static func key(_ repoCwd: String, _ branch: String) -> String {
+        "\(repoCwd)\u{0}\(branch)"
+    }
 }
 
 /// Create a fresh linked worktree off the repo containing `repoCwd`, checked out

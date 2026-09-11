@@ -338,6 +338,36 @@ final class GitTests: XCTestCase {
                      "the session branch must not track origin/main")
     }
 
+    /// The refresh is best effort, and a forge that is slow to answer must not be
+    /// something a person waits through. `ext::` runs the command as git's transport,
+    /// so this remote takes five seconds to say anything and then fails — no network,
+    /// and no dependence on how a machine behaves when a host is unreachable. A
+    /// create that finishes long before that is one that branched off the ref it
+    /// already had, which is the point.
+    func testCreateWorktreeDoesNotWaitOutASlowRemote() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        try runGit(["branch", "-M", "main"])
+        let remote = mkdtemp("juancode-remote-")
+        defer { rmrf(remote) }
+        try TempGitRepo.initializeBare(at: remote)
+        try runGit(["remote", "add", "origin", remote])
+        try runGit(["push", "-q", "-u", "origin", "main"])
+        let base = try runGit(["rev-parse", "origin/main"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["remote", "set-url", "origin", "ext::sleep 5"])
+
+        let start = Date()
+        let wt = try await createWorktree(dir, "slowremote")
+        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
+        let waited = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(waited, 4, "create waited \(waited)s on a remote that answers in 5s")
+        let at = try runGit(["rev-parse", "HEAD"], cwd: wt.path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(at, base, "must start at the origin/main we already had")
+    }
+
     // MARK: - createWorktree(checkingOut:) — the PR-tracker's worktree (juancode-4bpz)
 
     /// The ordinary case: the PR's branch exists locally and nothing else has it

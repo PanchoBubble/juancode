@@ -17,8 +17,11 @@
 //! `removeWorktree`). `SessionMeta::worktree_path` is what the reaper reads
 //! (juancode-oe30).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::pr::BranchWorktree;
 
@@ -50,9 +53,38 @@ impl std::error::Error for WorktreeError {}
 /// that was asked to be isolated and is not is indistinguishable, from the outside,
 /// from one that is.
 pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeError> {
+    create_timed(repo_cwd, name).map(|(created, _)| created)
+}
+
+/// How long each step of [`create`] took, in milliseconds.
+///
+/// Session start is the one latency a person watches end to end, and the steps below
+/// are wildly uneven — a no-op `git fetch` against a remote costs an order of
+/// magnitude more than the checkout it exists to date-stamp. Measuring them
+/// separately is what stops the next person optimising the cheap one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CreateStages {
+    /// `rev-parse` twice: is this a work tree, and where is its root.
+    pub repo_root_ms: f64,
+    /// Resolving the base branch, including the `git fetch` that refreshes it.
+    pub base_ref_ms: f64,
+    /// `git worktree add` itself: the branch and the checkout.
+    pub worktree_add_ms: f64,
+    /// Symlinking the source checkout's `node_modules` into the new tree.
+    pub link_modules_ms: f64,
+}
+
+/// [`create`], with the cost of each step alongside the result.
+pub fn create_timed(
+    repo_cwd: &str,
+    name: &str,
+) -> Result<(CreatedWorktree, CreateStages), WorktreeError> {
+    let mut stages = CreateStages::default();
+    let step = std::time::Instant::now();
     let root = repo_root(repo_cwd).ok_or_else(|| {
         WorktreeError("Not a git repository — can't isolate this session in a worktree.".into())
     })?;
+    stages.repo_root_ms = step.elapsed().as_secs_f64() * 1000.0;
     let branch = format!("juancode/{name}");
     let worktrees_dir = siblings_dir(&root);
     // Best effort, exactly as the Swift core does it: `git worktree add` reports the
@@ -69,9 +101,13 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
         branch.clone(),
         dir.to_string_lossy().to_string(),
     ];
-    if let Some(base) = base_ref(repo_cwd) {
+    let step = std::time::Instant::now();
+    let base = base_ref(repo_cwd);
+    stages.base_ref_ms = step.elapsed().as_secs_f64() * 1000.0;
+    if let Some(base) = base {
         args.push(base);
     }
+    let step = std::time::Instant::now();
     let out = Command::new("git")
         .args(&args)
         .current_dir(repo_cwd)
@@ -86,9 +122,12 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
         };
         return Err(WorktreeError(format!("Failed to create worktree: {why}")));
     }
+    stages.worktree_add_ms = step.elapsed().as_secs_f64() * 1000.0;
     let path = dir.to_string_lossy().to_string();
+    let step = std::time::Instant::now();
     link_node_modules(&root, &path);
-    Ok(CreatedWorktree { path, branch })
+    stages.link_modules_ms = step.elapsed().as_secs_f64() * 1000.0;
+    Ok((CreatedWorktree { path, branch }, stages))
 }
 
 /// Create `<repo>-worktrees/<name>` with an **existing** branch checked out, for
@@ -254,22 +293,39 @@ fn main_worktree(cwd: &str) -> Option<String> {
     Some(first.to_string())
 }
 
+/// How long a create is willing to wait for the base-branch refresh before it
+/// branches off the ref it already has.
+///
+/// A `git fetch` that has nothing to fetch still costs a full SSH handshake to the
+/// forge — measured at 1.8-2.3s against github.com on this machine, which was 67% of
+/// the entire cost of starting an isolated session and the single thing that made a
+/// worktree session feel slower than an ordinary one. The budget is set so a fetch
+/// that IS cheap (a local or on-LAN remote) is still waited for, and a handshake to
+/// the internet is not.
+const FETCH_BUDGET: Duration = Duration::from_millis(250);
+
+/// How long a completed fetch counts as current for.
+///
+/// The case this exists for is a burst: "dispatch five agents" used to pay the
+/// handshake five times over, serially, for five refreshes of the same branch.
+const FETCH_TTL: Duration = Duration::from_secs(60);
+
 /// The ref a fresh session worktree branches from: the repo's default branch as
-/// `origin` has it, refreshed first, so a new agent starts from what everyone else
-/// has rather than from whatever the main checkout happens to have open. Mirrors
-/// `worktreeBaseRef` in the Swift core, including the fallbacks: the local branch
-/// when there is no remote or the fetch fails, and `None` (branch off HEAD, the old
-/// behaviour) when the repo has no default branch at all.
+/// `origin` has it. Mirrors `worktreeBaseRef` in the Swift core, including the
+/// fallbacks: the local branch when there is no remote, and `None` (branch off HEAD,
+/// the old behaviour) when the repo has no default branch at all.
+///
+/// The refresh that keeps a new agent off a stale base is NOT waited out. It is
+/// started, given [`FETCH_BUDGET`], and then left to finish on its own while the
+/// worktree is created off the ref we already have — so the cost a person waits
+/// through is the checkout, and the fetch it used to hide behind lands in time for
+/// the next session instead. Staleness is bounded by how recently a session was
+/// started in this repo, which in practice is minutes at worst and is the same
+/// window a `git pull` in the main checkout leaves open anyway.
 fn base_ref(repo_cwd: &str) -> Option<String> {
     let base = default_base_branch(repo_cwd)?;
     let short = base.strip_prefix("origin/").unwrap_or(&base).to_string();
-    // Best effort: offline, or no remote, still leaves us the local ref.
-    let fetched = Command::new("git")
-        .args(["fetch", "origin", &short])
-        .current_dir(repo_cwd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let fetched = refresh_base(repo_cwd, &short);
     // A local-only `main` can become `origin/main` once the fetch has run.
     if fetched && !base.starts_with("origin/") {
         let remote = format!("origin/{short}");
@@ -280,6 +336,106 @@ fn base_ref(repo_cwd: &str) -> Option<String> {
         }
     }
     Some(base)
+}
+
+/// Bring `origin/<branch>` up to date, waiting at most [`FETCH_BUDGET`] for it.
+///
+/// `true` only when the fetch finished, successfully, inside the budget — the one
+/// case where the caller may conclude something about refs it did not have before.
+/// A fetch still running when the budget expires is deliberately left alone rather
+/// than killed: it is the thing that makes the NEXT create current, and a reaper
+/// thread waits on it so nothing is left for `launchd` to inherit.
+fn refresh_base(repo_cwd: &str, branch: &str) -> bool {
+    let key = format!("{repo_cwd}\u{0}{branch}");
+    if fetch_clock().is_current(&key) {
+        return false;
+    }
+    // A remote that hangs rather than answering — no route to the forge — would
+    // otherwise leave one stuck `git fetch` per create, and a person starting a
+    // batch of sessions offline would pile up a dozen of them.
+    if !fetch_clock().begin(&key) {
+        return false;
+    }
+    let Ok(mut child) = Command::new("git")
+        .args(["fetch", "origin", branch])
+        .current_dir(repo_cwd)
+        // Inherited pipes would be a place for git's progress output to block on.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        fetch_clock().settle(&key, false);
+        return false;
+    };
+    let deadline = Instant::now() + FETCH_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                fetch_clock().settle(&key, status.success());
+                return status.success();
+            }
+            // Unwaitable: nothing to reap and nothing to conclude.
+            Err(_) => {
+                fetch_clock().settle(&key, false);
+                return false;
+            }
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Bounded by git's own exit, and the only reason the thread exists: an
+    // unwaited child stays a zombie for the life of the daemon.
+    std::thread::spawn(move || {
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        fetch_clock().settle(&key, ok);
+    });
+    false
+}
+
+/// When each `<repo>/<branch>` pair was last fetched, and which fetches are still in
+/// the air, so a burst of creates in one repo pays for one refresh rather than one
+/// each.
+#[derive(Default)]
+struct FetchClock {
+    state: Mutex<FetchState>,
+}
+
+#[derive(Default)]
+struct FetchState {
+    last: HashMap<String, Instant>,
+    in_flight: HashSet<String>,
+}
+
+impl FetchClock {
+    fn is_current(&self, key: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .last
+            .get(key)
+            .is_some_and(|at| at.elapsed() < FETCH_TTL)
+    }
+
+    /// Claim the right to fetch this key. `false` when one is already running.
+    fn begin(&self, key: &str) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.in_flight.insert(key.to_string())
+    }
+
+    fn settle(&self, key: &str, ok: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.in_flight.remove(key);
+        if ok {
+            state.last.insert(key.to_string(), Instant::now());
+        }
+    }
+}
+
+fn fetch_clock() -> &'static FetchClock {
+    static CLOCK: OnceLock<FetchClock> = OnceLock::new();
+    CLOCK.get_or_init(FetchClock::default)
 }
 
 /// The repo's default branch: `origin/HEAD` when the remote has published one, else
@@ -587,6 +743,41 @@ mod tests {
         assert!(
             git(made.path.as_str(), &["rev-parse", "--abbrev-ref", "@{u}"]).is_none(),
             "the session branch must not track origin/main"
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The refresh is best effort, and a forge that is slow to answer must not be
+    /// something a person waits through. The remote here takes five seconds to say
+    /// anything at all; a `create` that finishes long before that is a `create` that
+    /// branched off the ref it already had, which is the whole point.
+    #[test]
+    fn a_slow_remote_does_not_hold_up_the_worktree() {
+        let (parent, root) = repo("slowfetch");
+        let remote = parent.join("remote.git");
+        run(&parent, &["init", "--bare", "--quiet", "remote.git"]);
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run(&root, &["push", "--quiet", "-u", "origin", "main"]);
+        let base = sha(&root, "origin/main");
+        // `ext::` runs the command as the transport, so this is a remote that hangs
+        // for five seconds and then fails — no network, and no dependence on how a
+        // machine behaves when a host is unreachable.
+        run(&root, &["remote", "set-url", "origin", "ext::sleep 5"]);
+
+        let start = Instant::now();
+        let made = create(root.to_str().unwrap(), "slow1").expect("a worktree");
+        let waited = start.elapsed();
+        assert!(
+            waited < Duration::from_secs(4),
+            "create waited {waited:?} on a remote that answers in 5s"
+        );
+        assert_eq!(
+            sha(Path::new(&made.path), "HEAD"),
+            base,
+            "must start at the origin/main we already had"
         );
         std::fs::remove_dir_all(&parent).ok();
     }
