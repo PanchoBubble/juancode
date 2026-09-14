@@ -120,7 +120,7 @@ final class OracleModel {
         if tab == .issues { loadGlobalBeads() }
         // Opening straight onto the chat should land the cursor in the agent's input
         // (same as ⌃Space), so the focus handoff into Oracle is deterministic.
-        if tab == .chat { chatFocusToken += 1 }
+        focusChat()
     }
 
     /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open; on close
@@ -130,6 +130,7 @@ final class OracleModel {
         expanded = true
         bootstrap()
         ensureAgentSession()
+        focusChat()
     }
 
     /// ⌃Space: open the Oracle on the chat tab with the input focused, so you can
@@ -144,7 +145,7 @@ final class OracleModel {
         tab = .chat
         bootstrap()
         ensureAgentSession()
-        chatFocusToken += 1
+        focusChat()
     }
 
     /// Collapse the dock and hand keyboard focus straight back to the currently-open
@@ -158,6 +159,16 @@ final class OracleModel {
         // open beneath the dock (the dock now layers above it): the editor pty should
         // keep focus so you land back in it, not the main terminal behind it.
         if app.editing == nil { app.focusTerminal() }
+    }
+
+    /// Put the keyboard in the Oracle's terminal — the panel's only input. Every
+    /// path that opens, reveals or re-surfaces the chat routes through here, so an
+    /// open dock always types into the agent rather than leaving focus stranded on
+    /// whatever control opened it. A no-op unless the chat is actually on screen
+    /// (the issues tab and the rail own their own text fields).
+    func focusChat() {
+        guard expanded, tab == .chat else { return }
+        chatFocusToken += 1
     }
 
     init(app: AppModel) { self.app = app }
@@ -187,6 +198,14 @@ final class OracleModel {
                                   offsetFile: OraclePaths.askOffsetFile)
         ready = true
         startLoop()
+        // Re-assert chat focus when the app comes back frontmost with the dock open
+        // (`focusChat` no-ops when it isn't): cmd-tabbing away and back otherwise
+        // returns to a panel you have to click before you can type into it.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.focusChat() }
+        }
         Task {
             // Stand up the bd tracker and load the global issue listing. The agent
             // itself is NOT spawned here — it comes up lazily when the panel is first
@@ -211,7 +230,7 @@ final class OracleModel {
         tab = .chat
         expanded = true
         ensureAgentSession()
-        chatFocusToken += 1
+        focusChat()
     }
 
     /// Bring the Oracle agent back up from the chat tab's "Start Oracle" button.
@@ -279,7 +298,7 @@ final class OracleModel {
         guard ready else { bootstrap(); return }
         tab = .chat
         spawnAgent(provider: provider ?? oracleProvider)
-        chatFocusToken += 1
+        focusChat()
     }
 
     /// Expand the dock on the chat tab without `open(tab:)`'s toggle behavior — the
@@ -288,6 +307,7 @@ final class OracleModel {
     /// entry points always follow up with an explicit select or spawn.
     func reveal() {
         tab = .chat
+        defer { focusChat() }
         guard !expanded else { return }
         expanded = true
         bootstrap()
@@ -302,6 +322,9 @@ final class OracleModel {
     func selectOracle(_ id: String) {
         apply(OracleChatRouting.select(id, active: oracleSessionId,
                                        isLive: app.liveSession(id) != nil))
+        // Tapping the row you're already on is still "put me in this Oracle": the
+        // routing decision is `.none`, but focus is sitting on the rail, so take it.
+        focusChat()
     }
 
     /// Carry out a routing decision: point the chat at the chosen Oracle and, when it
@@ -313,11 +336,11 @@ final class OracleModel {
         case let .focus(id), let .adopt(id):
             oracleSessionId = id
             tab = .chat
-            chatFocusToken += 1
+            focusChat()
         case let .revive(id):
             oracleSessionId = id
             tab = .chat
-            chatFocusToken += 1
+            focusChat()
             reviveOracle(id)
         case .spawnFresh:
             spawnAgent(provider: oracleProvider)
@@ -408,6 +431,7 @@ final class OracleModel {
     func receiveAsk(_ text: String) {
         expanded = true
         tab = .chat
+        focusChat()
         if let s = session {
             // Route through `submit` (bracketed paste + separate Enter), not a raw
             // `"\(text)\r"` burst — the latter makes the CLI read a multi-line ask
@@ -474,6 +498,7 @@ final class OracleModel {
     func ask(_ text: String) {
         expanded = true
         tab = .chat
+        focusChat()
         if let s = session {
             s.submit(text) // bracketed paste + separate Enter (see `receiveAsk`)
         } else {

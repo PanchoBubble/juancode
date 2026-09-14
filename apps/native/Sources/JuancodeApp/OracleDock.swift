@@ -79,6 +79,13 @@ struct OracleDock: View {
         // so the dock auto-presents on the chat tab at first launch. A one-shot inside
         // `presentChatAtLaunch`, so it won't re-open after the user closes it.
         .onAppear { oracle.presentChatAtLaunch() }
+        // An open dock is always focused on its terminal, whatever surfaced it —
+        // a keyboard toggle, a rail tap, a remote ask from the sidecar, or the agent
+        // session finally coming up after an async spawn. `focusChat` no-ops when the
+        // panel is shut or showing issues, so these are safe blanket hooks.
+        .onChange(of: oracle.expanded) { _, open in if open { oracle.focusChat() } }
+        .onChange(of: oracle.tab) { _, _ in oracle.focusChat() }
+        .onChange(of: oracle.oracleSessionId) { _, _ in oracle.focusChat() }
     }
 
     /// How far to push the collapsed panel past the right edge so nothing (incl. its
@@ -139,7 +146,7 @@ struct OracleDock: View {
                 headerButton("arrow.clockwise", help: "Refresh issues") { oracle.loadGlobalBeads() }
                 headerButton("sparkles", help: "Back to chat") {
                     oracle.tab = .chat
-                    oracle.chatFocusToken += 1
+                    oracle.focusChat()
                 }
             case .chat:
                 // Issues is a header action, not a tab (juancode dock cleanup): chat
@@ -153,13 +160,23 @@ struct OracleDock: View {
                     sessionRailShown.toggle()
                 }
                 if oracle.session != nil {
-                    headerButton("arrow.clockwise", help: "Refresh terminal — rebuild and replay scrollback to fix a corrupted render") { oracle.refreshChat() }
-                    headerButton("arrow.triangle.2.circlepath", help: "Restart the Oracle agent") { oracle.restartAgent() }
+                    headerButton("arrow.clockwise", help: "Refresh terminal — rebuild and replay scrollback to fix a corrupted render") {
+                        oracle.refreshChat()
+                        oracle.focusChat()
+                    }
+                    headerButton("arrow.triangle.2.circlepath", help: "Restart the Oracle agent") {
+                        oracle.restartAgent()
+                        oracle.focusChat()
+                    }
                 }
             }
             headerButton("chevron.right", help: "Close (⌃Space)") { oracle.collapse() }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
+        // Clicking the chrome (not a button) must not park focus on the header —
+        // the chat has one input and an open dock always types into it.
+        .contentShape(Rectangle())
+        .onTapGesture { oracle.focusChat() }
     }
 
     /// A header action: a borderless icon button with a tooltip and the click cursor,
