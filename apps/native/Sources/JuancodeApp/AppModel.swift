@@ -685,6 +685,34 @@ final class AppModel {
         updateDockBadge()
     }
 
+    /// Clear every "look at me" colour a set of sessions is carrying: the red unread
+    /// dot, the green done-since-you-last-looked check, their OS notifications, and
+    /// their work-at-risk notices. The header's risk badges are deliberately left
+    /// alone — those count real uncommitted/unpushed work, not something you've seen.
+    /// Drives the project row's "Mark read" (juancode), which exists because a day of
+    /// background sessions leaves a sidebar that is all colour and therefore no signal.
+    func markRead(sessionIds: [String]) {
+        let ids = Set(sessionIds)
+        for id in ids { clearUnread(id) }
+        workAtRiskNotices.removeAll { ids.contains($0.sessionId) }
+    }
+
+    /// How many of these sessions currently carry a clearable colour — the count the
+    /// "Mark read" menu item shows, and what decides whether it's offered at all.
+    func unreadOrNoticed(sessionIds: [String]) -> Int {
+        let ids = Set(sessionIds)
+        var hits = ids.filter { unreadSessions.contains($0) || unseenCompletions.contains($0) }
+        for notice in workAtRiskNotices where ids.contains(notice.sessionId) {
+            hits.insert(notice.sessionId)
+        }
+        return hits.count
+    }
+
+    /// Clear the colours on every visible session at once — the bell's "Mark all read".
+    func markAllRead() {
+        markRead(sessionIds: sessions.map(\.id) + Array(unreadSessions))
+    }
+
     /// Is this one of Oracle's own sessions (rooted in its control dir)?
     private func isOracleSession(_ id: String) -> Bool {
         (liveSession(id)?.meta.cwd ?? sessions.first { $0.id == id }?.cwd) == OraclePaths.controlDir

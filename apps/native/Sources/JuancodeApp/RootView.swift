@@ -290,6 +290,14 @@ private struct PaneNavInstaller: NSViewRepresentable {
 /// `projectCwd(for:)` (the worktree→repo folding used for sidebar grouping) now
 /// lives in JuancodeCore so the store's retention cap can share it.
 
+/// One pass over the session list: the folder groups to render, and how many
+/// sessions each facet would match (the dropdown's counts, tallied before the
+/// facet filter narrows anything so they don't collapse as you pick).
+private struct SidebarContent {
+    var groups: [FolderGroup]
+    var facetCounts: [SessionFacet: Int]
+}
+
 /// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
 private struct FolderGroup: Identifiable {
     let cwd: String
@@ -298,6 +306,56 @@ private struct FolderGroup: Identifiable {
     let sessions: [SessionMeta]
     let running: Int
     var id: String { cwd }
+}
+
+/// A non-text sidebar filter, offered from the funnel dropdown next to the filter
+/// field. The text field answers "which session was that"; these answer "what still
+/// has a claim on me" — the question the sidebar's colours ask but can't be narrowed
+/// to (juancode). Selected facets combine as OR: a row shows if it matches any one.
+enum SessionFacet: String, CaseIterable, Identifiable {
+    /// Finished a turn or asked a question while you were elsewhere — the same set
+    /// the unread dot and the green done-check paint.
+    case unread
+    /// Sitting at a prompt right now, waiting for a reply.
+    case waiting
+    /// Its branch has an open pull request.
+    case prOpen
+    /// Still on watch duty: a tracked PR or a tracked Linear issue is bound to it.
+    case tracking
+    /// Its checkout holds uncommitted or unpushed work.
+    case atRisk
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unread: return "Unread"
+        case .waiting: return "Waiting on me"
+        case .prOpen: return "Has open PR"
+        case .tracking: return "Tracking"
+        case .atRisk: return "Work at risk"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .unread: return "circle.fill"
+        case .waiting: return "questionmark.circle.fill"
+        case .prOpen: return "arrow.triangle.pull"
+        case .tracking: return "eye.fill"
+        case .atRisk: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .unread: return "Finished a turn or asked a question since you last looked"
+        case .waiting: return "Sitting at a prompt, waiting for your reply"
+        case .prOpen: return "The session's branch has an open pull request"
+        case .tracking: return "Still watching a tracked PR or Linear issue"
+        case .atRisk: return "Uncommitted or unpushed work in this session's checkout"
+        }
+    }
 }
 
 /// Top-bar notification center: a bell with the unread count that opens a popover
@@ -366,9 +424,23 @@ private struct NotificationsBell: View {
         .clickCursor()
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Notifications")
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
+                HStack(spacing: 8) {
+                    Text("Notifications")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer(minLength: 12)
+                    if hasAny {
+                        Button("Mark all read") {
+                            model.markAllRead()
+                            showing = false
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                        .clickCursor()
+                        .help("Clear every unread dot, done check and at-risk notice")
+                    }
+                }
+                .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
                 if unread.isEmpty {
                     Text("Nothing unread.")
                         .font(.system(size: 12))
@@ -552,6 +624,13 @@ struct SidebarView: View {
     @State private var query = ""
     /// When off (default) archived sessions are hidden from the list.
     @State private var showArchived = false
+    /// Whether the funnel dropdown is open. Also gates the facet tally: with it shut
+    /// and nothing selected, the per-session predicates never run.
+    @State private var showingFilters = false
+    /// Non-text filters picked from the funnel dropdown (empty = show everything).
+    /// Combine as OR, so "Waiting on me + Work at risk" is one list of everything
+    /// with a claim on you rather than the empty intersection of the two.
+    @State private var facets: Set<SessionFacet> = []
     /// Project folders the user has collapsed (by cwd); their session rows are hidden.
     /// Projects start collapsed (minimized by default) — see `seenFolders`.
     @State private var collapsedFolders: Set<String> = []
@@ -625,6 +704,113 @@ struct SidebarView: View {
         }
     }
 
+    /// The funnel next to the filter field: click for the facet list, with a live
+    /// count beside each one and a dot when any are on.
+    @ViewBuilder
+    private func facetMenu(counts: [SessionFacet: Int], active: Bool) -> some View {
+        Button { showingFilters = true } label: {
+            Image(systemName: active ? "line.3.horizontal.decrease.circle.fill"
+                                     : "line.3.horizontal.decrease.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(active ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help(facets.isEmpty ? "Filter by state — unread, waiting, PR, tracking, at risk"
+                             : "Filtering: \(activeFacetLabel)")
+        .popover(isPresented: $showingFilters, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Show only")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
+                ForEach(SessionFacet.allCases) { facet in
+                    Toggle(isOn: facetBinding(facet)) {
+                        HStack(spacing: 8) {
+                            Image(systemName: facet.systemImage)
+                                .font(.system(size: 10))
+                                .foregroundStyle(facetTint(facet))
+                                .frame(width: 14)
+                            Text(facet.label).font(.system(size: 12))
+                            Spacer(minLength: 12)
+                            Text("\(counts[facet] ?? 0)")
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .toggleStyle(.checkbox)
+                    .help(facet.help)
+                    .padding(.horizontal, 12).padding(.vertical, 3)
+                }
+                // The PR list is fetched on demand, so this count is only as complete
+                // as what has been loaded until the facet is switched on.
+                Text("Turning on \"Has open PR\" fetches each project's pull requests.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12).padding(.top, 4)
+                Divider().padding(.vertical, 6)
+                HStack {
+                    Toggle(isOn: $showArchived) {
+                        Text("Include archived (\(archivedCount))").font(.system(size: 11))
+                    }
+                    .toggleStyle(.checkbox)
+                    Spacer(minLength: 12)
+                    if !facets.isEmpty {
+                        Button("Reset") { facets = [] }
+                            .font(.system(size: 11, weight: .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                            .clickCursor()
+                    }
+                }
+                .padding(.horizontal, 12).padding(.bottom, 10)
+            }
+            .frame(width: 250)
+        }
+    }
+
+    /// Toggling a facet on/off, with the PR fetch hung off the `prOpen` switch so it
+    /// only ever runs when that filter is actually asked for.
+    private func facetBinding(_ facet: SessionFacet) -> Binding<Bool> {
+        Binding(
+            get: { facets.contains(facet) },
+            set: { on in
+                if on {
+                    facets.insert(facet)
+                    if facet == .prOpen { loadPrContextForFacet() }
+                } else {
+                    facets.remove(facet)
+                }
+            }
+        )
+    }
+
+    /// The colour each facet wears elsewhere in the sidebar, so the dropdown reads as
+    /// the same vocabulary as the rows it filters.
+    private func facetTint(_ facet: SessionFacet) -> Color {
+        switch facet {
+        case .unread: return .red
+        case .waiting: return .yellow
+        case .prOpen: return .purple
+        case .tracking: return .blue
+        case .atRisk: return .orange
+        }
+    }
+
+    /// Human-readable list of what's currently filtered, for the hint line + tooltip.
+    private var activeFacetLabel: String {
+        SessionFacet.allCases.filter { facets.contains($0) }
+            .map(\.label).joined(separator: " / ")
+    }
+
+    /// Back to an unfiltered sidebar: text and facets both.
+    private func clearFilters() {
+        query = ""
+        facets = []
+    }
+
     /// Sessions filtered by `query` (case-insensitive over title + cwd) and the
     /// archived toggle, then grouped by folder and sorted stably by cwd — mirrors
     /// the web sidebar.
@@ -633,7 +819,7 @@ struct SidebarView: View {
     /// local and threads that value through every consumer, instead of re-deriving
     /// the whole filter/group/sort on each of the ~6 references per body eval
     /// (juancode-5qw.8).
-    private func makeGroups() -> [FolderGroup] {
+    private func makeGroups(tallyFacets: Bool) -> SidebarContent {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         // Own sessions + discovered terminal sessions, grouped by project together.
         // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
@@ -644,11 +830,32 @@ struct SidebarView: View {
         // in sibling `<repo>-worktrees/…` dirs, still under the root, so they survive.
         let inWorkspace = nonOracle.filter { Config.isUnderWorkspaceRoot($0.cwd) }
         let visible = showArchived ? inWorkspace : inWorkspace.filter { !$0.archived }
-        let filtered = q.isEmpty
+        let matchingQuery = q.isEmpty
             ? visible
             : visible.filter {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q)
             }
+        // Facet tallies come off the same pass that applies them, so the dropdown's
+        // counts cost one walk of the list rather than one per facet per body eval.
+        // With the dropdown shut and nothing selected there is nothing to tally, and
+        // this loop degenerates to a copy — the sidebar re-renders on every activity
+        // tick, so five per-session predicates must not be the resting cost.
+        let tally = tallyFacets
+        var counts: [SessionFacet: Int] = [:]
+        var filtered: [SessionMeta] = []
+        filtered.reserveCapacity(matchingQuery.count)
+        for meta in matchingQuery {
+            guard tally || !facets.isEmpty else { filtered.append(meta); continue }
+            var kept = facets.isEmpty
+            for facet in SessionFacet.allCases {
+                // Only the selected facets need evaluating when the list isn't open.
+                guard tally || facets.contains(facet) else { continue }
+                guard matches(facet, meta) else { continue }
+                counts[facet, default: 0] += 1
+                if facets.contains(facet) { kept = true }
+            }
+            if kept { filtered.append(meta) }
+        }
         // Group by the owning repo so linked worktrees nest under their project
         // instead of floating as their own folder. Prefer git's authoritative
         // worktree→repo map (`worktreeRepoRoots`); fall back to the path heuristic
@@ -658,7 +865,7 @@ struct SidebarView: View {
         })
         // Projects the user removed from the sidebar drop out here — the folder and
         // its rows, not the sessions themselves (restorable from the footer below).
-        return byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions in
+        let groups = byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions -> FolderGroup in
             // Within a project: only sessions waiting on a reply bubble to the top;
             // the rest hold the user's drag order, with unplaced ones resting where
             // the stable sort puts them (live newest-first, dead sinking —
@@ -693,6 +900,46 @@ struct SidebarView: View {
             case (nil, nil): return a.cwd.localizedCompare(b.cwd) == .orderedAscending
             }
         }
+        return SidebarContent(groups: groups, facetCounts: counts)
+    }
+
+    /// Does one session carry this facet? Everything here reads state the model
+    /// already holds, except `prOpen`, whose PR list is fetched lazily — see
+    /// `loadPrContextForFacet`.
+    private func matches(_ facet: SessionFacet, _ meta: SessionMeta) -> Bool {
+        switch facet {
+        case .unread:
+            return model.unreadSessions.contains(meta.id)
+                || model.unseenCompletions.contains(meta.id)
+        case .waiting:
+            return model.activity(meta.id) == .waitingInput
+        case .prOpen:
+            return model.openPr(forSession: meta) != nil
+        case .tracking:
+            return model.trackedPr(forSession: meta.id) != nil
+                || model.trackedIssue(forSession: meta.id) != nil
+        case .atRisk:
+            guard let risk = model.workAtRisk(forSession: meta) else { return false }
+            return risk.dirtyFiles > 0 || risk.ahead > 0
+        }
+    }
+
+    /// PR state is deliberately not loaded for every row on startup (three `gh` round
+    /// trips per project was the sidebar's biggest boot cost). Turning the "Has open
+    /// PR" facet on is an explicit ask for it, so that's when we go get it — once per
+    /// project root, coalesced downstream.
+    private func loadPrContextForFacet() {
+        // Every session the sidebar could show, not just the ones the other facets
+        // leave standing — the facets are OR'd, so switching this one on widens the
+        // list and the widened rows are exactly the ones whose PR state is missing.
+        let candidates = model.sessions
+            .filter { $0.cwd != OraclePaths.controlDir && Config.isUnderWorkspaceRoot($0.cwd) }
+            .filter { showArchived || !$0.archived }
+        var roots: Set<String> = []
+        for meta in candidates where roots.insert(model.repoRoot(forSession: meta)).inserted {
+            model.loadPrs(model.repoRoot(forSession: meta))
+        }
+        for meta in candidates { model.loadSessionPrContext(meta) }
     }
 
     /// Fingerprint of the sidebar's *structure*: which sessions sit in which folder and
@@ -786,7 +1033,7 @@ struct SidebarView: View {
     /// drags are stable.
     private func reorderProjects(moving dragged: String, onto target: String) {
         guard dragged != target else { return }
-        var order = makeGroups().map(\.cwd)
+        var order = makeGroups(tallyFacets: false).groups.map(\.cwd)
         guard let from = order.firstIndex(of: dragged) else { return }
         order.remove(at: from)
         guard let to = order.firstIndex(of: target) else { return }
@@ -898,15 +1145,13 @@ struct SidebarView: View {
         // Derive the grouped/sorted list once per body eval and thread it through
         // every consumer below, instead of re-running the filter/group/sort on each
         // reference (juancode-5qw.8).
-        let groups = makeGroups()
+        let content = makeGroups(tallyFacets: showingFilters)
+        let groups = content.groups
         let visibleIDs = visibleOrderedIDs(from: groups)
         return VStack(spacing: 0) {
-            let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty
+            let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty || !facets.isEmpty
             HStack(spacing: 6) {
-                Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill"
-                                            : "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(filtering ? Color.accentColor : Color.secondary)
+                facetMenu(counts: content.facetCounts, active: filtering)
                 TextField("Filter sessions…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
@@ -916,11 +1161,11 @@ struct SidebarView: View {
                     // Esc clears an active filter (only while the field is focused).
                     .onKeyPress(.escape) {
                         guard filtering else { return .ignored }
-                        query = ""
+                        clearFilters()
                         return .handled
                     }
                 if filtering {
-                    Button { query = "" } label: {
+                    Button { clearFilters() } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
@@ -941,11 +1186,13 @@ struct SidebarView: View {
             .padding(.vertical, 6)
             if filtering {
                 HStack(spacing: 6) {
-                    Text("Showing \(filteredVisibleCount(groups)) of \(unfilteredVisibleCount)")
+                    Text("Showing \(filteredVisibleCount(groups)) of \(unfilteredVisibleCount)"
+                         + (facets.isEmpty ? "" : " · " + activeFacetLabel))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     Spacer()
-                    Button("Clear") { query = "" }
+                    Button("Clear") { clearFilters() }
                         .font(.system(size: 10, weight: .medium))
                         .buttonStyle(.plain)
                         .foregroundStyle(Color.accentColor)
@@ -1567,6 +1814,12 @@ private struct FolderHeader: View {
         group.sessions.filter { model.unreadSessions.contains($0.id) }.count
     }
 
+    /// Sessions here carrying a colour the "Mark Read" item would clear: an unread
+    /// dot, an unseen done check, or a work-at-risk notice.
+    private var clearableCount: Int {
+        model.unreadOrNoticed(sessionIds: group.sessions.map(\.id))
+    }
+
     /// At-risk work rolled up per CHECKOUT, not per session — dozens of sessions
     /// share one checkout, so counting sessions showed absurd numbers ("97" for
     /// one dirty branch, juancode-64z). `main` is the repo root's own risk entry
@@ -1897,6 +2150,14 @@ private struct FolderHeader: View {
         // padding outside the fill stretches it to the true sidebar edges.
         .padding(.horizontal, -10)
         .contextMenu {
+            // A day of background sessions leaves this project painted in unread
+            // dots, done checks and at-risk notices — one click puts it back to
+            // neutral so the next colour means something (juancode).
+            if clearableCount > 0 {
+                Button("Mark Read (\(clearableCount))") {
+                    model.markRead(sessionIds: group.sessions.map(\.id))
+                }
+            }
             if !closableSessions.isEmpty {
                 Button(closeAllLabel, role: .destructive) {
                     model.closeSessions(closableSessions.map(\.id))
