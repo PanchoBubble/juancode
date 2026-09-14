@@ -150,11 +150,9 @@ public struct DaemonOwner: Sendable, Equatable {
     }
 }
 
-/// What this app is, for the comparison. Deliberately tiny: a launch time and the
-/// two environment values whose disagreement with the daemon's is what burns people.
+/// What this app is, for the comparison. Deliberately tiny: the two environment
+/// values whose disagreement with the daemon's is what burns people.
 public struct AppIdentity: Sendable, Equatable {
-    /// When this app process started.
-    public let launchedAt: Date
     /// `JUANCODE_BUILD_ID` in this process's environment, nil when nothing stamped it.
     public let buildId: String?
     /// `JUANCODE_SESSIONS_PER_PROJECT` in this process's environment, nil when unset.
@@ -170,8 +168,7 @@ public struct AppIdentity: Sendable, Equatable {
         sessionsPerProject ?? Self.defaultSessionsPerProject
     }
 
-    public init(launchedAt: Date, buildId: String?, sessionsPerProject: Int?) {
-        self.launchedAt = launchedAt
+    public init(buildId: String?, sessionsPerProject: Int?) {
         self.buildId = buildId
         self.sessionsPerProject = sessionsPerProject
     }
@@ -179,26 +176,8 @@ public struct AppIdentity: Sendable, Equatable {
     public static var current: AppIdentity {
         let env = ProcessInfo.processInfo.environment
         return AppIdentity(
-            launchedAt: processStartTime() ?? Date(),
             buildId: env["JUANCODE_BUILD_ID"].flatMap { $0.isEmpty ? nil : $0 },
             sessionsPerProject: env["JUANCODE_SESSIONS_PER_PROJECT"].flatMap(Int.init))
-    }
-
-    /// This process's real start time, from the kernel. `Date()` at boot would drift
-    /// by however long the app spent launching, and the comparison this feeds — "did
-    /// the daemon predate my launch" — is the one that has to be right.
-    static func processStartTime(pid: pid_t = getpid()) -> Date? {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        let ok = mib.withUnsafeMutableBufferPointer { buf in
-            sysctl(buf.baseAddress, UInt32(buf.count), &info, &size, nil, 0) == 0
-        }
-        guard ok, size > 0 else { return nil }
-        let tv = info.kp_proc.p_starttime
-        guard tv.tv_sec > 0 else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec)
-            + TimeInterval(tv.tv_usec) / 1_000_000)
     }
 }
 
@@ -207,9 +186,6 @@ public struct DaemonWarning: Sendable, Equatable, Identifiable {
     public enum Kind: String, Sendable {
         /// The daemon is running a build the checkout has moved past.
         case staleBuild
-        /// The daemon was already running before this app launched, so nothing set on
-        /// this launch line reached it.
-        case predatesLaunch
         /// The daemon's retention differs from what this app's environment asks for.
         case retentionMismatch
     }
@@ -261,25 +237,6 @@ public extension DaemonIdentity {
                     + "restarts it and lists the live sessions that costs."))
         }
 
-        // Only worth saying when it changes something, and only when nothing stronger
-        // has already been said. A daemon older than this launch is normal and wanted
-        // (that is how ptys survive); what makes it worth a line is that environment
-        // set on the launch line stopped at the app. And a daemon already reported as
-        // the wrong BUILD needs one restart, not two warnings describing it.
-        if found.isEmpty, let started = startedAt, started < app.launchedAt,
-           !environmentReached(app) {
-            found.append(DaemonWarning(
-                kind: .predatesLaunch,
-                headline: "daemon predates this launch (up since "
-                    + "\(Self.clock.string(from: started)))",
-                detail: "The daemon has been running since "
-                    + "\(Self.clock.string(from: started)), before this app launched at "
-                    + "\(Self.clock.string(from: app.launchedAt)), so this launch did not start "
-                    + "it. JUANCODE_* variables set on this launch line went to the app only — "
-                    + "the daemon still has the environment it started with. "
-                    + "`scripts/dev-daemon.sh status` says who owns it."))
-        }
-
         // An unset variable is not "no opinion": it is the default, and the default
         // keeps everything. So the comparison is against the cap this launch would
         // enforce, not only against one somebody typed — a daemon started before the
@@ -309,14 +266,6 @@ public extension DaemonIdentity {
             (try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate]) as? Date
         }
         return warnings(against: app, binaryModifiedAt: now)
-    }
-
-    /// Whether this app's environment demonstrably reached the daemon. Used to keep
-    /// the "predates this launch" note quiet for the ordinary, healthy adoption where
-    /// nothing actually differs.
-    private func environmentReached(_ app: AppIdentity) -> Bool {
-        if let mine = app.buildId, let theirs = buildId { return mine == theirs }
-        return false
     }
 
     private func describe(_ cap: Int) -> String {

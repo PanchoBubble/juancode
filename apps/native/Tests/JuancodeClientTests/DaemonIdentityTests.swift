@@ -59,8 +59,7 @@ final class DaemonIdentityTests: XCTestCase {
         XCTAssertNil(daemon.startedAt)
         XCTAssertNil(daemon.buildStamp)
         XCTAssertNil(daemon.sessionsPerProject)
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: nil, sessionsPerProject: 40)
+        let app = AppIdentity(buildId: nil, sessionsPerProject: 40)
         XCTAssertEqual(daemon.warnings(against: app, binaryModifiedAt: boot), [])
     }
 
@@ -71,8 +70,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// the design, not the bug.
     func testAnAdoptedMatchingDaemonProducesNoWarnings() {
         let daemon = identity(buildId: "abc123")
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "abc123", sessionsPerProject: 40)
+        let app = AppIdentity(buildId: "abc123", sessionsPerProject: 40)
         XCTAssertEqual(daemon.warnings(against: app, binaryModifiedAt: boot), [])
     }
 
@@ -82,8 +80,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// moved past. The build ids differ, so no interpretation is needed.
     func testMismatchedBuildIdsAreStale() {
         let daemon = identity(buildId: "old111")
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "new222", sessionsPerProject: 40)
+        let app = AppIdentity(buildId: "new222", sessionsPerProject: 40)
         let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
         XCTAssertEqual(warnings.map(\.kind), [.staleBuild])
         XCTAssertTrue(warnings[0].headline.contains("old111"), warnings[0].headline)
@@ -98,12 +95,9 @@ final class DaemonIdentityTests: XCTestCase {
     /// is the fallback: rebuilt after the daemon booted means the daemon is old.
     func testARebuiltBinaryIsStaleEvenWithNoBuildStamp() {
         let daemon = identity()
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: nil, sessionsPerProject: 40)
+        let app = AppIdentity(buildId: nil, sessionsPerProject: 40)
         let rebuilt = boot.addingTimeInterval(1800)
         let warnings = daemon.warnings(against: app, binaryModifiedAt: rebuilt)
-        // Not also `.predatesLaunch`: one restart fixes both, and two lines for one
-        // remedy is how a warning starts getting scrolled past.
         XCTAssertEqual(warnings.map(\.kind), [.staleBuild])
         XCTAssertTrue(warnings[0].detail.contains("/checkout/target/debug/juancoded"),
                       warnings[0].detail)
@@ -113,30 +107,16 @@ final class DaemonIdentityTests: XCTestCase {
     /// keeps filesystem timestamp granularity from inventing staleness on every boot.
     func testAnUnchangedBinaryIsNotAReuild() {
         let daemon = identity(buildId: "abc123")
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "abc123", sessionsPerProject: 40)
+        let app = AppIdentity(buildId: "abc123", sessionsPerProject: 40)
         XCTAssertEqual(daemon.warnings(against: app,
                                        binaryModifiedAt: boot.addingTimeInterval(0.5)), [])
     }
 
-    // MARK: - Predates the launch
-
-    /// A daemon older than this app launch is only worth flagging when this launch's
-    /// environment provably did not reach it. Unstamped is unproven, so it is flagged.
-    func testAnUnstampedOlderDaemonIsFlaggedAsPredatingTheLaunch() {
+    /// An unstamped daemon older than this launch says nothing on its own: outliving
+    /// the app is the design, and an unprovable build is not evidence of a stale one.
+    func testAnUnstampedOlderDaemonIsNotFlagged() {
         let daemon = identity()
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(7200),
-                              buildId: nil, sessionsPerProject: 40)
-        let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
-        XCTAssertEqual(warnings.map(\.kind), [.predatesLaunch])
-        XCTAssertTrue(warnings[0].detail.contains("JUANCODE_*"), warnings[0].detail)
-    }
-
-    /// A daemon this launch started cannot predate it, and must say nothing.
-    func testADaemonStartedAfterTheAppIsNotFlagged() {
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(-60),
-                              buildId: nil, sessionsPerProject: 40)
-        let daemon = identity()
+        let app = AppIdentity(buildId: nil, sessionsPerProject: 40)
         XCTAssertEqual(daemon.warnings(against: app, binaryModifiedAt: boot), [])
     }
 
@@ -147,8 +127,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// been relaunched with the variable set. The app can now say so.
     func testARetentionThatTheDaemonNeverSawIsReported() {
         let daemon = identity(buildId: "abc123", retention: 40)
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "abc123", sessionsPerProject: 0)
+        let app = AppIdentity(buildId: "abc123", sessionsPerProject: 0)
         let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
         XCTAssertEqual(warnings.map(\.kind), [.retentionMismatch])
         XCTAssertTrue(warnings[0].headline.contains("40 sessions"), warnings[0].headline)
@@ -161,8 +140,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// 40, and the app was presenting its own unlimited default as if it applied.
     func testADaemonPruningUnderAnUnsetEnvironmentIsStillAMismatch() {
         let daemon = identity(buildId: "abc123", retention: 40)
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "abc123", sessionsPerProject: nil)
+        let app = AppIdentity(buildId: "abc123", sessionsPerProject: nil)
         let warnings = daemon.warnings(against: app, binaryModifiedAt: boot)
         XCTAssertEqual(warnings.map(\.kind), [.retentionMismatch])
         XCTAssertTrue(warnings[0].headline.contains("40 sessions"), warnings[0].headline)
@@ -174,8 +152,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// of "keep everything", with nobody having typed anything.
     func testTheSharedDefaultOfKeepingEverythingIsNotAMismatch() {
         let daemon = identity(buildId: "abc123", retention: 0)
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "abc123", sessionsPerProject: nil)
+        let app = AppIdentity(buildId: "abc123", sessionsPerProject: nil)
         XCTAssertEqual(AppIdentity.defaultSessionsPerProject, 0)
         XCTAssertEqual(daemon.warnings(against: app, binaryModifiedAt: boot), [])
     }
@@ -186,8 +163,7 @@ final class DaemonIdentityTests: XCTestCase {
     /// verdict has to land — not in a log nobody opens.
     func testBootPutsTheVerdictOnTheSelection() {
         let daemon = identity(buildId: "old111")
-        let app = AppIdentity(launchedAt: boot.addingTimeInterval(3600),
-                              buildId: "new222", sessionsPerProject: 40)
+        let app = AppIdentity(buildId: "new222", sessionsPerProject: 40)
         let booted = CoreBoot.boot(
             persisted: .rust, override: nil, rustCoreURL: "http://127.0.0.1:4290",
             makeSwift: { _ in (FakeCore(capabilities: []), nil) },
@@ -211,17 +187,6 @@ final class DaemonIdentityTests: XCTestCase {
             makeRust: { _ in FakeCore(capabilities: []) })
         XCTAssertNil(booted.selection.daemon)
         XCTAssertFalse(booted.selection.daemonIsStale)
-    }
-
-    /// The app's launch time comes from the kernel, not from a `Date()` captured
-    /// somewhere during boot: the comparison it feeds is "did the daemon predate this
-    /// launch", and a value that drifts by however long the app took to start is the
-    /// wrong side of that question.
-    func testProcessStartTimeIsRealAndInThePast() {
-        let started = AppIdentity.processStartTime()
-        XCTAssertNotNil(started)
-        XCTAssertLessThanOrEqual(started!, Date())
-        XCTAssertGreaterThan(started!, Date(timeIntervalSinceNow: -86_400))
     }
 }
 // MARK: - who ends the daemon
@@ -277,7 +242,7 @@ extension DaemonIdentityTests {
         let daemon = try XCTUnwrap(DaemonIdentity(json: [
             "pid": 6, "buildId": "abc-1", "ownerState": "unowned", "ownerGraceMs": 120_000,
         ]))
-        let app = AppIdentity(launchedAt: Date(), buildId: "abc-1", sessionsPerProject: nil)
+        let app = AppIdentity(buildId: "abc-1", sessionsPerProject: nil)
         XCTAssertTrue(daemon.warnings(against: app, binaryModifiedAt: nil).isEmpty)
     }
 }
