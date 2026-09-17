@@ -136,6 +136,18 @@ public enum Config {
         reapIdleMinutesOverride ?? 30
     }
 
+    /// How long an auto-slept row keeps its "open but closed" treatment — moon
+    /// glyph, resting slot in the sidebar order, exempt from the folder's "Load
+    /// more" — before it reverts to an ordinary exited row
+    /// (`JUANCODE_SLEEP_LAPSE_HOURS`, default 24; `0` keeps sleeping rows surfaced
+    /// forever). Hours rather than minutes because the only reason to set it at all
+    /// is to watch the lapse happen without waiting out a day.
+    public static var sleepLapseWindowMs: Int {
+        let hours = env["JUANCODE_SLEEP_LAPSE_HOURS"].flatMap(Int.init)
+        guard let hours else { return SleepLapse.defaultWindowMs }
+        return hours <= 0 ? 0 : hours * 60 * 60 * 1000
+    }
+
     /// Ceiling on simultaneously live CLI sessions (`JUANCODE_MAX_LIVE_SESSIONS`,
     /// default 12; `0` disables). Past it the reaper sleeps the least-recently-active
     /// sessions that are safe to sleep, regardless of the idle window — the window

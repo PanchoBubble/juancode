@@ -328,3 +328,25 @@ public func jumpResults(_ candidates: [JumpCandidate], query: String) -> [JumpCa
     }
     .map(\.0)
 }
+
+/// When an auto-slept row stops counting as "open but closed".
+///
+/// Sleeping is a promise that the session is one click from live and still yours to
+/// pick up — which is why the moon holds its slot in the resting order and never
+/// folds behind "Load more". That promise has a shelf life. A session you haven't
+/// touched since yesterday isn't open work you forgot to close; it's history, and
+/// keeping a purple moon on it crowds the rows that *are* open out of the preview.
+///
+/// So the exemption expires: after the window the row reverts to an ordinary exited
+/// one — grey dot, sinks with the dead, foldable — without anything being deleted or
+/// made harder to resume.
+public enum SleepLapse {
+    /// A day, the interval after which "I left it sleeping" reads as "I left it".
+    public static let defaultWindowMs = 24 * 60 * 60 * 1000
+
+    /// Whether a row slept at `sleptAtMs` has outlived the window. A window ≤ 0
+    /// disables the lapse entirely (sleeping rows stay surfaced forever).
+    public static func lapsed(sleptAtMs: Int, nowMs: Int, windowMs: Int = defaultWindowMs) -> Bool {
+        windowMs > 0 && nowMs - sleptAtMs >= windowMs
+    }
+}

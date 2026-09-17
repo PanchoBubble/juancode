@@ -1097,8 +1097,8 @@ struct SidebarView: View {
     /// can park dead ones in the preview slots — and an active session must never be
     /// hidden behind "Load more", least of all one that just auto-started. The
     /// sleeping ones stay for a different reason: the reaper closed them, not the
-    /// user, so the fold only takes them once the user waves them off
-    /// (see `foldedPreviewKeeps`).
+    /// user, so the fold only takes them once the user waves them off — or once
+    /// they've been asleep a full day (`AppModel.isResting`, `foldedPreviewKeeps`).
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
         let s = group.sessions
         guard s.count > folderPreviewCount else { return s }
@@ -1106,8 +1106,7 @@ struct SidebarView: View {
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
                                    live: model.isLive($0.element.id),
-                                   sleepingUndismissed: model.isAsleep($0.element.id)
-                                       && !model.isDismissed($0.element.id))
+                                   sleepingUndismissed: model.isResting($0.element.id))
             }
             .map(\.element)
     }
@@ -1768,7 +1767,7 @@ private struct SessionRowHost: View {
                    onTogglePin: external ? nil : { model.togglePinned(meta.id) },
                    selected: selected,
                    activating: model.isActivating(meta.id),
-                   asleep: model.isAsleep(meta.id),
+                   asleep: model.isResting(meta.id),
                    dismissed: !external && model.isDismissed(meta.id),
                    onToggleDismissed: external || !model.isAsleep(meta.id)
                        ? nil : { model.toggleDismissed(meta.id) })
@@ -2727,8 +2726,10 @@ struct SessionRow: View {
     /// The session's exited pane is being resumed right now (juancode click-to-open
     /// feedback) — swaps the status glyph for a spinner until the pty is back.
     var activating: Bool = false
-    /// Auto-slept while idle to free memory (`AppModel.isAsleep`): purple moon, and
-    /// the row rests in place instead of sinking or fading like an exited one.
+    /// Auto-slept while idle and still resting (`AppModel.isResting`): purple moon,
+    /// and the row holds its place instead of sinking like an exited one. False once
+    /// the user dismisses it or it has slept a day — then it's a grey dot like any
+    /// other closed session.
     var asleep: Bool = false
     /// The user dismissed this sleeping row (`AppModel.isDismissed`) — it sinks and
     /// the fold may hide it. Drives the hover chip's glyph, which then offers the
@@ -2798,8 +2799,9 @@ struct SessionRow: View {
         .onHover { hovering = $0 }
     }
 
-    /// The reaper put this session to sleep and it hasn't been revived yet. Not the
-    /// same as `meta.dormant` — see `AppModel.isAsleep`.
+    /// The reaper put this session to sleep, it hasn't been revived, and it is still
+    /// being offered as open work. Not the same as `meta.dormant` — see
+    /// `AppModel.isResting`.
     private var sleeping: Bool { !live && asleep }
 
     /// The at-risk warning plus (for external rows) a hover-revealed resume button.

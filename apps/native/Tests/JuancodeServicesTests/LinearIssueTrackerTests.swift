@@ -222,3 +222,45 @@ final class IssuePromptTests: XCTestCase {
         XCTAssertEqual(t.state, .needsDecision)
     }
 }
+
+// MARK: - offline escalation
+
+/// `appendingAgentOfflineNotice`: a tracked issue whose agent session is gone (closed
+/// from the sidebar, or unresumable) must say so once. The poll already advanced the
+/// baseline past that activity, so a silently dropped prompt is work lost for good.
+final class IssueAgentOfflineNoticeTests: XCTestCase {
+    private func notice(_ message: String) -> IssueTrackNotification {
+        IssueTrackNotification(id: "n0", issueIdentifier: "ENG-1", message: message, createdAt: 1)
+    }
+
+    func testAddsTheEscalationWhenNoneIsOutstanding() {
+        let out = appendingAgentOfflineNotice([], identifier: "ENG-1", id: "n1", now: 42)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].id, "n1")
+        XCTAssertEqual(out[0].issueIdentifier, "ENG-1")
+        XCTAssertEqual(out[0].createdAt, 42)
+        XCTAssertEqual(out[0].message, issueAgentOfflineMessage)
+    }
+
+    func testDoesNotRepeatItselfOnEveryPoll() {
+        let first = appendingAgentOfflineNotice([], identifier: "ENG-1", id: "n1", now: 1)
+        let second = appendingAgentOfflineNotice(first, identifier: "ENG-1", id: "n2", now: 2)
+        XCTAssertEqual(second, first)
+    }
+
+    func testKeepsUnrelatedDecisionsAndAppendsAfterThem() {
+        let existing = [notice("issue was canceled (Canceled)")]
+        let out = appendingAgentOfflineNotice(existing, identifier: "ENG-1", id: "n1", now: 2)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0], existing[0])
+        XCTAssertEqual(out[1].message, issueAgentOfflineMessage)
+    }
+
+    func testAnEscalatedIssueReadsAsNeedsDecision() {
+        var t = TrackedIssue(identifier: "ENG-1", title: "t", url: "u", cwd: "/repo", sessionId: "s")
+        t.snapshot.stateType = "started"
+        t.notifications = appendingAgentOfflineNotice(
+            t.notifications, identifier: t.identifier, id: "n1", now: 1)
+        XCTAssertEqual(t.state, .needsDecision)
+    }
+}

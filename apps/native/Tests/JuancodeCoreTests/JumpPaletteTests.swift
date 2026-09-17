@@ -459,6 +459,35 @@ import Testing
         #expect(!manualRestingPrecedes(placed, asleep))
     }
 
+    @Test func sleepingRowLapsesAfterADay() {
+        let day = SleepLapse.defaultWindowMs
+        let slept = 1_700_000_000_000
+        // Fresh sleep, and all the way to the last minute of the window: still open work.
+        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept))
+        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + day - 60_000))
+        // On the hour it turns over, and stays turned over.
+        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + day))
+        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 9 * day))
+        // A clock that went backwards (NTP step, timezone-free ms arithmetic) must not
+        // lapse a row that was slept "in the future".
+        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept - day))
+        // A zero/negative window is the opt-out: nothing ever lapses.
+        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 99 * day, windowMs: 0))
+        // And a short window (the env override exists so the lapse is watchable) works
+        // on the same edge.
+        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 60_000, windowMs: 60_000))
+        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 59_999, windowMs: 60_000))
+    }
+
+    @Test func lapsedSleepSinksAndFoldsLikeAnyExitedRow() {
+        // The app passes `dormant: false` / `sleepingUndismissed: false` once a row has
+        // lapsed (AppModel.isResting), so it lands back in the plain-exited rules.
+        #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
+                                      crashOrphan: false, dormant: false) == .exited)
+        #expect(!foldedPreviewKeeps(index: 7, limit: 5, live: false,
+                                    sleepingUndismissed: false))
+    }
+
     @Test func foldKeepsLiveAndUndismissedSleepingRows() {
         let limit = 5
         // Inside the preview window: everything shows, whatever its state.

@@ -547,8 +547,51 @@ final class AppModel {
     /// says the wrong thing. Excluding the boot orphans leaves the moon meaning
     /// exactly one thing: auto-slept to free memory, open it to carry on.
     func isAsleep(_ id: String) -> Bool {
-        guard !isLive(id), !isCrashOrphan(id) else { return false }
+        guard !isLive(id), !isCrashOrphan(id), !lapsedSleeps.contains(id) else { return false }
         return sessions.first(where: { $0.id == id })?.dormant ?? false
+    }
+
+    /// Whether `id` is asleep *and* still resting in place: the moon glyph, the
+    /// unsunk slot in the sidebar order, and the exemption from the folder's "Load
+    /// more". That treatment says "we closed this, not you — it's still open work",
+    /// so it ends the moment either of those stops being true:
+    ///
+    /// - the user waved the row off (wheel click / the hover chevron): they closed it,
+    ///   so it reads like anything else they closed — grey dot, sunk, foldable. The
+    ///   dismissal itself stays undoable from the same chip, which is why the raw
+    ///   `isAsleep` fact (what gates that affordance) is a separate question;
+    /// - a day has passed since it was slept (`SleepLapse`): a moon still burning on
+    ///   yesterday's session crowds out the ones that really are open.
+    func isResting(_ id: String) -> Bool { isAsleep(id) && !isDismissed(id) }
+
+    /// Auto-slept sessions whose day has run out (`SleepLapse`) — they render and sort
+    /// as plain exited rows from here on. Recomputed on the coarse health tick rather
+    /// than derived per-read, so a view reading `isAsleep` observes the flip instead of
+    /// waiting for some unrelated state change to redraw it.
+    private(set) var lapsedSleeps: Set<String> = []
+
+    /// Re-evaluate which sleeping rows have outlived the window. Publishes (and
+    /// re-sweeps the order projection) only when the set actually moves, so the common
+    /// tick costs one pass over `sessions` and changes nothing.
+    func refreshLapsedSleeps() {
+        let window = Config.sleepLapseWindowMs
+        guard window > 0 else {
+            if !lapsedSleeps.isEmpty { lapsedSleeps = []; syncSidebarOrder() }
+            return
+        }
+        let now = nowMs()
+        var next: Set<String> = []
+        for meta in sessions where meta.dormant {
+            // `updatedAt` is stamped by `markDormant` and by the exit row it precedes,
+            // so for a session nothing has touched since it was slept it *is* the
+            // moment we closed it.
+            if SleepLapse.lapsed(sleptAtMs: meta.updatedAt, nowMs: now, windowMs: window) {
+                next.insert(meta.id)
+            }
+        }
+        guard next != lapsedSleeps else { return }
+        lapsedSleeps = next
+        syncSidebarOrder()
     }
 
     /// Live-output subscription cancels for restored panes awaiting their first live
@@ -743,6 +786,10 @@ final class AppModel {
         sessions = merged
         for m in sessions { metaCache[m.id] = m }
         rebuildWorkAtRiskSessionIndex()
+        // A relaunch is the usual way a day passes with the app closed: the rows that
+        // slept yesterday have to come back grey, not wearing a moon until the first
+        // health tick.
+        refreshLapsedSleeps()
         // Liveness just changed for someone (this is the create/exit/adopt path), which
         // is exactly what the sidebar's sink/bubble order keys off.
         syncSidebarOrder()
@@ -904,9 +951,11 @@ final class AppModel {
         let live = Set(core.liveSessions().map(\.id))
         // Auto-slept rows rest where they were rather than sinking into the dead
         // pile — they're "open but closed" (see `restingAttention`). Unless the user
-        // dismissed one: that's them closing it, so it sinks like any exited row.
+        // dismissed one (that's them closing it) or it has been asleep a full day
+        // (`SleepLapse`): either way it sinks like any exited row.
         let dormantIds = Set(sessions.filter(\.dormant).map(\.id))
             .subtracting(dismissedSessions)
+            .subtracting(lapsedSleeps)
         var next: [String: SessionAttention] = [:]
         next.reserveCapacity(sessions.count + externalSessions.count)
         func project(_ id: String) {
@@ -2858,16 +2907,72 @@ final class AppModel {
                     break  // issue classifier never emits this; PR-only terminal event
                 }
             }
-            if !reasons.isEmpty, let session = liveSession(entry.sessionId) {
+            if !reasons.isEmpty {
                 let prompt = issueActivityPrompt(identifier: identifier, reasons: reasons)
-                // Bracketed paste + separate Enter (via `submit`), not a raw
-                // `"\(prompt)\r"` burst — the CLI reads that burst as a paste and
-                // keeps the CR literal, so the prompt lands but never submits.
-                session.submit(prompt)
+                await deliverIssuePrompt(prompt, to: &entry)
             }
+            // The entry may have been untracked while the delivery above was off-actor
+            // (a revive or respawn awaits); writing it back would resurrect it.
+            guard trackedIssues[key] != nil else { continue }
             trackedIssues[key] = entry
         }
         persistTrackedIssues()
+    }
+
+    /// Hand a poll's prompt to the issue's agent, bringing the session back when it
+    /// isn't live — the delivery chain `PrTrackingEngine.apply` runs for tracked PRs.
+    /// A dead session used to make the prompt vanish: the baseline had already
+    /// advanced past that activity, so it was never replayed and the issue stayed on
+    /// the list, polling forever, acting never. Closing the driving session from the
+    /// sidebar was enough to do it.
+    ///
+    /// Live → paste into the conversation. Exited but on record → resume it and seed.
+    /// Gone (closed, or nothing resumable) → open a replacement and rebind tracking to
+    /// it. Nothing worked → escalate, so the panel shows the work is stuck rather than
+    /// dropping it.
+    private func deliverIssuePrompt(_ prompt: String, to entry: inout TrackedIssue) async {
+        if let session = liveSession(entry.sessionId) {
+            // Bracketed paste + separate Enter (via `submit`), not a raw
+            // `"\(prompt)\r"` burst — the CLI reads that burst as a paste and
+            // keeps the CR literal, so the prompt lands but never submits.
+            session.submit(prompt)
+            return
+        }
+        // Quiet: a poll tick runs unattended, so a failed resume falls through to the
+        // respawn below instead of raising a modal error the user never asked for.
+        if await reactivate(entry.sessionId, quiet: true), let session = liveSession(entry.sessionId) {
+            // A just-revived session hasn't repainted its TUI yet, so the prompt needs
+            // the verified settle-paste-Enter engine rather than a straight-in paste.
+            session.autoSubmit(prompt)
+            return
+        }
+        if let fresh = await respawnIssueAgent(entry, prompt: prompt) {
+            entry.sessionId = fresh.id
+            return
+        }
+        entry.notifications = appendingAgentOfflineNotice(
+            entry.notifications, identifier: entry.identifier,
+            id: UUID().uuidString, now: nowMs())
+    }
+
+    /// Open a replacement agent for a tracked issue whose session can't be revived,
+    /// on its own fresh worktree exactly as `trackIssue`'s original spawn did. The
+    /// contract and the pending prompt go in as ONE opening prompt: `create` delivers
+    /// that through whichever core is running and its verified paste-then-Enter, where
+    /// two back-to-back sends would race each other into a still-booting TUI.
+    /// Nil when the spawn itself fails.
+    private func respawnIssueAgent(_ entry: TrackedIssue, prompt: String) async -> (any LiveSession)? {
+        let seed = trackIssueSeedPrompt(identifier: entry.identifier, title: entry.title,
+                                        url: entry.url) + "\n\n" + prompt
+        // Short suffix: the predecessor's worktree may still be on disk under the
+        // plain identifier (removing it is best-effort when a session closes).
+        let worktreeName = "\(entry.identifier.lowercased())-\(String(UUID().uuidString.prefix(4)).lowercased())"
+        guard let fresh = await create(provider: .claude, cwd: entry.cwd, skipPermissions: true,
+                                       isolateWorktree: true, initialInput: seed,
+                                       model: "opus", worktreeName: worktreeName) else { return nil }
+        core.logSessionEvent("trackIssueRespawn", sessionId: fresh.id, project: entry.cwd,
+                             fields: ["issue": entry.identifier, "replaces": entry.sessionId])
+        return fresh
     }
 
     /// Revive an exited session (mirrors the WS `reactivate` path). Returns whether
@@ -3621,6 +3726,9 @@ final class AppModel {
     /// the next tick.
     func runHealthCheckOnce() {
         let now = nowMs()
+        // Cheap enough to ride along here rather than run its own timer — the lapse is
+        // a once-a-day edge, and 30s late on it is invisible.
+        refreshLapsedSleeps()
         // Cheap re-assert of the reaper's never-sleep set (a no-op unless it moved):
         // the 30s tick is well inside the sweep interval, so even a change path that
         // forgets to push can't lose the open pane or the active Oracle.

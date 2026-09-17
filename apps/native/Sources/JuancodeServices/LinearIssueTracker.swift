@@ -185,3 +185,26 @@ public func issueActivityPrompt(identifier: String, reasons: [String]) -> String
     do it. If it needs a real decision, STOP and tell me what you need.
     """
 }
+
+// MARK: - offline escalation
+
+/// Surfaced when a poll has work for the tracked issue's agent but that agent is
+/// gone — the session was closed, or its conversation can be neither resumed nor
+/// replaced. Without it the prompt would vanish silently while the baseline had
+/// already advanced, so the activity was never replayed and tracking went quiet
+/// for good (the Linear twin of the PR engine's offline notice).
+public let issueAgentOfflineMessage =
+    "New issue activity needs the agent, but its session is offline and couldn't be resumed or respawned."
+
+/// Add the offline escalation to `notifications` unless one is already outstanding.
+/// Deduped by message: a persistently-dead session raises this once, not on every
+/// poll tick, and the entry stays dismissable from the issues panel.
+public func appendingAgentOfflineNotice(_ notifications: [IssueTrackNotification],
+                                        identifier: String, id: String,
+                                        now: Int) -> [IssueTrackNotification] {
+    guard !notifications.contains(where: { $0.message == issueAgentOfflineMessage }) else {
+        return notifications
+    }
+    return notifications + [IssueTrackNotification(
+        id: id, issueIdentifier: identifier, message: issueAgentOfflineMessage, createdAt: now)]
+}
