@@ -18,6 +18,12 @@ struct RunningSessionsBadge: View {
     /// Live agents, and how many are mid-turn. Both come off the model's
     /// projection: a toolbar body that filtered sessions itself would re-render on
     /// every activity edge in every session (juancode-2n0).
+    ///
+    /// "Running" means a live agent pty, which is the set the pause button sleeps —
+    /// not the number of rows in the sidebar. Sleeping and exited rows count zero,
+    /// editor panes and adopted external sessions never count, and Oracle's own
+    /// hidden sessions do (they are tagged in the list so the number reconciles
+    /// with what you can see).
     private var running: Int { model.runningSessionCount }
     private var busy: Int { model.busySessionCount }
 
@@ -85,7 +91,9 @@ struct RunningSessionsBadge: View {
         let activity = model.activity(meta.id)
         return HStack(spacing: 8) {
             Button {
-                model.selection = meta.id
+                // `revealSession`, not a bare selection: an Oracle row is never the
+                // sidebar selection, so setting it would look like a dead click.
+                model.revealSession(meta.id)
                 showing = false
             } label: {
                 HStack(spacing: 8) {
@@ -93,7 +101,20 @@ struct RunningSessionsBadge: View {
                         .font(.system(size: 11))
                         .foregroundStyle(colour(activity))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(meta.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        HStack(spacing: 5) {
+                            Text(meta.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            // Oracle's sessions are hidden from the sidebar but counted
+                            // here, so say which ones they are rather than leaving a
+                            // number that doesn't add up against the rows on screen.
+                            if model.isOracleSession(meta.id) {
+                                Text("Oracle")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color.accentColor.opacity(0.18)))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
                         Text("\((meta.cwd as NSString).lastPathComponent) · \(label(activity))")
                             .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                     }

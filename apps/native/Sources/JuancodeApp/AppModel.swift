@@ -771,7 +771,7 @@ final class AppModel {
     }
 
     /// Is this one of Oracle's own sessions (rooted in its control dir)?
-    private func isOracleSession(_ id: String) -> Bool {
+    func isOracleSession(_ id: String) -> Bool {
         (liveSession(id)?.meta.cwd ?? sessions.first { $0.id == id }?.cwd) == OraclePaths.controlDir
     }
 

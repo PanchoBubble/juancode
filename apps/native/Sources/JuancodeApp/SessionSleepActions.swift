@@ -140,9 +140,20 @@ extension AppModel {
     var runningSessionCount: Int { runningTally.live }
     var busySessionCount: Int { runningTally.busy }
 
-    /// The live agents the toolbar's running badge lists, working ones first. Same
-    /// set the pause counts (`pauseCandidates` + `GlobalPause.targets`), so the
-    /// number on the badge and the rows behind it can never disagree.
+    /// The live agents the toolbar's running badge lists, working ones first.
+    ///
+    /// Exactly the set `pauseAllSessions` would sleep — same `pauseCandidates` and
+    /// the same `GlobalPause.targets` filter — so the number on the badge, the rows
+    /// behind it and what the pause button acts on can never disagree. Which means:
+    /// every live agent pty this core owns, INCLUDING Oracle's own sidebar-hidden
+    /// sessions (tagged as such in the list, since they are real processes holding
+    /// real RAM), and excluding editor panes (nvim — no conversation to stop),
+    /// adopted external sessions (their pty belongs to a terminal we don't own), and
+    /// every row that is asleep or exited. It is not "all open rows": a sidebar full
+    /// of sleeping sessions counts zero.
+    ///
+    /// Recomputed per view pass, unlike the badge's own count — the popover is open
+    /// or it isn't, so there is no re-render cost to hoist.
     var runningSessionMetas: [SessionMeta] {
         let running = Set(GlobalPause.targets(pauseCandidates()))
         let rows = sessions.filter { running.contains($0.id) }
