@@ -22,6 +22,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use juancoded_core::model::{ProviderId, SessionKind, SessionMeta, SessionStatus, SessionUsage};
 
 pub mod discovery;
+pub mod import_swift;
 pub mod schema;
 
 /// Scrollback bytes plus the grid they were parsed at. Never one without the other.
@@ -30,6 +31,37 @@ pub struct Scrollback {
     pub cols: u16,
     pub rows: u16,
     pub bytes: Vec<u8>,
+}
+
+impl Scrollback {
+    /// The one grid that is not a grid: bytes whose source never recorded the width
+    /// they were written at.
+    ///
+    /// Only the Swift-store importer writes it, and it exists because that store has
+    /// no width to carry: its `sessions.scrollback` is a lossy UTF-8 column and there
+    /// is no column beside it saying how wide the terminal was. The choice there is
+    /// between inventing a number and admitting there isn't one, and inventing one is
+    /// the garble this table's `cols`/`rows` exist to prevent — a hard wrap laid out
+    /// at 120 columns and replayed at 80 is wrong in every line that reached the
+    /// right margin.
+    ///
+    /// `(0, 0)` cannot collide with a real grid: a terminal with no columns has
+    /// nothing to print. Readers take [`Scrollback::grid`] rather than the fields, so
+    /// an unknown grid becomes `None` and falls back to whatever default the reader
+    /// already uses for scrollback it does not have — which is exactly the fidelity
+    /// this data has always had under the Swift core, where the client parsed it at
+    /// its own width too.
+    pub const UNKNOWN_GRID: (u16, u16) = (0, 0);
+
+    /// The grid these bytes were parsed at, or `None` when the source never recorded
+    /// one. Never read `cols`/`rows` directly to decide a replay width.
+    pub fn grid(&self) -> Option<(u16, u16)> {
+        if (self.cols, self.rows) == Self::UNKNOWN_GRID {
+            None
+        } else {
+            Some((self.cols, self.rows))
+        }
+    }
 }
 
 /// One transcript record on its way to or from the store: the sequence number that
@@ -933,7 +965,10 @@ mod tests {
         for i in 0..50 {
             store.upsert(&exited(&format!("s{i}"), "/proj", i)).unwrap();
         }
-        assert!(store.prune_project("/proj", default_cap).unwrap().is_empty());
+        assert!(store
+            .prune_project("/proj", default_cap)
+            .unwrap()
+            .is_empty());
         assert_eq!(store.all().unwrap().len(), 50);
     }
 

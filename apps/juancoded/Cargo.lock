@@ -561,8 +561,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "juancoded-cordis",
+ "juancoded-persistence",
  "juancoded-server",
  "juancoded-state",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -653,6 +655,7 @@ dependencies = [
  "juancoded-persistence",
  "juancoded-transcripts",
  "juancoded-vt",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

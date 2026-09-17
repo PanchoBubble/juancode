@@ -11,9 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 juancoded-cordis.workspace = true
+juancoded-persistence.workspace = true
 juancoded-server.workspace = true
 juancoded-state.workspace = true
 anyhow.workspace = true
+libc.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

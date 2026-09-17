@@ -20,4 +20,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 juancoded-persistence.workspace = true
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

@@ -457,6 +457,15 @@ impl SessionRegistry {
     /// row that claimed to be running would be a session no client could ever get
     /// bytes out of. The scrollback comes back with the grid it was written at, which
     /// is the whole point of storing the two together.
+    ///
+    /// One kind of row has no grid to come back with: scrollback imported from the
+    /// Swift store, which never recorded a width. `Scrollback::grid` reports that as
+    /// `None`, so those bytes are replayed at this daemon's default grid — the same
+    /// fallback a session with no stored scrollback at all gets, and the same thing
+    /// the Swift core's own clients did with this data, which parsed it at whatever
+    /// width the window happened to be. The stored pair is kept verbatim in the ring
+    /// so nothing downstream mistakes "unknown" for "out of date" and stamps this
+    /// process's default over it.
     fn hydrate(&self) {
         let rows = match self.inner.store.all() {
             Ok(rows) => rows,
@@ -468,9 +477,12 @@ impl SessionRegistry {
         let mut sessions = self.lock_sessions();
         for mut meta in rows {
             let scrollback = self.inner.store.scrollback(&meta.id).ok().flatten();
+            // The pair exactly as stored, unknown included: it is what the row says,
+            // and `flush_scrollback` compares against it to decide the row is stale.
+            let saved_grid = scrollback.as_ref().map(|s| (s.cols, s.rows));
             let (cols, rows_) = scrollback
                 .as_ref()
-                .map(|s| (s.cols, s.rows))
+                .and_then(Scrollback::grid)
                 .unwrap_or(self.inner.config.default_grid);
             if meta.status == SessionStatus::Running {
                 meta.status = SessionStatus::Exited;
@@ -480,7 +492,7 @@ impl SessionRegistry {
             let mut ring = Ring::new(self.inner.config.scrollback_cap);
             if let Some(Scrollback { bytes, .. }) = scrollback {
                 ring.bytes = bytes;
-                ring.saved_grid = Some((cols, rows_));
+                ring.saved_grid = saved_grid;
             }
             // Neither the model nor the preset survives a restart, which is what
             // the Swift core's revive does too: both are per-spawn knobs, and the
@@ -2049,6 +2061,16 @@ impl SessionRegistry {
             let mut ring = live.scrollback.lock().unwrap_or_else(|e| e.into_inner());
             // A width change is as much a reason to rewrite as a byte change: the
             // stored row is the pair, and a stale half of it is the whole bug.
+            // Imported bytes were never parsed at any grid this daemon knows, and the
+            // grid it holds for them is only its own default. Rewriting the row on a
+            // shutdown sweep would replace an honest "no width recorded" with an
+            // invented one — the exact garble the stored pair exists to prevent. A
+            // replay that really does feed these bytes into a terminal clears the
+            // marker itself, so the only write skipped here is one with no new fact
+            // behind it.
+            if !ring.dirty && ring.saved_grid == Some(Scrollback::UNKNOWN_GRID) {
+                return;
+            }
             let regridded = ring.saved_grid != Some((cols, rows));
             if !ring.dirty && !regridded {
                 return;
@@ -2081,7 +2103,13 @@ impl SessionRegistry {
 
     fn rebuild_replay_grid(&self, id: &str, live: &Arc<LiveSession>, cols: u16, rows: u16) {
         let bytes = {
-            let ring = live.scrollback.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ring = live.scrollback.lock().unwrap_or_else(|e| e.into_inner());
+            // About to actually parse them at this grid, which is the one thing that
+            // turns an imported ring's "no width recorded" into a width. Dropping the
+            // marker lets the flush below write the pair it just made true.
+            if ring.saved_grid == Some(Scrollback::UNKNOWN_GRID) {
+                ring.saved_grid = None;
+            }
             ring.bytes.clone()
         };
         self.inner.terminal.close(id);

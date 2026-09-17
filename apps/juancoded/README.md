@@ -178,6 +178,36 @@ script, and a check that needs a JSON parser it may not have is a check that get
 skipped. Written on a successful bind, removed on a clean stop; a crash leaves it
 behind, which is why every reader confirms the pid is alive first.
 
+### Bringing the Swift core's history across
+
+One DB per core means a session recorded under the Swift core is not visible here,
+which is fine until somebody wants the Swift core deleted (`juancode-nqpm`). The
+bridge is one subcommand:
+
+```sh
+juancoded import-swift ~/.juancode/data/juancode.db --dry-run   # count it first
+juancoded import-swift ~/.juancode/data/juancode.db             # then move it
+```
+
+It is additive and idempotent: a session this store already holds keeps its own row —
+an import must not undo a rename or move `updated_at` backwards — and scrollback is
+written only where this store has none. A row of zero bytes counts as none, which is
+the case that matters: the daemon writes one for every session it rehydrates with
+nothing to replay, so "there is a row" is the wrong test and "there is something in
+it" is the right one. It never writes `forgotten_cli_sessions`; a tombstone would make
+every imported conversation un-adoptable.
+
+It refuses to run while a daemon is serving the destination (the `juancoded.run` file
+beside it names a live pid). That daemon holds every session in memory and flushes its
+own copy on the way out, so an import underneath one is undone at the next quit.
+
+**Imported scrollback has no grid**, and says so rather than guessing: the Swift store
+has no column recording how wide the terminal was, so the rows land at
+`Scrollback::UNKNOWN_GRID` (`0x0`) and are replayed at the reader's default — exactly
+what the Swift core's own clients did with this data. A shutdown sweep leaves the
+marker alone; only a replay that really feeds the bytes into a terminal may write a
+width.
+
 ## Conformance
 
 Measured against `apps/wire-conformance` (20 golden scenarios, protocol v1) by
