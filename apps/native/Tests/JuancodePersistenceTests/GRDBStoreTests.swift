@@ -63,6 +63,19 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.list().map(\.id), ["b", "c", "a"])
     }
 
+    /// The sidebar rebuild runs `list()` on the main actor, and every session row
+    /// carries its scrollback inline — so a plan that opens the table walks each
+    /// row's overflow chain to reach the meta columns stored after `scrollback`
+    /// (measured: 329ms over 728 rows, the freeze when a new session appears).
+    /// Only an index-only scan is fast, and adding a meta column without adding it
+    /// to `idx_sessions_meta` silently loses that, so the plan itself is asserted.
+    func testListUsesCoveringIndex() {
+        store.insert(meta())
+        let plan = store.queryPlan(GRDBStore.listSQL).joined(separator: " | ")
+        XCTAssertTrue(plan.contains("COVERING INDEX idx_sessions_meta"),
+                      "list() must scan idx_sessions_meta only; got: \(plan)")
+    }
+
     func testUpdatePersistsScrollbackAndMeta() {
         var m = meta()
         store.insert(m)

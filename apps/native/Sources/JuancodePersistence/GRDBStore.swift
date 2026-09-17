@@ -98,6 +98,19 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN mid_turn INTEGER NOT NULL DEFAULT 0")
             }
 
+            // A covering index over exactly `metaColumns`, so `list()` reads the
+            // sidebar's session list straight out of the index and never opens a
+            // `sessions` row — whose `scrollback` column makes almost every row spill
+            // into an overflow chain that the meta columns stored after it would
+            // otherwise have to be walked through. See `metaColumns`.
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_sessions_meta ON sessions(
+                    created_at DESC, id, provider, cwd, title, status, exit_code, updated_at,
+                    cli_session_id, skip_permissions, worktree_path, usage, archived, dormant,
+                    dispatch_id
+                );
+                """)
+
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS diff_comments (
                     id          TEXT PRIMARY KEY,
@@ -399,10 +412,22 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
     /// decodes it just for `rowToMeta` to throw it away. The sidebar rebuild runs
     /// `list()` on the main actor, so with a few dozen persisted sessions that was
     /// megabytes of pointless main-thread work per refresh (juancode-mapj).
-    private static let metaColumns = """
+    ///
+    /// Naming the columns is necessary but not sufficient: `scrollback` sits PHYSICALLY
+    /// before half of them in the row, and a row whose payload spills past one page
+    /// keeps the remainder in an overflow chain. So reading `skip_permissions` or
+    /// anything after it still walks every overflow page of that row's scrollback —
+    /// `list()` measured 329ms of main-thread `pread` over 728 rows / 149MB. That is
+    /// what `idx_sessions_meta` is for: it carries exactly this projection, so the
+    /// scan is index-only and never opens a table row (1ms). Adding a column here
+    /// means adding it to that index too — `testListUsesCoveringIndex` fails otherwise.
+    static let metaColumns = """
         id, provider, cwd, title, status, exit_code, created_at, updated_at, \
         cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id
         """
+
+    /// The exact statement `list()` runs, shared with the test that asserts its plan.
+    static let listSQL = "SELECT \(metaColumns) FROM sessions ORDER BY created_at DESC"
 
     public func get(_ id: String) -> SessionMeta? {
         try? dbQueue.read { db in
@@ -414,9 +439,17 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
 
     public func list() -> [SessionMeta] {
         (try? dbQueue.read { db in
-            try Row.fetchAll(
-                db, sql: "SELECT \(Self.metaColumns) FROM sessions ORDER BY created_at DESC"
-            ).map(rowToMeta)
+            try Row.fetchAll(db, sql: Self.listSQL).map(rowToMeta)
+        }) ?? []
+    }
+
+    /// SQLite's plan for `sql`, so a test can pin `list()` to its covering index —
+    /// the difference between an index-only scan and a 329ms main-thread table walk
+    /// is invisible in a functional test (see `metaColumns`). Not part of the public
+    /// API: `@testable` is the only caller.
+    func queryPlan(_ sql: String) -> [String] {
+        (try? dbQueue.read { db in
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN \(sql)").map { $0["detail"] as String }
         }) ?? []
     }
 
