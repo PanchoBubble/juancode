@@ -557,7 +557,6 @@ struct OracleGlobalRail: View {
         let hidden = all.count - shown.count
         return VStack(spacing: 0) {
             HStack(spacing: 5) {
-                Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
                 Text("Oracles")
                     .font(.system(size: 10, weight: .semibold))
                     .textCase(.uppercase).tracking(0.5)
