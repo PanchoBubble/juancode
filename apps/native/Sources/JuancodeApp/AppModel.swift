@@ -206,6 +206,11 @@ final class AppModel {
         firstOutputCancels[s.id] = s.subscribeOutput(replay: false) { [weak self] _ in
             Task { @MainActor in self?.notePaneDrawn(s.id) }
         }
+        // The scrollback read above and the subscription take the session's lock
+        // separately, so a byte landing between them reaches neither. Re-read now
+        // that the listener is registered — otherwise a pane that painted inside
+        // that gap waits on a next byte a settled CLI may never send.
+        if !s.getScrollback().isEmpty { notePaneDrawn(s.id) }
     }
 
     private func notePaneDrawn(_ id: String) {
@@ -214,16 +219,25 @@ final class AppModel {
         drawnPanes.insert(id)
     }
 
-    /// Drop first-byte bookkeeping for sessions that are no longer live, so a pane
-    /// that dies mid-boot doesn't hold its subscription (or a stale "drawn" flag that
-    /// would suppress the hint on its next spawn). Called from `refresh`, which every
-    /// registry change routes through.
-    private func pruneDrawnPanes(live: Set<String>) {
-        for id in firstOutputCancels.keys where !live.contains(id) {
-            firstOutputCancels.removeValue(forKey: id)?()
-        }
-        let stale = drawnPanes.subtracting(live)
-        if !stale.isEmpty { drawnPanes.subtract(stale) }
+    /// Reconcile first-byte bookkeeping with the sessions that are live now, so a
+    /// pane that dies mid-boot doesn't hold its subscription (or a stale "drawn" flag
+    /// that would suppress the hint on its next spawn) — and a pane that came BACK
+    /// gets its watch armed again. Called from `refresh`, which every registry change
+    /// routes through, including the one `reactivate` does after a revive.
+    ///
+    /// The re-arm is what a revive needs: the rust core reuses the handle it already
+    /// holds for the id, so no `onSessionCreated` fires and `watch` — where the watch
+    /// is normally armed — never runs for the revived pty. Its previous watch went
+    /// when it exited, so nothing was left to mark the pane painted and the
+    /// "Starting …" hint stayed up over a session that was already streaming.
+    private func syncDrawnPanes(live: [any LiveSession]) {
+        let plan = SessionPaneState.firstOutputWatches(
+            live: Set(live.map(\.id)),
+            watched: Set(firstOutputCancels.keys),
+            drawn: drawnPanes)
+        for id in plan.cancel { firstOutputCancels.removeValue(forKey: id)?() }
+        if !plan.forget.isEmpty { drawnPanes.subtract(plan.forget) }
+        for s in live where plan.arm.contains(s.id) { watchFirstPaneOutput(s) }
     }
 
     /// Sessions whose agent was killed from the UI this run (juancode-x46x). Their
@@ -803,7 +817,7 @@ final class AppModel {
         // is where pooled keep-alive panes whose session died or was replaced get
         // unmounted rather than lingering hidden on a dead pty subscription.
         livePanes.prune { [core] in core.pooledSession($0) }
-        pruneDrawnPanes(live: Set(liveSessions.map(\.id)))
+        syncDrawnPanes(live: liveSessions)
         refreshWorktreeMap()
         // Every create/exit/adopt lands here, so this is where the at-risk watch set
         // follows the sessions we're actually driving (juancode-78c4).

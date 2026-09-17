@@ -46,3 +46,38 @@ public enum SessionPaneState {
         return .replay
     }
 }
+
+/// What the pane bookkeeping behind `SessionPanePhase.booting` should do after a
+/// liveness change: which first-byte watches to drop, which "this pane painted"
+/// flags are stale, and which live panes still need a watch armed.
+public struct FirstOutputWatchPlan: Equatable, Sendable {
+    /// Watches whose pty is gone — cancel them.
+    public let cancel: Set<String>
+    /// `drawn` entries for sessions that are no longer live.
+    public let forget: Set<String>
+    /// Live panes with no watch and no paint yet: arm (or re-arm) one.
+    public let arm: Set<String>
+
+    public init(cancel: Set<String>, forget: Set<String>, arm: Set<String>) {
+        self.cancel = cancel
+        self.forget = forget
+        self.arm = arm
+    }
+}
+
+extension SessionPaneState {
+    /// Reconcile the first-byte watches against the sessions that are live now.
+    ///
+    /// `arm` is the half that only a revive needs. A session can go live again
+    /// without announcing a create — the rust core reuses the handle it already
+    /// holds for that id, so nothing fires `onSessionCreated` and the watch armed
+    /// for the previous pty was already cancelled when that pty exited. Without
+    /// re-arming, `hasDrawn` stays false for a pane that is streaming, and the
+    /// booting hint sits on top of a working session forever.
+    public static func firstOutputWatches(live: Set<String>, watched: Set<String>,
+                                          drawn: Set<String>) -> FirstOutputWatchPlan {
+        FirstOutputWatchPlan(cancel: watched.subtracting(live),
+                             forget: drawn.subtracting(live),
+                             arm: live.subtracting(drawn).subtracting(watched))
+    }
+}
