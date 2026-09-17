@@ -954,6 +954,13 @@ final class AppModel {
     /// an agent working — the typing path — leaves this untouched.
     private(set) var sidebarOrder: [String: SessionAttention] = [:]
 
+    /// Live agents right now, and how many are mid-turn — what the pause button
+    /// shows. Stored rather than derived in the view: a toolbar body that read
+    /// `activities` would re-render on every keystroke echo in every session
+    /// (juancode-2n0). It lands in the same sweep the sidebar order does, since the
+    /// paths that move either are the same ones.
+    private(set) var runningTally: GlobalPause.RunningTally = .empty
+
     /// `id`'s order bucket, defaulting to a resting live session for anything not yet
     /// projected. Every create/exit routes through `refresh`, which re-sweeps.
     func orderAttention(_ id: String) -> SessionAttention { sidebarOrder[id] ?? .idle }
@@ -981,6 +988,9 @@ final class AppModel {
         for meta in sessions { project(meta.id) }
         for meta in externalSessions where next[meta.id] == nil { project(meta.id) }
         if next != sidebarOrder { sidebarOrder = next }
+        let tally = GlobalPause.tally(pauseCandidates(),
+                                      busy: Set(activities.filter { $0.value == .busy }.keys))
+        if tally != runningTally { runningTally = tally }
     }
 
     /// Whether the active core implements `capability`. The one question every

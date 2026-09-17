@@ -374,25 +374,44 @@ private struct GlobalPauseButton: View {
     @Environment(AppModel.self) private var model
     @State private var confirming = false
 
-    /// Live agents a pause would sleep right now. Zero means there is nothing to
-    /// pause, and the button goes quiet rather than pretending it would do something.
-    private var pausable: Int {
-        model.sessions.filter { model.isLive($0.id) && !model.isEditorSession($0.id)
-                                && !model.isExternal($0.id) }.count
-    }
+    /// Live agents a pause would sleep right now, and how many are mid-turn. Both
+    /// come off the model's projection rather than a filter over every session here:
+    /// a toolbar body that read each session's activity would re-render on every
+    /// keystroke echo anywhere in the app (juancode-2n0). Zero pausable means there
+    /// is nothing to pause, and the button goes quiet rather than pretending
+    /// otherwise.
+    private var pausable: Int { model.runningSessionCount }
+    private var busy: Int { model.busySessionCount }
+
+    /// The number on the button: what a pause would stop, or — once paused — what a
+    /// play would bring back, so the badge never goes blank while the pause holds.
+    private var badge: Int { model.isGloballyPaused ? model.pausedSessionCount : pausable }
 
     var body: some View {
         Button {
             if model.isGloballyPaused { model.resumeAllSessions() } else { confirming = true }
         } label: {
-            Label(model.isGloballyPaused ? "Resume All" : "Pause All",
-                  systemImage: model.isGloballyPaused ? "play.circle.fill" : "pause.circle")
+            // A plain Label would render icon-only in the toolbar, so the count is its
+            // own view next to the glyph.
+            HStack(spacing: 3) {
+                Image(systemName: model.isGloballyPaused ? "play.circle.fill" : "pause.circle")
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                }
+            }
+            .accessibilityLabel(model.isGloballyPaused
+                                ? "Resume All, \(badge) paused"
+                                : "Pause All, \(pausable) running")
         }
         .disabled(!model.isGloballyPaused && pausable == 0)
-        .foregroundStyle(model.isGloballyPaused ? Color.orange : Color.primary)
+        // Orange while paused; while running, orange only when an agent is actually
+        // working, so the count reads at a glance as "something is still going".
+        .foregroundStyle(model.isGloballyPaused || busy > 0 ? Color.orange : Color.primary)
         .help(model.isGloballyPaused
               ? "Resume the \(model.pausedSessionCount) session(s) the pause put to sleep"
-              : "Pause all — sleep \(pausable) running session(s) and free their memory")
+              : "Pause all — sleep \(pausable) running session(s) "
+                + "(\(busy) working right now) and free their memory")
         .clickCursor()
         .confirmationDialog("Pause \(pausable) running session(s)?",
                             isPresented: $confirming, titleVisibility: .visible) {

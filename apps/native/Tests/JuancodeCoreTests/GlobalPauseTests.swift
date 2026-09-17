@@ -18,6 +18,24 @@ final class GlobalPauseTests: XCTestCase {
         XCTAssertEqual(targets, ["live"])
     }
 
+    func testTallyCountsLiveAgentsAndTheBusyOnes() {
+        let tally = GlobalPause.tally([c("a"), c("b"), c("c")], busy: ["a", "c"])
+        XCTAssertEqual(tally, .init(live: 3, busy: 2))
+    }
+
+    func testTallyIgnoresBusyRowsAPauseWouldNotTouch() {
+        // An editor pane and a sleeping row can both carry a busy activity; neither
+        // is pausable, so neither may inflate the badge past the live count.
+        let tally = GlobalPause.tally([
+            c("live"), c("editor", agent: false), c("asleep", live: false),
+        ], busy: ["live", "editor", "asleep", "unknown"])
+        XCTAssertEqual(tally, .init(live: 1, busy: 1))
+    }
+
+    func testTallyOfNothingIsEmpty() {
+        XCTAssertEqual(GlobalPause.tally([], busy: []), .empty)
+    }
+
     func testRevivesOnlyThePausedSetThatIsStillAsleep() {
         // "woke" came back on its own while paused; "gone" left the sidebar.
         let revivals = GlobalPause.revivals(

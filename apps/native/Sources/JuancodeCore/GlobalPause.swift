@@ -38,6 +38,33 @@ public enum GlobalPause {
         candidates.filter { $0.isLive && $0.isAgent }.map(\.id)
     }
 
+    /// What the pause button counts: how many live agents a pause would sleep, and
+    /// how many of those are mid-turn right now.
+    ///
+    /// Both numbers, not just the total, because they answer different questions —
+    /// "is anything still working before I walk away" is the busy one, and the total
+    /// is what the pause will actually stop.
+    public struct RunningTally: Sendable, Equatable {
+        public let live: Int
+        public let busy: Int
+
+        public static let empty = RunningTally(live: 0, busy: 0)
+
+        public init(live: Int, busy: Int) {
+            self.live = live
+            self.busy = busy
+        }
+    }
+
+    /// Tally the same set `targets` would pause, splitting out the ids in `busy`.
+    /// Anything busy but not pausable (an editor pane, a sleeping row) is ignored,
+    /// so the busy count can never exceed the live one.
+    public static func tally(_ candidates: [Candidate], busy: Set<String>) -> RunningTally {
+        let running = targets(candidates)
+        return RunningTally(live: running.count,
+                            busy: running.filter { busy.contains($0) }.count)
+    }
+
     /// The sessions a play should revive: the recorded paused set, minus anything
     /// that came back on its own (clicked, resumed by the Oracle) or vanished from
     /// the sidebar entirely while paused.

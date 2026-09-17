@@ -126,7 +126,7 @@ extension AppModel {
     /// Every sidebar session as the pause planner sees it. External (adopted) rows
     /// are excluded: their pty belongs to a terminal we don't own, so sleeping one
     /// kills a process the user started elsewhere.
-    private func pauseCandidates() -> [GlobalPause.Candidate] {
+    func pauseCandidates() -> [GlobalPause.Candidate] {
         sessions.filter { !isExternal($0.id) }.map { meta in
             .init(id: meta.id, isLive: isLive(meta.id), isAgent: !isEditorSession(meta.id))
         }
@@ -134,6 +134,11 @@ extension AppModel {
 
     /// How many sessions a play would bring back right now — the button's badge.
     var pausedSessionCount: Int { pausedSessionIds.count }
+
+    /// How many live agents a pause would sleep right now, and how many of those are
+    /// mid-turn. Projected in `syncSidebarOrder`, not recomputed per view pass.
+    var runningSessionCount: Int { runningTally.live }
+    var busySessionCount: Int { runningTally.busy }
 }
 
 /// The desktop's pause, as the thing a remote `pauseAll` runs.
