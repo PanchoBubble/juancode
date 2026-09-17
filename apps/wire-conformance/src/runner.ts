@@ -120,6 +120,11 @@ export function seedVars(
     dispatchId: `conformance-${scenarioId}-${stamp}`,
     requestId: `req-${scenarioId}-${stamp}`,
     cliSessionId: `conformance-adopted-${scenarioId}-${stamp}`,
+    // The name a client asks its isolation worktree be called. Stamped like the ids
+    // above and for a sharper reason: `git worktree add` refuses a directory that
+    // exists and a branch that exists, and every attempt runs against the same repo,
+    // so a fixed name would pass once and then error for the rest of the run.
+    worktreeName: `conformance-${stamp}`,
     // Where the fake agent's `SPAWN` records its helper's pid. Fixed per workspace
     // rather than stamped like the ids above, because the AGENT has to write it
     // knowing only its own cwd: an `input` frame carries one literal string, and

@@ -46,6 +46,12 @@ public protocol CoreClient: AnyObject, Sendable {
 
     // MARK: - Session lifecycle (wire: create, reactivate, adoptExternal, setSkipPermissions, kill)
 
+    /// Whether this core cuts a `create`'s isolation worktree itself, given
+    /// `.requested`. A requirement rather than an extension-only member so the answer
+    /// is the core's and not the protocol's: see the extension below for the default
+    /// and `SessionWorktree` for why the two sides differ.
+    var makesWorktrees: Bool { get }
+
     /// Spawn a new agent session (wire `create`). Blocking: resolves the CLI
     /// through a login shell and forkpty()s, so callers keep it off the main actor.
     ///
@@ -63,9 +69,12 @@ public protocol CoreClient: AnyObject, Sendable {
     /// not submit. There is no success callback on purpose: the daemon reports a
     /// failed seed and says nothing about one that worked, so a success signal here
     /// would exist on one core and be invented on the other.
+    ///
+    /// `worktree` asks for isolation, and says who cut the tree — see
+    /// `SessionWorktree` and `makesWorktrees`.
     @discardableResult
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
-                opts: SpawnOptions, worktreePath: String?,
+                opts: SpawnOptions, worktree: SessionWorktree?,
                 dispatchId: String?, initialInput: String?,
                 onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession
 
@@ -275,6 +284,31 @@ public extension CoreClient {
     func logSessionEvent(_ event: String, sessionId: String, project: String) {
         logSessionEvent(event, sessionId: sessionId, project: project, fields: [:])
     }
+}
+
+/// The worktree a `create` is to be isolated in, and which side cut it.
+///
+/// Which case a caller uses is not a preference: the tree has to belong to whichever
+/// process owns the session row, because that row's `worktreePath` is the only thing
+/// the delete-reap reads. A desktop that cut its own tree and handed the daemon the
+/// path as a plain `cwd` left the daemon's row blank, so closing the session removed
+/// nothing and the tree stayed on disk forever (juancode-asnn). `makesWorktrees`
+/// answers which case the core in hand takes.
+public enum SessionWorktree: Sendable, Equatable {
+    /// A tree the CALLER already cut, by absolute path. Only for a core in this
+    /// process, where the row and the tree are made by the same program.
+    case made(path: String)
+    /// A tree the CORE must cut, as `<repo>-worktrees/<name>` off the create's `cwd`,
+    /// on branch `juancode/<name>`.
+    case requested(name: String)
+}
+
+public extension CoreClient {
+    /// The in-process answer, and the default: the app IS that core, so the
+    /// app cuts the tree and hands over `.made` — the registry records it on the row
+    /// it writes in this same process. `RustCoreClient` overrides it to true, because
+    /// a daemon can only reap a tree its own row names.
+    var makesWorktrees: Bool { false }
 }
 
 /// A core's wire-protocol version and implemented capabilities: the `serverInfo`

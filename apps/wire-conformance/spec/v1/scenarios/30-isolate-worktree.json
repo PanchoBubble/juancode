@@ -77,6 +77,61 @@
         "provider": "claude",
         "cwd": "$gitCwd",
         "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true,
+        "worktreeName": "$worktreeName"
+      },
+      "note": "a client with an opinion about the name: a fan-out cuts <stem>-a, <stem>-b so one question's parallel answers are one family on disk"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "cwd": {
+            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
+          },
+          "worktreePath": {
+            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
+          }
+        }
+      },
+      "bind": {
+        "named": "session.id"
+      },
+      "timeoutMs": 20000,
+      "note": "the name the client sent, not one the core invented"
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$named"
+      }
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true,
+        "worktreeName": "../escape"
+      },
+      "note": "a name that is really a path"
+    },
+    {
+      "expect": {
+        "type": "error"
+      },
+      "timeoutMs": 20000,
+      "note": "refused rather than sanitised: the name spells a directory and a branch, and a tree somewhere nobody named is not the tree that was asked for"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
         "rows": 24
       },
       "note": "no flag: the other half of the contract"

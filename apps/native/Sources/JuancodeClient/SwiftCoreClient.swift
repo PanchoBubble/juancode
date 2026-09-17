@@ -78,9 +78,23 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
 
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
-                       opts: SpawnOptions, worktreePath: String?,
+                       opts: SpawnOptions, worktree: SessionWorktree?,
                        dispatchId: String?, initialInput: String?,
                        onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
+        var worktreePath: String? = nil
+        switch worktree {
+        case .none: break
+        case let .made(path): worktreePath = path
+        case let .requested(name):
+            // `makesWorktrees` is false for this core, so nothing should ask: cutting
+            // a tree is async git work and this call is synchronous. Thrown rather
+            // than dropped — a session that was asked to be isolated and is not looks
+            // exactly like one that is.
+            throw CoreOperationUnsupported(
+                operation: "Isolating a session in a worktree named \(name)",
+                backend: "swift",
+                detail: "the in-process core is handed a tree the app already cut; it does not cut one itself")
+        }
         let session = try state.registry.create(provider: provider, cwd: cwd, cols: cols, rows: rows,
                                                 opts: opts, worktreePath: worktreePath,
                                                 dispatchId: dispatchId)

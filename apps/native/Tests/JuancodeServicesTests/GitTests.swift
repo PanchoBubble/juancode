@@ -271,6 +271,27 @@ final class GitTests: XCTestCase {
         XCTAssertFalse(after.contains(where: { resolvePath($0.path) == resolvePath(wt.path) }))
     }
 
+    /// The name can arrive over the wire (`create.worktreeName`) and is spelled into
+    /// both a directory and a branch, so one that is really a path is refused before
+    /// git is asked anything. Sanitising it instead would make a tree nobody named.
+    func testCreateWorktreeRefusesANameThatIsReallyAPath() async throws {
+        writeFile(join(dir, "a.txt"), "x\n")
+        _ = try await commitAll(dir, "init")
+        for name in ["../escape", "a/b", "", "-rf", ".git"] {
+            do {
+                let wt = try await createWorktree(dir, name)
+                rmrf((wt.path as NSString).deletingLastPathComponent)
+                XCTFail("\(name) should not name a worktree")
+            } catch let e as GitError {
+                XCTAssertNotNil(e.message.range(of: "not a usable worktree name"), e.message)
+            }
+        }
+        // The parent directory was never made on the way to those refusals.
+        let siblings = (dir as NSString).lastPathComponent + "-worktrees"
+        let parent = join((dir as NSString).deletingLastPathComponent, siblings)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: parent))
+    }
+
     /// A session isolated to start new work must branch off the repo's default
     /// branch, not off whatever the main checkout has open — otherwise dispatching an
     /// agent while you sit on a feature branch hands it that branch's half-done work.

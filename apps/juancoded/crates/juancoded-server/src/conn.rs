@@ -743,6 +743,7 @@ fn handle_client_message(
             model,
             preset,
             isolate_worktree,
+            worktree_name,
             dispatch_id,
         } => {
             let Some(provider_id) = ProviderId::parse(&provider) else {
@@ -765,6 +766,7 @@ fn handle_client_message(
                 model: model.filter(|m| !m.is_empty()),
                 preset: preset.filter(|p| !p.is_empty()),
                 isolate_worktree: isolate_worktree.unwrap_or(false),
+                worktree_name: worktree_name.filter(|n| !n.is_empty()),
                 dispatch_id,
                 owner: client,
             };
@@ -1491,6 +1493,7 @@ mod tests {
                 model: None,
                 preset: None,
                 isolate_worktree: false,
+                worktree_name: None,
                 dispatch_id: None,
                 owner: 1,
             })
@@ -1656,6 +1659,7 @@ mod tests {
                     model: None,
                     preset: None,
                     isolate_worktree: false,
+                    worktree_name: None,
                     dispatch_id: None,
                     owner: 1,
                 })

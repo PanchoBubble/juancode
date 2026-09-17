@@ -29,9 +29,13 @@ public enum ClientMessage: Sendable {
     /// `--append-system-prompt` with a body the core resolves, codex `--profile`,
     /// opencode `--agent`). A name the core cannot resolve is answered with `error`
     /// rather than spawned without it.
+    /// `worktreeName` names the tree `isolateWorktree` asks for
+    /// (`<repo>-worktrees/<name>`, branch `juancode/<name>`). Absent means the core
+    /// names it; a client names it when the name carries meaning, as the desktop's
+    /// fan-out does with `<stem>-a`, `<stem>-b`, …
     case create(provider: String, cwd: String, cols: Int?, rows: Int?,
                 initialInput: String?, skipPermissions: Bool?, isolateWorktree: Bool?,
-                model: String?, preset: String?, dispatchId: String?)
+                worktreeName: String?, model: String?, preset: String?, dispatchId: String?)
     case attach(sessionId: String, cols: Int, rows: Int)
     case reactivate(sessionId: String, cols: Int, rows: Int)
     /// Restart an exited session as a brand-new CLI conversation under the same
@@ -121,6 +125,7 @@ public enum ClientMessage: Sendable {
 extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
+        case worktreeName
         case sessionId, data, file, requestId, cliSessionId, startMs, seq, model, preset
         // Oracle dispatch over WS (juancode-2kz.1).
         case dispatchId
@@ -143,6 +148,7 @@ extension ClientMessage: Decodable {
                 initialInput: try c.decodeIfPresent(String.self, forKey: .initialInput),
                 skipPermissions: try c.decodeIfPresent(Bool.self, forKey: .skipPermissions),
                 isolateWorktree: try c.decodeIfPresent(Bool.self, forKey: .isolateWorktree),
+                worktreeName: try c.decodeIfPresent(String.self, forKey: .worktreeName),
                 model: try c.decodeIfPresent(String.self, forKey: .model),
                 preset: try c.decodeIfPresent(String.self, forKey: .preset),
                 dispatchId: try c.decodeIfPresent(String.self, forKey: .dispatchId)

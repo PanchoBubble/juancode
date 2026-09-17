@@ -117,7 +117,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         XCTAssertTrue(session.isRunning)
         XCTAssertEqual(session.meta.provider, .claude)
@@ -197,7 +197,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
         XCTAssertTrue(session.resizeLocal(cols: 95, rows: 28))
@@ -227,7 +227,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: "TITLE seeded-by-the-core",
                                       onSeedFailure: { _, reason in
                                           XCTFail("the seed was not delivered: \(reason)")
@@ -255,7 +255,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 80, rows: 24,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
 
@@ -291,7 +291,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 80, rows: 24,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         let id = session.id
         let core = core!
@@ -338,7 +338,7 @@ final class RustCoreLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
         let renamed = expectation(description: "the CLI's own title arrived")

@@ -207,6 +207,7 @@ impl TrackedPrs {
             // Already standing in the worktree above, which is the PR's branch rather
             // than a fresh `juancode/<name>` one this flag would cut.
             isolate_worktree: false,
+            worktree_name: None,
             dispatch_id: None,
             owner: req.owner,
         }) {

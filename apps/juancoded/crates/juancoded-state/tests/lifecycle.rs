@@ -20,6 +20,7 @@ fn request(cwd: &str) -> CreateRequest {
         model: None,
         preset: None,
         isolate_worktree: false,
+        worktree_name: None,
         dispatch_id: None,
         owner: 1,
     }
@@ -443,6 +444,45 @@ async fn a_create_that_cannot_be_isolated_is_refused_rather_than_run_in_the_shar
     assert!(err.to_string().contains("Not a git repository"), "{err}");
     // And nothing was started: a refusal that still left a session running would be
     // the same bug with an error frame stapled to it.
+    assert!(harness.sessions.ids().is_empty());
+}
+
+/// The desktop's fan-out names its trees `<stem>-a`, `<stem>-b`, … so one question's
+/// parallel answers read as a family on disk and in `git branch`. That name reaches
+/// the daemon now, because the daemon is the side that cuts the tree: a desktop that
+/// cut its own left a row with no `worktree_path` and a tree nothing ever reaped
+/// (juancode-asnn).
+#[tokio::test]
+async fn an_isolated_create_takes_the_name_the_client_asked_for() {
+    let harness = Harness::new("isolate-named");
+    let repo = seed_repo(&harness, "repo");
+    let mut req = request(repo.to_str().unwrap());
+    req.isolate_worktree = true;
+    req.worktree_name = Some("a1b2c3-a".into());
+    let meta = harness.sessions.create(req).expect("create");
+    let worktree = meta.worktree_path.clone().expect("a worktree path");
+    assert!(worktree.ends_with("repo-worktrees/a1b2c3-a"), "{worktree}");
+    assert_eq!(meta.cwd, worktree);
+}
+
+/// A name off the wire spells a directory and a branch, so one carrying a separator
+/// would put the tree — and the agent in it — somewhere nobody named. Refused, not
+/// sanitised into a different tree than the one that was asked for.
+#[tokio::test]
+async fn a_worktree_name_that_would_escape_its_directory_is_refused() {
+    let harness = Harness::new("isolate-escape");
+    let repo = seed_repo(&harness, "repo");
+    let mut req = request(repo.to_str().unwrap());
+    req.isolate_worktree = true;
+    req.worktree_name = Some("../../etc/evil".into());
+    let err = harness
+        .sessions
+        .create(req)
+        .expect_err("a name that is a path is not a name");
+    assert!(
+        err.to_string().contains("not a usable worktree name"),
+        "{err}"
+    );
     assert!(harness.sessions.ids().is_empty());
 }
 

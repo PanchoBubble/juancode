@@ -26,7 +26,7 @@ final class RustCoreSeedTests: XCTestCase {
             _ = try await Task.detached {
                 try core.create(provider: .claude, cwd: "/tmp", cols: 80, rows: 24,
                                 opts: SpawnOptions(skipPermissions: true, model: nil),
-                                worktreePath: nil, dispatchId: "dispatch-1",
+                                worktree: nil, dispatchId: "dispatch-1",
                                 initialInput: "fix the failing test", onSeedFailure: nil)
             }.value
             let creates = daemon.frames(ofType: "create")
@@ -48,7 +48,7 @@ final class RustCoreSeedTests: XCTestCase {
             _ = try await Task.detached {
                 try core.create(provider: .claude, cwd: "/tmp", cols: 80, rows: 24,
                                 opts: SpawnOptions(skipPermissions: true, model: nil),
-                                worktreePath: nil, dispatchId: nil,
+                                worktree: nil, dispatchId: nil,
                                 initialInput: "", onSeedFailure: nil)
             }.value
             XCTAssertNil(daemon.frames(ofType: "create").first?["initialInput"])
@@ -72,7 +72,7 @@ final class RustCoreSeedTests: XCTestCase {
             let session = try await Task.detached {
                 try core.create(provider: .claude, cwd: "/tmp", cols: 80, rows: 24,
                                 opts: SpawnOptions(skipPermissions: true, model: nil),
-                                worktreePath: nil, dispatchId: nil,
+                                worktree: nil, dispatchId: nil,
                                 initialInput: "fix the failing test",
                                 onSeedFailure: { sessionId, why in
                                     reported.set(sessionId: sessionId, reason: why)

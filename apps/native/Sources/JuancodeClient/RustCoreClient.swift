@@ -320,9 +320,52 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     // MARK: - Session lifecycle
 
+    /// The `create` frame this client sends, split out so its one load-bearing
+    /// decision is testable without a socket: who cuts the worktree.
+    ///
+    /// `isolateWorktree` is sent for real now. It used to be hardcoded `false` with the
+    /// tree this app had already cut passed off as a plain `cwd`, which left the
+    /// daemon's row with no `worktreePath` — so deleting the session reaped nothing and
+    /// the tree stayed on disk (juancode-asnn). `.made` is refused for the same reason:
+    /// there is no frame that could tell the daemon about a tree it did not cut, and a
+    /// create that quietly dropped the record would leak exactly as before.
+    static func createFrame(provider: ProviderId, cwd: String, cols: Int, rows: Int,
+                            opts: SpawnOptions, worktree: SessionWorktree?,
+                            pinsModel: Bool) throws -> [String: Any] {
+        var frame: [String: Any] = [
+            "type": "create",
+            "provider": provider.rawValue,
+            "cwd": cwd,
+            "cols": cols,
+            "rows": rows,
+            "skipPermissions": opts.skipPermissions,
+            "isolateWorktree": false,
+        ]
+        switch worktree {
+        case .none: break
+        case let .requested(name):
+            frame["isolateWorktree"] = true
+            // The name carries meaning for the caller — the fan-out's `<stem>-a`,
+            // `<stem>-b` family — and the daemon names the tree after the session when
+            // it is absent.
+            if !name.isEmpty { frame["worktreeName"] = name }
+        case let .made(path):
+            throw CoreOperationUnsupported(
+                operation: "Isolating a session in \(path)",
+                backend: "rust",
+                detail: "the daemon cuts its own tree, and no frame can tell it about one it did not cut")
+        }
+        if pinsModel, let model = opts.model, !model.isEmpty { frame["model"] = model }
+        return frame
+    }
+
+    /// The daemon cuts the isolation worktree, so its own row names the tree and its
+    /// delete-reap can remove it. See `SessionWorktree`.
+    public var makesWorktrees: Bool { true }
+
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
-                       opts: SpawnOptions, worktreePath: String?,
+                       opts: SpawnOptions, worktree: SessionWorktree?,
                        dispatchId: String?, initialInput: String?,
                        onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
         let pinsModel = supports(.spawnModel)
@@ -338,20 +381,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 NSLog("juancode: the \(backendName) core does not advertise `spawnModel`; the CLI's own default model is used")
             }
         }
-        var frame: [String: Any] = [
-            "type": "create",
-            // A juancode-owned worktree is created by this app, and there is no
-            // worktreePath on the wire, so the agent is started IN the worktree and
-            // the row simply records that directory as its cwd.
-            "provider": provider.rawValue,
-            "cwd": worktreePath ?? cwd,
-            "cols": cols,
-            "rows": rows,
-            "skipPermissions": opts.skipPermissions,
-            "isolateWorktree": false,
-        ]
+        var frame = try Self.createFrame(provider: provider, cwd: cwd, cols: cols, rows: rows,
+                                         opts: opts, worktree: worktree, pinsModel: pinsModel)
         if let dispatchId { frame["dispatchId"] = dispatchId }
-        if pinsModel, let model = opts.model, !model.isEmpty { frame["model"] = model }
         // The prompt travels on the create so the DAEMON delivers it: it owns the pty
         // and the parsed screen, so it is the only side that can confirm the paste
         // landed before pressing Enter. Delivering it from here instead is

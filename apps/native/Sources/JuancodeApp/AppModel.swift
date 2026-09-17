@@ -1758,18 +1758,26 @@ final class AppModel {
         unhideProject(projectCwd(for: cwd))
         do {
             var workCwd = cwd
-            var worktreePath: String? = nil
+            var worktree: SessionWorktree? = nil
             if isolateWorktree {
                 let name = worktreeName ?? String(UUID().uuidString.prefix(8)).lowercased()
-                let wt = try await createWorktree(cwd, name)
-                workCwd = wt.path
-                worktreePath = wt.path
+                if core.makesWorktrees {
+                    // The core cuts it, from the repo root: a tree this app cut and
+                    // passed off as a plain `cwd` left the daemon's row with no
+                    // `worktreePath`, so closing the session reaped nothing and the
+                    // directory stayed on disk (juancode-asnn).
+                    worktree = .requested(name: name)
+                } else {
+                    let wt = try await createWorktree(cwd, name)
+                    workCwd = wt.path
+                    worktree = .made(path: wt.path)
+                }
             }
             // Spawn off the main actor: this resolves the CLI via a login shell and
             // forkpty()s — work that must never block the UI run loop.
             let core = core
             let cwdToUse = workCwd
-            let wt = worktreePath
+            let wt = worktree
             // Spawn at the given size, else the last on-screen terminal size, so the
             // CLI's alt-screen boots matching the view it'll render in (fixes "fresh
             // session opens short" / the Oracle dock garble). Oracle passes its dock
@@ -1786,7 +1794,7 @@ final class AppModel {
             let s = try await Task.detached(priority: .userInitiated) { [weak self] in
                 try core.create(
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
-                    opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktreePath: wt,
+                    opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktree: wt,
                     dispatchId: dispatchId, initialInput: seed,
                     // A prompt that never reached the agent is said out loud: the
                     // failure mode being guarded against is a session that looks

@@ -151,6 +151,12 @@ pub struct CreateRequest {
     /// a create that asks for it and cannot have it is an error, not a session in
     /// the shared tree (juancode-yiho).
     pub isolate_worktree: bool,
+    /// What to call that tree: `<repo>-worktrees/<name>`, branch `juancode/<name>`.
+    /// `None` names it after the session, which is what the id prefix below is. A
+    /// caller has a name of its own when it carries meaning — the desktop's fan-out
+    /// numbers a family of trees off one question — and an unusable one is refused
+    /// rather than silently replaced, same as any other part of the isolation promise.
+    pub worktree_name: Option<String>,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -632,9 +638,12 @@ impl SessionRegistry {
         // shared checkout and reporting success, which is the same frame a real
         // isolated start sends (juancode-yiho).
         let worktree = if req.isolate_worktree {
-            // Named after the session, so a stray tree in `<repo>-worktrees` can be
-            // traced back to the row that made it.
-            let name = id.chars().take(8).collect::<String>();
+            // Named after the session unless the client named it, so a stray tree in
+            // `<repo>-worktrees` can be traced back to the row that made it.
+            let name = req
+                .worktree_name
+                .clone()
+                .unwrap_or_else(|| id.chars().take(8).collect::<String>());
             Some(worktree::create(&req.cwd, &name).map_err(|e| StateError::Worktree(e.0))?)
         } else {
             None

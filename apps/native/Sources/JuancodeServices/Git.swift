@@ -482,6 +482,23 @@ private actor BaseFetchClock {
     }
 }
 
+/// Whether `name` is safe to spell a directory and a branch with.
+///
+/// The name can arrive over the wire (`create.worktreeName`), and it is pasted into
+/// two things that read a path: `<repo>-worktrees/<name>` and `juancode/<name>`. A
+/// name carrying a separator or a `..` would put the tree, and the agent in it,
+/// somewhere the client never named — so an unsafe one is refused rather than
+/// sanitised into a different tree than the one that was asked for. The daemon
+/// applies the same rule (`juancoded-core::worktree::safe_name`).
+func isUsableWorktreeName(_ name: String) -> Bool {
+    guard !name.isEmpty, name.count <= 64, !name.hasPrefix("-"), !name.hasPrefix(".") else {
+        return false
+    }
+    return name.allSatisfy { c in
+        c.isASCII && (c.isLetter || c.isNumber || c == "-" || c == "_" || c == ".")
+    }
+}
+
 /// Create a fresh linked worktree off the repo containing `repoCwd`, checked out
 /// on a new `juancode/<name>` branch, so a session can work the repo in parallel
 /// without sharing the main working tree. The worktree lives in a sibling
@@ -492,6 +509,9 @@ private actor BaseFetchClock {
 /// half-finished work. Throws a clean message if `repoCwd` isn't a git work tree or
 /// the repo has no commit yet to branch from.
 public func createWorktree(_ repoCwd: String, _ name: String) async throws -> CreatedWorktree {
+    guard isUsableWorktreeName(name) else {
+        throw GitError("\"\(name)\" is not a usable worktree name: letters, digits, -, _ and . only.")
+    }
     let root: String
     do {
         let inside = try await git(repoCwd, ["rev-parse", "--is-inside-work-tree"])

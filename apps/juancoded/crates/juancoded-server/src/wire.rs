@@ -243,6 +243,13 @@ pub enum ClientMessage {
         /// `false` are the same thing; `true` is a promise, so a core that cannot
         /// keep it answers `error` rather than starting in the shared tree.
         isolate_worktree: Option<bool>,
+        /// What to call the tree `isolate_worktree` asks for: `<repo>-worktrees/<name>`
+        /// on branch `juancode/<name>`. Absent means the core names it after the
+        /// session, which is what a client that has no opinion gets. A client has one
+        /// when the name carries meaning — the desktop's fan-out cuts `<stem>-a`,
+        /// `<stem>-b`, … so one question's parallel answers are one family on disk and
+        /// in `git branch`. Ignored without `isolate_worktree`.
+        worktree_name: Option<String>,
         dispatch_id: Option<String>,
     },
     Attach {
@@ -560,6 +567,8 @@ struct RawClient {
     preset: Option<String>,
     #[serde(rename = "isolateWorktree", default)]
     isolate_worktree: Option<bool>,
+    #[serde(rename = "worktreeName", default)]
+    worktree_name: Option<String>,
     #[serde(rename = "cliSessionId", default)]
     cli_session_id: Option<String>,
     #[serde(rename = "startMs", default)]
@@ -647,6 +656,7 @@ impl ClientMessage {
                 model: raw.model,
                 preset: raw.preset,
                 isolate_worktree: raw.isolate_worktree,
+                worktree_name: raw.worktree_name,
                 dispatch_id: raw.dispatch_id,
             }),
             "attach" => Ok(Self::Attach {
@@ -1386,6 +1396,7 @@ mod tests {
                 model: None,
                 preset: None,
                 isolate_worktree: None,
+                worktree_name: None,
                 dispatch_id: None,
             }
         );
@@ -1409,6 +1420,26 @@ mod tests {
         // reach the CLI rather than be accepted and dropped.
         assert!(CAPABILITIES.contains(&"spawnModel"));
         assert!(CAPABILITIES.contains(&"spawnPreset"));
+    }
+
+    /// The name rides on the same frame as the flag, because the tree is cut here:
+    /// a client that cuts its own and sends it as `cwd` leaves this core's row
+    /// without a `worktree_path`, and its delete-reap reads nothing else
+    /// (juancode-asnn).
+    #[test]
+    fn create_decodes_the_worktree_name() {
+        let msg = ClientMessage::decode(
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","isolateWorktree":true,"worktreeName":"a1b2c3-a"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &msg,
+                ClientMessage::Create { isolate_worktree: Some(true), worktree_name: Some(n), .. }
+                    if n == "a1b2c3-a"
+            ),
+            "{msg:?}"
+        );
     }
 
     #[test]

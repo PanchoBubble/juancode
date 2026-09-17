@@ -342,7 +342,7 @@ final class WebSocketConnection: @unchecked Sendable {
     func handle(_ msg: ClientMessage) async {
         switch msg {
         case let .create(provider, cwd, requestedCols, requestedRows, initialInput,
-                         skipPermissions, isolateWorktree, model, preset, dispatchId):
+                         skipPermissions, isolateWorktree, worktreeName, model, preset, dispatchId):
             // A client that isn't going to display this session (the Oracle
             // dispatch) sends no grid. Boot at the desktop's real one: whatever the
             // CLI prints during its first turn is wrapped at the spawn width
@@ -397,7 +397,11 @@ final class WebSocketConnection: @unchecked Sendable {
                 var workCwd = cwd
                 var worktreePath: String? = nil
                 if isolateWorktree == true {
-                    let wt = try await createWorktree(cwd, String(UUID().uuidString.prefix(8)).lowercased())
+                    // The client's name when it sent one — it is the family a fan-out
+                    // reads by — else one named after nothing in particular.
+                    let name = worktreeName.flatMap { $0.isEmpty ? nil : $0 }
+                        ?? String(UUID().uuidString.prefix(8)).lowercased()
+                    let wt = try await createWorktree(cwd, name)
                     workCwd = wt.path
                     worktreePath = wt.path
                 }

@@ -203,7 +203,7 @@ final class RestartFreshAndModelTests: XCTestCase {
         await tap.conn.handle(.create(provider: "claude",
                                       cwd: FileManager.default.temporaryDirectory.path,
                                       cols: 80, rows: 24, initialInput: nil,
-                                      skipPermissions: nil, isolateWorktree: nil,
+                                      skipPermissions: nil, isolateWorktree: nil, worktreeName: nil,
                                       model: "opus", preset: nil, dispatchId: nil))
 
         let created = frames(await tap.drain(), ofType: "created").first
@@ -227,7 +227,7 @@ final class RestartFreshAndModelTests: XCTestCase {
         await tap.conn.handle(.create(provider: "claude",
                                       cwd: FileManager.default.temporaryDirectory.path,
                                       cols: 80, rows: 24, initialInput: nil,
-                                      skipPermissions: nil, isolateWorktree: nil,
+                                      skipPermissions: nil, isolateWorktree: nil, worktreeName: nil,
                                       model: "", preset: nil, dispatchId: nil))
 
         let created = frames(await tap.drain(), ofType: "created").first

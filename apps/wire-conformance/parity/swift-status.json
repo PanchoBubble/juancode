@@ -2,8 +2,8 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-09-10",
-  "specRevision": "1.11.0",
+  "measuredAt": "2026-09-17",
+  "specRevision": "1.12.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",

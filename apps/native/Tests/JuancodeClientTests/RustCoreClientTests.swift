@@ -285,6 +285,49 @@ final class RustCoreClientTests: XCTestCase {
             XCTAssertTrue(daemon.frames(ofType: "editQueued").isEmpty)
         }
     }
+
+    // MARK: - Who cuts the worktree
+
+    /// The `create` frame for an isolated session. This client used to cut the tree
+    /// itself and send it as a plain `cwd` with `isolateWorktree: false`, so the
+    /// daemon's row carried no `worktreePath` — and the delete-reap, which reads
+    /// exactly that field, removed nothing. 60 worktrees were still on disk for rows
+    /// in that shape when this was fixed (juancode-asnn).
+    func testAnIsolatedCreateAsksTheDaemonToCutTheTree() throws {
+        let frame = try RustCoreClient.createFrame(
+            provider: .claude, cwd: "/repo", cols: 80, rows: 24,
+            opts: SpawnOptions(skipPermissions: true, model: nil),
+            worktree: .requested(name: "a1b2c3-a"), pinsModel: false)
+        XCTAssertEqual(frame["isolateWorktree"] as? Bool, true)
+        // The REPO, not a tree this side made: the daemon cuts it off this path.
+        XCTAssertEqual(frame["cwd"] as? String, "/repo")
+        XCTAssertEqual(frame["worktreeName"] as? String, "a1b2c3-a")
+    }
+
+    /// No isolation asked for, nothing promised: the flag is false and no name rides
+    /// along to make a tree out of.
+    func testAPlainCreateAsksForNoTree() throws {
+        let frame = try RustCoreClient.createFrame(
+            provider: .claude, cwd: "/repo", cols: 80, rows: 24,
+            opts: SpawnOptions(skipPermissions: false, model: nil),
+            worktree: nil, pinsModel: false)
+        XCTAssertEqual(frame["isolateWorktree"] as? Bool, false)
+        XCTAssertNil(frame["worktreeName"])
+        XCTAssertEqual(frame["cwd"] as? String, "/repo")
+    }
+
+    /// A tree the caller cut is refused rather than sent as a `cwd`: there is no frame
+    /// that could tell the daemon about one, so the row would be blank and the tree
+    /// would outlive every session that ever used it. That silence IS the bug.
+    func testATreeThisSideCutIsRefusedRatherThanSentAsACwd() {
+        XCTAssertThrowsError(try RustCoreClient.createFrame(
+            provider: .claude, cwd: "/repo", cols: 80, rows: 24,
+            opts: SpawnOptions(skipPermissions: true, model: nil),
+            worktree: .made(path: "/repo-worktrees/abc12345"), pinsModel: false)) { error in
+                XCTAssertTrue((error as? CoreOperationUnsupported)?.detail.contains("did not cut") == true,
+                              "\(error)")
+            }
+    }
 }
 
 // MARK: - The stand-in daemon
@@ -523,7 +566,7 @@ final class RustCoreQueueLiveTests: XCTestCase {
         let session = try core.create(provider: .claude, cwd: NSTemporaryDirectory(),
                                       cols: 100, rows: 30,
                                       opts: SpawnOptions(skipPermissions: true, model: nil),
-                                      worktreePath: nil, dispatchId: nil,
+                                      worktree: nil, dispatchId: nil,
                                       initialInput: nil, onSeedFailure: nil)
         defer { session.kill() }
 

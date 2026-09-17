@@ -56,6 +56,22 @@ pub fn create(repo_cwd: &str, name: &str) -> Result<CreatedWorktree, WorktreeErr
     create_timed(repo_cwd, name).map(|(created, _)| created)
 }
 
+/// Whether `name` is safe to spell a directory and a branch with.
+///
+/// The name arrives over the wire now (`create.worktreeName`), and it is pasted into
+/// two things that read a path: `<repo>-worktrees/<name>` and `juancode/<name>`. A
+/// name carrying a separator or a `..` would put the tree, and the agent, somewhere
+/// the client never named — so an unsafe one is refused rather than sanitised into a
+/// different tree than the one that was asked for.
+fn safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with(['-', '.'])
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// How long each step of [`create`] took, in milliseconds.
 ///
 /// Session start is the one latency a person watches end to end, and the steps below
@@ -79,6 +95,11 @@ pub fn create_timed(
     repo_cwd: &str,
     name: &str,
 ) -> Result<(CreatedWorktree, CreateStages), WorktreeError> {
+    if !safe_name(name) {
+        return Err(WorktreeError(format!(
+            "\"{name}\" is not a usable worktree name: letters, digits, -, _ and . only."
+        )));
+    }
     let mut stages = CreateStages::default();
     let step = std::time::Instant::now();
     let root = repo_root(repo_cwd).ok_or_else(|| {
@@ -631,6 +652,26 @@ mod tests {
         assert!(Path::new(&made.path).join("committed.txt").is_file());
         // The point of the whole feature: a different tree from the one asked about.
         assert_ne!(made.path, root.to_string_lossy());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The name is a client's now (`create.worktreeName`), and it is spelled into a
+    /// path and a branch. One that walks out of `<repo>-worktrees` is refused before
+    /// git is asked anything, so the tree can never land where nobody named.
+    #[test]
+    fn a_name_that_is_really_a_path_is_refused_before_git_runs() {
+        let (parent, root) = repo("badname");
+        for name in ["../escape", "a/b", "", "-rf", ".git", "x\u{0}y"] {
+            let err = create(root.to_str().unwrap(), name)
+                .expect_err(&format!("{name:?} should not name a worktree"));
+            assert!(
+                err.0.contains("not a usable worktree name"),
+                "{name:?}: {err}"
+            );
+        }
+        // And nothing was created on the way to those refusals.
+        assert!(!parent.join("repo-worktrees").exists());
+        assert!(create(root.to_str().unwrap(), "a1b2c3-a").is_ok());
         std::fs::remove_dir_all(&parent).ok();
     }
 
