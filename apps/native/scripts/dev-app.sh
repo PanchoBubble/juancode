@@ -41,7 +41,18 @@ esac
 
 if [ -z "$APP_BIN" ]; then
 if [ "$CONFIG" = "release" ]; then
-  swift build --package-path "$NATIVE" --product juancode -c release >&2
+  # Release WITHOUT whole-module optimization. SwiftPM's release default compiles
+  # each module as a single unit, so editing one file in JuancodeApp recompiles all
+  # 48 of its files: measured 212s for a one-line change against 1.2s for a no-op.
+  # `-no-whole-module-optimization` restores per-file incremental compilation while
+  # keeping -O, and `-enable-batch-mode` lets the surviving files compile in
+  # parallel batches. The cost is cross-file inlining, which matters for the
+  # SHIPPED build and not for the one you relaunch twenty times a day — so the real
+  # release bundle (scripts/bundle-app.sh, driven by the Makefile) is untouched.
+  # Put WMO back for a launch with: JUANCODE_WMO=1 juancode
+  wmo=(-Xswiftc -no-whole-module-optimization -Xswiftc -enable-batch-mode)
+  [ "${JUANCODE_WMO:-0}" = "1" ] && wmo=()
+  swift build --package-path "$NATIVE" --product juancode -c release "${wmo[@]}" >&2
 else
   swift build --package-path "$NATIVE" --product juancode >&2
 fi
