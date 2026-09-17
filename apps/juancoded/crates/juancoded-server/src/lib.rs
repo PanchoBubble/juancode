@@ -12,6 +12,7 @@ pub mod global_pause;
 pub mod identity;
 pub mod owner;
 pub mod queue_delivery;
+pub mod reads;
 pub mod screen;
 pub mod seed;
 pub mod serve;

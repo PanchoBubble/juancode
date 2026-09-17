@@ -24,4 +24,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }
 futures-util = "0.3"

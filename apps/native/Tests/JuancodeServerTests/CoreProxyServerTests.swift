@@ -259,6 +259,127 @@ final class CoreProxyServerTests: XCTestCase {
         }
     }
 
+    // MARK: - The three per-session reads, proxied to the daemon
+
+    /// A stand-in daemon's HTTP half: it answers the three reads the way juancoded
+    /// does, and says which path it was asked for so the relay cannot be caught
+    /// answering locally.
+    private func makeReadingDaemon(status: HTTPResponse.Status = .ok) -> some ApplicationProtocol {
+        let router = Router()
+        for leaf in CoreProxyServer.sessionReadLeaves {
+            router.get("/api/sessions/:id/\(leaf)") { req, ctx -> Response in
+                let id = ctx.parameters.get("id") ?? ""
+                let body = #"{"sessionId":"\#(id)","leaf":"\#(leaf)","cols":132,"rows":43,"query":"\#(req.uri.query ?? "")"}"#
+                var headers = HTTPFields()
+                headers[.contentType] = "application/json; charset=utf-8"
+                return Response(status: status, headers: headers,
+                                body: .init(byteBuffer: ByteBuffer(string: body)))
+            }
+        }
+        return Application(
+            router: router,
+            configuration: .init(address: .hostname("127.0.0.1", port: 0), serverName: "reading-daemon"))
+    }
+
+    /// The bug this closes: all three answered 501 on the rust core, so everything
+    /// that reads a session remotely saw an empty session rather than an outage
+    /// (juancode-ag1e). They have to reach the daemon, and the grid the bytes were
+    /// parsed at has to survive the hop — a byte ring replayed at the wrong width is
+    /// garbled in every line that reached the right margin.
+    func testTheThreeSessionReadsReachTheDaemonWithTheirGridIntact() async throws {
+        let mirror = FakeMirror([Self.meta("s1")])
+        try await makeReadingDaemon().test(.live) { daemonClient in
+            let daemonPort = try XCTUnwrap(daemonClient.port)
+            let proxy = try CoreProxyServer.makeApplication(
+                source: mirror.source(),
+                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                host: "127.0.0.1", port: 0)
+            try await proxy.test(.live) { client in
+                for leaf in CoreProxyServer.sessionReadLeaves {
+                    try await client.execute(uri: "/api/sessions/s1/\(leaf)", method: .get) { res in
+                        XCTAssertEqual(res.status, .ok, leaf)
+                        let body = Self.json(res) as? [String: Any]
+                        XCTAssertEqual(body?["leaf"] as? String, leaf)
+                        XCTAssertEqual(body?["sessionId"] as? String, "s1")
+                        XCTAssertEqual(body?["cols"] as? Int, 132, leaf)
+                        XCTAssertEqual(body?["rows"] as? Int, 43, leaf)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The query string is the caller's bound on how much history it wants, so it has
+    /// to arrive: a relay that dropped it would answer every read with the default.
+    func testAReadCarriesItsQueryStringThrough() async throws {
+        let mirror = FakeMirror([Self.meta("s1")])
+        try await makeReadingDaemon().test(.live) { daemonClient in
+            let daemonPort = try XCTUnwrap(daemonClient.port)
+            let proxy = try CoreProxyServer.makeApplication(
+                source: mirror.source(),
+                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                host: "127.0.0.1", port: 0)
+            try await proxy.test(.live) { client in
+                try await client.execute(uri: "/api/sessions/s1/messages?limit=7", method: .get) { res in
+                    XCTAssertEqual((Self.json(res) as? [String: Any])?["query"] as? String, "limit=7")
+                }
+            }
+        }
+    }
+
+    /// The id reaches the daemon exactly as it arrived, still encoded. Re-encoding it
+    /// here would turn a `%2F` into a `%252F` and the daemon would look up a session
+    /// id nobody has; decoding it would send two path segments where there was one.
+    func testASessionIdReachesTheDaemonStillEncoded() async throws {
+        let mirror = FakeMirror([Self.meta("s/1")])
+        try await makeReadingDaemon().test(.live) { daemonClient in
+            let daemonPort = try XCTUnwrap(daemonClient.port)
+            let proxy = try CoreProxyServer.makeApplication(
+                source: mirror.source(),
+                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                host: "127.0.0.1", port: 0)
+            try await proxy.test(.live) { client in
+                try await client.execute(uri: "/api/sessions/s%2F1/scrollback", method: .get) { res in
+                    XCTAssertEqual(res.status, .ok)
+                    XCTAssertEqual((Self.json(res) as? [String: Any])?["sessionId"] as? String, "s%2F1")
+                }
+            }
+        }
+    }
+
+    /// The daemon's status is the answer, not this hop's opinion of it: a session the
+    /// core has never heard of is a 404, and reinterpreting that as a 501 would tell a
+    /// caller the core cannot serve reads at all.
+    func testTheDaemonsStatusIsWhatTheCallerGets() async throws {
+        let mirror = FakeMirror([Self.meta("s1")])
+        try await makeReadingDaemon(status: .notFound).test(.live) { daemonClient in
+            let daemonPort = try XCTUnwrap(daemonClient.port)
+            let proxy = try CoreProxyServer.makeApplication(
+                source: mirror.source(),
+                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                host: "127.0.0.1", port: 0)
+            try await proxy.test(.live) { client in
+                try await client.execute(uri: "/api/sessions/s1/transcript", method: .get) { res in
+                    XCTAssertEqual(res.status, .notFound)
+                }
+            }
+        }
+    }
+
+    /// A core that is not answering is a bad gateway, not a 501: the route exists and
+    /// the capability exists, the hop behind it failed.
+    func testAnUnreachableDaemonIsA502NotA501() async throws {
+        let mirror = FakeMirror([Self.meta("s1")])
+        let proxy = try CoreProxyServer.makeApplication(
+            source: mirror.source(), upstreamBaseURL: "http://127.0.0.1:1",
+            host: "127.0.0.1", port: 0)
+        try await proxy.test(.live) { client in
+            try await client.execute(uri: "/api/sessions/s1/scrollback", method: .get) { res in
+                XCTAssertEqual(res.status, .badGateway)
+            }
+        }
+    }
+
     /// A daemon that is not there must close the relayed socket, not hold it open:
     /// the sidecar's reconnect loop is what recovers, and it only runs on a close.
     func testRelayClosesWhenTheDaemonIsUnreachable() async throws {

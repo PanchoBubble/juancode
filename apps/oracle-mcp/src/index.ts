@@ -37,6 +37,7 @@ import {
   oracleChatStream,
   resetChat,
 } from "./oracle.ts";
+import { digest, fetchMessages, fetchScrollback } from "./session-reads.ts";
 import { dispatch } from "./dispatch.ts";
 import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
@@ -190,6 +191,52 @@ function buildServer(): McpServer {
       inputSchema: {},
     },
     tool(async () => ok(JSON.stringify(await listSessions(), null, 2))),
+  );
+
+  server.registerTool(
+    "oracle_session_transcript",
+    {
+      title: "Read a session's recent turns",
+      description:
+        "Read what a running agent session has actually been doing: its recent transcript turns as chat (prompts, assistant prose, tool calls and their results), newest last. This is the structured plane, not the terminal picture — use oracle_session_screen for what the pane looks like. The native app must be running.",
+      inputSchema: {
+        id: z.string().min(1).describe("The session id (from oracle_list_sessions)"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("How many of the most recent records to read (default 40)"),
+      },
+    },
+    async (args) => {
+      try {
+        const read = await fetchMessages(args.id, args.limit ?? 40);
+        return ok(digest(read.messages));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_session_screen",
+    {
+      title: "Read a session's terminal",
+      description:
+        "Read a session's retained terminal bytes and the grid they were parsed at. Returns { cols, rows, scrollback }: parse or render the bytes at THAT width — a terminal grid replayed at a different width is garbled in every line that wrapped. The native app must be running.",
+      inputSchema: {
+        id: z.string().min(1).describe("The session id (from oracle_list_sessions)"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(JSON.stringify(await fetchScrollback(args.id), null, 2));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
   );
 
   server.registerTool(

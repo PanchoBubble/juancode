@@ -640,6 +640,9 @@ impl SessionsApi for Fake {
     fn grid(&self, _id: &str) -> Option<(u16, u16)> {
         unimplemented!()
     }
+    fn scrollback(&self, _id: &str) -> Option<String> {
+        unimplemented!()
+    }
     fn grid_owner(&self, _id: &str) -> Option<crate::grid::ClientId> {
         unimplemented!()
     }

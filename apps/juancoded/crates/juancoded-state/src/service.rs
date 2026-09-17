@@ -41,6 +41,14 @@ pub trait SessionsApi: Send + Sync {
     fn activity(&self, id: &str) -> Option<SessionActivity>;
     fn snapshot(&self, id: &str) -> Option<Snapshot>;
     fn grid(&self, id: &str) -> Option<(u16, u16)>;
+    /// The session's retained pty bytes, as the `attached` frame carries them.
+    ///
+    /// Read-only, unlike `attach`: an attach resizes the session to the caller's grid
+    /// before it hands the bytes over, and a remote client that only wants to READ a
+    /// session must never move the desktop's terminal to do it. Always paired with
+    /// [`SessionsApi::grid`] by its callers — bytes with no width can only be replayed
+    /// by guessing, and a wrong guess lands hard wraps in the wrong cells.
+    fn scrollback(&self, id: &str) -> Option<String>;
     /// Which client drives the session's grid, or `None` when it is unclaimed. The
     /// wire layer needs it to tell an arriving connection what it missed.
     fn grid_owner(&self, id: &str) -> Option<ClientId>;
@@ -235,6 +243,10 @@ impl SessionsApi for SessionRegistry {
 
     fn grid(&self, id: &str) -> Option<(u16, u16)> {
         SessionRegistry::grid(self, id)
+    }
+
+    fn scrollback(&self, id: &str) -> Option<String> {
+        SessionRegistry::scrollback(self, id)
     }
 
     fn grid_owner(&self, id: &str) -> Option<ClientId> {

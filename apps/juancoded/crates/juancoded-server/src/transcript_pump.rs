@@ -115,7 +115,15 @@ impl TranscriptPlane {
     /// pane that cannot draw its transcript is worse off than one that draws none, and
     /// the pty scrollback it repaints from is a different plane and unaffected.
     pub fn history(&self, session: &str) -> Vec<serde_json::Value> {
-        match self.store.transcript(session, self.replay_limit) {
+        self.history_of(session, self.replay_limit)
+    }
+
+    /// The same read with the bound named by the caller, for the one-shot HTTP read
+    /// where the client says how much of the tail it wants. `0` is the whole history
+    /// the daemon kept, which is what [`juancoded_persistence::SessionStore::transcript`]
+    /// already means by zero.
+    pub fn history_of(&self, session: &str, limit: usize) -> Vec<serde_json::Value> {
+        match self.store.transcript(session, limit) {
             Ok(rows) => rows
                 .iter()
                 .filter_map(|row| serde_json::from_str(&row.json).ok())

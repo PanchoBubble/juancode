@@ -24,6 +24,7 @@ use crate::conn;
 use crate::global_pause::GlobalPause;
 use crate::identity::{self, DaemonIdentity};
 use crate::queue_delivery;
+use crate::reads;
 use crate::seed::SeedTiming;
 use crate::tracked_prs::{self, TrackedPrs};
 use crate::transcript_pump::{self, TranscriptPlane};
@@ -190,7 +191,7 @@ async fn is_live(path: &std::path::Path) -> bool {
     tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
-fn router(handles: CoreHandles) -> Router {
+pub(crate) fn router(handles: CoreHandles) -> Router {
     Router::new()
         // Both spellings, on purpose: the Swift core serves `/api/health` and remote
         // clients probe it, so a core that only answered `/health` would look down to
@@ -198,6 +199,10 @@ fn router(handles: CoreHandles) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/api/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
+        // The per-session reads. Here rather than only on the Swift app's relay,
+        // because the daemon is the one process that holds the bytes and the grid they
+        // were parsed at; the relay proxies these paths through unchanged.
+        .merge(reads::routes())
         .with_state(handles)
 }
 

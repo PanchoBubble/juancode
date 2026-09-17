@@ -339,6 +339,30 @@ public enum CoreProxyServer {
             return Response(status: .noContent)
         }
 
+        // The three per-session reads, proxied to the daemon verbatim.
+        //
+        // Not answered here, and deliberately not answered off the desktop's mirror:
+        // the mirror is a cache of rows, it holds no transcript at all, and the
+        // scrollback it does hold has no record of the width those bytes were parsed
+        // at. Replaying a byte ring at the wrong width lands every hard wrap and
+        // absolute cursor move in the wrong cell, so the one process that knows the
+        // grid is the one that has to answer — and its answer carries `cols`/`rows`
+        // through to the client (juancode-ag1e).
+        //
+        // An allowlist rather than a blanket `/api/sessions/**` proxy: these are the
+        // paths the daemon serves, and forwarding the rest would turn an honest 501
+        // naming the missing capability into the daemon's bare 404.
+        for leaf in sessionReadLeaves {
+            router.get("/api/sessions/:id/\(leaf)") { req, ctx -> Response in
+                guard let id = ctx.parameters.get("id") else {
+                    throw APIError(.notFound, "not found")
+                }
+                return try await proxyRead(sessionId: id, leaf: leaf, query: req.uri.query,
+                                           upstreamBaseURL: upstreamBaseURL,
+                                           core: source.backendName)
+            }
+        }
+
         // Everything else the Swift core serves. A 404 here would read as "wrong
         // URL"; this says which core is running and what it does not have.
         for method: HTTPRequest.Method in [.get, .post, .put, .delete, .patch] {
@@ -348,6 +372,49 @@ public enum CoreProxyServer {
         }
 
         return router
+    }
+
+    /// The per-session reads the daemon serves and this relay forwards. Kept as one
+    /// list so the route table and the proxy cannot drift apart.
+    static let sessionReadLeaves = ["transcript", "messages", "scrollback"]
+
+    /// Forward one read to the daemon and hand its answer back unchanged.
+    ///
+    /// Status, body and content type all come from upstream: this hop must not
+    /// reinterpret a 404 for a session the daemon has never heard of, and it must not
+    /// re-encode a body whose `cols`/`rows` are the point of the response. An
+    /// unreachable daemon is a 502 rather than a 501 — the route exists, the core
+    /// behind it did not answer.
+    static func proxyRead(sessionId: String, leaf: String, query: String?,
+                          upstreamBaseURL: String, core: String) async throws -> Response {
+        guard var comps = URLComponents(string: upstreamBaseURL) else {
+            throw APIError(.internalServerError, "not a usable core URL to relay to: \(upstreamBaseURL)")
+        }
+        // The segment goes on verbatim, still percent-encoded as it arrived: the router
+        // hands back the raw segment, so re-encoding it here would turn a `%2F` into a
+        // `%252F` and the daemon would look up a session id nobody has. Encoding and
+        // decoding are the client's and the daemon's business, and this hop is neither.
+        comps.percentEncodedPath = "/api/sessions/\(sessionId)/\(leaf)"
+        comps.percentEncodedQuery = query
+        guard let url = comps.url else {
+            throw APIError(.internalServerError, "not a usable core URL to relay to: \(upstreamBaseURL)")
+        }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(from: url)
+        } catch {
+            throw APIError(.badGateway,
+                           "the \(core) core did not answer /api/sessions/\(sessionId)/\(leaf): "
+                           + errMsg(error))
+        }
+        let http = response as? HTTPURLResponse
+        let status = HTTPResponse.Status(code: http?.statusCode ?? 200)
+        var headers = HTTPFields()
+        headers[.contentType] = http?.value(forHTTPHeaderField: "Content-Type")
+            ?? "application/json; charset=utf-8"
+        return Response(status: status, headers: headers,
+                        body: .init(byteBuffer: ByteBuffer(bytes: data)))
     }
 
     /// One sentence per unserved endpoint: what is missing and why, in the terms

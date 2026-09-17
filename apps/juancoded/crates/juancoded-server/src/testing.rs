@@ -194,6 +194,11 @@ impl SessionsApi for FakeChild {
     fn grid(&self, _id: &str) -> Option<(u16, u16)> {
         Some((80, 24))
     }
+    /// No ring behind this fixture: it models a child, not a store, and the reads
+    /// that care about retained bytes are measured against the real registry.
+    fn scrollback(&self, _id: &str) -> Option<String> {
+        None
+    }
     fn grid_owner(&self, _id: &str) -> Option<ClientId> {
         None
     }
