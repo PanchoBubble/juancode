@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-17",
-  "specRevision": "1.12.0",
+  "specRevision": "1.13.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -28,7 +28,8 @@
     "spawnPreset",
     "stuck",
     "sessionList",
-    "sessionDelete"
+    "sessionDelete",
+    "sessionSearch"
   ],
   "scenarios": {
     "handshake": {
@@ -212,6 +213,11 @@
       "passes": 3
     },
     "usage": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-search": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

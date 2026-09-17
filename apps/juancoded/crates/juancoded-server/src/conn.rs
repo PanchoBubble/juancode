@@ -1067,6 +1067,28 @@ fn handle_client_message(
             });
         }
 
+        ClientMessage::SearchSessions {
+            query,
+            limit,
+            request_id,
+        } => {
+            // Off this connection's task, unlike every other frame here, because it is
+            // the only one that reads the whole store: a scan of the conversation
+            // records costs a few hundred milliseconds warm and a few seconds on the
+            // first one after a start, and the socket it arrived on is the same socket
+            // carrying every attached session's pty bytes. Answered out of band with
+            // the `requestId` the client sent, which is what makes a late answer
+            // discardable rather than confusing.
+            let sessions = Arc::clone(sessions);
+            let oob = fanout.oob.clone();
+            tokio::task::spawn_blocking(move || {
+                let hits = sessions.search(&query, limit);
+                // A closed channel is a client that hung up mid-search; its answer is
+                // nobody's now.
+                let _ = oob.send(ServerMessage::SearchResults { request_id, hits });
+            });
+        }
+
         ClientMessage::DeleteSession { session_id } => {
             // The frame is broadcast by the registry rather than pushed here: a
             // delete has to reach every connection, and a client that hears about its
@@ -1397,6 +1419,41 @@ mod tests {
             &mut reply,
         );
         reply
+    }
+
+    #[tokio::test]
+    async fn a_search_is_answered_out_of_band_under_the_id_the_client_sent() {
+        // The two facts the wire owes a search box: the answer arrives on the socket
+        // without the handler having held it up, and it carries back the id that says
+        // which keystroke it belongs to. What is IN it is the store's business, and
+        // `juancoded-persistence` tests that.
+        let handles = crate::testing::handles();
+        let (oob_tx, mut oob_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fanout = fanout();
+        fanout.oob = oob_tx;
+
+        let reply = contribution_step(
+            ClientMessage::SearchSessions {
+                query: "the reaper window".into(),
+                limit: 10,
+                request_id: "r-7".into(),
+            },
+            &handles,
+            &mut fanout,
+        );
+        assert!(
+            reply.is_empty(),
+            "the handler answers nothing inline: {reply:?}"
+        );
+
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), oob_rx.recv())
+            .await
+            .expect("the search answered within five seconds")
+            .expect("the side channel is open");
+        let ServerMessage::SearchResults { request_id, .. } = answer else {
+            panic!("expected search results, got {answer:?}");
+        };
+        assert_eq!(request_id, "r-7");
     }
 
     #[test]

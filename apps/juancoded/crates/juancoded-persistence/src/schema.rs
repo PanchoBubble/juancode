@@ -215,6 +215,24 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sessions ADD COLUMN title_is_manual INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 9: the one index session search needs.
+    //
+    // An index on an expression, and not an fts5 table, because fts5 keeps a second
+    // copy of everything it indexes and the corpus here is 436 MB of transcript JSON
+    // (juancode-5bwj is that complaint about the desktop's mirror). What makes a plain
+    // scan affordable is that almost none of that 436 MB is worth searching: on the
+    // real store, tool calls and their results are 350 MB of it, and what somebody
+    // actually said — a prompt, a reply, a thought — is 25 MB across 33k of 535k
+    // records. This narrows to those rows, and the scan reads only them. It cost 8 MB
+    // and 1.1s to build on a 610 MB file.
+    //
+    // `json_extract` rather than a `kind` column: the record is opaque to this layer
+    // by design (see migration 4), and a column would mean migrating every row and
+    // writing a field the transcripts crate already owns.
+    r#"
+    CREATE INDEX transcript_by_kind
+        ON transcript_records (json_extract(record, '$.kind'));
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

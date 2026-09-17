@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use juancoded_cordis::Service;
-use juancoded_persistence::{QueuedMessage, SessionStore};
+use juancoded_persistence::{QueuedMessage, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
 
@@ -40,6 +40,16 @@ pub trait SessionsApi: Send + Sync {
     fn is_running(&self, id: &str) -> bool;
     fn activity(&self, id: &str) -> Option<SessionActivity>;
     fn snapshot(&self, id: &str) -> Option<Snapshot>;
+    /// Sessions whose history mentions `query`, newest first, at most `limit`.
+    ///
+    /// Defaulted to nothing rather than required, unlike everything else here: the
+    /// stand-ins in the reaper's and the stuck detector's tests hold sessions in a
+    /// map with no store behind them, and "this core keeps no history" is the honest
+    /// answer for one of those, not a hole a `todo!()` should fall into. The real
+    /// registry overrides it.
+    fn search(&self, _query: &str, _limit: usize) -> Vec<SearchHit> {
+        Vec::new()
+    }
     fn grid(&self, id: &str) -> Option<(u16, u16)>;
     /// The session's retained pty bytes, as the `attached` frame carries them.
     ///
@@ -239,6 +249,10 @@ impl SessionsApi for SessionRegistry {
 
     fn snapshot(&self, id: &str) -> Option<Snapshot> {
         SessionRegistry::snapshot(self, id)
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        SessionRegistry::search(self, query, limit)
     }
 
     fn grid(&self, id: &str) -> Option<(u16, u16)> {

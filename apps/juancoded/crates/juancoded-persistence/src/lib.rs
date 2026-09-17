@@ -24,6 +24,9 @@ use juancoded_core::model::{ProviderId, SessionKind, SessionMeta, SessionStatus,
 pub mod discovery;
 pub mod import_swift;
 pub mod schema;
+pub mod search;
+
+pub use search::SearchHit;
 
 /// Scrollback bytes plus the grid they were parsed at. Never one without the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +192,15 @@ pub trait SessionStore: Send + Sync {
     /// The newest `limit` records for one session, oldest first — the order a
     /// consumer replays them in. `limit == 0` returns everything kept.
     fn transcript(&self, id: &str, limit: usize) -> Result<Vec<TranscriptRow>>;
+
+    /// Sessions whose history mentions `query`, newest first, at most `limit`.
+    ///
+    /// On the store rather than on a client, because this is the only side that holds
+    /// every session's history: a desktop mirror only learns a session's bytes by
+    /// attaching to it, so searching there answers for the sessions that Mac happens
+    /// to have opened and title-only for every other one (juancode-rz4c). See
+    /// `search` for what is scanned and what it costs.
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
 
     fn enqueue(&self, item: &QueuedMessage) -> Result<()>;
     /// Drop one queued message from one session's queue. `false` means there was
@@ -479,6 +491,10 @@ impl SessionStore for SqliteStore {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        search::search(&self.conn(), query, limit)
     }
 
     fn enqueue(&self, item: &QueuedMessage) -> Result<()> {
@@ -806,6 +822,120 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.transcript("s1", 0).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn said(seq: u64, kind: &str, text: &str) -> TranscriptRow {
+        let field = if kind == "turnStart" {
+            "prompt"
+        } else {
+            "text"
+        };
+        TranscriptRow {
+            seq,
+            json: format!(
+                r#"{{"session":"s1","source":"claude-jsonl","seq":{seq},"kind":"{kind}","{field}":{}}}"#,
+                serde_json::to_string(text).unwrap()
+            ),
+        }
+    }
+
+    #[test]
+    fn a_session_this_desktop_never_opened_is_still_found_by_what_was_said_in_it() {
+        // The whole of juancode-rz4c: a dispatched session has a row and a transcript
+        // here and no scrollback anywhere, and searching it used to answer on its
+        // title alone.
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store
+            .append_transcript(
+                "s1",
+                &[
+                    said(0, "turnStart", "fix the reaper window"),
+                    said(1, "assistant", "the idle sweep runs in the daemon"),
+                ],
+                0,
+            )
+            .unwrap();
+        assert!(store.scrollback("s1").unwrap().is_none());
+
+        let hits = store.search("idle sweep", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].session_id, "s1");
+        assert!(
+            hits[0].snippet.contains("[idle sweep]"),
+            "the match is bracketed: {:?}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn a_word_only_a_tool_call_used_is_not_a_hit() {
+        // Tool calls and their results are 80% of the bytes and almost none of the
+        // meaning: matching in them answers "which session ran grep".
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store
+            .append_transcript("s1", &[said(0, "toolResult", "ripgrep found nothing")], 0)
+            .unwrap();
+        assert!(store.search("ripgrep", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_envelope_every_record_carries_is_not_searchable_text() {
+        // Every record says `"source":"claude-jsonl"`. Matching the raw JSON made a
+        // search for "claude" return 764 of 857 sessions on the real store where the
+        // text itself was in 377.
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store
+            .append_transcript("s1", &[said(0, "assistant", "nothing to see")], 0)
+            .unwrap();
+        assert!(store.search("claude-jsonl", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scrollback_is_searched_too_for_a_session_with_no_transcript() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store
+            .save_scrollback("s1", 80, 24, b"\x1b[32mcompiling juancoded-vt\x1b[0m")
+            .unwrap();
+        let hits = store.search("juancoded-vt", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("[juancoded-vt]"), "{hits:?}");
+    }
+
+    #[test]
+    fn hits_come_back_newest_first_and_no_more_than_asked_for() {
+        let store = SqliteStore::in_memory().unwrap();
+        for (i, id) in ["old", "middle", "newest"].iter().enumerate() {
+            let mut m = meta(id, "/tmp", i as i64);
+            m.updated_at = i as i64;
+            store.upsert(&m).unwrap();
+            store
+                .append_transcript(id, &[said(0, "assistant", "the shared word")], 0)
+                .unwrap();
+        }
+        let hits = store.search("shared word", 10).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|h| h.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newest", "middle", "old"]
+        );
+        assert_eq!(store.search("shared word", 2).unwrap().len(), 2);
+        assert!(store.search("shared word", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_query_that_is_all_wildcard_matches_nothing_rather_than_everything() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&meta("s1", "/tmp", 1)).unwrap();
+        store
+            .append_transcript("s1", &[said(0, "assistant", "plain text")], 0)
+            .unwrap();
+        assert!(store.search("%", 10).unwrap().is_empty());
+        assert!(store.search("  ", 10).unwrap().is_empty());
     }
 
     #[test]

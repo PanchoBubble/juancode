@@ -45,7 +45,7 @@ use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnO
 use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
 use juancoded_core::usage::UsageFold;
 use juancoded_core::worktree;
-use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SessionStore};
+use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::Snapshot;
 
@@ -578,6 +578,24 @@ impl SessionRegistry {
         let live = self.get(id)?;
         self.ensure_replay_grid(id, &live);
         self.inner.terminal.snapshot(id)
+    }
+
+    /// Sessions whose history mentions `query`, newest first — the answer to a
+    /// client's `searchSessions`.
+    ///
+    /// Straight to the store rather than through the live map, unlike `sessions`
+    /// above, because the thing being searched is history and the map holds none of
+    /// it. A running session's newest bytes may be a flush behind (`persist` writes
+    /// on a timer), which costs at most the last few seconds of the one session the
+    /// person is already looking at.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        match self.inner.store.search(query, limit) {
+            Ok(hits) => hits,
+            Err(e) => {
+                warn!(error = %e, "could not search the session store");
+                Vec::new()
+            }
+        }
     }
 
     pub fn scrollback(&self, id: &str) -> Option<String> {

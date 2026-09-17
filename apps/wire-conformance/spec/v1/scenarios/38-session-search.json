@@ -1,0 +1,144 @@
+{
+  "id": "session-search",
+  "title": "a core that holds the history is the one that answers what is in it",
+  "asserts": "a core that advertises `sessionSearch` answers `searchSessions` from its own store, over the whole history rather than over whatever a client happens to have seen. That is the half no client index can supply: a desktop mirror learns a session's bytes by attaching to it, so searching there matched the title of every session and the text of only the ones that Mac had opened - 508 of 857 sessions on the real pair against the 772 the daemon can answer for, measured 2026-09-17 (juancode-rz4c). The corpus is what was SAID: this drives a turn into the CLI's own transcript, never attaches a second client to it, and then asks a connection that has seen none of it. The `requestId` comes back unchanged, because a search box has a frame per keystroke in flight and the answers are not ordered.",
+  "capabilities": [
+    "sessionSearch",
+    "transcript"
+  ],
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit",
+    "queue",
+    "transcript"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT parsimonious-haddock\r"
+      },
+      "note": "the fake agent writes this turn into claude's own jsonl, which is what a session's history is made of; the pty bytes it also prints are a different plane"
+    },
+    {
+      "sleep": 6000,
+      "note": "a core's first bind attempt lands on the spawn banner, before this turn's file exists, so it backs off for BIND_RETRY; this outlasts that back-off"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO nudge\r"
+      },
+      "note": "a bound transcript is only polled for a session that has produced output"
+    },
+    {
+      "sleep": 1500,
+      "note": "one pump tick plus room, so the turn has landed in the store the search reads"
+    },
+    {
+      "open": "b",
+      "note": "the client this scenario is about: it was not connected for any of the above, so the turn is history it was never told"
+    },
+    {
+      "send": {
+        "type": "searchSessions",
+        "query": "parsimonious-haddock",
+        "limit": 10,
+        "requestId": "conformance-search-1"
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "searchResults",
+        "requestId": "conformance-search-1",
+        "hits": {
+          "$some": {
+            "sessionId": "$session"
+          }
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000,
+      "note": "a session b never saw created, found by a word only its transcript holds"
+    },
+    {
+      "send": {
+        "type": "searchSessions",
+        "query": "vociferous-turnip",
+        "limit": 10,
+        "requestId": "conformance-search-2"
+      },
+      "on": "b",
+      "note": "a word nothing said, to prove the answer is a search and not the session list"
+    },
+    {
+      "expect": {
+        "type": "searchResults",
+        "requestId": "conformance-search-2",
+        "hits": {
+          "$length": 0
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000
+    },
+    {
+      "close": "b"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      },
+      "note": "this scenario's own cleanup"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 15000,
+      "ignore": [
+        "activity",
+        "output",
+        "sessionMeta",
+        "gridChange",
+        "queue",
+        "transcript"
+      ]
+    }
+  ]
+}

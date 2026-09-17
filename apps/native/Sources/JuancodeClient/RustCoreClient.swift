@@ -103,6 +103,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// rather than with a reply of their own.
     private var trackedWaiters: [FrameWaiter] = []
 
+    /// Searches waiting on the daemon, keyed by the `requestId` they went out under.
+    /// Keyed rather than a list because a search box sends a frame per keystroke: the
+    /// id is what tells this client's answer from the two stale ones behind it.
+    private var searchWaiters: [String: SearchWaiter] = [:]
+    private var nextSearchId = 1
+
     /// Each session's steering queue as the daemon last sent it, keyed by session id.
     /// A missing key and an empty array are different answers: the daemon answers
     /// `subscribeQueue` with the whole queue, so empty means "nothing is pending" and
@@ -223,6 +229,22 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// still renames, it just does not survive the core's next broadcast, which is a
     /// thing to log rather than a thing to grey out.
     static let sessionEditCapability = "sessionEdit"
+    /// The capability behind `searchSessions`/`searchResults`.
+    ///
+    /// A string rather than a `CoreCapability` case for the same reason
+    /// `sessionEdit` is: the enum is the list whose every name the Swift core
+    /// advertises, and the Swift core searches its own in-process store with no frame
+    /// at all. There is no gated control either — a search on a core without the frame
+    /// still searches, it just answers over the sessions this Mac has opened.
+    static let sessionSearchCapability = "sessionSearch"
+    /// How long a search waits for the daemon's answer before falling back to the
+    /// mirror's own hits.
+    ///
+    /// Generous because the daemon scans rather than indexes: measured on the real
+    /// 857-session store it answers in ~0.4s warm and up to 3s on the first search
+    /// after a start, when the pages are still cold. Timing out is not an error — it
+    /// degrades to exactly the search this client had before the frame existed.
+    private static let searchTimeout: TimeInterval = 6.0
     /// How long boot waits for the first `sessions` snapshot. Long enough for the
     /// daemon to serialise a few hundred rows, short enough that an unresponsive core
     /// costs a late sidebar rather than a launch.
@@ -527,8 +549,79 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     public func usedCliSessionIds() -> Set<String> { mirror.usedCliSessionIds() }
 
+    /// Search every session this core holds, not only the ones this Mac has opened.
+    ///
+    /// Two stores answer, and they have to. The mirror learns a session's bytes by
+    /// attaching to it over the socket, so on its own it indexes the title of every
+    /// session and the text of only the ones somebody clicked here: a dispatched
+    /// session, or any session older than the switch to this core, matched on its name
+    /// and nothing that was ever said in it (juancode-rz4c). The daemon holds the
+    /// history for all of them and answers from it. Neither side is a superset —
+    /// measured on the real pair on 2026-09-17, 857 sessions: the mirror had scrollback
+    /// for 508 and the daemon transcripts or bytes for 765, and 392 of the mirror's
+    /// were rows the daemon has no bytes for at all — so a search that asked only one
+    /// of them would lose the other's.
+    ///
+    /// Ordered by recency across both, rather than the mirror's bm25 first and the
+    /// daemon's after: "which session was this about" is answered by the newest one
+    /// that mentions it, and interleaving two rankings would put every locally-opened
+    /// session above every dispatched one, which is the bias this whole method exists
+    /// to remove.
+    ///
+    /// Blocking, because `CoreClient.searchSessions` is. Both callers already run it
+    /// off the main actor — `AppModel.search` on a detached task, the proxy route on
+    /// the server's own — and a timeout degrades to the mirror's hits rather than
+    /// failing.
     public func searchSessions(_ query: String, limit: Int) -> [SearchHit] {
-        mirror.search(query, limit: limit)
+        let local = mirror.search(query, limit: limit)
+        guard info.has(Self.sessionSearchCapability) else { return local }
+        let remote = daemonSearch(query, limit: limit)
+        guard !remote.isEmpty else { return local }
+
+        var snippets: [String: String] = [:]
+        var metas: [String: SessionMeta] = [:]
+        for hit in local {
+            metas[hit.meta.id] = hit.meta
+            snippets[hit.meta.id] = hit.snippet
+        }
+        for hit in remote {
+            // The daemon's snippet wins where both matched: it is cut out of what was
+            // actually said, where the mirror's is cut out of raw pty bytes and comes
+            // back carrying whatever escape sequences were around the word.
+            if !hit.snippet.isEmpty { snippets[hit.sessionId] = hit.snippet }
+            if metas[hit.sessionId] == nil, let meta = mirror.get(hit.sessionId) {
+                metas[hit.sessionId] = meta
+            }
+        }
+        // A hit with no row is dropped rather than drawn: the backfill puts the
+        // daemon's whole list in the mirror, so this is a session deleted between the
+        // search and its answer.
+        return metas.values
+            .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
+            .prefix(limit)
+            .map { SearchHit(meta: $0, snippet: snippets[$0.id] ?? "") }
+    }
+
+    /// Ask the daemon, and wait. An empty answer and a timeout are the same value on
+    /// purpose: both mean "nothing to add to the mirror's hits".
+    private func daemonSearch(_ query: String, limit: Int) -> [(sessionId: String, snippet: String)] {
+        let waiter = SearchWaiter()
+        let requestId = lock.withLock { () -> String in
+            let id = "search-\(nextSearchId)"
+            nextSearchId += 1
+            searchWaiters[id] = waiter
+            return id
+        }
+        connection.send(["type": "searchSessions", "query": query,
+                         "limit": limit, "requestId": requestId])
+        let hits = waiter.wait(timeout: Self.searchTimeout)
+        lock.withLock { searchWaiters[requestId] = nil }
+        if hits == nil {
+            NSLog("juancode: the \(backendName) core did not answer a search within "
+                  + "\(Int(Self.searchTimeout))s; the sessions this Mac has not opened "
+                  + "are matched on their titles only")
+        }
+        return hits ?? []
     }
 
     public func enforceSessionCap(projectKey: (String) -> String, keepIds: Set<String>) {
@@ -1300,6 +1393,21 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                   let requestId = body["requestId"] as? String else { return }
             ephemeral.bindTerminal(requestId: requestId, terminalId: id)
 
+        case "searchResults":
+            // Correlated on the requestId, never on arrival order: a search box has a
+            // frame per keystroke in flight and the daemon answers whichever scan
+            // finishes first.
+            guard let requestId = body["requestId"] as? String else { return }
+            let hits = (body["hits"] as? [[String: Any]] ?? [])
+                .compactMap { hit -> (sessionId: String, snippet: String)? in
+                    guard let id = hit["sessionId"] as? String else { return nil }
+                    return (sessionId: id, snippet: hit["snippet"] as? String ?? "")
+                }
+            // Removed, not left to expire: an answer that arrives after its caller
+            // gave up has nobody, and the next search mints its own id.
+            let waiter = lock.withLock { searchWaiters.removeValue(forKey: requestId) }
+            waiter?.deliver(hits)
+
         case "inputAck", "screen":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
@@ -1366,15 +1474,22 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // the socket that would have carried the confirmation is gone, so the write
             // is unconfirmable and the caller has to be told while the user is still
             // looking at the thing they pressed.
-            let (orphaned, stranded) = lock.withLock { () -> ([QueueWrite], [FrameWaiter]) in
+            let (orphaned, stranded, searches) = lock.withLock {
+                () -> ([QueueWrite], [FrameWaiter], [SearchWaiter]) in
                 let writes = queueWrites.values.flatMap { $0 }
                 let waiters = queueFrameWaiters.values.flatMap { $0 }
+                let searches = Array(searchWaiters.values)
                 queueWrites.removeAll()
                 queueFrameWaiters.removeAll()
-                return (writes, waiters)
+                searchWaiters.removeAll()
+                return (writes, waiters, searches)
             }
             for write in orphaned { write.refuse("the connection dropped: \(reason)") }
             for waiter in stranded { waiter.expire() }
+            // A search waits six seconds for an answer; the socket that would have
+            // carried it is gone, so it is told now and falls back to the mirror's own
+            // hits rather than standing there.
+            for search in searches { search.expire() }
         }
         for l in listeners { l(up, reason) }
     }
@@ -1601,13 +1716,6 @@ public struct CoreRemoteError: LocalizedError {
     public var errorDescription: String? { message }
 }
 
-/// A one-shot "the frame arrived, or the wait ran out" handoff.
-///
-/// One-shot is the whole contract: the frame and the expiry race, and the loser must
-/// not be able to resume a continuation the winner already used. `DispatchSemaphore` is
-/// what the lifecycle waiter beside this uses, and it cannot be: its `wait` is
-/// unavailable from an async context, and the tracked-PR reads are async all the way
-/// down.
 /// One queue write waiting for the core's verdict.
 ///
 /// Three answers and no fourth: the row appeared in a snapshot, the core refused it
@@ -1672,6 +1780,45 @@ private final class QueueWrite: @unchecked Sendable {
     }
 }
 
+/// One search waiting on the daemon.
+///
+/// A semaphore rather than `FrameWaiter`'s continuation because the call it serves is
+/// synchronous: `CoreClient.searchSessions` hands back an array, and both of its
+/// callers are already off the main actor.
+private final class SearchWaiter: @unchecked Sendable {
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var hits: [(sessionId: String, snippet: String)]?
+
+    /// The answer, or nil when the budget ran out or the connection dropped.
+    func wait(timeout: TimeInterval) -> [(sessionId: String, snippet: String)]? {
+        guard gate.wait(timeout: .now() + timeout) == .success else { return nil }
+        return lock.withLock { hits }
+    }
+
+    func deliver(_ hits: [(sessionId: String, snippet: String)]) {
+        settle(hits)
+    }
+
+    func expire() { settle(nil) }
+
+    private func settle(_ value: [(sessionId: String, snippet: String)]?) {
+        let first = lock.withLock { () -> Bool in
+            guard hits == nil else { return false }
+            hits = value ?? []
+            return true
+        }
+        if first { gate.signal() }
+    }
+}
+
+/// A one-shot "the frame arrived, or the wait ran out" handoff.
+///
+/// One-shot is the whole contract: the frame and the expiry race, and the loser must
+/// not be able to resume a continuation the winner already used. `DispatchSemaphore` is
+/// what the lifecycle waiter beside this uses, and it cannot be: its `wait` is
+/// unavailable from an async context, and the tracked-PR reads are async all the way
+/// down.
 private final class FrameWaiter: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Bool, Never>?

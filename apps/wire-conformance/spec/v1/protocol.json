@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.12.0",
+  "specRevision": "1.13.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -39,7 +39,8 @@
       "sessionDelete",
       "sessionSleep",
       "sessionEdit",
-      "globalPause"
+      "globalPause",
+      "sessionSearch"
     ],
     "gates": {
       "queue": [
@@ -116,6 +117,10 @@
       "sessionList": [
         "listSessions",
         "sessions"
+      ],
+      "sessionSearch": [
+        "searchSessions",
+        "searchResults"
       ],
       "sessionDelete": [
         "deleteSession",
@@ -259,6 +264,17 @@
       "optional": [],
       "capability": "sessionList",
       "notes": "Ask what this core holds. Answered with one `sessions` frame carrying every session, and it is not a subscription: `created`, `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks this once on the handshake and keeps up from the broadcasts. It exists because protocol v1 had no way to ask: the desktop got the list from REST routes (/api/sessions) that the Rust daemon does not serve, so its mirror held only what arrived over the wire while it happened to be connected - 28 sessions against the daemon's 379, measured 2026-08-24 (juancode-3l2p, juancode-75c5)."
+    },
+    "searchSessions": {
+      "required": [
+        "query",
+        "requestId"
+      ],
+      "optional": [
+        "limit"
+      ],
+      "capability": "sessionSearch",
+      "notes": "Ask what this core's own history mentions. Answered with one `searchResults` carrying the `requestId` back, and answered off the connection's task so a scan does not hold up the pty bytes on the same socket. `limit` defaults to 50. It exists because a client's own index cannot answer it: a desktop mirror learns a session's bytes by attaching to it, so searching there matched the title of every session and the text of only the ones that Mac had opened - 508 of 857 sessions on the real pair, against 772 the daemon can answer for, measured 2026-09-17 (juancode-rz4c)."
     },
     "deleteSession": {
       "required": [
@@ -580,6 +596,15 @@
       ],
       "optional": [],
       "capability": "terminal"
+    },
+    "searchResults": {
+      "required": [
+        "requestId",
+        "hits"
+      ],
+      "optional": [],
+      "capability": "sessionSearch",
+      "notes": "The answer to one `searchSessions`, newest session first. Each hit is `{ sessionId, snippet }` and nothing else: the client that asked already holds every row this core has (it backfilled them with `listSessions`), so a session row here would be a second copy of what it is about to look up. `requestId` is the asking client's own, echoed back - a search box has a frame per keystroke in flight and the core answers whichever scan finishes first."
     },
     "stuck": {
       "required": [

@@ -17,6 +17,7 @@ use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSna
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_core::pr::{TrackNotification, TrackedPr};
+use juancoded_persistence::SearchHit;
 use juancoded_state::{ClientId, StuckAlert};
 use juancoded_vt::wire::RowUpdate;
 
@@ -143,6 +144,19 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// (juancode-0yao). Advertised because the frame does the whole thing: the row is
 /// written here, persisted, pinned against `adopt_osc_title`, and broadcast.
 ///
+/// `sessionSearch` says a client can ask this core what its own history mentions and
+/// be answered from every session it holds. It is the half of search that only the
+/// daemon can serve: the desktop's mirror learns a session's bytes by attaching to it,
+/// so a search there answers for the sessions that Mac happens to have clicked and
+/// title-only for every other one — every dispatched session, and everything older
+/// than the switch to this core (juancode-rz4c). Measured on the real store the day it
+/// landed: 857 sessions, of which the desktop's mirror held text for 508 and this one
+/// answers for 765.
+///
+/// Advertised because the frame answers over the whole store rather than the part of
+/// it the asking client has seen, and a client that does not know the frame keeps
+/// exactly the search it already had.
+///
 /// `transcript` is advertised on the same terms `queue` finally was: the promise is
 /// about what this core answers, and it answers all of it. A session's transcript is
 /// bound to its CLI's own store, read forward as the session works, kept across a
@@ -150,6 +164,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// It is not the `contributions` case — there is no button to draw here and no chrome
 /// to promise, only records a client either asks for or does not. A client that does
 /// not know the frame never sends the subscribe and never sees one.
+/// How many hits a `searchSessions` with no `limit` comes back with. A screenful of
+/// the search sheet, and the same number the desktop's own mirror search asks for.
+pub const DEFAULT_SEARCH_LIMIT: usize = 50;
+
 pub const CAPABILITIES: &[&str] = &[
     "inputAck",
     "resizeAck",
@@ -176,6 +194,7 @@ pub const CAPABILITIES: &[&str] = &[
     "stuck",
     "sessionList",
     "sessionDelete",
+    "sessionSearch",
 ];
 
 /// One queued occurrence on the wire.
@@ -538,6 +557,20 @@ pub enum ClientMessage {
         session_id: String,
         message_id: String,
     },
+    /// What of this core's history mentions `query`.
+    ///
+    /// `requestId` is required and echoed back in `searchResults`, for the reason
+    /// `openTerminal` carries one: a search box sends a frame per keystroke, so a
+    /// client with three in flight needs to know which answer is the one it is still
+    /// waiting for and which two are stale.
+    ///
+    /// Answered off the connection's own task, so a scan of the whole store does not
+    /// hold up the pty bytes on the same socket.
+    SearchSessions {
+        query: String,
+        limit: usize,
+        request_id: String,
+    },
     /// A well-formed frame this core doesn't implement. Ignored, not fatal.
     Unknown {
         r#type: String,
@@ -613,6 +646,10 @@ struct RawClient {
     title: Option<String>,
     #[serde(default)]
     archived: Option<bool>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -725,6 +762,14 @@ impl ClientMessage {
                 archived: raw.archived,
             }),
             "listSessions" => Ok(Self::ListSessions),
+            // `limit` defaults rather than being required: a client that asks a
+            // question without saying how many answers it wants gets a screenful,
+            // and a client that asks for none is taken at its word.
+            "searchSessions" => Ok(Self::SearchSessions {
+                query: raw.query.ok_or("missing query")?,
+                limit: raw.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
             "deleteSession" => Ok(Self::DeleteSession {
                 session_id: need_session()?,
             }),
@@ -862,6 +907,16 @@ pub enum ServerMessage {
     /// as `output` under that id.
     EditorReady {
         editor_id: String,
+    },
+    /// What the store matched, in the order a client should draw it: newest session
+    /// first. `requestId` is the asking client's own, echoed back unchanged.
+    ///
+    /// Ids and snippets, and no session rows: the client that asked already holds
+    /// every row this core has (it backfilled them with `listSessions`), so sending
+    /// metadata back would be a second copy of what it is about to look up anyway.
+    SearchResults {
+        request_id: String,
+        hits: Vec<SearchHit>,
     },
     /// The shell pty is up, and `requestId` is the client's own, echoed back
     /// unchanged. Without it a client with two opens in flight has two `terminalReady`
@@ -1193,6 +1248,13 @@ impl ServerMessage {
                 request_id,
             } => json!({
                 "type": "terminalReady", "terminalId": terminal_id, "requestId": request_id,
+            }),
+            Self::SearchResults { request_id, hits } => json!({
+                "type": "searchResults",
+                "requestId": request_id,
+                "hits": hits.iter().map(|h| json!({
+                    "sessionId": h.session_id, "snippet": h.snippet,
+                })).collect::<Vec<_>>(),
             }),
             Self::Activity {
                 session_id,
@@ -1599,6 +1661,9 @@ mod tests {
             r#"{"type":"trackPr","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
             r#"{"type":"untrackPr","trackedId":"/tmp#7"}"#,
             r#"{"type":"resolveTrackNotification","trackedId":"/tmp#7","notificationId":"n-1"}"#,
+            // And for `sessionSearch`: falling through to `Unknown` would leave a
+            // search box waiting forever on an answer nothing is coming for.
+            r#"{"type":"searchSessions","query":"the reaper","requestId":"r"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1655,11 +1720,49 @@ mod tests {
                     // could tell instead is advertising it and never broadcasting,
                     // which is what the conformance scenario catches.
                     "stuck",
+                    "sessionSearch",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
             );
         }
+    }
+
+    #[test]
+    fn a_search_defaults_its_limit_and_insists_on_an_id_to_answer_under() {
+        assert_eq!(
+            ClientMessage::decode(r#"{"type":"searchSessions","query":"reaper","requestId":"r"}"#)
+                .unwrap(),
+            ClientMessage::SearchSessions {
+                query: "reaper".into(),
+                limit: DEFAULT_SEARCH_LIMIT,
+                request_id: "r".into(),
+            }
+        );
+        // No `requestId` is refused rather than answered under an invented one, the
+        // same rule `openTerminal` follows: the id is how a client tells this answer
+        // from the two stale ones behind it.
+        assert!(ClientMessage::decode(r#"{"type":"searchSessions","query":"reaper"}"#).is_err());
+        assert!(ClientMessage::decode(r#"{"type":"searchSessions","requestId":"r"}"#).is_err());
+    }
+
+    #[test]
+    fn search_results_go_out_as_ids_and_snippets() {
+        let frame = ServerMessage::SearchResults {
+            request_id: "r-1".into(),
+            hits: vec![SearchHit {
+                session_id: "s-1".into(),
+                snippet: "the [reaper] window".into(),
+            }],
+        }
+        .to_json();
+        let v: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], "searchResults");
+        assert_eq!(v["requestId"], "r-1");
+        assert_eq!(v["hits"][0]["sessionId"], "s-1");
+        assert_eq!(v["hits"][0]["snippet"], "the [reaper] window");
+        // No session row rides along: the client that asked already holds every one.
+        assert!(v["hits"][0].get("title").is_none(), "{v}");
     }
 
     #[test]
