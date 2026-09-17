@@ -139,6 +139,17 @@ extension AppModel {
     /// mid-turn. Projected in `syncSidebarOrder`, not recomputed per view pass.
     var runningSessionCount: Int { runningTally.live }
     var busySessionCount: Int { runningTally.busy }
+
+    /// The live agents the toolbar's running badge lists, working ones first. Same
+    /// set the pause counts (`pauseCandidates` + `GlobalPause.targets`), so the
+    /// number on the badge and the rows behind it can never disagree.
+    var runningSessionMetas: [SessionMeta] {
+        let running = Set(GlobalPause.targets(pauseCandidates()))
+        let rows = sessions.filter { running.contains($0.id) }
+        let ordered = RunningSessions.order(rows.map { .init(id: $0.id, activity: activity($0.id)) })
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        return ordered.compactMap { byId[$0.id] }
+    }
 }
 
 /// The desktop's pause, as the thing a remote `pauseAll` runs.

@@ -50,9 +50,10 @@ struct RootView: View {
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                // Which core produced what you are looking at (juancode-52e8.2).
-                // Always visible, including on the default Swift core.
-                CoreBadge()
+                // How much is actually running, with the list (and a kill for each
+                // one) behind a click. Took the core pill's slot; the core moved
+                // into this popover's footer (juancode-52e8.2).
+                RunningSessionsBadge()
                 // Slimmed top bar (juancode-v4ep): notifications, the Oracle AI, an
                 // AI-settings prompt, and a Tools popover. Everything else moved —
                 // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP status

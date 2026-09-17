@@ -1,5 +1,6 @@
-// Settings → Core, plus the always-visible active-core badge in the window
-// toolbar and the launch-time "the rust core did not answer" offer.
+// Settings → Core, the core pill (shown in Settings and in the running-sessions
+// popover's footer since it gave up its toolbar slot), and the launch-time "the
+// rust core did not answer" offer.
 //
 // The picker is restart-scoped on purpose: a core owns the ptys, so switching one
 // mid-flight would mean migrating live sessions between processes. It records a
@@ -183,75 +184,6 @@ struct DaemonWarningRow: View {
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// Toolbar item: the badge, with the whole story behind a click.
-struct CoreBadge: View {
-    @Environment(AppModel.self) private var model
-    @State private var showing = false
-
-    var body: some View {
-        Button { showing = true } label: {
-            CoreBadgeLabel(selection: model.coreSelection,
-                           connectionDown: model.coreConnectionDown)
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .clickCursor()
-        .popover(isPresented: $showing, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Active core: \(model.coreSelection.active.label)")
-                    .font(.system(size: 12, weight: .semibold))
-                if let down = model.coreConnectionDown {
-                    Text("Connection down: \(down). Sessions keep running in the daemon; "
-                        + "the app is retrying.")
-                        .font(.caption).foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let reason = model.coreSelection.unreachableReason {
-                    Text("Asked for the \(model.coreSelection.requested.rawValue) core and fell "
-                        + "back: \(reason)")
-                        .font(.caption).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                ForEach(model.coreSelection.daemonWarnings) { warning in
-                    DaemonWarningRow(warning: warning)
-                }
-                if let daemon = model.coreSelection.daemon,
-                   model.coreSelection.daemonWarnings.isEmpty {
-                    Text("Daemon \(daemon.summary)")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text("Wire protocol v\(model.core.info.protocolVersion)")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(model.coreSelection.databasePath)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                let missing = model.core.missingCapabilities
-                if !missing.isEmpty {
-                    Divider()
-                    Text("Unavailable on this core: "
-                        + missing.map(\.title).joined(separator: ", "))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Settings → Core lists what each one costs.")
-                        .font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            .padding(12)
-            .frame(width: 320)
-        }
-    }
-
-    private var helpText: String {
-        var parts = ["Active core: \(model.coreSelection.active.label)"]
-        if let down = model.coreConnectionDown { parts.append("connection down: \(down)") }
-        if let reason = model.coreSelection.unreachableReason { parts.append("fell back: \(reason)") }
-        parts.append(contentsOf: model.coreSelection.daemonWarnings.map(\.headline))
-        return parts.joined(separator: " · ")
     }
 }
 
