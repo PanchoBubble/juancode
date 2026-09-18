@@ -1,0 +1,452 @@
+{
+  "id": "github",
+  "title": "the GitHub data layer and the review surface, answered by the core rather than by the machine the app is on",
+  "asserts": "a core that advertises `github` answers the whole PR reading surface itself: the folder's open PRs with the triage question and the order already applied, one PR's conversation, that conversation merged into the chronology it is read in, and a red build parsed into folds and lines. All four are HTTP, because each one is a question somebody asks once and leaves — and all four used to be the desktop's own `gh` calls, which is why a phone had no PR view at all. The decisions are made HERE and not in a client on purpose: 'is this PR waiting on me' is four rules with a priority between them, and 'which of these two comments came first' has three tie-breaks in it, and two clients that implemented either separately would eventually disagree about the same PR. The review surface is the write half and goes over the wire, because a refresh is a whole model turn: held open as a request it would block the socket carrying every attached session's bytes, and answered as a frame it arrives when it is done. A staged comment is answered with the WHOLE list rather than with itself, because two surfaces stage comments against one session. The failures are as load-bearing as the answers: a read with no `cwd` is a 400 rather than a question about no repository, a PR `gh` cannot reach is a 502 rather than a 404 — a client told 'not found' would cache a PR out of existence — and a green PR's Actions log is a 200 with no sections rather than an error, because having no failing build is an answer.",
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "capabilities": [
+    "github",
+    "sessionDelete"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "attached",
+    "sessionMeta",
+    "gridChange",
+    "queue",
+    "pauseState",
+    "exit"
+  ],
+  "steps": [
+    {
+      "get": "/api/prs?cwd=$ghCwd",
+      "expectBody": {
+        "available": true,
+        "viewer": "octocat",
+        "prs": [
+          {
+            "number": 42,
+            "branch": "octocat/fix-login",
+            "checks": "failing",
+            "checkCount": 2,
+            "passedCount": 1,
+            "unresolvedComments": 1,
+            "author": "octocat",
+            "assignees": [
+              "octocat"
+            ],
+            "reviewRequests": [
+              "hubber"
+            ],
+            "additions": 120,
+            "deletions": 9,
+            "changedFiles": 4
+          },
+          {
+            "number": 7,
+            "checks": "passing",
+            "author": "hubber",
+            "unresolvedComments": 0
+          }
+        ]
+      },
+      "note": "one call for the page, one for the viewer, one GraphQL for every PR's unresolved threads — and never one per folder, because fork+exec is a quarter of a second on the machine this was measured on. The rollup is a judgement rather than a count: two checks, one green and one red, is a red PR with `passedCount` 1. `unresolvedComments` is merged in afterwards because the list call cannot see thread resolution at all"
+    },
+    {
+      "get": "/api/prs?cwd=$ghCwd",
+      "expectBody": {
+        "needsYou": [
+          {
+            "pr": {
+              "number": 42
+            },
+            "reason": "ciFailing",
+            "label": "CI failing",
+            "cwd": "$ghCwd"
+          },
+          {
+            "pr": {
+              "number": 7
+            },
+            "reason": "reviewRequested",
+            "label": "review requested"
+          }
+        ]
+      },
+      "note": "the triage answer, in the order the pinned group is drawn: your own red PR outranks somebody else's review request, and #7 is in the list at all only because the viewer's review was requested on it. The label travels with the reason so no client keeps its own table of these four strings"
+    },
+    {
+      "get": "/api/prs?cwd=$ghCwd&sort=submitted",
+      "expectBody": {
+        "prs": [
+          {
+            "number": 42
+          },
+          {
+            "number": 7
+          }
+        ]
+      },
+      "note": "the other order the list is shown in. GitHub numbers PRs at creation, so descending number IS descending submit date and there is no second field to fetch"
+    },
+    {
+      "get": "/api/prs",
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "cwd"
+        }
+      },
+      "note": "a PR list with no folder is a question about no repository, so it is refused rather than answered for whatever directory the daemon happens to be standing in"
+    },
+    {
+      "get": "/api/pr/conversation?cwd=$ghCwd&number=42&url=https%3A%2F%2Fgithub.com%2Fconformance%2Frepo%2Fpull%2F42",
+      "expectBody": {
+        "state": "OPEN",
+        "body": "Fixes the redirect loop.",
+        "issueComments": [
+          {
+            "id": "IC_1",
+            "databaseId": 111,
+            "author": "hubber",
+            "authorAvatarUrl": "https://avatars.invalid/hubber.png",
+            "reactions": [
+              {
+                "content": "THUMBS_UP",
+                "count": 2
+              }
+            ]
+          }
+        ],
+        "threads": [
+          {
+            "id": "RT_1",
+            "isResolved": false,
+            "path": "Sources/App/Login.swift",
+            "line": 42,
+            "comments": [
+              {
+                "id": "RC_1",
+                "databaseId": 222
+              },
+              {
+                "id": "RC_2"
+              }
+            ]
+          }
+        ],
+        "commits": [
+          {
+            "abbreviatedOid": "abc123d",
+            "author": "octocat"
+          }
+        ]
+      },
+      "note": "the whole Conversation tab out of one GraphQL call, scoped by the owner/name lifted from the PR's own url so there is no extra `gh repo view`. An empty reaction bucket is not a reaction anybody left, so it is not in the list"
+    },
+    {
+      "get": "/api/pr/timeline?cwd=$ghCwd&number=42&url=https%3A%2F%2Fgithub.com%2Fconformance%2Frepo%2Fpull%2F42",
+      "expectBody": {
+        "state": "OPEN",
+        "items": [
+          {
+            "kind": "commit",
+            "id": "commit:abc123def4567890"
+          },
+          {
+            "kind": "comment",
+            "id": "comment:IC_1"
+          },
+          {
+            "kind": "review",
+            "id": "review:PRR_1",
+            "threadGroups": [
+              {
+                "id": "RT_1",
+                "replyTargetId": 222,
+                "comments": [
+                  {
+                    "id": "RC_1"
+                  },
+                  {
+                    "id": "RC_2"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "three lists become one chronology, and the review carries the thread it started with BOTH turns in it. PRR_2 is not here: GitHub writes a bare COMMENTED review for every inline reply, and with no body, no reactions and no thread of its own it would draw as a card that says nothing while the reply it records is already on screen inside RT_1. The reply target is the thread's FIRST comment, because GitHub's replies API 422s on a reply to a reply"
+    },
+    {
+      "get": "/api/pr/actions-log?cwd=$ghCwd&number=42",
+      "expectBody": {
+        "truncated": false,
+        "sections": [
+          {
+            "runId": "901",
+            "job": "build",
+            "step": "Run tests",
+            "hasError": true,
+            "errorLines": [
+              {
+                "severity": "error"
+              }
+            ],
+            "groups": [
+              {
+                "title": "Run pnpm test",
+                "foldable": true,
+                "hasError": false
+              },
+              {
+                "title": "",
+                "foldable": false,
+                "hasError": true
+              }
+            ]
+          },
+          {
+            "step": "Lint",
+            "hasError": false,
+            "groups": [
+              {
+                "title": "Never closed",
+                "foldable": true,
+                "lines": [
+                  {
+                    "spans": [
+                      {
+                        "text": "warning",
+                        "fg": 31,
+                        "bold": true
+                      },
+                      {
+                        "text": ": 2 warnings"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "a red build read the way the Actions web UI reads it rather than as a 20k-character dump. Only the failing run's id is here because only its check failed. The error line is reachable without opening a fold, an unterminated `##[group]` is closed at the step boundary, and the ANSI is split into attributed spans with the raw SGR code kept — which red a client draws is its own business and depends on its theme"
+    },
+    {
+      "get": "/api/pr/conversation?cwd=$ghCwd&number=42&url=https%3A%2F%2Fexample.invalid%2Fnot-a-pr",
+      "status": 502,
+      "expectBody": {
+        "error": {
+          "$contains": "gh could not read PR #42"
+        }
+      },
+      "note": "a 502 and not a 404. The route exists and the PR probably does; what failed is the hop to GitHub, and a client told 'not found' would cache a PR out of existence"
+    },
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24
+      },
+      "note": "the review surface is per session, and it reviews that session's own working tree — which is why this one starts in the dirty git checkout"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "id": {
+            "$type": "string"
+          },
+          "cwd": "$gitCwd"
+        }
+      },
+      "bind": {
+        "mine": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "send": {
+        "type": "sessionReview",
+        "sessionId": "$mine"
+      },
+      "note": "a read, which costs nothing and is answered inline"
+    },
+    {
+      "expect": {
+        "type": "review",
+        "sessionId": "$mine",
+        "result": null
+      },
+      "timeoutMs": 10000,
+      "note": "absent rather than an empty result: 'nothing has reviewed this' is a different thing from 'a pass found nothing', and a client draws two different panels from them"
+    },
+    {
+      "send": {
+        "type": "diffCommentAdd",
+        "sessionId": "$mine",
+        "file": "committed.txt",
+        "side": "new",
+        "line": 8,
+        "endLine": 2,
+        "body": "  why this way?  ",
+        "quote": "+changed"
+      },
+      "note": "a selection dragged upwards arrives backwards. That is a selection, not a mistake"
+    },
+    {
+      "expect": {
+        "type": "diffComments",
+        "sessionId": "$mine",
+        "comments": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "file": "committed.txt",
+            "side": "new",
+            "line": 2,
+            "endLine": 8,
+            "body": "why this way?",
+            "quote": "+changed"
+          }
+        ]
+      },
+      "timeoutMs": 10000,
+      "note": "answered with the WHOLE list rather than with the comment, because two surfaces stage comments against one session and a client patching its own copy would drift from the set the composer reads. The range is normalised and the body trimmed"
+    },
+    {
+      "send": {
+        "type": "diffCommentAdd",
+        "sessionId": "$mine",
+        "file": "a.txt",
+        "side": "sideways",
+        "line": 1,
+        "body": "x"
+      },
+      "note": "refused rather than defaulted: a comment on the wrong side of a hunk hangs off a line the author never wrote"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$mine",
+        "message": {
+          "$contains": "side"
+        }
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "get": "/api/sessions/$mine/comments",
+      "expectBody": [
+        {
+          "file": "committed.txt",
+          "line": 2,
+          "endLine": 8
+        }
+      ],
+      "note": "and the same set over HTTP, because the phone console reads it that way"
+    },
+    {
+      "send": {
+        "type": "sessionReview",
+        "sessionId": "$mine",
+        "refresh": true
+      },
+      "note": "a whole model turn. Off the connection's own task, which is the point of the frame: the socket it arrived on is carrying every attached session's pty bytes"
+    },
+    {
+      "expect": {
+        "type": "review",
+        "sessionId": "$mine",
+        "result": {
+          "createdAt": {
+            "$type": "number"
+          }
+        }
+      },
+      "timeoutMs": 60000,
+      "note": "the stand-in agent is not a `-p` JSON emitter, so the pass concludes that it could not read the CLI's output. That is the honest verdict and it is cached like any other: 'the last pass failed, and this is why' is what the panel shows, and losing it would make a failed review look like a review nobody ever ran"
+    },
+    {
+      "send": {
+        "type": "sessionReview",
+        "sessionId": "$mine"
+      },
+      "note": "and the read again, which is the half of the round trip that proves it was stored"
+    },
+    {
+      "expect": {
+        "type": "review",
+        "sessionId": "$mine",
+        "result": {
+          "createdAt": {
+            "$type": "number"
+          }
+        }
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "get": "/api/sessions/$mine/review",
+      "expectBody": {
+        "createdAt": {
+          "$type": "number"
+        }
+      },
+      "note": "one cached pass, one row, reachable both ways"
+    },
+    {
+      "send": {
+        "type": "diffCommentDelete",
+        "sessionId": "$mine"
+      },
+      "note": "no comment id is the whole set: unstaging one comment and discarding the review you were composing are the same operation at two scopes"
+    },
+    {
+      "expect": {
+        "type": "diffComments",
+        "sessionId": "$mine",
+        "comments": []
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "send": {
+        "type": "diffCommentDelete",
+        "sessionId": "$mine",
+        "commentId": "never-existed"
+      },
+      "note": "a miss is reported rather than swallowed: the client was holding a comment this core does not have"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$mine",
+        "message": {
+          "$contains": "never-existed"
+        }
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "get": "/api/sessions/no-such-session/review",
+      "status": 404,
+      "note": "a session this core has never heard of, which is a different failure from a session with no review and reads as one"
+    },
+    {
+      "send": {
+        "type": "deleteSession",
+        "sessionId": "$mine"
+      }
+    }
+  ]
+}

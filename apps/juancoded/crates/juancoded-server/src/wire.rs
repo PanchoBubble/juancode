@@ -18,6 +18,7 @@ use juancoded_core::changes::ChangeStat;
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_core::pr::{TrackNotification, TrackedPr};
+use juancoded_core::review::{DiffComment, ReviewResult};
 use juancoded_persistence::SearchHit;
 use juancoded_state::{ClientId, StuckAlert};
 use juancoded_vt::wire::RowUpdate;
@@ -226,6 +227,14 @@ pub const CAPABILITIES: &[&str] = &[
     // session's other traffic rather than racing it. The Swift core kept this for
     // itself, which meant the answer only existed on the Mac the app was running on.
     "changes",
+    // The GitHub data layer and the review surface (juancode-52e8.14.6). Advertised
+    // because all of it answers here now — the PR list with its triage and order, the
+    // conversation, the merged timeline, the parsed Actions log, and a review pass over
+    // a session's working tree with the staged comments it was steered by. A core
+    // without it is a core whose GitHub panel would have to shell out to `gh` from
+    // whichever machine the app happens to be on, which is exactly what the phone
+    // console cannot do.
+    "github",
 ];
 
 /// One queued occurrence on the wire.
@@ -685,6 +694,50 @@ pub enum ClientMessage {
     HeavyCancel {
         pid: i32,
     },
+    /// A session's review: the cached one, or a fresh pass when `refresh` is set.
+    ///
+    /// A frame rather than only the HTTP route because a refresh is a whole model turn:
+    /// held open as a request it would be a socket blocked for minutes, and answered
+    /// here it is a frame that arrives when the pass is done, off this connection's own
+    /// task, with the pty bytes on the same socket still flowing the whole time.
+    ///
+    /// `refresh: false` (or absent) is a read and costs nothing. `refresh: true` spends
+    /// a model turn, which is why it is a flag on this frame and not a separate one: a
+    /// client that means "show me the review" and a client that means "review it again"
+    /// are asking about the same thing and must not be able to confuse the two.
+    SessionReview {
+        session_id: String,
+        refresh: bool,
+    },
+    /// Stage an inline comment against a session's diff.
+    ///
+    /// `side` is required rather than defaulted: a comment on the wrong side of a hunk
+    /// hangs off a line the author never wrote. A backwards range is normalised rather
+    /// than refused — a selection dragged upwards is a selection, not a mistake.
+    ///
+    /// Answered by the whole comment list, like every mutation in this protocol that
+    /// changes a set: a client that patched its own copy of a set two surfaces write to
+    /// would drift from it.
+    DiffCommentAdd {
+        session_id: String,
+        file: String,
+        side: String,
+        line: i64,
+        end_line: Option<i64>,
+        body: String,
+        quote: Option<String>,
+        commit_sha: Option<String>,
+        commit_subject: Option<String>,
+    },
+    /// Drop one staged comment, or — with no `commentId` — all of a session's.
+    ///
+    /// One frame and not two, because "unstage this" and "discard the review I was
+    /// composing" are the same operation at two scopes, and a separate clear frame is a
+    /// second way to get the set wrong.
+    DiffCommentDelete {
+        session_id: String,
+        comment_id: Option<String>,
+    },
     /// What of this core's history mentions `query`.
     ///
     /// `requestId` is required and echoed back in `searchResults`, for the reason
@@ -842,6 +895,25 @@ struct RawClient {
     prio: Option<i64>,
     #[serde(default)]
     slots: Option<i64>,
+    /// The review surface (juancode-52e8.14.6).
+    #[serde(default)]
+    refresh: Option<bool>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(rename = "endLine", default)]
+    end_line: Option<i64>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    quote: Option<String>,
+    #[serde(rename = "commitSha", default)]
+    commit_sha: Option<String>,
+    #[serde(rename = "commitSubject", default)]
+    commit_subject: Option<String>,
+    #[serde(rename = "commentId", default)]
+    comment_id: Option<String>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -970,6 +1042,26 @@ impl ClientMessage {
             }),
             "heavyCancel" => Ok(Self::HeavyCancel {
                 pid: raw.pid.ok_or("missing pid")?,
+            }),
+            "sessionReview" => Ok(Self::SessionReview {
+                session_id: need_session()?,
+                refresh: raw.refresh.unwrap_or(false),
+            }),
+            "diffCommentAdd" => Ok(Self::DiffCommentAdd {
+                session_id: need_session()?,
+                file: raw.file.ok_or("missing file")?,
+                side: raw.side.ok_or("missing side")?,
+                line: raw.line.ok_or("missing line")?,
+                end_line: raw.end_line,
+                body: raw.body.ok_or("missing body")?,
+                quote: raw.quote,
+                commit_sha: raw.commit_sha,
+                commit_subject: raw.commit_subject,
+            }),
+            // No `commentId` is the whole set, deliberately: see the frame.
+            "diffCommentDelete" => Ok(Self::DiffCommentDelete {
+                session_id: need_session()?,
+                comment_id: raw.comment_id,
             }),
             // `limit` defaults rather than being required: a client that asks a
             // question without saying how many answers it wants gets a screenful,
@@ -1248,6 +1340,26 @@ pub enum ServerMessage {
     /// script about what the capacity is.
     HeavyQueue {
         snapshot: Arc<HeavyQueueSnapshot>,
+    },
+    /// A session's review — the cached one, or the pass that has just finished.
+    ///
+    /// Answered out of band on the connection that asked, because a refresh takes as
+    /// long as a model turn and the socket it arrived on is the one carrying every
+    /// attached session's bytes. `result` is absent for a session nothing has reviewed:
+    /// a client draws "not reviewed yet" from that, which is a different thing from a
+    /// pass that found nothing.
+    Review {
+        session_id: String,
+        result: Option<Arc<ReviewResult>>,
+    },
+    /// A session's staged diff comments, complete.
+    ///
+    /// Always the whole list and never a delta, for the reason every set in this
+    /// protocol is: two surfaces stage comments against the same session, so a client
+    /// applying a patch to its own copy would drift from the set the composer reads.
+    DiffComments {
+        session_id: String,
+        comments: Arc<Vec<DiffComment>>,
     },
     /// The set a global pause is holding asleep, sorted.
     ///
@@ -1635,6 +1747,15 @@ impl ServerMessage {
             }),
             Self::PauseState { paused } => json!({
                 "type": "pauseState", "paused": paused,
+            }),
+            Self::Review { session_id, result } => json!({
+                "type": "review", "sessionId": session_id, "result": result,
+            }),
+            Self::DiffComments {
+                session_id,
+                comments,
+            } => json!({
+                "type": "diffComments", "sessionId": session_id, "comments": comments,
             }),
             Self::HeavyQueue { snapshot } => json!({
                 "type": "heavyQueue",
@@ -2032,6 +2153,13 @@ mod tests {
             r#"{"type":"sessionRevert","sessionId":"s","path":"a.txt","requestId":"r"}"#,
             r#"{"type":"sessionRevert","sessionId":"s","file":"a.txt","hunkIndex":1,"requestId":"r"}"#,
             r#"{"type":"sessionCommitMessage","sessionId":"s","requestId":"r"}"#,
+            // And for `github`, all three: a client feature-detecting off the
+            // capability draws a review button, a comment composer and an unstage, and
+            // any one of them reaching `Unknown` is a control that does nothing and
+            // says nothing.
+            r#"{"type":"sessionReview","sessionId":"s"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentDelete","sessionId":"s"}"#,
         ] {
             assert!(
                 !matches!(
@@ -2048,6 +2176,19 @@ mod tests {
             r#"{"type":"trackPrInSession","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#
         )
         .is_err());
+
+        // A comment with nothing to hang off is rejected rather than defaulted. Every
+        // one of these fields decides where the note lands, and a default for any of
+        // them is a note on a line nobody wrote.
+        for frame in [
+            r#"{"type":"diffCommentAdd","sessionId":"s","side":"new","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","line":3}"#,
+            r#"{"type":"sessionReview"}"#,
+        ] {
+            assert!(ClientMessage::decode(frame).is_err(), "{frame}");
+        }
 
         // A heavy mutation with nothing to act on is rejected rather than defaulted:
         // a `heavyCancel` that lost its pid must not become a cancel of pid 0, and a
@@ -2122,6 +2263,7 @@ mod tests {
                     "namedKeys",
                     "heavyQueue",
                     "changes",
+                    "github",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

@@ -27,6 +27,7 @@ use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnap
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::ProviderId;
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
@@ -120,6 +121,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         stuck: _,
         pty,
         tracked_prs,
+        reviews,
         global_pause,
         heavy,
         bus,
@@ -294,6 +296,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     transcripts: transcripts.as_ref(),
                                     reaper: reaper.as_ref(),
                                     tracked_prs: tracked_prs.as_ref(),
+                                    reviews: reviews.as_ref(),
                                     global_pause: &global_pause,
                                     heavy: &heavy,
                                 },
@@ -859,12 +862,38 @@ struct Tree<'a> {
     /// `None` when the tree mounted no store for a watch list to live in. The
     /// tracked-PR frames then say so rather than accepting a track nothing keeps.
     tracked_prs: Option<&'a Arc<TrackedPrs>>,
+    /// A session's staged diff comments and its last review. `None` when the tree
+    /// mounted no store for them, and the three review frames then say so rather than
+    /// answering with an empty list — an empty list is a promise nothing was staged.
+    reviews: Option<&'a Arc<dyn ReviewStore>>,
     /// The paused set. Not optional: a pause needs only the registry, and the store is
     /// what it survives a restart on rather than what it needs to work.
     global_pause: &'a Arc<GlobalPause>,
     /// The `heavy` slot queue. Not optional either, and for a simpler reason: it needs
     /// nothing from the tree at all, only a directory on disk.
     heavy: &'a Arc<HeavyWatch>,
+}
+
+/// The answer to every review frame on a tree that mounted no store for one. An error
+/// rather than an empty list, because an empty list is a promise that nothing was
+/// staged and this core is in no position to make it.
+fn no_review_store(session_id: String) -> ServerMessage {
+    ServerMessage::Error {
+        session_id: Some(session_id),
+        message: "this core mounted no review store, so diff comments and reviews have \
+                  nowhere to live"
+            .into(),
+    }
+}
+
+/// A session's whole comment list, which is what every mutation is answered with.
+/// A read that fails reads as empty: the mutation itself already reported its own
+/// failure, and a second error about the same click says nothing new.
+fn diff_comments_frame(reviews: &Arc<dyn ReviewStore>, session_id: String) -> ServerMessage {
+    ServerMessage::DiffComments {
+        comments: Arc::new(reviews.list_comments(&session_id).unwrap_or_default()),
+        session_id,
+    }
 }
 
 fn handle_client_message(
@@ -883,6 +912,7 @@ fn handle_client_message(
         transcripts,
         reaper,
         tracked_prs,
+        reviews,
         global_pause,
         heavy,
     } = *tree;
@@ -1256,6 +1286,156 @@ fn handle_client_message(
             outbound.push(ServerMessage::Sessions {
                 sessions: sessions.sessions(),
             });
+        }
+
+        ClientMessage::SessionReview {
+            session_id,
+            refresh,
+        } => {
+            let Some(reviews) = reviews.map(Arc::clone) else {
+                outbound.push(no_review_store(session_id));
+                return;
+            };
+            if sessions.meta(&session_id).is_none() {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id.clone()),
+                    message: format!("no session `{session_id}`"),
+                });
+                return;
+            }
+            if !refresh {
+                // A read is cheap, so it is answered inline like every other read here.
+                let result = reviews.get_review(&session_id).ok().flatten().map(Arc::new);
+                outbound.push(ServerMessage::Review { session_id, result });
+                return;
+            }
+            // A refresh is a whole model turn. Off this connection's task, for the
+            // reason `searchSessions` is: the socket it arrived on is carrying every
+            // attached session's pty bytes, and holding those for four minutes to run a
+            // review would freeze every pane on this client.
+            let Some(meta) = sessions.meta(&session_id) else {
+                return;
+            };
+            let oob = fanout.oob.clone();
+            tokio::spawn(async move {
+                let comments = reviews.list_comments(&session_id).unwrap_or_default();
+                let cwd = meta.cwd.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    juancoded_core::review::working_tree_files(&cwd)
+                })
+                .await
+                .unwrap_or_default();
+                let result = juancoded_core::review::run_review(
+                    &meta.cwd,
+                    &files,
+                    &comments,
+                    juancoded_core::model::now_ms(),
+                )
+                .await;
+                // Cached even when it failed: "the last pass errored, and this is why"
+                // is what the panel shows, and losing it would make a failed review
+                // look like a review nobody ever ran.
+                let _ = reviews.save_review(&session_id, &result);
+                let _ = oob.send(ServerMessage::Review {
+                    session_id,
+                    result: Some(Arc::new(result)),
+                });
+            });
+        }
+
+        ClientMessage::DiffCommentAdd {
+            session_id,
+            file,
+            side,
+            line,
+            end_line,
+            body,
+            quote,
+            commit_sha,
+            commit_subject,
+        } => {
+            let Some(reviews) = reviews else {
+                outbound.push(no_review_store(session_id));
+                return;
+            };
+            let side = match side.as_str() {
+                "old" => juancoded_core::review::CommentSide::Old,
+                "new" => juancoded_core::review::CommentSide::New,
+                // Refused rather than defaulted: a comment on the wrong side of a hunk
+                // hangs off a line the author never wrote.
+                other => {
+                    outbound.push(ServerMessage::Error {
+                        session_id: Some(session_id),
+                        message: format!("side must be `old` or `new`, not `{other}`"),
+                    });
+                    return;
+                }
+            };
+            let text = body.trim();
+            if text.is_empty() {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id),
+                    message: "a diff comment needs a body".into(),
+                });
+                return;
+            }
+            let end = end_line.unwrap_or(line);
+            let comment = juancoded_core::review::DiffComment {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                file,
+                side,
+                // Normalised rather than trusted: a selection dragged upwards arrives
+                // backwards, and a backwards range highlights nothing.
+                line: line.min(end),
+                end_line: line.max(end),
+                body: text.to_string(),
+                created_at: juancoded_core::model::now_ms(),
+                quote,
+                commit_sha,
+                commit_subject,
+            };
+            if let Err(e) = reviews.add_comment(&comment) {
+                outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id),
+                    message: e.to_string(),
+                });
+                return;
+            }
+            outbound.push(diff_comments_frame(reviews, session_id));
+        }
+
+        ClientMessage::DiffCommentDelete {
+            session_id,
+            comment_id,
+        } => {
+            let Some(reviews) = reviews else {
+                outbound.push(no_review_store(session_id));
+                return;
+            };
+            let outcome = match &comment_id {
+                Some(id) => reviews.remove_comment(&session_id, id).map(|removed| {
+                    // A miss is reported rather than swallowed: the client was holding a
+                    // comment this core does not have, which is worth it knowing.
+                    (!removed).then(|| format!("no comment `{id}` on `{session_id}`"))
+                }),
+                None => reviews.clear_comments(&session_id).map(|()| None),
+            };
+            match outcome {
+                Ok(None) => {}
+                Ok(Some(message)) => outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id.clone()),
+                    message,
+                }),
+                Err(e) => {
+                    outbound.push(ServerMessage::Error {
+                        session_id: Some(session_id),
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            }
+            outbound.push(diff_comments_frame(reviews, session_id));
         }
 
         ClientMessage::SearchSessions {
@@ -1772,6 +1952,7 @@ mod tests {
                 transcripts: handles.transcripts.as_ref(),
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
+                reviews: handles.reviews.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy: &handles.heavy,
             },
@@ -1833,6 +2014,7 @@ mod tests {
                 transcripts: handles.transcripts.as_ref(),
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
+                reviews: handles.reviews.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy,
             },
@@ -2299,6 +2481,7 @@ mod tests {
                     transcripts: self.handles.transcripts.as_ref(),
                     reaper: self.handles.reaper.as_ref(),
                     tracked_prs: self.handles.tracked_prs.as_ref(),
+                    reviews: self.handles.reviews.as_ref(),
                     global_pause: &self.handles.global_pause,
                     heavy: &self.handles.heavy,
                 },

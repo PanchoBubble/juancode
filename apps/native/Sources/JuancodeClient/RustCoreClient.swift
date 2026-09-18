@@ -119,6 +119,13 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// what stops the polling.
     private var heavyListeners: [Int: @Sendable (HeavyQueueSnapshot) -> Void] = [:]
     private var heavySubscribed = false
+    /// One-shot waiters for `review` and `diffComments`, keyed by session id.
+    ///
+    /// Keyed by session rather than by a request id, because neither frame carries
+    /// one: a second review of the same session while the first is running is the same
+    /// question asked twice, and both callers want the answer that arrives.
+    private var reviewWaiters: [String: [GitHubWaiter<ReviewPass?>]] = [:]
+    private var commentWaiters: [String: [GitHubWaiter<[StagedDiffComment]>]] = [:]
     /// The queue as the daemon last sent it, or nil while this connection has never
     /// been sent one. Handed to a new subscriber so a second panel does not have to
     /// wait out a change for its first draw.
@@ -1164,6 +1171,81 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         connection.send(["type": "heavyCancel", "pid": pid])
     }
 
+    // MARK: - The GitHub surface (capability: github)
+
+    /// The daemon's own HTTP root — the one the sidecar and the phone console read
+    /// through. There is exactly one, so there is exactly one PR list.
+    public var httpBaseURL: String? { baseURL }
+
+    public func review(sessionId: String, refresh: Bool) async throws -> ReviewPass? {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        let waiter = GitHubWaiter<ReviewPass?>()
+        lock.withLock { reviewWaiters[sessionId, default: []].append(waiter) }
+        connection.send(["type": "sessionReview", "sessionId": sessionId, "refresh": refresh])
+        // A refresh is a model turn. The budget is the daemon's own review timeout
+        // plus a margin, so this gives up after the pass would have, never before it.
+        let budget: TimeInterval = refresh ? 300 : 20
+        guard let answer = await waiter.landed(within: budget) else {
+            lock.withLock { reviewWaiters[sessionId]?.removeAll { $0 === waiter } }
+            throw CoreOperationUnsupported(
+                operation: "Review with Claude", backend: backendName,
+                detail: "the core did not answer within \(Int(budget))s")
+        }
+        return answer
+    }
+
+    @discardableResult
+    public func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                               endLine: Int?, body: String, quote: String?,
+                               commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment] {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        var frame: [String: Any] = [
+            "type": "diffCommentAdd", "sessionId": sessionId, "file": file,
+            "side": side, "line": line, "body": body,
+        ]
+        if let endLine { frame["endLine"] = endLine }
+        if let quote { frame["quote"] = quote }
+        if let commitSha { frame["commitSha"] = commitSha }
+        if let commitSubject { frame["commitSubject"] = commitSubject }
+        return try await awaitComments(sessionId: sessionId, frame: frame)
+    }
+
+    @discardableResult
+    public func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment] {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        var frame: [String: Any] = ["type": "diffCommentDelete", "sessionId": sessionId]
+        if let commentId { frame["commentId"] = commentId }
+        return try await awaitComments(sessionId: sessionId, frame: frame)
+    }
+
+    /// Send a comment mutation and wait for the list it is answered with.
+    ///
+    /// Both mutations are answered by the WHOLE list rather than by what they changed,
+    /// so this is one helper rather than two: the caller replaces what it holds either
+    /// way, which is the only thing that keeps two surfaces staging against one session
+    /// from drifting apart.
+    private func awaitComments(sessionId: String,
+                               frame: [String: Any]) async throws -> [StagedDiffComment] {
+        let waiter = GitHubWaiter<[StagedDiffComment]>()
+        lock.withLock { commentWaiters[sessionId, default: []].append(waiter) }
+        connection.send(frame)
+        guard let list = await waiter.landed(within: 20) else {
+            lock.withLock { commentWaiters[sessionId]?.removeAll { $0 === waiter } }
+            throw CoreOperationUnsupported(
+                operation: "Staging a diff comment", backend: backendName,
+                detail: "the core did not answer within 20s")
+        }
+        return list
+    }
+
     // MARK: - Presence, diagnostics, lifecycle
 
     /// No `/presence` on the daemon. The push gate it feeds is the sidecar's, which
@@ -1490,6 +1572,23 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // delta, so a subscriber's whole job is to drop what it was holding.
             for l in listeners { l(.trackedPrs(list)) }
             for w in waiters { w.arrived() }
+
+        case "review":
+            guard let id = sessionId else { return }
+            // Absent rather than null is "nothing has reviewed this", and both spellings
+            // reach here: the core omits the key, an older one could send null.
+            let pass = Self.decodeJSON(ReviewPass.self, body["result"])
+            for w in lock.withLock({ reviewWaiters.removeValue(forKey: id) ?? [] }) {
+                w.deliver(pass)
+            }
+
+        case "diffComments":
+            guard let id = sessionId else { return }
+            let list = (body["comments"] as? [Any] ?? [])
+                .compactMap { Self.decodeJSON(StagedDiffComment.self, $0) }
+            for w in lock.withLock({ commentWaiters.removeValue(forKey: id) ?? [] }) {
+                w.deliver(list)
+            }
 
         case "heavyQueue":
             guard let snapshot = HeavyQueueSnapshot(wire: body) else { return }
@@ -2084,4 +2183,56 @@ private final class LifecycleWaiter: @unchecked Sendable {
 /// exists. Written once rather than repeated per closure.
 private final class SelfBox: @unchecked Sendable {
     weak var value: RustCoreClient?
+}
+
+/// A one-shot handoff for a GitHub frame the client asked for, with a deadline.
+///
+/// One-shot is the whole contract, the same as `FrameWaiter` above: the frame and the
+/// expiry race, and the loser must not be able to resume a continuation the winner
+/// already used. Generic rather than two near-identical classes because the two frames
+/// differ only in what they carry — `review` a pass that may be absent, `diffComments`
+/// a list that may be empty — and both of those are legitimate answers.
+private final class GitHubWaiter<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+    private var settled = false
+
+    /// The answer, or nil when the budget ran out.
+    func landed(within budget: TimeInterval) async -> Value? {
+        let answer = await withCheckedContinuation { (c: CheckedContinuation<Value?, Never>) in
+            let alreadyDone = lock.withLock { () -> Bool in
+                if settled { return true }
+                continuation = c
+                return false
+            }
+            if alreadyDone { c.resume(returning: nil) }
+        }
+        return answer
+    }
+
+    func deliver(_ value: Value) { settle(value) }
+
+    private func settle(_ value: Value?) {
+        let waiting = lock.withLock { () -> CheckedContinuation<Value?, Never>? in
+            guard !settled else { return nil }
+            settled = true
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: value)
+    }
+}
+
+/// Decode one wire value into a `Codable` shape, or nil.
+///
+/// Through `JSONSerialization` and back rather than a hand-written decoder per type,
+/// because the frames arrive as `[String: Any]` and the shapes they carry are the
+/// core's own — a hand decoder here would be a second spelling of a schema that already
+/// exists on the other side.
+extension RustCoreClient {
+    static func decodeJSON<T: Decodable>(_ type: T.Type, _ value: Any?) -> T? {
+        guard let value, !(value is NSNull) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
 }

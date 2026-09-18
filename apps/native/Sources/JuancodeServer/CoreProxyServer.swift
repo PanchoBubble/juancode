@@ -516,6 +516,12 @@ public enum CoreProxyServer {
     static let sessionReadLeaves = [
         "transcript", "messages", "scrollback", "screen",
         "diff", "git", "worktrees", "file",
+        // And the review surface's read half (juancode-52e8.14.6), forwarded for the
+        // same reason: the sidecar and the phone console are exactly the clients that
+        // cannot run a review themselves and have to read the one the daemon cached.
+        // The writes go over the socket, where a pass that takes minutes is a frame
+        // rather than a request held open.
+        "review", "comments",
     ]
 
     /// The session a relayed write names, confirmed against the mirror first.

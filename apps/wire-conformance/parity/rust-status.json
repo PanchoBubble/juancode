@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.19.0",
+  "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -34,228 +34,234 @@
     "trackPrInSession",
     "prWebhook",
     "heavyQueue",
-    "changes"
+    "changes",
+    "github"
   ],
   "scenarios": {
     "handshake": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "create": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "create-guards": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "attach-scrollback": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "input-ack": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "resize": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "screen-stream": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "activity-notify": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "activity-changes": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "queue": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "exit-codes": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "unresumable": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "errors": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "tracked-prs": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "editor-terminal": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "adopt-external": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "dispatch-correlation": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "skip-permissions": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-meta": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "grid-owner": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "restart-fresh": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "spawn-model": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "seeded-input": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "transcript": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "queue-edit": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "transcript-activity": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "orphan-reap": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "spawn-preset": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "reaper": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "isolate-worktree": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "stuck": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-list": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-delete": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-sleep": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "global-pause": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-set-meta": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "usage": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-search": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "track-pr-in-session": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "pr-webhook": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "session-screen": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "named-keys": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "heavy-queue": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
     },
     "changes": {
       "status": "passed",
-      "attempts": 1,
-      "passes": 1
+      "attempts": 3,
+      "passes": 3
+    },
+    "github": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     }
   }
 }

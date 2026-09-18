@@ -253,6 +253,39 @@ public protocol CoreClient: AnyObject, Sendable {
     /// Stop a queued or running heavy job (wire `heavyCancel`).
     func heavyCancel(pid: Int)
 
+    // MARK: - The GitHub surface (capability: github)
+
+    /// The core's HTTP root, for the GitHub reads that are requests rather than
+    /// subscriptions. Nil for a core with no HTTP surface of its own.
+    ///
+    /// On the protocol rather than only on the client that has one, because the reads
+    /// it serves are the same reads the sidecar and the phone console make: one URL,
+    /// three callers, and no second answer to "where does a PR list come from".
+    var httpBaseURL: String? { get }
+
+    /// A session's review — the cached one, or a fresh pass when `refresh` is true
+    /// (wire `sessionReview` → `review`).
+    ///
+    /// Nil is "nothing has reviewed this", which is a different thing from a pass that
+    /// found nothing and draws a different panel. A refresh is a whole model turn, so
+    /// this can take minutes; it is off the socket's own task on the far side, so the
+    /// panes on this connection keep painting while it runs.
+    func review(sessionId: String, refresh: Bool) async throws -> ReviewPass?
+
+    /// Stage an inline comment against a session's diff (wire `diffCommentAdd`).
+    /// Answered with the whole list, because two surfaces stage against one session.
+    @discardableResult
+    func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                        endLine: Int?, body: String, quote: String?,
+                        commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment]
+
+    /// Drop one staged comment, or — with no id — every one of the session's
+    /// (wire `diffCommentDelete`).
+    @discardableResult
+    func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment]
+
     // MARK: - Launch state
 
     /// Sessions that were live when the previous process died or quit. Kept
@@ -341,6 +374,36 @@ public extension CoreClient {
     func heavySetPriority(pid: Int, prio: Int) {}
     func heavySetSlots(_ slots: Int) {}
     func heavyCancel(pid: Int) {}
+
+    /// What a core with no `github` capability does: refuse, by name.
+    ///
+    /// Thrown rather than silently answered with nil, for the reason
+    /// `CoreCapabilityError` exists: a caller that reached a gated operation anyway is
+    /// a UI bug, and an invented empty answer hides it. The panel reads
+    /// `unavailableReason(.github)` and greys itself out with that sentence, so none of
+    /// these is reached from a working build.
+    var httpBaseURL: String? { nil }
+
+    func review(sessionId: String, refresh: Bool) async throws -> ReviewPass? {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    @discardableResult
+    func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                        endLine: Int?, body: String, quote: String?,
+                        commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment] {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    @discardableResult
+    func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment] {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    /// The GitHub reads, when this core has an HTTP surface to make them against.
+    var github: GitHubReads? { httpBaseURL.map { GitHubReads(baseURL: $0) } }
 
     /// Track `pr` the default way: spawn a dedicated agent session for it.
     func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {

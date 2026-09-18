@@ -16,6 +16,7 @@ const workspace = {
   cwd: "/w/plain",
   gitCwd: "/w/repo",
   gitRemoteCwd: "/w/remote-repo",
+  ghCwd: "/w/gh-repo",
   missingCwd: "/w/nope",
   file: "/w/note.txt",
 };

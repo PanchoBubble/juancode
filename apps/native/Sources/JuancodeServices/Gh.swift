@@ -774,46 +774,6 @@ public func rerunChecks(_ cwd: String, number: Int, failedOnly: Bool) async thro
     }
 }
 
-/// Cap on captured CI-log text, so a huge log can't blow up the UI / an agent
-/// prompt. We keep the tail (where failures surface), not the head.
-private let MAX_LOG_CHARS = 20_000
-
-/// Read the failing-step logs for a PR's red CI checks: resolve each failing
-/// GitHub Actions check to its run id and pull `gh run view <id> --log-failed`,
-/// concatenated (capped). Returns "" when nothing is failing or logs can't be
-/// read — best-effort, never throws. Lets the UI / a tracking agent surface *why*
-/// CI is red without leaving juancode.
-public func getFailedCheckLogs(_ cwd: String, number: Int, maxRuns: Int = 5) async -> String {
-    let failing = await getPrCheckRuns(cwd, number: number).filter(\.failed)
-    var seen = Set<String>()
-    var runIds: [String] = []
-    for check in failing {
-        if let id = runIdFromCheckLink(check.link), seen.insert(id).inserted { runIds.append(id) }
-    }
-    guard !runIds.isEmpty else { return "" }
-
-    var sections: [String] = []
-    for id in runIds.prefix(maxRuns) {
-        guard let log = await failedRunLog(cwd, runId: id), !log.isEmpty else { continue }
-        sections.append("===== run \(id) (failed steps) =====\n\(log)")
-    }
-    return sections.joined(separator: "\n\n")
-}
-
-/// `gh run view <id> --log-failed`, capped to the trailing `MAX_LOG_CHARS`.
-private func failedRunLog(_ cwd: String, runId: String) async -> String? {
-    do {
-        let r = try await ProcessRunner.capture(
-            ghBin(), ["run", "view", runId, "--log-failed"], cwd: cwd, maxBytes: MAX_BUFFER)
-        guard r.ok else { return nil }
-        let log = r.stdout
-        guard log.count > MAX_LOG_CHARS else { return log }
-        return "…(truncated)\n" + String(log.suffix(MAX_LOG_CHARS))
-    } catch {
-        return nil
-    }
-}
-
 // MARK: - replying to a PR (juancode-49w)
 
 /// Post a top-level comment on a PR (`gh pr comment`). Throws `GhError` on failure.

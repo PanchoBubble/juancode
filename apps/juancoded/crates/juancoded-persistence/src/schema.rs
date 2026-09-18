@@ -233,6 +233,40 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX transcript_by_kind
         ON transcript_records (json_extract(record, '$.kind'));
     "#,
+    // 10: the review surface — a person's staged notes, and the cache of a model pass.
+    //
+    // Two tables because they have opposite lifetimes. `diff_comments` is deliberate
+    // human input and is kept until somebody clears it; `diff_reviews` is one row per
+    // session, replaced wholesale by every pass, because a review is about the tree as
+    // it is right now and last week's verdict is about a diff nobody can see.
+    //
+    // Both cascade off `sessions`, unlike `global_pause` above: a comment on a pruned
+    // session names a file that may not be in the tree any more, so keeping it would be
+    // keeping a note nobody can act on. The result is stored as the JSON this core
+    // serves rather than as columns — it is a cache of a model's answer, and a schema
+    // for it would be a migration every time the finding shape moves.
+    r#"
+    CREATE TABLE diff_comments (
+        id             TEXT PRIMARY KEY,
+        session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        file           TEXT NOT NULL,
+        side           TEXT NOT NULL,
+        line           INTEGER NOT NULL,
+        end_line       INTEGER NOT NULL,
+        body           TEXT NOT NULL,
+        created_at     INTEGER NOT NULL,
+        quote          TEXT,
+        commit_sha     TEXT,
+        commit_subject TEXT
+    );
+    CREATE INDEX diff_comments_by_session ON diff_comments (session_id);
+
+    CREATE TABLE diff_reviews (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        result     TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

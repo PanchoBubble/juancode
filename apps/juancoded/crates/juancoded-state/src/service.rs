@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use juancoded_cordis::Service;
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_persistence::{QueuedMessage, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::{ScreenPeek, Snapshot};
@@ -235,6 +236,20 @@ pub struct StoreService;
 impl Service for StoreService {
     const KEY: &'static str = "store";
     type Api = dyn SessionStore;
+}
+
+/// `ctx.resolve::<ReviewStoreService>()` yields `Arc<dyn ReviewStore>` — a session's
+/// staged diff comments and its last review pass.
+///
+/// A key of its own rather than a widening of `SessionStore`, because they are two
+/// different promises. Everything behind `store` is what a session *is*, and this is
+/// what somebody wrote about one. A tree can mount a registry without a review surface
+/// and the frames will say so, which is the whole reason the services are keyed.
+pub struct ReviewStoreService;
+
+impl Service for ReviewStoreService {
+    const KEY: &'static str = "review-store";
+    type Api = dyn ReviewStore;
 }
 
 impl SessionsApi for SessionRegistry {

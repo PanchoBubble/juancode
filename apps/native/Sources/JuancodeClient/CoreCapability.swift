@@ -27,6 +27,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case isolateWorktree
     case heavyQueue
     case changes
+    case github
 
     /// What the user calls this.
     public var title: String {
@@ -49,6 +50,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .isolateWorktree: return "Isolate in a fresh worktree"
         case .heavyQueue: return "Heavy command queue"
         case .changes: return "Working-tree changes"
+        case .github: return "GitHub data layer"
         }
     }
 
@@ -90,6 +92,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "A session cannot be given a worktree of its own: the isolate toggle is disabled, and a dispatch that asks for isolation is refused rather than run in the shared checkout."
         case .changes:
             return "The Changes panel is unavailable: this core does not read the session's git working tree, so there is no diff, no branch state, and no Commit, Push or Discard. The worktree rail and the at-risk badges go with them \u{2014} they are the same read. Nothing about the repository changes; it just cannot be seen or acted on from here."
+        case .github:
+            return "The GitHub panel reads nothing from this core: the failing-CI log arrives unparsed rather than folded into steps with the errors up front, and Review with Claude is disabled along with the inline comments that steer it. The data layer lives in the daemon so a Mac you have walked away from can still be asked why CI went red \u{2014} and so a phone, which cannot shell out to `gh`, has some way to ask at all."
         case .heavyQueue:
             return "The Heavy Queue panel is unavailable: this core does not read the shared slot registry, so there is nothing to show what is holding a slot and no way to reorder the line or widen it. Heavy commands still queue \u{2014} the `heavy` wrapper is what serializes them \u{2014} they just cannot be watched from here."
         }

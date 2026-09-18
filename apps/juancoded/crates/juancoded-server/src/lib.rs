@@ -9,6 +9,7 @@
 pub mod changes;
 pub mod conn;
 pub mod ephemeral;
+pub mod github;
 pub mod global_pause;
 pub mod heavy_watch;
 pub mod identity;

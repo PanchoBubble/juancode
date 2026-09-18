@@ -12,10 +12,11 @@ use juancoded_cordis::plugin::{Context, Plugin};
 use juancoded_cordis::services::pty::PtySpawnService;
 use juancoded_cordis::services::terminal::TerminalService;
 use juancoded_cordis::{Entry, EntryList, Loader};
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_persistence::{SessionStore, SqliteStore};
 
 use crate::registry::{RegistryConfig, SessionRegistry};
-use crate::service::{SessionsService, StoreService};
+use crate::service::{ReviewStoreService, SessionsService, StoreService};
 
 /// Claims the `store` key with a real SQLite file. `config.path` overrides where it
 /// lives; `:memory:` gives a store that dies with the process, which is what a test
@@ -29,12 +30,16 @@ impl Plugin for SqliteStorePlugin {
 
     fn apply(&self, ctx: &Context) -> anyhow::Result<()> {
         let path = ctx.config().get("path").and_then(|v| v.as_str());
-        let store: Arc<dyn SessionStore> = match path {
-            Some(":memory:") => Arc::new(SqliteStore::in_memory()?),
-            Some(path) => Arc::new(SqliteStore::open(path)?),
-            None => Arc::new(SqliteStore::open_default()?),
-        };
-        ctx.provide::<StoreService>(store)?;
+        let sqlite: Arc<SqliteStore> = Arc::new(match path {
+            Some(":memory:") => SqliteStore::in_memory()?,
+            Some(path) => SqliteStore::open(path)?,
+            None => SqliteStore::open_default()?,
+        });
+        // One database behind both keys. Two `SqliteStore`s over one file would be two
+        // connections, two locks and two writers of the same WAL, which is exactly the
+        // arrangement this crate's single-mutex comment exists to prevent.
+        ctx.provide::<StoreService>(Arc::clone(&sqlite) as Arc<dyn SessionStore>)?;
+        ctx.provide::<ReviewStoreService>(sqlite as Arc<dyn ReviewStore>)?;
         Ok(())
     }
 }

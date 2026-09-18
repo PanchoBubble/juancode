@@ -454,6 +454,120 @@ function emitPauseState(paused: string[]): void {
 // If a Changes view is ever built on the phone, its writes go through the relay's
 // POSTs, not through here.
 //
+// ── The GitHub surface (juancode-52e8.14.6) ──────────────────────────────────
+// The GitHub data layer lives in the core, so the phone reads a PR list, a
+// conversation, a merged timeline and a parsed failing-CI log the same way the desktop
+// does: over the core's own HTTP routes, through the relay on :4280. Those are plain
+// requests and are made where they are needed (oracle.ts, the phone console) rather
+// than mirrored here — nothing about them is a stream.
+//
+// What DOES belong on the socket is the review surface, because a refresh is a whole
+// model turn: held open as a request it would block for minutes. Two client frames
+// stage and unstage an inline comment, one asks for the review, and the core answers
+// with `review` and `diffComments`. Both answers are ALWAYS complete — a whole comment
+// list, never a delta, because two surfaces stage against one session — so a listener
+// replaces what it holds rather than patching it.
+//
+// Gated by the `github` capability: the Swift core advertises none of this and the
+// frames would be `error` there.
+
+/** One review finding, anchored to the file and line it concerns. */
+export interface ReviewFinding {
+  file: string;
+  /** `old` or `new` — which side of the hunk the line is on. */
+  side: string;
+  /** Absent for a file-level finding with no single line. */
+  line?: number;
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
+  note: string;
+}
+
+/** One cached review pass. `error` is present when the pass could not run or its
+ *  output could not be read — cached like any other result, because "the last pass
+ *  failed, and this is why" is an answer and losing it looks like no review at all. */
+export interface ReviewPass {
+  status: "ok" | "empty" | "error";
+  findings: ReviewFinding[];
+  summary?: string;
+  createdAt: number;
+  error?: string;
+}
+
+/** One inline comment staged against a session's diff. */
+export interface DiffComment {
+  id: string;
+  sessionId: string;
+  file: string;
+  side: string;
+  line: number;
+  endLine: number;
+  body: string;
+  createdAt: number;
+  quote?: string;
+  commitSha?: string;
+  commitSubject?: string;
+}
+
+/** Whether the connected core has the GitHub data layer at all. */
+export function supportsGithub(): boolean {
+  return nativeCapabilities.includes("github");
+}
+
+type ReviewListener = (sessionId: string, pass: ReviewPass | null) => void;
+type CommentsListener = (sessionId: string, comments: DiffComment[]) => void;
+const reviewListeners = new Set<ReviewListener>();
+const commentListeners = new Set<CommentsListener>();
+
+/** Watch review passes. Fires on every `review` frame; `null` is a session nothing has
+ *  reviewed, which is not the same as a pass that found nothing. */
+export function onReview(listener: ReviewListener): () => void {
+  reviewListeners.add(listener);
+  return () => reviewListeners.delete(listener);
+}
+
+/** Watch staged diff comments. Always the whole list; replace wholesale. */
+export function onDiffComments(listener: CommentsListener): () => void {
+  commentListeners.add(listener);
+  return () => commentListeners.delete(listener);
+}
+
+/** Ask for a session's review — the cached one, or a fresh pass with `refresh`. */
+export function requestReview(sessionId: string, refresh = false): void {
+  sendToNative({ type: "sessionReview", sessionId, refresh });
+}
+
+/** A `review` frame, or null if it is not one. `result` absent and `result: null` say
+ *  the same thing, and both spellings reach here. */
+function parseReview(msg: Record<string, unknown>): { sessionId: string; pass: ReviewPass | null } | null {
+  if (msg.type !== "review" || typeof msg.sessionId !== "string") return null;
+  const raw = msg.result;
+  if (raw === undefined || raw === null) return { sessionId: msg.sessionId, pass: null };
+  if (typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const status = r.status;
+  if (status !== "ok" && status !== "empty" && status !== "error") return null;
+  return {
+    sessionId: msg.sessionId,
+    pass: {
+      status,
+      findings: Array.isArray(r.findings) ? (r.findings as ReviewFinding[]) : [],
+      summary: typeof r.summary === "string" ? r.summary : undefined,
+      createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
+      error: typeof r.error === "string" ? r.error : undefined,
+    },
+  };
+}
+
+/** A `diffComments` frame, or null if it is not one. */
+function parseDiffComments(
+  msg: Record<string, unknown>,
+): { sessionId: string; comments: DiffComment[] } | null {
+  if (msg.type !== "diffComments" || typeof msg.sessionId !== "string") return null;
+  if (!Array.isArray(msg.comments)) return null;
+  return { sessionId: msg.sessionId, comments: msg.comments as DiffComment[] };
+}
+
 // ── Heavy command queue (juancode-52e8.14.3) ─────────────────────────────────
 // The phone's view of the global `heavy` slot queue: memory-heavy commands (CI,
 // integration tests) serialized across every agent session on the Mac. The CORE
@@ -699,6 +813,16 @@ function handleMessage(raw: string): void {
   if (msg.type === "heavyQueue") {
     const queue = parseHeavyQueue(msg);
     if (queue) emitHeavyQueue(queue);
+    return;
+  }
+  if (msg.type === "review") {
+    const ev = parseReview(msg);
+    if (ev) for (const l of reviewListeners) l(ev.sessionId, ev.pass);
+    return;
+  }
+  if (msg.type === "diffComments") {
+    const ev = parseDiffComments(msg);
+    if (ev) for (const l of commentListeners) l(ev.sessionId, ev.comments);
     return;
   }
   if (msg.type === "screen") {

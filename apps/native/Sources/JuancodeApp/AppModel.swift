@@ -3956,9 +3956,13 @@ final class AppModel {
     var changesBaseBySession: [String: String] = [:]
     /// A per-session diff-load error (base/PR fetch failures), shown in the panel.
     var changesErrorBySession: [String: String] = [:]
-    /// Per-session failing-CI logs for the PR currently shown in its ChangesPanel,
-    /// fetched on demand via `gh run view --log-failed` (juancode-49w).
-    var prCiLogsBySession: [String: String] = [:]
+    /// Per-session failing-CI logs for the PR currently shown in its ChangesPanel
+    /// (juancode-49w), read from the core already parsed into steps and folds.
+    ///
+    /// The core reads and parses it, not this process (juancode-52e8.14.6). A red
+    /// build is exactly the thing somebody wants to ask about from a phone, and a
+    /// phone cannot shell out to `gh run view`.
+    var prCiLogsBySession: [String: ActionsLog] = [:]
     /// Sessions whose CI-log fetch is in flight (for the banner spinner).
     private var prCiLogsLoading: Set<String> = []
     /// Recent commits for the ChangesPanel's commit picker (juancode-5u2), per session.
@@ -3976,7 +3980,7 @@ final class AppModel {
     func changesSource(_ id: String) -> ChangesSource { changesSourceBySession[id] ?? .workingTree }
     func changesBaseLabel(_ id: String) -> String? { changesBaseBySession[id] }
     func changesError(_ id: String) -> String? { changesErrorBySession[id] }
-    func prCiLogs(_ id: String) -> String? { prCiLogsBySession[id] }
+    func prCiLogs(_ id: String) -> ActionsLog? { prCiLogsBySession[id] }
     func isLoadingPrCiLogs(_ id: String) -> Bool { prCiLogsLoading.contains(id) }
     func recentCommits(_ id: String) -> [RecentCommit] { recentCommitsBySession[id] ?? [] }
     func isLoadingRecentCommits(_ id: String) -> Bool { recentCommitsLoading.contains(id) }
@@ -3993,17 +3997,19 @@ final class AppModel {
         }
     }
 
-    /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel
-    /// (`gh run view --log-failed` for each red Actions check). Off the main actor;
-    /// coalesces. A "no logs" result is shown rather than left blank.
+    /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel,
+    /// already parsed into steps and folds by the core. Coalesces.
+    ///
+    /// An empty log is an answer and is stored as one: a green PR has no failing
+    /// build, and the panel says so rather than spinning. A core with no `github`
+    /// capability stores nothing, and the banner reads the reason off the capability.
     func loadPrCiLogs(_ id: String, number: Int) {
         guard let cwd = cwd(of: id), !prCiLogsLoading.contains(id) else { return }
+        guard let reads = core.github else { return }
         prCiLogsLoading.insert(id)
         Task {
-            let logs = await Task.detached(priority: .utility) {
-                await getFailedCheckLogs(cwd, number: number)
-            }.value
-            prCiLogsBySession[id] = logs.isEmpty ? "No failing-step logs available." : logs
+            let log = await reads.actionsLog(cwd: cwd, number: number)
+            prCiLogsBySession[id] = log ?? ActionsLog()
             prCiLogsLoading.remove(id)
         }
     }
@@ -4659,25 +4665,79 @@ final class AppModel {
         }
     }
 
-    /// Run an AI review pass over the session's working-tree diff (juancode-7ha):
-    /// feed the diff (+ any staged inline comments as steering context) to the real
-    /// `claude` CLI via the existing `BinaryResolver` — same auth/binary as a
-    /// session, no shadow HOME — and cache the structured findings to overlay on the
-    /// diff. Coalesces concurrent runs; mirrors the web "Review with Claude". No-op
-    /// without a cwd. The runner is async and shells out, so we hop off the main
-    /// actor and publish the result back on it.
+    /// Run an AI review pass over the session's working-tree diff (juancode-7ha).
+    ///
+    /// The pass belongs to the core now (juancode-52e8.14.6): it reads the tree, builds
+    /// the prompt and launches the user's own `claude` with their environment untouched
+    /// — the same promise this app made when it ran the pass itself, kept by the
+    /// process that outlives the app rather than by the app. What changes here is who
+    /// can ask: a review started from the phone lands in the same cached row.
+    ///
+    /// The staged basket is pushed across first. The core reviews the comments IT
+    /// holds, which is the only arrangement in which the phone and the desktop are
+    /// steering the same pass; leaving them here would mean a review that silently
+    /// ignored what the reviewer had already written down.
+    ///
+    /// Coalesces concurrent runs. A core with no `github` capability surfaces the
+    /// capability's own sentence rather than running nothing and saying nothing.
     func runReview(_ id: String) {
-        guard let cwd = gitCwd(of: id), !reviewRunning.contains(id) else { return }
-        let files = diffBySession[id]?.files ?? []
-        let comments = comments(id)
+        guard gitCwd(of: id) != nil, !reviewRunning.contains(id) else { return }
+        let staged = comments(id)
         reviewRunning.insert(id)
         Task {
-            let now = Int(Date().timeIntervalSince1970 * 1000)
-            let result = await JuancodeServices.runReview(
-                cwd: cwd, files: files, comments: comments, now: now)
-            reviewBySession[id] = result
+            do {
+                try await pushStagedComments(id, staged)
+                let pass = try await core.review(sessionId: id, refresh: true)
+                reviewBySession[id] = pass.map(Self.reviewResult(from:))
+            } catch {
+                reviewBySession[id] = ReviewResult(
+                    status: .error, findings: [], summary: nil,
+                    createdAt: Int(Date().timeIntervalSince1970 * 1000),
+                    error: error.localizedDescription)
+            }
             reviewRunning.remove(id)
         }
+    }
+
+    /// Replace the core's staged comments with this session's basket.
+    ///
+    /// Replace rather than merge: the basket here is the one the reviewer is looking
+    /// at, and a merge would re-add comments they had already unstaged.
+    private func pushStagedComments(_ id: String, _ staged: [DiffComment]) async throws {
+        try await core.removeDiffComments(sessionId: id, commentId: nil)
+        for c in staged {
+            try await core.addDiffComment(
+                sessionId: id, file: c.file, side: c.side.rawValue, line: c.line,
+                endLine: c.endLine, body: c.body, quote: c.quote,
+                commitSha: c.commitSha, commitSubject: c.commitSubject)
+        }
+    }
+
+    /// One review pass off the wire, in the shape the diff overlay already renders.
+    ///
+    /// A mapping rather than a shared type because the two are owned by different
+    /// sides: `ReviewResult` is what this app's panels are written against, and
+    /// `ReviewPass` is what the core serves to every client including the phone.
+    private static func reviewResult(from pass: ReviewPass) -> ReviewResult {
+        let status: ReviewResult.Status
+        switch pass.status {
+        case .ok: status = .ok
+        case .empty: status = .empty
+        case .error: status = .error
+        }
+        return ReviewResult(
+            status: status,
+            findings: pass.findings.map { f in
+                ReviewFinding(
+                    file: f.file,
+                    side: f.side == "old" ? .old : .new,
+                    line: f.line,
+                    severity: ReviewSeverity(rawValue: f.severity.rawValue) ?? .info,
+                    title: f.title, note: f.note)
+            },
+            summary: pass.summary,
+            createdAt: pass.createdAt,
+            error: pass.error)
     }
 
     /// Stage everything and commit, off the main actor. Refreshes the diff + git

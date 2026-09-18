@@ -49,6 +49,8 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use juancoded_cordis::bus::Bus;
+use juancoded_cordis::events::{PrNotify, PrNotifyCandidate, PrNotifyKind, PrNotifyPass};
 use juancoded_core::gh;
 use juancoded_core::model::{now_ms, ProviderId};
 use juancoded_core::pr::{
@@ -137,6 +139,11 @@ pub struct TrackedPrs {
     pending_refresh: Mutex<BTreeMap<String, JoinHandle<()>>>,
     webhook_debounce: Duration,
     seed_timing: SeedTiming,
+    /// The bus the notification rules hang off (juancode-2vlz). Every candidate a pass
+    /// produces goes through `pr.notify` before anybody is told, and with no listener
+    /// mounted the terminal returns all of them — which is exactly the behaviour this
+    /// engine had before the rules existed.
+    bus: Bus,
 }
 
 impl TrackedPrs {
@@ -147,6 +154,7 @@ impl TrackedPrs {
         sessions: Arc<dyn SessionsApi>,
         store: Arc<dyn SessionStore>,
         poll_interval: Duration,
+        bus: Bus,
     ) -> Arc<Self> {
         let restored = match store.tracked_prs() {
             Ok(rows) => rows,
@@ -168,6 +176,7 @@ impl TrackedPrs {
             pending_refresh: Mutex::new(BTreeMap::new()),
             webhook_debounce: WEBHOOK_DEBOUNCE,
             seed_timing: SeedTiming::default(),
+            bus,
         })
     }
 
@@ -607,22 +616,47 @@ impl TrackedPrs {
             TrackEvent::Closed(reason) => Some(reason.clone()),
             _ => None,
         }) {
-            self.publish_notification(key, TrackNotification::now(number, reason));
+            // Through the rules like everything else, so a merge of somebody else's PR
+            // is as quiet as its reviews were — but the watch is dropped either way: the
+            // filter decides who hears about it, never whether it happened.
+            for surviving in self.notifiable(
+                &entry,
+                viewer_login,
+                &activity.author,
+                vec![PrNotifyCandidate {
+                    kind: PrNotifyKind::Closed,
+                    message: reason,
+                    actor: String::new(),
+                    review_id: None,
+                }],
+            ) {
+                self.publish_notification(key, TrackNotification::now(number, surviving.message));
+            }
             self.untrack(key);
             return;
         }
 
         let mut fix_reasons = Vec::new();
-        let mut raised = Vec::new();
+        let mut candidates = Vec::new();
         for event in result.events {
             match event {
                 TrackEvent::AutoFix(reason) => fix_reasons.push(reason),
-                TrackEvent::NeedsDecision(reason) => {
-                    raised.push(TrackNotification::now(number, reason))
-                }
+                // Only a decision is a notification. An auto-fix is work handed to the
+                // agent, and the rules are about what reaches a person.
+                TrackEvent::NeedsDecision(reason) => candidates.push(PrNotifyCandidate {
+                    kind: PrNotifyKind::Review,
+                    actor: actor_of(&reason),
+                    message: reason,
+                    review_id: None,
+                }),
                 TrackEvent::Closed(_) => {}
             }
         }
+        let raised: Vec<TrackNotification> = self
+            .notifiable(&entry, viewer_login, &activity.author, candidates)
+            .into_iter()
+            .map(|c| TrackNotification::now(number, c.message))
+            .collect();
         entry.notifications.extend(raised.iter().cloned());
 
         // Red CI must always have a live agent on it. The classifier is edge-triggered,
@@ -653,6 +687,48 @@ impl TrackedPrs {
         if let Some(offline) = self.hand_over(&entry, &prompt, session_live).await {
             self.raise(key, number, offline);
         }
+    }
+
+    /// Run one pass's candidates through the `pr.notify` rules and hand back what
+    /// survived.
+    ///
+    /// The terminal returns every candidate, so a tree that mounted no filter behaves
+    /// exactly as this engine did before the rules existed — which is what makes the
+    /// row in the tree genuinely removable rather than load-bearing.
+    ///
+    /// `notes` are logged rather than dropped: a notification that never arrived is the
+    /// hardest kind of bug to report, and the sentence explaining it is written right
+    /// here and nowhere else.
+    fn notifiable(
+        &self,
+        entry: &TrackedPr,
+        viewer_login: &str,
+        author: &str,
+        candidates: Vec<PrNotifyCandidate>,
+    ) -> Vec<PrNotifyCandidate> {
+        if candidates.is_empty() {
+            return candidates;
+        }
+        let mut pass = PrNotifyPass {
+            tracked_id: entry.id.clone(),
+            pr_number: entry.number,
+            viewer: viewer_login.to_lowercase(),
+            author: author.to_lowercase(),
+            already_open: entry
+                .notifications
+                .iter()
+                .map(|n| n.message.clone())
+                .collect(),
+            candidates,
+            notes: Vec::new(),
+        };
+        let kept = self
+            .bus
+            .waterfall::<PrNotify>(&mut pass, |p| std::mem::take(&mut p.candidates));
+        for note in &pass.notes {
+            debug!("{note}");
+        }
+        kept
     }
 
     /// Type the fix prompt into the PR's agent, reviving it first when its pty is gone.
@@ -807,6 +883,26 @@ impl TrackedPrs {
     }
 }
 
+/// The handle a classifier sentence names, lower-cased, or empty when it names nobody.
+///
+/// `classify_pr_activity` writes its reasons as prose ("@hubber requested changes"),
+/// which is the right shape for a client to render and the wrong shape for a rule to
+/// read. Lifting the `@handle` back out is a small dishonesty about where the structure
+/// lives, and it is here rather than in the classifier because the classifier's output
+/// is a sentence by design: two cores render it, and a structured event would have to
+/// be rendered identically by both.
+fn actor_of(reason: &str) -> String {
+    reason
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix('@'))
+        .map(|handle| {
+            handle
+                .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-')
+                .to_lowercase()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,7 +917,12 @@ mod tests {
         let sessions = crate::testing::sessions();
         let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::in_memory().expect("a store"));
         (
-            TrackedPrs::new(Arc::clone(&sessions), store, Duration::from_secs(3600)),
+            TrackedPrs::new(
+                Arc::clone(&sessions),
+                store,
+                Duration::from_secs(3600),
+                Bus::new(),
+            ),
             sessions,
         )
     }
@@ -1203,7 +1304,12 @@ mod tests {
 
         let root = repo("restart");
         let cwd = root.to_string_lossy().to_string();
-        let first = TrackedPrs::new(Arc::clone(&sessions), Arc::clone(&store), POLL_INTERVAL);
+        let first = TrackedPrs::new(
+            Arc::clone(&sessions),
+            Arc::clone(&store),
+            POLL_INTERVAL,
+            Bus::new(),
+        );
         let entry = first.track(request(&cwd, 4242)).await.expect("a watch");
         first.raise(&entry.id, 4242, "@somebody requested changes".into());
         let before = first.list();
@@ -1211,7 +1317,7 @@ mod tests {
         drop(first);
 
         let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::open(&file).expect("reopened"));
-        let second = TrackedPrs::new(sessions, store, POLL_INTERVAL);
+        let second = TrackedPrs::new(sessions, store, POLL_INTERVAL, Bus::new());
         assert_eq!(second.list(), before, "the same watch, decision included");
 
         // And resolving it is what clears it, on the row a client can address.
@@ -1248,5 +1354,140 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+}
+
+/// The notification rules, from this side of the seam (juancode-2vlz). The rules
+/// themselves are tested in the plugin; what is tested here is that the poller actually
+/// asks, and that a tree without the plugin is the poller this engine has always been.
+#[cfg(test)]
+mod notify_filter_tests {
+    use super::*;
+    use juancoded_cordis::plugins::PrNotifyFilter;
+    use juancoded_cordis::{Entry, EntryList};
+    use juancoded_persistence::SqliteStore;
+    use std::sync::Arc;
+
+    fn engine_on(bus: Bus) -> Arc<TrackedPrs> {
+        std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
+        let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::in_memory().expect("a store"));
+        TrackedPrs::new(
+            crate::testing::sessions(),
+            store,
+            Duration::from_secs(3600),
+            bus,
+        )
+    }
+
+    fn filtered_bus() -> Bus {
+        let mut loader = juancoded_cordis::Loader::new();
+        loader.register(Arc::new(PrNotifyFilter));
+        let entries = EntryList::new().push(Entry::new("pr-notify-filter", "pr-notify-filter"));
+        loader.apply(&entries).expect("the filter mounts");
+        let bus = loader.bus().clone();
+        // The loader owns the effect scope, so it has to outlive the bus it registered
+        // into: leaking it here is what keeps the listener mounted for the assertion.
+        std::mem::forget(loader);
+        bus
+    }
+
+    fn watch(notifications: Vec<TrackNotification>) -> TrackedPr {
+        TrackedPr {
+            id: "/tmp#7".into(),
+            number: 7,
+            title: "t".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            branch: "b".into(),
+            cwd: "/tmp".into(),
+            session_id: None,
+            baseline: Default::default(),
+            notifications,
+            created_at: 0,
+            last_polled_at: None,
+            repo_nwo: None,
+        }
+    }
+
+    fn candidate(message: &str) -> PrNotifyCandidate {
+        PrNotifyCandidate {
+            kind: PrNotifyKind::Review,
+            actor: actor_of(message),
+            message: message.into(),
+            review_id: None,
+        }
+    }
+
+    /// The load-bearing property of making this a row in the tree: with nothing mounted,
+    /// every candidate survives, which is the poller as it was before any of this.
+    #[test]
+    fn a_tree_with_no_filter_notifies_exactly_what_it_always_did() {
+        let engine = engine_on(Bus::new());
+        let kept = engine.notifiable(
+            &watch(Vec::new()),
+            "octocat",
+            "hubber",
+            vec![
+                candidate("@a requested changes"),
+                candidate("@b requested changes"),
+            ],
+        );
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn with_the_filter_mounted_somebody_elses_pr_goes_quiet() {
+        let engine = engine_on(filtered_bus());
+        let theirs = engine.notifiable(
+            &watch(Vec::new()),
+            "octocat",
+            "hubber",
+            vec![candidate("@a requested changes")],
+        );
+        assert!(theirs.is_empty(), "rule 1: not the viewer's PR");
+
+        let mine = engine.notifiable(
+            &watch(Vec::new()),
+            "octocat",
+            "OctoCat",
+            vec![
+                candidate("@a requested changes"),
+                candidate("@b requested changes"),
+            ],
+        );
+        assert_eq!(
+            mine.iter().map(|c| c.message.as_str()).collect::<Vec<_>>(),
+            vec!["@b requested changes"],
+            "rule 2: one pass, one reviewer's last word — and the author match is \
+             case-insensitive, because GitHub is"
+        );
+
+        let repeat = engine.notifiable(
+            &watch(vec![TrackNotification::now(7, "@b requested changes")]),
+            "octocat",
+            "octocat",
+            vec![candidate("@b requested changes")],
+        );
+        assert!(repeat.is_empty(), "rule 3: already open");
+    }
+
+    /// A pass with nothing in it must not reach the bus at all: the rules would have
+    /// nothing to decide, and the empty answer is already known.
+    #[test]
+    fn an_empty_pass_is_answered_without_asking_anybody() {
+        let engine = engine_on(filtered_bus());
+        assert!(engine
+            .notifiable(&watch(Vec::new()), "octocat", "octocat", Vec::new())
+            .is_empty());
+    }
+
+    /// The classifier writes prose and the rules read handles, so this is the one place
+    /// the two shapes meet.
+    #[test]
+    fn a_handle_comes_back_out_of_the_sentence_it_was_written_into() {
+        assert_eq!(actor_of("@hubber requested changes"), "hubber");
+        assert_eq!(actor_of("New review from @Octo-Cat"), "octo-cat");
+        assert_eq!(actor_of("2 new comments from @a and @b"), "a");
+        assert_eq!(actor_of("CI went red"), "");
+        assert_eq!(actor_of(""), "");
     }
 }

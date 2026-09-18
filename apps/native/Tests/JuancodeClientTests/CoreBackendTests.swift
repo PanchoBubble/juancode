@@ -238,7 +238,7 @@ final class CoreBackendTests: XCTestCase {
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
                         .terminal, .restartFresh, .spawnModel, .spawnPreset, .heavyQueue,
-                        .changes])
+                        .changes, .github])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -258,7 +258,7 @@ final class CoreBackendTests: XCTestCase {
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
                         .terminal, .adoptExternal, .sessionMeta, .gridOwner,
                         .restartFresh, .spawnModel, .spawnPreset, .isolateWorktree,
-                        .heavyQueue, .changes])
+                        .heavyQueue, .changes, .github])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, bar
@@ -272,7 +272,9 @@ final class CoreBackendTests: XCTestCase {
     /// than drawing a queue nothing is watching. `changes` is the second
     /// (juancode-52e8.14.5): the session's git working tree is the daemon's to read,
     /// so the Changes panel says why it is empty rather than showing an empty diff,
-    /// which would read as "the agent changed nothing".
+    /// which would read as "the agent changed nothing". `github` is the third
+    /// (juancode-52e8.14.6): the failing-CI log is parsed by the daemon and a review
+    /// pass is run by it, so this core serves the cached review and nothing else.
     func testTheSwiftCoreGatesOnlyWhatHasMovedOutOfIt() throws {
         let dbPath = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("juancode-caps-\(UUID().uuidString).db")
@@ -280,10 +282,10 @@ final class CoreBackendTests: XCTestCase {
             for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbPath + suffix) }
         }
         let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
-        XCTAssertEqual(core.missingCapabilities, [.heavyQueue, .changes])
+        XCTAssertEqual(core.missingCapabilities, [.heavyQueue, .changes, .github])
         XCTAssertEqual(Set(WireProtocol.capabilities).subtracting(WireProtocol.remoteOnlyCapabilities),
                        Set(CoreCapability.allCases.map(\.rawValue))
-                           .subtracting(["heavyQueue", "changes"]),
+                           .subtracting(["heavyQueue", "changes", "github"]),
                        "every capability the Swift core advertises is one the app can ask for, "
                        + "except the ones that only describe what the endpoint serves a remote client")
     }

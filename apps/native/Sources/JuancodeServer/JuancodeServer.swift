@@ -293,6 +293,11 @@ public enum JuancodeServer {
             return await getBeads(m.cwd)
         }
 
+        // The cached pass only. Running one moved into the daemon with the rest of the
+        // GitHub data layer (juancode-52e8.14.6), so this core has no `POST` for it and
+        // does not advertise `github`: a review started here would be a second
+        // implementation of the same model turn, on the one machine that does not need
+        // it. A client reads the reason off the capability rather than off a 404.
         router.get("/api/sessions/:id/review") { _, ctx in
             _ = try meta(ctx, store)
             let id = try param(ctx, "id")

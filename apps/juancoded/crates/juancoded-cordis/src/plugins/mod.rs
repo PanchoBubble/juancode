@@ -8,6 +8,7 @@ mod activity_log;
 mod core_pty;
 mod goal;
 mod input_guard;
+mod pr_notify_filter;
 mod pty_to_grid;
 // Public because the client-discipline half of the queue contract lives under it.
 pub mod queue;
@@ -20,6 +21,7 @@ pub use activity_log::ActivityLog;
 pub use core_pty::CorePty;
 pub use goal::{SessionGoal, SqliteGoalJournal};
 pub use input_guard::InputGuard;
+pub use pr_notify_filter::PrNotifyFilter;
 pub use pty_to_grid::PtyToGrid;
 pub use queue::{
     QueueChanged, SteeringQueue, EDIT_ID as QUEUE_EDIT_ID, REMOVE_ID as QUEUE_REMOVE_ID,
@@ -42,6 +44,7 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(CorePty))
         .register(Arc::new(InputGuard))
         .register(Arc::new(PtyToGrid))
+        .register(Arc::new(PrNotifyFilter))
         .register(Arc::new(ActivityLog))
         .register(Arc::new(SessionChrome))
         .register(Arc::new(SteeringQueue))
@@ -63,4 +66,9 @@ pub fn default_entries() -> EntryList {
         .push(Entry::new("pty-to-grid", "pty-to-grid"))
         .push(Entry::new("activity-log", "activity-log"))
         .push(Entry::new("session-chrome", "session-chrome"))
+        // The tracked-PR notification rules (juancode-2vlz). In the default tree
+        // because a poller that pings on raw activity is the noisy default, and an
+        // entry because whose PRs are worth a ping is one person's opinion: `disabled
+        // = true` here restores the unfiltered poller with nothing left behind.
+        .push(Entry::new("pr-notify-filter", "pr-notify-filter"))
 }

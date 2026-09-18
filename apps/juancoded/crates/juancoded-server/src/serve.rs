@@ -16,8 +16,10 @@ use juancoded_cordis::services::pty::{PtySpawnApi, PtySpawnService};
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::{
-    ReaperConfig, ReaperProbes, SessionReaper, SessionsApi, StallPolicy, StoreService, StuckWatch,
+    ReaperConfig, ReaperProbes, ReviewStoreService, SessionReaper, SessionsApi, StallPolicy,
+    StoreService, StuckWatch,
 };
 
 use crate::conn;
@@ -80,6 +82,10 @@ pub struct CoreHandles {
     /// would be two answers to when it changed. Always present — it needs nothing from
     /// the tree, only a directory.
     pub heavy: Arc<HeavyWatch>,
+    /// A session's staged diff comments and its last review. `None` when the tree
+    /// mounted no store for them, and the review routes then say so rather than
+    /// answering with an empty list — an empty list is a promise nothing was staged.
+    pub reviews: Option<Arc<dyn ReviewStore>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -99,6 +105,7 @@ impl CoreHandles {
             .zip(loader.services().resolve::<StoreService>().ok())
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
         let queue = loader.services().resolve::<QueueService>().ok();
+        let reviews = loader.services().resolve::<ReviewStoreService>().ok();
         let pty = loader.services().resolve::<PtySpawnService>().ok();
         // The reaper reads the transcripts hub directly for its size probe: the hub
         // already holds every binding it has resolved, so one call per sweep replaces a
@@ -128,7 +135,14 @@ impl CoreHandles {
             .services()
             .resolve::<StoreService>()
             .ok()
-            .map(|store| TrackedPrs::new(Arc::clone(&sessions), store, tracked_prs::POLL_INTERVAL));
+            .map(|store| {
+                TrackedPrs::new(
+                    Arc::clone(&sessions),
+                    store,
+                    tracked_prs::POLL_INTERVAL,
+                    loader.bus().clone(),
+                )
+            });
         // Same store, and `None` only costs the pause its persistence: the frames work
         // over the registry alone, so a tree with no store still answers a phone.
         let global_pause = GlobalPause::new(
@@ -144,6 +158,7 @@ impl CoreHandles {
             stuck,
             pty,
             tracked_prs,
+            reviews,
             global_pause,
             // Its root and its config come from the environment, so a conformance run
             // (or a test) points `JUANCODE_HEAVY_ROOT` at a directory of its own rather
@@ -218,6 +233,9 @@ pub(crate) fn router(handles: CoreHandles) -> Router {
         // The git working tree, both session-addressed (which the relay forwards) and
         // path-addressed (which it does not — see `changes.rs`).
         .merge(crate::changes::routes())
+        // The GitHub reads and the review surface. Same reason as the reads above: the
+        // relay 501s them, so without these the phone console has no PR view at all.
+        .merge(crate::github::routes())
         .with_state(handles)
 }
 

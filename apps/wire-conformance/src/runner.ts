@@ -34,6 +34,11 @@ export interface Workspace {
    *  would make an isolation test depend on what a changes test left behind. The bare
    *  remote is local, so the push is a file copy and the suite needs no network. */
   gitRemoteCwd: string;
+  /** A checkout `fake-gh.sh` answers for: a plain directory carrying a
+   *  `.gh-fixtures/` of recorded gh output. The stub keys off the cwd rather than off
+   *  a variable so both of its behaviours are live in one core boot - 14-tracked-prs
+   *  needs a `gh` that fails, 45-github needs one that answers. */
+  ghCwd: string;
   /** A path that does not exist, for the create-guard error. */
   missingCwd: string;
   /** A file inside `cwd`, for openEditor. */
@@ -103,11 +108,234 @@ export function makeWorkspace(): Workspace {
     cwd,
     gitCwd,
     gitRemoteCwd,
+    ghCwd: seedGhFixtures(join(root, "gh-repo")),
     missingCwd: join(root, "definitely-not-here"),
     file,
     dispose: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+/** The recorded `gh` output 45-github reads, in the directory `fake-gh.sh` answers
+ *  for.
+ *
+ *  Recorded shapes, not invented ones: every field here is one the parsers in
+ *  `juancoded_core::gh` / `gh_convo` / `actions_log` actually read, spelled the way gh
+ *  spells it. Three of them carry a deliberate awkwardness, because a fixture that is
+ *  only the happy path tests nothing:
+ *
+ *   * PR #7 is somebody else's with the viewer's review requested, and #42 is the
+ *     viewer's own with red CI — so the triage answer has to order two different
+ *     reasons rather than repeat one.
+ *   * The conversation carries a bare COMMENTED review that is only the record of an
+ *     inline reply, which the timeline has to drop.
+ *   * The Actions log carries seven fractional digits, an unterminated `##[group]` and
+ *     an ANSI-coloured line, all of which the real thing does. */
+function seedGhFixtures(dir: string): string {
+  const fixtures = join(dir, ".gh-fixtures");
+  mkdirSync(fixtures, { recursive: true });
+  const write = (name: string, body: unknown) =>
+    writeFileSync(
+      join(fixtures, name),
+      typeof body === "string" ? body : `${JSON.stringify(body, null, 2)}\n`,
+      "utf8",
+    );
+  const url = (n: number) => `https://github.com/conformance/repo/pull/${n}`;
+  const inline = (id: string, databaseId: number, login: string, body: string, at: string) => ({
+    id,
+    databaseId,
+    author: { login },
+    body,
+    createdAt: at,
+    url: `${url(42)}#discussion_r${databaseId}`,
+    path: "Sources/App/Login.swift",
+    line: 42,
+    ...(id === "RC_1" ? { diffHunk: "@@ -38,6 +38,7 @@ func load() {" } : {}),
+  });
+
+  write("viewer.txt", "octocat\n");
+  write("repo-nwo.txt", "conformance/repo\n");
+  write("pr-list.json", [
+    {
+      number: 42,
+      title: "Fix the login redirect",
+      url: url(42),
+      headRefName: "octocat/fix-login",
+      isDraft: false,
+      statusCheckRollup: [
+        { status: "COMPLETED", conclusion: "SUCCESS" },
+        { status: "COMPLETED", conclusion: "FAILURE" },
+      ],
+      author: { login: "octocat" },
+      assignees: [{ login: "octocat" }],
+      createdAt: "2026-09-01T09:00:00Z",
+      reviewDecision: "REVIEW_REQUIRED",
+      reviewRequests: [{ login: "hubber" }],
+      additions: 120,
+      deletions: 9,
+      changedFiles: 4,
+    },
+    {
+      number: 7,
+      title: "Bump the flake",
+      url: url(7),
+      headRefName: "hubber/bump",
+      isDraft: false,
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+      author: { login: "hubber" },
+      assignees: [],
+      createdAt: "2026-08-20T09:00:00Z",
+      reviewRequests: [{ login: "octocat" }, { slug: "platform" }],
+      additions: 2,
+      deletions: 2,
+      changedFiles: 1,
+    },
+  ]);
+  write("pr-for-branch.json", [
+    {
+      number: 42,
+      title: "Fix the login redirect",
+      url: url(42),
+      headRefName: "octocat/fix-login",
+      isDraft: false,
+      statusCheckRollup: [],
+      author: { login: "octocat" },
+    },
+  ]);
+  write("pr-search.json", []);
+  write("thread-counts.json", {
+    data: {
+      repository: {
+        pullRequests: {
+          nodes: [
+            { number: 42, reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }] } },
+            { number: 7, reviewThreads: { nodes: [] } },
+          ],
+        },
+      },
+    },
+  });
+  write("pr-activity.json", {
+    state: "OPEN",
+    author: { login: "octocat" },
+    statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }],
+    comments: [],
+    reviews: [],
+  });
+  write("pr-checks.json", [
+    {
+      name: "build",
+      state: "SUCCESS",
+      bucket: "pass",
+      link: "https://github.com/conformance/repo/actions/runs/900/job/1",
+    },
+    {
+      name: "test",
+      state: "FAILURE",
+      bucket: "fail",
+      link: "https://github.com/conformance/repo/actions/runs/901/job/2",
+    },
+  ]);
+  write("conversation.json", {
+    data: {
+      repository: {
+        pullRequest: {
+          state: "OPEN",
+          body: "Fixes the redirect loop.",
+          comments: {
+            nodes: [
+              {
+                id: "IC_1",
+                databaseId: 111,
+                author: { login: "hubber", avatarUrl: "https://avatars.invalid/hubber.png" },
+                body: "Looks good overall",
+                createdAt: "2026-09-01T12:00:00Z",
+                url: `${url(42)}#issuecomment-111`,
+                reactionGroups: [
+                  { content: "THUMBS_UP", reactors: { totalCount: 2 } },
+                  { content: "CONFUSED", reactors: { totalCount: 0 } },
+                ],
+              },
+            ],
+          },
+          reviews: {
+            nodes: [
+              {
+                id: "PRR_1",
+                author: { login: "hubber" },
+                state: "CHANGES_REQUESTED",
+                body: "Needs a test",
+                createdAt: "2026-09-01T13:00:00Z",
+                url: `${url(42)}#pullrequestreview-1`,
+                comments: {
+                  nodes: [
+                    inline("RC_1", 222, "hubber", "This can crash on nil", "2026-09-01T13:01:00Z"),
+                  ],
+                },
+              },
+              {
+                id: "PRR_2",
+                author: { login: "octocat" },
+                state: "COMMENTED",
+                body: "",
+                createdAt: "2026-09-01T13:05:00Z",
+                url: `${url(42)}#pullrequestreview-2`,
+                comments: {
+                  nodes: [inline("RC_2", 333, "octocat", "Fixed", "2026-09-01T13:05:00Z")],
+                },
+              },
+            ],
+          },
+          reviewThreads: {
+            nodes: [
+              {
+                id: "RT_1",
+                isResolved: false,
+                isOutdated: false,
+                path: "Sources/App/Login.swift",
+                line: 42,
+                comments: {
+                  nodes: [
+                    inline("RC_1", 222, "hubber", "This can crash on nil", "2026-09-01T13:01:00Z"),
+                    inline("RC_2", 333, "octocat", "Fixed", "2026-09-01T13:05:00Z"),
+                  ],
+                },
+              },
+            ],
+          },
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: "abc123def4567890",
+                  abbreviatedOid: "abc123d",
+                  messageHeadline: "fix the redirect",
+                  committedDate: "2026-09-01T11:00:00Z",
+                  authors: { nodes: [{ name: "Octo Cat", user: { login: "octocat" } }] },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const esc = "";
+  write(
+    "run-log.txt",
+    [
+      "build\tRun tests\t2026-09-01T09:41:02.1234567Z ##[group]Run pnpm test",
+      "build\tRun tests\t2026-09-01T09:41:02.2000000Z pnpm test",
+      "build\tRun tests\t2026-09-01T09:41:02.3000000Z ##[endgroup]",
+      "build\tRun tests\t2026-09-01T09:41:09.0000000Z FAIL src/login.spec.ts",
+      "build\tRun tests\t2026-09-01T09:41:09.5000000Z ##[error]Process completed with exit code 1.",
+      "build\tLint\t2026-09-01T09:42:00.0000000Z ##[group]Never closed",
+      `build\tLint\t2026-09-01T09:42:01.0000000Z ${esc}[1;31mwarning${esc}[0m: 2 warnings`,
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
+
 
 /** A token unique to this suite process.
  *
@@ -154,6 +382,7 @@ export function seedVars(
     cwd: workspace.cwd,
     gitCwd: workspace.gitCwd,
     gitRemoteCwd: workspace.gitRemoteCwd,
+    ghCwd: workspace.ghCwd,
     missingCwd: workspace.missingCwd,
     file: workspace.file,
     dispatchId: `conformance-${scenarioId}-${stamp}`,

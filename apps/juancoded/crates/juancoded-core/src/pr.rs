@@ -200,6 +200,11 @@ pub struct PrActivity {
     pub checks: PrChecks,
     pub comments: Vec<PrComment>,
     pub reviews: Vec<PrReview>,
+    /// The PR author's login, empty when GitHub reported none. Read in the same call as
+    /// everything else here, and carried because "is this PR mine" is the first of
+    /// GitHub Desktop's notification rules (juancode-2vlz) and a poll has nowhere else
+    /// to learn it from.
+    pub author: String,
 }
 
 /// A classified change detected between two polls.
@@ -472,6 +477,7 @@ mod tests {
             checks,
             comments: Vec::new(),
             reviews: Vec::new(),
+            author: "octocat".into(),
         }
     }
 

@@ -88,3 +88,70 @@ impl SerialEvent for ResolveBinary {
     type Payload = BinQuery;
     type Output = String;
 }
+
+/// What kind of PR activity a candidate notification came out of.
+///
+/// Carried rather than inferred from the message, because every rule a filter applies
+/// is about the kind: "only the most recent review" is only about reviews, and a
+/// sentence is not a thing you can apply a rule to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrNotifyKind {
+    /// A review verdict — approved, changes requested, a review comment.
+    Review,
+    /// An issue-level comment on the PR.
+    Comment,
+    /// CI went red, or would not run.
+    Ci,
+    /// The PR merged or closed.
+    Closed,
+    /// The engine itself has something to say: it could not reach the agent, could not
+    /// revive a session, could not hand the work over. Never GitHub's doing.
+    Engine,
+}
+
+/// One thing the tracked-PR poller is about to tell somebody about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrNotifyCandidate {
+    pub kind: PrNotifyKind,
+    /// The message as a client would read it.
+    pub message: String,
+    /// Who caused it, lower-cased; empty when this core cannot say.
+    pub actor: String,
+    /// For a review: GitHub's node id, which is what "the most recent one" is decided
+    /// by, and what makes two passes over the same review the same event.
+    pub review_id: Option<String>,
+}
+
+/// One poll pass's worth of candidates, with the context every rule needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrNotifyPass {
+    pub tracked_id: String,
+    pub pr_number: i64,
+    /// The login `gh` is authenticated as, lower-cased. Empty when it could not be
+    /// determined, which every rule reads as "no viewer to filter for".
+    pub viewer: String,
+    /// The PR author's login, lower-cased. Empty when GitHub reported none.
+    pub author: String,
+    /// The messages already open on this watch, so a repeat can be recognised.
+    pub already_open: Vec<String>,
+    pub candidates: Vec<PrNotifyCandidate>,
+    /// What each listener decided and why, for `dump-config` and for a bug report that
+    /// has to explain a notification that never arrived.
+    pub notes: Vec<String>,
+}
+
+/// Around-middleware over the poller's notifications: a listener may drop candidates
+/// and say why, or delegate.
+///
+/// Around rather than observe because the whole point is to REMOVE notifications, and
+/// around rather than a branch inside the poller because these are somebody's rules
+/// about their own inbox — turning them off should be an entry in the tree, not a
+/// rebuild. With no listener mounted the terminal returns every candidate, which is the
+/// behaviour the poller had before any of this existed.
+pub struct PrNotify;
+
+impl AroundEvent for PrNotify {
+    const NAME: &'static str = "pr.notify";
+    type Request = PrNotifyPass;
+    type Output = Vec<PrNotifyCandidate>;
+}

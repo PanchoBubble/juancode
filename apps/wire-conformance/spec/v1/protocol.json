@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.19.0",
+  "specRevision": "1.20.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -45,7 +45,8 @@
       "prWebhook",
       "namedKeys",
       "heavyQueue",
-      "changes"
+      "changes",
+      "github"
     ],
     "gates": {
       "queue": [
@@ -165,6 +166,13 @@
         "sessionRevert",
         "sessionCommitMessage",
         "changesResult"
+      ],
+      "github": [
+        "sessionReview",
+        "diffCommentAdd",
+        "diffCommentDelete",
+        "review",
+        "diffComments"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -574,6 +582,43 @@
       ],
       "capability": "changes",
       "notes": "Draft a commit message for what is currently uncommitted, by running the genuine `claude` CLI in headless print mode against the diff the CORE reads - not one the client sends, which would describe a snapshot that may already be stale. Seconds rather than milliseconds, and answered out of band, so it does not hold up the pty bytes on the same socket."
+    },
+    "sessionReview": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "refresh"
+      ],
+      "capability": "github",
+      "notes": "A session's review: the cached one, or a fresh pass when `refresh` is true. A frame rather than only `GET /api/sessions/{id}/review` because a refresh is a whole model turn over the session's working tree - held open as an HTTP request it would block for minutes, and answered as a frame it arrives when the pass is done while the pty bytes on the same socket keep flowing. `refresh` absent or false is a read and costs nothing. The two are one frame rather than two because 'show me the review' and 'review it again' are questions about the same thing, and a client must not be able to confuse them. Answered by `review`, and by `error` for a session this core does not hold or a tree that mounted no review store."
+    },
+    "diffCommentAdd": {
+      "required": [
+        "sessionId",
+        "file",
+        "side",
+        "line",
+        "body"
+      ],
+      "optional": [
+        "endLine",
+        "quote",
+        "commitSha",
+        "commitSubject"
+      ],
+      "capability": "github",
+      "notes": "Stage an inline comment against a session's diff. `side` is required rather than defaulted and anything but `old`/`new` is answered with `error`: a comment on the wrong side of a hunk hangs off a line the author never wrote. A backwards range (endLine < line) is NORMALISED rather than refused, because a selection dragged upwards is a selection. An empty body after trimming is refused. Answered by `diffComments` with the whole list."
+    },
+    "diffCommentDelete": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "commentId"
+      ],
+      "capability": "github",
+      "notes": "Drop one staged comment, or - with no `commentId` - every one of the session's. One frame at two scopes rather than two frames, because a separate clear is a second way to get the same set wrong. A `commentId` this session does not hold is answered with `error` as well as the list: the client was holding a comment this core does not have, which is worth it knowing. Answered by `diffComments` with the whole list."
     }
   },
   "serverMessages": {
@@ -829,6 +874,25 @@
       ],
       "capability": "changes",
       "notes": "The answer to one of the four `session*` git writes. One frame for all four because a client does the same thing with each: match the `requestId`, then draw the result or show the reason. `op` is `commit`, `push`, `revert` or `commitMessage`, so a late answer cannot be read as the wrong one. `error` is present exactly when the write did NOT happen, and `result` exactly when it did - a refusal that arrived looking like a success is the failure mode this shape exists to make impossible, and it is pointed at a destructive action."
+    },
+    "review": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "result"
+      ],
+      "capability": "github",
+      "notes": "A session's review - the cached one, or the pass that has just finished. `result` is ABSENT for a session nothing has reviewed, which is a different thing from a pass that found nothing and draws a different panel. Sent on the connection that asked, out of band for a refresh because the pass takes as long as a model turn. The result is { status: ok|empty|error, findings[], summary?, createdAt, error? }; each finding is { file, side, line?, severity, title, note } with severity one of critical/high/medium/low/info. A failed pass is cached and reported like any other: 'the last pass errored, and this is why' is what the panel shows, and losing it would make a failure look like a review nobody ran."
+    },
+    "diffComments": {
+      "required": [
+        "sessionId",
+        "comments"
+      ],
+      "optional": [],
+      "capability": "github",
+      "notes": "A session's staged diff comments, oldest first, ALWAYS complete and never a delta - two surfaces stage comments against one session, so a client applying a patch to its own copy would drift from the set the composer reads. Each is { id, sessionId, file, side, line, endLine, body, createdAt, quote?, commitSha?, commitSubject? }. Empty means nothing is staged, which is a set and not a missing one."
     }
   },
   "enums": {
