@@ -79,6 +79,15 @@ public struct CoreSelection: Sendable, Equatable {
     /// Whether the core that answered is not the one this checkout would have built.
     public var daemonIsStale: Bool { !daemonWarnings.isEmpty }
 
+    /// Whether live sessions are still there after this app quits, and what keeps them.
+    /// Nil when the answer is no — including for the Swift core, which is this process.
+    ///
+    /// NOT a warning, and deliberately not carried in `daemonWarnings`: that array is
+    /// what turns the core badge yellow, and a stated mode working as asked is not a
+    /// fault. The two do stack, though, and that is the point — a persistent daemon
+    /// that has gone stale is both persistent and loud.
+    public var sessionPersistence: String? { daemon?.persistence }
+
     public var didFallBack: Bool { requested != active }
 
     /// Whether the user's picker can change anything, or an env var has pinned it.

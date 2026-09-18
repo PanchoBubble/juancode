@@ -292,6 +292,14 @@ the shutdown path is one path and not two. A daemon nobody declared an owner for
 declared, never inferred, because the thing being ended is somebody's ptys. The live
 verdict rides on `serverInfo.daemon` as `ownerState` / `ownerPid` / `ownerGraceMs`.
 
+`ownerState: unowned` is where a decision and an accident look identical — a daemon
+started to outlive the app reports it, and so does one nobody got round to claiming.
+`ownerManaged` is the difference: `persistent` when a launch wrote that intent into the
+ownership record (`JUANCODE_DAEMON_PERSIST=1`), `launchd` for the LaunchAgent's, and
+null when nothing declared anything. It changes nothing about the watchdog — both
+spellings come with an owner pid `Claim::owner_of` already drops — and exists so a
+client can say "these sessions survive a quit" only when somebody meant them to.
+
 That shutdown path calls `SessionsApi::flush_all` before the tree unwinds. Scrollback
 is persisted on a 2-second throttle while a session runs and no plugin unmount writes
 it (teardown is effects going away; there is no unmount hook), so without it every exit

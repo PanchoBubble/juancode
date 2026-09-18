@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prove, against real processes, that the daemon's lifetime is owned.
 #
-# Four scenarios, and each one is a bug that actually happened:
+# Five scenarios, and each one is a bug that actually happened:
 #
 #   1. QUIT      a launch that started a daemon reaps it. Zero juancoded left.
 #   2. SIGKILL   a launch that never got to run its trap does not strand one. The
@@ -13,6 +13,11 @@
 #                STALE one is warned about rather than restarted. Claiming it would arm
 #                the trap, so quitting the app would end a daemon launchd restarts
 #                empty: five live agents lost to closing a window.
+#   5. PERSIST   JUANCODE_DAEMON_PERSIST=1 starts a daemon that outlives the app, says
+#                so in the ownership record, and is STILL there after a second launch
+#                quits. This is the one scenario whose failure is silent: the daemon
+#                lives or dies by whether the trap armed, and a `started` verdict where
+#                `persistent` was asked for arms it.
 #
 # WHY A SLEEPER INSTEAD OF THE APP. The lifetime is a contract between the launch
 # shell, juancoded.sh and juancoded; which binary sits in the foreground is irrelevant
@@ -254,9 +259,122 @@ else
 fi
 evidence
 
+# ------------------------------------------------------- 5. the stated persistent mode
+say "SCENARIO 5: JUANCODE_DAEMON_PERSIST=1 outlives the app, twice, and says it meant to"
+kill -TERM "$MANAGED" 2>/dev/null || true
+wait_gone 20 || { fail "scenario 5: could not free :$JUANCODED_PORT"; exit 1; }
+rm -f "$JUANCODED_DATA_DIR/juancoded.owner" "$JUANCODED_DATA_DIR/juancoded.run"
+
+# `launch`, with the mode asked for. Same script, same seam; the only difference is the
+# env var, which is the whole claim being tested.
+launch_persist() {
+  local persist="$1" log="$2"
+  JUANCODE_DAEMON_PERSIST="$persist" JUANCODE_APP_BIN="$SLEEPER" "$SCRIPTS/dev-app.sh" \
+    >"$WORK/$log" 2>&1 &
+  local pid=$!
+  STARTED_PIDS+=("$pid")
+  local waited=0
+  while [ -z "$(mine)" ]; do
+    kill -0 "$pid" 2>/dev/null || { cat "$WORK/$log"; return 1; }
+    [ "$waited" -ge 300 ] && { cat "$WORK/$log"; return 1; }
+    /bin/sleep 0.1
+    waited=$((waited + 1))
+  done
+  printf '%s' "$pid"
+}
+quit_launch() {
+  pkill -TERM -P "$1" -f stand-in-app 2>/dev/null || kill -TERM "$1" 2>/dev/null || true
+}
+# Wait for a line to appear in a launch log, rather than reading it straight away.
+# `launch` returns as soon as the port answers, and when the daemon is ALREADY
+# listening — which is the entire point of the launches below — the port answers before
+# `dev-app.sh` has even called `ensure`. Grepping the log at that moment reads an empty
+# file and reports a launch that said nothing. Measured: it is the difference between
+# scenario 5's third launch passing and failing.
+wait_log() {
+  local file="$1" pattern="$2" waited=0
+  while ! grep -q "$pattern" "$file" 2>/dev/null; do
+    [ "$waited" -ge 100 ] && return 1
+    /bin/sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
+LAUNCH="$(launch_persist 1 launch5.log)" || { fail "scenario 5: the persistent launch never brought a daemon up"; exit 1; }
+PERSISTENT="$(mine)"
+evidence
+wait_log "$WORK/launch5.log" 'PERSISTENT' \
+  && pass "the launch said the daemon is persistent" \
+  || fail "a persistent launch said nothing about the mode"
+[ "$(sed -n 's/^managed=//p' "$JUANCODED_DATA_DIR/juancoded.owner")" = "persistent" ] \
+  && pass "the ownership record records the mode" \
+  || fail "the ownership record does not say managed=persistent"
+# The reason, not only the fact. `status` reads these back, and an empty intent is how
+# a stated mode decays into an unowned one nobody can tell apart.
+[ "$(sed -n 's/^intent=//p' "$JUANCODED_DATA_DIR/juancoded.owner")" = "outlives-the-app" ] \
+  && pass "and why" \
+  || fail "the ownership record does not record the intent"
+"$SCRIPTS/juancoded.sh" status 2>&1 | tee "$WORK/status5.log" | sed 's/^/    /'
+grep -q 'SURVIVES app quits' "$WORK/status5.log" \
+  && pass "status names the mode instead of a stale record" \
+  || fail "status did not name the persistent mode"
+
+quit_launch "$LAUNCH"
+/bin/sleep 3
+if kill -0 "$PERSISTENT" 2>/dev/null; then
+  pass "the daemon survived the first quit"
+else
+  fail "a persistent daemon was reaped by the launch that started it"
+fi
+
+# The second launch is the whole ticket: it must CONNECT to that daemon, not claim it.
+# A claim here arms the trap in dev-app.sh, and the next quit ends the sessions the mode
+# exists to keep.
+LAUNCH="$(launch_persist 1 launch5b.log)" || { fail "scenario 5: the second launch failed"; exit 1; }
+wait_log "$WORK/launch5b.log" 'PERSISTENT' \
+  && pass "the second launch reported the mode it connected to" \
+  || fail "the second launch said nothing about the persistent daemon"
+[ "$(mine)" = "$PERSISTENT" ] \
+  && pass "the second launch reused the same daemon" \
+  || fail "the second launch replaced the persistent daemon (now $(mine), was $PERSISTENT)"
+[ "$(sed -n 's/^managed=//p' "$JUANCODED_DATA_DIR/juancoded.owner")" = "persistent" ] \
+  && pass "and did not claim it" \
+  || fail "the second launch claimed a persistent daemon"
+quit_launch "$LAUNCH"
+/bin/sleep 3
+if kill -0 "$PERSISTENT" 2>/dev/null; then
+  pass "and it is still running after the second quit"
+else
+  fail "the persistent daemon died on the second quit"
+fi
+
+# A DEFAULT launch meeting it must leave it alone too. Otherwise the mode lasts exactly
+# as long as nobody forgets the env var, which is not a mode.
+LAUNCH="$(launch_persist 0 launch5c.log)" || { fail "scenario 5: the default launch failed"; exit 1; }
+wait_log "$WORK/launch5c.log" 'PERSISTENT' \
+  && pass "a default launch reported the persistent daemon" \
+  || fail "a default launch said nothing about the persistent daemon it connected to"
+quit_launch "$LAUNCH"
+/bin/sleep 3
+if kill -0 "$PERSISTENT" 2>/dev/null; then
+  pass "a default launch's quit did not reap it"
+else
+  fail "a default launch reaped a persistent daemon"
+fi
+# And the watchdog must be inert: no owner was ever declared, so nothing counts down.
+/bin/sleep $((JUANCODE_OWNER_GRACE_SECONDS + 4))
+if kill -0 "$PERSISTENT" 2>/dev/null; then
+  pass "the self-exit watchdog never armed for it"
+else
+  fail "a persistent daemon self-exited — its watchdog was armed"
+fi
+evidence
+kill -TERM "$PERSISTENT" 2>/dev/null || true
+wait_gone 20 || true
+
 say "RESULT"
 if [ "$FAILURES" -eq 0 ]; then
-  printf 'all four scenarios hold\n'
+  printf 'all five scenarios hold\n'
 else
   printf '%s check(s) failed\n' "$FAILURES"
 fi

@@ -82,6 +82,30 @@ public struct DaemonIdentity: Sendable, Equatable {
         return parts.joined(separator: " · ")
     }
 
+    /// For a daemon that outlives the app: what keeps it alive, and which build the
+    /// sessions it is holding are running on. Nil when quitting the app ends it.
+    ///
+    /// The build belongs in this line and not only in the staleness warning. Choosing
+    /// to keep sessions across app restarts is choosing to keep the PROCESS that holds
+    /// them, and that process is the one thing a rebuild does not touch — so the moment
+    /// the UI says "these survive a quit" is the moment it has to say what they are
+    /// surviving on.
+    var persistence: String? {
+        guard owner.outlivesTheApp else { return nil }
+        let keeper = owner.managed == .launchd
+            ? "launchd keeps it running across quits, logout and reboot"
+            : "it was started with JUANCODE_DAEMON_PERSIST=1, so quitting leaves it running"
+        var line = "Sessions survive quitting the app: \(keeper) (daemon pid \(pid))."
+        if let buildId {
+            line += " Build \(buildId)."
+        } else if let buildStamp {
+            line += " Built at \(Self.clock.string(from: buildStamp)), unstamped."
+        } else {
+            line += " Build UNSTAMPED — it cannot be matched against this checkout."
+        }
+        return line
+    }
+
     static let clock: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
@@ -105,6 +129,20 @@ public struct DaemonOwner: Sendable, Equatable {
         case unowned
     }
 
+    /// What was DECLARED about a daemon no launch owns.
+    ///
+    /// This is the difference between an accident and a decision, and `state` alone
+    /// cannot carry it: a daemon started to outlive the app and a daemon nobody got
+    /// round to claiming are both `unowned`, and both keep their ptys across a quit.
+    /// Only one of them was meant.
+    public enum Managed: String, Sendable {
+        /// The LaunchAgent's (`com.juanone.juancoded`). Survives logout and reboot.
+        case launchd
+        /// Started with `JUANCODE_DAEMON_PERSIST=1`, which writes the intent into the
+        /// ownership record so it can be said here.
+        case persistent
+    }
+
     /// Nil for a daemon too old to report ownership at all, which is a different
     /// answer from `unowned` and must not be flattened into it.
     public let state: State?
@@ -113,11 +151,15 @@ public struct DaemonOwner: Sendable, Equatable {
     /// How long the daemon waits after its owner is gone before ending itself. Zero
     /// means the watchdog is switched off.
     public let grace: TimeInterval?
+    /// Who keeps it alive when no launch does. Nil for an owned daemon, and for an
+    /// unowned one nobody declared.
+    public let managed: Managed?
 
-    public init(state: State?, pid: Int?, grace: TimeInterval?) {
+    public init(state: State?, pid: Int?, grace: TimeInterval?, managed: Managed? = nil) {
         self.state = state
         self.pid = pid
         self.grace = grace
+        self.managed = managed
     }
 
     /// Decode the ownership keys off the `daemon` object.
@@ -125,6 +167,7 @@ public struct DaemonOwner: Sendable, Equatable {
         self.state = (body["ownerState"] as? String).flatMap(State.init(rawValue:))
         self.pid = body["ownerPid"] as? Int
         self.grace = (body["ownerGraceMs"] as? Int).map { TimeInterval($0) / 1000 }
+        self.managed = (body["ownerManaged"] as? String).flatMap(Managed.init(rawValue:))
     }
 
     /// Whether anything at all will end this daemon.
@@ -133,8 +176,23 @@ public struct DaemonOwner: Sendable, Equatable {
         return state != .unowned && (grace ?? 0) > 0
     }
 
+    /// Whether the sessions in this daemon are still there after the app quits — the
+    /// one question the mode exists to answer.
+    ///
+    /// Deliberately keyed on the DECLARATION and not on `state == .unowned`. An
+    /// undeclared unowned daemon does outlive the app, and saying "your sessions are
+    /// safe" about a process nobody meant to keep is the promise this whole area of
+    /// the code exists to stop making.
+    public var outlivesTheApp: Bool { managed != nil }
+
     /// One clause for the identity line.
     public var summary: String {
+        if let managed {
+            switch managed {
+            case .launchd: return "managed by launchd — outlives app quits, logout and reboot"
+            case .persistent: return "PERSISTENT — started to outlive the app; its sessions survive a quit"
+            }
+        }
         switch state {
         case .owned:
             let seconds = Int(grace ?? 0)
@@ -143,7 +201,7 @@ public struct DaemonOwner: Sendable, Equatable {
         case .orphaned:
             return "ORPHANED — its launch is gone and it is shutting down"
         case .unowned:
-            return "unowned — nothing will end it"
+            return "unowned — nothing will end it, and nothing said that was meant"
         case nil:
             return "ownership unreported"
         }

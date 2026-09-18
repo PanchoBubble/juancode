@@ -97,6 +97,15 @@ pub struct Claim {
     /// The launch's own token, carried for logs only. The launcher matches on it; we
     /// never do, because a token that changed hands is still a live owner.
     pub token: Option<String>,
+    /// Who manages this daemon's lifetime when no launch does: `launchd` for the
+    /// LaunchAgent's, `persistent` for one started to outlive the app on purpose.
+    ///
+    /// It changes nothing about the watchdog — both spellings come with an owner pid
+    /// the watchdog already drops, so the countdown is inert either way. What it is
+    /// for is the SENTENCE: an unowned daemon and a persistent one are the same
+    /// process, and without this field a client can only report "nobody claimed it",
+    /// which is the accident and the decision said in one voice.
+    pub managed: Option<String>,
 }
 
 impl Claim {
@@ -107,6 +116,7 @@ impl Claim {
             daemon_pid: None,
             owner_pid: None,
             token: None,
+            managed: None,
         };
         for line in body.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -118,6 +128,9 @@ impl Claim {
                 "owner_pid" if claim.owner_pid.is_none() => claim.owner_pid = value.parse().ok(),
                 "token" if claim.token.is_none() && !value.is_empty() => {
                     claim.token = Some(value.to_string())
+                }
+                "managed" if claim.managed.is_none() && !value.is_empty() => {
+                    claim.managed = Some(value.to_string())
                 }
                 _ => {}
             }
@@ -140,6 +153,17 @@ impl Claim {
             return None;
         }
         self.owner_pid.filter(|&p| p > 1)
+    }
+
+    /// The declared lifetime manager for `daemon_pid`, or `None` when the record is
+    /// about some other daemon or declares nothing. Same `daemon_pid` guard as
+    /// `owner_of`, for the same reason: a leftover record about a process that died
+    /// hours ago must not be read back as a statement about this one.
+    pub fn managed_of(&self, daemon_pid: u32) -> Option<&str> {
+        if self.daemon_pid != Some(daemon_pid) {
+            return None;
+        }
+        self.managed.as_deref()
     }
 }
 
@@ -237,6 +261,19 @@ impl Watchdog {
             Some(pid) if alive(pid) => Ownership::Owned(pid),
             Some(pid) => Ownership::Orphaned(pid),
         }
+    }
+
+    /// What has been DECLARED about this daemon's lifetime, when no launch owns it:
+    /// `launchd`, `persistent`, or nothing.
+    ///
+    /// Read per call rather than captured, like `ownership` and for the same reason: a
+    /// launch can write the record after this process started, and the moment a daemon
+    /// is declared persistent is exactly the moment a client wants to be told.
+    pub fn managed(&self) -> Option<String> {
+        self.owner_file
+            .as_deref()
+            .and_then(Claim::read)
+            .and_then(|c| c.managed_of(self.daemon_pid).map(str::to_owned))
     }
 
     /// Run until the daemon must end itself. Returns only when the owner has been
@@ -371,6 +408,34 @@ mod tests {
             claim.owner_of(1000),
             None,
             "a record about another daemon must never name our owner"
+        );
+    }
+
+    /// The persistent mode is a line in the record and nothing else: the process is
+    /// identical to an unowned one, and the watchdog must stay inert for it either way.
+    #[test]
+    fn a_declared_mode_is_reported_without_arming_anything() {
+        let persistent = Claim::parse(
+            "daemon_pid=7\ntoken=persistent\nowner_pid=0\nmanaged=persistent\nintent=outlives-the-app\n",
+        );
+        assert_eq!(persistent.managed_of(7), Some("persistent"));
+        assert_eq!(
+            persistent.owner_of(7),
+            None,
+            "owner_pid=0 is the statement that no launch owns it"
+        );
+        // A record about a daemon that died hours ago says nothing about this one —
+        // the shape that had `juancoded.sh status` reporting a hand-started daemon as
+        // launchd's (juancode-ur0e).
+        assert_eq!(persistent.managed_of(8), None);
+        assert_eq!(
+            Claim::parse("daemon_pid=7\ntoken=x\nowner_pid=9\n").managed_of(7),
+            None,
+            "an ordinary owned daemon declares no manager"
+        );
+        assert_eq!(
+            Claim::parse("daemon_pid=7\nowner_pid=1\nmanaged=launchd\n").managed_of(7),
+            Some("launchd")
         );
     }
 

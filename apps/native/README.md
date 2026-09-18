@@ -402,6 +402,29 @@ The handshake carries the lifetime too: `serverInfo.daemon` reports `ownerState`
 ever end this daemon" is something the app can say rather than something you find out
 two hours later in `ps`.
 
+### Sessions that survive quitting the app
+
+The default trade is stated above: a launch owns the daemon it starts, so quitting the
+app ends its live ptys. `JUANCODE_DAEMON_PERSIST=1 scripts/dev-app.sh` buys that back
+**by name**. The daemon is started unowned on purpose — no owner pid, grace 0, so
+neither the trap nor the watchdog can arm — and `juancoded.sh` writes `managed=persistent`
+plus the intent into the ownership record. Later launches, persistent or not, connect to
+it and never claim it; `juancoded.sh status` opens with `mode: SURVIVES app quits`
+instead of `owner: nobody`; and the handshake carries `ownerManaged` (`persistent` or
+`launchd`), which the core badge shows as `rust · persists` with the daemon's build in
+the tooltip.
+
+The mode makes nothing quieter. The daemon is still built and stamped before it starts,
+and a persistent one the checkout has moved past is still shouted about on every launch
+and still reads `rust · stale` — staleness wins the badge when both apply. It is only
+the reaping that is opted out of. An *undeclared* unowned daemon outlives the app too,
+and is deliberately NOT reported as persistent: that one is the accident this whole
+area of the code exists to name.
+
+`apps/native/scripts/daemon-lifecycle-check.sh` is the proof, against real processes —
+scenario 5 launches, quits, relaunches and quits again, and the daemon and its ptys are
+still there.
+
 `scripts/dev-app.sh --print-bin` is the one path that cannot reap: it ends the moment
 it prints the path, so it starts the daemon **unowned** — no trap and no watchdog — and
 tells you to stop it yourself. The next full `dev-app.sh` claims that daemon if the

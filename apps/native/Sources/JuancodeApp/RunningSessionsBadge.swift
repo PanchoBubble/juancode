@@ -245,6 +245,11 @@ struct RunningSessionsBadge: View {
                     .font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // Beside the session list itself: whether these rows are still here after
+            // Cmd-Q is a fact about the list, not a footnote about the core.
+            if let persistence = model.coreSelection.sessionPersistence {
+                DaemonPersistenceRow(note: persistence)
+            }
             ForEach(model.coreSelection.daemonWarnings) { warning in
                 DaemonWarningRow(warning: warning)
             }

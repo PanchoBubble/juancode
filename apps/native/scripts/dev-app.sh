@@ -112,6 +112,15 @@ fi
 # The cost, stated plainly: live agent sessions no longer survive quitting the app.
 # That is the trade for never being able to read a stale mirror.
 #
+# JUANCODE_DAEMON_PERSIST=1 buys that cost back, by name. The daemon is started UNOWNED
+# on purpose and its ownership record says so, `ensure` answers `persistent` instead of
+# `started`, and the trap below therefore never arms — so the ptys survive this app
+# quitting and the next launch reconnects to them. It is the same process an accidental
+# unowned daemon is; what changes is that something wrote down that it was meant, so
+# `juancoded.sh status` and the app's core badge can say which of the two you are in.
+# Rule 1 is untouched: it is still built, still stamped, and a persistent daemon the
+# checkout has moved past is still shouted about on every launch.
+#
 # An empty token under `--print-bin` is not an oversight: that invocation ends the
 # moment it prints the path, so it can never reap anything, and claiming ownership it
 # cannot honour would arm a trap that fires while the caller is still about to launch
@@ -133,6 +142,10 @@ DAEMON_STATE="$("$DAEMON" ensure "$LAUNCH_TOKEN" "$$")"
 # solved here: the daemon was handed this shell's pid at spawn and ends ITSELF once
 # that pid has been gone for JUANCODE_OWNER_GRACE_SECONDS (default 120s). Two layers,
 # because each one covers exactly what the other cannot.
+#
+# `persistent` is deliberately not in the list beside `started` and `claimed`. A
+# persistent daemon is one somebody asked to outlive this app; arming a trap for it
+# would end, on the next Cmd-Q, exactly the sessions the mode exists to keep.
 reap_daemon() { "$DAEMON" reap "$LAUNCH_TOKEN" || true; }
 if [ -n "$LAUNCH_TOKEN" ]; then
   case "$DAEMON_STATE" in

@@ -35,6 +35,29 @@
 # juancoded`, or one a developer keeps alive deliberately — is never handed an owner,
 # so its watchdog is inert and it outlives everything, which is the point.
 #
+# THE PERSISTENT MODE: PAYING RULE 2's COST ON PURPOSE
+#
+# Two of the states below outlive an app quit — `unowned` and `launchd` — and until
+# this mode existed, which one you were in was decided by which script happened to
+# start the daemon. `juancoded.sh restart` left an unowned one; so did running the
+# binary by hand; and nothing on screen said whether the sessions you were looking at
+# would still be there after Cmd-Q. That is an accident, not a choice.
+#
+# JUANCODE_DAEMON_PERSIST=1 makes it a choice. A persistent launch starts the daemon
+# UNOWNED on purpose — no JUANCODE_OWNER_PID, grace 0, so neither the trap nor the
+# watchdog can ever arm — and writes `managed=persistent` plus the reason into the
+# ownership record. The process is identical to an accidental unowned one; the RECORD
+# is what makes it a stated mode, and it is what lets `status`, `ensure` and the app's
+# core badge say "meant to outlive the app" instead of "owner: nobody".
+#
+# It buys nothing that weakens rule 1. The daemon is still built before it starts,
+# still stamped with JUANCODE_BUILD_ID, and a persistent daemon whose build the
+# checkout has moved past is warned about on EVERY launch and flagged in the core
+# badge, exactly as launchd's is. Staleness stays loud; only the reaping is opted out
+# of, and only by name.
+#
+# The default is unchanged: owned, trapped, reaped.
+#
 # WHEN THE INVARIANT CANNOT HOLD
 #
 # Something already listening that this launch did not start is FOREIGN. It is not
@@ -50,9 +73,10 @@
 # THE FOURTH KIND OF DAEMON: launchd's
 #
 # A daemon started by the LaunchAgent (`juancoded-agent.sh install`, label
-# com.juanone.juancoded) is a fifth state beside ours/unowned/foreign/none, and it has
-# to be, because everything above assumes the daemon's lifetime belongs to a launch
-# shell. launchd's does not. It is recorded as `managed=launchd` in the ownership file
+# com.juanone.juancoded) is a state of its own beside ours/unowned/foreign/none, and it
+# has to be, because everything above assumes the daemon's lifetime belongs to a launch
+# shell. launchd's does not — and neither does a persistent one, which is why the two
+# are handled the same way everywhere below. It is recorded as `managed=launchd` in the ownership file
 # by `juancoded.sh serve`, and the two rules for it are absolute:
 #
 #   * it is NEVER claimed. Claiming it would arm the trap in dev-app.sh, and the app
@@ -64,6 +88,7 @@
 #
 # Usage:
 #   juancoded.sh ensure [token]  # build, then start (owned by `token`) or report foreign
+#   juancoded.sh persist         # build, then start one that OUTLIVES the app, on purpose
 #   juancoded.sh reap <token>    # end the daemon `token` owns: TERM, grace, then KILL
 #   juancoded.sh status          # what is running, who owns it, does it match the checkout
 #   juancoded.sh stop            # end whatever is running, after confirming
@@ -77,6 +102,9 @@
 # Env:
 #   JUANCODE_CONFIG=debug|release   which profile to build and run (matches dev-app.sh)
 #   JUANCODE_DAEMON=off             do nothing at all; you are managing it yourself
+#   JUANCODE_DAEMON_PERSIST=1       `ensure` starts a daemon that OUTLIVES the app and
+#                                   records that it meant to. Live ptys survive a quit;
+#                                   nothing but `juancoded.sh stop` ends it.
 #   JUANCODE_SKIP_DAEMON_BUILD=1    skip cargo (test harnesses only — reintroduces the bug)
 #   JUANCODE_OWNER_GRACE_SECONDS=N  how long an ORPHANED daemon keeps serving before it
 #                                   ends itself (default 120; 0 disables the watchdog)
@@ -92,6 +120,12 @@ MANIFEST="$ROOT/apps/juancoded/Cargo.toml"
 CONFIG="${JUANCODE_CONFIG:-debug}"
 # Shared with juancoded-agent.sh, which installs the plist that carries it.
 AGENT_LABEL="com.juanone.juancoded"
+# The token a persistent daemon's ownership record carries where a launch would write
+# its own. Not a launch id: no launch owns this process, and the point of the record is
+# to say so in a word rather than leave the field empty and unreadable.
+PERSIST_TOKEN="persistent"
+# Whether THIS invocation was asked for the persistent mode.
+PERSIST="${JUANCODE_DAEMON_PERSIST:-0}"
 
 # Mirrors `juancoded_persistence::db_path()` exactly. Two spellings of the same
 # default in two languages is a drift waiting to happen; this one is the copy, and
@@ -162,25 +196,58 @@ describe_running() {
   printf '  owns %s child process(es)\n' "$(child_count "$pid")" >&2
 }
 
-# Whoever is listening, is it ours? Answers on stdout: `ours`, `launchd`, `unowned`
-# or `foreign`. A recorded owner whose own process is gone counts as unowned — a launch
-# that was SIGKILLed never ran its trap, and its claim must not strand the daemon
-# forever.
+# The ptys themselves, one line each. Every path that is about to end them, or about to
+# tell you a quit would, shows this: a count is a number and this is the work.
+list_children() {
+  local kids; kids="$(daemon_children "$1")"
+  [ -n "$kids" ] || return 0
+  ps -o pid=,etime=,command= -p "$(printf '%s' "$kids" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null \
+    | sed 's/^/    /' >&2 || true
+}
+
+# Whoever is listening, is it ours? Answers on stdout: `ours`, `launchd`, `persistent`,
+# `unowned`, `unrecorded` or `foreign`. A recorded owner whose own process is gone counts
+# as unowned — a launch that was SIGKILLed never ran its trap, and its claim must not
+# strand the daemon forever.
+#
+# `unrecorded` and `foreign` used to be one word, and the cost was measured
+# (juancode-ur0e): with a leftover record naming a daemon that died hours ago, `status`
+# read that record back as THIS daemon's owner and reported a hand-started process as
+# launchd's — so a developer left it alone, believing something supervised it, while
+# nothing did. Both verdicts are refused adoption and neither is ever signalled; the
+# difference is that only `foreign` has a record worth quoting. `unrecorded` means
+# nothing on disk claims this pid at all.
 #
 # `launchd` is checked before anything else about the record, and deliberately does not
 # depend on `alive "$owner_pid"`: that record names pid 1, which a non-root `kill -0`
 # reports as unsignalable, so the generic path below would read launchd's daemon as
 # UNOWNED and adopt it. Adopting it is the one outcome this whole file exists to
-# prevent.
+# prevent. `persistent` is checked in the same breath and for the same reason: its
+# record names pid 0 on purpose, and a launch that adopted it would arm the trap that
+# the mode exists to keep disarmed.
 ownership() {
   local pid="$1" token="$2"
   local owner_daemon owner_token owner_pid owner_managed
   owner_daemon="$(own_get daemon_pid)"; owner_token="$(own_get token)"; owner_pid="$(own_get owner_pid)"
   owner_managed="$(own_get managed)"
-  [ "$owner_daemon" = "$pid" ] || { printf 'foreign'; return; }
+  [ "$owner_daemon" = "$pid" ] || { printf 'unrecorded'; return; }
   [ "$owner_managed" = "launchd" ] && { printf 'launchd'; return; }
+  [ "$owner_managed" = "persistent" ] && { printf 'persistent'; return; }
   [ -n "$token" ] && [ "$owner_token" = "$token" ] && { printf 'ours'; return; }
   if [ -z "$owner_token" ] || ! alive "$owner_pid"; then printf 'unowned'; else printf 'foreign'; fi
+}
+
+# A record naming a daemon that is no longer alive describes nothing. Dropping it is
+# safe by construction — the pid it names cannot be signalled by anything reading it —
+# and leaving it is how ur0e happened: every later reader quoted a dead process's owner
+# as if it were the live one's. Only ever called from a path that is already about to
+# write the record itself.
+prune_dead_record() {
+  local recorded; recorded="$(own_get daemon_pid)"
+  [ -n "$recorded" ] || return 0
+  alive "$recorded" && return 0
+  say "clearing the ownership record for pid $recorded; that process is gone"
+  rm -f "$OWN_FILE"
 }
 
 # `owner_pid` is passed in rather than taken from $PPID: `ensure` is called inside a
@@ -219,6 +286,33 @@ claim_launchd() {
   mv -f "$OWN_FILE.tmp" "$OWN_FILE"
 }
 
+# The record for a daemon started to OUTLIVE the app, deliberately.
+#
+# The PROCESS is identical to an accidental unowned one — that is the whole difficulty
+# and the reason this record exists. `owner_pid=0` is not a placeholder: juancoded's
+# watchdog drops any owner pid <= 1 (`Claim::owner_of` in owner.rs), so the self-exit
+# countdown can never arm, and `start_daemon` also hands it
+# JUANCODE_OWNER_GRACE_SECONDS=0, off from two directions exactly like `serve`.
+#
+# What the extra lines buy is the sentence a reader needs. `managed=persistent` is what
+# `ownership` matches on; `intent` and `declared_at`/`declared_by` are what `status` and
+# the app's core badge quote back, so "this daemon survives Cmd-Q" is something the
+# machine says rather than something you infer from an empty owner field.
+claim_persistent() {
+  local pid="$1" by="${2:-$SELF}"
+  mkdir -p "$DATA_DIR"
+  {
+    printf 'daemon_pid=%s\n' "$pid"
+    printf 'token=%s\n' "$PERSIST_TOKEN"
+    printf 'owner_pid=0\n'
+    printf 'managed=persistent\n'
+    printf 'intent=outlives-the-app\n'
+    printf 'declared_at=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'declared_by=%s\n' "$by"
+  } > "$OWN_FILE.tmp"
+  mv -f "$OWN_FILE.tmp" "$OWN_FILE"
+}
+
 # TERM, wait out the grace period, then KILL. The only path that ever signals.
 end_daemon() {
   local pid="$1" reason="$2"
@@ -252,11 +346,7 @@ confirm_end() {
   warn "=============================================================="
   warn "$reason"
   describe_running "$pid"
-  local kids; kids="$(daemon_children "$pid")"
-  if [ -n "$kids" ]; then
-    ps -o pid=,etime=,command= -p "$(printf '%s' "$kids" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null \
-      | sed 's/^/    /' >&2 || true
-  fi
+  list_children "$pid"
   printf '\n' >&2
   if [ ! -t 0 ]; then
     warn "no terminal to ask on; leaving it running."
@@ -307,8 +397,13 @@ selected_core() {
   printf '%s' "${core:-swift}"
 }
 
+# `mode` is empty for the ordinary owned/unowned starts and `persistent` for a daemon
+# this launch is deliberately NOT going to own. It changes three things and nothing
+# else: what is said, which record is written, and the verdict printed on stdout — a
+# `persistent` verdict is what keeps dev-app.sh's trap (armed on `started*|claimed*`)
+# from arming.
 start_daemon() {
-  local want="$1" token="$2" owner_pid="${3:-0}"
+  local want="$1" token="$2" owner_pid="${3:-0}" mode="${4:-}"
   mkdir -p "$DATA_DIR"
   say "starting $BIN"
   say "  build $want, profile $CONFIG, port $PORT"
@@ -323,8 +418,15 @@ start_daemon() {
   # It is set only when this launch is actually claiming ownership — an unowned start
   # must stay unowned, or a `--print-bin` invocation that exits immediately would tell
   # the daemon its owner had already died.
-  local claiming=0
-  if [ -n "$token" ] && [ "$owner_pid" != "0" ]; then
+  local claiming=0 grace="$OWNER_GRACE_SECONDS"
+  if [ "$mode" = "persistent" ]; then
+    # Stated, not inferred. Grace 0 on top of declaring no owner is the same
+    # belt-and-braces `serve` uses: neither half can arm the countdown alone.
+    grace=0
+    say "  PERSISTENT: this daemon is meant to OUTLIVE the app. No owner, no watchdog."
+    say "  Its ptys survive quitting the app. Nothing ends it but \`$SELF stop\`."
+    say "  It is still built and stamped, so a checkout that moves past it is still loud."
+  elif [ -n "$token" ] && [ "$owner_pid" != "0" ]; then
     claiming=1
     say "  owned by pid $owner_pid; it self-exits ${OWNER_GRACE_SECONDS}s after that pid is gone"
   else
@@ -338,7 +440,7 @@ start_daemon() {
   # is the daemon's own pid and the ownership record names the right process.
   (
     export JUANCODE_BUILD_ID="$want"
-    export JUANCODE_OWNER_GRACE_SECONDS="$OWNER_GRACE_SECONDS"
+    export JUANCODE_OWNER_GRACE_SECONDS="$grace"
     [ "$claiming" = "1" ] && export JUANCODE_OWNER_PID="$owner_pid"
     exec nohup "$BIN" >>"$LOG_FILE" 2>&1
   ) &
@@ -351,9 +453,17 @@ start_daemon() {
     /bin/sleep 0.1
     waited=$((waited + 1))
   done
+  if [ "$mode" = "persistent" ]; then
+    claim_persistent "$pid" "${token:-$SELF}"
+    say "started pid $pid, PERSISTENT — its sessions survive quitting the app"
+    say "  \`$SELF status\` names the mode; \`$SELF stop\` is what ends it"
+    printf 'persistent %s\n' "$pid"
+    return 0
+  fi
   claim "$pid" "$token" "$owner_pid"
   if [ -n "$token" ]; then
     say "started pid $pid, owned by this launch — it is reaped when the app exits"
+    say "  sessions started here do NOT survive the quit. JUANCODE_DAEMON_PERSIST=1 is the mode that keeps them"
   else
     say "started pid $pid, UNOWNED — nothing will reap it. Stop it with \`$SCRIPTS/juancoded.sh stop\`"
   fi
@@ -369,17 +479,42 @@ cmd_status() {
   fi
   say "daemon running:"
   describe_running "$pid"
-  case "$(ownership "$pid" "")" in
-    launchd) say "  owner: launchd ($AGENT_LABEL) — it survives logout and app quits"
-             say "         no launch claims or reaps it; \`juancoded-agent.sh restart\` is the only restart" ;;
-    unowned) say "  owner: nobody — nothing will reap it when an app exits" ;;
-    *)       say "  owner: launch $(own_get token) (shell pid $(own_get owner_pid), $(alive "$(own_get owner_pid)" && echo alive || echo gone))" ;;
+  # The mode first, because it is the question being asked: do the sessions on screen
+  # survive quitting the app. Every arm answers it in its first word, and no arm quotes
+  # a record that `ownership` has just said is about some other process (juancode-ur0e).
+  local state; state="$(ownership "$pid" "")"
+  case "$state" in
+    launchd)
+      say "  mode: SURVIVES app quits — launchd ($AGENT_LABEL) owns its lifetime"
+      say "        no launch claims or reaps it; \`juancoded-agent.sh restart\` is the only restart" ;;
+    persistent)
+      say "  mode: SURVIVES app quits — started persistent on purpose ($(own_get intent))"
+      say "        declared $(own_get declared_at) by $(own_get declared_by)"
+      say "        no launch claims or reaps it; \`$SELF stop\` is what ends it" ;;
+    unowned)
+      warn "  mode: survives app quits BY ACCIDENT — nobody claimed it, nothing reaps it"
+      warn "        its record names no live owner, so this is the unowned state, not a stated mode"
+      warn "        JUANCODE_DAEMON_PERSIST=1 is how to mean it; \`$SELF stop\` ends it" ;;
+    unrecorded)
+      warn "  mode: UNKNOWN — nothing on disk claims pid $pid"
+      local ghost; ghost="$(own_get daemon_pid)"
+      [ -n "$ghost" ] && warn "        $OWN_FILE is about pid $ghost, a process that is gone; it says nothing about this one"
+      warn "        started outside this script, so no launch reaps it and its watchdog is inert" ;;
+    *)
+      local opid; opid="$(own_get owner_pid)"
+      say "  mode: reaped when its launch exits — owned by launch $(own_get token) (shell pid $opid, $(alive "$opid" && echo alive || echo gone))" ;;
   esac
   local wpid wgrace; wpid="$(run_get owner_pid)"; wgrace="$(run_get owner_grace_ms)"
   if [ -z "$wgrace" ]; then
     warn "  watchdog: NONE — this daemon predates the self-exit watchdog and can orphan"
   elif [ "$wgrace" = "0" ]; then
-    warn "  watchdog: DISABLED (JUANCODE_OWNER_GRACE_SECONDS=0) — it can outlive its owner"
+    # Off is the CORRECT setting for the two modes that outlive an app; warning about it
+    # there would train the reader to ignore the line everywhere else, where it is the
+    # escape hatch somebody set by hand.
+    case "$state" in
+      launchd|persistent) say "  watchdog: off, as the mode requires — nothing counts this daemon down" ;;
+      *) warn "  watchdog: DISABLED (JUANCODE_OWNER_GRACE_SECONDS=0) — it can outlive its owner" ;;
+    esac
   elif [ -z "$wpid" ]; then
     say "  watchdog: armed only by a claim (started with no owner); grace $((wgrace / 1000))s"
   else
@@ -401,12 +536,14 @@ cmd_status() {
 # every launch, and a prompt there is a launch that hangs.
 #
 # Prints one machine-readable line on stdout for the caller's trap:
-#   started <pid> | claimed <pid> | launchd <pid> | foreign <pid> | none
+#   started <pid> | claimed <pid> | persistent <pid> | launchd <pid> | foreign <pid> | none
 #
-# Only `started` and `claimed` arm a trap. `launchd` and `foreign` both mean "connect
-# to it, touch nothing"; `none` means the Swift core, or JUANCODE_DAEMON=off.
+# Only `started` and `claimed` arm a trap. `persistent`, `launchd` and `foreign` all
+# mean "connect to it, touch nothing"; `none` means the Swift core, or
+# JUANCODE_DAEMON=off.
 cmd_ensure() {
   local token="${1:-}" owner_pid="${2:-0}"
+  local persist=""; [ "$PERSIST" = "1" ] && persist="persistent"
   if [ "${JUANCODE_DAEMON:-}" = "off" ]; then
     say "JUANCODE_DAEMON=off — not touching the daemon"
     printf 'none\n'
@@ -420,6 +557,9 @@ cmd_ensure() {
   build_daemon
   local want; want="$(build_id)"
   local pid; pid="$(run_get pid)"
+  # Before any verdict is read off it. A record about a dead daemon describes nothing,
+  # and every reader below would otherwise quote it as if it described this one.
+  prune_dead_record
 
   if [ -n "$pid" ] && alive "$pid" && healthy; then
     local theirs; theirs="$(run_get build_id)"
@@ -443,11 +583,47 @@ cmd_ensure() {
         printf 'launchd %s\n' "$pid"
         return 0
         ;;
+      persistent)
+        # Started to outlive an app, by somebody who said so. Treated exactly like
+        # launchd's: connected to, never claimed, never reaped, and LOUD when its build
+        # has been left behind. Claiming it would arm the trap in dev-app.sh and the
+        # next Cmd-Q would end the very sessions the mode exists to keep — and it would
+        # do it to a launch that never asked for the mode, which is the worse half.
+        say "the daemon on :$PORT is PERSISTENT, pid $pid — started to outlive the app."
+        say "  declared $(own_get declared_at) by $(own_get declared_by)"
+        say "  not claimed and not reaped; quitting this app leaves it and its ptys alone"
+        if [ "$theirs" = "$want" ]; then
+          say "  build $theirs (matches this checkout), $(child_count "$pid") live session(s)"
+        elif [ -z "$theirs" ]; then
+          warn "  build UNSTAMPED — it cannot be matched against this checkout's $want."
+          warn "  Persistent is not a reason to trust it: \`$SELF stop\` then relaunch to get a matching one."
+        else
+          warn "  build $theirs — THIS CHECKOUT BUILDS $want. THE DAEMON IS STALE."
+          warn "  Nothing here restarts it: that would end $(child_count "$pid") live pty session(s)."
+          warn "  When you are ready to lose them: \`$SELF stop\`, then relaunch."
+        fi
+        printf 'persistent %s\n' "$pid"
+        return 0
+        ;;
       ours|unowned)
         if [ "$theirs" = "$want" ]; then
+          # The persistent mode never claims. An `unowned` daemon on a matching build is
+          # already outliving apps by accident; a persistent launch writes down that it
+          # is meant to, which is the entire difference between the two states.
+          if [ -n "$persist" ]; then
+            claim_persistent "$pid" "${token:-$SELF}"
+            say "the running daemon pid $pid is now PERSISTENT (build $want, $(child_count "$pid") live session(s))"
+            say "  it was unclaimed; this launch recorded that it is meant to outlive the app"
+            printf 'persistent %s\n' "$pid"
+            return 0
+          fi
           claim "$pid" "$token" "$owner_pid"
           say "claimed the running daemon pid $pid (build $want, $(child_count "$pid") live session(s))"
-          [ -n "$token" ] && say "it is reaped when this app exits"
+          if [ -n "$token" ]; then
+            say "it is reaped when this app exits"
+            local live; live="$(child_count "$pid")"
+            [ "$live" != "0" ] && say "quitting the app ENDS those $live session(s); JUANCODE_DAEMON_PERSIST=1 is the mode that keeps them"
+          fi
           printf 'claimed %s\n' "$pid"
           return 0
         fi
@@ -463,7 +639,16 @@ cmd_ensure() {
     warn "=============================================================="
     warn "A FOREIGN juancoded is already on :$PORT. Not adopting it."
     warn "=============================================================="
-    warn "It was started by launch $(own_get token) (shell pid $(own_get owner_pid)), not by this one."
+    # `unrecorded` and `foreign` land here together and are refused together, but only
+    # one of them has a record that is about this process. Quoting the other's is how a
+    # dead daemon's owner got read back as the live one's (juancode-ur0e).
+    if [ "$(ownership "$pid" "$token")" = "foreign" ]; then
+      warn "It was started by launch $(own_get token) (shell pid $(own_get owner_pid)), not by this one."
+    else
+      warn "Nothing on disk claims pid $pid: it was started outside this script, so no"
+      warn "launch reaps it and its watchdog is inert. It outlives this app either way."
+      [ -n "$persist" ] && warn "The persistent mode does not adopt it — a daemon nobody recorded is nobody's to declare."
+    fi
     describe_running "$pid"
     [ "$theirs" != "$want" ] && warn "  and it is build $theirs, not this checkout's $want — IT IS STALE."
     warn "This launch will not start or end a daemon. The app connects to that one and"
@@ -481,7 +666,22 @@ cmd_ensure() {
     return 0
   fi
 
+  # The persistent mode starts UNOWNED on purpose, so the token and the owner pid are
+  # dropped here rather than being carried into a claim that must never happen.
+  if [ -n "$persist" ]; then
+    start_daemon "$want" "$token" 0 persistent
+    return 0
+  fi
   start_daemon "$want" "$token" "$owner_pid"
+}
+
+# The persistent mode as a command, for the case where the daemon is what you are
+# starting and the app comes later. Same path as `ensure` with the env set; spelled out
+# because "start me one that survives" is a thing people type, not an env var they
+# remember.
+cmd_persist() {
+  PERSIST=1
+  cmd_ensure "${1:-}" 0
 }
 
 # The trap's half of `ensure`. Ends the daemon this launch owns and nothing else: a
@@ -493,8 +693,9 @@ cmd_reap() {
   [ -n "$pid" ] || return 0
   # Belt and braces: a launch never holds launchd's token, so the check below would
   # already refuse. Said explicitly because this is the signal that must never be sent.
-  if [ "$(own_get managed)" = "launchd" ]; then
-    say "daemon pid $pid is managed by launchd — not reaping it"
+  local managed; managed="$(own_get managed)"
+  if [ "$managed" = "launchd" ] || [ "$managed" = "persistent" ]; then
+    say "daemon pid $pid is managed by $managed — not reaping it"
     return 0
   fi
   if [ "$(own_get token)" != "$token" ]; then
@@ -502,6 +703,16 @@ cmd_reap() {
     return 0
   fi
   alive "$pid" || { rm -f "$OWN_FILE"; return 0; }
+  # Say what this is about to end, not just that it is ending something. The reap runs
+  # because the app exited, which is a destructive act nobody was asked to confirm — and
+  # it is the last moment at which the alternative is worth naming.
+  local live; live="$(child_count "$pid")"
+  if [ "$live" != "0" ]; then
+    warn "the app exited, so this reaps daemon pid $pid and ENDS its $live live session(s):"
+    list_children "$pid"
+    warn "they do not come back. To keep sessions across app quits, launch with:"
+    warn "  JUANCODE_DAEMON_PERSIST=1 $SCRIPTS/dev-app.sh"
+  fi
   end_daemon "$pid" "the app that started it exited"
 }
 
@@ -596,29 +807,37 @@ cmd_restart() {
   build_daemon
   local want; want="$(build_id)"
   local pid; pid="$(run_get pid)"
+  local mode=""; [ "$PERSIST" = "1" ] && mode=persistent
   if [ -n "$pid" ] && alive "$pid"; then
+    local state; state="$(ownership "$pid" "")"
     # A launchd-managed daemon must not be replaced by an unowned one: launchd is still
     # watching that slot, and the next login would start a second daemon that cannot
     # bind the port. That restart belongs to the agent script, which restarts the JOB.
-    if [ "$(ownership "$pid" "")" = "launchd" ]; then
+    if [ "$state" = "launchd" ]; then
       warn "daemon pid $pid is managed by launchd ($AGENT_LABEL)."
       warn "Restart the job, not the process: \`$SCRIPTS/juancoded-agent.sh restart\`"
       return 1
     fi
+    # A persistent daemon comes back persistent. The mode is a property of what somebody
+    # decided, not of the invocation replacing the process, and silently demoting it to
+    # unowned would un-state the state.
+    [ "$state" = "persistent" ] && mode=persistent
     confirm_end "$pid" "you asked to restart it onto build $want." || { say "left it running"; return 0; }
     end_daemon "$pid" "restarting onto build $want"
   fi
-  # Unowned: this invocation has no app to tie it to. The next `dev-app.sh` claims it.
-  start_daemon "$want" "" 0
+  # Unowned: this invocation has no app to tie it to. The next `dev-app.sh` claims it —
+  # unless it is persistent, which is the one state nothing claims.
+  start_daemon "$want" "" 0 "$mode"
 }
 
 case "${1:-ensure}" in
   ensure)   shift || true; cmd_ensure "${1:-}" "${2:-0}" ;;
+  persist)  shift || true; cmd_persist "${1:-}" ;;
   reap)     shift || true; cmd_reap "${1:-}" ;;
   status)   cmd_status ;;
   stop)     cmd_stop ;;
   restart)  cmd_restart ;;
   serve)    cmd_serve ;;
   build-id) build_id; printf '\n' ;;
-  *) warn "unknown command: $1 (want: ensure|reap|status|stop|restart|serve|build-id)"; exit 2 ;;
+  *) warn "unknown command: $1 (want: ensure|persist|reap|status|stop|restart|serve|build-id)"; exit 2 ;;
 esac

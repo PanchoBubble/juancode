@@ -132,6 +132,13 @@ impl DaemonIdentity {
             "ownerState": state,
             "ownerPid": owner_pid,
             "ownerGraceMs": i64::try_from(self.lifetime.grace.as_millis()).ok(),
+            // What the launcher DECLARED about a daemon no launch owns: `launchd`,
+            // `persistent`, or null. `ownerState` alone cannot tell a daemon meant to
+            // outlive the app from one nobody got round to claiming — both are
+            // `unowned`, and only one of them is a decision. The app shows the
+            // difference beside the build stamp, so choosing session persistence and
+            // knowing you may be on old code are the same glance.
+            "ownerManaged": self.lifetime.managed(),
         })
     }
 }
@@ -251,6 +258,7 @@ mod tests {
             "ownerState",
             "ownerPid",
             "ownerGraceMs",
+            "ownerManaged",
         ] {
             assert!(v.get(key).is_some(), "serverInfo.daemon is missing {key}");
         }
@@ -259,6 +267,40 @@ mod tests {
         // end it — never left to infer it from a missing key.
         assert_eq!(v["ownerState"], "unowned");
         assert!(v["ownerPid"].is_null());
+        // Unowned and undeclared: nobody claimed it and nobody said they meant to.
+        assert!(v["ownerManaged"].is_null());
+    }
+
+    /// A persistent daemon is unowned AND declared, and the wire has to carry both:
+    /// `unowned` alone is what an accident looks like.
+    #[test]
+    fn a_persistent_daemon_reports_the_mode_beside_the_unowned_state() {
+        let dir = std::env::temp_dir().join(format!("juancoded-persist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(owner::OWNER_FILE);
+        let pid = std::process::id();
+        std::fs::write(
+            &file,
+            format!(
+                "daemon_pid={pid}\ntoken=persistent\nowner_pid=0\nmanaged=persistent\nintent=outlives-the-app\n"
+            ),
+        )
+        .unwrap();
+        let id = DaemonIdentity::capture_owned(
+            0,
+            Arc::new(Watchdog {
+                daemon_pid: pid,
+                spawn_owner: None,
+                owner_file: Some(file),
+                grace: std::time::Duration::ZERO,
+                poll: owner::DEFAULT_POLL,
+            }),
+        );
+        let v = id.to_value();
+        assert_eq!(v["ownerState"], "unowned");
+        assert_eq!(v["ownerManaged"], "persistent");
+        assert_eq!(v["ownerGraceMs"], 0, "the countdown must be off for it");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

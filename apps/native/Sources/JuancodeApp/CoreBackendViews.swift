@@ -81,6 +81,9 @@ struct CoreSettingsView: View {
                                    "not reported — this daemon predates serverInfo.daemon")
                         }
                     }
+                    if let persistence = model.coreSelection.sessionPersistence {
+                        DaemonPersistenceRow(note: persistence)
+                    }
                     ForEach(model.coreSelection.daemonWarnings) { warning in
                         DaemonWarningRow(warning: warning)
                     }
@@ -150,17 +153,48 @@ struct CoreBadgeLabel: View {
         // from is a UI that looked normal while mirroring a two-hour-old core, so it
         // has to be legible without opening anything.
         let stale = selection.daemonIsStale
+        // And a daemon that outlives the app says so in the same place, because that
+        // is the other thing you cannot see by looking at a session list: whether the
+        // rows on screen are still there after Cmd-Q. `stale` wins the label when both
+        // are true — the mode is never allowed to make an old core quieter — and the
+        // tooltip carries both.
+        let persists = selection.sessionPersistence
         let tint: Color = down ? .red : (stale ? .yellow : (selection.active == .rust ? .orange : .secondary))
+        let label = stale ? "\(selection.active.rawValue) · stale"
+            : (persists != nil ? "\(selection.active.rawValue) · persists" : selection.active.rawValue)
         return HStack(spacing: 4) {
-            Image(systemName: down || stale ? "exclamationmark.triangle.fill" : "cpu")
+            Image(systemName: down || stale ? "exclamationmark.triangle.fill"
+                : (persists != nil ? "pin.fill" : "cpu"))
                 .font(.system(size: 9))
-            Text(stale ? "\(selection.active.rawValue) · stale" : selection.active.rawValue)
+            Text(label)
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
         }
+        .help(persists ?? "Quitting the app ends this core's live sessions.")
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(RoundedRectangle(cornerRadius: 4).fill(tint.opacity(down ? 0.22 : 0.18)))
         .foregroundStyle(tint)
+    }
+}
+
+/// That this core's sessions outlive the app, and what they are running on. Shared by
+/// the badge popover and the Settings pane, and deliberately NOT a `DaemonWarningRow`:
+/// a stated mode doing what it was asked is not a fault, and rendering it in the yellow
+/// that means "you are on an old core" would cost that colour its meaning. The two sit
+/// beside each other when both apply, which is the case worth seeing.
+struct DaemonPersistenceRow: View {
+    let note: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "pin.fill")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(note)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
