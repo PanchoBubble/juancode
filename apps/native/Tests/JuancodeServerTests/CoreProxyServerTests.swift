@@ -83,6 +83,19 @@ final class CoreProxyServerTests: XCTestCase {
         try await app.test(.router) { client in try await body(client) }
     }
 
+    // MARK: - Live test servers
+
+    /// Every server booted with `.test(.live)` binds the NAME `localhost`:
+    /// HummingbirdTesting replaces whatever address the application's own
+    /// configuration gives, and its own client dials that same name. On a machine
+    /// whose resolver answers `::1` first, the v4 literal is therefore left
+    /// unbound and a hand-rolled URL aimed at `127.0.0.1` is refused by a server
+    /// that is up. Build every URL aimed at a live test server from the name it
+    /// bound, not from a literal.
+    private static func liveURL(_ scheme: String, _ port: Int, _ path: String = "") -> String {
+        "\(scheme)://localhost:\(port)\(path)"
+    }
+
     // MARK: - REST from the mirror
 
     func testHealthNamesTheCoreAndTheRelayTarget() async throws {
@@ -269,13 +282,13 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://127.0.0.1:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { proxyClient in
                 let proxyPort = try XCTUnwrap(proxyClient.port)
                 let session = URLSession(configuration: .ephemeral)
                 let task = session.webSocketTask(
-                    with: URL(string: "ws://127.0.0.1:\(proxyPort)/ws")!)
+                    with: URL(string: Self.liveURL("ws", proxyPort, "/ws"))!)
                 task.resume()
                 defer { task.cancel(with: .goingAway, reason: nil) }
 
@@ -317,12 +330,12 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://127.0.0.1:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { proxyClient in
                 let proxyPort = try XCTUnwrap(proxyClient.port)
                 let task = URLSession(configuration: .ephemeral)
-                    .webSocketTask(with: URL(string: "ws://127.0.0.1:\(proxyPort)/ws")!)
+                    .webSocketTask(with: URL(string: Self.liveURL("ws", proxyPort, "/ws"))!)
                 task.resume()
                 defer { task.cancel(with: .goingAway, reason: nil) }
                 _ = try await task.receive() // the handshake
@@ -373,7 +386,7 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { client in
                 for leaf in CoreProxyServer.sessionReadLeaves {
@@ -398,7 +411,7 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s1/messages?limit=7", method: .get) { res in
@@ -417,7 +430,7 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s%2F1/scrollback", method: .get) { res in
@@ -437,7 +450,7 @@ final class CoreProxyServerTests: XCTestCase {
             let daemonPort = try XCTUnwrap(daemonClient.port)
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
-                upstreamBaseURL: "http://localhost:\(daemonPort)",
+                upstreamBaseURL: Self.liveURL("http", daemonPort),
                 host: "127.0.0.1", port: 0)
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s1/transcript", method: .get) { res in
@@ -472,14 +485,18 @@ final class CoreProxyServerTests: XCTestCase {
         try await proxy.test(.live) { proxyClient in
             let proxyPort = try XCTUnwrap(proxyClient.port)
             let session = URLSession(configuration: .ephemeral)
-            let task = session.webSocketTask(with: URL(string: "ws://127.0.0.1:\(proxyPort)/ws")!)
+            let task = session.webSocketTask(with: URL(string: Self.liveURL("ws", proxyPort, "/ws"))!)
             task.resume()
             defer { task.cancel(with: .goingAway, reason: nil) }
             do {
                 _ = try await task.receive()
                 XCTFail("the relay should have closed instead of answering")
             } catch {
-                // Any receive failure is the pass: the socket did not stay open.
+                // The socket did not stay open — but only a failure AFTER the relay
+                // answered the upgrade proves that. A refused connection means the
+                // relay was never reached and this test measured nothing.
+                XCTAssertNotEqual((error as NSError).code, NSURLErrorCannotConnectToHost,
+                                  "the relay itself was unreachable: \(error)")
             }
         }
     }
