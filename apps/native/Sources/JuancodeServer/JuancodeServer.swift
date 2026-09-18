@@ -134,6 +134,29 @@ public enum JuancodeServer {
             try meta(ctx, store)
         }
 
+        // A one-shot read of the RENDERED screen, straight out of the session's
+        // terminal model: text by default, `?scrollback` to include history,
+        // `?json=1` for the stream's own row encoding. See `ScreenPeek`.
+        //
+        // The model lives and dies with the pty, so a reaped session has no last-known
+        // grid to serve — that is a 409, not an empty screen, so a caller can tell
+        // "nothing on screen" from "nothing left to look at" and fall back to the
+        // stored scrollback deliberately.
+        router.get("/api/sessions/:id/screen") { req, ctx in
+            let id = try param(ctx, "id")
+            guard store.get(id) != nil else { throw APIError(.notFound, "not found") }
+            guard let live = state.registry.get(id) else {
+                throw APIError(.conflict, "session is not running — its screen died with the pty")
+            }
+            let q = req.uri.queryParameters
+            let peek = ScreenPeek(model: live.terminalModel,
+                                  scrollbackRows: ScreenPeek.scrollbackRows(
+                                      q["scrollback"].map(String.init)))
+            return ScreenPeek.flag(q["json"].map(String.init))
+                ? jsonResponse(peek.wire(sessionId: id))
+                : textResponse(peek.text)
+        }
+
         // Put a session to sleep: kill the CLI process tree to free its RAM (a
         // ~300MB phys_footprint each) but keep the row, its scrollback and its
         // resume id, so the tile comes back on demand. The same thing the idle

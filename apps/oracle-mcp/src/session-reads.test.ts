@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   digest,
   fetchMessages,
+  fetchScreen,
+  fetchScreenText,
   fetchScrollback,
   fetchTranscript,
   NoSuchSession,
+  SessionNotRunning,
   UnservedRead,
   type SessionMessage,
 } from "./session-reads.ts";
@@ -21,6 +24,16 @@ function stubFetch(status: number, body: unknown): { urls: string[] } {
       status,
       headers: { "content-type": "application/json" },
     });
+  }) as unknown as typeof fetch;
+  return { urls };
+}
+
+/** The same, for the text/plain body `/screen` answers by default. */
+function stubText(status: number, body: string): { urls: string[] } {
+  const urls: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    urls.push(String(url));
+    return new Response(body, { status, headers: { "content-type": "text/plain" } });
   }) as unknown as typeof fetch;
   return { urls };
 }
@@ -78,6 +91,43 @@ describe("the native server's per-session reads", () => {
 
     stubFetch(200, { sessionId: "s1", messages: [] });
     await expect(fetchMessages("s1")).resolves.toEqual({ sessionId: "s1", messages: [] });
+  });
+
+  // The rendered screen is the read that does NOT need a width to travel with it: it
+  // is the parsed grid, so there is nothing left to replay at the wrong one.
+  it("reads the rendered screen as text, with history only when asked for", async () => {
+    const { urls } = stubText(200, "hello from the grid");
+    expect(await fetchScreenText("s1")).toBe("hello from the grid");
+    await fetchScreenText("s1", 200);
+    expect(urls).toEqual([
+      "http://native.test/api/sessions/s1/screen",
+      "http://native.test/api/sessions/s1/screen?scrollback=200",
+    ]);
+  });
+
+  it("asks for the stream's row shape with json=1", async () => {
+    const { urls } = stubFetch(200, {
+      sessionId: "s1",
+      cols: 80,
+      rows: 24,
+      cursor: { x: 0, y: 1, visible: true },
+      alt: false,
+      scrollback: 0,
+      lines: [{ row: 0, segs: [{ text: "hi" }] }],
+    });
+    const screen = await fetchScreen("s1");
+    expect(screen.lines[0]).toEqual({ row: 0, segs: [{ text: "hi" }] });
+    expect(urls).toEqual(["http://native.test/api/sessions/s1/screen?json=1"]);
+  });
+
+  // A reaped pty has no screen to read — that is its own outcome, not "no session"
+  // and not "this core can't", because the caller's answer differs: fall back to the
+  // stored bytes.
+  it("tells a reaped session apart from a missing one", async () => {
+    stubFetch(409, { error: "session is not running — its screen died with the pty" });
+    const err = await fetchScreenText("s1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionNotRunning);
+    expect((err as Error).message).toContain("not running");
   });
 
   it("names the app when it is not reachable at all", async () => {

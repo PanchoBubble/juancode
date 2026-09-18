@@ -15,6 +15,7 @@ sidecar only **relays intent and reads state**:
 | `oracle_dispatch` | Spawn/seed an agent in a project | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down |
 | `oracle_dispatch_status` | What happened to a dispatch | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions` |
 | `oracle_list_sessions` | List live + persisted sessions | `GET` the native app's `/api/sessions` |
+| `oracle_session_screen` | What a session's pane shows right now | `GET /api/sessions/:id/screen` — the RENDERED grid, not the byte log; falls back to `/scrollback` for a reaped pty or a core without the route |
 | `oracle_ask` | Ask the live Oracle agent | append `ask.jsonl` (native app tails it) |
 
 `dispatch` is WS-first: with the app up you get a real ack (the session id, or the

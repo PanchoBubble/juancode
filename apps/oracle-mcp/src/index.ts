@@ -37,7 +37,15 @@ import {
   oracleChatStream,
   resetChat,
 } from "./oracle.ts";
-import { digest, fetchMessages, fetchScrollback } from "./session-reads.ts";
+import {
+  digest,
+  fetchMessages,
+  fetchScreenText,
+  fetchScrollback,
+  SCREEN_SCROLLBACK_ROWS,
+  SessionNotRunning,
+  UnservedRead,
+} from "./session-reads.ts";
 import { dispatch } from "./dispatch.ts";
 import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
@@ -225,15 +233,29 @@ function buildServer(): McpServer {
     {
       title: "Read a session's terminal",
       description:
-        "Read a session's retained terminal bytes and the grid they were parsed at. Returns { cols, rows, scrollback }: parse or render the bytes at THAT width — a terminal grid replayed at a different width is garbled in every line that wrapped. The native app must be running.",
+        "Read what a session's terminal pane currently shows: the RENDERED screen, reconstructed from the live terminal state, so it is ordered, fully redrawn and already at the right width — no replay, no garble. Pass scrollback to include the history above the screen. For a session whose pty has been reaped there is no screen left, and this falls back to the retained bytes plus the grid they were parsed at (render them at THAT width or every wrapped line lands wrong). The native app must be running.",
       inputSchema: {
         id: z.string().min(1).describe("The session id (from oracle_list_sessions)"),
+        scrollback: z
+          .boolean()
+          .optional()
+          .describe("Include the scrollback history above the visible screen"),
       },
     },
     async (args) => {
       try {
-        return ok(JSON.stringify(await fetchScrollback(args.id), null, 2));
+        const rows = args.scrollback ? SCREEN_SCROLLBACK_ROWS : 0;
+        return ok(await fetchScreenText(args.id, rows));
       } catch (e) {
+        // A reaped session has no screen, and a core that doesn't serve /screen says so
+        // — both leave the stored byte log as the only thing left to read.
+        if (e instanceof SessionNotRunning || e instanceof UnservedRead) {
+          try {
+            return ok(JSON.stringify(await fetchScrollback(args.id), null, 2));
+          } catch (fallback) {
+            return fail(fallback instanceof Error ? fallback.message : String(fallback));
+          }
+        }
         return fail(e instanceof Error ? e.message : String(e));
       }
     },

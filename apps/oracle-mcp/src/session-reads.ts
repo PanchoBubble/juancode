@@ -15,7 +15,28 @@
 // recoverable from the bytes — so it travels with them, all the way to whoever
 // renders.
 
+import type { ScreenRowUpdate } from "./native-events.ts";
 import { nativeApiBase } from "./oracle.ts";
+
+/** The RENDERED screen of a live session: the parsed grid, not a byte log
+ *  (`GET /api/sessions/:id/screen?json=1`, juancode-tyd9). Ordered, fully redrawn, and
+ *  width-correct by construction — nothing here has to be replayed at a width, which is
+ *  the failure mode `SessionScrollback` exists to work around.
+ *
+ *  `lines` is the `subscribeScreen` row shape, so the stream's decoder reads it too.
+ *  History rows (asked for with `scrollback`) carry NEGATIVE row indices, which leaves
+ *  the visible grid at 0 … rows-1 exactly as a screen frame has it. */
+export interface SessionScreen {
+  sessionId: string;
+  cols: number;
+  rows: number;
+  cursor: { x: number; y: number; visible: boolean };
+  alt: boolean;
+  title?: string;
+  /** How many of `lines` are history rows. */
+  scrollback: number;
+  lines: ScreenRowUpdate[];
+}
 
 /** Retained pty bytes with the grid they were parsed at. Never one without the other. */
 export interface SessionScrollback {
@@ -69,7 +90,13 @@ export class UnservedRead extends Error {}
 /** Raised when the session id is not one the core holds. */
 export class NoSuchSession extends Error {}
 
-async function read<T>(id: string, leaf: string, params?: URLSearchParams): Promise<T> {
+/** Raised when the session exists but has no live pty, so a read that can only come
+ *  from the running process (the rendered screen) has nothing to answer with. */
+export class SessionNotRunning extends Error {}
+
+/** One read, with the status codes mapped to the distinctions a caller acts on. The
+ *  body is left to the caller: `/screen` answers text/plain unless asked for JSON. */
+async function request(id: string, leaf: string, params?: URLSearchParams): Promise<Response> {
   const query = params && [...params.keys()].length > 0 ? `?${params}` : "";
   const url = `${nativeApiBase()}/api/sessions/${encodeURIComponent(id)}/${leaf}${query}`;
   let res: Response;
@@ -81,13 +108,18 @@ async function read<T>(id: string, leaf: string, params?: URLSearchParams): Prom
     );
   }
   if (res.status === 404) throw new NoSuchSession(`Session ${id} not found`);
+  if (res.status === 409) throw new SessionNotRunning(await errorText(res));
   if (res.status === 501) {
     throw new UnservedRead(
       `The core serving ${nativeApiBase()} doesn't serve /${leaf} — ${await errorText(res)}`,
     );
   }
   if (!res.ok) throw new Error(`GET /api/sessions/${id}/${leaf} returned ${res.status}`);
-  return (await res.json()) as T;
+  return res;
+}
+
+async function read<T>(id: string, leaf: string, params?: URLSearchParams): Promise<T> {
+  return (await (await request(id, leaf, params)).json()) as T;
 }
 
 /** The `error` field of a JSON error body, or the status line when there isn't one. */
@@ -104,6 +136,30 @@ async function errorText(res: Response): Promise<string> {
 /** A session's retained pty bytes and the grid they were parsed at. */
 export function fetchScrollback(id: string): Promise<SessionScrollback> {
   return read<SessionScrollback>(id, "scrollback");
+}
+
+/** How much history a screen read asks for by default when it asks at all: enough for
+ *  the turn that just happened, far short of the model's 500-row cap. */
+export const SCREEN_SCROLLBACK_ROWS = 200;
+
+/** The rendered screen as text — the default body of `/screen`, which is what anyone
+ *  answering "what does that pane look like" actually wants. `scrollback` rows of
+ *  history are flowed in above it when asked for. */
+export async function fetchScreenText(id: string, scrollback = 0): Promise<string> {
+  return (await request(id, "screen", screenParams(scrollback))).text();
+}
+
+/** The same screen as styled rows in the `subscribeScreen` shape. */
+export function fetchScreen(id: string, scrollback = 0): Promise<SessionScreen> {
+  const params = screenParams(scrollback);
+  params.set("json", "1");
+  return read<SessionScreen>(id, "screen", params);
+}
+
+function screenParams(scrollback: number): URLSearchParams {
+  const params = new URLSearchParams();
+  if (scrollback > 0) params.set("scrollback", String(scrollback));
+  return params;
 }
 
 /** A session's stored transcript records, oldest first. `limit` is how much of the
