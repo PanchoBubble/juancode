@@ -31,6 +31,7 @@ use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
 use crate::ephemeral::EphemeralPtys;
 use crate::global_pause::GlobalPause;
+use crate::named_key;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
@@ -950,6 +951,42 @@ fn handle_client_message(
             }
             // Acked after the write attempt either way: the ack means the frame was
             // received and processed, and a dead pty surfaces through its own `exit`.
+            if let Some(seq) = seq {
+                outbound.push(ServerMessage::InputAck { session_id, seq });
+            }
+        }
+
+        ClientMessage::Key {
+            session_id,
+            keys,
+            seq,
+        } => {
+            // Resolved here, never client-side: the vocabulary is the core's
+            // (juancode-uigs). All or nothing — an unrecognised name refuses the whole
+            // frame rather than writing the bytes that DID resolve, because a
+            // half-applied "Up, Up, Enter" answers a permission prompt on the wrong
+            // row. And no bracketed paste: that wrapper is what makes `input` literal.
+            match named_key::resolve(&keys) {
+                Ok(bytes) => {
+                    if ephemeral.holds(&session_id) {
+                        ephemeral.input(&session_id, &bytes);
+                    } else if let Err(e) = sessions.input(&session_id, &bytes) {
+                        outbound.push(ServerMessage::Error {
+                            session_id: Some(session_id.clone()),
+                            message: format!(
+                                "Session is not running — no pty to send keys to: {e}"
+                            ),
+                        });
+                    }
+                }
+                Err(name) => outbound.push(ServerMessage::Error {
+                    session_id: Some(session_id.clone()),
+                    message: format!(
+                        "Unknown key \"{name}\". Known keys: {}",
+                        named_key::names().join(", ")
+                    ),
+                }),
+            }
             if let Some(seq) = seq {
                 outbound.push(ServerMessage::InputAck { session_id, seq });
             }

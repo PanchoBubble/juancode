@@ -418,6 +418,23 @@ function emitPauseState(paused: string[]): void {
   }
 }
 
+// ── Named control keys (juancode-uigs) ───────────────────────────────────────
+// The client→server mirror of `ClientMessage.key` in WireProtocol.swift:
+//
+//   { type: "key", sessionId: string, keys: string[], seq?: number }
+//
+// `keys` are NAMES ("Escape", "C-c", "Up"), never bytes: the vocabulary and its
+// resolution belong to the core, so a client cannot invent an escape sequence and the
+// two cores cannot disagree about one. The resolved bytes reach the pty raw — a `key`
+// is never bracketed-pasted, which is what `input` does and what made every remote
+// keystroke arrive as literal text. An unknown name is answered with `error` and
+// writes nothing. Gated by the `namedKeys` capability.
+//
+// The sending itself lives in oracle.ts (`sendKeys`), on a short-lived socket like the
+// other one-shot writes — so it feature-detects on that socket's own handshake rather
+// than on this module's cached capability list, and works while this one is between
+// reconnects. The table of names is keys.ts.
+
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
     try {

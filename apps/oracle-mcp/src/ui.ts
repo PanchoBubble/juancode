@@ -477,6 +477,17 @@ export const consoleHtml = /* html */ `<!doctype html>
   .live-foot .lq:active, .live-foot .ls:active { transform: scale(.94); }
   .live-foot button:disabled { opacity: .45; }
 
+  /* Control keys (juancode-uigs): a reply is pasted literally, so a prompt driven by
+     arrows + Enter — which is what claude stops on — is only answerable from here. */
+  .live-keys { display: flex; gap: 6px; padding: 8px 0 0; }
+  .live-keys button {
+    flex: 1; min-width: 0; height: 34px; border: 0; border-radius: 9px;
+    background: var(--panel-2); color: var(--txt); font-size: 13px; font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--line); transition: transform .08s, opacity .15s;
+  }
+  .live-keys button:active { transform: scale(.94); }
+  .live-keys button:disabled { opacity: .45; }
+
   /* ── Settings (keyboard shortcuts) ── */
   .gear {
     flex: none; margin-left: 8px; width: 34px; height: 34px; border-radius: 999px;
@@ -628,6 +639,14 @@ export const consoleHtml = /* html */ `<!doctype html>
       <button id="live-close" class="lx" aria-label="Close live view">✕</button>
     </div>
     <div id="live-screen" class="live-screen"><pre id="live-pre"></pre></div>
+    <div id="live-keys" class="live-keys">
+      <button data-key="Escape" title="Escape (interrupt the turn)">Esc</button>
+      <button data-key="C-c" title="Ctrl-C (signal the CLI)">⌃C</button>
+      <button data-key="Up" title="Arrow up">↑</button>
+      <button data-key="Down" title="Arrow down">↓</button>
+      <button data-key="Tab" title="Tab">⇥</button>
+      <button data-key="Enter" title="Enter (submit)">⏎</button>
+    </div>
     <div class="live-foot">
       <textarea id="live-in" placeholder="Reply into this session…" rows="1"></textarea>
       <button id="live-queue" class="lq" aria-label="Queue for next idle" title="Queue for next idle">⏳</button>
@@ -947,6 +966,25 @@ async function liveDeliver(queue){
   } catch(e){ setConn(false); alert("Couldn't deliver: " + e.message); }
   sb.disabled = qb.disabled = false;
 }
+// Named control keys (juancode-uigs). The button sends a NAME; the core owns the
+// vocabulary and resolves it to bytes, so nothing here spells an escape sequence and
+// nothing goes through bracketed paste — which is what makes /api/reply literal.
+async function liveKey(name){
+  const id = $("#live-view").dataset.id;
+  if (!id) return;
+  const pad = $("#live-keys");
+  pad.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  try {
+    await api("/api/keys", { method:"POST", body: JSON.stringify({ sessionId: id, keys: [name] }) });
+    setConn(true);
+    flashLiveStatus(name + " ✓");
+  } catch(e){ setConn(false); alert("Couldn't send " + name + ": " + e.message); }
+  pad.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+}
+$("#live-keys").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-key]");
+  if (b) liveKey(b.dataset.key);
+});
 $("#live-close").onclick = closeLiveView;
 $("#live-send").onclick = () => liveDeliver(false);
 $("#live-queue").onclick = () => liveDeliver(true);

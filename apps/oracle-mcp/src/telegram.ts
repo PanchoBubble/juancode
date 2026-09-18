@@ -61,7 +61,15 @@ import {
   type TriggerOrigin,
 } from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
-import { deliverReply, listSessions, oracleChat, queueMessages, type ChatReply } from "./oracle.ts";
+import {
+  deliverReply,
+  listSessions,
+  oracleChat,
+  queueMessages,
+  sendKeys,
+  type ChatReply,
+} from "./oracle.ts";
+import { unknownKey, unknownKeyMessage } from "./keys.ts";
 import {
   onSessionEvent,
   onSessionStuck,
@@ -348,6 +356,11 @@ export interface TelegramDeps {
   deliver: (sessionId: string, text: string) => Promise<void>;
   /** Queue text for in-order delivery on the session's next idle (busy sessions). */
   queue: (sessionId: string, texts: string[]) => Promise<void>;
+  /** Press named control keys in a session's terminal (juancode-uigs). Unlike
+   *  `deliver`, which bracketed-pastes literal text, these arrive as keystrokes —
+   *  the only way to interrupt a turn or answer an arrows-driven permission prompt
+   *  from a phone. Throws on an unknown name / an unreachable app. */
+  keys: (sessionId: string, names: string[]) => Promise<void>;
   /** Transcribe a Telegram voice/audio file to text (local whisper CLI). Throws on
    *  download or transcription failure so the handler can reply with a clear error. */
   transcribe: (fileId: string) => Promise<string>;
@@ -387,6 +400,7 @@ function defaultDeps(token: string): TelegramDeps {
     originTrigger: dispatchTriggerOrigin,
     deliver: deliverReply,
     queue: queueMessages,
+    keys: sendKeys,
     transcribe: makeTranscriber(token),
     pause: {
       supported: supportsGlobalPause,
@@ -494,6 +508,10 @@ export async function handleUpdate(
   }
   if (command === "/observe" || command.startsWith("/observe ")) {
     await handleObserveCommand(chatId, text.slice("/observe".length).trim(), deps, state);
+    return;
+  }
+  if (command === "/keys" || command.startsWith("/keys ")) {
+    await handleKeysCommand(chatId, text.slice("/keys".length).trim(), deps, state);
     return;
   }
   if (command === "/unobserve" || command.startsWith("/unobserve ")) {
@@ -792,6 +810,69 @@ async function handleUnobserveCommand(
   );
 }
 
+// ── Control-key pad (juancode-uigs) ──────────────────────────────────────────
+// The tap that makes a stopped session reachable. Replying to a notification types
+// text, which is pasted literally, so before this a permission prompt — the thing
+// claude stops on, driven by arrows and Enter — could not be answered from a phone at
+// all, and a runaway agent could not be interrupted.
+//
+// Five buttons, one row: the vocabulary is 35 names and a phone is not where you pick
+// from 35. The names are the wire's own (keys.ts / the cores' tables), never bytes.
+
+/** The keys worth a tap, in the order a thumb wants them. */
+const KEY_PAD: { text: string; key: string }[] = [
+  { text: "Esc", key: "Escape" },
+  { text: "⌃C", key: "C-c" },
+  { text: "↑", key: "Up" },
+  { text: "↓", key: "Down" },
+  { text: "⏎", key: "Enter" },
+];
+
+/** The pad as a one-row inline keyboard for `sessionId`.
+ *
+ *  `k:<key>:<sessionId>` stays inside Telegram's 64-byte callback_data limit: the
+ *  longest key name here is 6 characters and a session id is a 36-character uuid. */
+export function keyPadRow(sessionId: string): InlineButton[] {
+  return KEY_PAD.map((b) => ({ text: b.text, data: `k:${b.key}:${sessionId}` }));
+}
+
+/** Post a standalone keypad for a session, so one can be reached without waiting for
+ *  a notification to arrive first. */
+async function handleKeysCommand(
+  chatId: number,
+  selector: string,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  if (!selector) {
+    await deps.send(chatId, "Usage: /keys <n|id> — n from the last /sessions list.");
+    return;
+  }
+  const ordered = await fetchOrdered(chatId, deps);
+  if (!ordered) return;
+  const id = resolveSelector(selector, ordered, state.lastList.get(chatId));
+  if (!id) {
+    await deps.send(chatId, `No session matches “${selector}”. /sessions to list them.`);
+    return;
+  }
+  const s = ordered.find((x) => x.id === id);
+  const name = s ? `${s.title} — ${projectName(s.cwd)}` : id.slice(0, 8);
+  const mid = await deps.send(chatId, `⌨️ ${name}\nTap a key. ↩️ Reply to this message to type.`, {
+    keyboard: [keyPadRow(id)],
+  });
+  // Recorded like a notification so a Telegram-native reply to the pad types into the
+  // same session the buttons drive.
+  if (mid !== null) {
+    await deps.outbound.record({
+      chatId,
+      messageId: mid,
+      sessionId: id,
+      title: s?.title ?? id.slice(0, 8),
+      at: Date.now(),
+    });
+  }
+}
+
 /** Chunk one flat button list into keyboard rows of up to 5. */
 function buttonRows(buttons: InlineButton[], perRow = 5): InlineButton[][] {
   const rows: InlineButton[][] = [];
@@ -808,9 +889,30 @@ async function handleCallback(
 ): Promise<void> {
   const sep = cb.data.indexOf(":");
   const op = sep === -1 ? cb.data : cb.data.slice(0, sep);
-  const sessionId = sep === -1 ? "" : cb.data.slice(sep + 1);
-  if (!sessionId || (op !== "o" && op !== "u")) {
+  const rest = sep === -1 ? "" : cb.data.slice(sep + 1);
+  // `k:<key>:<sessionId>` carries a key between the op and the id; `o:` / `u:` do not.
+  const keySep = op === "k" ? rest.indexOf(":") : -1;
+  const keyName = keySep === -1 ? "" : rest.slice(0, keySep);
+  const sessionId = op === "k" ? rest.slice(keySep + 1) : rest;
+  if (!sessionId || (op !== "o" && op !== "u" && op !== "k")) {
     await deps.answerCallback(cb.callbackId);
+    return;
+  }
+  if (op === "k") {
+    // Validated before the send so a malformed callback_data (a truncated button, an
+    // old message from a build with a different pad) says so instead of typing its own
+    // name into the agent's prompt box.
+    const bad = unknownKey([keyName]);
+    if (bad !== null) {
+      await deps.answerCallback(cb.callbackId, unknownKeyMessage(bad).slice(0, 190));
+      return;
+    }
+    try {
+      await deps.keys(sessionId, [keyName]);
+      await deps.answerCallback(cb.callbackId, `⌨️ ${keyName}`);
+    } catch (e) {
+      await deps.answerCallback(cb.callbackId, `Failed: ${e instanceof Error ? e.message : e}`);
+    }
     return;
   }
   try {
@@ -925,7 +1027,7 @@ export async function notifySessionEvent(
   }
   const hint =
     kind === "needs_input"
-      ? "↩️ Reply to this message to answer it."
+      ? "↩️ Reply to this message to answer it, or tap a key below."
       : "↩️ Reply to this message to send a follow-up.";
   // Mirror the desktop change badge into the finish ping: "finished its turn,
   // 3 files changed (+120/−44)" when the settled turn left unreviewed changes.
@@ -937,7 +1039,13 @@ export async function notifySessionEvent(
     if (state.lastNotified.get(key) === kind) continue;
     state.lastNotified.set(key, kind);
     try {
-      const mid = await deps.send(chatId, text);
+      // A needs-input ping carries the keypad: the prompt it is about is usually
+      // claude's own permission prompt, which is arrows + Enter and unanswerable by
+      // typing. A finish ping gets none — there is nothing to steer.
+      const mid =
+        kind === "needs_input"
+          ? await deps.send(chatId, text, { keyboard: [keyPadRow(ev.sessionId)] })
+          : await deps.send(chatId, text);
       if (mid !== null) {
         await deps.outbound.record({
           chatId,
@@ -991,7 +1099,7 @@ export async function notifyStuckEvent(
     // Native app unreachable — advise with the id slice rather than staying silent.
   }
   const header = project ? `${title} — ${project}` : title;
-  const text = `🔁 ${header}\n${ev.advice}\n↩️ Reply to this message to steer it.`;
+  const text = `🔁 ${header}\n${ev.advice}\n↩️ Reply to this message to steer it, or tap a key below.`;
 
   for (const chatId of chats) {
     const key = `${chatId}:${ev.sessionId}`;
@@ -999,7 +1107,9 @@ export async function notifyStuckEvent(
     if (last !== undefined && now - last < STUCK_COOLDOWN_MS) continue;
     state.lastStuck.set(key, now);
     try {
-      const mid = await deps.send(chatId, text);
+      // The pad, because a session going in circles is the case ⌃C exists for — and
+      // the advisory is read-only, so the human's tap is the only thing that acts.
+      const mid = await deps.send(chatId, text, { keyboard: [keyPadRow(ev.sessionId)] });
       if (mid !== null) {
         await deps.outbound.record({
           chatId,

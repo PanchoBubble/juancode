@@ -593,6 +593,32 @@ final class WebSocketConnection: @unchecked Sendable {
             // its own `exit`.
             if let seq { send(.inputAck(sessionId: sessionId, seq: seq)) }
 
+        case let .key(sessionId, keys, seq):
+            // Resolved here, never client-side: the vocabulary is the server's
+            // (juancode-uigs). All or nothing — an unrecognised name refuses the
+            // whole frame instead of writing the bytes that DID resolve, because a
+            // half-applied "Up, Up, Enter" answers a permission prompt on the wrong
+            // row. And no bracketed paste: that wrapper is what makes `input`
+            // literal, which is the bug this case exists to fix.
+            switch NamedKey.resolve(keys) {
+            case let .bytes(bytes):
+                if let pty = resolvePty(sessionId) {
+                    pty.write(bytes)
+                } else {
+                    // Unlike `input`, a dead session is NOT revived to receive a
+                    // keystroke: reviving for a message delivers the message, while
+                    // reviving for an Escape spends a CLI boot on a key the fresh
+                    // process has no prompt to answer.
+                    send(.error(sessionId: sessionId,
+                                message: "Session is not running — no pty to send keys to."))
+                }
+            case let .unknown(name):
+                send(.error(sessionId: sessionId,
+                            message: "Unknown key \"\(name)\". Known keys: "
+                                + NamedKey.names.joined(separator: ", ")))
+            }
+            if let seq { send(.inputAck(sessionId: sessionId, seq: seq)) }
+
         case let .resize(sessionId, cols, rows, seq):
             // Sessions arbitrate the shared grid per client (juancode-1th.1): a
             // non-owner's resize is `denied` and left un-applied so the CLI TUI

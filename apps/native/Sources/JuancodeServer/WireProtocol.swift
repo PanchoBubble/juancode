@@ -56,6 +56,19 @@ public enum ClientMessage: Sendable {
     /// matching `inputAck` after writing, so the client can buffer unacked input
     /// and resend it on reconnect. Nil for older clients / fire-and-forget writes.
     case input(sessionId: String, data: String, seq: Int?)
+    /// Named control keys for a pty — Esc, Ctrl-C, an arrow (juancode-uigs). The
+    /// names are resolved to bytes server-side by `NamedKey`, and the bytes go to
+    /// the pty RAW: never through bracketed paste, which is the wrapper that makes
+    /// `input` literal and is exactly why a remote client could not send a keystroke
+    /// before this. `seq` acks like `input`'s does.
+    ///
+    /// Its own case rather than a flag on `input`, because the two carry different
+    /// things — a name to resolve vs. bytes to write — and a core that ignored such a
+    /// flag would TYPE "Escape" into the agent's prompt box while answering exactly as
+    /// it would have for a real keystroke. An unknown `type` is ignored whole, which
+    /// is a silence the client can see (juancode-jlhz), and the capability
+    /// `namedKeys` is what a client feature-detects on.
+    case key(sessionId: String, keys: [String], seq: Int?)
     /// Resize a pty's grid. `seq` is an optional per-connection monotonic id
     /// (juancode-uz6): when present the server replies with a matching `resizeAck`
     /// reporting whether the grid reached a live pty, so the client can re-assert a
@@ -148,6 +161,8 @@ extension ClientMessage: Decodable {
         case pr, trackedId, notificationId, repo, number
         // Per-session message queue (oracle-cj3 / juancode-r82).
         case text, messageId
+        // Named control keys (juancode-uigs).
+        case keys
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +211,10 @@ extension ClientMessage: Decodable {
             self = .input(sessionId: try c.decode(String.self, forKey: .sessionId),
                           data: try c.decode(String.self, forKey: .data),
                           seq: try c.decodeIfPresent(Int.self, forKey: .seq))
+        case "key":
+            self = .key(sessionId: try c.decode(String.self, forKey: .sessionId),
+                        keys: try c.decode([String].self, forKey: .keys),
+                        seq: try c.decodeIfPresent(Int.self, forKey: .seq))
         case "resize":
             self = .resize(sessionId: try c.decode(String.self, forKey: .sessionId),
                            cols: try c.decode(Int.self, forKey: .cols),
@@ -270,7 +289,7 @@ public enum WireProtocol {
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
                                       "isolateWorktree", "globalPause", "trackPrInSession",
-                                      "prWebhook"]
+                                      "prWebhook", "namedKeys"]
 
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.

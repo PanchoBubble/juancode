@@ -1,0 +1,138 @@
+{
+  "id": "named-keys",
+  "title": "named control keys reach the pty raw",
+  "asserts": "a `key` frame resolves NAMES to bytes in the core and writes them to the pty without bracketed paste, which is what makes them keystrokes rather than text: a Backspace erases the character before it and an Enter submits the line, so the title the stand-in then sets is proof both bytes were read by the line discipline and neither was pasted. An unknown name is refused with an `error` and writes NOTHING - the failure the frame exists to prevent is the word \"Escape\" landing in an agent's prompt box - and a key is never worth reviving a dead session for.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "namedKeys",
+    "sessionMeta",
+    "inputAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE keys-landedX"
+      },
+      "note": "no trailing newline, and one character too many"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Backspace"
+        ],
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 1
+      },
+      "note": "a sequenced key acks like a sequenced input"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Enter"
+        ],
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "title": "keys-landed"
+        }
+      },
+      "timeoutMs": 40000,
+      "note": "the X is gone and the line ran, so 0x7f was ERASE and 0x0d was a carriage return - not the words Backspace and Enter typed into the line"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Up",
+          "Excape",
+          "Enter"
+        ]
+      },
+      "note": "one bad name in a batch, which refuses the whole batch"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$session",
+        "message": {
+          "$contains": "Unknown key"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "conformance-missing",
+        "keys": [
+          "Escape"
+        ]
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": {
+          "$contains": "not running"
+        }
+      },
+      "note": "unlike an `input`, which revives a dead session to deliver a message: there is no prompt in a fresh process for a keystroke to answer"
+    }
+  ]
+}

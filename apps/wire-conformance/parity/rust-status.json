@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.16.0",
+  "specRevision": "1.17.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -30,6 +30,7 @@
     "sessionList",
     "sessionDelete",
     "sessionSearch",
+    "namedKeys",
     "trackPrInSession",
     "prWebhook"
   ],
@@ -235,6 +236,11 @@
       "passes": 3
     },
     "session-screen": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "named-keys": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

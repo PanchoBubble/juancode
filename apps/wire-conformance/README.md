@@ -43,7 +43,8 @@ what keeps the spec from becoming documentation.
 ### The catalogue is the union, and the gate says which core
 
 The two cores do not implement the same set. Both have `restartFresh`, `spawnModel`,
-`spawnPreset`, `editor`, `terminal`, `trackedPrs`, `trackPrInSession`, `prWebhook` and
+`spawnPreset`, `editor`, `terminal`, `trackedPrs`, `trackPrInSession`, `prWebhook`,
+`namedKeys` and
 `globalPause`; the Rust core has
 `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
 `sessionSleep` and `sessionEdit` on top of that. The catalogue describes **all** of it, and a

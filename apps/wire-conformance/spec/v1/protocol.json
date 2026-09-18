@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.16.0",
+  "specRevision": "1.17.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -42,7 +42,8 @@
       "globalPause",
       "sessionSearch",
       "trackPrInSession",
-      "prWebhook"
+      "prWebhook",
+      "namedKeys"
     ],
     "gates": {
       "queue": [
@@ -144,6 +145,9 @@
       ],
       "prWebhook": [
         "prWebhook"
+      ],
+      "namedKeys": [
+        "key"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -230,6 +234,17 @@
         "seq"
       ],
       "notes": "seq present means the core must reply with a matching inputAck; absent means no ack."
+    },
+    "key": {
+      "required": [
+        "sessionId",
+        "keys"
+      ],
+      "optional": [
+        "seq"
+      ],
+      "capability": "namedKeys",
+      "notes": "Named control keys for a pty - Esc, Ctrl-C, an arrow (juancode-uigs). `keys` are NAMES, never bytes: the vocabulary and its resolution belong to the CORE, so a client cannot invent an escape sequence and the two cores cannot disagree about one. The vocabulary is Enter, Escape, Tab, Backspace, Space, Up, Down, Left, Right and C-a .. C-z; resolution is case-insensitive, `ctrl-c` resolves wherever `C-c` is spelled, and `esc` / `return` are aliases. Arrows are the normal-mode CSI forms (ESC [ A .. ESC [ D), because no client can know which cursor mode the pty is in. The resolved bytes reach the pty RAW - a key is never bracketed-pasted, which is what `input` is for and what made every remote keystroke arrive as literal text, leaving a session stopped on a permission prompt (arrows + Enter) unreachable from a phone. A batch is all or nothing: an unrecognised name is answered with `error` and writes NOTHING, because a half-applied `Up, Up, Enter` answers a prompt on the wrong row. Its own frame rather than a flag on `input`, because a core that ignored such a flag would type the word \"Escape\" into the agent's prompt box while answering exactly as it would for a real keystroke. `seq` present means the core must reply with a matching inputAck, as `input` does."
     },
     "resize": {
       "required": [

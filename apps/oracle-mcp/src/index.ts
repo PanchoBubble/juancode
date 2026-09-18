@@ -36,6 +36,7 @@ import {
   oracleChat,
   oracleChatStream,
   resetChat,
+  sendKeys,
 } from "./oracle.ts";
 import {
   digest,
@@ -57,6 +58,7 @@ import {
 } from "./observer-trigger.ts";
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
+import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
@@ -323,6 +325,36 @@ function buildServer(): McpServer {
         await queueMessages(args.sessionId, args.messages);
         const n = args.messages.length;
         return ok(`Queued ${n} message${n === 1 ? "" : "s"} to session ${args.sessionId}.`);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_session_keys",
+    {
+      title: "Send control keys to a session",
+      description:
+        "Press named control keys in a running agent session's terminal — Escape to interrupt a turn, C-c to signal the CLI, Up/Down + Enter to answer a permission prompt. Unlike a reply, which is pasted as literal text, these arrive as real keystrokes. Use this when asked to 'interrupt', 'stop', 'escape', 'press ctrl-c', or to pick an option in a prompt. The native app must be running. Known keys: " +
+        KEY_NAMES.join(", "),
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id to send keys to (from oracle_list_sessions)"),
+        keys: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Key names, pressed in this order, e.g. [\"Down\", \"Enter\"]"),
+      },
+    },
+    async (args) => {
+      const bad = unknownKey(args.keys);
+      if (bad !== null) return fail(unknownKeyMessage(bad));
+      try {
+        await sendKeys(args.sessionId, args.keys);
+        return ok(`Sent ${args.keys.join(", ")} to session ${args.sessionId}.`);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -767,6 +799,38 @@ app.post("/api/reply", async (req: Request, res: Response) => {
       return;
     }
     await deliverReply(sessionId, text);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Send named control keys into a live session's pty (juancode-uigs) — Esc, Ctrl-C, an
+// arrow. Separate from /api/reply because that path bracketed-pastes its text, and a
+// paste is literal by definition: this is the route that can interrupt a runaway agent
+// or answer a permission prompt, which claude drives with arrows + Enter. Accepts
+// `keys: string[]` (or a single `key`); an unknown name is a 400 naming the vocabulary
+// rather than text typed into the agent's prompt box.
+app.post("/api/keys", async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const sessionId = body.sessionId;
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    const raw: unknown[] = Array.isArray(body.keys) ? body.keys : [body.key];
+    const keys = raw.filter((k): k is string => typeof k === "string" && k.trim().length > 0);
+    if (keys.length === 0) {
+      res.status(400).send("keys (a non-empty string array) or key is required");
+      return;
+    }
+    const bad = unknownKey(keys);
+    if (bad !== null) {
+      res.status(400).send(unknownKeyMessage(bad));
+      return;
+    }
+    await sendKeys(sessionId, keys);
     res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);

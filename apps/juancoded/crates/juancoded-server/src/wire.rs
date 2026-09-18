@@ -195,6 +195,10 @@ pub const CAPABILITIES: &[&str] = &[
     "sessionList",
     "sessionDelete",
     "sessionSearch",
+    // The remote surface's keystrokes (juancode-uigs): advertised because the frame
+    // resolves the whole vocabulary and writes it raw, so a client that switches its
+    // Esc button on gets an Esc and not the word.
+    "namedKeys",
     // Advertised separately from `trackedPrs` because a core can watch PRs perfectly
     // well and still have no way to put the watch into a session that already exists,
     // and a client that could not tell the two apart offered the track-in-this-session
@@ -327,6 +331,19 @@ pub enum ClientMessage {
     Input {
         session_id: String,
         data: String,
+        seq: Option<i64>,
+    },
+    /// Named control keys for a pty — Esc, Ctrl-C, an arrow (juancode-uigs). The
+    /// names are resolved to bytes by [`crate::named_key`] and written to the pty RAW,
+    /// never through bracketed paste: that wrapper is what makes `input` literal, and
+    /// is exactly why a remote client could not send a keystroke before this.
+    ///
+    /// Its own frame rather than a flag on `input`, because a core that ignored such a
+    /// flag would TYPE "Escape" into the agent's prompt box while answering exactly as
+    /// it would have for a real keystroke. `seq` acks like `input`'s does.
+    Key {
+        session_id: String,
+        keys: Vec<String>,
         seq: Option<i64>,
     },
     Resize {
@@ -704,6 +721,9 @@ struct RawClient {
     query: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Named control keys (juancode-uigs).
+    #[serde(default)]
+    keys: Option<Vec<String>>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -782,6 +802,11 @@ impl ClientMessage {
             "input" => Ok(Self::Input {
                 session_id: need_session()?,
                 data: raw.data.ok_or("missing data")?,
+                seq: raw.seq,
+            }),
+            "key" => Ok(Self::Key {
+                session_id: need_session()?,
+                keys: raw.keys.ok_or("missing keys")?,
                 seq: raw.seq,
             }),
             "resize" => Ok(Self::Resize {
@@ -1645,6 +1670,28 @@ mod tests {
     }
 
     #[test]
+    fn a_key_frame_carries_a_batch_of_names_and_an_optional_seq() {
+        // Names on the wire, bytes nowhere near it (juancode-uigs): the resolution is
+        // this core's, so a client cannot spell an escape sequence of its own.
+        let with_seq = ClientMessage::decode(
+            r#"{"type":"key","sessionId":"s","keys":["Up","Enter"],"seq":4}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_seq,
+            ClientMessage::Key {
+                session_id: "s".into(),
+                keys: vec!["Up".into(), "Enter".into()],
+                seq: Some(4)
+            }
+        );
+        let without =
+            ClientMessage::decode(r#"{"type":"key","sessionId":"s","keys":["C-c"]}"#).unwrap();
+        assert!(matches!(without, ClientMessage::Key { seq: None, .. }));
+        assert!(ClientMessage::decode(r#"{"type":"key","sessionId":"s"}"#).is_err());
+    }
+
+    #[test]
     fn reactivate_is_its_own_message_not_an_attach() {
         // Decoding it as `attach` made `unresumable` unreachable: attach only reads,
         // and only a reactivate can be told there is nothing left to resume.
@@ -1729,6 +1776,10 @@ mod tests {
             // And for `sessionSearch`: falling through to `Unknown` would leave a
             // search box waiting forever on an answer nothing is coming for.
             r#"{"type":"searchSessions","query":"the reaper","requestId":"r"}"#,
+            // And for `namedKeys`: a phone Esc button that fell through to `Unknown`
+            // is a tap that does nothing, on the one surface where the alternative was
+            // typing the word "Escape" into the agent's prompt box.
+            r#"{"type":"key","sessionId":"s","keys":["Escape"]}"#,
         ] {
             assert!(
                 !matches!(
@@ -1796,6 +1847,7 @@ mod tests {
                     "sessionSearch",
                     "trackPrInSession",
                     "prWebhook",
+                    "namedKeys",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

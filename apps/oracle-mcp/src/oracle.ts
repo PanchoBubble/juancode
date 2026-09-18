@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { touchChatSession, upsertChatSession } from "./chat-store.ts";
+import { keyBytesFor, unknownKey, unknownKeyMessage } from "./keys.ts";
 
 /** `~/.juancode/oracle` (the Oracle control dir), overridable to match the Swift
  *  `JUANCODE_ORACLE_DIR` so both sides point at the same tree in tests. */
@@ -245,6 +246,73 @@ export async function deliverReply(sessionId: string, text: string): Promise<voi
             }
             resolve();
           }, 80);
+        }, 80);
+      } catch (e) {
+        clearTimeout(timer);
+        fail(e);
+      }
+    });
+  });
+}
+
+/**
+ * Send named control keys — Esc, Ctrl-C, an arrow — into a live session's pty
+ * (juancode-uigs). The half of remote steering {@link deliverReply} cannot do: it
+ * bracketed-pastes its text, and a paste is LITERAL by definition, so an Escape sent
+ * that way arrives as the word. Two things were unreachable from the phone because of
+ * it — interrupting a runaway agent, and answering a permission prompt, which claude
+ * drives with arrows + Enter.
+ *
+ * Names go on the wire, never bytes: the vocabulary belongs to the core, which
+ * resolves it (`key` frame, gated by the `namedKeys` capability). A core too old to
+ * know the frame gets the resolved bytes as a plain `input` instead — still raw, still
+ * never bracketed-pasted — so the phone's Esc button works whichever core is serving
+ * 4280 today. An unknown name is refused here, before the socket, because a name
+ * typed into an agent's prompt box as text is the failure this exists to end.
+ */
+export async function sendKeys(sessionId: string, keys: string[]): Promise<void> {
+  const names = keys.map((k) => k.trim()).filter((k) => k.length > 0);
+  if (names.length === 0) return;
+  const bad = unknownKey(names);
+  if (bad !== null) throw new Error(unknownKeyMessage(bad));
+  const url = nativeWsUrl();
+  await new Promise<void>((resolve, reject) => {
+    const sock = new WebSocket(url);
+    const fail = (e: unknown) => {
+      try {
+        sock.close();
+      } catch {
+        /* already closing */
+      }
+      reject(
+        e instanceof Error
+          ? e
+          : new Error(`Couldn't reach the juancode app at ${nativeApiBase()} — is it running?`),
+      );
+    };
+    const timer = setTimeout(() => fail(new Error("timed out reaching the native app")), 5000);
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      fail(e);
+    });
+    sock.on("message", (data) => {
+      const capabilities = serverInfoCapabilities(data.toString());
+      if (capabilities === null) return; // not the handshake; ignore the rest
+      try {
+        sock.send(
+          capabilities.includes("namedKeys")
+            ? JSON.stringify({ type: "key", sessionId, keys: names })
+            : JSON.stringify({ type: "input", sessionId, data: keyBytesFor(names) }),
+        );
+        // A tick to flush the write before the socket closes, as the other senders do.
+        setTimeout(() => {
+          clearTimeout(timer);
+          try {
+            sock.close();
+          } catch {
+            /* already closing */
+          }
+          resolve();
         }, 80);
       } catch (e) {
         clearTimeout(timer);
