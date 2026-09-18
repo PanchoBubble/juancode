@@ -49,3 +49,29 @@ public enum OracleChatRouting {
         return .spawnFresh
     }
 }
+
+/// What the Oracle chat surface shows.
+public enum OracleChatState: Equatable, Sendable {
+    /// A live pty to render.
+    case terminal
+    /// A spawn or revive is in flight — the dock is open and the agent is on its way.
+    case starting
+    /// Nothing running and nothing pending: offer the CTA (resuming this Oracle's
+    /// conversation, or starting a fresh one).
+    case start(resume: Bool)
+}
+
+extension OracleChatRouting {
+    /// The chat's surface, given the live session, any in-flight spawn/revive, and
+    /// whether the active Oracle has a conversation to resume.
+    ///
+    /// `starting` outranks the CTA: the dock opens on demand even with no agent up
+    /// yet, and flashing "Oracle agent isn't running" over a spawn that is already
+    /// running reads as a glitch — and invites a second spawn on top of the first.
+    public static func chatState(hasSession: Bool, starting: Bool,
+                                 canResume: Bool) -> OracleChatState {
+        if hasSession { return .terminal }
+        if starting { return .starting }
+        return .start(resume: canResume)
+    }
+}

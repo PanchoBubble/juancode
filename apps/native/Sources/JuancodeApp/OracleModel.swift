@@ -30,8 +30,80 @@ final class OracleModel {
     /// `AppModel` so it can treat the open dock as the viewer for Oracle's own
     /// (sidebar-hidden) sessions and clear/suppress their unread notifications.
     var expanded = false {
-        didSet { app.oracleDockExpanded = expanded }
+        didSet {
+            app.oracleDockExpanded = expanded
+            guard expanded != oldValue else { return }
+            slideStartedAt = .now()
+            // The drawer slides over live terminals, and the chat's own surface
+            // re-measures its grid as it comes back on screen. Mark the slide a
+            // layout transition so those grid pushes coalesce into one settle pass
+            // (`LayoutTransitionGate`) instead of a raw burst mid-animation.
+            LayoutTransitionGate.shared.begin(for: .milliseconds(PanelSettle.windowMs))
+        }
     }
+
+    /// When the drawer last started sliding. Work that can repaint the chat terminal
+    /// is held until `PanelSettle.windowMs` past it — see `afterDockSettles`.
+    @ObservationIgnored private var slideStartedAt: DispatchTime?
+    /// The single in-flight settle timer, and the work waiting on it.
+    @ObservationIgnored private var settleWork: Task<Void, Never>?
+    @ObservationIgnored private var pendingSettle: [@MainActor () -> Void] = []
+
+    /// How many agent spawns / revives are in flight. Drives `chatState`: while one
+    /// is running the chat shows "Starting Oracle…" rather than the start CTA, so
+    /// opening the dock over a booting agent doesn't flash a dead-end button.
+    private(set) var startingAgents = 0
+
+    /// What the chat renders: the live terminal, a spawn in flight, or the CTA.
+    var chatState: OracleChatState {
+        OracleChatRouting.chatState(hasSession: session != nil,
+                                    starting: startingAgents > 0,
+                                    canResume: canResumeActiveOracle)
+    }
+
+    /// Run `work` once the drawer has finished sliding, plus a quiet beat.
+    ///
+    /// Everything that disturbs the chat terminal goes through here — the bootstrap's
+    /// disk IO (on main), an agent spawn/revive (which repoints the pane, rebuilding
+    /// the surface and replaying scrollback), a rail selection, the issues fetch — so
+    /// the drawer animates in over an idle main thread instead of repainting the TUI
+    /// under a moving panel. The panel itself is never gated: `expanded` is set by the
+    /// caller first, so the dock opens on the keystroke even when the agent is still
+    /// loading.
+    ///
+    /// With no slide in flight it runs inline, so acting on an already-open dock (a
+    /// rail tap, a second ask) stays instant. Queued work all runs on one timer, and
+    /// a slide that starts while work is waiting pushes the deadline out rather than
+    /// letting it land mid-animation.
+    private func afterDockSettles(_ work: @escaping @MainActor () -> Void) {
+        guard PanelSettle.waitMs(sinceSlideStartMs: msSinceSlideStart()) > 0 else {
+            work()
+            return
+        }
+        pendingSettle.append(work)
+        guard settleWork == nil else { return }
+        settleWork = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                let wait = PanelSettle.waitMs(sinceSlideStartMs: self.msSinceSlideStart())
+                if wait <= 0 { break }
+                await Nap.ms(wait)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.settleWork = nil
+            let queued = self.pendingSettle
+            self.pendingSettle = []
+            for item in queued { item() }
+        }
+    }
+
+    /// Milliseconds since the drawer last started sliding, or nil if it never has.
+    private func msSinceSlideStart() -> Int? {
+        guard let started = slideStartedAt else { return nil }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now > started.uptimeNanoseconds else { return 0 }
+        return Int((now &- started.uptimeNanoseconds) / 1_000_000)
+    }
+
     /// Which dock tab is showing. Defaults to `.chat` so the Oracle conversation is
     /// the surface the app leads with (juancode-8n0) — chat is the primary window,
     /// not a transient afterthought.
@@ -115,12 +187,18 @@ final class OracleModel {
         }
         self.tab = tab
         expanded = true
-        bootstrap()
-        ensureAgentSession()
-        if tab == .issues { loadGlobalBeads() }
         // Opening straight onto the chat should land the cursor in the agent's input
         // (same as ⌃Space), so the focus handoff into Oracle is deterministic.
         focusChat()
+        // The panel is already opening; everything that would repaint the terminal
+        // under it waits for the slide (juancode: jumpy Oracle open).
+        afterDockSettles { [weak self] in
+            guard let self else { return }
+            self.bootstrap()
+            self.ensureAgentSession()
+            if tab == .issues { self.loadGlobalBeads() }
+            self.focusChat()
+        }
     }
 
     /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open; on close
@@ -128,9 +206,12 @@ final class OracleModel {
     func toggle() {
         if expanded { collapse(); return }
         expanded = true
-        bootstrap()
-        ensureAgentSession()
         focusChat()
+        afterDockSettles { [weak self] in
+            self?.bootstrap()
+            self?.ensureAgentSession()
+            self?.focusChat()
+        }
     }
 
     /// ⌃Space: open the Oracle on the chat tab with the input focused, so you can
@@ -143,9 +224,12 @@ final class OracleModel {
         }
         expanded = true
         tab = .chat
-        bootstrap()
-        ensureAgentSession()
         focusChat()
+        afterDockSettles { [weak self] in
+            self?.bootstrap()
+            self?.ensureAgentSession()
+            self?.focusChat()
+        }
     }
 
     /// Collapse the dock and hand keyboard focus straight back to the currently-open
@@ -229,8 +313,11 @@ final class OracleModel {
         didAutoPresentChat = true
         tab = .chat
         expanded = true
-        ensureAgentSession()
         focusChat()
+        afterDockSettles { [weak self] in
+            self?.ensureAgentSession()
+            self?.focusChat()
+        }
     }
 
     /// Bring the Oracle agent back up from the chat tab's "Start Oracle" button.
@@ -297,8 +384,11 @@ final class OracleModel {
     func newOracle(provider: ProviderId? = nil) {
         guard ready else { bootstrap(); return }
         tab = .chat
-        spawnAgent(provider: provider ?? oracleProvider)
-        focusChat()
+        afterDockSettles { [weak self] in
+            guard let self else { return }
+            self.spawnAgent(provider: provider ?? self.oracleProvider)
+            self.focusChat()
+        }
     }
 
     /// Expand the dock on the chat tab without `open(tab:)`'s toggle behavior — the
@@ -310,7 +400,10 @@ final class OracleModel {
         defer { focusChat() }
         guard !expanded else { return }
         expanded = true
-        bootstrap()
+        afterDockSettles { [weak self] in
+            self?.bootstrap()
+            self?.focusChat()
+        }
     }
 
     /// Switch the chat to an existing Oracle session (rail tap). No-op only when that
@@ -320,11 +413,17 @@ final class OracleModel {
     /// including when it's the one already showing, which an identity-only guard used
     /// to skip.
     func selectOracle(_ id: String) {
-        apply(OracleChatRouting.select(id, active: oracleSessionId,
-                                       isLive: app.liveSession(id) != nil))
-        // Tapping the row you're already on is still "put me in this Oracle": the
-        // routing decision is `.none`, but focus is sitting on the rail, so take it.
-        focusChat()
+        // Repointing the chat rebuilds the terminal surface, so on a rail tap that
+        // also opened the drawer it waits for the slide; with the dock already open
+        // `afterDockSettles` runs inline and the switch stays instant.
+        afterDockSettles { [weak self] in
+            guard let self else { return }
+            self.apply(OracleChatRouting.select(id, active: self.oracleSessionId,
+                                                isLive: self.app.liveSession(id) != nil))
+            // Tapping the row you're already on is still "put me in this Oracle": the
+            // routing decision is `.none`, but focus is sitting on the rail, so take it.
+            self.focusChat()
+        }
     }
 
     /// Carry out a routing decision: point the chat at the chosen Oracle and, when it
@@ -353,8 +452,9 @@ final class OracleModel {
     /// and re-tapping the row meanwhile must not start a second one.
     private func reviveOracle(_ id: String) {
         guard app.liveSession(id) == nil, reviving.insert(id).inserted else { return }
+        startingAgents += 1
         Task {
-            defer { reviving.remove(id) }
+            defer { reviving.remove(id); startingAgents -= 1 }
             // Resume into the dock's grid, not the wide main-window one, so the CLI
             // boots at the drawer width instead of wrapping into garbage.
             if await app.reactivate(id, grid: dockGrid) { return }
@@ -410,7 +510,12 @@ final class OracleModel {
     /// there's no seed prompt typed into the chat. `seed` is only non-empty on the ask
     /// path (`receiveAsk`), where the remote question is delivered as the first turn.
     private func spawnAgent(provider: ProviderId, seed: String = "") {
+        // Counted so the chat shows "Starting Oracle…" rather than the start CTA
+        // while the pty is coming up — a spawn costs real time here (fork+exec alone
+        // is ~250ms), and a CTA over a booting agent invites a second spawn.
+        startingAgents += 1
         Task {
+            defer { startingAgents -= 1 }
             // Accept-all so Oracle can run bd + manage its mailbox without prompts;
             // it operates only in its own control dir. Don't steal the selection.
             // Spawn sized to the Oracle drawer (not the main window) so the agent CLI's
@@ -432,6 +537,11 @@ final class OracleModel {
         expanded = true
         tab = .chat
         focusChat()
+        afterDockSettles { [weak self] in self?.deliverAsk(text) }
+    }
+
+    /// Hand the ask to the agent once the drawer has settled (see `receiveAsk`).
+    private func deliverAsk(_ text: String) {
         if let s = session {
             // Route through `submit` (bracketed paste + separate Enter), not a raw
             // `"\(text)\r"` burst — the latter makes the CLI read a multi-line ask

@@ -70,3 +70,28 @@ final class OracleChatRoutingTests: XCTestCase {
             .spawnFresh)
     }
 }
+
+// MARK: - chat surface
+
+extension OracleChatRoutingTests {
+    func testALivePtyAlwaysWins() {
+        XCTAssertEqual(OracleChatRouting.chatState(hasSession: true, starting: true, canResume: true),
+                       .terminal)
+    }
+
+    func testAnInFlightSpawnShowsStartingRatherThanTheCta() {
+        // Opening the dock over a booting agent used to flash "Oracle agent isn't
+        // running" until the pty came up — a dead-end button that would start a second.
+        XCTAssertEqual(OracleChatRouting.chatState(hasSession: false, starting: true, canResume: false),
+                       .starting)
+        XCTAssertEqual(OracleChatRouting.chatState(hasSession: false, starting: true, canResume: true),
+                       .starting)
+    }
+
+    func testNothingRunningOffersTheCtaAndSaysWhichOne() {
+        XCTAssertEqual(OracleChatRouting.chatState(hasSession: false, starting: false, canResume: true),
+                       .start(resume: true))
+        XCTAssertEqual(OracleChatRouting.chatState(hasSession: false, starting: false, canResume: false),
+                       .start(resume: false))
+    }
+}

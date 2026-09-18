@@ -74,7 +74,10 @@ struct OracleDock: View {
         // after reopening the dock. Flipping the entire overlay click-through the
         // instant it collapses makes the underlying app immediately clickable again.
         .allowsHitTesting(oracle.expanded)
-        .animation(.easeOut(duration: 0.16), value: oracle.expanded)
+        // Duration lives in `PanelSettle`: the model holds the terminal-disturbing
+        // work (spawns, bootstrap IO, chat repointing) for exactly this slide plus a
+        // quiet beat, so the two must not drift apart.
+        .animation(.easeOut(duration: Double(PanelSettle.slideMs) / 1000), value: oracle.expanded)
         // Open the app into the Oracle chat (juancode-8n0): chat is the main surface,
         // so the dock auto-presents on the chat tab at first launch. A one-shot inside
         // `presentChatAtLaunch`, so it won't re-open after the user closes it.
@@ -193,7 +196,10 @@ struct OracleDock: View {
         if let err = oracle.setupError {
             centered("Oracle unavailable:\n\(err)")
         } else if !oracle.ready {
-            centered("Setting up Oracle…")
+            // Same copy as the chat's own starting state: bootstrap and a spawn are
+            // both "the agent is on its way", and swapping between two wordings as
+            // one hands off to the other reads as a flicker.
+            centered("Starting Oracle…")
         } else {
             switch oracle.tab {
             case .issues: OracleIssuesView()
@@ -424,14 +430,24 @@ private struct OracleChatView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        } else if case let .start(resume) = oracle.chatState {
             VStack(spacing: 8) {
                 Spacer()
-                let resume = oracle.canResumeActiveOracle
                 Text(resume ? "This Oracle's agent isn't running." : "Oracle agent isn't running.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
                 Button(resume ? "Resume Oracle" : "Start Oracle") { oracle.startAgent() }
                     .controlSize(.small).clickCursor()
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            // A spawn/revive is in flight. The dock opens on demand whatever the agent
+            // is doing, so this is the state you land in when you open over a booting
+            // Oracle — a quiet placeholder, not a CTA that would start a second one.
+            VStack(spacing: 8) {
+                Spacer()
+                ProgressView().controlSize(.small)
+                Text("Starting Oracle…").font(.system(size: 12)).foregroundStyle(.secondary)
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -557,6 +573,7 @@ struct OracleGlobalRail: View {
         let hidden = all.count - shown.count
         return VStack(spacing: 0) {
             HStack(spacing: 5) {
+                Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
                 Text("Oracles")
                     .font(.system(size: 10, weight: .semibold))
                     .textCase(.uppercase).tracking(0.5)
@@ -721,7 +738,7 @@ struct OracleGlobalRail: View {
             activity: entry.activity,
             unread: model.unreadSessions.contains(meta.id),
             unseenDone: model.unseenCompletions.contains(meta.id),
-            asleep: model.isAsleep(meta.id),
+            asleep: model.isResting(meta.id),
             pinned: entry.pinned,
             onTogglePin: { model.togglePinned(meta.id) },
             // Reveal first: tapping a row with the drawer closed slides the chat in
@@ -771,7 +788,7 @@ private struct OracleRailRow: View {
     let unread: Bool
     /// It finished a turn while you were looking elsewhere — green check until viewed.
     let unseenDone: Bool
-    /// Auto-slept while idle to free memory (`AppModel.isAsleep`) — purple moon, and
+    /// Auto-slept while idle and still resting (`AppModel.isResting`) — purple moon, and
     /// the card only steps back instead of fading like an exited one.
     let asleep: Bool
     /// Pinned to the top of the rail — a pin ornament at rest, and the hover chip's

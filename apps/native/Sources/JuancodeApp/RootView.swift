@@ -192,15 +192,6 @@ private final class ContainingScrollView: NSScrollView {
                       height: min(max(contentHeight, 0), maxContentHeight))
     }
 
-    // Pinned, not just set once: AppKit forces `.legacy` when the system preference is
-    // "Show scroll bars: Always", and again on every preferredScrollerStyle change. A
-    // legacy scroller is inset into the clip view, which would reflow every row in the
-    // box ~15pt narrower than the rows outside it. Overlay means it floats over them.
-    override var scrollerStyle: NSScroller.Style {
-        get { .overlay }
-        set { super.scrollerStyle = .overlay }
-    }
-
     override func scrollWheel(with event: NSEvent) {
         guard let doc = documentView else { super.scrollWheel(with: event); return }
         let maxY = max(0, doc.frame.height - contentView.bounds.height)
@@ -238,9 +229,7 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
         scroll.documentView = hosting
         NSLayoutConstraint.activate([
             hosting.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            // Width from the scroll view, not the clip view: should a scroller ever be
-            // inset anyway, it covers the content instead of narrowing it.
-            hosting.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            hosting.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
             hosting.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
         ])
         context.coordinator.hosting = hosting
