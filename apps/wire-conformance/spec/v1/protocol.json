@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.15.0",
+  "specRevision": "1.16.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {

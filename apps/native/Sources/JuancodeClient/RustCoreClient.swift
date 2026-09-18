@@ -582,60 +582,50 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     /// Search every session this core holds, not only the ones this Mac has opened.
     ///
-    /// Two stores answer, and they have to. The mirror learns a session's bytes by
-    /// attaching to it over the socket, so on its own it indexes the title of every
-    /// session and the text of only the ones somebody clicked here: a dispatched
-    /// session, or any session older than the switch to this core, matched on its name
-    /// and nothing that was ever said in it (juancode-rz4c). The daemon holds the
-    /// history for all of them and answers from it. Neither side is a superset —
-    /// measured on the real pair on 2026-09-17, 857 sessions: the mirror had scrollback
-    /// for 508 and the daemon transcripts or bytes for 765, and 392 of the mirror's
-    /// were rows the daemon has no bytes for at all — so a search that asked only one
-    /// of them would lose the other's.
+    /// One store answers: the daemon's. It is the side that holds the history — every
+    /// session's transcript records and its own copy of the pty scrollback — where
+    /// this mirror only ever learns the bytes of a session somebody attached to here,
+    /// so a dispatched session, or any session older than the switch to this core,
+    /// matched on its name and nothing that was ever said in it (juancode-rz4c).
     ///
-    /// Ordered by recency across both, rather than the mirror's bm25 first and the
-    /// daemon's after: "which session was this about" is answered by the newest one
-    /// that mentions it, and interleaving two rankings would put every locally-opened
-    /// session above every dispatched one, which is the bias this whole method exists
-    /// to remove.
+    /// This used to merge the two, because neither was a superset. Measured on the
+    /// real pair on 2026-09-18, 882 sessions: the daemon answers for 797 (788 with
+    /// transcript records, 156 with scrollback bytes) and the mirror holds scrollback
+    /// for 520, of which 27 — 537 KB, every one of them a session that exited before
+    /// 2026-09-09 — are text the daemon has none of. That set is closed, not growing:
+    /// nothing since lands bytes here that the daemon does not also hold.
+    /// `juancoded import-swift ~/.juancode/data/juancode-rust.db` moves them across
+    /// and is the way to close it; it needs the daemon stopped, so it is a thing the
+    /// person does once rather than something this client can do behind them.
+    ///
+    /// The mirror is still the answer when the daemon has none to give: a core that
+    /// does not advertise `sessionSearch`, or one that did not answer in time. That is
+    /// a fallback, not a merge — when the daemon answers, its answer stands, including
+    /// when it is empty. Merging an empty one with the mirror's hits is how a search
+    /// for a word only this Mac's scrollback holds used to look like it worked.
     ///
     /// Blocking, because `CoreClient.searchSessions` is. Both callers already run it
     /// off the main actor — `AppModel.search` on a detached task, the proxy route on
-    /// the server's own — and a timeout degrades to the mirror's hits rather than
-    /// failing.
+    /// the server's own.
     public func searchSessions(_ query: String, limit: Int) -> [SearchHit] {
-        let local = mirror.search(query, limit: limit)
-        guard info.has(Self.sessionSearchCapability) else { return local }
-        let remote = daemonSearch(query, limit: limit)
-        guard !remote.isEmpty else { return local }
-
-        var snippets: [String: String] = [:]
-        var metas: [String: SessionMeta] = [:]
-        for hit in local {
-            metas[hit.meta.id] = hit.meta
-            snippets[hit.meta.id] = hit.snippet
+        guard info.has(Self.sessionSearchCapability) else {
+            return mirror.search(query, limit: limit)
         }
-        for hit in remote {
-            // The daemon's snippet wins where both matched: it is cut out of what was
-            // actually said, where the mirror's is cut out of raw pty bytes and comes
-            // back carrying whatever escape sequences were around the word.
-            if !hit.snippet.isEmpty { snippets[hit.sessionId] = hit.snippet }
-            if metas[hit.sessionId] == nil, let meta = mirror.get(hit.sessionId) {
-                metas[hit.sessionId] = meta
-            }
+        guard let remote = daemonSearch(query, limit: limit) else {
+            return mirror.search(query, limit: limit)
         }
         // A hit with no row is dropped rather than drawn: the backfill puts the
         // daemon's whole list in the mirror, so this is a session deleted between the
         // search and its answer.
-        return metas.values
-            .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
-            .prefix(limit)
-            .map { SearchHit(meta: $0, snippet: snippets[$0.id] ?? "") }
+        return remote.compactMap { hit in
+            mirror.get(hit.sessionId).map { SearchHit(meta: $0, snippet: hit.snippet) }
+        }
     }
 
-    /// Ask the daemon, and wait. An empty answer and a timeout are the same value on
-    /// purpose: both mean "nothing to add to the mirror's hits".
-    private func daemonSearch(_ query: String, limit: Int) -> [(sessionId: String, snippet: String)] {
+    /// Ask the daemon, and wait. `nil` is a timeout — the one case that falls back to
+    /// the mirror. An empty array is an answer, and means the daemon looked and found
+    /// nothing.
+    private func daemonSearch(_ query: String, limit: Int) -> [(sessionId: String, snippet: String)]? {
         let waiter = SearchWaiter()
         let requestId = lock.withLock { () -> String in
             let id = "search-\(nextSearchId)"
@@ -649,10 +639,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         lock.withLock { searchWaiters[requestId] = nil }
         if hits == nil {
             NSLog("juancode: the \(backendName) core did not answer a search within "
-                  + "\(Int(Self.searchTimeout))s; the sessions this Mac has not opened "
-                  + "are matched on their titles only")
+                  + "\(Int(Self.searchTimeout))s; falling back to the sessions this "
+                  + "Mac has opened")
         }
-        return hits ?? []
+        return hits
     }
 
     /// Nothing, deliberately: on this core the cap is the daemon's, and a client that
@@ -1224,7 +1214,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if let scrollback {
             mirror.update(meta, scrollback: scrollback)
         } else {
-            mirror.updateMeta(meta, reindexTitleFts: true)
+            mirror.updateMeta(meta)
         }
     }
 
@@ -1285,7 +1275,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 row.status = .exited
                 row.exitCode = code
                 row.updatedAt = nowMs()
-                mirror.updateMeta(row, reindexTitleFts: false)
+                mirror.updateMeta(row)
             }
 
         case "resizeAck":
@@ -1592,7 +1582,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if mirror.get(meta.id) == nil {
             mirror.insert(meta)
         } else {
-            mirror.updateMeta(meta, reindexTitleFts: true)
+            mirror.updateMeta(meta)
         }
         if !isNew { handle.apply(meta: meta) }
         if isNew { for l in listeners { l(handle) } }
@@ -1626,7 +1616,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // a reconnect costs reads and no writes. Each write here is its own
             // transaction, and a few hundred needless ones is a visible boot pause.
             guard existing != meta else { continue }
-            mirror.updateMeta(meta, reindexTitleFts: existing.title != meta.title)
+            mirror.updateMeta(meta)
             updated += 1
         }
         let live = lock.withLock { Set(handles.keys) }

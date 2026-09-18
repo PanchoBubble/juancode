@@ -1496,7 +1496,7 @@ public final class Session: @unchecked Sendable {
         // row from the reader thread. A deferred write would race that, and since the
         // meta path rewrites the whole row, the loser resurrects `status = .running`
         // with a nil exit code over a session whose pty is already gone.
-        if persistEnabled { env.store.updateMeta(meta, reindexTitleFts: false) }
+        if persistEnabled { env.store.updateMeta(meta) }
         emitMetaChange(meta)
     }
 
@@ -1698,7 +1698,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: true) }
+        if changed { persistMeta() }
     }
 
     /// Archive / unarchive the live session and persist the flag.
@@ -1708,18 +1708,12 @@ public final class Session: @unchecked Sendable {
             _meta.archived = archived
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     /// Adopt an OSC 0/2 window title the CLI set (via `terminalModel.onTitleChange`)
     /// as the session title, unless the user pinned a manual name. Once one lands,
     /// the transcript poll stops writing the title (see `titleFromOsc`).
-    ///
-    /// Deliberately does NOT reindex the FTS title: a CLI repaints its window title
-    /// many times per turn, and `reindexTitleFts` re-reads the stored scrollback and
-    /// re-tokenizes the whole ring — per repaint. Search picks the new title up on the
-    /// next full flush (the busy->idle edge / exit), exactly as scrollback already
-    /// does. A manual rename still reindexes immediately (juancode-c438).
     private func adoptOscTitle(_ raw: String) {
         let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
@@ -1730,7 +1724,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     /// Read the CLI's generated title (or first prompt) and persist if changed.
@@ -1746,7 +1740,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: true) }
+        if changed { persistMeta() }
     }
 
     /// Read the CLI transcript's token usage and persist if it changed.
@@ -1762,7 +1756,7 @@ public final class Session: @unchecked Sendable {
             _meta.usage = usage
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     // MARK: - post-spawn cli id discovery + persistence
@@ -1847,10 +1841,9 @@ public final class Session: @unchecked Sendable {
     }
 
     /// Persist a metadata edit (title/usage/archive/dormant) via the meta-only write
-    /// path so it doesn't rewrite the scrollback column or re-tokenize its FTS row
-    /// (juancode-5qw.1). `titleChanged` reindexes the FTS title (reusing the stored
-    /// scrollback). Always notifies — a meta edit moves the sidebar.
-    private func persistMeta(titleChanged: Bool) {
+    /// path so it doesn't rewrite the scrollback column (juancode-5qw.1). Always
+    /// notifies — a meta edit moves the sidebar.
+    private func persistMeta() {
         let meta = lock.withLock { () -> SessionMeta in
             _meta.updatedAt = nowMs()
             return _meta
@@ -1868,15 +1861,14 @@ public final class Session: @unchecked Sendable {
                 // the whole row, so an edit that queued before the session exited and
                 // ran after it would put `status = .running` back on a dead session.
                 // Latest-wins is the only safe rule for a full-row write.
-                self.env.store.updateMeta(self.lock.withLock { self._meta },
-                                          reindexTitleFts: titleChanged)
+                self.env.store.updateMeta(self.lock.withLock { self._meta })
             }
         }
         emitMetaChange(meta)
     }
 
-    /// Full persist: metadata + scrollback + FTS reindex — the heavy write, reserved
-    /// for the busy->idle edge and exit, where search needs to catch up. Pass
+    /// Full persist: metadata + scrollback — the heavy write, reserved for the
+    /// busy->idle edge and exit, where search needs to catch up. Pass
     /// `notify: true` to rebuild the sidebar.
     ///
     /// Called on `persistQueue` for the turn boundary (via `enqueuePersist`) and

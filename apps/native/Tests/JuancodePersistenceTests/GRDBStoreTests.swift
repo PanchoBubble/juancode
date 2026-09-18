@@ -152,7 +152,7 @@ final class GRDBStoreTests: XCTestCase {
         store.insert(m)
         XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
         m.title = "renamed"
-        store.updateMeta(m, reindexTitleFts: false)
+        store.updateMeta(m)
         XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
 
         store.insert(meta("interactive"))
@@ -222,7 +222,7 @@ final class GRDBStoreTests: XCTestCase {
 
     // MARK: - rename + archive (juancode-211)
 
-    func testSetTitlePersistsAndSyncsFts() {
+    func testSetTitlePersistsAndStaysSearchable() {
         let m = meta("r1", title: "original")
         store.insert(m)
         store.update(m, scrollback: Array("haystack needle".utf8))
@@ -231,7 +231,7 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.get("r1")?.title, "Renamed widget")
         // Scrollback untouched by a rename.
         XCTAssertEqual(store.getScrollback("r1"), Array("haystack needle".utf8))
-        // FTS reflects the new title and still indexes the scrollback.
+        // Search reflects the new title and still reaches the scrollback.
         XCTAssertEqual(store.search("widget", limit: 10).map(\.meta.id), ["r1"])
         XCTAssertEqual(store.search("needle", limit: 10).map(\.meta.id), ["r1"])
         XCTAssertTrue(store.search("original", limit: 10).isEmpty)
@@ -270,7 +270,7 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(reopened.get("a3")?.archived, true)
     }
 
-    // MARK: - delta scrollback persistence + throttled FTS (juancode-5qw.1)
+    // MARK: - delta scrollback persistence (juancode-5qw.1)
 
     /// A meta-only update (title / usage / flags) must NOT rewrite the scrollback
     /// column — that's the whole point of splitting the write paths.
@@ -282,7 +282,7 @@ final class GRDBStoreTests: XCTestCase {
 
         m.title = "after"
         m.status = .exited
-        store.updateMeta(m, reindexTitleFts: false)
+        store.updateMeta(m)
 
         XCTAssertEqual(store.get("mo1")?.title, "after")
         XCTAssertEqual(store.get("mo1")?.status, .exited)
@@ -290,50 +290,46 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.getScrollback("mo1"), scroll)
     }
 
-    /// Without `reindexTitleFts`, a meta update doesn't touch FTS at all: an old
-    /// title still matches and a renamed one is only searchable once reindexed.
-    func testUpdateMetaSkipsFtsUnlessTitleReindexRequested() {
+    /// A rename is searchable the moment it is written. There is no index to fall
+    /// behind any more: search reads the `sessions` row itself, so the old title stops
+    /// matching and the new one starts on the same write.
+    func testUpdateMetaMakesARenameSearchableImmediately() {
         let m = meta("mo2", title: "alpha")
         store.insert(m)
         store.update(m, scrollback: Array("body text".utf8))
 
         var renamed = m
         renamed.title = "bravo"
-        store.updateMeta(renamed, reindexTitleFts: false)
-        // FTS still holds the pre-rename title; new title not indexed yet.
-        XCTAssertEqual(store.search("alpha", limit: 10).map(\.meta.id), ["mo2"])
-        XCTAssertTrue(store.search("bravo", limit: 10).isEmpty)
-
-        store.updateMeta(renamed, reindexTitleFts: true)
+        store.updateMeta(renamed)
         XCTAssertEqual(store.search("bravo", limit: 10).map(\.meta.id), ["mo2"])
         XCTAssertTrue(store.search("alpha", limit: 10).isEmpty)
-        // Scrollback stayed searchable across both meta updates.
+        // Scrollback stayed searchable across the meta update.
         XCTAssertEqual(store.search("body", limit: 10).map(\.meta.id), ["mo2"])
     }
 
-    /// The crash-safety flush writes the scrollback column + `updated_at` but does
-    /// NOT reindex FTS — search of a running session catches up on the idle edge.
-    func testUpdateScrollbackPersistsBytesButDefersFts() {
+    /// The crash-safety flush writes the scrollback column + `updated_at`, nothing
+    /// else — and because search reads that column rather than a separate index, the
+    /// bytes it wrote are findable at once. That is what dropping the fts5 table
+    /// bought: a running session used to be unsearchable until its idle edge, since
+    /// reindexing on every flush was the write-queue cost 5bwj measured.
+    func testUpdateScrollbackPersistsBytesAndIsSearchableAtOnce() {
         let m = meta("ss1", title: "running", createdAt: 1000)
         store.insert(m)
 
         store.updateScrollback("ss1", scrollback: Array("needle in the stream".utf8), updatedAt: 5000)
         XCTAssertEqual(store.getScrollback("ss1"), Array("needle in the stream".utf8))
         XCTAssertEqual(store.get("ss1")?.updatedAt, 5000)
-        // Not yet searchable — FTS wasn't reindexed.
-        XCTAssertTrue(store.search("needle", limit: 10).isEmpty)
+        XCTAssertEqual(store.search("needle", limit: 10).map(\.meta.id), ["ss1"])
     }
 
-    /// The busy->idle edge / exit path (`update`) reindexes FTS, so search finds the
-    /// session's content after it exits — the acceptance criterion.
-    func testFullUpdateReindexesFtsSoSearchFindsContentAfterExit() {
+    /// The busy->idle edge / exit path (`update`) writes the final scrollback, so
+    /// search finds the session's content after it exits — the acceptance criterion.
+    func testFullUpdatePersistsFinalContentForSearchAfterExit() {
         var m = meta("ex1", title: "task", status: .running)
         store.insert(m)
-        // Simulate the running-session crash-safety flushes (no FTS).
         store.updateScrollback("ex1", scrollback: Array("partial".utf8), updatedAt: 100)
         XCTAssertTrue(store.search("distinctive", limit: 10).isEmpty)
 
-        // Exit: full flush with the final scrollback → FTS caught up.
         m.status = .exited
         m.exitCode = 0
         store.update(m, scrollback: Array("a distinctive final line".utf8))
@@ -341,7 +337,47 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.search("distinctive", limit: 10).map(\.meta.id), ["ex1"])
     }
 
-    // MARK: - search (FTS5)
+    // MARK: - the fts5 index is gone (juancode-52e8.14.4)
+
+    /// Opening a file that still has the fts5 index drops it and its four shadow
+    /// tables, and the history it was built over is untouched. A real mirror carried
+    /// 105 MB of scrollback in `sessions` and the same 105 MB again in
+    /// `sessions_fts_content` — 53% of a 255 MB file was the duplicate and its index
+    /// (juancode-5bwj, re-measured 2026-09-18).
+    func testOpeningAnOldFileDropsTheFtsIndexAndKeepsTheHistory() throws {
+        let m = meta("f1", title: "a title")
+        store.insert(m)
+        store.update(m, scrollback: Array("a distinctive word".utf8))
+        // Put the old index back, exactly as a pre-migration file has it.
+        try store.rawWriteForTesting("""
+            CREATE VIRTUAL TABLE sessions_fts USING fts5(session_id UNINDEXED, title, scrollback);
+            INSERT INTO sessions_fts (session_id, title, scrollback)
+            SELECT id, title, scrollback FROM sessions;
+            """)
+        XCTAssertFalse(try shadowTables().isEmpty, "the fixture has to actually create them")
+        store = nil
+
+        store = try GRDBStore(path: path)
+        XCTAssertEqual(try shadowTables(), [], "the drop takes the shadow tables with it")
+        XCTAssertEqual(store.getScrollback("f1"), Array("a distinctive word".utf8))
+        XCTAssertEqual(store.search("distinctive", limit: 10).map(\.meta.id), ["f1"])
+    }
+
+    /// And a file that never had it opens without trying to drop anything.
+    func testASecondOpenHasNothingLeftToDrop() throws {
+        store.insert(meta("f2"))
+        store = nil
+        store = try GRDBStore(path: path)
+        XCTAssertEqual(try shadowTables(), [])
+        XCTAssertNotNil(store.get("f2"))
+    }
+
+    private func shadowTables() throws -> [String] {
+        try store.rawQueryForTesting(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'sessions_fts%' ORDER BY name")
+    }
+
+    // MARK: - search
 
     func testSearchMatchesTitleAndScrollback() {
         let a = meta("a", title: "Refactor the parser")
@@ -357,25 +393,39 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertFalse(hits.first { $0.meta.id == "b" }!.snippet.isEmpty)
     }
 
-    func testSearchPrefixAndAnd() {
+    /// Substring, not fts5's token-prefix: a query matches where it appears
+    /// literally, so an infix finds the word and two words must be adjacent.
+    func testSearchIsASubstringMatch() {
         let a = meta("a", title: "deploy pipeline broken")
         store.insert(a)
         store.update(a, scrollback: [])
-        // prefix match: "pipe" -> "pipeline"; AND of both tokens
         XCTAssertEqual(store.search("deploy pipe", limit: 10).map(\.meta.id), ["a"])
+        XCTAssertEqual(store.search("ipelin", limit: 10).map(\.meta.id), ["a"])
         XCTAssertTrue(store.search("deploy missing", limit: 10).isEmpty)
+        XCTAssertTrue(store.search("deploy broken", limit: 10).isEmpty)
+    }
+
+    /// A `%` or `_` in the query is a character somebody typed, not a wildcard.
+    func testSearchTreatsLikeWildcardsAsLiterals() {
+        store.insert(meta("a", title: "done 100% of it"))
+        store.insert(meta("b", title: "nothing like that"))
+        XCTAssertEqual(store.search("100%", limit: 10).map(\.meta.id), ["a"])
+        XCTAssertTrue(store.search("100%%%", limit: 10).isEmpty)
+        XCTAssertTrue(store.search("n_thing", limit: 10).isEmpty)
+    }
+
+    /// Newest first, where fts5 ranked by bm25. The daemon answers in this order too,
+    /// so a fallback result list is not sorted differently from a real one.
+    func testSearchOrdersByRecency() {
+        store.insert(meta("old", title: "the parser", createdAt: 1))
+        store.insert(meta("new", title: "the parser again", createdAt: 9))
+        XCTAssertEqual(store.search("parser", limit: 10).map(\.meta.id), ["new", "old"])
+        XCTAssertEqual(store.search("parser", limit: 1).map(\.meta.id), ["new"])
     }
 
     func testSearchBlankReturnsEmpty() {
         store.insert(meta("a", title: "x"))
         XCTAssertTrue(store.search("   ", limit: 10).isEmpty)
-    }
-
-    func testToFtsMatchEscapesQuotes() {
-        XCTAssertEqual(GRDBStore.toFtsMatch("foo bar"), "\"foo\"* AND \"bar\"*")
-        XCTAssertEqual(GRDBStore.toFtsMatch("  spaced   out "), "\"spaced\"* AND \"out\"*")
-        XCTAssertEqual(GRDBStore.toFtsMatch("a\"b"), "\"a\"\"b\"*")
-        XCTAssertEqual(GRDBStore.toFtsMatch("   "), "")
     }
 
     func testSearchToleratesStrayOperators() {
@@ -524,7 +574,6 @@ final class GRDBStoreTests: XCTestCase {
         // Threshold 0 forces the VACUUM so the test is deterministic.
         let report = try store.performMaintenance(vacuumIfFreelistPagesExceeds: 0)
         XCTAssertTrue(report.vacuumed)
-        XCTAssertTrue(report.optimizedFts)
         XCTAssertGreaterThan(report.pageCountAfter, 0)
 
         // Surviving rows and their search index are intact after the rewrite.
@@ -538,6 +587,5 @@ final class GRDBStoreTests: XCTestCase {
         // A fresh db has almost nothing on the freelist, so a high threshold no-ops.
         let report = try store.performMaintenance(vacuumIfFreelistPagesExceeds: 1_000_000)
         XCTAssertFalse(report.vacuumed)
-        XCTAssertTrue(report.optimizedFts)
     }
 }

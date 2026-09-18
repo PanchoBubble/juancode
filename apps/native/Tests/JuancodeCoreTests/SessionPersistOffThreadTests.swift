@@ -26,8 +26,8 @@ import Testing
             lock.withLock { fullLabels.append(Self.currentQueueLabel()) }
             backing.update(meta, scrollback: scrollback)
         }
-        func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
-            backing.updateMeta(meta, reindexTitleFts: reindexTitleFts)
+        func updateMeta(_ meta: SessionMeta) {
+            backing.updateMeta(meta)
         }
         func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int) {
             lock.withLock { scrollbackLabels.append(Self.currentQueueLabel()) }

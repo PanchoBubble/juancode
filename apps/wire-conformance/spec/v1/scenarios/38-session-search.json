@@ -1,7 +1,7 @@
 {
   "id": "session-search",
   "title": "a core that holds the history is the one that answers what is in it",
-  "asserts": "a core that advertises `sessionSearch` answers `searchSessions` from its own store, over the whole history rather than over whatever a client happens to have seen. That is the half no client index can supply: a desktop mirror learns a session's bytes by attaching to it, so searching there matched the title of every session and the text of only the ones that Mac had opened - 508 of 857 sessions on the real pair against the 772 the daemon can answer for, measured 2026-09-17 (juancode-rz4c). The corpus is what was SAID: this drives a turn into the CLI's own transcript, never attaches a second client to it, and then asks a connection that has seen none of it. The `requestId` comes back unchanged, because a search box has a frame per keystroke in flight and the answers are not ordered.",
+  "asserts": "a core that advertises `sessionSearch` answers `searchSessions` from its own store, over the whole history rather than over whatever a client happens to have seen. That is the half no client index can supply: a desktop mirror learns a session's bytes by attaching to it, so searching there matched the title of every session and the text of only the ones that Mac had opened - 508 of 857 sessions on the real pair against the 772 the daemon can answer for, measured 2026-09-17 (juancode-rz4c). The corpus is what was SAID: this drives a turn into the CLI's own transcript, never attaches a second client to it, and then asks a connection that has seen none of it. Both planes of a session's history count, and they are different stores: what was said lands in the CLI's own transcript, what was PRINTED lands in the pty scrollback the core keeps its own copy of. A core that searched only one of them would miss the sessions that have only the other - measured on the real daemon 2026-09-18, 788 sessions have transcript records and 156 have scrollback bytes, and neither set contains the other. So this scenario says one word into each plane and asks for both. The `requestId` comes back unchanged, because a search box has a frame per keystroke in flight and the answers are not ordered.",
   "capabilities": [
     "sessionSearch",
     "transcript"
@@ -42,6 +42,14 @@
         "type": "attached",
         "sessionId": "$session"
       }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO vestigial-parakeet\r"
+      },
+      "note": "the other plane: this word is only ever pty bytes, so the only place it can be found is the scrollback the core persists for itself"
     },
     {
       "send": {
@@ -93,6 +101,29 @@
       "on": "b",
       "timeoutMs": 15000,
       "note": "a session b never saw created, found by a word only its transcript holds"
+    },
+    {
+      "send": {
+        "type": "searchSessions",
+        "query": "vestigial-parakeet",
+        "limit": 10,
+        "requestId": "conformance-search-scrollback"
+      },
+      "on": "b",
+      "note": "a word that never reached a transcript record, only the screen; a core whose corpus is transcripts alone answers nothing here"
+    },
+    {
+      "expect": {
+        "type": "searchResults",
+        "requestId": "conformance-search-scrollback",
+        "hits": {
+          "$some": {
+            "sessionId": "$session"
+          }
+        }
+      },
+      "on": "b",
+      "timeoutMs": 15000
     },
     {
       "send": {

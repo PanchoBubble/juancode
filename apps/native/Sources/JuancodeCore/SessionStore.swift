@@ -5,24 +5,18 @@ import Foundation
 /// GRDB/SQLite store lands in u34.5 behind this same protocol.
 public protocol SessionStore: AnyObject, Sendable {
     func insert(_ meta: SessionMeta)
-    /// Full write: metadata columns + scrollback + FTS reindex. The heavy path, so
-    /// callers reserve it for moments that need fresh search (busy->idle edge, exit,
-    /// resume/seed). Use `updateMeta` / `updateScrollback` for the hot paths.
+    /// Full write: metadata columns + scrollback. The heavy path, so callers reserve
+    /// it for moments that need fresh search (busy->idle edge, exit, resume/seed).
+    /// Use `updateMeta` / `updateScrollback` for the hot paths.
     func update(_ meta: SessionMeta, scrollback: [UInt8])
     /// Persist a metadata edit (title / usage / status / flags) WITHOUT rewriting the
-    /// (potentially 256KiB) scrollback column (juancode-5qw.1). Pass
-    /// `reindexTitleFts: true` when the title changed so search reflects the rename;
-    /// the reindex reuses the already-stored scrollback text, never re-serializing
-    /// the live ring.
-    func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool)
+    /// (potentially 256KiB) scrollback column (juancode-5qw.1).
+    func updateMeta(_ meta: SessionMeta)
     /// Persist scrollback only — the periodic crash-safety flush of a running
-    /// session. Skips the metadata columns and, deliberately, the FTS reindex: a busy
-    /// session's searchable scrollback is refreshed on the busy->idle edge / exit via
-    /// `update` (its live output is already visible, so second-fresh search of a
-    /// running session isn't needed).
+    /// session. Skips the metadata columns.
     func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int)
     func setCliSessionId(_ id: String, cliSessionId: String)
-    /// Rename a session: persist a new title (also refreshes the FTS index).
+    /// Rename a session: persist a new title.
     func setTitle(_ id: String, title: String)
     /// Archive / unarchive a session: hides it from the default sidebar list
     /// while keeping its row + scrollback intact.
@@ -117,9 +111,8 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         }
     }
 
-    public func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
-        // Scrollback map left untouched; the naive search reads titles live so the
-        // `reindexTitleFts` hint is a no-op here.
+    public func updateMeta(_ meta: SessionMeta) {
+        // Scrollback map left untouched; the naive search reads titles live.
         lock.withLock { metas[meta.id] = meta }
     }
 

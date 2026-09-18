@@ -1,13 +1,12 @@
 import SwiftUI
 import JuancodeCore
-import JuancodeServices
 
-/// Full-text search over persisted session transcripts — the native analogue of
-/// the web `SearchPanel.tsx`. Distinct from the sidebar's session-name filter:
-/// this queries scrollback (titles + transcript text) via the in-process FTS
-/// store, debounces the query, lists matching sessions with a highlighted
-/// snippet, and selects the matched session on click. Presented as a sheet from
-/// the sidebar toolbar's magnifying-glass button.
+/// Search over persisted session history — the native analogue of the web
+/// `SearchPanel.tsx`. Distinct from the sidebar's session-name filter: this asks
+/// the core what its whole history mentions (the daemon's own store on the Rust
+/// core, the local one on the Swift core), debounces the query, lists matching
+/// sessions with a highlighted snippet, and selects the matched session on click.
+/// Presented as a sheet from the sidebar toolbar's magnifying-glass button.
 struct SearchPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss

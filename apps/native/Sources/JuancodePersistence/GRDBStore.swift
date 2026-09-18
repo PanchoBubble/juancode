@@ -5,8 +5,8 @@ import JuancodeCore
 /// SQLite-backed `PersistentStore` (juancode-u34.5), a faithful port of
 /// `apps/server/src/db.ts` onto GRDB. Persists session metadata + capped
 /// scrollback, GitHub-PR-style inline diff comments, cached 'Review with Claude'
-/// results, and an FTS5 full-text index over session titles + scrollback so
-/// history (and search) survive app restarts.
+/// results, and a title/scrollback scan behind `search` so history (and search)
+/// survive app restarts.
 ///
 /// Schema-compatible with the Node `juancode.db`: scrollback is stored as TEXT
 /// (a lossy UTF-8 decode of the raw pty bytes) so the same data dir is readable
@@ -47,7 +47,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
     // MARK: - schema + migrations
 
     private func migrate() throws {
-        try dbQueue.write { db in
+        let droppedFts = try dbQueue.write { db -> Bool in
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS sessions (
                     id               TEXT PRIMARY KEY,
@@ -174,24 +174,47 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                 CREATE INDEX IF NOT EXISTS idx_message_queue_session ON message_queue(session_id);
                 """)
 
-            // Contentless FTS5 mirror of sessions(title, scrollback), keyed by id.
-            try db.execute(sql: """
-                CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
-                    session_id UNINDEXED,
-                    title,
-                    scrollback
-                );
-                """)
-
-            // Backfill the FTS index the first time it's empty (older db / rebuild).
-            let ftsCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sessions_fts") ?? 0
-            if ftsCount == 0 {
-                try db.execute(sql: """
-                    INSERT INTO sessions_fts (session_id, title, scrollback)
-                    SELECT id, title, scrollback FROM sessions
-                    """)
-            }
+            return try Self.dropTheFtsIndex(db)
         }
+        // Outside the migration's transaction, because VACUUM cannot run inside one.
+        if droppedFts {
+            try? dbQueue.writeWithoutTransaction { db in try db.execute(sql: "VACUUM") }
+        }
+    }
+
+    /// Drop the fts5 index over `sessions(title, scrollback)`, and give the file back.
+    ///
+    /// The index was a second copy of every scrollback (juancode-5bwj). Measured on
+    /// the real mirror on 2026-09-18: a 255 MB file holding 105 MB of scrollback in
+    /// `sessions`, the same 105 MB again in `sessions_fts_content`, and 30 MB of
+    /// index — 53% of the file was the duplicate and its index. Writing it was the
+    /// other half of the cost: 325 of 392 write-queue samples in 5bwj were inside
+    /// `syncFts`, tokenizing a ring that had just been tokenized.
+    ///
+    /// Not replaced with an external-content fts5, which would have fixed the
+    /// duplicate and kept the index. Search on this store is a fallback now — the
+    /// daemon holds every session's history and answers `searchSessions` from it
+    /// (juancode-rz4c), and this file only ever sees the bytes of sessions this Mac
+    /// attached to — so it is not worth an index at all, and `search` below scans.
+    ///
+    /// `DROP TABLE` on the virtual table takes its four shadow tables with it, and the
+    /// VACUUM the caller then runs is what actually gives the pages back — without it
+    /// the file keeps every one of them on the freelist, since `performMaintenance`
+    /// only vacuums past a threshold. Returning whether anything was dropped is how
+    /// that VACUUM stays a once-per-file cost instead of a once-per-launch one.
+    ///
+    /// Measured on a copy of the real mirror, 2026-09-18: 267.4 MB to 117.0 MB, 0.9s
+    /// to drop and 1.9s to vacuum, with all 882 sessions and all 110.6 MB of their
+    /// scrollback still there. That ~3s lands on the first launch after this ships,
+    /// once, inside the open — which is where the schema already is.
+    private static func dropTheFtsIndex(_ db: Database) throws -> Bool {
+        let present = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions_fts'"
+        ) ?? 0
+        guard present > 0 else { return false }
+        try db.execute(sql: "DROP TABLE sessions_fts")
+        return true
     }
 
     // MARK: - maintenance (juancode-hv06)
@@ -204,20 +227,20 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         public var pageCountAfter: Int
         /// Whether a VACUUM actually ran (it only does past the threshold).
         public var vacuumed: Bool
-        /// Whether the FTS index was compacted.
-        public var optimizedFts: Bool
     }
 
-    /// Compact the database: merge the FTS index's b-tree segments and, if enough
-    /// pages are sitting on the freelist, rewrite the file to give the space back.
+    /// Compact the database: if enough pages are sitting on the freelist, rewrite the
+    /// file to give the space back.
     ///
     /// Deletes (the per-project retention cap, `enforceSessionCap`) return pages to
-    /// SQLite's freelist but never to the filesystem, and fts5 deletes leave tombstone
-    /// entries that slow every subsequent query and merge — nothing in the app had ever
-    /// reclaimed either. Measured on a real db: 445 MB total, ~24 MB of it freelist.
+    /// SQLite's freelist but never to the filesystem, and nothing in the app had ever
+    /// reclaimed them. Measured on a real db: 445 MB total, ~24 MB of it freelist.
     ///
-    /// Both statements are slow (seconds, on a large file) and take a write lock, so
-    /// this belongs on a background queue at launch — never on a path a frame waits on.
+    /// It used to compact the fts5 index here too; there is no index to compact since
+    /// that table was dropped, and the one VACUUM its removal needs runs in `migrate`.
+    ///
+    /// VACUUM is slow (seconds, on a large file) and takes a write lock, so this
+    /// belongs on a background queue at launch — never on a path a frame waits on.
     /// `vacuumIfFreelistPagesExceeds` keeps a routine launch from rewriting the whole
     /// file for a few stray pages.
     @discardableResult
@@ -225,12 +248,6 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         // VACUUM cannot run inside a transaction, so this deliberately avoids `write`.
         try dbQueue.writeWithoutTransaction { db in
             let freelist = try Int.fetchOne(db, sql: "PRAGMA freelist_count") ?? 0
-
-            var optimized = false
-            // 'optimize' is a no-op-ish merge when the index is already tidy.
-            if (try? db.execute(sql: "INSERT INTO sessions_fts (sessions_fts) VALUES ('optimize')")) != nil {
-                optimized = true
-            }
 
             var vacuumed = false
             if freelist > threshold {
@@ -240,7 +257,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
 
             let pages = try Int.fetchOne(db, sql: "PRAGMA page_count") ?? 0
             return MaintenanceReport(freelistPagesBefore: freelist, pageCountAfter: pages,
-                                     vacuumed: vacuumed, optimizedFts: optimized)
+                                     vacuumed: vacuumed)
         }
     }
 
@@ -276,18 +293,9 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// Lossy UTF-8 view of raw scrollback bytes, for the TEXT column + FTS.
+    /// Lossy UTF-8 view of raw scrollback bytes, for the TEXT column.
     private static func scrollbackText(_ bytes: [UInt8]) -> String {
         String(decoding: bytes, as: UTF8.self)
-    }
-
-    // FTS is contentless, so a row "update" is delete-then-insert.
-    private func syncFts(_ db: Database, id: String, title: String, scrollback: String) throws {
-        try db.execute(sql: "DELETE FROM sessions_fts WHERE session_id = ?", arguments: [id])
-        try db.execute(
-            sql: "INSERT INTO sessions_fts (session_id, title, scrollback) VALUES (?, ?, ?)",
-            arguments: [id, title, scrollback]
-        )
     }
 
     // MARK: - SessionStore (write-path)
@@ -304,7 +312,6 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
                     meta.dormant ? 1 : 0, meta.dispatchId, meta.createdAt, meta.updatedAt,
                 ])
-            try syncFts(db, id: meta.id, title: meta.title, scrollback: "")
         }
     }
 
@@ -321,15 +328,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
                     meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
                 ])
-            try syncFts(db, id: meta.id, title: meta.title, scrollback: text)
         }
     }
 
     /// Persist a metadata edit without rewriting the (up to 256KiB) scrollback column
-    /// (juancode-5qw.1). `reindexTitleFts` reindexes the FTS row when the title
-    /// changed, reusing the already-stored scrollback text so it never re-serializes
-    /// the live ring; otherwise the FTS index is left alone.
-    public func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
+    /// (juancode-5qw.1).
+    public func updateMeta(_ meta: SessionMeta) {
         try? dbQueue.write { db in
             try db.execute(sql: """
                 UPDATE sessions
@@ -341,18 +345,11 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
                     meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
                 ])
-            if reindexTitleFts {
-                let scroll = try String.fetchOne(
-                    db, sql: "SELECT scrollback FROM sessions WHERE id = ?", arguments: [meta.id]) ?? ""
-                try syncFts(db, id: meta.id, title: meta.title, scrollback: scroll)
-            }
         }
     }
 
     /// Crash-safety flush of a running session's scrollback — the column plus
-    /// `updated_at`, nothing else. Deliberately skips the FTS reindex (the tokenize of
-    /// the ring is the hot cost); search catches up on the busy->idle edge / exit via
-    /// `update`.
+    /// `updated_at`, nothing else.
     public func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int) {
         let text = Self.scrollbackText(scrollback)
         try? dbQueue.write { db in
@@ -402,10 +399,6 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                 sql: "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
                 arguments: [title, nowMs(), id]
             )
-            // Keep the FTS title in sync without touching the stored scrollback.
-            let scroll = try String.fetchOne(
-                db, sql: "SELECT scrollback FROM sessions WHERE id = ?", arguments: [id]) ?? ""
-            try syncFts(db, id: id, title: title, scrollback: scroll)
         }
     }
 
@@ -486,25 +479,65 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         }) ?? []
     }
 
+    /// Run `sql` against this store. `@testable` only, and for one job: putting an
+    /// old file's shape BACK so the migration that removes it can be measured. A test
+    /// that builds the pre-migration file by hand is the only test that proves the
+    /// migration does anything.
+    func rawWriteForTesting(_ sql: String) throws {
+        try dbQueue.write { db in try db.execute(sql: sql) }
+    }
+
+    /// The first column of every row `sql` returns, as strings. Same caller, same
+    /// reason: a test asserting a table is gone has to be able to ask sqlite_master.
+    func rawQueryForTesting(_ sql: String) throws -> [String] {
+        try dbQueue.read { db in try String.fetchAll(db, sql: sql) }
+    }
+
     public func usedCliSessionIds() -> Set<String> {
         (try? dbQueue.read { db in
             Set(try String.fetchAll(db, sql: "SELECT cli_session_id FROM sessions WHERE cli_session_id IS NOT NULL"))
         }) ?? []
     }
 
+    /// Sessions whose title or scrollback contains `query`, newest first.
+    ///
+    /// A scan, where this used to be an fts5 `MATCH` with a bm25 ranking. Two reasons
+    /// the index is not worth keeping. It was a second copy of every scrollback
+    /// (juancode-5bwj) — 53% of a 255 MB file, measured 2026-09-18 — and it was the
+    /// busiest thing on the write queue, retokenizing a ring on every flush. And this
+    /// store is no longer the one that answers: the daemon holds every session's
+    /// history and answers `searchSessions` from it, so what is left here is the
+    /// fallback for a core that does not (juancode-rz4c), over the sessions this Mac
+    /// attached to. Measured on the real mirror on 2026-09-18: 105 MB of scrollback
+    /// across 520 rows of 882.
+    ///
+    /// Substring rather than fts5's prefix-per-token, so a search for `ustom` finds
+    /// `custom` where the index would not, and a two-word query matches only where the
+    /// two words are adjacent. Recency rather than bm25: which session was this about
+    /// is answered by the newest one that mentions it, and that is also the order the
+    /// daemon answers in, so a fallback result list is not sorted differently from a
+    /// real one.
     public func search(_ query: String, limit: Int) -> [SearchHit] {
-        let match = GRDBStore.toFtsMatch(query)
-        guard !match.isEmpty else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty, limit > 0 else { return [] }
+        let pattern = "%" + needle.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_") + "%"
         return (try? dbQueue.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT s.*, snippet(sessions_fts, 2, '[', ']', '…', 12) AS snippet
-                FROM sessions_fts f
-                JOIN sessions s ON s.id = f.session_id
-                WHERE sessions_fts MATCH ?
-                ORDER BY bm25(sessions_fts), s.updated_at DESC
+                SELECT * FROM sessions
+                WHERE title LIKE ? ESCAPE '\\' OR scrollback LIKE ? ESCAPE '\\'
+                ORDER BY updated_at DESC, id DESC
                 LIMIT ?
-                """, arguments: [match, limit])
-                .map { SearchHit(meta: rowToMeta($0), snippet: $0["snippet"]) }
+                """, arguments: [pattern, pattern, limit])
+                .map { row in
+                    let title: String = row["title"]
+                    let scrollback: String = row["scrollback"]
+                    let snippet = searchSnippet(in: title, matching: needle)
+                        ?? searchSnippet(in: scrollback, matching: needle)
+                        ?? ""
+                    return SearchHit(meta: rowToMeta(row), snippet: snippet)
+                }
         }) ?? []
     }
 
@@ -514,7 +547,6 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: "DELETE FROM diff_comments WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM diff_reviews WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM message_queue WHERE session_id = ?", arguments: [id])
-            try db.execute(sql: "DELETE FROM sessions_fts WHERE session_id = ?", arguments: [id])
             try db.execute(sql: "DELETE FROM sessions WHERE id = ?", arguments: [id])
             return db.changesCount > 0
         }) ?? false
@@ -706,18 +738,5 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                            arguments: [id, sessionId])
             return db.changesCount > 0
         }) ?? false
-    }
-
-    // MARK: - FTS query building
-
-    /// Turn free-text input into a safe FTS5 MATCH expression: each whitespace
-    /// token becomes a quoted, prefix-matched term ANDed together. Mirrors
-    /// `toFtsMatch` in db.ts so stray quotes/operators can't cause a syntax error.
-    public static func toFtsMatch(_ query: String) -> String {
-        query
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" })
-            .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"*" }
-            .joined(separator: " AND ")
     }
 }

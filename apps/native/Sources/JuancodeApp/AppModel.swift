@@ -862,8 +862,7 @@ final class AppModel {
                     """
                     db maintenance: freelist \(report.freelistPagesBefore, privacy: .public) pages before, \
                     \(report.pageCountAfter, privacy: .public) pages after, \
-                    vacuumed=\(report.vacuumed, privacy: .public) \
-                    optimizedFts=\(report.optimizedFts, privacy: .public)
+                    vacuumed=\(report.vacuumed, privacy: .public)
                     """)
             } catch {
                 storeMaintenanceLog.error("db maintenance failed: \(error, privacy: .public)")
