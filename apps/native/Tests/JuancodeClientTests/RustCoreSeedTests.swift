@@ -90,6 +90,38 @@ final class RustCoreSeedTests: XCTestCase {
                           reported.reason ?? "nothing was reported")
         }
     }
+
+    /// The same verdict, arriving before the create it belongs to has been acked. The
+    /// reporter cannot exist yet — it is keyed by a session id the ack has not named —
+    /// so a client that only looked for a registered one would drop the verdict and
+    /// leave a session that looks started and is silently idle. This ordering is the
+    /// deterministic form of the race behind juancode-h52n, where the daemon's frame
+    /// and the registration a few microseconds behind it landed either way round.
+    func testAVerdictThatOvertakesItsOwnCreateStillReachesTheCaller() async throws {
+        let daemon = StandInDaemon()
+        daemon.beforeCreated = { id in
+            [json(["type": "error", "sessionId": id,
+                   "message": "the initial prompt was not delivered: the prompt stayed in the input box"])]
+        }
+        let reported = ReasonBox()
+        try await withStandInDaemon(daemon) { core in
+            let session = try await Task.detached {
+                try core.create(provider: .claude, cwd: "/tmp", cols: 80, rows: 24,
+                                opts: SpawnOptions(skipPermissions: true, model: nil),
+                                worktree: nil, dispatchId: nil,
+                                initialInput: "fix the failing test",
+                                onSeedFailure: { sessionId, why in
+                                    reported.set(sessionId: sessionId, reason: why)
+                                })
+            }.value
+            // The early verdict is not the create's answer: the create is still acked
+            // normally, and the prompt's failure is reported on top of it.
+            XCTAssertEqual(session.id, "session-1")
+            XCTAssertEqual(reported.sessionId, "session-1")
+            XCTAssertTrue(reported.reason?.contains("stayed in the input box") == true,
+                          reported.reason ?? "nothing was reported")
+        }
+    }
 }
 
 // MARK: - The stand-in daemon
@@ -103,6 +135,10 @@ private final class StandInDaemon: @unchecked Sendable {
     /// Sent after the `created`/`attached` pair, when a test sets it: the shape of a
     /// delivery the daemon accepted and could not finish.
     var afterCreate: (@Sendable (_ sessionId: String) -> [String])?
+
+    /// Sent BEFORE the `created` ack, when a test sets it: a delivery the daemon gave
+    /// up on at once, so its verdict overtakes the create it belongs to.
+    var beforeCreated: (@Sendable (_ sessionId: String) -> [String])?
 
     func record(_ frame: [String: Any]) { lock.withLock { received.append(frame) } }
     var frames: [[String: Any]] { lock.withLock { received } }
@@ -150,6 +186,9 @@ private func makeApplication(_ daemon: StandInDaemon) -> some ApplicationProtoco
                                       updatedAt: nowMs(), cliSessionId: nil, skipPermissions: true,
                                       worktreePath: nil, usage: nil)
             let object = metaObject(session)
+            for line in daemon.beforeCreated?(session.id) ?? [] {
+                try await outbound.writeTextMessage(line)
+            }
             try await outbound.writeTextMessage(json(["type": "created", "session": object]))
             try await outbound.writeTextMessage(json([
                 "type": "attached", "sessionId": session.id, "scrollback": "", "session": object,
@@ -180,8 +219,11 @@ private func withStandInDaemon(
     }
     try await makeApplication(daemon).test(.live) { client in
         let port = try XCTUnwrap(client.port)
+        // `localhost`, not the v4 literal: `.test(.live)` binds the NAME, and a
+        // resolver that answers ::1 first leaves 127.0.0.1 unbound, so a client
+        // dialling the literal is refused by a stand-in that is up.
         let core = try await Task.detached {
-            try RustCoreClient.connect(baseURL: "http://127.0.0.1:\(port)",
+            try RustCoreClient.connect(baseURL: "http://localhost:\(port)",
                                        mirrorPath: mirrorPath, timeout: 5)
         }.value
         defer { core.shutdown() }

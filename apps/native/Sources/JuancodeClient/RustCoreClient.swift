@@ -57,6 +57,15 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// deliver, keyed by session id. One entry lives from the create's ack until the
     /// daemon says the delivery failed, or until the session exits.
     private var seedFailureReporters: [String: @Sendable (String, String) -> Void] = [:]
+    /// A verdict that arrived before the create it belongs to had been acked, keyed
+    /// by session id. The reporter cannot be registered until the ack names the
+    /// session, so a daemon that fails a delivery immediately would otherwise be
+    /// talking to nobody — and a lost verdict is a session that looks started and
+    /// sits silently idle, which is the one state this path exists to make
+    /// impossible. Held only while a seeded create is in flight, and dropped when the
+    /// last one finishes, so an unclaimed entry cannot outlive its create.
+    private var unclaimedSeedFailures: [String: String] = [:]
+    private var seededCreatesInFlight = 0
     /// Sessions we have asked the core about but not yet heard back on, so one
     /// activity burst does not produce a dozen `attach` frames.
     private var probing: Set<String> = []
@@ -417,11 +426,30 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         // the prompt was typed into a booting TUI and never submitted.
         let seed = (initialInput?.isEmpty ?? true) ? nil : initialInput
         if let seed { frame["initialInput"] = seed }
+        let reportsSeed = seed != nil && onSeedFailure != nil
+        if reportsSeed { lock.withLock { seededCreatesInFlight += 1 } }
+        defer {
+            if reportsSeed {
+                lock.withLock {
+                    seededCreatesInFlight -= 1
+                    if seededCreatesInFlight == 0 { unclaimedSeedFailures.removeAll() }
+                }
+            }
+        }
         let handle = try lifecycle(frame, operation: "create", timeout: 60)
-        // Registered after the ack because the daemon's verdict comes minutes later,
-        // as its own frame, long after this create was answered.
+        // Registered after the ack because the daemon's verdict usually comes minutes
+        // later, as its own frame, long after this create was answered — but it is
+        // allowed to come at once, and then it is already waiting here.
         if seed != nil, let onSeedFailure {
-            lock.withLock { seedFailureReporters[handle.id] = onSeedFailure }
+            let waiting = lock.withLock { () -> String? in
+                if let why = unclaimedSeedFailures.removeValue(forKey: handle.id) { return why }
+                seedFailureReporters[handle.id] = onSeedFailure
+                return nil
+            }
+            if let waiting {
+                NSLog("juancode: rust core did not deliver the prompt for \(handle.id): \(waiting)")
+                onSeedFailure(handle.id, waiting)
+            }
         }
         return handle
     }
@@ -1348,6 +1376,18 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 // A probe for a session the daemon does not have: expected, and not
                 // the answer to whatever lifecycle request may be in flight.
                 NSLog("juancode: rust core has no session \(id) (\(message))")
+                return
+            }
+            // The same verdict, arriving before the create that asked for it had been
+            // acked: there is no reporter yet, so it is held for the registration a
+            // few microseconds behind it rather than read as some other request's
+            // answer. Only while a seeded create is in flight, so nothing else that
+            // names a session is swallowed here.
+            if let id = sessionId, lock.withLock({ () -> Bool in
+                guard seededCreatesInFlight > 0, pendingSessionId != id else { return false }
+                unclaimedSeedFailures[id] = message
+                return true
+            }) {
                 return
             }
             pendingResult { $0.failure = CoreRemoteError(message: message, sessionId: sessionId) }

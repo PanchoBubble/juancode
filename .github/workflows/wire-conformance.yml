@@ -70,6 +70,10 @@ jobs:
           cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu
 
   conformance-swift:
+    # Two things on one macOS runner: the live conformance suite against a real
+    # Swift core, and the package's own XCTest suite (see the step at the end).
+    # The name is load-bearing — it is a required status check on `main` — so it
+    # stays as it is until the branch-protection context moves with it.
     name: conformance vs the Swift core
     runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
     steps:
@@ -121,6 +125,33 @@ jobs:
       - name: Committed parity file still describes the core
         working-directory: apps/wire-conformance
         run: pnpm exec tsx src/parity-cli.ts --verify ${{ github.workspace }}/conformance-swift-status.json
+
+      # Until this step existed, NOTHING in .github/workflows ran `swift test`: the
+      # XCTest suite was never a gate, and two suites had been red on main for as
+      # long as they had existed while main reported green (juancode-rzuw,
+      # juancode-h52n, both fixed in the commits that added this).
+      #
+      # Folded into this job rather than given its own, because a second macos-15
+      # boot is the expensive part: the toolchain, the checkout, the resolve and
+      # most of the module graph are already warm here from the juancode-serve
+      # build above, so the suite costs a few minutes rather than a whole job at
+      # the 10x macOS minute multiplier. The cost of folding is that a failure
+      # here is reported under this job's name — main-red lists jobs, not steps —
+      # so a red XCTest reads as "conformance vs the Swift core" until you open
+      # the run.
+      #
+      # `!cancelled()` rather than the default, so a conformance failure above
+      # still leaves a test result behind instead of skipping the suite.
+      #
+      # When the Swift core is deleted (juancode-nqpm), the conformance steps in
+      # this job go and this one stays — that is the moment to split it out, give
+      # it its own name and move the branch-protection context, NOT before: this
+      # job is a required check today, and this step is why the XCTest suite is
+      # gated at all.
+      - name: Run the XCTest suite
+        if: ${{ !cancelled() }}
+        working-directory: apps/native
+        run: swift test
 
       - name: Upload the run report
         if: always()
