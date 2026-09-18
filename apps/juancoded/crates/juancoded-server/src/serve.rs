@@ -215,6 +215,9 @@ pub(crate) fn router(handles: CoreHandles) -> Router {
         // because the daemon is the one process that holds the bytes and the grid they
         // were parsed at; the relay proxies these paths through unchanged.
         .merge(reads::routes())
+        // The git working tree, both session-addressed (which the relay forwards) and
+        // path-addressed (which it does not — see `changes.rs`).
+        .merge(crate::changes::routes())
         .with_state(handles)
 }
 

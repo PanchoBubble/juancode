@@ -462,7 +462,7 @@ fn fetch_clock() -> &'static FetchClock {
 /// The repo's default branch: `origin/HEAD` when the remote has published one, else
 /// the first of main/master/develop that exists as a remote or local ref. Same order
 /// as `defaultBaseBranch` in the Swift core, so both cores pick the same base.
-fn default_base_branch(cwd: &str) -> Option<String> {
+pub fn default_base_branch(cwd: &str) -> Option<String> {
     if let Some(head) = git(cwd, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
         let head = head.trim();
         if !head.is_empty() && head != "origin/HEAD" {
@@ -517,6 +517,142 @@ fn git(cwd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     String::from_utf8(out.stdout).ok()
+}
+
+/// Every linked worktree of the repo `cwd` belongs to, main one first.
+///
+/// Parses `git worktree list --porcelain`: blank-line-separated blocks of `key value`
+/// lines, which is the format git documents as stable. `[]` for a cwd that is not a
+/// repo, because a caller drawing a worktree rail has nothing to say about one.
+pub fn list(cwd: &str) -> Vec<crate::git::Worktree> {
+    let Some(out) = git(cwd, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    let mut trees: Vec<crate::git::Worktree> = Vec::new();
+    let mut path = String::new();
+    let mut branch: Option<String> = None;
+    let mut head: Option<String> = None;
+    let mut locked_reason: Option<String> = None;
+    let flush = |path: &mut String,
+                 branch: &mut Option<String>,
+                 head: &mut Option<String>,
+                 locked: &mut Option<String>,
+                 trees: &mut Vec<crate::git::Worktree>| {
+        if !path.is_empty() {
+            trees.push(crate::git::Worktree {
+                path: std::mem::take(path),
+                branch: branch.take(),
+                head: head.take(),
+                main: trees.is_empty(),
+                locked_reason: locked.take(),
+            });
+        }
+        *path = String::new();
+        *branch = None;
+        *head = None;
+        *locked = None;
+    };
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            flush(
+                &mut path,
+                &mut branch,
+                &mut head,
+                &mut locked_reason,
+                &mut trees,
+            );
+        } else if let Some(v) = line.strip_prefix("worktree ") {
+            path = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("HEAD ") {
+            head = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("branch ") {
+            let b = v.trim();
+            branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if let Some(v) = line.strip_prefix("locked") {
+            // `locked` alone means locked with no reason given; `locked <why>` carries
+            // one, and the reason is the whole basis of `detect_agent_worktree`.
+            locked_reason = Some(v.trim().to_string());
+        }
+    }
+    flush(
+        &mut path,
+        &mut branch,
+        &mut head,
+        &mut locked_reason,
+        &mut trees,
+    );
+    trees
+}
+
+/// Adopt an existing worktree directory, reporting the branch checked out in it.
+///
+/// Worktrees outlive the session that made them, so a replacement agent for the same
+/// job can stand in the one its predecessor used rather than cut a second copy.
+/// `None` when `path` is not a usable work tree, so the caller falls back to creating.
+/// `branch` is `None` on a detached HEAD, matching [`create_on_branch`].
+pub fn adopt(path: &str) -> Option<BranchWorktree> {
+    if !Path::new(path).exists() {
+        return None;
+    }
+    let inside = git(path, &["rev-parse", "--is-inside-work-tree"])?;
+    if inside.trim() != "true" {
+        return None;
+    }
+    let head = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty() && h != "HEAD");
+    Some(BranchWorktree {
+        path: path.to_string(),
+        branch: head,
+    })
+}
+
+/// The worktree the agent process `child_pid` cut for ITSELF from inside its pty.
+///
+/// Claude Code's own EnterWorktree makes a tree under `<repo>/.claude/worktrees/<name>`
+/// and locks it with a reason naming its pid — "claude session <name> (pid 123 …)".
+/// Matching on the pid is what keeps the mapping exact when several sessions share one
+/// repo; matching on the name would tie two agents working the same ticket together.
+/// The LAST match wins, because an agent that hopped worktrees leaves the earlier ones
+/// locked too.
+///
+/// What this must NOT be used for is writing `SessionMeta::worktree_path`. That field
+/// is what the session-delete reap removes, and a tree Claude manages is not ours to
+/// remove: pointing the reaper at one would delete work the agent is still in.
+pub fn detect_agent_worktree(cwd: &str, child_pid: i32) -> Option<String> {
+    let trees = list(cwd);
+    if trees.len() <= 1 {
+        return None;
+    }
+    let needle = format!("pid {child_pid}");
+    trees
+        .into_iter()
+        .skip(1)
+        .filter(|t| {
+            t.locked_reason
+                .as_deref()
+                .is_some_and(|r| pid_word_match(r, &needle))
+        })
+        .next_back()
+        .map(|t| t.path)
+}
+
+/// `\bpid <n>\b` without a regex engine: the match has to be the whole number, or
+/// pid 123 would claim the tree locked by pid 1234.
+fn pid_word_match(reason: &str, needle: &str) -> bool {
+    let bytes = reason.as_bytes();
+    let mut from = 0;
+    while let Some(at) = reason[from..].find(needle) {
+        let start = from + at;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// How deep to look for a package's `node_modules`. Two levels covers a pnpm

@@ -911,7 +911,7 @@ final class AppModel {
         Task {
             var additions: [String: String] = [:]
             for cwd in cwds {
-                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 for t in trees { additions[t.path] = main.path }
             }
@@ -2577,15 +2577,14 @@ final class AppModel {
     /// The cached branch/state for `cwd`, if loaded yet.
     func folderGitState(_ cwd: String) -> GitState? { gitStateByCwd[cwd] }
 
-    /// Load (or refresh) the git state for `cwd` via `getGitState` (a light
-    /// `symbolic-ref` shell-out). Runs off the main actor; coalesces concurrent
-    /// calls. Non-git folders resolve to `git: false` (branch nil), so the label
-    /// just stays hidden. Mirrors `loadPrs`/`loadBeads`.
+    /// Load (or refresh) the git state for `cwd` from the core. Coalesces concurrent
+    /// calls. A non-git folder — and a core with no `changes` capability — resolve to
+    /// `git: false`, so the label just stays hidden. Mirrors `loadPrs`/`loadBeads`.
     func loadFolderGitState(_ cwd: String) {
         guard !gitStateCwdLoading.contains(cwd) else { return }
         gitStateCwdLoading.insert(cwd)
         Task {
-            let state = await Task.detached(priority: .utility) { await getGitState(cwd) }.value
+            let state = (try? await core.gitState(cwd: cwd)) ?? GitState.unknown
             gitStateByCwd[cwd] = state
             gitStateCwdLoading.remove(cwd)
         }
@@ -3988,9 +3987,7 @@ final class AppModel {
         guard let cwd = gitCwd(of: id), !recentCommitsLoading.contains(id) else { return }
         recentCommitsLoading.insert(id)
         Task {
-            let commits = await Task.detached(priority: .utility) {
-                await listRecentCommits(cwd, limit: 50)
-            }.value
+            let commits = (try? await core.recentCommits(cwd: cwd, limit: 50)) ?? []
             recentCommitsBySession[id] = commits
             recentCommitsLoading.remove(id)
         }
@@ -4049,9 +4046,7 @@ final class AppModel {
     private func resolveAgentWorktree(_ id: String) async {
         guard let session = liveSession(id), let pid = session.childPid else { return }
         let cwd = session.meta.cwd
-        let detected = await Task.detached(priority: .utility) {
-            await detectAgentWorktree(cwd, childPid: pid)
-        }.value
+        let detected = try? await core.agentWorktree(cwd: cwd, childPid: pid)
         let previous = agentWorktreeBySession[id]
         agentWorktreeBySession[id] = detected
         // The diff watcher is rooted at gitCwd — re-arm it when that just moved.
@@ -4096,9 +4091,7 @@ final class AppModel {
         Task {
             await resolveAgentWorktree(id)
             guard let cwd = agentWorktreeBySession[id] ?? effectiveCwd(of: id) else { return }
-            let stat = await Task.detached(priority: .utility) {
-                await computeChangeStat(cwd)
-            }.value
+            let stat = (try? await core.changeStat(cwd: cwd)) ?? ChangeStat.empty
             changeStatBySession[id] = stat.isEmpty ? nil : stat
             if !stat.isEmpty, isChangesPanelOpen(for: id) {
                 viewedChangeSignatureBySession[id] = stat.signature
@@ -4150,6 +4143,14 @@ final class AppModel {
     /// from `changesSource`. Coalesces concurrent calls. Mirrors `loadPrs`.
     func loadChanges(_ id: String) {
         guard cwd(of: id) != nil, !diffInFlight.contains(id) else { return }
+        // A core with no working tree to read is said out loud, once, in the panel's
+        // own error slot — rather than by an empty diff, which reads as "the agent
+        // changed nothing" and is the one wrong thing this panel can say.
+        if let reason = core.unavailableReason(.changes) {
+            changesErrorBySession[id] = reason
+            diffLoading.remove(id)
+            return
+        }
         let source = changesSource(id)
         diffInFlight.insert(id)
         diffLoading.insert(id)
@@ -4160,9 +4161,8 @@ final class AppModel {
             guard let cwd = gitCwd(of: id) else {
                 diffLoading.remove(id); diffInFlight.remove(id); return
             }
-            async let stateTask = Task.detached(priority: .utility) { await getGitState(cwd) }.value
-            let loaded = await Task.detached(priority: .utility) { await loadDiffForSource(cwd, source) }.value
-            let state = await stateTask
+            let loaded = await loadDiffForSource(core, cwd, source)
+            let state = (try? await core.gitState(cwd: cwd)) ?? GitState.unknown
             if let d = loaded.diff { diffBySession[id] = d }
             if let base = loaded.base { changesBaseBySession[id] = base }
             changesErrorBySession[id] = loaded.error
@@ -4201,9 +4201,7 @@ final class AppModel {
 
     private func refreshWorktreeStatus(_ path: String) {
         Task {
-            let entries = await Task.detached(priority: .utility) {
-                await computeWorktreeStatus(path)
-            }.value
+            let entries = (try? await core.worktreeStatus(cwd: path)) ?? []
             worktreeStatusByPath[path] = entries
         }
     }
@@ -4231,9 +4229,7 @@ final class AppModel {
     private func loadFileIndex(_ path: String) {
         quickOpenLoading = true
         Task {
-            let files = await Task.detached(priority: .userInitiated) {
-                await listTrackedFiles(path)
-            }.value
+            let files = (try? await core.trackedFiles(cwd: path, limit: 20_000)) ?? []
             fileIndex.store(files, for: path)
             if quickOpenCwd == path { quickOpenFiles = files }
             quickOpenLoading = false
@@ -4326,9 +4322,7 @@ final class AppModel {
             if let cached = fileIndex.files(for: path) {
                 files = cached
             } else {
-                files = await Task.detached(priority: .userInitiated) {
-                    await listTrackedFiles(path)
-                }.value
+                files = (try? await core.trackedFiles(cwd: path, limit: 20_000)) ?? []
                 fileIndex.store(files, for: path)
             }
             let tree = await Task.detached(priority: .userInitiated) {
@@ -4643,9 +4637,7 @@ final class AppModel {
     func revertFile(_ id: String, path: String) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.revertFile(cwd, path: path)
-            }.value
+            let r = try await core.revert(sessionId: id, cwd: cwd, path: path, hunkIndex: nil)
             gitNoteBySession[id] = GitNote(ok: true, text: "Reverted \(r.path)")
             loadChanges(id)
         } catch {
@@ -4658,9 +4650,8 @@ final class AppModel {
     func revertHunk(_ id: String, path: String, hunkIndex: Int) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.revertHunk(cwd, path: path, hunkIndex: hunkIndex)
-            }.value
+            let r = try await core.revert(sessionId: id, cwd: cwd, path: path,
+                                         hunkIndex: hunkIndex)
             gitNoteBySession[id] = GitNote(ok: true, text: "Reverted a hunk in \(r.path)")
             loadChanges(id)
         } catch {
@@ -4697,9 +4688,7 @@ final class AppModel {
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !msg.isEmpty else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await commitAll(cwd, msg)
-            }.value
+            let r = try await core.commitAll(sessionId: id, cwd: cwd, message: msg)
             gitNoteBySession[id] = GitNote(ok: true, text: "Committed \(r.sha) · \(r.subject)")
             loadChanges(id)
         } catch {
@@ -4711,9 +4700,7 @@ final class AppModel {
     func push(_ id: String) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await pushCurrent(cwd)
-            }.value
+            let r = try await core.push(sessionId: id, cwd: cwd)
             gitNoteBySession[id] = GitNote(ok: true, text: "Pushed \(r.branch).")
             loadChanges(id)
         } catch {
@@ -4744,11 +4731,11 @@ final class AppModel {
     /// main actor. Returns the message, or nil on failure (note set).
     func generateCommitMessage(_ id: String) async -> String? {
         guard let cwd = gitCwd(of: id) else { return nil }
-        let files = diffBySession[id]?.files ?? []
         do {
-            return try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.generateCommitMessage(cwd, files)
-            }.value
+            // Drafted from the diff the CORE reads, not the one this panel happens to
+            // be holding: a message written against a snapshot taken a minute ago
+            // describes changes that may no longer be there.
+            return try await core.draftCommitMessage(sessionId: id, cwd: cwd)
         } catch {
             gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
             return nil
@@ -4759,7 +4746,7 @@ final class AppModel {
     private func gitErrorText(_ error: Error) -> String {
         if let e = error as? GitError { return e.message }
         if let e = error as? GhError { return e.message }
-        if let e = error as? CommitMessageError { return e.message }
+        if let e = error as? ChangesError { return e.reason }
         return String(describing: error)
     }
 
@@ -4825,6 +4812,11 @@ final class AppModel {
     /// Whether the connected core reads the slot registry at all.
     var supportsHeavyQueue: Bool { core.supports(.heavyQueue) }
 
+    /// Whether the connected core reads the session's git working tree at all. Every
+    /// Changes affordance — Commit, Push, Discard, the worktree rail, the at-risk
+    /// badges — is the same answer, so they share one question.
+    var supportsChanges: Bool { core.supports(.changes) }
+
     /// Jump a waiting job to the head of the line. The wrapper re-reads its priority
     /// every poll, so it takes effect within a few seconds without signalling it.
     func heavyQueueMoveToFront(_ pid: Int) {
@@ -4870,7 +4862,7 @@ final class AppModel {
             var seenRepos = Set<String>()
             var groups: [WorktreeGroup] = []
             for cwd in cwds {
-                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 guard seenRepos.insert(main.path).inserted else { continue }
                 let children = trees.filter { !$0.main }
@@ -5386,19 +5378,29 @@ final class AppModel {
         }
     }
 
+    /// Ask the core about one folder and run the classifier over its answer.
+    ///
+    /// `nonisolated static` so the wide sweep can call it from inside its detached
+    /// task without hopping back onto the main actor per folder — the probe itself is
+    /// the core's work now, and the classification is pure.
+    nonisolated static func classifyAtRisk(_ core: any CoreClient,
+                                           _ root: WorkAtRiskScan.RootRef) async -> WorkAtRisk? {
+        guard let probed = (try? await core.probeAtRisk(path: root.path)) ?? nil else {
+            return nil
+        }
+        return WorkAtRiskScan.classify(root, state: probed.state,
+                                       dirtyFiles: probed.dirtyFiles,
+                                       aheadOfBase: probed.aheadOfBase,
+                                       headOnRemote: probed.headOnRemote)
+    }
+
     /// Probe one root and publish the delta.
     private func runWorkAtRiskProbe(_ root: String) async {
         workAtRiskProbed.insert(root)
         let sessionIds = workAtRiskSessionIdsByRoot[root] ?? []
         let repoRoot = workAtRiskRepoRootCache[root] ?? worktreeRepoRoots[root] ?? ""
         let ref = WorkAtRiskScan.RootRef(path: root, repoRoot: repoRoot, sessionIds: sessionIds)
-        let risk = await Task.detached(priority: .utility) { () -> WorkAtRisk? in
-            guard let probed = await probeWorkAtRisk(root) else { return nil }
-            return WorkAtRiskScan.classify(ref, state: probed.state,
-                                           dirtyFiles: probed.dirtyFiles,
-                                           aheadOfBase: probed.aheadOfBase,
-                                           headOnRemote: probed.headOnRemote)
-        }.value
+        let risk = await Self.classifyAtRisk(core, ref)
         // `publishWorkAtRisk` drops an unchanged result. A probe fires on every
         // settled write in the folder, and an agent mid-turn changes files
         // constantly — but the answer ("3 dirty files, 1 unpushed commit") usually
@@ -5442,6 +5444,7 @@ final class AppModel {
         let cachedRepoRoots = workAtRiskRepoRootCache
         let watched = Set(workAtRiskWatchTokens.keys)
 
+        let core = self.core
         let (results, discoveredRepoRoots) = await Task.detached(priority: .utility) {
             () -> ([String: WorkAtRisk], [String: String]) in
             // One worktree listing per repo: `git worktree list` from any worktree
@@ -5453,7 +5456,7 @@ final class AppModel {
             let folders = Set(sessionRefs.map(\.cwd) + sessionRefs.compactMap(\.worktreePath))
             for cwd in folders.sorted() {
                 if let known = cachedRepoRoots[cwd], worktreesByRepo[known] != nil { continue }
-                let trees = await listWorktrees(cwd)
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 if worktreesByRepo[main.path] == nil { worktreesByRepo[main.path] = trees }
                 learned[cwd] = main.path
@@ -5472,13 +5475,7 @@ final class AppModel {
                 func enqueue() {
                     guard next < roots.count else { return }
                     let root = roots[next]; next += 1
-                    group.addTask {
-                        guard let probed = await probeWorkAtRisk(root.path) else { return nil }
-                        return WorkAtRiskScan.classify(root, state: probed.state,
-                                                       dirtyFiles: probed.dirtyFiles,
-                                                       aheadOfBase: probed.aheadOfBase,
-                                                       headOnRemote: probed.headOnRemote)
-                    }
+                    group.addTask { await AppModel.classifyAtRisk(core, root) }
                 }
                 for _ in 0..<4 { enqueue() }
                 while let risk = await group.next() {
@@ -5557,16 +5554,20 @@ private struct LoadedDiff: Sendable {
     var error: String?
 }
 
-/// Resolve a `ChangesSource` to its diff off the main actor (juancode-49w). The
-/// working-tree path keeps the old "swallow errors, keep prior diff" behaviour;
-/// the base/PR paths surface a clean error string the panel can show.
-private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) async -> LoadedDiff {
+/// Resolve a `ChangesSource` to its diff (juancode-49w). Three of the four come from
+/// the core that owns the session's tree; the PR one still comes from `gh`, which is
+/// the desktop's own until juancode-52e8.14.6 moves it.
+///
+/// The working-tree path keeps the old "swallow errors, keep the prior diff"
+/// behaviour; the base/PR/commit paths surface a clean error string the panel shows.
+private func loadDiffForSource(_ core: any CoreClient, _ cwd: String,
+                               _ source: AppModel.ChangesSource) async -> LoadedDiff {
     switch source {
     case .workingTree:
-        return LoadedDiff(diff: try? await getDiff(cwd), base: nil, error: nil)
+        return LoadedDiff(diff: try? await core.diff(cwd: cwd), base: nil, error: nil)
     case .base:
         do {
-            let bd = try await getBaseDiff(cwd)
+            let bd = try await core.baseDiff(cwd: cwd, base: nil)
             return LoadedDiff(diff: bd.result, base: bd.base, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
@@ -5579,7 +5580,8 @@ private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) 
         }
     case .commit(let sha, _):
         do {
-            return LoadedDiff(diff: try await getCommitDiff(cwd, sha: sha), base: nil, error: nil)
+            return LoadedDiff(diff: try await core.commitDiff(cwd: cwd, sha: sha),
+                              base: nil, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
         }

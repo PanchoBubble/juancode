@@ -32,8 +32,8 @@ use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
 use crate::ephemeral::EphemeralPtys;
 use crate::global_pause::GlobalPause;
-use crate::named_key;
 use crate::heavy_watch::HeavyWatch;
+use crate::named_key;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
@@ -749,6 +749,73 @@ fn queue_refusal(session: &str, error: QueueError) -> ServerMessage {
 ///
 /// Its own code, and not one of the two above, because it is not a stale row: retrying
 /// will never help and the client should put the dock away rather than resynchronise.
+/// The session's own cwd, or `None` when this core holds no such session.
+///
+/// Looked up on the connection's task, before the work is handed off: a frame naming
+/// a session nobody has must be refused now, not by a blocking task that has already
+/// been told to run `git` in whatever directory it was handed.
+fn git_target(sessions: &Arc<dyn SessionsApi>, session_id: &str) -> Option<String> {
+    sessions.meta(session_id).map(|m| m.cwd)
+}
+
+/// Which worktree a git write acts on: the session's own, or the one `cwd` names when
+/// that path really is one of this repo's worktrees.
+///
+/// The validation is load-bearing. `cwd` arrives over a socket, and without this the
+/// four writes would each be "run git wherever I say" — a push from a directory the
+/// client picked, a discard scoped to a tree nobody named. Anything git has not just
+/// listed for this repo falls back to the session's own tree rather than being
+/// honoured or refused: the fallback is the tree the frame was addressed to anyway.
+fn resolve_worktree(session_cwd: &str, requested: Option<&str>) -> String {
+    let Some(req) = requested.map(str::trim).filter(|r| !r.is_empty()) else {
+        return session_cwd.to_string();
+    };
+    let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+    if same(req, session_cwd) {
+        return session_cwd.to_string();
+    }
+    juancoded_core::worktree::list(session_cwd)
+        .into_iter()
+        .find(|t| same(&t.path, req))
+        .map(|t| t.path)
+        .unwrap_or_else(|| session_cwd.to_string())
+}
+
+/// One git write's outcome as the frame that carries it.
+fn changes_reply<T: serde::Serialize>(
+    request_id: String,
+    session_id: String,
+    op: &'static str,
+    outcome: Result<T, juancoded_core::git::GitError>,
+) -> ServerMessage {
+    match outcome {
+        Ok(value) => ServerMessage::ChangesResult {
+            request_id,
+            session_id,
+            op,
+            result: serde_json::to_value(value).ok(),
+            error: None,
+        },
+        Err(e) => ServerMessage::ChangesResult {
+            request_id,
+            session_id,
+            op,
+            result: None,
+            error: Some(e.0),
+        },
+    }
+}
+
+fn unknown_session(request_id: &str, session_id: &str, op: &'static str) -> ServerMessage {
+    ServerMessage::ChangesResult {
+        request_id: request_id.to_string(),
+        session_id: session_id.to_string(),
+        op,
+        result: None,
+        error: Some(format!("no session {session_id}")),
+    }
+}
+
 fn queue_unavailable(session: &str, outbound: &mut Vec<ServerMessage>) {
     outbound.push(ServerMessage::Error {
         session_id: Some(session.to_string()),
@@ -1210,6 +1277,119 @@ fn handle_client_message(
                 // A closed channel is a client that hung up mid-search; its answer is
                 // nobody's now.
                 let _ = oob.send(ServerMessage::SearchResults { request_id, hits });
+            });
+        }
+
+        // The four git writes. All four go the same way: resolve which worktree the
+        // frame means, run it off this task, and answer with the `requestId` it came
+        // with — so a slow one (a drafted commit message is seconds of a `claude` run)
+        // never holds up the pty bytes on the same socket, and a late answer is
+        // discardable rather than confusing.
+        ClientMessage::SessionCommit {
+            session_id,
+            message,
+            cwd,
+            request_id,
+        } => {
+            let Some(target) = git_target(sessions, &session_id) else {
+                outbound.push(unknown_session(&request_id, &session_id, "commit"));
+                return;
+            };
+            let oob = fanout.oob.clone();
+            tokio::task::spawn_blocking(move || {
+                let cwd = resolve_worktree(&target, cwd.as_deref());
+                let _ = oob.send(changes_reply(
+                    request_id,
+                    session_id,
+                    "commit",
+                    juancoded_core::git::commit_all(&cwd, &message),
+                ));
+            });
+        }
+
+        ClientMessage::SessionPush {
+            session_id,
+            cwd,
+            request_id,
+        } => {
+            let Some(target) = git_target(sessions, &session_id) else {
+                outbound.push(unknown_session(&request_id, &session_id, "push"));
+                return;
+            };
+            let oob = fanout.oob.clone();
+            tokio::task::spawn_blocking(move || {
+                let cwd = resolve_worktree(&target, cwd.as_deref());
+                let _ = oob.send(changes_reply(
+                    request_id,
+                    session_id,
+                    "push",
+                    juancoded_core::git::push_current(&cwd),
+                ));
+            });
+        }
+
+        ClientMessage::SessionRevert {
+            session_id,
+            path,
+            hunk_index,
+            cwd,
+            request_id,
+        } => {
+            let Some(target) = git_target(sessions, &session_id) else {
+                outbound.push(unknown_session(&request_id, &session_id, "revert"));
+                return;
+            };
+            let oob = fanout.oob.clone();
+            tokio::task::spawn_blocking(move || {
+                let cwd = resolve_worktree(&target, cwd.as_deref());
+                let outcome = match hunk_index {
+                    Some(index) => juancoded_core::git::revert_hunk(&cwd, &path, index),
+                    None => juancoded_core::git::revert_file(&cwd, &path),
+                };
+                let _ = oob.send(changes_reply(request_id, session_id, "revert", outcome));
+            });
+        }
+
+        ClientMessage::SessionCommitMessage {
+            session_id,
+            cwd,
+            request_id,
+        } => {
+            let Some(target) = git_target(sessions, &session_id) else {
+                outbound.push(unknown_session(&request_id, &session_id, "commitMessage"));
+                return;
+            };
+            let oob = fanout.oob.clone();
+            // A task rather than `spawn_blocking`: the draft is an async `claude` run
+            // with a timeout, and the blocking pool is for the `git` forks.
+            tokio::task::spawn(async move {
+                let cwd =
+                    tokio::task::spawn_blocking(move || resolve_worktree(&target, cwd.as_deref()))
+                        .await
+                        .unwrap_or_default();
+                let files = tokio::task::spawn_blocking({
+                    let cwd = cwd.clone();
+                    move || juancoded_core::git::diff(&cwd).files
+                })
+                .await
+                .unwrap_or_default();
+                let outcome = juancoded_core::commit_message::generate(&cwd, &files).await;
+                let _ = oob.send(match outcome {
+                    Ok(message) => ServerMessage::ChangesResult {
+                        request_id,
+                        session_id,
+                        op: "commitMessage",
+                        result: Some(serde_json::json!({ "message": message })),
+                        error: None,
+                    },
+                    Err(e) => ServerMessage::ChangesResult {
+                        request_id,
+                        session_id,
+                        op: "commitMessage",
+                        result: None,
+                        error: Some(e.0),
+                    },
+                });
             });
         }
 

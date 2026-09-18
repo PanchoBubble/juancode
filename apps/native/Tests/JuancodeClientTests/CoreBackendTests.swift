@@ -237,7 +237,8 @@ final class CoreBackendTests: XCTestCase {
                                            "sessionMeta", "gridOwner", "isolateWorktree"])
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
-                        .terminal, .restartFresh, .spawnModel, .spawnPreset, .heavyQueue])
+                        .terminal, .restartFresh, .spawnModel, .spawnPreset, .heavyQueue,
+                        .changes])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -257,7 +258,7 @@ final class CoreBackendTests: XCTestCase {
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
                         .terminal, .adoptExternal, .sessionMeta, .gridOwner,
                         .restartFresh, .spawnModel, .spawnPreset, .isolateWorktree,
-                        .heavyQueue])
+                        .heavyQueue, .changes])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, bar
@@ -268,7 +269,10 @@ final class CoreBackendTests: XCTestCase {
     /// `heavyQueue` is the first name on the other side of that line
     /// (juancode-52e8.14.3): the slot registry is read by the daemon now, and the
     /// Swift core has no frame for it, so the panel greys out under this core rather
-    /// than drawing a queue nothing is watching.
+    /// than drawing a queue nothing is watching. `changes` is the second
+    /// (juancode-52e8.14.5): the session's git working tree is the daemon's to read,
+    /// so the Changes panel says why it is empty rather than showing an empty diff,
+    /// which would read as "the agent changed nothing".
     func testTheSwiftCoreGatesOnlyWhatHasMovedOutOfIt() throws {
         let dbPath = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("juancode-caps-\(UUID().uuidString).db")
@@ -276,11 +280,43 @@ final class CoreBackendTests: XCTestCase {
             for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbPath + suffix) }
         }
         let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
-        XCTAssertEqual(core.missingCapabilities, [.heavyQueue])
+        XCTAssertEqual(core.missingCapabilities, [.heavyQueue, .changes])
         XCTAssertEqual(Set(WireProtocol.capabilities).subtracting(WireProtocol.remoteOnlyCapabilities),
-                       Set(CoreCapability.allCases.map(\.rawValue)).subtracting(["heavyQueue"]),
+                       Set(CoreCapability.allCases.map(\.rawValue))
+                           .subtracting(["heavyQueue", "changes"]),
                        "every capability the Swift core advertises is one the app can ask for, "
                        + "except the ones that only describe what the endpoint serves a remote client")
+    }
+
+    /// The bug this closes, and the only reason the `changes` surface is spelled as
+    /// protocol REQUIREMENTS rather than left in the extension beside its defaults.
+    ///
+    /// A member that exists only in a protocol extension is dispatched statically: a
+    /// call through `any CoreClient` binds to the extension's default at compile time
+    /// and never reaches the conforming type's own version. The whole working-tree
+    /// surface would have been silently dead on every core that implements it, with
+    /// the panel drawing "this core cannot read the tree" against a core that can.
+    ///
+    /// This asserts it the only way that is meaningful: through an EXISTENTIAL, which
+    /// is what `AppModel.core` is.
+    func testTheChangesSurfaceDispatchesDynamicallyThroughTheExistential() async throws {
+        let core: any CoreClient = AnsweringCore()
+        let diff = try await core.diff(cwd: "/repo")
+        XCTAssertTrue(diff.git, "a static bind would have thrown the capability default instead")
+        let state = try await core.gitState(cwd: "/repo")
+        XCTAssertEqual(state.branch, "main")
+        let committed = try await core.commitAll(sessionId: "s1", cwd: nil, message: "m")
+        XCTAssertEqual(committed.sha, "abc1234")
+
+        // And the default is what a core WITHOUT the capability answers, through the
+        // same existential: a refusal that names the capability, not an empty diff.
+        let silent: any CoreClient = FakeCore(capabilities: [])
+        do {
+            _ = try await silent.diff(cwd: "/repo")
+            XCTFail("a core with no `changes` capability must refuse rather than answer")
+        } catch let error as CoreCapabilityError {
+            XCTAssertEqual(error.capability, .changes)
+        }
     }
 
     /// The error a caller that got past a gate sees: it names the capability and
@@ -336,6 +372,120 @@ final class CoreBackendTests: XCTestCase {
     private static func refusingRust(_ url: String) throws -> any CoreClient {
         throw WireConnection.ConnectError.timedOut(seconds: 0.2, url: url)
     }
+}
+
+/// A `FakeCore` that answers the three working-tree members the dispatch test asks
+/// for. Its whole purpose is to be a DIFFERENT answer from the protocol extension's
+/// default, so a static bind is visible as a thrown capability error.
+final class AnsweringCore: CoreClient, @unchecked Sendable {
+    private let inner = FakeCore(capabilities: ["changes"])
+    var info: CoreServerInfo { inner.info }
+    var globalPause: GlobalPauseBook { inner.globalPause }
+
+    func diff(cwd: String) async throws -> DiffResult {
+        DiffResult(git: true, root: cwd, files: [])
+    }
+    func gitState(cwd: String) async throws -> GitState {
+        GitState(git: true, branch: "main", detached: false, upstream: nil,
+                 ahead: 0, behind: 0, dirty: false, remote: false)
+    }
+    func commitAll(sessionId: String, cwd: String?, message: String) async throws -> CommitResult {
+        CommitResult(sha: "abc1234", subject: message)
+    }
+
+    // Everything else is the stand-in's, which traps.
+    func create(provider: ProviderId, cwd: String, cols: Int, rows: Int, opts: SpawnOptions,
+                worktree: SessionWorktree?, dispatchId: String?, initialInput: String?,
+                onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
+        try inner.create(provider: provider, cwd: cwd, cols: cols, rows: rows, opts: opts,
+                         worktree: worktree, dispatchId: dispatchId, initialInput: initialInput,
+                         onSeedFailure: onSeedFailure)
+    }
+    func createEditorSession(parent: SessionMeta, file: String?, line: Int?, cols: Int,
+                             rows: Int) throws -> any LiveSession {
+        try inner.createEditorSession(parent: parent, file: file, line: line, cols: cols, rows: rows)
+    }
+    func resume(_ meta: SessionMeta, cols: Int, rows: Int,
+                priorScrollback: [UInt8]) throws -> any LiveSession {
+        try inner.resume(meta, cols: cols, rows: rows, priorScrollback: priorScrollback)
+    }
+    func restartFresh(_ meta: SessionMeta, cols: Int, rows: Int) throws -> any LiveSession {
+        try inner.restartFresh(meta, cols: cols, rows: rows)
+    }
+    func setSkipPermissions(_ sessionId: String, skipPermissions: Bool, cols: Int,
+                            rows: Int) async throws -> any LiveSession {
+        try await inner.setSkipPermissions(sessionId, skipPermissions: skipPermissions,
+                                           cols: cols, rows: rows)
+    }
+    func kill(_ sessionId: String) { inner.kill(sessionId) }
+    func liveSession(_ id: String) -> (any LiveSession)? { inner.liveSession(id) }
+    func liveSessions() -> [any LiveSession] { inner.liveSessions() }
+    func onSessionCreated(_ listener: @escaping (any LiveSession) -> Void) -> () -> Void {
+        inner.onSessionCreated(listener)
+    }
+    func sessions() -> [SessionMeta] { inner.sessions() }
+    func session(_ id: String) -> SessionMeta? { inner.session(id) }
+    func insertSession(_ meta: SessionMeta) { inner.insertSession(meta) }
+    func updateSession(_ meta: SessionMeta, scrollback: [UInt8]) {
+        inner.updateSession(meta, scrollback: scrollback)
+    }
+    func deleteSession(_ id: String) { inner.deleteSession(id) }
+    func storedScrollback(_ id: String) -> [UInt8]? { inner.storedScrollback(id) }
+    func setTitle(_ id: String, title: String) { inner.setTitle(id, title: title) }
+    func setArchived(_ id: String, archived: Bool) { inner.setArchived(id, archived: archived) }
+    func setCliSessionId(_ id: String, cliSessionId: String) {
+        inner.setCliSessionId(id, cliSessionId: cliSessionId)
+    }
+    func usedCliSessionIds() -> Set<String> { inner.usedCliSessionIds() }
+    func searchSessions(_ query: String, limit: Int) -> [SearchHit] {
+        inner.searchSessions(query, limit: limit)
+    }
+    func enforceSessionCap(projectKey: (String) -> String, keepIds: Set<String>) {
+        inner.enforceSessionCap(projectKey: projectKey, keepIds: keepIds)
+    }
+    func performMaintenance() throws -> GRDBStore.MaintenanceReport { try inner.performMaintenance() }
+    func queueMessage(_ sessionId: String, text: String) -> QueuedMessage {
+        inner.queueMessage(sessionId, text: text)
+    }
+    func queuedMessages(_ sessionId: String) -> [QueuedMessage] { inner.queuedMessages(sessionId) }
+    func dequeueMessage(_ sessionId: String, messageId: String) -> Bool {
+        inner.dequeueMessage(sessionId, messageId: messageId)
+    }
+    func subscribeQueue(_ sessionId: String,
+                        _ listener: @escaping MessageQueue.Listener) -> @Sendable () -> Void {
+        inner.subscribeQueue(sessionId, listener)
+    }
+    func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty {
+        try inner.openEditorPty(cwd: cwd, file: file, cols: cols, rows: rows)
+    }
+    func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty {
+        try inner.openTerminalPty(cwd: cwd, cols: cols, rows: rows)
+    }
+    func trackedPrs() async -> [TrackedPr] { await inner.trackedPrs() }
+    func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,
+                 adoptSessionId: String?) async -> TrackedPr? {
+        await inner.trackPr(pr, cwd: cwd, cols: cols, rows: rows, adoptSessionId: adoptSessionId)
+    }
+    func untrackPr(_ trackedId: String) async { await inner.untrackPr(trackedId) }
+    func resolveTrackNotification(trackedId: String, notificationId: String) async {
+        await inner.resolveTrackNotification(trackedId: trackedId, notificationId: notificationId)
+    }
+    func subscribeTrackedPrs(
+        _ onEvent: @escaping @Sendable (TrackedPrEvent) -> Void) async -> @Sendable () -> Void {
+        await inner.subscribeTrackedPrs(onEvent)
+    }
+    var crashOrphanIds: Set<String> { inner.crashOrphanIds }
+    var midTurnOrphanIds: Set<String> { inner.midTurnOrphanIds }
+    func markDesktopActive() { inner.markDesktopActive() }
+    func logSessionEvent(_ event: String, sessionId: String, project: String,
+                         fields: [String: String]) {
+        inner.logSessionEvent(event, sessionId: sessionId, project: project, fields: fields)
+    }
+    func flushSessionLog() -> String { inner.flushSessionLog() }
+    func setReaperIdleWindow(minutes: Int) async { await inner.setReaperIdleWindow(minutes: minutes) }
+    func setReaperProtectedIds(_ ids: Set<String>) async { await inner.setReaperProtectedIds(ids) }
+    func shutdown() { inner.shutdown() }
+    func shutdownGracefully(timeout: TimeInterval) { inner.shutdownGracefully(timeout: timeout) }
 }
 
 /// A `CoreClient` that exists only to carry a capability list. Every member that

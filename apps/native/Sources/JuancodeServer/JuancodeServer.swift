@@ -210,97 +210,19 @@ public enum JuancodeServer {
             return Response(status: .noContent)
         }
 
-        router.get("/api/sessions/:id/diff") { req, ctx in
-            let m = try meta(ctx, store)
-            let cwd = await resolveTargetCwd(m.cwd, req.uri.queryParameters["cwd"].map(String.init))
-            do { return try await getDiff(cwd) }
-            catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        router.get("/api/sessions/:id/git") { req, ctx in
-            let m = try meta(ctx, store)
-            return await getGitState(await resolveTargetCwd(m.cwd, req.uri.queryParameters["cwd"].map(String.init)))
-        }
-
-        router.post("/api/sessions/:id/commit-message") { req, ctx in
-            let m = try meta(ctx, store)
-            let body = try? await req.decode(as: CwdBody.self, context: ctx)
-            do {
-                let cwd = await resolveTargetCwd(m.cwd, body?.cwd)
-                let diff = try await getDiff(cwd)
-                return CommitMessageResult(message: try await generateCommitMessage(cwd, diff.files))
-            } catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        router.post("/api/sessions/:id/commit") { req, ctx in
-            let m = try meta(ctx, store)
-            let body = try await req.decode(as: CommitBody.self, context: ctx)
-            let message = body.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !message.isEmpty else { throw APIError(.badRequest, "message required") }
-            let cwd = await resolveTargetCwd(m.cwd, body.cwd)
-            do { return try await commitAll(cwd, message) }
-            catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        router.post("/api/sessions/:id/push") { req, ctx in
-            let m = try meta(ctx, store)
-            let body = try? await req.decode(as: CwdBody.self, context: ctx)
-            let cwd = await resolveTargetCwd(m.cwd, body?.cwd)
-            do { return try await pushCurrent(cwd) }
-            catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        router.post("/api/sessions/:id/pr") { req, ctx in
-            let m = try meta(ctx, store)
-            let body = try await req.decode(as: PrBody.self, context: ctx)
-            let title = body.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !title.isEmpty else { throw APIError(.badRequest, "title required") }
-            let cwd = await resolveTargetCwd(m.cwd, body.cwd)
-            do {
-                _ = try await pushCurrent(cwd) // ensure the branch is on the remote first
-                return try await createPr(cwd, title: title, body: body.body ?? "", draft: body.draft ?? false)
-            } catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        // Discard uncommitted work — per-file or per-hunk (juancode-qce.3). A plain
-        // HTTP route (no WS wire change): `file` is required and validated inside the
-        // worktree; an optional `hunkIndex` scopes it to one hunk. Destructive, so it
-        // refuses anything unscoped and the UI gates it behind an explicit confirm.
-        router.post("/api/sessions/:id/revert") { req, ctx in
-            let m = try meta(ctx, store)
-            let body = try await req.decode(as: RevertBody.self, context: ctx)
-            guard !body.file.trimmingCharacters(in: .whitespaces).isEmpty else {
-                throw APIError(.badRequest, "file required")
-            }
-            let cwd = await resolveTargetCwd(m.cwd, body.cwd)
-            do {
-                if let hunk = body.hunkIndex {
-                    return try await revertHunk(cwd, path: body.file, hunkIndex: hunk)
-                }
-                return try await revertFile(cwd, path: body.file)
-            } catch { throw APIError(.internalServerError, errMsg(error)) }
-        }
-
-        router.get("/api/sessions/:id/worktrees") { _, ctx in
-            let m = try meta(ctx, store)
-            return await listWorktrees(m.cwd)
-        }
-
-        router.get("/api/sessions/:id/file") { req, ctx in
-            let m = try meta(ctx, store)
-            guard let rel = req.uri.queryParameters["path"].map(String.init), !rel.isEmpty else {
-                throw APIError(.badRequest, "path required")
-            }
-            let root = URL(fileURLWithPath: m.cwd).standardizedFileURL
-            let full = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
-            guard full.path == root.path || full.path.hasPrefix(root.path + "/") else {
-                throw APIError(.badRequest, "path escapes working dir")
-            }
-            guard let content = try? String(contentsOfFile: full.path, encoding: .utf8) else {
-                throw APIError(.notFound, "could not read file")
-            }
-            return FileContentResponse(path: rel, content: content)
-        }
+        // The working-tree reads and writes — diff, git state, commit, push, discard,
+        // worktrees, file — are NOT served here any more. They moved into the daemon
+        // (juancode-52e8.14.5), which serves them at the same paths, and this core does
+        // not advertise `changes`. A 404 is the honest answer from a core that does not
+        // claim the capability; the alternative was keeping a second implementation of
+        // it alive on the side of a core that is being deleted (juancode-nqpm).
+        //
+        // Two routes went with them because they read the working tree to do their own
+        // job: `POST /api/sessions/:id/pr` pushed the branch before opening the PR, and
+        // `POST /api/sessions/:id/review` diffed the tree before reviewing it. Both
+        // were unreachable — nothing in this repo has called them since the web app was
+        // deleted — and both still exist as in-app actions, which is where the desktop
+        // reaches them. The GET halves of review and comments stay: they read the store.
 
         router.get("/api/prs") { req, _ in
             guard let cwd = req.uri.queryParameters["cwd"].map(String.init), !cwd.isEmpty else {
@@ -376,18 +298,6 @@ public enum JuancodeServer {
             let id = try param(ctx, "id")
             guard let review = store.getReview(id) else { return jsonNullResponse }
             return jsonResponse(review)
-        }
-
-        router.post("/api/sessions/:id/review") { _, ctx in
-            let m = try meta(ctx, store)
-            let id = try param(ctx, "id")
-            do {
-                let diff = try await getDiff(m.cwd)
-                let result = await runReview(cwd: m.cwd, files: diff.files,
-                                             comments: store.listComments(id), now: nowMs())
-                store.saveReview(id, result)
-                return jsonResponse(result)
-            } catch { throw APIError(.internalServerError, errMsg(error)) }
         }
 
         router.get("/api/sessions/:id/comments") { _, ctx in

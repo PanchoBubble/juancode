@@ -8,8 +8,12 @@
 //! exception (opencode's opt-in bypass, which has no flag).
 
 pub mod activity;
+pub mod at_risk;
 pub mod changes;
+pub mod commit_message;
+pub mod diff;
 pub mod gh;
+pub mod git;
 pub mod heavy;
 pub mod model;
 pub mod notify;
@@ -27,6 +31,11 @@ pub use activity::{
     Transition,
 };
 pub use changes::ChangeStat;
+pub use diff::{DiffFile, FileStatus};
+pub use git::{
+    BaseDiffResult, CommitResult, DiffResult, GitError, GitState, PushResult, RecentCommit,
+    RevertResult, Worktree, WorktreeStatusEntry,
+};
 pub use heavy::{HeavyJob, HeavyQueue, HeavyQueueSnapshot};
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
 pub use notify::{notification_text, webhook_body, NotificationEvent};

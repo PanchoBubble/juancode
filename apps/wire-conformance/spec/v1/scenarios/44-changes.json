@@ -1,0 +1,367 @@
+{
+  "id": "changes",
+  "title": "the working tree a session is changing",
+  "asserts": "a core that advertises `changes` can answer for the git tree its session works in - the diff, the branch state, the worktree listing, a file out of it - and can commit, push and discard in it, naming a reason when it will not. The two assertions that carry the weight are the destructive ones: a discard is scoped to exactly the path it was given and nothing else, and a path that tries to leave the worktree is REFUSED rather than sanitised, because a revert frame that accepts `../` is a write primitive pointed at the whole filesystem by anything that can reach the socket. The reads are here for a sharper reason than completeness: a core that answers an empty diff where it means `I cannot read this tree` tells somebody the agent changed nothing, which is the one wrong thing a Changes view can say.",
+  "capabilities": [
+    "changes",
+    "isolateWorktree"
+  ],
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "exit",
+    "sessionDeleted"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitRemoteCwd",
+        "cols": 80,
+        "rows": 24,
+        "isolateWorktree": true,
+        "worktreeName": "$worktreeName"
+      },
+      "note": "a worktree of its own, off the repo that has a local bare remote. Its own tree per attempt is what makes this scenario repeatable: a commit and a push are writes, and a second run against a tree the first one already committed in would be measuring what the first run left behind"
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "cwd": {
+            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
+          }
+        }
+      },
+      "bind": {
+        "session": "session.id",
+        "sessionCwd": "session.cwd"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "get": "/api/sessions/$session/git",
+      "expectBody": {
+        "git": true,
+        "branch": {
+          "$regex": "^juancode/conformance-"
+        },
+        "detached": false,
+        "dirty": false,
+        "remote": true
+      },
+      "note": "a clean tree on its own branch, in a repo that has a remote. `remote: true` is not decoration: it is what the difference between `offer a push` and `say there is nowhere to push to` is drawn from"
+    },
+    {
+      "get": "/api/sessions/$session/diff",
+      "expectBody": {
+        "git": true,
+        "files": {
+          "$length": 0
+        }
+      },
+      "note": "a clean tree is an EMPTY file list under `git: true`. A core that cannot read the tree must not answer this shape - `git: false` is the other answer, and a 501 is the third; all three mean different things to whoever draws them"
+    },
+    {
+      "get": "/api/sessions/$session/worktrees",
+      "expectBody": {
+        "$some": {
+          "path": "$sessionCwd",
+          "main": false,
+          "branch": {
+            "$regex": "^juancode/conformance-"
+          }
+        }
+      },
+      "note": "the session's own tree is in the repo's listing, and is not the main one. The main worktree is first in the list by git's own ordering, which is what makes it a stable per-repo key"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "EDIT wide.txt 3 line 3 EDITED\r"
+      },
+      "note": "the agent changes a file in the tree it was given. Line 3 and line 37 are far enough apart that git emits TWO hunks, which is the only way a per-hunk discard can be told from a whole-file one"
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "edited: wide.txt:3"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "EDIT wide.txt 37 line 37 EDITED\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "output",
+        "sessionId": "$session",
+        "data": {
+          "$contains": "edited: wide.txt:37"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "get": "/api/sessions/$session/diff",
+      "expectBody": {
+        "git": true,
+        "files": [
+          {
+            "path": "wide.txt",
+            "status": "modified",
+            "additions": 2,
+            "deletions": 2,
+            "binary": false,
+            "truncated": false,
+            "diff": {
+              "$contains": "+line 3 EDITED"
+            }
+          }
+        ]
+      },
+      "note": "one file, two changed lines, and the patch itself - the client parses the hunks, so the raw unified diff is what has to travel"
+    },
+    {
+      "get": "/api/sessions/$session/file?path=wide.txt",
+      "expectBody": {
+        "path": "wide.txt",
+        "content": {
+          "$contains": "line 3 EDITED"
+        }
+      }
+    },
+    {
+      "get": "/api/sessions/$session/file?path=..%2F..%2Fescape.txt",
+      "status": 404,
+      "note": "a read that tries to climb out of the worktree is refused. 404 rather than 403 on purpose: a caller must not be able to use the status code to learn what exists outside the tree"
+    },
+    {
+      "send": {
+        "type": "sessionRevert",
+        "sessionId": "$session",
+        "path": "../../escape.txt",
+        "requestId": "$requestId"
+      },
+      "note": "the assertion this scenario exists for. A discard is a scoped `git checkout` or an unlink, and a frame that accepted `../` would aim either one at the whole filesystem"
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "$requestId",
+        "sessionId": "$session",
+        "op": "revert",
+        "ok": false,
+        "error": {
+          "$contains": "out-of-tree"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "REFUSED, and refused by name. Not sanitised into some path inside the tree, which would discard a file nobody asked about, and not answered `ok` with nothing done, which is worse than either"
+    },
+    {
+      "get": "/api/sessions/$session/diff",
+      "expectBody": {
+        "files": {
+          "$length": 1
+        }
+      },
+      "note": "and the refusal changed nothing: the file the agent edited is still edited"
+    },
+    {
+      "send": {
+        "type": "sessionRevert",
+        "sessionId": "$session",
+        "path": "wide.txt",
+        "hunkIndex": 0,
+        "requestId": "hunk-$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "hunk-$requestId",
+        "op": "revert",
+        "ok": true,
+        "result": {
+          "path": "wide.txt",
+          "reverted": true
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "get": "/api/sessions/$session/diff",
+      "expectBody": {
+        "files": [
+          {
+            "path": "wide.txt",
+            "additions": 1,
+            "deletions": 1,
+            "diff": {
+              "$contains": "+line 37 EDITED"
+            }
+          }
+        ]
+      },
+      "note": "one hunk discarded, the OTHER one still there. A core that reverted the whole file would pass the frame's assertion above and fail here, which is the point of asking twice"
+    },
+    {
+      "send": {
+        "type": "sessionCommit",
+        "sessionId": "$session",
+        "message": "fix: the thirty-seventh line",
+        "requestId": "commit-$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "commit-$requestId",
+        "op": "commit",
+        "ok": true,
+        "result": {
+          "sha": {
+            "$regex": "^[0-9a-f]{7,}$"
+          },
+          "subject": "fix: the thirty-seventh line"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "the subject read back off the commit that was made, not echoed from the frame: a core that answered with the message it was handed would pass while having committed nothing"
+    },
+    {
+      "get": "/api/sessions/$session/diff",
+      "expectBody": {
+        "files": {
+          "$length": 0
+        }
+      },
+      "note": "the tree is clean, which is the only witness that the commit actually took the change"
+    },
+    {
+      "send": {
+        "type": "sessionCommitMessage",
+        "sessionId": "$session",
+        "requestId": "draft-$requestId"
+      },
+      "note": "the draft, asked for against a tree that was just committed. Driven at its REFUSAL rather than at a real answer on purpose: a genuine draft is a `claude -p` run, and a conformance verdict that depended on what a language model said would be measuring the model"
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "draft-$requestId",
+        "op": "commitMessage",
+        "ok": false,
+        "error": {
+          "$contains": "No changes to describe"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "refused before anything is spawned. A core that ran the CLI anyway would answer with whatever it said about an empty diff, which is a paragraph nobody asked for and a request somebody paid for"
+    },
+    {
+      "send": {
+        "type": "sessionCommit",
+        "sessionId": "$session",
+        "message": "chore: nothing to say",
+        "requestId": "empty-$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "empty-$requestId",
+        "op": "commit",
+        "ok": false,
+        "error": {
+          "$contains": "Nothing to commit"
+        }
+      },
+      "timeoutMs": 20000,
+      "note": "a commit with nothing staged is refused with a sentence a person can act on, rather than with git's advice block about `git add` or with an empty success"
+    },
+    {
+      "send": {
+        "type": "sessionPush",
+        "sessionId": "$session",
+        "requestId": "push-$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "push-$requestId",
+        "op": "push",
+        "ok": true,
+        "result": {
+          "branch": {
+            "$regex": "^juancode/conformance-"
+          }
+        }
+      },
+      "timeoutMs": 30000,
+      "note": "the first push sets the upstream, which is what the state read below proves happened"
+    },
+    {
+      "get": "/api/sessions/$session/git",
+      "expectBody": {
+        "git": true,
+        "upstream": {
+          "$regex": "^origin/juancode/conformance-"
+        },
+        "ahead": 0,
+        "behind": 0,
+        "dirty": false
+      },
+      "note": "upstream set and nothing ahead of it. Without the upstream leg a core could `git push` to whatever the last one was and still answer `ok`"
+    },
+    {
+      "send": {
+        "type": "sessionRevert",
+        "sessionId": "no-such-session-here",
+        "path": "wide.txt",
+        "requestId": "ghost-$requestId"
+      },
+      "note": "a write addressed to a session this core does not hold"
+    },
+    {
+      "expect": {
+        "type": "changesResult",
+        "requestId": "ghost-$requestId",
+        "ok": false,
+        "error": {
+          "$contains": "no session"
+        }
+      },
+      "timeoutMs": 15000,
+      "note": "answered rather than dropped: a client waiting on a `requestId` that never comes back cannot tell a refused write from a slow one, and on a discard that difference is whether somebody's file is still there"
+    },
+    {
+      "get": "/api/sessions/no-such-session-here/diff",
+      "status": 404,
+      "note": "and the reads say so the same way"
+    }
+  ]
+}

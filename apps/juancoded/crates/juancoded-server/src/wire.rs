@@ -219,6 +219,13 @@ pub const CAPABILITIES: &[&str] = &[
     // has: the queue is machine state that outlives an app launch, and a Mac you have
     // walked away from is exactly when you want to know what is holding the slot.
     "heavyQueue",
+    // The git working tree (juancode-52e8.14.5). Advertised because the whole surface
+    // answers here: the diff, the branch state, the worktree listing and a file's
+    // contents over HTTP, and the four writes — commit, push, discard, draft a message
+    // — as frames, so a refusal names a reason and a discard is ordered against the
+    // session's other traffic rather than racing it. The Swift core kept this for
+    // itself, which meant the answer only existed on the Mac the app was running on.
+    "changes",
 ];
 
 /// One queued occurrence on the wire.
@@ -692,6 +699,48 @@ pub enum ClientMessage {
         limit: usize,
         request_id: String,
     },
+    /// Stage everything in the session's tree and commit it.
+    ///
+    /// A frame rather than an HTTP POST, and that is the whole reason the four writes
+    /// below are here at all: a commit is ordered against the session's other traffic
+    /// on the same socket, and a refusal ("Nothing to commit.", a hook's own words)
+    /// comes back naming itself instead of as a status code somebody has to map.
+    ///
+    /// `cwd` names another worktree of the same repo, validated against that repo's
+    /// own listing; absent means the session's own tree.
+    SessionCommit {
+        session_id: String,
+        message: String,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Push the session's current branch, setting the upstream on the first push.
+    SessionPush {
+        session_id: String,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Discard uncommitted work: one file, or one hunk of one file when `hunkIndex`
+    /// is present.
+    ///
+    /// The destructive one. `path` is validated inside the target worktree before
+    /// anything runs — see `juancoded_core::git::scoped_relative_path`, which is what
+    /// stops this frame being a write primitive aimed at the whole filesystem.
+    SessionRevert {
+        session_id: String,
+        path: String,
+        hunk_index: Option<usize>,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Draft a commit message for what is currently uncommitted, by asking the genuine
+    /// `claude` CLI in headless print mode. Slow by nature — seconds, not
+    /// milliseconds — which is why it is correlated and answered out of band.
+    SessionCommitMessage {
+        session_id: String,
+        cwd: Option<String>,
+        request_id: String,
+    },
     /// A well-formed frame this core doesn't implement. Ignored, not fatal.
     Unknown {
         r#type: String,
@@ -778,6 +827,15 @@ struct RawClient {
     /// Named control keys (juancode-uigs).
     #[serde(default)]
     keys: Option<Vec<String>>,
+    #[serde(default)]
+    message: Option<String>,
+    /// The path a `sessionRevert` names. `file` is accepted as the same thing, because
+    /// that is what the Swift core's `POST /revert` body called it and a client moved
+    /// across must not have its discard silently widened into a missing-path refusal.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "hunkIndex", default)]
+    hunk_index: Option<usize>,
     #[serde(default)]
     pid: Option<i32>,
     #[serde(default)]
@@ -923,6 +981,46 @@ impl ClientMessage {
             }),
             "deleteSession" => Ok(Self::DeleteSession {
                 session_id: need_session()?,
+            }),
+            // All four carry a `requestId`: a panel can have a commit and a message
+            // draft in flight at once, and a draft takes seconds, so an answer with no
+            // way to say which question it belongs to is not an answer.
+            "sessionCommit" => Ok(Self::SessionCommit {
+                session_id: need_session()?,
+                // Refused rather than defaulted to something: a commit with no message
+                // is a commit nobody can read back, and inventing one here would put
+                // this core's words in somebody's history.
+                message: raw
+                    .message
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .ok_or("missing message")?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionPush" => Ok(Self::SessionPush {
+                session_id: need_session()?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionRevert" => Ok(Self::SessionRevert {
+                session_id: need_session()?,
+                // A revert with no path is refused and never widened into "the tree":
+                // the one thing this frame must never mean is `git checkout .`.
+                path: raw
+                    .file
+                    .or(raw.path)
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .ok_or("missing path")?,
+                hunk_index: raw.hunk_index,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionCommitMessage" => Ok(Self::SessionCommitMessage {
+                session_id: need_session()?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
             }),
             "subscribeScreen" => Ok(Self::SubscribeScreen {
                 session_id: need_session()?,
@@ -1077,6 +1175,24 @@ pub enum ServerMessage {
     SearchResults {
         request_id: String,
         hits: Vec<SearchHit>,
+    },
+    /// The answer to one of the four `session*` git writes.
+    ///
+    /// One frame for all four rather than four, because a client does exactly the same
+    /// thing with each: match the `requestId`, and then either draw the result or show
+    /// the reason. `op` says which write it answers so a late reply cannot be read as
+    /// the wrong one, and `error` is present exactly when the write did not happen —
+    /// a refusal that arrived as a success is the failure mode this shape exists to
+    /// make impossible.
+    ChangesResult {
+        request_id: String,
+        session_id: String,
+        /// `commit`, `push`, `revert` or `commitMessage`.
+        op: &'static str,
+        /// The write's own payload, absent on a refusal.
+        result: Option<Value>,
+        /// Git's first useful line, or this core's, present only on a refusal.
+        error: Option<String>,
     },
     /// The shell pty is up, and `requestId` is the client's own, echoed back
     /// unchanged. Without it a client with two opens in flight has two `terminalReady`
@@ -1425,6 +1541,28 @@ impl ServerMessage {
             } => json!({
                 "type": "terminalReady", "terminalId": terminal_id, "requestId": request_id,
             }),
+            Self::ChangesResult {
+                request_id,
+                session_id,
+                op,
+                result,
+                error,
+            } => {
+                let mut v = json!({
+                    "type": "changesResult",
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "op": op,
+                    "ok": error.is_none(),
+                });
+                if let Some(result) = result {
+                    v["result"] = result.clone();
+                }
+                if let Some(error) = error {
+                    v["error"] = json!(error);
+                }
+                v
+            }
             Self::SearchResults { request_id, hits } => json!({
                 "type": "searchResults",
                 "requestId": request_id,
@@ -1884,6 +2022,16 @@ mod tests {
             r#"{"type":"heavySetPriority","pid":4242,"prio":5}"#,
             r#"{"type":"heavySetSlots","slots":2}"#,
             r#"{"type":"heavyCancel","pid":4242}"#,
+            // And for `changes`, all four writes: a client feature-detecting off the
+            // capability draws Commit, Push, Discard and "draft me a message", and any
+            // one of them reaching `Unknown` is a button that does nothing and says
+            // nothing on the one panel where doing nothing quietly is indistinguishable
+            // from having discarded the file.
+            r#"{"type":"sessionCommit","sessionId":"s","message":"feat: x","requestId":"r"}"#,
+            r#"{"type":"sessionPush","sessionId":"s","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","path":"a.txt","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","file":"a.txt","hunkIndex":1,"requestId":"r"}"#,
+            r#"{"type":"sessionCommitMessage","sessionId":"s","requestId":"r"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1908,6 +2056,15 @@ mod tests {
             r#"{"type":"heavyCancel"}"#,
             r#"{"type":"heavySetPriority","pid":4242}"#,
             r#"{"type":"heavySetSlots"}"#,
+            // And a git write with nothing to act on. A `sessionRevert` that lost its
+            // path must NOT become a discard of the tree, and a `sessionCommit` with a
+            // blank message must not put words this core invented into a history.
+            r#"{"type":"sessionRevert","sessionId":"s","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","path":"  ","requestId":"r"}"#,
+            r#"{"type":"sessionCommit","sessionId":"s","message":"   ","requestId":"r"}"#,
+            r#"{"type":"sessionCommit","sessionId":"s","requestId":"r"}"#,
+            // And one with nowhere to send the answer.
+            r#"{"type":"sessionPush","sessionId":"s"}"#,
         ] {
             assert!(ClientMessage::decode(frame).is_err(), "{frame}");
         }
@@ -1964,6 +2121,7 @@ mod tests {
                     "prWebhook",
                     "namedKeys",
                     "heavyQueue",
+                    "changes",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

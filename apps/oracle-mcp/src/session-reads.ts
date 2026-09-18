@@ -1,6 +1,7 @@
-// The reader for the native server's three per-session reads: the retained pty
-// bytes, the structured transcript records the daemon kept, and those records in
-// chat shape.
+// The reader for the native server's per-session reads: the retained pty bytes, the
+// rendered screen, the structured transcript records the daemon kept, those records in
+// chat shape, and the session's git working tree — diff, branch state, worktrees, and
+// one file out of it.
 //
 // Everything else the sidecar knows about a session is a subscription — the phone
 // console follows `subscribeScreen` row diffs over the shared WS. That is right for a
@@ -85,6 +86,53 @@ export interface SessionMessages {
 /** Raised when the core behind the native server does not serve a read (HTTP 501),
  *  so a caller can say "this core cannot" rather than "this session is empty". The
  *  distinction is the whole reason the routes 501 instead of answering `[]`. */
+/** One file's change in a session's working tree, as `GET /api/sessions/:id/diff`
+ *  answers it (juancode-52e8.14.5). `diff` is the raw unified patch; it is empty for a
+ *  binary file and for one past the core's per-file cap, which `truncated` tells apart
+ *  from a file with no changed lines. */
+export interface DiffFile {
+  path: string;
+  oldPath?: string;
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked";
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  diff: string;
+  truncated: boolean;
+}
+
+/** A session's working-tree diff. `git: false` is a session in a directory that is not
+ *  a repo — which is normal, and is NOT an error: a caller draws "not a repo" rather
+ *  than "nothing changed", because those are different things to tell somebody. */
+export interface SessionDiff {
+  git: boolean;
+  root?: string;
+  files: DiffFile[];
+  truncatedFiles?: boolean;
+}
+
+/** A session's branch state: what to say about committing and pushing. With no
+ *  upstream, `ahead` counts every commit on the branch, not the unpushed ones. */
+export interface SessionGitState {
+  git: boolean;
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  remote: boolean;
+}
+
+/** One linked worktree of the repo a session's cwd belongs to. */
+export interface SessionWorktree {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  main: boolean;
+  lockedReason?: string;
+}
+
 export class UnservedRead extends Error {}
 
 /** Raised when the session id is not one the core holds. */
@@ -171,6 +219,32 @@ export function fetchTranscript(id: string, limit?: number): Promise<SessionTran
 /** The same records in chat shape, with the ones carrying no prose dropped. */
 export function fetchMessages(id: string, limit?: number): Promise<SessionMessages> {
   return read<SessionMessages>(id, "messages", limitParams(limit));
+}
+
+/** The session's working-tree diff vs HEAD (juancode-52e8.14.5).
+ *
+ *  Both cores serve this path, but only one answers it: the Swift core does not
+ *  advertise `changes` and 501s, which surfaces here as `UnservedRead` — the same
+ *  distinction the transcript reads make between "this core cannot" and "this session
+ *  has nothing", and the reason a caller must not render a 501 as an empty diff. */
+export function fetchDiff(id: string): Promise<SessionDiff> {
+  return read<SessionDiff>(id, "diff");
+}
+
+/** The session's branch, upstream and dirtiness. */
+export function fetchGitState(id: string): Promise<SessionGitState> {
+  return read<SessionGitState>(id, "git");
+}
+
+/** Every linked worktree of the session's repo, main one first. */
+export function fetchWorktrees(id: string): Promise<SessionWorktree[]> {
+  return read<SessionWorktree[]>(id, "worktrees");
+}
+
+/** One file out of the session's worktree. A path that leaves the tree is refused by
+ *  the core, and arrives here as an ordinary not-found. */
+export function fetchWorktreeFile(id: string, path: string): Promise<{ path: string; content: string }> {
+  return read<{ path: string; content: string }>(id, "file", new URLSearchParams({ path }));
 }
 
 function limitParams(limit?: number): URLSearchParams | undefined {

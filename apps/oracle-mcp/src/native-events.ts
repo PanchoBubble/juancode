@@ -434,6 +434,26 @@ function emitPauseState(paused: string[]): void {
 // other one-shot writes — so it feature-detects on that socket's own handshake rather
 // than on this module's cached capability list, and works while this one is between
 // reconnects. The table of names is keys.ts.
+//
+// ── Working-tree changes, capability `changes` (juancode-52e8.14.5) ──────────
+//
+// Deliberately NOT mirrored in this module, and the reason is worth writing down so
+// the next person does not "fix" it. The `changes` surface is split by transport:
+//
+//   * The READS are HTTP — `GET /api/sessions/:id/{diff,git,worktrees,file}` — and
+//     their client is session-reads.ts, beside the transcript and screen reads it
+//     already owns. Nothing about them belongs on this socket.
+//   * The WRITES are frames — `sessionCommit`, `sessionPush`, `sessionRevert`,
+//     `sessionCommitMessage`, each answered by one `changesResult` correlated on
+//     `requestId`. The sidecar does not send them: the phone console has no Commit,
+//     Push or Discard, and mirroring frames nothing sends would be a second copy of
+//     the protocol to keep in step for no caller. The desktop relay translates the
+//     phone's POSTs into them (`CoreProxyServer.gitWrite`), so the HTTP shape the
+//     Swift core served is still what a remote client sees.
+//
+// If a Changes view is ever built on the phone, its writes go through the relay's
+// POSTs, not through here.
+//
 // ── Heavy command queue (juancode-52e8.14.3) ─────────────────────────────────
 // The phone's view of the global `heavy` slot queue: memory-heavy commands (CI,
 // integration tests) serialized across every agent session on the Mac. The CORE

@@ -26,6 +26,14 @@ export interface Workspace {
   /** A git repo with one commit and one uncommitted file, for the settle-edge
    *  change rollup and for the tracked-PR worktree path. */
   gitCwd: string;
+  /** A SECOND git repo, with a local bare remote already wired up as `origin` and
+   *  a 40-line file committed, for the working-tree scenario (juancode-52e8.14.5).
+   *
+   *  Its own repo rather than a remote bolted onto `gitCwd`: a commit and a push are
+   *  writes, and running them against the tree that scenario 30 branches worktrees off
+   *  would make an isolation test depend on what a changes test left behind. The bare
+   *  remote is local, so the push is a file copy and the suite needs no network. */
+  gitRemoteCwd: string;
   /** A path that does not exist, for the create-guard error. */
   missingCwd: string;
   /** A file inside `cwd`, for openEditor. */
@@ -62,9 +70,39 @@ export function makeWorkspace(): Workspace {
   // there is something to report.
   writeFileSync(join(gitCwd, "committed.txt"), "base\nchanged\n");
 
+  // The changes fixture: its own repo, its own bare remote, and a file wide enough
+  // that two edits far apart produce two hunks rather than one — which is what a
+  // per-hunk discard has to be measured against.
+  const gitRemoteCwd = join(root, "remote-repo");
+  const bare = join(root, "origin.git");
+  mkdirSync(gitRemoteCwd);
+  const gitRemote = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: gitRemoteCwd,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "conformance",
+        GIT_AUTHOR_EMAIL: "conformance@localhost",
+        GIT_COMMITTER_NAME: "conformance",
+        GIT_COMMITTER_EMAIL: "conformance@localhost",
+      },
+    });
+  execFileSync("git", ["init", "--quiet", "--bare", bare], { stdio: "ignore" });
+  gitRemote("init", "--quiet", "--initial-branch=main");
+  writeFileSync(
+    join(gitRemoteCwd, "wide.txt"),
+    Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n",
+  );
+  gitRemote("add", "wide.txt");
+  gitRemote("commit", "--quiet", "-m", "base");
+  gitRemote("remote", "add", "origin", bare);
+  gitRemote("push", "--quiet", "-u", "origin", "main");
+
   return {
     cwd,
     gitCwd,
+    gitRemoteCwd,
     missingCwd: join(root, "definitely-not-here"),
     file,
     dispose: () => rmSync(root, { recursive: true, force: true }),
@@ -115,6 +153,7 @@ export function seedVars(
   return {
     cwd: workspace.cwd,
     gitCwd: workspace.gitCwd,
+    gitRemoteCwd: workspace.gitRemoteCwd,
     missingCwd: workspace.missingCwd,
     file: workspace.file,
     dispatchId: `conformance-${scenarioId}-${stamp}`,

@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Pure flat-file-list → directory-tree construction for the native ChangesPanel's
 /// VS Code-style "Source Control" file tree (juancode-dxg). Given the flat

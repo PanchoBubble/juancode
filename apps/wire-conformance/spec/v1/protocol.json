@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.18.0",
+  "specRevision": "1.19.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -44,7 +44,8 @@
       "trackPrInSession",
       "prWebhook",
       "namedKeys",
-      "heavyQueue"
+      "heavyQueue",
+      "changes"
     ],
     "gates": {
       "queue": [
@@ -157,6 +158,13 @@
         "heavySetSlots",
         "heavyCancel",
         "heavyQueue"
+      ],
+      "changes": [
+        "sessionCommit",
+        "sessionPush",
+        "sessionRevert",
+        "sessionCommitMessage",
+        "changesResult"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -518,6 +526,54 @@
       "optional": [],
       "capability": "heavyQueue",
       "notes": "SIGTERM a job's wrapper, which forwards it to the running command and frees its slot. Refused with `error` for a pid the core's own snapshot does not hold, and that refusal is the frame's safety property rather than tidiness: without it this is an arbitrary-signal gadget aimed at any process on the machine by anything that can reach the socket. The check is membership in the queue, so the worst a client can do is stop a job in the list it was just sent. Answered by the queue when the job goes."
+    },
+    "sessionCommit": {
+      "required": [
+        "sessionId",
+        "message",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Stage everything in the session's working tree and commit it. A frame rather than an HTTP POST so it is ordered against the session's other traffic on the same socket, and so a refusal can carry git's own first useful line - a hook's rejection, or \"Nothing to commit.\", which is the whole answer and is not recoverable from a status code. A blank or absent `message` is refused rather than defaulted: a commit message this core invented would be in somebody's history forever. `cwd` names another worktree of the same repo and is validated against that repo's own `git worktree list`; anything git has not just listed falls back to the session's own tree."
+    },
+    "sessionPush": {
+      "required": [
+        "sessionId",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Push the branch checked out in the session's tree, setting the upstream to origin on the first push. A detached HEAD is refused by name rather than pushed to whatever the last upstream was."
+    },
+    "sessionRevert": {
+      "required": [
+        "sessionId",
+        "path",
+        "requestId"
+      ],
+      "optional": [
+        "file",
+        "hunkIndex",
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Discard uncommitted work: one file, or one hunk of it when `hunkIndex` is present. The destructive frame, and the one with a guard that is load-bearing rather than tidy - `path` is resolved lexically against the target worktree's root and refused unless it lands strictly inside it, so `../`, an absolute path elsewhere, and the root itself are all rejected before git runs. Without that this frame is an arbitrary write primitive aimed at the whole filesystem by anything that can reach the socket. A missing path is refused and never widened into the tree: the one thing this must not become is `git checkout .`. `file` is accepted as a synonym for `path`, because that is what the Swift core's own POST body called it."
+    },
+    "sessionCommitMessage": {
+      "required": [
+        "sessionId",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Draft a commit message for what is currently uncommitted, by running the genuine `claude` CLI in headless print mode against the diff the CORE reads - not one the client sends, which would describe a snapshot that may already be stale. Seconds rather than milliseconds, and answered out of band, so it does not hold up the pty bytes on the same socket."
     }
   },
   "serverMessages": {
@@ -759,6 +815,20 @@
       "optional": [],
       "capability": "heavyQueue",
       "notes": "The whole `heavy` slot queue: its capacity and the two ordered lists - running first by slot, waiting in the order the wrappers will admit themselves (priority first, then how long each has been queued). Sent once in answer to `heavyQueueSubscribe`, and after that only when the registry actually moved: the core polls on a timer, so \"nothing changed\" is the common case and an identical snapshot carries no information. Always complete; replace wholesale, never a patch - the registry has other writers, so a delta a client applied to its own copy would drift from the line the wrappers are reading. Empty lists mean nothing is queued, which is a queue and not a missing one. `slots` is how many may run at once and `workerCap` how many test-runner workers each admitted job may fan out to; both are read out of the wrapper's own config rather than invented, so a client never disagrees with the shell script about the capacity. Each job is { pid, child?, prio, since, started?, slot, cmd, cwd }: `pid` is the wrapper's, which is the registry filename and the id a cancel names; `child` and `started` are absent while a job waits; `slot` is 0 for a waiting job and its slot index for a running one."
+    },
+    "changesResult": {
+      "required": [
+        "requestId",
+        "sessionId",
+        "op",
+        "ok"
+      ],
+      "optional": [
+        "result",
+        "error"
+      ],
+      "capability": "changes",
+      "notes": "The answer to one of the four `session*` git writes. One frame for all four because a client does the same thing with each: match the `requestId`, then draw the result or show the reason. `op` is `commit`, `push`, `revert` or `commitMessage`, so a late answer cannot be read as the wrong one. `error` is present exactly when the write did NOT happen, and `result` exactly when it did - a refusal that arrived looking like a success is the failure mode this shape exists to make impossible, and it is pointed at a destructive action."
     }
   },
   "enums": {

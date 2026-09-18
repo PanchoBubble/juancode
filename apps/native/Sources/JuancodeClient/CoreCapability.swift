@@ -26,6 +26,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case spawnPreset
     case isolateWorktree
     case heavyQueue
+    case changes
 
     /// What the user calls this.
     public var title: String {
@@ -47,6 +48,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .spawnPreset: return "Named instruction set"
         case .isolateWorktree: return "Isolate in a fresh worktree"
         case .heavyQueue: return "Heavy command queue"
+        case .changes: return "Working-tree changes"
         }
     }
 
@@ -86,6 +88,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "A session cannot be started under a named instruction set: the preset picker is disabled, and a dispatch that names one is refused rather than started without the instructions it asked for."
         case .isolateWorktree:
             return "A session cannot be given a worktree of its own: the isolate toggle is disabled, and a dispatch that asks for isolation is refused rather than run in the shared checkout."
+        case .changes:
+            return "The Changes panel is unavailable: this core does not read the session's git working tree, so there is no diff, no branch state, and no Commit, Push or Discard. The worktree rail and the at-risk badges go with them \u{2014} they are the same read. Nothing about the repository changes; it just cannot be seen or acted on from here."
         case .heavyQueue:
             return "The Heavy Queue panel is unavailable: this core does not read the shared slot registry, so there is nothing to show what is holding a slot and no way to reorder the line or widen it. Heavy commands still queue \u{2014} the `heavy` wrapper is what serializes them \u{2014} they just cannot be watched from here."
         }

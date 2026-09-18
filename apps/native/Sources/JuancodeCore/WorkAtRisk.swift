@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Work-at-risk detection (juancode-rxu): find folders — session cwds and git
 /// worktrees, including orphaned ones whose sessions are gone — holding
@@ -8,7 +7,10 @@ import JuancodeCore
 ///
 /// Split like `SessionHealth`: the brittle rules (root collection/dedup, at-risk
 /// classification, nudge debounce) are pure statics on `WorkAtRiskScan`, testable
-/// without a repo; the one shell-out lives in `probeWorkAtRisk`.
+/// without a repo. The one shell-out that fed them is gone from here — the daemon
+/// probes the folder now (`juancoded_core::at_risk`), and `CoreClient.probeAtRisk`
+/// hands its answer back for `classify` to judge (juancode-52e8.14.5). What is left
+/// is what it always was: rules, and no git.
 
 /// One folder holding at-risk work.
 public struct WorkAtRisk: Codable, Sendable, Equatable, Identifiable {
@@ -174,104 +176,4 @@ public enum WorkAtRiskScan {
             return s.id
         }
     }
-}
-
-/// True when HEAD is contained in at least one remote-tracking branch — i.e.
-/// it's already been pushed somewhere, even if this local branch has no upstream
-/// configured (pushed without `-u`, or sharing history with a pushed branch).
-/// Never throws; false on any error or with no remotes.
-func headContainedInAnyRemote(_ path: String) async -> Bool {
-    guard let out = try? await git(path, ["branch", "-r", "--contains", "HEAD"]) else { return false }
-    return out.split(separator: "\n").contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-}
-
-/// Branch + dirty-count facts for one root, parsed out of a single
-/// `git status --porcelain=v2 --branch`.
-///
-/// `getGitState` answers the same questions with five separate forks
-/// (`rev-parse --is-inside-work-tree`, `symbolic-ref`, `remote`, `rev-parse @{u}`,
-/// `rev-list --count`) plus a sixth for the dirty list. At-risk probing runs across
-/// every watched worktree, so it uses this instead — one fork for all of it
-/// (juancode-78c4). `getGitState` is untouched: the Changes-panel CTAs depend on its
-/// exact semantics, including the `remote` flag this doesn't report.
-struct GitStatusSummary {
-    var branch: String?
-    var detached: Bool
-    var upstream: String?
-    var ahead: Int
-    var behind: Int
-    var dirtyFiles: Int
-}
-
-/// Parse `git status --porcelain=v2 --branch` output. Header lines carry the branch
-/// facts; every non-header line is one changed path (`1`/`2` tracked, `u` unmerged,
-/// `?` untracked), matching what `--porcelain` v1 counted.
-func parseGitStatusSummary(_ out: String) -> GitStatusSummary {
-    var s = GitStatusSummary(branch: nil, detached: false, upstream: nil,
-                             ahead: 0, behind: 0, dirtyFiles: 0)
-    for line in out.split(separator: "\n", omittingEmptySubsequences: true) {
-        guard line.hasPrefix("# ") else {
-            // "1 ", "2 ", "u ", "? " — one entry per changed/untracked path.
-            if let first = line.first, "12u?".contains(first) { s.dirtyFiles += 1 }
-            continue
-        }
-        let parts = line.dropFirst(2).split(separator: " ", omittingEmptySubsequences: true)
-        guard let key = parts.first else { continue }
-        switch key {
-        case "branch.head":
-            let value = parts.count > 1 ? String(parts[1]) : ""
-            // git prints "(detached)" here for a detached HEAD.
-            if value == "(detached)" { s.detached = true } else if !value.isEmpty { s.branch = value }
-        case "branch.upstream":
-            if parts.count > 1 { s.upstream = String(parts[1]) }
-        case "branch.ab":
-            // "+<ahead> -<behind>"
-            for token in parts.dropFirst() {
-                guard let sign = token.first, let n = Int(token.dropFirst()) else { continue }
-                if sign == "+" { s.ahead = n } else if sign == "-" { s.behind = n }
-            }
-        default:
-            continue
-        }
-    }
-    return s
-}
-
-/// Raw git facts about one root, for `WorkAtRiskScan.classify`. nil for a
-/// missing dir or non-git cwd. Never throws.
-public func probeWorkAtRisk(_ path: String) async -> (state: GitState, dirtyFiles: Int, aheadOfBase: Int?, headOnRemote: Bool)? {
-    guard FileManager.default.fileExists(atPath: path) else { return nil }
-    // One fork for branch, upstream, ahead/behind and the dirty count. A non-git dir
-    // makes this fail, which is also how we detect it.
-    guard let out = try? await git(path, ["status", "--porcelain=v2", "--branch"]) else { return nil }
-    let summary = parseGitStatusSummary(out)
-    let dirtyFiles = summary.dirtyFiles
-
-    // `remote` is the one `GitState` field this fast path can't know without another
-    // fork; `classify` never reads it, so infer it from the upstream rather than pay
-    // for `git remote`.
-    let state = GitState(
-        git: true, branch: summary.branch, detached: summary.detached,
-        upstream: summary.upstream,
-        // git omits the `branch.ab` header entirely without an upstream, so these stay
-        // 0 in that case — which is fine: `classify` distrusts `ahead` when there's no
-        // upstream and uses `aheadOfBase` below instead.
-        ahead: summary.ahead, behind: summary.behind,
-        dirty: dirtyFiles > 0, remote: summary.upstream != nil)
-
-    // With an upstream, `state.ahead` is the true unpushed count. Without one,
-    // count commits beyond the inferred base branch instead — `state.ahead`
-    // would be the branch's entire history. But first check whether HEAD is
-    // already on a remote: a branch pushed without upstream tracking has no
-    // `@{u}` yet its commits ARE on the remote, so it isn't unpushed at all.
-    var aheadOfBase: Int? = nil
-    var headOnRemote = false
-    if state.upstream == nil, !state.detached {
-        headOnRemote = await headContainedInAnyRemote(path)
-        if !headOnRemote, let base = await defaultBaseBranch(path),
-           let counted = try? await git(path, ["rev-list", "--count", "\(base)..HEAD"]) {
-            aheadOfBase = Int(counted.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-    }
-    return (state, dirtyFiles, aheadOfBase, headOnRemote)
 }

@@ -70,6 +70,20 @@ public enum CoreProxyServer {
         /// (juancode-rnx6).
         public let forwardPrWebhook: (@Sendable (String, Int) -> Bool)?
 
+        /// Run one of the four working-tree writes through the core and hand back what
+        /// it answered, already encoded (juancode-52e8.14.5).
+        ///
+        /// A closure rather than another proxied HTTP route, because the writes are NOT
+        /// HTTP on the daemon: they are wire frames, so that a discard is ordered
+        /// against the session's other traffic and a refusal can carry git's own
+        /// sentence. This hop turns the phone's POST into that frame and waits for the
+        /// correlated answer.
+        ///
+        /// Nil for a core with no frame for them, and the route is then not registered
+        /// at all — which leaves the 501 below, naming the missing capability, instead
+        /// of a 200 for a commit that never happened.
+        public let gitWrite: (@Sendable (GitWrite) async -> GitWriteOutcome)?
+
         public init(sessions: @escaping @Sendable () -> [SessionMeta],
                     session: @escaping @Sendable (String) -> SessionMeta?,
                     searchSessions: @escaping @Sendable (String, Int) -> [SearchHit],
@@ -77,7 +91,8 @@ public enum CoreProxyServer {
                     deleteSession: @escaping @Sendable (String) -> Void,
                     backendName: String,
                     globalPause: GlobalPauseBook? = nil,
-                    forwardPrWebhook: (@Sendable (String, Int) -> Bool)? = nil) {
+                    forwardPrWebhook: (@Sendable (String, Int) -> Bool)? = nil,
+                    gitWrite: (@Sendable (GitWrite) async -> GitWriteOutcome)? = nil) {
             self.sessions = sessions
             self.session = session
             self.searchSessions = searchSessions
@@ -86,7 +101,41 @@ public enum CoreProxyServer {
             self.backendName = backendName
             self.globalPause = globalPause
             self.forwardPrWebhook = forwardPrWebhook
+            self.gitWrite = gitWrite
         }
+    }
+
+    /// One working-tree write, as a remote client asked for it.
+    public struct GitWrite: Sendable {
+        public enum Kind: String, Sendable {
+            case commit, push, revert, commitMessage
+        }
+        public let kind: Kind
+        public let sessionId: String
+        /// Another worktree of the same repo, when the client named one.
+        public let cwd: String?
+        /// The commit message, on `.commit`.
+        public let message: String?
+        /// The path to discard, on `.revert`.
+        public let path: String?
+        /// Which hunk of it, when the discard is per-hunk.
+        public let hunkIndex: Int?
+
+        public init(kind: Kind, sessionId: String, cwd: String? = nil, message: String? = nil,
+                    path: String? = nil, hunkIndex: Int? = nil) {
+            self.kind = kind; self.sessionId = sessionId; self.cwd = cwd
+            self.message = message; self.path = path; self.hunkIndex = hunkIndex
+        }
+    }
+
+    /// What the core answered: its JSON payload, or its reason for refusing.
+    ///
+    /// Never both, and never neither. A write that this relay could not confirm is a
+    /// failure, because a 200 for a commit nobody made is the one answer a client
+    /// cannot recover from.
+    public enum GitWriteOutcome: Sendable {
+        case ok(Data)
+        case failed(String)
     }
 
     /// Largest relayed frame. Same ceiling `JuancodeServer` reads with, so a frame
@@ -352,7 +401,7 @@ public enum CoreProxyServer {
             return Response(status: .noContent)
         }
 
-        // The four per-session reads, proxied to the daemon verbatim.
+        // The per-session reads, proxied to the daemon verbatim.
         //
         // Not answered here, and deliberately not answered off the desktop's mirror:
         // the mirror is a cache of rows, it holds no transcript at all, and the
@@ -373,6 +422,46 @@ public enum CoreProxyServer {
                 return try await proxyRead(sessionId: id, leaf: leaf, query: req.uri.query,
                                            upstreamBaseURL: upstreamBaseURL,
                                            core: source.backendName)
+            }
+        }
+
+        // The four working-tree writes. Registered only when the core behind this relay
+        // has frames for them, so a core without falls through to the 501 that names
+        // what is missing — which is the honest answer for one that would not have
+        // committed anything.
+        //
+        // Same paths and same bodies the Swift core served, so a client that had them
+        // before has them again. `file` is the body key for the discard's path because
+        // that is what the Swift core's `RevertBody` called it.
+        if let write = source.gitWrite {
+            router.post("/api/sessions/:id/commit") { req, ctx -> Response in
+                let id = try relaySessionId(ctx, source)
+                let body = try await req.decode(as: RelayCommitBody.self, context: ctx)
+                let message = body.message.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !message.isEmpty else { throw APIError(.badRequest, "message required") }
+                return try await relayGitWrite(write, .init(kind: .commit, sessionId: id,
+                                                            cwd: body.cwd, message: message))
+            }
+            router.post("/api/sessions/:id/push") { req, ctx -> Response in
+                let id = try relaySessionId(ctx, source)
+                let body = try? await req.decode(as: RelayCwdBody.self, context: ctx)
+                return try await relayGitWrite(write, .init(kind: .push, sessionId: id,
+                                                            cwd: body?.cwd))
+            }
+            router.post("/api/sessions/:id/revert") { req, ctx -> Response in
+                let id = try relaySessionId(ctx, source)
+                let body = try await req.decode(as: RelayRevertBody.self, context: ctx)
+                let file = body.file.trimmingCharacters(in: .whitespaces)
+                guard !file.isEmpty else { throw APIError(.badRequest, "file required") }
+                return try await relayGitWrite(write, .init(kind: .revert, sessionId: id,
+                                                            cwd: body.cwd, path: file,
+                                                            hunkIndex: body.hunkIndex))
+            }
+            router.post("/api/sessions/:id/commit-message") { req, ctx -> Response in
+                let id = try relaySessionId(ctx, source)
+                let body = try? await req.decode(as: RelayCwdBody.self, context: ctx)
+                return try await relayGitWrite(write, .init(kind: .commitMessage, sessionId: id,
+                                                            cwd: body?.cwd))
             }
         }
 
@@ -416,7 +505,48 @@ public enum CoreProxyServer {
     /// `screen` is the rendered one (juancode-s96g): it is why the byte-log fallback
     /// beside it exists at all, so a relay that forwarded the log and not the picture
     /// would hand every caller the garbling input this route was added to retire.
-    static let sessionReadLeaves = ["transcript", "messages", "scrollback", "screen"]
+    ///
+    /// The last four are the working tree (juancode-52e8.14.5). They are the same URLs
+    /// the Swift core used to serve in-process, so a remote client that had them before
+    /// has them again — this time answered by the process that actually holds the
+    /// session. The daemon's PATH-addressed git family (`/api/git/…?cwd=`) is
+    /// deliberately NOT here: it names a directory rather than a session, it is what
+    /// the desktop asks over loopback, and forwarding it would put "read git anywhere
+    /// on this machine" on the address the phone reaches.
+    static let sessionReadLeaves = [
+        "transcript", "messages", "scrollback", "screen",
+        "diff", "git", "worktrees", "file",
+    ]
+
+    /// The session a relayed write names, confirmed against the mirror first.
+    ///
+    /// A 404 here rather than letting the frame go out and waiting out its budget: the
+    /// mirror is the daemon's own list, so an id it has never heard of is an id the
+    /// daemon has not either.
+    static func relaySessionId(_ ctx: BasicRequestContext, _ source: Source) throws -> String {
+        guard let id = ctx.parameters.get("id"), source.session(id) != nil else {
+            throw APIError(.notFound, "not found")
+        }
+        return id
+    }
+
+    /// Run one write and turn its outcome into a response.
+    ///
+    /// A refusal is a 422 carrying the core's own sentence — git's first useful line,
+    /// or "Nothing to commit." — because that text is the whole answer and a status
+    /// code alone would make the caller invent one.
+    static func relayGitWrite(_ write: @Sendable (GitWrite) async -> GitWriteOutcome,
+                              _ request: GitWrite) async throws -> Response {
+        switch await write(request) {
+        case .ok(let data):
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json; charset=utf-8"
+            return Response(status: .ok, headers: headers,
+                            body: .init(byteBuffer: ByteBuffer(bytes: data)))
+        case .failed(let reason):
+            throw APIError(.unprocessableContent, reason)
+        }
+    }
 
     /// Forward one read to the daemon and hand its answer back unchanged.
     ///
@@ -480,6 +610,12 @@ public enum CoreProxyServer {
 /// number in it. The event itself never crosses the relay — the core re-reads the PR
 /// through `gh` — so this is the whole of what a webhook is worth forwarding.
 struct RelayPrWebhookBody: Decodable { let repo: String; let number: Int }
+
+/// The bodies of the four relayed working-tree writes — the same shapes the Swift
+/// core's own routes decoded, so a client's request does not change with the core.
+struct RelayCwdBody: Decodable { let cwd: String? }
+struct RelayCommitBody: Decodable { let message: String; let cwd: String? }
+struct RelayRevertBody: Decodable { let file: String; let hunkIndex: Int?; let cwd: String? }
 
 /// Its reply. No `matched`: see the route.
 struct RelayPrWebhookResponse: Encodable { let ok: Bool }

@@ -1,6 +1,5 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Unit tests for word-level intraline diffing behind the ChangesPanel.
 final class DiffIntralineTests: XCTestCase {

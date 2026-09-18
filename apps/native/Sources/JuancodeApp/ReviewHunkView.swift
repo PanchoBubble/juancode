@@ -1,4 +1,5 @@
 import SwiftUI
+import JuancodeCore
 import JuancodeServices
 
 /// The code an inline review comment hangs off, rendered from GitHub's `diffHunk`

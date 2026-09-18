@@ -1,10 +1,10 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
-/// Work-at-risk detection (juancode-rxu). Pure-logic tests for the root
-/// collection, classification, and nudge rules, plus one real-git integration
-/// test for the probe (temp-repo pattern from `GitTests`).
+/// Work-at-risk detection (juancode-rxu). The root collection, classification and
+/// nudge rules — all of what is left after the git probe moved into the daemon
+/// (`juancoded_core::at_risk`, juancode-52e8.14.5), where its own tests live against
+/// a real repo.
 final class WorkAtRiskTests: XCTestCase {
 
     // MARK: - collectRoots
@@ -170,146 +170,5 @@ final class WorkAtRiskTests: XCTestCase {
     func testNudgeNotAtRiskSuppressed() {
         let n = nudge("s1", atRisk: false, status: .exited, isLive: false)
         XCTAssertEqual(WorkAtRiskScan.nudges([n], nowMs: 10_000, idleMs: 5_000, alreadyNudged: []), [])
-    }
-
-    // MARK: - parseGitStatusSummary (the single-fork probe, juancode-78c4)
-
-    func testParsesBranchUpstreamAheadBehindAndDirtyCount() {
-        let out = """
-        # branch.oid 1111111111111111111111111111111111111111
-        # branch.head feature/x
-        # branch.upstream origin/feature/x
-        # branch.ab +3 -1
-        1 .M N... 100644 100644 100644 aaa bbb src/a.ts
-        1 M. N... 100644 100644 100644 ccc ddd src/b.ts
-        ? untracked.txt
-        """
-        let s = parseGitStatusSummary(out)
-        XCTAssertEqual(s.branch, "feature/x")
-        XCTAssertFalse(s.detached)
-        XCTAssertEqual(s.upstream, "origin/feature/x")
-        XCTAssertEqual(s.ahead, 3)
-        XCTAssertEqual(s.behind, 1)
-        XCTAssertEqual(s.dirtyFiles, 3)
-    }
-
-    func testParsesDetachedHeadAndNoUpstream() {
-        // No `branch.ab` header at all when there's no upstream.
-        let out = """
-        # branch.oid 2222222222222222222222222222222222222222
-        # branch.head (detached)
-        """
-        let s = parseGitStatusSummary(out)
-        XCTAssertTrue(s.detached)
-        XCTAssertNil(s.branch)
-        XCTAssertNil(s.upstream)
-        XCTAssertEqual(s.ahead, 0)
-        XCTAssertEqual(s.behind, 0)
-        XCTAssertEqual(s.dirtyFiles, 0)
-    }
-
-    func testCountsUnmergedAndRenamedEntriesAsDirty() {
-        let out = """
-        # branch.head main
-        2 R. N... 100644 100644 100644 aaa bbb R100 new.ts\told.ts
-        u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.ts
-        """
-        let s = parseGitStatusSummary(out)
-        XCTAssertEqual(s.dirtyFiles, 2)
-        XCTAssertEqual(s.branch, "main")
-    }
-
-    func testCleanTreeOnHeaderOnlyOutputIsNotDirty() {
-        let s = parseGitStatusSummary("# branch.head main\n# branch.ab +0 -0\n")
-        XCTAssertEqual(s.dirtyFiles, 0)
-        XCTAssertEqual(s.ahead, 0)
-    }
-
-    // MARK: - probeWorkAtRisk (real git)
-
-    private func runGit(_ args: [String], cwd: String) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["git"] + args
-        p.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        let err = Pipe(); p.standardOutput = Pipe(); p.standardError = err
-        try p.run()
-        p.waitUntilExit()
-        if p.terminationStatus != 0 {
-            let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            throw NSError(domain: "git", code: Int(p.terminationStatus),
-                          userInfo: [NSLocalizedDescriptionKey: msg])
-        }
-    }
-
-    private func mkdtemp(_ prefix: String) -> String {
-        let template = (NSTemporaryDirectory() as NSString).appendingPathComponent("\(prefix)XXXXXX")
-        var bytes = template.utf8CString.map { $0 }
-        _ = bytes.withUnsafeMutableBufferPointer { Darwin.mkdtemp($0.baseAddress) }
-        return String(cString: bytes)
-    }
-
-    func testProbeReportsDirtyFileCount() async throws {
-        let dir = mkdtemp("juancode-war-")
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        try TempGitRepo.initialize(at: dir)
-        try "one\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
-                          atomically: true, encoding: .utf8)
-        try runGit(["add", "-A"], cwd: dir)
-        try runGit(["commit", "-qm", "init"], cwd: dir)
-
-        // Clean tree → not dirty.
-        let clean = await probeWorkAtRisk(dir)
-        XCTAssertEqual(clean?.dirtyFiles, 0)
-        XCTAssertTrue(clean?.state.git == true)
-
-        // Modify + add an untracked file → 2 dirty entries.
-        try "one\ntwo\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
-                               atomically: true, encoding: .utf8)
-        try "new\n".write(toFile: (dir as NSString).appendingPathComponent("b.txt"),
-                          atomically: true, encoding: .utf8)
-        let dirty = await probeWorkAtRisk(dir)
-        XCTAssertEqual(dirty?.dirtyFiles, 2)
-    }
-
-    func testProbeNoUpstreamButHeadOnRemoteIsNotUnpushed() async throws {
-        // A branch pushed to a remote WITHOUT upstream tracking: HEAD is on a
-        // remote branch, so nothing is unpushed even though there is no @{u}.
-        let remote = mkdtemp("juancode-remote-")
-        let dir = mkdtemp("juancode-war2-")
-        defer {
-            try? FileManager.default.removeItem(atPath: remote)
-            try? FileManager.default.removeItem(atPath: dir)
-        }
-        try TempGitRepo.initializeBare(at: remote)
-        try TempGitRepo.initialize(at: dir)
-        try runGit(["remote", "add", "origin", remote], cwd: dir)
-        try "one\n".write(toFile: (dir as NSString).appendingPathComponent("a.txt"),
-                          atomically: true, encoding: .utf8)
-        try runGit(["add", "-A"], cwd: dir)
-        try runGit(["commit", "-qm", "init"], cwd: dir)
-        // Push HEAD under a remote branch name but do NOT set upstream (no -u).
-        try runGit(["push", "-q", "origin", "HEAD:some-remote-branch"], cwd: dir)
-
-        let probed = await probeWorkAtRisk(dir)
-        XCTAssertEqual(probed?.headOnRemote, true)
-        XCTAssertNil(probed?.state.upstream) // sanity: no upstream configured
-        // Clean tree + head-on-remote → not at risk.
-        let risk = WorkAtRiskScan.classify(
-            root(), state: probed!.state, dirtyFiles: probed!.dirtyFiles,
-            aheadOfBase: probed!.aheadOfBase, headOnRemote: probed!.headOnRemote)
-        XCTAssertNil(risk)
-    }
-
-    func testProbeReturnsNilForNonGitDir() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { try? FileManager.default.removeItem(atPath: plain) }
-        let r = await probeWorkAtRisk(plain)
-        XCTAssertNil(r)
-    }
-
-    func testProbeReturnsNilForMissingDir() async {
-        let r = await probeWorkAtRisk("/nonexistent/path/xyz-\(UUID().uuidString)")
-        XCTAssertNil(r)
     }
 }

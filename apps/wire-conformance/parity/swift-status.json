@@ -3,7 +3,7 @@
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.18.0",
+  "specRevision": "1.19.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -228,6 +228,10 @@
     "heavy-queue": {
       "status": "skipped",
       "note": "core does not advertise the \"heavyQueue\" capability"
+    },
+    "changes": {
+      "status": "skipped",
+      "note": "core does not advertise the \"changes\" capability"
     }
   }
 }

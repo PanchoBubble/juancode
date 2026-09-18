@@ -1,6 +1,5 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Unit tests for the pure flat-list → directory-tree builder backing the native
 /// ChangesPanel file tree (juancode-dxg). No SwiftUI / git — only data shaping.

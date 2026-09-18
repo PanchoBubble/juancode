@@ -1,6 +1,5 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Unit tests for the pure unified-diff parser + review-prompt composer backing the
 /// native ChangesPanel (juancode-3bq). No git here — only string parsing.

@@ -263,6 +263,34 @@ public protocol CoreClient: AnyObject, Sendable {
     /// "Continue" offer on their restored pane.
     var midTurnOrphanIds: Set<String> { get }
 
+    // MARK: - Working-tree changes (HTTP: /api/git/**, wire: session{Commit,Push,Revert,CommitMessage})
+
+    /// The git working tree of a session's cwd. Every member is REQUIRED here rather
+    /// than left in the extension beside its default, and that is not a style choice:
+    /// a member that exists only in a protocol extension is dispatched STATICALLY, so
+    /// a call through `any CoreClient` would reach the "this core cannot" default even
+    /// on a core that implements it. The whole surface would be silently dead.
+    ///
+    /// `ChangesClient.swift` holds the defaults — all of them throw
+    /// `CoreCapabilityError(.changes)` — and the doc comment for each.
+    func diff(cwd: String) async throws -> DiffResult
+    func baseDiff(cwd: String, base: String?) async throws -> BaseDiffResult
+    func commitDiff(cwd: String, sha: String) async throws -> DiffResult
+    func gitState(cwd: String) async throws -> GitState
+    func recentCommits(cwd: String, limit: Int) async throws -> [RecentCommit]
+    func worktrees(cwd: String) async throws -> [Worktree]
+    func worktreeStatus(cwd: String) async throws -> [WorktreeStatusEntry]
+    func trackedFiles(cwd: String, limit: Int) async throws -> [String]
+    func changeStat(cwd: String) async throws -> ChangeStat
+    func readFile(cwd: String, path: String) async throws -> String
+    func probeAtRisk(path: String) async throws -> AtRiskProbe?
+    func agentWorktree(cwd: String, childPid: Int32) async throws -> String?
+    func commitAll(sessionId: String, cwd: String?, message: String) async throws -> CommitResult
+    func push(sessionId: String, cwd: String?) async throws -> PushResult
+    func revert(sessionId: String, cwd: String?, path: String,
+                hunkIndex: Int?) async throws -> RevertResult
+    func draftCommitMessage(sessionId: String, cwd: String?) async throws -> String
+
     // MARK: - Presence, diagnostics, lifecycle
 
     /// Mark the desktop frontmost right now, so the core's push gate stays quiet

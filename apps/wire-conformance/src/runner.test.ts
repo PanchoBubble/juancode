@@ -15,6 +15,7 @@ import {
 const workspace = {
   cwd: "/w/plain",
   gitCwd: "/w/repo",
+  gitRemoteCwd: "/w/remote-repo",
   missingCwd: "/w/nope",
   file: "/w/note.txt",
 };

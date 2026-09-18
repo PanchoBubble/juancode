@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Word-level intraline diffing for the ChangesPanel: given a removed line paired
 /// with the added line that replaced it, compute the character ranges that actually

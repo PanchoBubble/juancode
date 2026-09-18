@@ -279,6 +279,16 @@ public struct GitState: Codable, Sendable, Equatable {
     }
 }
 
+public extension GitState {
+    /// What a caller draws when a core could not answer: not a repo, so no branch,
+    /// nothing dirty, nothing to push. The same shape a genuinely non-git cwd gets, so
+    /// the panel has one empty state and not two.
+    static var unknown: GitState {
+        GitState(git: false, branch: nil, detached: false, upstream: nil,
+                 ahead: 0, behind: 0, dirty: false, remote: false)
+    }
+}
+
 public struct CommitResult: Codable, Sendable, Equatable {
     public var sha: String
     public var subject: String
@@ -289,6 +299,43 @@ public struct PushResult: Codable, Sendable, Equatable {
     public var branch: String
     public var output: String
     public init(branch: String, output: String) { self.branch = branch; self.output = output }
+}
+
+/// A branch diffed against a base ref: the ref actually used (e.g. `origin/main`)
+/// plus the diff against the merge-base, so the panel can label what it is
+/// comparing against.
+public struct BaseDiffResult: Codable, Sendable, Equatable {
+    /// The base ref the diff was computed against (empty when not a git repo).
+    public var base: String
+    public var result: DiffResult
+    public init(base: String, result: DiffResult) {
+        self.base = base; self.result = result
+    }
+}
+
+/// One commit in the ChangesPanel's commit picker (juancode-5u2), newest first.
+public struct RecentCommit: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { sha }
+    public var sha: String         // full %H
+    public var shortSha: String    // %h
+    public var subject: String     // %s
+    public var relativeAge: String // %cr, e.g. "3 hours ago"
+    /// Whether the commit is in `<base>..HEAD`, i.e. not on the base branch yet.
+    public var aheadOfBase: Bool
+
+    public init(sha: String, shortSha: String, subject: String, relativeAge: String,
+                aheadOfBase: Bool) {
+        self.sha = sha; self.shortSha = shortSha; self.subject = subject
+        self.relativeAge = relativeAge; self.aheadOfBase = aheadOfBase
+    }
+}
+
+/// The outcome of a discard: the worktree-relative path acted on — never the one the
+/// caller asked for, always the one the core validated — and whether it ran.
+public struct RevertResult: Codable, Sendable, Equatable {
+    public var path: String
+    public var reverted: Bool
+    public init(path: String, reverted: Bool) { self.path = path; self.reverted = reverted }
 }
 
 public struct CommitMessageResult: Codable, Sendable, Equatable {

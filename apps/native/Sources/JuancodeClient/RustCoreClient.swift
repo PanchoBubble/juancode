@@ -36,7 +36,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// Where the daemon is, for error text and the active-core badge.
     public let baseURL: String
 
-    private let connection: WireConnection
+    let connection: WireConnection
     private let mirror: GRDBStore
     private let activityLog: SessionActivityLog
     /// The editor and shell panes this connection has open in the daemon. Not
@@ -44,7 +44,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// the pane that asked for them, or as long as the socket, whichever ends first.
     private let ephemeral: RemoteEphemeralPtys
 
-    private let lock = NSLock()
+    let lock = NSLock()
     private var handles: [String: RemoteLiveSession] = [:]
     private var createdListeners: [Int: (any LiveSession) -> Void] = [:]
     private var nextListenerToken = 1
@@ -129,6 +129,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// id is what tells this client's answer from the two stale ones behind it.
     private var searchWaiters: [String: SearchWaiter] = [:]
     private var nextSearchId = 1
+
+    /// Git writes waiting on the daemon, keyed by their `requestId`. Same reason the
+    /// searches are keyed: a panel can have a commit and a message draft in flight at
+    /// once, and a draft takes seconds while a commit takes milliseconds.
+    var changesWaiters: [String: ChangesWaiter] = [:]
+    var nextChangesId = 1
 
     /// Each session's steering queue as the daemon last sent it, keyed by session id.
     /// A missing key and an empty array are different answers: the daemon answers
@@ -313,7 +319,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             globalPause: globalPause,
             forwardPrWebhook: { [weak self] repo, number in
                 self?.forwardPrWebhook(repo: repo, number: number) ?? false
-            })
+            },
+            // The phone's Commit/Push/Discard, turned into the frames the daemon takes.
+            // Nil when this core does not advertise `changes`, which leaves the relay
+            // answering 501 and naming that — rather than 200 for a write nothing made.
+            gitWrite: gitWriteRelay())
         let upstream = baseURL
         Task.detached {
             do {
@@ -322,6 +332,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             } catch {
                 NSLog("juancode: core proxy server did not start: \(error)")
             }
+        }
+    }
+
+    /// The relay's working-tree writes, or nil when this core does not advertise
+    /// `changes` — in which case the relay does not register the routes at all and the
+    /// 501 that names the missing capability stands.
+    private func gitWriteRelay() -> (@Sendable (CoreProxyServer.GitWrite) async -> CoreProxyServer.GitWriteOutcome)? {
+        guard supports(.changes) else { return nil }
+        return { [weak self] request in
+            guard let self else { return .failed("the app is shutting down") }
+            return await self.relayGitWrite(request)
         }
     }
 
@@ -1557,6 +1578,14 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             let waiter = lock.withLock { searchWaiters.removeValue(forKey: requestId) }
             waiter?.deliver(hits)
 
+        case "changesResult":
+            // Correlated on the requestId and nothing else. A discard and a commit can
+            // be in flight together, and reading one's answer as the other's would tell
+            // somebody their file came back when what happened was a push.
+            guard let requestId = body["requestId"] as? String else { return }
+            let waiter = lock.withLock { changesWaiters.removeValue(forKey: requestId) }
+            waiter?.deliver(body)
+
         case "inputAck", "screen":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
@@ -1633,15 +1662,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // the socket that would have carried the confirmation is gone, so the write
             // is unconfirmable and the caller has to be told while the user is still
             // looking at the thing they pressed.
-            let (orphaned, stranded, searches) = lock.withLock {
-                () -> ([QueueWrite], [FrameWaiter], [SearchWaiter]) in
+            let (orphaned, stranded, searches, changes) = lock.withLock {
+                () -> ([QueueWrite], [FrameWaiter], [SearchWaiter], [ChangesWaiter]) in
                 let writes = queueWrites.values.flatMap { $0 }
                 let waiters = queueFrameWaiters.values.flatMap { $0 }
                 let searches = Array(searchWaiters.values)
+                let changes = Array(changesWaiters.values)
                 queueWrites.removeAll()
                 queueFrameWaiters.removeAll()
                 searchWaiters.removeAll()
-                return (writes, waiters, searches)
+                changesWaiters.removeAll()
+                return (writes, waiters, searches, changes)
             }
             for write in orphaned { write.refuse("the connection dropped: \(reason)") }
             for waiter in stranded { waiter.expire() }
@@ -1649,6 +1680,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // carried it is gone, so it is told now and falls back to the mirror's own
             // hits rather than standing there.
             for search in searches { search.expire() }
+            // A commit or a discard whose answer is not coming must fail NOW, while the
+            // person is still looking at the button they pressed. Silence here is the
+            // failure mode juancode-rzl7 was about, pointed at a destructive action.
+            for change in changes {
+                change.fail("the connection dropped: \(reason)")
+            }
         }
         for l in listeners { l(up, reason) }
     }

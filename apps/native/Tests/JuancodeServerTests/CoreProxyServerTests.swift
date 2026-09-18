@@ -168,9 +168,13 @@ final class CoreProxyServerTests: XCTestCase {
     func testUnservedEndpointsSayWhyIn501() async throws {
         let mirror = FakeMirror([])
         try await withProxy(mirror) { client in
+            // `/diff` moved OFF this list on 2026-09-18 (juancode-52e8.14.5): the
+            // daemon serves the working tree now, so the relay forwards it rather
+            // than refusing it. `/api/sessions/s1/review` took its place as an
+            // endpoint neither core answers on this relay.
             for (uri, method) in [("/api/pr-webhook", HTTPRequest.Method.post),
                                   ("/api/tracked-prs", .get),
-                                  ("/api/sessions/s1/diff", .get),
+                                  ("/api/sessions/s1/review", .get),
                                   ("/presence", .get)] {
                 try await client.execute(uri: uri, method: method) { res in
                     XCTAssertEqual(res.status, .notImplemented, "\(uri)")

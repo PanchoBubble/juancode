@@ -1,6 +1,5 @@
 import CoreGraphics
 import Foundation
-import JuancodeCore
 
 /// Pure unified-diff parsing for the native ChangesPanel — the SwiftUI analogue of
 /// the web's `react-diff-view` `parseDiff` + change-key machinery. Given the raw
