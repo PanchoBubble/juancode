@@ -25,6 +25,7 @@ use juancoded_cordis::contribution::ContributionRegistry;
 use juancoded_cordis::plugins::QueueChanged;
 use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnapshot};
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
+use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::ProviderId;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
@@ -32,6 +33,7 @@ use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 use crate::ephemeral::EphemeralPtys;
 use crate::global_pause::GlobalPause;
 use crate::named_key;
+use crate::heavy_watch::HeavyWatch;
 use crate::screen::ScreenStreamer;
 use crate::seed::{deliver_seed, log_outcome, SeedTiming};
 use crate::serve::CoreHandles;
@@ -67,6 +69,17 @@ struct Fanout {
     /// and a redundant snapshot races whatever the client asked for next — an untrack
     /// answered by a list that still lists the PR.
     tracked_prs: Option<Vec<TrackedPrWire>>,
+    /// The heavy-queue change stream, once this connection asked for it. `None` is
+    /// not watching, which is every client that does not know the surface exists —
+    /// and it is also the gate on the daemon's poll, which reads the shared registry
+    /// only while a receiver is out.
+    heavy: Option<tokio::sync::broadcast::Receiver<Arc<HeavyQueueSnapshot>>>,
+    /// The queue this connection was last SENT, for the reason `tracked_prs` above
+    /// keeps its list: a subscribe reads the registry directly, so the first change
+    /// the bus carries afterwards is routinely the same queue again, and a client
+    /// that was told twice would see its own reorder answered by the snapshot before
+    /// it. Dropped with the watch.
+    heavy_sent: Option<Arc<HeavyQueueSnapshot>>,
     carries: HashMap<String, Utf8Stream>,
     /// Frames a background task owes this client, out of band from the request that
     /// started it. Seeded delivery is the only one today: it outlives the create it
@@ -108,6 +121,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         pty,
         tracked_prs,
         global_pause,
+        heavy,
         bus,
         identity,
     } = handles;
@@ -216,6 +230,8 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         transcript_watchers: HashSet::new(),
         contribution_revision: None,
         tracked_prs: None,
+        heavy: None,
+        heavy_sent: None,
         carries: HashMap::new(),
         oob: oob_tx,
     };
@@ -279,6 +295,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     reaper: reaper.as_ref(),
                                     tracked_prs: tracked_prs.as_ref(),
                                     global_pause: &global_pause,
+                                    heavy: &heavy,
                                 },
                                 client,
                                 &mut fanout,
@@ -358,6 +375,9 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
 
         // Ahead of whatever else this pass produced, always: see `prepend_pause`.
         prepend_pause(&mut pause_rx, &mut outbound);
+        // And behind it, for the opposite reason: a queue snapshot explains nothing
+        // about the frames beside it, so it only has to arrive, not to arrive first.
+        drain_heavy(&mut fanout, &mut outbound);
 
         for msg in outbound {
             if tx.send(Message::Text(msg.to_json().into())).await.is_err() {
@@ -593,6 +613,40 @@ fn prepend_pause(
     }
 }
 
+/// Every heavy-queue change published since the last pass, for a connection that
+/// asked to watch one.
+///
+/// Drained here rather than selected on, exactly like the pause bus: the screen
+/// ticker wakes this loop every 80ms whatever else is happening, so a `try_recv` at
+/// the bottom of a pass is a bounded delay and not a frame that waits for traffic.
+fn drain_heavy(fanout: &mut Fanout, outbound: &mut Vec<ServerMessage>) {
+    let Some(rx) = fanout.heavy.as_mut() else {
+        return;
+    };
+    let mut fresh: Vec<Arc<HeavyQueueSnapshot>> = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(snapshot) => fresh.push(snapshot),
+            Err(TryRecvError::Lagged(n)) => {
+                // Survivable by construction: the next snapshot is the whole queue
+                // again, which is why this frame is never a delta.
+                debug!(dropped = n, "connection lagged behind the heavy-queue bus");
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        }
+    }
+    for snapshot in fresh {
+        // Only what this connection is not already holding: the same rule the
+        // tracked-PR list follows, and for the same reason — a redundant snapshot
+        // races whatever the client asked for next.
+        if fanout.heavy_sent.as_deref() == Some(&*snapshot) {
+            continue;
+        }
+        fanout.heavy_sent = Some(Arc::clone(&snapshot));
+        outbound.push(ServerMessage::HeavyQueue { snapshot });
+    }
+}
+
 /// Who already drives which session's grid, for a connection that just arrived.
 ///
 /// Only a claimed grid on a live session: a client starts out assuming the grid is
@@ -741,6 +795,9 @@ struct Tree<'a> {
     /// The paused set. Not optional: a pause needs only the registry, and the store is
     /// what it survives a restart on rather than what it needs to work.
     global_pause: &'a Arc<GlobalPause>,
+    /// The `heavy` slot queue. Not optional either, and for a simpler reason: it needs
+    /// nothing from the tree at all, only a directory on disk.
+    heavy: &'a Arc<HeavyWatch>,
 }
 
 fn handle_client_message(
@@ -760,6 +817,7 @@ fn handle_client_message(
         reaper,
         tracked_prs,
         global_pause,
+        heavy,
     } = *tree;
     let attached = &mut fanout.attached;
     match msg {
@@ -1304,6 +1362,52 @@ fn handle_client_message(
         ClientMessage::UnsubscribeContributions => {
             fanout.contribution_revision = None;
         }
+        ClientMessage::HeavyQueueSubscribe => {
+            // The receiver first, then the snapshot: a change landing between the two
+            // is a duplicate frame rather than a missed one, and the frame is a
+            // complete state, so a client that replaces what it holds twice ends up
+            // right. Taking it again on a second subscribe would drop whatever the
+            // first one has not drained yet, so an existing watch is left alone.
+            if fanout.heavy.is_none() {
+                fanout.heavy = Some(heavy.subscribe());
+            }
+            let snapshot = heavy.snapshot();
+            fanout.heavy_sent = Some(Arc::clone(&snapshot));
+            outbound.push(ServerMessage::HeavyQueue { snapshot });
+        }
+        ClientMessage::HeavyQueueUnsubscribe => {
+            // Dropping the receiver is also what releases the daemon's poll: with no
+            // receiver out, the tick reads no files at all.
+            fanout.heavy = None;
+            fanout.heavy_sent = None;
+        }
+        ClientMessage::HeavySetPriority { pid, prio } => {
+            if !heavy.set_priority(pid, prio) {
+                outbound.push(ServerMessage::Error {
+                    session_id: None,
+                    message: "heavy-job-not-found".into(),
+                });
+            }
+        }
+        ClientMessage::HeavySetSlots { slots } => {
+            if !heavy.set_slots(slots) {
+                outbound.push(ServerMessage::Error {
+                    session_id: None,
+                    message: "heavy-slots-invalid".into(),
+                });
+            }
+        }
+        ClientMessage::HeavyCancel { pid } => {
+            // A pid with no entry in this queue is refused rather than signalled: see
+            // `HeavyWatch::cancel` for why that check is the frame's safety property
+            // and not a nicety.
+            if !heavy.cancel(pid) {
+                outbound.push(ServerMessage::Error {
+                    session_id: None,
+                    message: "heavy-job-not-found".into(),
+                });
+            }
+        }
 
         ClientMessage::ActivateContribution {
             contribution,
@@ -1460,6 +1564,8 @@ mod tests {
             transcript_watchers: HashSet::new(),
             contribution_revision: None,
             tracked_prs: None,
+            heavy: None,
+            heavy_sent: None,
             carries: HashMap::new(),
             // Nothing in these tests reads the side channel; the receiver is dropped
             // and a send on it is the no-op a departed client already gets.
@@ -1487,6 +1593,7 @@ mod tests {
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
                 global_pause: &handles.global_pause,
+                heavy: &handles.heavy,
             },
             1,
             fanout,
@@ -1495,6 +1602,201 @@ mod tests {
             &mut reply,
         );
         reply
+    }
+
+    /// A registry of its own for every heavy-queue test, so nothing here can read,
+    /// reorder or signal the developer's real `/tmp/claude-heavy-$UID` — or rewrite
+    /// the live `~/.claude/heavy-queue.json` that other tooling on this machine reads.
+    fn heavy_fixture(name: &str) -> (std::path::PathBuf, Arc<HeavyWatch>) {
+        let root = std::env::temp_dir().join(format!(
+            "conn-heavy-{}-{name}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("queue")).unwrap();
+        for (pid, since) in [(10, 100), (20, 200)] {
+            let entry = serde_json::json!({
+                "pid": pid, "prio": 0, "since": since, "slot": 0,
+                "cmd": "pnpm build", "cwd": "/repo/pandora", "child": serde_json::Value::Null,
+            });
+            std::fs::write(
+                root.join(format!("queue/{pid}.json")),
+                serde_json::to_vec(&entry).unwrap(),
+            )
+            .unwrap();
+        }
+        let queue = juancoded_core::heavy::HeavyQueue::new(root.clone(), root.join("cfg.json"))
+            .with_probes(Box::new(|_| true), Box::new(|_| None));
+        (root, HeavyWatch::new(queue))
+    }
+
+    /// One frame through the handler against an isolated queue, folding in the
+    /// pushed snapshots the loop would have drained afterwards.
+    fn heavy_step(
+        msg: ClientMessage,
+        handles: &CoreHandles,
+        heavy: &Arc<HeavyWatch>,
+        fanout: &mut Fanout,
+    ) -> Vec<ServerMessage> {
+        let mut reply = Vec::new();
+        let mut screens = HashMap::new();
+        let mut ephemeral = EphemeralPtys::new(handles.pty.clone(), fanout.oob.clone());
+        handle_client_message(
+            msg,
+            &Tree {
+                sessions: &handles.sessions,
+                contributions: &handles.contributions,
+                queue: handles.queue.as_ref(),
+                transcripts: handles.transcripts.as_ref(),
+                reaper: handles.reaper.as_ref(),
+                tracked_prs: handles.tracked_prs.as_ref(),
+                global_pause: &handles.global_pause,
+                heavy,
+            },
+            1,
+            fanout,
+            &mut screens,
+            &mut ephemeral,
+            &mut reply,
+        );
+        drain_heavy(fanout, &mut reply);
+        reply
+    }
+
+    fn waiting_pids(frames: &[ServerMessage]) -> Vec<Vec<i32>> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::HeavyQueue { snapshot } => {
+                    Some(snapshot.waiting.iter().map(|j| j.pid).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn subscribing_to_the_heavy_queue_answers_with_the_whole_line() {
+        let handles = crate::testing::handles();
+        let (root, heavy) = heavy_fixture("subscribe");
+        let mut fanout = fanout();
+
+        let first = heavy_step(
+            ClientMessage::HeavyQueueSubscribe,
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+        assert_eq!(waiting_pids(&first), vec![vec![10, 20]]);
+        assert!(fanout.heavy.is_some(), "the watch is held per connection");
+
+        // A reorder reaches a subscriber without another subscribe, and the frame is
+        // the whole queue rather than a delta.
+        let after = heavy_step(
+            ClientMessage::HeavySetPriority { pid: 20, prio: 5 },
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+        assert_eq!(waiting_pids(&after), vec![vec![20, 10]]);
+
+        heavy_step(
+            ClientMessage::HeavyQueueUnsubscribe,
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+        assert!(fanout.heavy.is_none());
+        // And nothing reaches a connection that stopped watching.
+        let silent = heavy_step(
+            ClientMessage::HeavySetPriority { pid: 20, prio: 9 },
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+        assert!(waiting_pids(&silent).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn the_three_heavy_refusals_say_which_one_they_are() {
+        let handles = crate::testing::handles();
+        let (root, heavy) = heavy_fixture("refusals");
+        let mut fanout = fanout();
+        heavy_step(
+            ClientMessage::HeavyQueueSubscribe,
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+
+        let message = |frames: Vec<ServerMessage>| match frames.first() {
+            Some(ServerMessage::Error { message, .. }) => message.clone(),
+            other => panic!("expected an error, got {other:?}"),
+        };
+
+        // A job that finished between a client's snapshot and its click.
+        assert_eq!(
+            message(heavy_step(
+                ClientMessage::HeavySetPriority { pid: 999, prio: 1 },
+                &handles,
+                &heavy,
+                &mut fanout,
+            )),
+            "heavy-job-not-found"
+        );
+        // A queue with no slots admits nothing forever.
+        assert_eq!(
+            message(heavy_step(
+                ClientMessage::HeavySetSlots { slots: 0 },
+                &handles,
+                &heavy,
+                &mut fanout,
+            )),
+            "heavy-slots-invalid"
+        );
+        // And the one that matters: a pid this queue does not hold is refused rather
+        // than signalled, so the frame is not an arbitrary-kill gadget.
+        assert_eq!(
+            message(heavy_step(
+                ClientMessage::HeavyCancel { pid: 424_242 },
+                &handles,
+                &heavy,
+                &mut fanout,
+            )),
+            "heavy-job-not-found"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn widening_the_heavy_queue_is_published_as_state() {
+        let handles = crate::testing::handles();
+        let (root, heavy) = heavy_fixture("slots");
+        let mut fanout = fanout();
+        heavy_step(
+            ClientMessage::HeavyQueueSubscribe,
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+
+        let frames = heavy_step(
+            ClientMessage::HeavySetSlots { slots: 3 },
+            &handles,
+            &heavy,
+            &mut fanout,
+        );
+        let [ServerMessage::HeavyQueue { snapshot }] = &frames[..] else {
+            panic!("expected one queue frame, got {frames:?}");
+        };
+        assert_eq!(snapshot.slots, 3);
+        // The wrapper's own default for the other half, reported rather than invented.
+        assert_eq!(snapshot.worker_cap, 4);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
@@ -1818,6 +2120,7 @@ mod tests {
                     reaper: self.handles.reaper.as_ref(),
                     tracked_prs: self.handles.tracked_prs.as_ref(),
                     global_pause: &self.handles.global_pause,
+                    heavy: &self.handles.heavy,
                 },
                 1,
                 fanout,
@@ -1834,6 +2137,7 @@ mod tests {
             // Last, and it goes to the FRONT: the same rule the loop applies at its
             // flush, so a test sees the set ahead of the exits it caused.
             prepend_pause(&mut self.pause, &mut ahead);
+            drain_heavy(fanout, &mut ahead);
             ahead
         }
 

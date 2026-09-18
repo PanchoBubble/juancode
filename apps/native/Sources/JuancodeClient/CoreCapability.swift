@@ -25,6 +25,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case spawnModel
     case spawnPreset
     case isolateWorktree
+    case heavyQueue
 
     /// What the user calls this.
     public var title: String {
@@ -45,6 +46,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .spawnModel: return "Pinned model"
         case .spawnPreset: return "Named instruction set"
         case .isolateWorktree: return "Isolate in a fresh worktree"
+        case .heavyQueue: return "Heavy command queue"
         }
     }
 
@@ -84,6 +86,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "A session cannot be started under a named instruction set: the preset picker is disabled, and a dispatch that names one is refused rather than started without the instructions it asked for."
         case .isolateWorktree:
             return "A session cannot be given a worktree of its own: the isolate toggle is disabled, and a dispatch that asks for isolation is refused rather than run in the shared checkout."
+        case .heavyQueue:
+            return "The Heavy Queue panel is unavailable: this core does not read the shared slot registry, so there is nothing to show what is holding a slot and no way to reorder the line or widen it. Heavy commands still queue \u{2014} the `heavy` wrapper is what serializes them \u{2014} they just cannot be watched from here."
         }
     }
 }

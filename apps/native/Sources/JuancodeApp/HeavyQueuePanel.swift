@@ -1,7 +1,7 @@
 import SwiftUI
 import JuancodeCore
 import AppKit
-import JuancodeServices
+import JuancodeClient
 
 /// The global heavy-command queue (juancode-ik11): memory-heavy commands — pandora
 /// CI, integration tests — serialized across every Claude session on this Mac by
@@ -12,19 +12,28 @@ import JuancodeServices
 /// by adding slots. Reordering is a priority rewrite in the shared registry; the
 /// waiting wrappers pick it up on their next poll (~3s), so nothing here has to talk
 /// to those processes directly.
+///
+/// The registry is read by the CORE (juancode-52e8.14.3), which pushes the whole
+/// queue on every change — so this draws a value rather than polling a directory,
+/// and the same queue is readable from the phone. A core that does not advertise
+/// `heavyQueue` leaves the panel greyed out with that capability's own sentence.
 struct HeavyQueuePanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    /// Ticks the relative times ("4m ago") without a full reload every second.
+    /// Ticks the relative times ("4m ago"); the queue itself arrives pushed.
     @State private var now = Date()
 
     private var queue: HeavyQueueSnapshot { model.heavyQueue }
+    /// Nil when this core reads the registry; the sentence to show when it does not.
+    private var unavailable: String? { model.unavailable(.heavyQueue) }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            if queue.isEmpty {
+            if let unavailable {
+                unsupported(unavailable)
+            } else if queue.isEmpty {
                 empty
             } else {
                 ScrollView {
@@ -51,13 +60,16 @@ struct HeavyQueuePanel: View {
             footer
         }
         .frame(width: 680, height: 460)
-        .onAppear { model.refreshHeavyQueue() }
-        // Poll: the queue is other processes' state, so there's nothing to observe.
+        // The queue is pushed; this watch is what tells the core somebody is looking,
+        // and dropping it is what stops the core reading the registry.
+        .onAppear { model.watchHeavyQueue() }
+        .onDisappear { model.releaseHeavyQueue() }
+        // The only thing still on a timer is the clock: "running 4m" has to tick even
+        // when nothing about the queue has changed.
         .task {
             while !Task.isCancelled {
-                await Nap.duration(.seconds(2))
+                await Nap.duration(.seconds(1))
                 now = Date()
-                model.refreshHeavyQueue()
             }
         }
     }
@@ -68,8 +80,6 @@ struct HeavyQueuePanel: View {
             Text("\(queue.running.count)/\(queue.slots) running")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             Spacer()
-            Button { model.refreshHeavyQueue() } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(.borderless).help("Reload the queue").clickCursor()
             Button("Done") { dismiss() }.clickCursor()
         }
         .padding()
@@ -88,15 +98,32 @@ struct HeavyQueuePanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// What a core with no `heavyQueue` capability gets: the reason, in the
+    /// capability's own words, rather than an empty queue that reads as "nothing is
+    /// running" when the truth is "nobody is looking".
+    private func unsupported(_ reason: String) -> some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Image(systemName: "square.stack.3d.up.slash").font(.largeTitle).foregroundStyle(.secondary)
+            Text("This core has no heavy queue.").foregroundStyle(.secondary).font(.system(size: 13))
+            Text(reason)
+                .font(.system(size: 11)).foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center).frame(maxWidth: 480)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var footer: some View {
         HStack(spacing: 8) {
             Text("Slots").font(.system(size: 11)).foregroundStyle(.secondary)
             Stepper(value: Binding(
                 get: { queue.slots },
-                set: { HeavyQueue.shared.setSlots($0); model.refreshHeavyQueue() }
+                set: { model.setHeavySlots($0) }
             ), in: 1...8) {
                 Text("\(queue.slots)").font(.system(size: 11).monospacedDigit())
             }
+            .disabled(unavailable != nil)
             .help("How many heavy jobs may run at once. Each one can use several GB — "
                 + "raising this is how you trade RAM for throughput.")
             Text("· worker cap \(queue.workerCap)")

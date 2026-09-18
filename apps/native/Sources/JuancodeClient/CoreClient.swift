@@ -232,6 +232,27 @@ public protocol CoreClient: AnyObject, Sendable {
     func subscribeTrackedPrs(
         _ onEvent: @escaping @Sendable (TrackedPrEvent) -> Void) async -> @Sendable () -> Void
 
+    // MARK: - Heavy command queue (wire: heavyQueueSubscribe, heavySetPriority,
+    //         heavySetSlots, heavyCancel)
+
+    /// Watch the global `heavy` slot queue (wire `heavyQueueSubscribe`). The
+    /// subscriber is handed the current queue as soon as the core answers, and the
+    /// whole queue again on every change; replace wholesale. Returns a cancel handle,
+    /// which also stops the core reading the registry when it is the last one.
+    func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void
+
+    /// Move a job in line by rewriting its priority (wire `heavySetPriority`). Higher
+    /// runs sooner; the waiting wrapper picks it up on its own next poll.
+    func heavySetPriority(pid: Int, prio: Int)
+
+    /// How many heavy jobs may run at once (wire `heavySetSlots`). Written into the
+    /// wrapper's own config, so raising it lets jobs already in line through.
+    func heavySetSlots(_ slots: Int)
+
+    /// Stop a queued or running heavy job (wire `heavyCancel`).
+    func heavyCancel(pid: Int)
+
     // MARK: - Launch state
 
     /// Sessions that were live when the previous process died or quit. Kept
@@ -275,6 +296,24 @@ public protocol CoreClient: AnyObject, Sendable {
 }
 
 public extension CoreClient {
+    /// What a core with no `heavyQueue` capability does: nothing, visibly.
+    ///
+    /// Defaults rather than four no-op methods on every client, because the queue has
+    /// exactly one implementation — the daemon that owns the registry — and a core
+    /// without it has nothing to fall back to. The panel reads
+    /// `unavailableReason(.heavyQueue)` and greys itself out with that sentence, so
+    /// none of these is reached from a working build; they exist so a client is not
+    /// forced to write a stub that would be a second answer to the same question.
+    func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void {
+        onSnapshot(HeavyQueueSnapshot())
+        return {}
+    }
+
+    func heavySetPriority(pid: Int, prio: Int) {}
+    func heavySetSlots(_ slots: Int) {}
+    func heavyCancel(pid: Int) {}
+
     /// Track `pr` the default way: spawn a dedicated agent session for it.
     func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {
         await trackPr(pr, cwd: cwd, cols: cols, rows: rows, adoptSessionId: nil)

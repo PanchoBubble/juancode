@@ -47,7 +47,7 @@ The two cores do not implement the same set. Both have `restartFresh`, `spawnMod
 `namedKeys` and
 `globalPause`; the Rust core has
 `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
-`sessionSleep` and `sessionEdit` on top of that. The catalogue describes **all** of it, and a
+`sessionSleep`, `sessionEdit` and `heavyQueue` on top of that. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
 measured against the subset its own advertised capability list entails:
 
@@ -355,6 +355,18 @@ claude's mechanism puts the body in the CLI's argv and the scenario matches it o
 `ARGS`). `conformance-missing` is deliberately never written: a core has to refuse a
 name it cannot resolve rather than spawn without it. Unset, a core would read the
 developer's real presets and the run would depend on what they happen to have written.
+
+The `heavy-queue` scenario needs the same kind of thing and for the same reason, one
+level up: the queue is a shared filesystem registry, and a scenario cannot write a
+file. `coreEnv` points every booted core at its own `JUANCODE_HEAVY_ROOT` and seeds
+two waiting entries in it (`seedHeavyQueue`), for this process's pid and its parent's
+— two pids that are alive for the length of the run, because a core filters the
+registry on liveness and a dead entry is in no snapshot. That variable moves the
+capacity config with the registry, which is what keeps `heavySetSlots` from
+rewriting the developer's live `~/.claude/heavy-queue.json`; unset, a run would be
+reordering their real jobs. Nothing in the scenario signals either pid: `heavyCancel`
+is exercised against a pid the queue does **not** hold, which is the refusal that
+keeps that frame from being an arbitrary-signal gadget.
 
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:

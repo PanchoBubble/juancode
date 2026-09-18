@@ -3,9 +3,16 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import {
   ScreenMirror,
+  heavyCancel,
+  heavyMoveToFrontPriority,
+  heavyQueue,
+  heavySetPriority,
+  heavySetSlots,
+  onHeavyQueue,
   onPauseState,
   onSessionEvent,
   onSessionScreen,
+  parseHeavyQueue,
   parsePauseState,
   parseScreenFrame,
   parseStuckEvent,
@@ -14,7 +21,9 @@ import {
   pausedSessions,
   startActivityListener,
   stopActivityListener,
+  subscribeHeavyQueue,
   supportsGlobalPause,
+  supportsHeavyQueue,
   type ScreenFrame,
   type SessionActivityEvent,
 } from "./native-events.ts";
@@ -460,5 +469,128 @@ describe("parseUsageSample", () => {
     expect(
       parseUsageSample({ type: "sessionMeta", session: { usage: { totalTokens: 1 } } }),
     ).toBeNull();
+  });
+});
+
+// The registry belongs to the core; this module mirrors the last `heavyQueue` frame
+// and never reads a directory of its own.
+describe("heavy queue over the shared native WS", () => {
+  let wss: WebSocketServer;
+  let server: WsSocket | null = null;
+  let received: Record<string, unknown>[];
+  const prev = process.env.JUANCODE_API;
+
+  beforeEach(async () => {
+    received = [];
+    server = null;
+    wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss.on("connection", (sock) => {
+      server = sock;
+      sock.on("message", (data) => received.push(JSON.parse(data.toString())));
+    });
+    await new Promise<void>((resolve) => wss.on("listening", () => resolve()));
+    process.env.JUANCODE_API = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    stopActivityListener();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    if (prev === undefined) delete process.env.JUANCODE_API;
+    else process.env.JUANCODE_API = prev;
+  });
+
+  const until = async (cond: () => boolean) => {
+    const deadline = Date.now() + 2000;
+    while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(cond()).toBe(true);
+  };
+
+  const snapshot = {
+    type: "heavyQueue",
+    slots: 1,
+    workerCap: 4,
+    running: [{ pid: 1, prio: 0, since: 10, slot: 1, cmd: "cargo build", cwd: "/repo/a" }],
+    waiting: [{ pid: 2, prio: 0, since: 20, slot: 0, cmd: "cargo build", cwd: "/repo/b" }],
+  };
+
+  it("fails closed before the handshake, then mirrors what the core publishes", async () => {
+    const seen: number[][] = [];
+    onHeavyQueue((q) => seen.push(q.waiting.map((j) => j.pid)));
+    // Nothing sent, nothing claimed: a phone that guessed here would draw a queue
+    // on a core with no frame behind it.
+    expect(supportsHeavyQueue()).toBe(false);
+    expect(subscribeHeavyQueue()).toBe(false);
+    expect(heavySetSlots(2)).toBe(false);
+
+    startActivityListener();
+    await until(() => server !== null);
+    server!.send(
+      JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: ["heavyQueue"] }),
+    );
+    await until(() => supportsHeavyQueue());
+
+    expect(subscribeHeavyQueue()).toBe(true);
+    await until(() => received.some((m) => m.type === "heavyQueueSubscribe"));
+    // Idempotent per connection: the core answers one subscribe with the whole queue.
+    expect(subscribeHeavyQueue()).toBe(true);
+    expect(received.filter((m) => m.type === "heavyQueueSubscribe")).toHaveLength(1);
+
+    server!.send(JSON.stringify(snapshot));
+    await until(() => heavyQueue() !== null);
+    expect(seen.at(-1)).toEqual([2]);
+    expect(heavyQueue()?.running.map((j) => j.pid)).toEqual([1]);
+    expect(heavyQueue()?.slots).toBe(1);
+
+    expect(heavySetPriority(2, 5)).toBe(true);
+    await until(() => received.some((m) => m.type === "heavySetPriority" && m.prio === 5));
+    expect(heavyCancel(2)).toBe(true);
+    await until(() => received.some((m) => m.type === "heavyCancel" && m.pid === 2));
+  });
+
+  it("sends nothing to a core that does not advertise the capability", async () => {
+    startActivityListener();
+    await until(() => server !== null);
+    server!.send(
+      JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: ["screen"] }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    expect(supportsHeavyQueue()).toBe(false);
+    expect(heavyCancel(2)).toBe(false);
+    expect(received.some((m) => String(m.type).startsWith("heavy"))).toBe(false);
+  });
+});
+
+describe("parseHeavyQueue", () => {
+  it("drops a frame that is not one, and a row with no pid", () => {
+    expect(parseHeavyQueue({ type: "queue", slots: 1 })).toBeNull();
+    expect(parseHeavyQueue({ type: "heavyQueue" })).toBeNull();
+    const queue = parseHeavyQueue({
+      type: "heavyQueue",
+      slots: 2,
+      running: [],
+      // The pid is the id, the registry filename and the thing a cancel names, so a
+      // row without one is not addressable and is not a job.
+      waiting: [{ prio: 1 }, { pid: 7, prio: 3, since: 5, slot: 0, cmd: "c", cwd: "/w" }],
+    });
+    expect(queue?.waiting.map((j) => j.pid)).toEqual([7]);
+    // An absent workerCap is the wrapper's own default rather than zero: a client
+    // that drew 0 would be reporting a cap nothing applies.
+    expect(queue?.workerCap).toBe(4);
+    expect(queue?.waiting[0]?.child).toBeUndefined();
+  });
+
+  it("turns 'run this next' into one better than the best queued priority", () => {
+    expect(heavyMoveToFrontPriority({ slots: 1, workerCap: 4, running: [], waiting: [] })).toBe(1);
+    expect(
+      heavyMoveToFrontPriority({
+        slots: 1,
+        workerCap: 4,
+        running: [],
+        waiting: [
+          { pid: 1, prio: 4, since: 1, slot: 0, cmd: "c", cwd: "/w" },
+          { pid: 2, prio: 0, since: 2, slot: 0, cmd: "c", cwd: "/w" },
+        ],
+      }),
+    ).toBe(5);
   });
 });

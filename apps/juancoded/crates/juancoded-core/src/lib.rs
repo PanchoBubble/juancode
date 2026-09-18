@@ -10,6 +10,7 @@
 pub mod activity;
 pub mod changes;
 pub mod gh;
+pub mod heavy;
 pub mod model;
 pub mod pr;
 pub mod preset;
@@ -25,6 +26,7 @@ pub use activity::{
     Transition,
 };
 pub use changes::ChangeStat;
+pub use heavy::{HeavyJob, HeavyQueue, HeavyQueueSnapshot};
 pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionStatus};
 pub use pr::{
     auto_fix_prompt, classify_pr_activity, derive_track_state, stalled_ci_fix_reason,

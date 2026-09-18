@@ -9,6 +9,7 @@
 pub mod conn;
 pub mod ephemeral;
 pub mod global_pause;
+pub mod heavy_watch;
 pub mod identity;
 pub mod named_key;
 pub mod owner;

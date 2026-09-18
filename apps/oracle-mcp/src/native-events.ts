@@ -434,6 +434,150 @@ function emitPauseState(paused: string[]): void {
 // other one-shot writes — so it feature-detects on that socket's own handshake rather
 // than on this module's cached capability list, and works while this one is between
 // reconnects. The table of names is keys.ts.
+// ── Heavy command queue (juancode-52e8.14.3) ─────────────────────────────────
+// The phone's view of the global `heavy` slot queue: memory-heavy commands (CI,
+// integration tests) serialized across every agent session on the Mac. The CORE
+// owns the shared registry and pushes the whole queue on every change, so this
+// module never reads a directory — it mirrors the last `heavyQueue` frame, and the
+// subscription is what tells the core somebody is looking.
+
+/** One job in the queue. `child` and `started` are absent while a job waits. */
+export interface HeavyJob {
+  /** The wrapper's pid: the registry filename, and the id a cancel names. */
+  pid: number;
+  child?: number;
+  /** Higher runs sooner; ties break on how long the job has been queued. */
+  prio: number;
+  /** Epoch seconds when it joined the queue. */
+  since: number;
+  started?: number;
+  /** Slot index it holds, or 0 while waiting. */
+  slot: number;
+  cmd: string;
+  cwd: string;
+}
+
+/** The whole queue: capacity, and the two lists already ordered by the core. */
+export interface HeavyQueue {
+  slots: number;
+  workerCap: number;
+  running: HeavyJob[];
+  waiting: HeavyJob[];
+}
+
+/** The queue as the endpoint last sent it, or null before it has said. Distinct
+ *  from an empty queue, which means nothing is running and nothing is waiting. */
+let heavyQueueState: HeavyQueue | null = null;
+/** Whether `heavyQueueSubscribe` has gone out on THIS socket. Per connection on the
+ *  core's side, so a reconnect has to send it again. */
+let heavySubscribed = false;
+
+type HeavyListener = (queue: HeavyQueue) => void;
+const heavyListeners: HeavyListener[] = [];
+
+/** Whether the connected endpoint reads the slot registry. False before the
+ *  handshake, so a caller fails closed rather than sending into the dark. */
+export function supportsHeavyQueue(): boolean {
+  return nativeCapabilities.includes("heavyQueue");
+}
+
+/** Ask the core to start pushing the queue. Idempotent per connection, and a no-op
+ *  on an endpoint with no such frame. */
+export function subscribeHeavyQueue(): boolean {
+  if (!supportsHeavyQueue()) return false;
+  if (heavySubscribed) return true;
+  heavySubscribed = true;
+  sendToNative({ type: "heavyQueueSubscribe" });
+  return true;
+}
+
+/** The queue the endpoint last sent, or null before it has sent one. */
+export function heavyQueue(): HeavyQueue | null {
+  return heavyQueueState;
+}
+
+/** Watch the queue. Fires on every `heavyQueue` frame, which is always the complete
+ *  queue — replace wholesale. Listener errors are isolated. */
+export function onHeavyQueue(listener: HeavyListener): void {
+  heavyListeners.push(listener);
+}
+
+/** Move a job in line. Fire-and-forget: the answer is the queue frame that follows.
+ *  Higher priority runs sooner. */
+export function heavySetPriority(pid: number, prio: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavySetPriority", pid, prio });
+  return true;
+}
+
+/** How many heavy jobs may run at once. Raising it lets jobs already in line
+ *  through, because the waiting wrappers re-read the capacity every poll. */
+export function heavySetSlots(slots: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavySetSlots", slots });
+  return true;
+}
+
+/** Stop a queued or running job. The core refuses a pid its own queue does not
+ *  hold, so this can only reach a job in the list above. */
+export function heavyCancel(pid: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavyCancel", pid });
+  return true;
+}
+
+/** The priority that puts a job at the head of the line: one better than the best
+ *  currently queued. The core's only mutation is a priority write, so this is what
+ *  turns "run this next" into a number. */
+export function heavyMoveToFrontPriority(queue: HeavyQueue): number {
+  return Math.max(...queue.waiting.map((j) => j.prio), 0) + 1;
+}
+
+/** Parse a `heavyQueue` frame, or null if it is not one. Lenient like the rest of
+ *  this module: a malformed frame is dropped, never thrown. */
+export function parseHeavyQueue(msg: Record<string, unknown>): HeavyQueue | null {
+  if (msg.type !== "heavyQueue") return null;
+  if (typeof msg.slots !== "number") return null;
+  return {
+    slots: msg.slots,
+    workerCap: typeof msg.workerCap === "number" ? msg.workerCap : 4,
+    running: parseHeavyJobs(msg.running),
+    waiting: parseHeavyJobs(msg.waiting),
+  };
+}
+
+function parseHeavyJobs(raw: unknown): HeavyJob[] {
+  if (!Array.isArray(raw)) return [];
+  const jobs: HeavyJob[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.pid !== "number") continue;
+    const job: HeavyJob = {
+      pid: row.pid,
+      prio: typeof row.prio === "number" ? row.prio : 0,
+      since: typeof row.since === "number" ? row.since : 0,
+      slot: typeof row.slot === "number" ? row.slot : 0,
+      cmd: typeof row.cmd === "string" ? row.cmd : "",
+      cwd: typeof row.cwd === "string" ? row.cwd : "",
+    };
+    if (typeof row.child === "number") job.child = row.child;
+    if (typeof row.started === "number") job.started = row.started;
+    jobs.push(job);
+  }
+  return jobs;
+}
+
+function emitHeavyQueue(queue: HeavyQueue): void {
+  heavyQueueState = queue;
+  for (const listener of heavyListeners) {
+    try {
+      listener(queue);
+    } catch (e) {
+      console.warn("oracle-mcp heavy listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
 
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
@@ -477,6 +621,10 @@ function connect(): void {
     for (const sessionId of screenListeners.keys()) {
       sendToNative({ type: "subscribeScreen", sessionId });
     }
+    // And the heavy queue, for the same reason: the watch is per connection on the
+    // core's side, so a reconnect has to ask again or the queue silently stops
+    // updating. Only when something is actually watching.
+    if (heavyListeners.length > 0) subscribeHeavyQueue();
   });
 
   sock.on("message", (data) => {
@@ -489,6 +637,11 @@ function connect(): void {
     // whose capabilities or paused set we still know.
     nativeCapabilities = [];
     pausedSessionIds = null;
+    // Dropped rather than kept: jobs have started and finished while this socket was
+    // down, and a stale queue is worse than none — it is what a reorder would be
+    // computed against.
+    heavyQueueState = null;
+    heavySubscribed = false;
     scheduleReconnect();
   });
 
@@ -521,6 +674,11 @@ function handleMessage(raw: string): void {
   if (msg.type === "pauseState") {
     const paused = parsePauseState(msg);
     if (paused) emitPauseState(paused);
+    return;
+  }
+  if (msg.type === "heavyQueue") {
+    const queue = parseHeavyQueue(msg);
+    if (queue) emitHeavyQueue(queue);
     return;
   }
   if (msg.type === "screen") {

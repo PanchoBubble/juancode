@@ -16,7 +16,7 @@ import {
 } from "./client.ts";
 import { matchValue, readBindings, resolveVars, type Vars } from "./match.ts";
 import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
-import type { CoreDeath } from "./core.ts";
+import { HEAVY_PIDS, type CoreDeath } from "./core.ts";
 import type { Requirement, Scenario, Step } from "./spec.ts";
 
 /** Per-run scratch space the scenarios address through bound variables. */
@@ -136,6 +136,13 @@ export function seedVars(
     // The preset `seedPresets` wrote, and a name it deliberately did not: a core has to
     // error on a name it cannot resolve rather than spawn without it. Fixed rather than
     // stamped, because the file is written at boot and every attempt reads the same one.
+    // The two pids `seedHeavyQueue` wrote registry entries for, and one the queue
+    // does not hold. Fixed rather than stamped: the entries are written at boot and
+    // every attempt reads the same two. The missing one is `0`, which no process can
+    // have — a core that treated it as a job would be signalling its own group.
+    heavyPidA: HEAVY_PIDS.a,
+    heavyPidB: HEAVY_PIDS.b,
+    heavyMissingPid: HEAVY_PIDS.missing,
     presetName: "conformance",
     presetMarker: "PRESET-MARKER-conformance",
     missingPresetName: "conformance-missing",

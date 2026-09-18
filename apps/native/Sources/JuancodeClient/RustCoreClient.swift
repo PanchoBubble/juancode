@@ -112,6 +112,18 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// rather than with a reply of their own.
     private var trackedWaiters: [FrameWaiter] = []
 
+    /// Heavy-queue watchers on this client, and whether `heavyQueueSubscribe` has
+    /// gone out on THIS socket. Per connection on the daemon's side like every other
+    /// watch here, so a reconnect has to send it again — and the daemon reads the
+    /// shared registry only while somebody is subscribed, so the last unsubscribe is
+    /// what stops the polling.
+    private var heavyListeners: [Int: @Sendable (HeavyQueueSnapshot) -> Void] = [:]
+    private var heavySubscribed = false
+    /// The queue as the daemon last sent it, or nil while this connection has never
+    /// been sent one. Handed to a new subscriber so a second panel does not have to
+    /// wait out a change for its first draw.
+    private var heavySnapshot: HeavyQueueSnapshot?
+
     /// Searches waiting on the daemon, keyed by the `requestId` they went out under.
     /// Keyed rather than a list because a search box sends a frame per keystroke: the
     /// id is what tells this client's answer from the two stale ones behind it.
@@ -1069,6 +1081,68 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         }
     }
 
+    // MARK: - Heavy command queue (capability: heavyQueue)
+
+    /// One subscription per connection, sent once and again after a reconnect.
+    private func ensureHeavySubscription() {
+        guard supports(.heavyQueue) else { return }
+        let send: Bool = lock.withLock {
+            guard !heavySubscribed, !heavyListeners.isEmpty else { return false }
+            heavySubscribed = true
+            return true
+        }
+        if send { connection.send(["type": "heavyQueueSubscribe"]) }
+    }
+
+    public func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void {
+        guard supports(.heavyQueue) else {
+            // An empty queue is the honest answer for a core that cannot read one, and
+            // the panel greys itself out off the capability rather than off this.
+            onSnapshot(HeavyQueueSnapshot())
+            return {}
+        }
+        let (token, known) = lock.withLock { () -> (Int, HeavyQueueSnapshot?) in
+            let t = nextListenerToken
+            nextListenerToken += 1
+            heavyListeners[t] = onSnapshot
+            return (t, heavySnapshot)
+        }
+        ensureHeavySubscription()
+        // When this connection already holds a queue, hand it over now; when it does
+        // not, the hand-over IS the daemon's answer to the subscribe just sent, and
+        // the listener is already registered to receive it.
+        if let known { onSnapshot(known) }
+        return { [weak self] in
+            guard let self else { return }
+            let stop: Bool = lock.withLock {
+                heavyListeners[token] = nil
+                guard heavyListeners.isEmpty, heavySubscribed else { return false }
+                heavySubscribed = false
+                heavySnapshot = nil
+                return true
+            }
+            // Told, rather than left holding a watch nobody reads: the daemon polls
+            // the shared registry only while a subscriber is out.
+            if stop { connection.send(["type": "heavyQueueUnsubscribe"]) }
+        }
+    }
+
+    public func heavySetPriority(pid: Int, prio: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavySetPriority", "pid": pid, "prio": prio])
+    }
+
+    public func heavySetSlots(_ slots: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavySetSlots", "slots": slots])
+    }
+
+    public func heavyCancel(pid: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavyCancel", "pid": pid])
+    }
+
     // MARK: - Presence, diagnostics, lifecycle
 
     /// No `/presence` on the daemon. The push gate it feeds is the sidecar's, which
@@ -1396,6 +1470,15 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             for l in listeners { l(.trackedPrs(list)) }
             for w in waiters { w.arrived() }
 
+        case "heavyQueue":
+            guard let snapshot = HeavyQueueSnapshot(wire: body) else { return }
+            let listeners = lock.withLock { () -> [@Sendable (HeavyQueueSnapshot) -> Void] in
+                heavySnapshot = snapshot
+                return Array(heavyListeners.values)
+            }
+            // Replace wholesale: the frame is the complete queue and never a delta.
+            for l in listeners { l(snapshot) }
+
         case "trackNotification":
             guard let trackedId = body["trackedId"] as? String,
                   let prNumber = body["prNumber"] as? Int,
@@ -1529,6 +1612,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return ids
             }
             for id in queues { ensureQueueSubscription(id) }
+            // And the heavy queue, for the same two reasons: the watch is per
+            // connection, and the cached snapshot is dropped rather than kept, because
+            // jobs have started and finished while this socket was down.
+            let heavyAgain: Bool = lock.withLock {
+                guard !heavyListeners.isEmpty else { return false }
+                heavySubscribed = false
+                heavySnapshot = nil
+                return true
+            }
+            if heavyAgain { ensureHeavySubscription() }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
             // The daemon's editor and shell ptys belong to the connection and die with

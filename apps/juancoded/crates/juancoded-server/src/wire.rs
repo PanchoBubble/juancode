@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
 use juancoded_core::changes::ChangeStat;
+use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_core::pr::{TrackNotification, TrackedPr};
 use juancoded_persistence::SearchHit;
@@ -210,6 +211,14 @@ pub const CAPABILITIES: &[&str] = &[
     // desktop relay needs to see before it will serve `/api/pr-webhook` at all: without
     // it the relay answers 501 and the poll stays this core's only update path.
     "prWebhook",
+    // The global `heavy` slot queue (juancode-52e8.14.3). Advertised because the whole
+    // of it answers here: the line is read from the shared registry, pushed on every
+    // change rather than polled, reorderable by a priority rewrite the waiting wrapper
+    // picks up on its own, and widenable by a config write that preserves every rule
+    // beside it. It moved out of the desktop for the reason every port in this epic
+    // has: the queue is machine state that outlives an app launch, and a Mac you have
+    // walked away from is exactly when you want to know what is holding the slot.
+    "heavyQueue",
 ];
 
 /// One queued occurrence on the wire.
@@ -624,6 +633,51 @@ pub enum ClientMessage {
         session_id: String,
         message_id: String,
     },
+    /// Watch the global `heavy` slot queue: the whole queue now, and the whole queue
+    /// again whenever it changes, until `heavyQueueUnsubscribe` or the socket closes.
+    ///
+    /// Per connection, and lazily: nothing reads the registry while nobody is
+    /// subscribed, so a daemon nobody has asked does no filesystem work for this at
+    /// all. The frame is one small snapshot for the whole machine rather than a
+    /// per-session stream, so there is no id to address and nothing to page.
+    HeavyQueueSubscribe,
+    HeavyQueueUnsubscribe,
+    /// Move a job in line by rewriting its registry entry's priority. Higher runs
+    /// sooner; ties break on how long the job has been queued.
+    ///
+    /// Not a move-up/move-down pair, because the queue is not this daemon's to order:
+    /// the waiting wrapper re-reads its own priority every poll and admits itself, so
+    /// the only thing anybody can do to the line is change a number in it. A client
+    /// that wants "run this next" computes the number off the snapshot it is already
+    /// holding.
+    ///
+    /// Answered by the queue, like every other mutation here, and by an `error` when
+    /// there is no entry for `pid` — a job that finished between a client's snapshot
+    /// and its click.
+    HeavySetPriority {
+        pid: i32,
+        prio: i64,
+    },
+    /// How many heavy jobs may run at once. Written into the wrapper's own config,
+    /// preserving every other key in it — the rules in particular, which belong to
+    /// the wrapper and are read by other tooling on the machine.
+    ///
+    /// Raising it lets jobs already in line through, because the waiting wrappers
+    /// re-read the capacity on every poll; it is not a knob that only applies to new
+    /// jobs. Anything below one slot is refused: a queue that admits nothing forever
+    /// is not a narrower queue, it is a broken one.
+    HeavySetSlots {
+        slots: i64,
+    },
+    /// SIGTERM a job's wrapper, which takes the command down with it and frees its
+    /// slot.
+    ///
+    /// Refused for a pid this queue does not hold, and that refusal is load-bearing
+    /// rather than tidy: without it the frame is an arbitrary-signal gadget aimed at
+    /// any process on the machine by anything that can reach this socket.
+    HeavyCancel {
+        pid: i32,
+    },
     /// What of this core's history mentions `query`.
     ///
     /// `requestId` is required and echoed back in `searchResults`, for the reason
@@ -724,6 +778,12 @@ struct RawClient {
     /// Named control keys (juancode-uigs).
     #[serde(default)]
     keys: Option<Vec<String>>,
+    #[serde(default)]
+    pid: Option<i32>,
+    #[serde(default)]
+    prio: Option<i64>,
+    #[serde(default)]
+    slots: Option<i64>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -841,6 +901,18 @@ impl ClientMessage {
                 archived: raw.archived,
             }),
             "listSessions" => Ok(Self::ListSessions),
+            "heavyQueueSubscribe" => Ok(Self::HeavyQueueSubscribe),
+            "heavyQueueUnsubscribe" => Ok(Self::HeavyQueueUnsubscribe),
+            "heavySetPriority" => Ok(Self::HeavySetPriority {
+                pid: raw.pid.ok_or("missing pid")?,
+                prio: raw.prio.ok_or("missing prio")?,
+            }),
+            "heavySetSlots" => Ok(Self::HeavySetSlots {
+                slots: raw.slots.ok_or("missing slots")?,
+            }),
+            "heavyCancel" => Ok(Self::HeavyCancel {
+                pid: raw.pid.ok_or("missing pid")?,
+            }),
             // `limit` defaults rather than being required: a client that asks a
             // question without saying how many answers it wants gets a screenful,
             // and a client that asks for none is taken at its word.
@@ -1044,6 +1116,22 @@ pub enum ServerMessage {
     /// multi-megabyte handshake for bytes a sidebar never draws.
     Sessions {
         sessions: Vec<SessionMeta>,
+    },
+    /// The whole `heavy` slot queue: its capacity and the two ordered lists, running
+    /// first by slot and waiting in the order the wrappers will admit themselves.
+    ///
+    /// Sent once in answer to `heavyQueueSubscribe`, and after that only when the
+    /// registry actually moved — the poll runs on a timer, so "nothing changed" is the
+    /// common case and an identical snapshot carries no information. Always complete;
+    /// replace wholesale. Empty lists mean nothing is queued, which is a queue and not
+    /// a missing one.
+    ///
+    /// `slots` is how many may run at once and `workerCap` how many test-runner
+    /// workers each admitted job may fan out to; both are the wrapper's own config,
+    /// reported rather than invented, so a client never disagrees with the shell
+    /// script about what the capacity is.
+    HeavyQueue {
+        snapshot: Arc<HeavyQueueSnapshot>,
     },
     /// The set a global pause is holding asleep, sorted.
     ///
@@ -1409,6 +1497,13 @@ impl ServerMessage {
             }),
             Self::PauseState { paused } => json!({
                 "type": "pauseState", "paused": paused,
+            }),
+            Self::HeavyQueue { snapshot } => json!({
+                "type": "heavyQueue",
+                "slots": snapshot.slots,
+                "workerCap": snapshot.worker_cap,
+                "running": snapshot.running,
+                "waiting": snapshot.waiting,
             }),
             Self::SessionDeleted {
                 session_id,
@@ -1780,6 +1875,15 @@ mod tests {
             // is a tap that does nothing, on the one surface where the alternative was
             // typing the word "Escape" into the agent's prompt box.
             r#"{"type":"key","sessionId":"s","keys":["Escape"]}"#,
+            // And for `heavyQueue`, all five: a client feature-detecting off the
+            // capability draws a queue, a reorder, a slot stepper and a cancel, and any
+            // one of them reaching `Unknown` is a control that does nothing and says
+            // nothing.
+            r#"{"type":"heavyQueueSubscribe"}"#,
+            r#"{"type":"heavyQueueUnsubscribe"}"#,
+            r#"{"type":"heavySetPriority","pid":4242,"prio":5}"#,
+            r#"{"type":"heavySetSlots","slots":2}"#,
+            r#"{"type":"heavyCancel","pid":4242}"#,
         ] {
             assert!(
                 !matches!(
@@ -1796,6 +1900,17 @@ mod tests {
             r#"{"type":"trackPrInSession","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#
         )
         .is_err());
+
+        // A heavy mutation with nothing to act on is rejected rather than defaulted:
+        // a `heavyCancel` that lost its pid must not become a cancel of pid 0, and a
+        // `heavySetSlots` with no number must not become a capacity somebody invented.
+        for frame in [
+            r#"{"type":"heavyCancel"}"#,
+            r#"{"type":"heavySetPriority","pid":4242}"#,
+            r#"{"type":"heavySetSlots"}"#,
+        ] {
+            assert!(ClientMessage::decode(frame).is_err(), "{frame}");
+        }
 
         // `isolateWorktree` gates a FIELD, not a frame, so the lie it could tell is
         // one level down: the create still decodes, minus the flag, and the session
@@ -1848,6 +1963,7 @@ mod tests {
                     "trackPrInSession",
                     "prWebhook",
                     "namedKeys",
+                    "heavyQueue",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

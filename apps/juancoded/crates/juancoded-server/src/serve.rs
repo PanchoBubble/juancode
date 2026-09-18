@@ -22,6 +22,7 @@ use juancoded_state::{
 
 use crate::conn;
 use crate::global_pause::GlobalPause;
+use crate::heavy_watch::HeavyWatch;
 use crate::identity::{self, DaemonIdentity};
 use crate::queue_delivery;
 use crate::reads;
@@ -73,6 +74,11 @@ pub struct CoreHandles {
     /// is the set the desktop plays, so both read this object. Always present — a pause
     /// needs only the registry, and the store leg is what makes it survive a restart.
     pub global_pause: Arc<GlobalPause>,
+    /// The `heavy` slot queue. One per daemon and never per connection: the registry
+    /// is machine state shared with every other `heavy` on this Mac, so two readers
+    /// would be two answers to when it changed. Always present — it needs nothing from
+    /// the tree, only a directory.
+    pub heavy: Arc<HeavyWatch>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -138,6 +144,11 @@ impl CoreHandles {
             pty,
             tracked_prs,
             global_pause,
+            // Its root and its config come from the environment, so a conformance run
+            // (or a test) points `JUANCODE_HEAVY_ROOT` at a directory of its own rather
+            // than reordering the developer's real queue and rewriting the live config
+            // beside it.
+            heavy: HeavyWatch::from_env(),
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
@@ -249,6 +260,9 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.
     let _reaper = handles.reaper.as_ref().map(|reaper| reaper.spawn());
+    // And the last, which is the only one that reads something no session owns: the
+    // shared `heavy` registry. A no-op tick until a client subscribes.
+    let _heavy = handles.heavy.spawn();
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {

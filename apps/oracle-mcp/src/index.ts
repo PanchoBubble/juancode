@@ -62,7 +62,16 @@ import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
-import { startActivityListener } from "./native-events.ts";
+import {
+  heavyCancel,
+  heavyMoveToFrontPriority,
+  heavyQueue,
+  heavySetPriority,
+  heavySetSlots,
+  startActivityListener,
+  subscribeHeavyQueue,
+  supportsHeavyQueue,
+} from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
@@ -572,6 +581,68 @@ app.post("/api/sessions/delete", async (req: Request, res: Response) => {
   } catch (e) {
     sendErr(res, e);
   }
+});
+
+// ── Heavy queue ──────────────────────────────────────────────────────────────
+// The phone's view of the global `heavy` slot queue. The core owns the registry and
+// pushes the whole queue, so the first GET subscribes and later ones read the frame
+// the core has already sent — no polling of anything on disk from here.
+
+app.get("/api/heavy", (_req: Request, res: Response) => {
+  if (!supportsHeavyQueue()) {
+    res.json({ supported: false, queue: null });
+    return;
+  }
+  subscribeHeavyQueue();
+  res.json({ supported: true, queue: heavyQueue() });
+});
+
+app.post("/api/heavy/priority", (req: Request, res: Response) => {
+  const { pid, prio, front } = req.body ?? {};
+  if (typeof pid !== "number") {
+    res.status(400).send("pid is required");
+    return;
+  }
+  const queue = heavyQueue();
+  // `front: true` is "run this next" without the phone having to know the
+  // arithmetic; an explicit `prio` wins when a caller has its own number.
+  const target =
+    typeof prio === "number" ? prio : front && queue ? heavyMoveToFrontPriority(queue) : null;
+  if (target === null) {
+    res.status(400).send("prio or front is required");
+    return;
+  }
+  if (!heavySetPriority(pid, target)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true, prio: target });
+});
+
+app.post("/api/heavy/slots", (req: Request, res: Response) => {
+  const slots = (req.body ?? {}).slots;
+  if (typeof slots !== "number" || slots < 1) {
+    res.status(400).send("slots must be a number >= 1");
+    return;
+  }
+  if (!heavySetSlots(slots)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/heavy/cancel", (req: Request, res: Response) => {
+  const pid = (req.body ?? {}).pid;
+  if (typeof pid !== "number") {
+    res.status(400).send("pid is required");
+    return;
+  }
+  if (!heavyCancel(pid)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true });
 });
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {

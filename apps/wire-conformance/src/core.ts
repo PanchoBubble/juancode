@@ -289,6 +289,36 @@ export function seedPresets(dir: string): string {
  *  and it changes how loud the core is rather than what it does — which is the bar
  *  for being on this list, because the point of the list below is that a knob a core
  *  READS is a knob a run must SET. */
+/** The heavy-queue registry a booted core reads, seeded with two waiting jobs.
+ *
+ *  Seeded here rather than by a scenario for the reason `seedPresets` is: the core
+ *  reads a directory, and a scenario cannot write a file. Left unset a core would
+ *  read `/tmp/claude-heavy-$UID` — the developer's REAL queue — and the scenario's
+ *  `heavySetSlots` would rewrite the live `~/.claude/heavy-queue.json` that other
+ *  tooling on the machine reads. `JUANCODE_HEAVY_ROOT` moves the config with the
+ *  registry for exactly that reason, so one variable is the whole isolation.
+ *
+ *  The two pids are this process and its parent, because the core filters the
+ *  registry on liveness and an entry for a dead pid is not in any snapshot. They are
+ *  alive for the length of the run by construction, and nothing in the scenario ever
+ *  signals them: `heavyCancel` is exercised against a pid the queue does NOT hold,
+ *  which is the refusal that keeps the frame from being an arbitrary-kill gadget.
+ *  `since` is fixed so the waiting order is the seeded order on every attempt. */
+export function seedHeavyQueue(dir: string): string {
+  const queue = join(dir, "queue");
+  mkdirSync(queue, { recursive: true });
+  const entry = (pid: number, since: number, cwd: string) =>
+    JSON.stringify({ pid, prio: 0, since, slot: 0, cmd: "conformance job", cwd, child: null });
+  writeFileSync(join(queue, `${HEAVY_PIDS.a}.json`), entry(HEAVY_PIDS.a, 100, "/repo/first"));
+  writeFileSync(join(queue, `${HEAVY_PIDS.b}.json`), entry(HEAVY_PIDS.b, 200, "/repo/second"));
+  return dir;
+}
+
+/** The two live pids `seedHeavyQueue` writes entries for, and one that is not in the
+ *  registry at all. `0` can never be a job: it is not a pid a process can have, so a
+ *  core that took it for one would be signalling its own process group. */
+export const HEAVY_PIDS = { a: process.pid, b: process.ppid, missing: 0 };
+
 export const CORE_ENV_PASSTHROUGH = ["JUANCODED_LOG"];
 
 /** The parent environment with every core knob removed.
@@ -363,6 +393,10 @@ export function coreEnv(port: number, dataDir: string, oracleDir: string): Recor
     // scenario cannot write a file. Left unset a core would read the developer's real
     // presets, so a run would depend on what they happen to have written.
     JUANCODE_PRESET_DIR: seedPresets(join(dataDir, "presets")),
+    // The heavy-queue registry, and the capacity config that moves with it. See
+    // `seedHeavyQueue`: unset, a run would reorder the developer's real queue and
+    // rewrite their live `~/.claude/heavy-queue.json`.
+    JUANCODE_HEAVY_ROOT: seedHeavyQueue(join(dataDir, "heavy")),
     // Fixed scrollback so replay assertions do not depend on a user's setting.
     JUANCODE_SCROLLBACK: String(64 * 1024),
     // No retention pruning and no reaping: a scenario's session must still exist

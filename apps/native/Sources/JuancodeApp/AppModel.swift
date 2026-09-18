@@ -4799,41 +4799,67 @@ final class AppModel {
         }
     }
 
-    // MARK: - Heavy command queue (juancode-ik11)
+    // MARK: - Heavy command queue (juancode-ik11, moved to the core in juancode-52e8.14.3)
 
     /// The global `heavy` slot queue — memory-heavy commands (CI, integration tests)
-    /// serialized across every Claude session on this Mac. Read from the shared
-    /// filesystem registry; empty when nothing is queued.
+    /// serialized across every Claude session on this Mac.
+    ///
+    /// Pushed by the core, not read here: the registry belongs to the daemon now, so
+    /// this is the last `heavyQueue` frame and nothing in the app touches
+    /// `/tmp/claude-heavy-$UID`. A core with no `heavyQueue` capability leaves it
+    /// empty and the panel greys itself out with the capability's own sentence.
     var heavyQueue = HeavyQueueSnapshot()
+    /// The live subscription's cancel handle, so the watch is dropped when the panel
+    /// and the Tools menu are both done with it — the daemon reads the shared
+    /// registry only while somebody is subscribed.
+    private var heavyQueueCancel: (@Sendable () -> Void)?
+    private var heavyQueueWatchers = 0
 
-    /// Reload the queue off the main actor. Cheap (a handful of small JSON files),
-    /// so the panel can poll it and the Tools menu can refresh on open.
-    func refreshHeavyQueue() {
-        Task {
-            heavyQueue = await Task.detached(priority: .utility) {
-                HeavyQueue.shared.snapshot()
-            }.value
+    /// Start (or join) the watch. Balanced by `releaseHeavyQueue()`: the panel holds
+    /// one for as long as it is open, the Tools menu one for as long as it is.
+    func watchHeavyQueue() {
+        heavyQueueWatchers += 1
+        guard heavyQueueCancel == nil, supportsHeavyQueue else { return }
+        heavyQueueCancel = core.subscribeHeavyQueue { [weak self] snapshot in
+            Task { @MainActor in self?.heavyQueue = snapshot }
         }
     }
+
+    /// Drop this watcher's claim, and the subscription with the last one.
+    func releaseHeavyQueue() {
+        heavyQueueWatchers = max(0, heavyQueueWatchers - 1)
+        guard heavyQueueWatchers == 0, let cancel = heavyQueueCancel else { return }
+        heavyQueueCancel = nil
+        cancel()
+        // Not cleared: the last queue drawn is a better first frame than an empty one
+        // the next open would flash before the core answers.
+    }
+
+    /// Whether the connected core reads the slot registry at all.
+    var supportsHeavyQueue: Bool { core.supports(.heavyQueue) }
 
     /// Jump a waiting job to the head of the line. The wrapper re-reads its priority
     /// every poll, so it takes effect within a few seconds without signalling it.
     func heavyQueueMoveToFront(_ pid: Int) {
-        HeavyQueue.shared.moveToFront(pid: pid, in: heavyQueue)
-        refreshHeavyQueue()
+        core.heavySetPriority(pid: pid, prio: heavyQueue.moveToFrontPriority)
     }
 
     /// Move a waiting job one place up or down the line.
     func heavyQueueNudge(_ pid: Int, up: Bool) {
-        HeavyQueue.shared.nudge(pid: pid, up: up, in: heavyQueue)
-        refreshHeavyQueue()
+        for step in heavyQueue.nudgePriorities(pid: pid, up: up) {
+            core.heavySetPriority(pid: step.pid, prio: step.prio)
+        }
+    }
+
+    /// Change how many heavy jobs may run at once.
+    func setHeavySlots(_ slots: Int) {
+        core.heavySetSlots(slots)
     }
 
     /// Cancel a queued or running heavy job (SIGTERM to its wrapper, which takes the
     /// command down with it and frees the slot).
     func cancelHeavyJob(_ pid: Int) {
-        HeavyQueue.shared.cancel(pid: pid)
-        refreshHeavyQueue()
+        core.heavyCancel(pid: pid)
     }
 
     // MARK: - Worktree cleanup (juancode-q6q)

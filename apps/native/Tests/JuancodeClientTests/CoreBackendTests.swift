@@ -237,7 +237,7 @@ final class CoreBackendTests: XCTestCase {
                                            "sessionMeta", "gridOwner", "isolateWorktree"])
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
-                        .terminal, .restartFresh, .spawnModel, .spawnPreset])
+                        .terminal, .restartFresh, .spawnModel, .spawnPreset, .heavyQueue])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -256,23 +256,29 @@ final class CoreBackendTests: XCTestCase {
         XCTAssertEqual(core.missingCapabilities,
                        [.queue, .trackedPrs, .trackPrInSession, .prWebhook, .editor,
                         .terminal, .adoptExternal, .sessionMeta, .gridOwner,
-                        .restartFresh, .spawnModel, .spawnPreset, .isolateWorktree])
+                        .restartFresh, .spawnModel, .spawnPreset, .isolateWorktree,
+                        .heavyQueue])
     }
 
-    /// The in-process core advertises everything the app knows how to ask for, so
-    /// nothing is gated on the default backend. This is also the drift guard: a new
+    /// The in-process core advertises everything the app knows how to ask for, bar
+    /// the surfaces that have moved out of it. This is also the drift guard: a new
     /// capability string added to `WireProtocol` without a `CoreCapability` case (or
     /// the reverse) shows up here.
-    func testTheSwiftCoreGatesNothing() throws {
+    ///
+    /// `heavyQueue` is the first name on the other side of that line
+    /// (juancode-52e8.14.3): the slot registry is read by the daemon now, and the
+    /// Swift core has no frame for it, so the panel greys out under this core rather
+    /// than drawing a queue nothing is watching.
+    func testTheSwiftCoreGatesOnlyWhatHasMovedOutOfIt() throws {
         let dbPath = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("juancode-caps-\(UUID().uuidString).db")
         defer {
             for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbPath + suffix) }
         }
         let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
-        XCTAssertEqual(core.missingCapabilities, [])
+        XCTAssertEqual(core.missingCapabilities, [.heavyQueue])
         XCTAssertEqual(Set(WireProtocol.capabilities).subtracting(WireProtocol.remoteOnlyCapabilities),
-                       Set(CoreCapability.allCases.map(\.rawValue)),
+                       Set(CoreCapability.allCases.map(\.rawValue)).subtracting(["heavyQueue"]),
                        "every capability the Swift core advertises is one the app can ask for, "
                        + "except the ones that only describe what the endpoint serves a remote client")
     }
