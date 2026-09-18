@@ -433,8 +433,9 @@ impl SessionRegistry {
         self.inner.config.retention
     }
 
-    /// Build the registry over the services it composes with, and rehydrate whatever
-    /// the store remembers. Spawns nothing and binds nothing.
+    /// Build the registry over the services it composes with, rehydrate whatever the
+    /// store remembers, and apply the retention cap to all of it. Spawns nothing and
+    /// binds nothing.
     pub fn new(
         pty: Arc<dyn PtySpawnApi>,
         terminal: Arc<dyn TerminalApi>,
@@ -454,6 +455,7 @@ impl SessionRegistry {
         });
         let registry = Self { inner };
         registry.hydrate();
+        registry.sweep_retention();
         registry
     }
 
@@ -2021,6 +2023,36 @@ impl SessionRegistry {
         self.prune_project(&cwd);
     }
 
+    /// Trim every project in the store to the cap, once, at boot.
+    ///
+    /// The exit path can only ever reach the project a session just finished in, so
+    /// without this a cap applies to whatever happened to run since the daemon came
+    /// up and to nothing else: raise `JUANCODE_SESSIONS_PER_PROJECT` from 0 on a
+    /// store with a year of history and the history stays, project by project, until
+    /// something exits there. Boot is the one moment that sees all of them.
+    ///
+    /// After `hydrate`, deliberately. Only an exited session is a candidate, and a
+    /// row left saying `running` by a daemon that was killed is not corrected until
+    /// hydration rewrites it — so a sweep that ran first would give every session the
+    /// last daemon died holding a free pass. Nothing is connected yet either way, so
+    /// the `Deleted` events this sends at boot reach no one and cost nothing. A cap
+    /// of 0 — the default — does not read the store at all.
+    fn sweep_retention(&self) {
+        if self.inner.config.retention == 0 {
+            return;
+        }
+        let cwds = match self.inner.store.project_cwds() {
+            Ok(cwds) => cwds,
+            Err(e) => {
+                warn!(error = %e, "could not list the projects to sweep");
+                return;
+            }
+        };
+        for cwd in cwds {
+            self.prune_project(&cwd);
+        }
+    }
+
     /// Trim this project's history to the cap. Only exited sessions are candidates:
     /// the cap is about how much we remember, never about killing live work.
     fn prune_project(&self, cwd: &str) {
@@ -2039,10 +2071,27 @@ impl SessionRegistry {
             return;
         }
         let doomed: HashSet<String> = pruned.into_iter().collect();
-        let mut sessions = self.lock_sessions();
+        {
+            let mut sessions = self.lock_sessions();
+            for id in &doomed {
+                sessions.remove(id);
+                self.inner.terminal.close(id);
+            }
+        }
+        // Said out loud, or the row lives on in every client until something makes
+        // it list the daemon again — which is the mirror rot `Deleted` exists for,
+        // and the half of juancode-0rbi a client cannot fix for itself. The lock is
+        // released first: a subscriber is entitled to call straight back in.
+        //
+        // No worktree in the frame, because none was reaped. A tree outlives its
+        // session on purpose and nothing on a timer may remove one (see `delete`),
+        // so the cap forgets the row and leaves the directory exactly where it is.
         for id in &doomed {
-            sessions.remove(id);
-            self.inner.terminal.close(id);
+            let _ = self.inner.events.send(SessionEvent::Deleted {
+                session_id: id.clone(),
+                worktree_path: None,
+                worktree_removed: None,
+            });
         }
         debug!(
             project = cwd,

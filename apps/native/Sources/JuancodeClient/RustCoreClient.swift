@@ -624,10 +624,27 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         return hits ?? []
     }
 
-    public func enforceSessionCap(projectKey: (String) -> String, keepIds: Set<String>) {
-        _ = mirror.enforceSessionCap(projectKey: projectKey, keepIds: keepIds)
-    }
+    /// Nothing, deliberately: on this core the cap is the daemon's, and a client that
+    /// enforced its own would be undoing it a moment later.
+    ///
+    /// Deleting the mirror's rows is what this used to do, and every one of them came
+    /// back — the daemon still had them, and the next `sessions` snapshot re-inserted
+    /// the lot, on the handshake and again on every reconnect (juancode-0rbi). What
+    /// did not come back was the scrollback and the FTS rows the mirror delete took
+    /// with them, so the pass cost local search content and bought nothing.
+    ///
+    /// Routing it through `deleteSession` instead would be worse rather than better.
+    /// A delete means "forget this": it tombstones the conversation so nothing adopts
+    /// it back and it reaps the worktree the session owned. A cap means "this project
+    /// has too much history", and it may not do either of those things — which is
+    /// exactly why the daemon enforces retention on its own path, at boot and on
+    /// every exit, and announces what it dropped as `sessionDeleted`. This mirror
+    /// follows that, and `forget` is where it lands.
+    public func enforceSessionCap(projectKey: (String) -> String, keepIds: Set<String>) {}
 
+    /// Compact **this mirror's** file, and say so: the report's page counts are the
+    /// local cache's, never the daemon's store. The daemon's own file is the bigger
+    /// one and nothing here can vacuum it — that is its own job, on its own side.
     public func performMaintenance() throws -> GRDBStore.MaintenanceReport {
         try mirror.performMaintenance()
     }

@@ -316,6 +316,37 @@ final class RustCoreClientTests: XCTestCase {
         XCTAssertEqual(frame["cwd"] as? String, "/repo")
     }
 
+    // MARK: - Retention
+
+    /// The cap on this core is the daemon's, so the client applies none of its own.
+    ///
+    /// It used to delete the rows out of this mirror and send nothing, which the
+    /// daemon undid on the next `sessions` snapshot — on the handshake and again on
+    /// every reconnect — while the scrollback and FTS rows that delete took with it
+    /// did not come back (juancode-0rbi). With a cap set, the rows stay and the wire
+    /// stays quiet.
+    func testTheCapIsTheDaemonsSoTheMirrorKeepsItsRows() async throws {
+        setenv("JUANCODE_SESSIONS_PER_PROJECT", "1", 1)
+        defer { unsetenv("JUANCODE_SESSIONS_PER_PROJECT") }
+        let daemon = QueueDaemon()
+        try await withQueueDaemon(daemon) { core in
+            for i in 0..<3 {
+                let at = 1_700_000_000_000 + i
+                core.insertSession(SessionMeta(id: "s\(i)", provider: .claude, cwd: "/tmp/project",
+                                               title: "s\(i)", status: .exited, exitCode: 0,
+                                               createdAt: at, updatedAt: at,
+                                               cliSessionId: nil, skipPermissions: false,
+                                               worktreePath: nil, usage: nil))
+            }
+            // One bucket and a cap of one: the old code deleted two of these.
+            core.enforceSessionCap(projectKey: { _ in "one-bucket" }, keepIds: [])
+            XCTAssertEqual(Set(core.sessions().map(\.id)), ["s0", "s1", "s2"])
+            XCTAssertTrue(daemon.frames(ofType: "deleteSession").isEmpty,
+                          "the cap must not be a delete: that tombstones the conversation "
+                          + "and reaps the worktree")
+        }
+    }
+
     /// A tree the caller cut is refused rather than sent as a `cwd`: there is no frame
     /// that could tell the daemon about one, so the row would be blank and the tree
     /// would outlive every session that ever used it. That silence IS the bug.

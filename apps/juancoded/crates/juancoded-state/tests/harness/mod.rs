@@ -40,6 +40,10 @@ pub struct Harness {
     loader: Option<Loader>,
     pub store: PathBuf,
     pub dir: PathBuf,
+    /// Sessions kept per project, carried across a restart so a second tree enforces
+    /// the same cap the first one did. 0 — the default everywhere but the retention
+    /// tests — keeps everything.
+    retention: usize,
     /// A restart hands the store file to the next tree, so its own drop must leave
     /// the directory alone.
     keep_dir: bool,
@@ -48,6 +52,11 @@ pub struct Harness {
 impl Harness {
     /// A fresh tree over a fresh store directory named after `label`.
     pub fn new(label: &str) -> Self {
+        Self::keeping(label, 0)
+    }
+
+    /// A fresh tree that enforces a per-project cap of `retention`.
+    pub fn keeping(label: &str, retention: usize) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "juancoded-state-{label}-{}-{:?}",
             std::process::id(),
@@ -56,16 +65,30 @@ impl Harness {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let store = dir.join("state.db");
-        Self::reopen(dir, store)
+        Self::reopen_keeping(dir, store, retention)
     }
 
     /// A tree over an existing store: the "daemon restarted" case.
     pub fn reopen(dir: PathBuf, store: PathBuf) -> Self {
-        let entries = juancoded_state::test_entries_at(
+        Self::reopen_keeping(dir, store, 0)
+    }
+
+    pub fn reopen_keeping(dir: PathBuf, store: PathBuf, retention: usize) -> Self {
+        let mut entries = juancoded_state::test_entries_at(
             store.to_str().expect("utf8 store path"),
             "/bin/sh",
             &["-c", ECHO_LOOP],
         );
+        if retention > 0 {
+            entries.set_config(
+                "sessions",
+                serde_json::json!({
+                    "program": "/bin/sh",
+                    "args": ["-c", ECHO_LOOP],
+                    "retention": retention,
+                }),
+            );
+        }
         let (loader, report, sessions) =
             juancoded_state::boot_with(&entries).expect("the tree mounts");
         // Every row in the daemon's tree has its providers now that `transcripts` is
@@ -77,16 +100,24 @@ impl Harness {
             loader: Some(loader),
             store,
             dir,
+            retention,
             keep_dir: false,
         }
     }
 
     /// Drop the whole tree and boot a new one over the same store file.
-    pub fn restart(mut self) -> Self {
+    pub fn restart(self) -> Self {
+        let retention = self.retention;
+        self.restart_keeping(retention)
+    }
+
+    /// Restart under a different cap: the daemon that comes back up having been told
+    /// to keep fewer sessions than the one that wrote the store.
+    pub fn restart_keeping(mut self, retention: usize) -> Self {
         let (dir, store) = (self.dir.clone(), self.store.clone());
         self.keep_dir = true;
         drop(self);
-        Self::reopen(dir, store)
+        Self::reopen_keeping(dir, store, retention)
     }
 
     /// Create a session and wait until its stand-in has turned echo off.

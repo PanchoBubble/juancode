@@ -231,7 +231,21 @@ pub trait SessionStore: Send + Sync {
 
     /// Trim a project's history to `keep` sessions, oldest exited first, and return
     /// what was removed. `keep == 0` keeps everything.
+    ///
+    /// An archived session is neither a candidate nor counted, which is what makes
+    /// archiving the one way to keep a session past the cap — the promise the Swift
+    /// core has always made for this same setting. Counting them would be worse than
+    /// pointless: a project whose archive alone exceeded the cap would sweep away
+    /// every unarchived session it had.
+    ///
+    /// The list it returns is the whole statement. Rows are gone from the store by
+    /// the time it lands, and every other holder of those ids — the session map, a
+    /// connected client's mirror — learns from this and nowhere else.
     fn prune_project(&self, cwd: &str, keep: usize) -> Result<Vec<String>>;
+
+    /// Every project in the store, for a sweep that has no session in hand to name
+    /// one. Distinct `cwd`s, in no particular order.
+    fn project_cwds(&self) -> Result<Vec<String>>;
 }
 
 /// The real store. One connection behind one mutex: every write here is small and
@@ -648,10 +662,14 @@ impl SessionStore for SqliteStore {
         }
         let conn = self.conn();
         // Newest first, then everything past the cap goes. A running session is
-        // never pruned: the cap is about history, not about killing live work.
+        // never pruned: the cap is about history, not about killing live work. An
+        // archived one is out of the ranking entirely — see the trait.
         let mut stmt = conn.prepare(
-            "SELECT id FROM sessions WHERE cwd = ?1 AND status = 'exited' \
-             ORDER BY created_at DESC LIMIT -1 OFFSET ?2",
+            // `id` breaks the tie for the same reason the session list does: two
+            // sessions created inside one millisecond are ordinary here, and without
+            // it which of them the cap drops is whatever SQLite happened to scan.
+            "SELECT id FROM sessions WHERE cwd = ?1 AND status = 'exited' AND archived = 0 \
+             ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?2",
         )?;
         let doomed: Vec<String> = stmt
             .query_map(params![cwd, keep as i64], |r| r.get::<_, String>(0))?
@@ -661,6 +679,15 @@ impl SessionStore for SqliteStore {
             conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         }
         Ok(doomed)
+    }
+
+    fn project_cwds(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT cwd FROM sessions")?;
+        let cwds: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(cwds)
     }
 }
 
@@ -1069,6 +1096,42 @@ mod tests {
         // The other project is untouched, which is what "per project" means.
         assert_eq!(store.prune_project("/proj/b", 5).unwrap().len(), 0);
         assert_eq!(store.all().unwrap().len(), 3 + 3);
+    }
+
+    /// Archiving is the one way to keep a session past the cap — the promise the
+    /// Swift core makes for this same setting, and one the Rust core did not keep.
+    #[test]
+    fn an_archived_session_is_neither_pruned_nor_counted() {
+        let store = SqliteStore::in_memory().unwrap();
+        for i in 0..4 {
+            let mut m = exited(&format!("a{i}"), "/proj/a", i);
+            // The two oldest are archived, so a cap of 2 has to look past them to
+            // find its candidates instead of spending both slots on them.
+            m.archived = i < 2;
+            store.upsert(&m).unwrap();
+        }
+
+        assert!(store.prune_project("/proj/a", 2).unwrap().is_empty());
+        assert_eq!(store.all().unwrap().len(), 4);
+
+        // One more unarchived session, and it is the oldest unarchived one that goes
+        // — never one of the archived pair, however old they are.
+        store.upsert(&exited("a4", "/proj/a", 4)).unwrap();
+        assert_eq!(store.prune_project("/proj/a", 2).unwrap(), vec!["a2"]);
+        assert!(store.get("a0").unwrap().is_some());
+        assert!(store.get("a1").unwrap().is_some());
+    }
+
+    /// A sweep with no session in hand has to find the projects for itself.
+    #[test]
+    fn the_store_lists_its_projects_once_each() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.upsert(&exited("a0", "/proj/a", 0)).unwrap();
+        store.upsert(&exited("a1", "/proj/a", 1)).unwrap();
+        store.upsert(&exited("b0", "/proj/b", 0)).unwrap();
+        let mut cwds = store.project_cwds().unwrap();
+        cwds.sort();
+        assert_eq!(cwds, vec!["/proj/a".to_string(), "/proj/b".to_string()]);
     }
 
     /// The regression the default itself is: nobody asked for a cap, so nothing is
