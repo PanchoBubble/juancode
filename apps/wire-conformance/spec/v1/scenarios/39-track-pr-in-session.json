@@ -1,0 +1,126 @@
+{
+  "id": "track-pr-in-session",
+  "title": "a PR tracked by a session that already exists",
+  "asserts": "trackPrInSession hands the watch to the session the client names instead of spawning one for it — the list that comes back carries that session's own id, and no second session is created — and the watch untracks like any other.",
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "capabilities": [
+    "trackedPrs",
+    "trackPrInSession"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "attached",
+    "error",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$gitCwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created",
+        "session": {
+          "id": {
+            "$type": "string"
+          },
+          "cwd": "$gitCwd",
+          "status": "running"
+        }
+      },
+      "bind": {
+        "mine": "session.id"
+      },
+      "timeoutMs": 20000,
+      "note": "the session the user is sitting in — the one whose branch would have opened the PR"
+    },
+    {
+      "send": {
+        "type": "subscribeTrackedPrs"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      }
+    },
+    {
+      "send": {
+        "type": "trackPrInSession",
+        "cwd": "$gitCwd",
+        "sessionId": "$mine",
+        "pr": {
+          "number": 4343,
+          "title": "conformance fixture PR",
+          "url": "https://example.invalid/pr/4343",
+          "branch": "main",
+          "draft": false,
+          "checks": "none",
+          "checkCount": 0,
+          "passedCount": 0,
+          "unresolvedComments": 0,
+          "author": "nobody",
+          "assignees": [],
+          "reviewRequests": []
+        }
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "number": 4343,
+            "title": "conformance fixture PR",
+            "branch": "main",
+            "url": "https://example.invalid/pr/4343",
+            "cwd": "$gitCwd",
+            "sessionId": "$mine",
+            "state": "watching",
+            "notifications": []
+          }
+        ]
+      },
+      "bind": {
+        "trackedId": "tracked.0.id"
+      },
+      "timeoutMs": 30000,
+      "note": "the whole clause: the watch names the session the client asked for, not a session the core spawned. No worktree is cut either, which is why the entry's cwd is still the repo the session is standing in."
+    },
+    {
+      "expectNone": {
+        "type": "created"
+      },
+      "withinMs": 1500,
+      "note": "and nothing else was spawned: an adopt that quietly fell through to the spawning track would put a second agent on this branch, which is the failure the frame exists to make impossible"
+    },
+    {
+      "send": {
+        "type": "untrackPr",
+        "trackedId": "$trackedId"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

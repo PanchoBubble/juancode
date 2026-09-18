@@ -106,6 +106,35 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(sessionId, "s-1")
     }
 
+    func testDecodesTrackPrInSession() throws {
+        let json = #"""
+        {"type":"trackPrInSession","cwd":"/repo","sessionId":"s-1",
+         "pr":{"number":7,"title":"t","url":"u","branch":"b","draft":false,"checks":"none","checkCount":0,"passedCount":0,"unresolvedComments":0,"author":"nobody","assignees":[],"reviewRequests":[]}}
+        """#
+        guard case let .trackPrInSession(cwd, pr, sessionId) = try decode(json) else {
+            return XCTFail("expected .trackPrInSession")
+        }
+        XCTAssertEqual(cwd, "/repo")
+        XCTAssertEqual(pr.number, 7)
+        XCTAssertEqual(sessionId, "s-1")
+    }
+
+    func testASessionIdOnTrackPrWouldHaveDecodedAsAPlainSpawningTrack() throws {
+        // Why the adopt is a message and not a field on `trackPr`, and the damage is
+        // worse than the `restartFresh` case above: a core that did not implement the
+        // field would drop it in silence and SPAWN a second agent, on its own worktree,
+        // for a PR the user asked the session they are sitting in to watch — two agents
+        // committing to one branch. An unknown `type` is ignored whole instead.
+        guard case let .trackPr(cwd, pr) = try decode(#"""
+        {"type":"trackPr","cwd":"/repo","sessionId":"s-1",
+         "pr":{"number":7,"title":"t","url":"u","branch":"b","draft":false,"checks":"none","checkCount":0,"passedCount":0,"unresolvedComments":0,"author":"nobody","assignees":[],"reviewRequests":[]}}
+        """#) else {
+            return XCTFail("expected .trackPr")
+        }
+        XCTAssertEqual(cwd, "/repo")
+        XCTAssertEqual(pr.number, 7)
+    }
+
     // ── Version/capability handshake + graceful degrade (juancode-tgc) ───────────
 
     func testAdvertisesTheNewCapabilities() {
@@ -114,6 +143,11 @@ final class WireProtocolTests: XCTestCase {
         // default and the restart is silence.
         XCTAssertTrue(WireProtocol.capabilities.contains("restartFresh"))
         XCTAssertTrue(WireProtocol.capabilities.contains("spawnModel"))
+        // Same reasoning one more time: without this string a client cannot tell a core
+        // that adopts a watch into an existing session from one that would spawn a
+        // second agent for it, so the menu item is enabled everywhere and fails on the
+        // click (juancode-jlhz).
+        XCTAssertTrue(WireProtocol.capabilities.contains("trackPrInSession"))
     }
 
     func testUnknownTypeDegradesToUnknown() throws {

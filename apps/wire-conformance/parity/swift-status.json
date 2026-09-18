@@ -2,8 +2,8 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-09-17",
-  "specRevision": "1.12.0",
+  "measuredAt": "2026-09-18",
+  "specRevision": "1.14.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -20,7 +20,8 @@
     "spawnModel",
     "spawnPreset",
     "isolateWorktree",
-    "globalPause"
+    "globalPause",
+    "trackPrInSession"
   ],
   "scenarios": {
     "handshake": {
@@ -197,6 +198,15 @@
     "usage": {
       "status": "skipped",
       "note": "core does not advertise the \"transcript\" capability"
+    },
+    "session-search": {
+      "status": "skipped",
+      "note": "core does not advertise the \"sessionSearch\" capability"
+    },
+    "track-pr-in-session": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     }
   }
 }

@@ -502,6 +502,35 @@ fn tracked_unavailable() -> ServerMessage {
     }
 }
 
+/// Hand a track to the engine, in the background and with nothing replied here.
+///
+/// Tracking creates a worktree (a fetch among the git it runs) and spawns a CLI, so a
+/// handler that waited would hold this connection's whole loop — no output, no acks —
+/// for as long as the network took. The answer is the new list, published on the bus so
+/// every subscriber gets it rather than only the client that asked: two clients on one
+/// daemon must not disagree about what is being watched. That is also what carries a
+/// REFUSED adopt, by carrying nothing: the asking client times out on a list that never
+/// names the PR.
+fn start_track(
+    engine: &Arc<TrackedPrs>,
+    cwd: String,
+    pr: crate::wire::TrackPrInput,
+    adopt_session_id: Option<String>,
+    owner: ClientId,
+) {
+    let engine = Arc::clone(engine);
+    let req = TrackRequest {
+        cwd,
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        branch: pr.branch,
+        adopt_session_id,
+        owner,
+    };
+    tokio::spawn(async move { engine.track(req).await });
+}
+
 /// Fold every event already queued on the bus into frames, splitting them by whether
 /// they may overtake the reply the handler is about to send: a grid change describes
 /// the state the reply is about, so it goes ahead of it; everything else follows.
@@ -1321,22 +1350,19 @@ fn handle_client_message(
                 outbound.push(tracked_unavailable());
                 return;
             };
-            // Backgrounded, and nothing is replied here. Tracking creates a worktree (a
-            // fetch among the git it runs) and spawns a CLI, so a handler that waited
-            // would hold this connection's whole loop — no output, no acks — for as long
-            // as the network took. The answer is the new list, published on the bus so
-            // every subscriber gets it rather than only the client that asked: two
-            // clients on one daemon must not disagree about what is being watched.
-            let engine = Arc::clone(engine);
-            let req = TrackRequest {
-                cwd,
-                number: pr.number,
-                title: pr.title,
-                url: pr.url,
-                branch: pr.branch,
-                owner: client,
+            start_track(engine, cwd, pr, None, client);
+        }
+
+        ClientMessage::TrackPrInSession {
+            cwd,
+            pr,
+            session_id,
+        } => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
             };
-            tokio::spawn(async move { engine.track(req).await });
+            start_track(engine, cwd, pr, Some(session_id), client);
         }
 
         ClientMessage::UntrackPr { tracked_id } => {
@@ -2478,8 +2504,11 @@ mod tests {
     /// A git repo with one commit, for the tracked-PR test below: tracking makes a
     /// worktree off it, and a path that is not a repo would measure the fallback rather
     /// than the thing.
-    fn tracked_pr_repo() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("juancoded-wire-pr-{}", std::process::id()));
+    /// Tagged per test: the tests below run concurrently, and a single process-scoped
+    /// path would have each one wiping the repo the other was tracking.
+    fn tracked_pr_repo(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("juancoded-wire-pr-{tag}-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let root = dir.join("repo");
         std::fs::create_dir_all(&root).unwrap();
@@ -2528,7 +2557,7 @@ mod tests {
         std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
         let mut wire = Wire::new();
         let mut fanout = fanout();
-        let root = tracked_pr_repo();
+        let root = tracked_pr_repo("spawn");
         let cwd = root.to_string_lossy().to_string();
 
         let subscribed = wire.step(ClientMessage::SubscribeTrackedPrs, &mut fanout);
@@ -2604,6 +2633,66 @@ mod tests {
             panic!("expected the list back, got {frames:?}");
         };
         assert!(tracked.is_empty(), "{tracked:?}");
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// The wire half of the adopt: `trackPrInSession` puts the watch into a session this
+    /// core already holds, spawns nothing, and answers on the same list every other
+    /// track answers on — so a subscriber that knows nothing about this frame still sees
+    /// the PR appear.
+    #[tokio::test]
+    async fn tracking_in_an_existing_session_adopts_it_rather_than_spawning() {
+        std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let root = tracked_pr_repo("adopt");
+        let cwd = root.to_string_lossy().to_string();
+        let mine = wire.session();
+        let before = wire.sessions().ids().len();
+
+        // Folded in with the registry's own events for the session just created, so the
+        // snapshot is looked for rather than asserted to be the only frame.
+        let subscribed = wire.step(ClientMessage::SubscribeTrackedPrs, &mut fanout);
+        assert!(
+            subscribed
+                .iter()
+                .any(|f| matches!(f, ServerMessage::TrackedPrs { tracked } if tracked.is_empty())),
+            "{subscribed:?}"
+        );
+
+        let sent = wire.step(
+            ClientMessage::TrackPrInSession {
+                cwd: cwd.clone(),
+                pr: crate::wire::TrackPrInput {
+                    number: 4242,
+                    title: "conformance fixture PR".into(),
+                    url: "https://example.invalid/pr/4242".into(),
+                    branch: "main".into(),
+                },
+                session_id: mine.clone(),
+            },
+            &mut fanout,
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|f| matches!(f, ServerMessage::Error { .. })),
+            "{sent:?}"
+        );
+        let frames = wire.tracked_frames(&mut fanout).await;
+        let [ServerMessage::TrackedPrs { tracked }] = &frames[..] else {
+            panic!("expected one replacement list, got {frames:?}");
+        };
+        let [entry] = &tracked[..] else {
+            panic!("the whole set, which is one PR: {tracked:?}");
+        };
+        assert_eq!(entry.session_id.as_deref(), Some(mine.as_str()));
+        assert_eq!(
+            wire.sessions().ids().len(),
+            before,
+            "the session the client named IS the tracker: nothing else was spawned"
+        );
 
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }

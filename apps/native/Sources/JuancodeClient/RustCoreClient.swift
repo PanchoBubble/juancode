@@ -950,23 +950,24 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             NSLog("juancode: refused to track PR #\(pr.number) — the \(backendName) core has no trackedPrs capability")
             return nil
         }
-        if let adoptSessionId {
-            // Protocol v1's `trackPr` carries no session to adopt into, so there is no
-            // frame for this and inventing one client-side would mean spawning a second
-            // agent for a PR the user asked to be watched by the session they are
-            // already sitting in. Refused rather than silently turned into a spawn.
+        if let adoptSessionId, !supports(.trackPrInSession) {
+            // The adopt is its own frame, gated separately from `trackedPrs`: a core
+            // that does not know it ignores it whole and answers nothing, so the track
+            // would sit here until the list timeout for no reason the user could read.
+            // Refused up front instead, with the reason the capability carries.
             NSLog("juancode: cannot track PR #\(pr.number) in session \(adoptSessionId) — "
-                  + "the \(backendName) core has no wire frame for tracking in an existing session")
+                  + "the \(backendName) core has no trackPrInSession capability")
             return nil
         }
         // The list this track produces is the answer, so the subscription has to be in
         // place before the frame goes out. `cols`/`rows` have nowhere to go: protocol
         // v1's `trackPr` carries no grid, so the daemon spawns the agent at its own
         // default — which is the same 120x40 a create with no viewport gets, so the
-        // agent's first turn is not wrapped narrow either way.
+        // agent's first turn is not wrapped narrow either way. An adopt has no use for
+        // them at all: the session it goes into is already on screen at its own size.
         ensureTrackedSubscription()
-        connection.send([
-            "type": "trackPr",
+        var frame: [String: Any] = [
+            "type": adoptSessionId == nil ? "trackPr" : "trackPrInSession",
             "cwd": cwd,
             "pr": [
                 "number": pr.number,
@@ -974,7 +975,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 "url": pr.url,
                 "branch": pr.branch,
             ],
-        ])
+        ]
+        if let adoptSessionId { frame["sessionId"] = adoptSessionId }
+        connection.send(frame)
         // Tracking makes a worktree (a fetch among the git it runs) and spawns a CLI,
         // so the list takes seconds rather than milliseconds. Every list until the
         // deadline is looked at, because another client's untrack can put one on the

@@ -2620,8 +2620,12 @@ final class AppModel {
     /// branch that opened the PR, so it adopts the watch contract instead and the
     /// poll loop drives that conversation from then on.
     func trackPrInSession(_ pr: PullRequest, cwd: String, sessionId: String) {
-        if let reason = unavailable(.trackedPrs) {
-            errorMessage = "Can't track PR #\(pr.number). \(reason)"
+        // Two gates, because a core can watch PRs perfectly well and still have no way
+        // to put the watch into a session that already exists. Reading only `trackedPrs`
+        // is what made this menu item enabled everywhere and fail on the click, with the
+        // real reason nowhere on screen (juancode-jlhz).
+        if let reason = unavailable(.trackedPrs) ?? unavailable(.trackPrInSession) {
+            errorMessage = "Can't track PR #\(pr.number) in this session. \(reason)"
             return
         }
         let grid = TerminalGrid.spawn

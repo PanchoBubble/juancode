@@ -236,8 +236,8 @@ final class CoreBackendTests: XCTestCase {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen", "adoptExternal",
                                            "sessionMeta", "gridOwner", "isolateWorktree"])
         XCTAssertEqual(core.missingCapabilities,
-                       [.queue, .trackedPrs, .editor, .terminal, .restartFresh, .spawnModel,
-                        .spawnPreset])
+                       [.queue, .trackedPrs, .trackPrInSession, .editor, .terminal,
+                        .restartFresh, .spawnModel, .spawnPreset])
         for capability in core.missingCapabilities {
             XCTAssertNotNil(core.unavailableReason(capability), capability.rawValue)
             XCTAssertFalse(core.supports(capability), capability.rawValue)
@@ -254,9 +254,9 @@ final class CoreBackendTests: XCTestCase {
     func testAMinimalCoreGatesEverythingElse() {
         let core = FakeCore(capabilities: ["inputAck", "resizeAck", "screen"])
         XCTAssertEqual(core.missingCapabilities,
-                       [.queue, .trackedPrs, .editor, .terminal, .adoptExternal,
-                        .sessionMeta, .gridOwner, .restartFresh, .spawnModel,
-                        .spawnPreset, .isolateWorktree])
+                       [.queue, .trackedPrs, .trackPrInSession, .editor, .terminal,
+                        .adoptExternal, .sessionMeta, .gridOwner, .restartFresh,
+                        .spawnModel, .spawnPreset, .isolateWorktree])
     }
 
     /// The in-process core advertises everything the app knows how to ask for, so

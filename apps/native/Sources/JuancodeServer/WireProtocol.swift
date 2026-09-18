@@ -109,6 +109,15 @@ public enum ClientMessage: Sendable {
     case subscribeTrackedPrs
     /// Start tracking `pr` in `cwd` (spawns its driving agent session server-side).
     case trackPr(cwd: String, pr: PullRequest)
+    /// Start tracking `pr` in the session `sessionId` names, instead of spawning one
+    /// for it: the "Track PR in This Session" path, where the conversation asking is
+    /// the one whose branch opened the PR.
+    ///
+    /// Its own type rather than an optional field on `trackPr`, because a core that
+    /// dropped the field would not do nothing — it would spawn a RIVAL agent on the
+    /// same branch. An unknown type is ignored whole, which is a silence the client
+    /// can see (juancode-jlhz). Gated by `trackPrInSession`.
+    case trackPrInSession(cwd: String, pr: PullRequest, sessionId: String)
     /// Stop tracking the PR whose `TrackedPr.key` is `trackedId`.
     case untrackPr(trackedId: String)
     /// Dismiss a surfaced needs-decision notification.
@@ -221,6 +230,10 @@ extension ClientMessage: Decodable {
         case "trackPr":
             self = .trackPr(cwd: try c.decode(String.self, forKey: .cwd),
                             pr: try c.decode(PullRequest.self, forKey: .pr))
+        case "trackPrInSession":
+            self = .trackPrInSession(cwd: try c.decode(String.self, forKey: .cwd),
+                                     pr: try c.decode(PullRequest.self, forKey: .pr),
+                                     sessionId: try c.decode(String.self, forKey: .sessionId))
         case "untrackPr":
             self = .untrackPr(trackedId: try c.decode(String.self, forKey: .trackedId))
         case "resolveTrackNotification":
@@ -247,7 +260,7 @@ public enum WireProtocol {
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
-                                      "isolateWorktree", "globalPause"]
+                                      "isolateWorktree", "globalPause", "trackPrInSession"]
 
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.

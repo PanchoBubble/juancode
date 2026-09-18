@@ -77,6 +77,10 @@ pub struct TrackRequest {
     pub title: String,
     pub url: String,
     pub branch: String,
+    /// Adopt the watch into this session instead of spawning one for it. `None` is the
+    /// spawning track; `Some` is the session the user is already sitting in, which is
+    /// typically the one whose branch opened the PR.
+    pub adopt_session_id: Option<String>,
     /// The connection that asked. It owns the spawned session's grid, so the claim is
     /// released when that client goes away; a daemon-owned claim would leave a session
     /// nobody could ever resize.
@@ -169,10 +173,16 @@ impl TrackedPrs {
     /// `None` when the PR is already tracked (a no-op, not an error — the watch that
     /// exists is the one that was asked for) or when the session could not be spawned at
     /// all, which is the one case where tracking would be a row with nobody behind it.
+    ///
+    /// A request carrying `adopt_session_id` is [`Self::adopt`] instead: no worktree and
+    /// no spawn, the watch goes into a session that already exists.
     pub async fn track(self: &Arc<Self>, req: TrackRequest) -> Option<TrackedPr> {
         let key = TrackedPr::key(&req.cwd, req.number);
         if self.held().contains_key(&key) {
             return None;
+        }
+        if req.adopt_session_id.is_some() {
+            return self.adopt(req, key).await;
         }
 
         // The agent works the PR on its own worktree with the PR's branch checked out,
@@ -243,20 +253,98 @@ impl TrackedPrs {
         let me = Arc::clone(self);
         let session = meta.id.clone();
         tokio::spawn(async move {
-            let outcome = deliver_text(
-                Arc::clone(&me.sessions),
-                &session,
-                &seed,
-                me.seed_timing,
-                Precondition::Booting,
-            )
-            .await;
-            log_outcome(&session, &outcome);
+            me.deliver(&session, &seed, false).await;
         });
 
         // Repo identity is resolved off the track path: it is a `gh` round-trip, the
         // only thing that needs it is matching an inbound GitHub event, and a resolve
         // that misses here is backfilled by the next poll.
+        let me = Arc::clone(self);
+        let cwd = req.cwd;
+        tokio::spawn(async move {
+            if let Some(nwo) = gh::repo_nwo(&cwd).await {
+                me.set_repo_nwo(&key, nwo);
+            }
+        });
+
+        self.start_if_tracking();
+        Some(entry)
+    }
+
+    /// Track a PR in a session that already exists — the "Track PR in this session"
+    /// path, where the user is sitting in the conversation whose branch opened the PR.
+    ///
+    /// No worktree and no spawn: the session is already standing on the branch, and a
+    /// second agent cut onto a tree of its own would be a rival committing to the same
+    /// branch. All this does is hand that session the watch contract; from there it is
+    /// an ordinary tracked PR, and the poll loop types fixes into it and escalates
+    /// decisions out of it exactly as it would for a spawned tracker.
+    ///
+    /// `None` — so no list is published and the asking client's track times out into
+    /// its own error — when the session is one this core does not hold, when it cannot
+    /// be brought back up, or when it already drives another tracked PR. That last one
+    /// is the rule the poll loop depends on: one session, one watch contract, or two
+    /// PRs' fix prompts interleave in one conversation.
+    async fn adopt(self: &Arc<Self>, req: TrackRequest, key: String) -> Option<TrackedPr> {
+        let session = req.adopt_session_id.clone()?;
+        if self
+            .held()
+            .values()
+            .any(|e| e.session_id.as_deref() == Some(session.as_str()))
+        {
+            warn!(pr = req.number, session = %session,
+                  "that session already drives a tracked PR");
+            return None;
+        }
+        if self.sessions.meta(&session).is_none() {
+            warn!(pr = req.number, session = %session, "no such session to track this PR in");
+            return None;
+        }
+        // Asleep, or offline after a restart, is fine: the same revive the poll loop
+        // uses brings it back. Only a session that cannot come up at all fails the
+        // adoption, and it fails it BEFORE the list is published — a watch whose
+        // session never came back is a row with nobody behind it.
+        let live = self.sessions.is_running(&session);
+        if !live {
+            if let Err(e) = self.revive(&session) {
+                warn!(pr = req.number, session = %session,
+                      "the session to track this PR in could not be resumed: {e}");
+                return None;
+            }
+        }
+
+        // No worktree argument: the seed's worktree paragraph tells the agent where the
+        // tree it was given is, and this session was not given one.
+        let seed = track_seed_prompt(req.number, &req.title, &req.branch, &req.url, None);
+        let entry = TrackedPr {
+            id: key.clone(),
+            number: req.number,
+            title: req.title,
+            url: req.url,
+            branch: req.branch,
+            cwd: req.cwd.clone(),
+            session_id: Some(session.clone()),
+            repo_nwo: None,
+            baseline: Default::default(),
+            notifications: Vec::new(),
+            last_polled_at: None,
+            created_at: now_ms(),
+        };
+        self.held().insert(key.clone(), entry.clone());
+        self.persist(&entry);
+        self.publish_list();
+        info!(pr = entry.number, session = %session, revived = !live,
+              "tracking a pull request in a session that already exists");
+
+        // Behind the list, like a spawn's seed: a client must not wait on a paste to
+        // learn the PR is being watched.
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Some(why) = me.deliver(&session, &seed, live).await {
+                warn!(session = %session, "the watch contract did not reach the agent: {why}");
+            }
+        });
+
         let me = Arc::clone(self);
         let cwd = req.cwd;
         tokio::spawn(async move {
@@ -459,36 +547,53 @@ impl TrackedPrs {
         // A live session is mid-conversation and takes the delivery straight in. One
         // that has to come up first has a boot to sit through, exactly like a spawn's
         // seed, which is what the two preconditions are.
-        let precondition = if live {
-            Precondition::LiveIdle
-        } else {
-            // `reactivate` respawns the CLI on the conversation the row remembers. The
-            // grid it claims is handed straight back: the daemon is not a viewer, and a
-            // claim nothing ever releases would leave the pane un-resizable.
-            const DAEMON: ClientId = 0;
-            let revived = self
-                .sessions
-                .reactivate(&session, DAEMON, SPAWN_GRID.0, SPAWN_GRID.1);
-            self.sessions.release_client(DAEMON);
-            if let Err(e) = revived {
+        if !live {
+            if let Err(e) = self.revive(&session) {
                 return Some(format!(
                     "Auto-fix needed, but the session working this PR could not be resumed: {e}"
                 ));
             }
+        }
+        self.deliver(&session, prompt, live)
+            .await
+            .map(|why| format!("Auto-fix needed, but the prompt did not reach the agent: {why}"))
+    }
+
+    /// Bring a session's pty back on the conversation its row remembers.
+    ///
+    /// The grid claim is handed straight back: the daemon is not a viewer, and a claim
+    /// nothing ever releases would leave the pane un-resizable.
+    fn revive(&self, session: &str) -> Result<(), String> {
+        const DAEMON: ClientId = 0;
+        let revived = self
+            .sessions
+            .reactivate(session, DAEMON, SPAWN_GRID.0, SPAWN_GRID.1);
+        self.sessions.release_client(DAEMON);
+        revived.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Paste `text` into a session and submit it. `Some(reason)` when nothing reached
+    /// the agent.
+    ///
+    /// `live` is about the session's state BEFORE any revive: a session that was up all
+    /// along is between turns and takes the paste straight in, and one that had to be
+    /// brought back has a CLI boot to sit through, exactly like a spawn's seed.
+    async fn deliver(&self, session: &str, text: &str, live: bool) -> Option<String> {
+        let precondition = if live {
+            Precondition::LiveIdle
+        } else {
             Precondition::Booting
         };
         let outcome = deliver_text(
             Arc::clone(&self.sessions),
-            &session,
-            prompt,
+            session,
+            text,
             self.seed_timing,
             precondition,
         )
         .await;
-        log_outcome(&session, &outcome);
-        outcome
-            .reason()
-            .map(|why| format!("Auto-fix needed, but the prompt did not reach the agent: {why}"))
+        log_outcome(session, &outcome);
+        outcome.reason().map(str::to_string)
     }
 
     /// Raise a decision on a tracked PR, deduplicated by message.
@@ -605,7 +710,16 @@ mod tests {
             title: "conformance fixture PR".into(),
             url: format!("https://example.invalid/pr/{number}"),
             branch: "main".into(),
+            adopt_session_id: None,
             owner: 1,
+        }
+    }
+
+    /// The same request, asking for the watch to go into a session that already exists.
+    fn adopting(cwd: &str, number: i64, session: &str) -> TrackRequest {
+        TrackRequest {
+            adopt_session_id: Some(session.into()),
+            ..request(cwd, number)
         }
     }
 
@@ -683,6 +797,117 @@ mod tests {
             changes.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// The "Track PR in This Session" path: the watch goes into the session the user is
+    /// already sitting in, and nothing else is spawned or cut. Both halves matter — a
+    /// second agent on a tree of its own would be a rival committing to the same branch,
+    /// which is the whole reason this path is not the spawning one (juancode-jlhz).
+    #[tokio::test]
+    async fn adopting_puts_the_watch_in_a_session_that_already_exists() {
+        let (engine, sessions) = engine();
+        let root = repo("adopt");
+        let cwd = root.to_string_lossy().to_string();
+        let mine = sessions
+            .create(CreateRequest {
+                provider: ProviderId::Claude,
+                cwd: cwd.clone(),
+                cols: 80,
+                rows: 24,
+                skip_permissions: false,
+                model: None,
+                preset: None,
+                isolate_worktree: false,
+                worktree_name: None,
+                dispatch_id: None,
+                owner: 1,
+            })
+            .expect("a session to adopt into");
+        let before = sessions.ids().len();
+        let mut changes = engine.subscribe();
+
+        let entry = engine
+            .track(adopting(&cwd, 4242, &mine.id))
+            .await
+            .expect("a watch in the session that asked for it");
+        assert_eq!(entry.session_id.as_deref(), Some(mine.id.as_str()));
+        assert_eq!(
+            sessions.ids().len(),
+            before,
+            "adopting spawns nothing: the session the user is in is the tracker"
+        );
+        assert_eq!(
+            sessions.meta(&mine.id).map(|m| m.cwd),
+            Some(cwd.clone()),
+            "and it is not moved onto a worktree of its own"
+        );
+
+        let TrackedPrChange::List(list) = changes.try_recv().expect("a list went out") else {
+            panic!("the first change is the list");
+        };
+        assert_eq!(list, vec![entry]);
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// One session, one watch contract. Two would interleave two PRs' fix prompts in one
+    /// conversation, so the second adoption is refused — and refused silently, because a
+    /// list that did not change carries no information.
+    #[tokio::test]
+    async fn one_session_cannot_drive_two_tracked_prs() {
+        let (engine, sessions) = engine();
+        let root = repo("adopt-twice");
+        let cwd = root.to_string_lossy().to_string();
+        let mine = sessions
+            .create(CreateRequest {
+                provider: ProviderId::Claude,
+                cwd: cwd.clone(),
+                cols: 80,
+                rows: 24,
+                skip_permissions: false,
+                model: None,
+                preset: None,
+                isolate_worktree: false,
+                worktree_name: None,
+                dispatch_id: None,
+                owner: 1,
+            })
+            .expect("a session to adopt into");
+        engine
+            .track(adopting(&cwd, 4242, &mine.id))
+            .await
+            .expect("the first watch");
+        let mut changes = engine.subscribe();
+
+        assert!(engine.track(adopting(&cwd, 4343, &mine.id)).await.is_none());
+        assert_eq!(engine.list().len(), 1);
+        assert!(matches!(
+            changes.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// A session id this core does not hold is refused rather than quietly turned into
+    /// the spawning track. The client asked for the watch to go into one conversation;
+    /// a spawn would be a different agent on a different tree, which is the failure the
+    /// Swift client refused to invent on its own.
+    #[tokio::test]
+    async fn adopting_into_a_session_this_core_does_not_hold_is_refused() {
+        let (engine, sessions) = engine();
+        let root = repo("adopt-ghost");
+        let cwd = root.to_string_lossy().to_string();
+        let before = sessions.ids().len();
+
+        assert!(engine
+            .track(adopting(&cwd, 4242, "no-such-session"))
+            .await
+            .is_none());
+        assert!(engine.list().is_empty());
+        assert_eq!(sessions.ids().len(), before, "and nothing was spawned");
 
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }

@@ -195,6 +195,13 @@ pub const CAPABILITIES: &[&str] = &[
     "sessionList",
     "sessionDelete",
     "sessionSearch",
+    // Advertised separately from `trackedPrs` because a core can watch PRs perfectly
+    // well and still have no way to put the watch into a session that already exists,
+    // and a client that could not tell the two apart offered the track-in-this-session
+    // menu item on every core advertising `trackedPrs` and failed on the click
+    // (juancode-jlhz). No quoted strings in here: the drift test reads this array's
+    // capability names with a regex over its string literals.
+    "trackPrInSession",
 ];
 
 /// One queued occurrence on the wire.
@@ -503,6 +510,28 @@ pub enum ClientMessage {
     TrackPr {
         cwd: String,
         pr: TrackPrInput,
+    },
+    /// Track `pr` in a session that already exists, instead of spawning one for it.
+    /// The session the user is sitting in is typically the one whose branch opened the
+    /// PR, so it holds the context a spawned tracker would have to rebuild, and it is
+    /// the one a second tracker would be racing to the same branch.
+    ///
+    /// A frame of its own rather than an optional `sessionId` on `trackPr`, and for the
+    /// reason ADDITIVE_FIELDS gives: a core that dropped the field would not do nothing,
+    /// it would spawn a SECOND agent on its own worktree for a PR the user asked one
+    /// conversation to watch, and two agents committing to one branch is worse than no
+    /// watch at all. An unknown TYPE is ignored whole, so an old core answers this with
+    /// the silence the client can see (juancode-jlhz). Same choice, same reason, as
+    /// `restartFresh` over a `fresh` flag on `reactivate`.
+    ///
+    /// Answered by the list, like `trackPr`. A session this core does not hold, one that
+    /// cannot be brought back up, and one that already drives another tracked PR are all
+    /// refusals, and a refusal publishes nothing: the client's track times out rather
+    /// than being answered by a watch it did not ask for.
+    TrackPrInSession {
+        cwd: String,
+        pr: TrackPrInput,
+        session_id: String,
     },
     /// Stop watching the PR whose `TrackedPr::key` is `tracked_id`. The agent's session
     /// is left alone: the watch is over, the conversation is not.
@@ -818,6 +847,11 @@ impl ClientMessage {
             "trackPr" => Ok(Self::TrackPr {
                 cwd: raw.cwd.ok_or("missing cwd")?,
                 pr: raw.pr.ok_or("missing pr")?,
+            }),
+            "trackPrInSession" => Ok(Self::TrackPrInSession {
+                cwd: raw.cwd.ok_or("missing cwd")?,
+                pr: raw.pr.ok_or("missing pr")?,
+                session_id: need_session()?,
             }),
             "untrackPr" => Ok(Self::UntrackPr {
                 tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
@@ -1659,6 +1693,7 @@ mod tests {
             // nothing and says nothing.
             r#"{"type":"subscribeTrackedPrs"}"#,
             r#"{"type":"trackPr","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
+            r#"{"type":"trackPrInSession","cwd":"/tmp","sessionId":"s","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
             r#"{"type":"untrackPr","trackedId":"/tmp#7"}"#,
             r#"{"type":"resolveTrackNotification","trackedId":"/tmp#7","notificationId":"n-1"}"#,
             // And for `sessionSearch`: falling through to `Unknown` would leave a
@@ -1673,6 +1708,14 @@ mod tests {
                 "{frame}"
             );
         }
+        // And the session it names is not optional: a `trackPrInSession` that lost its
+        // id would be an ordinary spawning track, which is the operation this frame
+        // exists to be distinguishable from.
+        assert!(ClientMessage::decode(
+            r#"{"type":"trackPrInSession","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#
+        )
+        .is_err());
+
         // `isolateWorktree` gates a FIELD, not a frame, so the lie it could tell is
         // one level down: the create still decodes, minus the flag, and the session
         // starts in the shared checkout under a `created` that says otherwise.
@@ -1721,6 +1764,7 @@ mod tests {
                     // which is what the conformance scenario catches.
                     "stuck",
                     "sessionSearch",
+                    "trackPrInSession",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

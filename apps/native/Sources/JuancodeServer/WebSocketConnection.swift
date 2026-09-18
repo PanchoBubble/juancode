@@ -670,6 +670,9 @@ final class WebSocketConnection: @unchecked Sendable {
         case let .trackPr(cwd, pr):
             await state.prTracking.track(pr, cwd: cwd)
 
+        case let .trackPrInSession(cwd, pr, sessionId):
+            await state.prTracking.track(pr, cwd: cwd, adoptSessionId: sessionId)
+
         case let .untrackPr(trackedId):
             await state.prTracking.untrack(trackedId)
 

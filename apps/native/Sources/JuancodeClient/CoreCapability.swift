@@ -11,6 +11,7 @@ import Foundation
 public enum CoreCapability: String, Sendable, CaseIterable {
     case queue
     case trackedPrs
+    case trackPrInSession
     case editor
     case terminal
     case adoptExternal
@@ -29,6 +30,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         switch self {
         case .queue: return "Message queue"
         case .trackedPrs: return "Tracked PRs"
+        case .trackPrInSession: return "Track a PR in an existing session"
         case .editor: return "Editor sessions"
         case .terminal: return "Terminal panel"
         case .adoptExternal: return "Adopt external session"
@@ -52,6 +54,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "Send-to-agent and review feedback are unavailable: nothing holds a message until the agent is idle, so the action is disabled rather than pasted mid-turn."
         case .trackedPrs:
             return "PRs cannot be tracked: Track and Track & send are disabled, and the tracked-PR list stays empty."
+        case .trackPrInSession:
+            return "A PR can only be watched by an agent spawned for it: Track PR in This Session is disabled, because a core that ignores the session would put a second agent on the same branch rather than handing the watch to the conversation that opened it."
         case .editor:
             return "Open-in-editor is unavailable: no editor pty can be opened for a session."
         case .terminal:
