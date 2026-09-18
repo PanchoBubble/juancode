@@ -294,14 +294,20 @@ public enum WireProtocol {
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.
     ///
-    /// `globalPause` is the only one so far. The desktop's pause button does not go
+    /// `globalPause` is the first. The desktop's pause button does not go
     /// through a core frame on either core — it goes through `CoreClient.globalPause`,
     /// the book both surfaces share — so a `CoreCapability` case for it would have
     /// the settings panel report "global pause unavailable" on the Rust core, which
     /// pauses perfectly well. The string exists for the phone, which genuinely cannot
     /// send `pauseAll` to an endpoint that does not serve it. Same reasoning as the
     /// `sessionSleep` / `reaper` string constants on `RustCoreClient`, mirrored.
-    public static let remoteOnlyCapabilities: Set<String> = ["globalPause"]
+    ///
+    /// `namedKeys` is the second, and for the sharper version of the same reason: the
+    /// desktop has a keyboard. It writes an Escape into the pty as the byte it is, so
+    /// it sends `input` and never `key`, and nothing in `JuancodeClient` spells that
+    /// frame at all. The capability is for a phone, whose alternative is typing the
+    /// word "Escape" into the agent's prompt box.
+    public static let remoteOnlyCapabilities: Set<String> = ["globalPause", "namedKeys"]
 }
 
 public enum ServerMessage: Sendable {
