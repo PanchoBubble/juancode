@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.14.0",
+  "specRevision": "1.15.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -41,7 +41,8 @@
       "sessionEdit",
       "globalPause",
       "sessionSearch",
-      "trackPrInSession"
+      "trackPrInSession",
+      "prWebhook"
     ],
     "gates": {
       "queue": [
@@ -140,6 +141,9 @@
       ],
       "trackPrInSession": [
         "trackPrInSession"
+      ],
+      "prWebhook": [
+        "prWebhook"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -399,6 +403,15 @@
       "optional": [],
       "capability": "trackPrInSession",
       "notes": "Track `pr` in the session `sessionId` names instead of spawning one for it: the \"Track PR in this session\" path, where the conversation asking is the one whose branch opened the PR, so it already holds the context a spawned tracker would have to rebuild. The core hands that session the watch contract and nothing else - no worktree is cut and no agent is spawned - and from there it is an ordinary tracked PR: the poll loop types fixes into it and raises decisions out of it exactly as it would for a spawned tracker. A TYPE of its own rather than an optional `sessionId` on `trackPr`, for the reason ADDITIVE_FIELDS gives: a core that dropped the field would not do nothing, it would spawn a second agent on its own worktree for a PR the user asked one conversation to watch, and two agents committing to one branch is worse than no watch at all. An unknown type is ignored whole, so an old core answers with the silence the client can see - the same choice `restartFresh` made over a `fresh` flag on `reactivate`. Answered by the `trackedPrs` list, like `trackPr`, and never by a reply of its own. Refused - and a refusal publishes NOTHING, so the asking client's track times out rather than being answered by a watch it did not ask for - when the session is one this core does not hold, when it cannot be brought back up, or when it already drives another tracked PR. That last one is the rule the poll loop depends on: one session, one watch contract, or two PRs' fix prompts interleave in one conversation."
+    },
+    "prWebhook": {
+      "required": [
+        "repo",
+        "number"
+      ],
+      "optional": [],
+      "capability": "prWebhook",
+      "notes": "A GitHub webhook said something happened to PR `number` in `repo` (`owner/name`): refresh every watch it matches, sooner than the poll would. Without it the poll is a core's only update path and a review comment or a CI result takes up to a poll interval to land. A TRIGGER, never a payload - the event body does not cross this wire and nothing in it is stored or believed, because the core re-reads the PR through `gh` on the same classify-inject-notify path a poll pass uses. That is what makes the frame safe to serve with no auth of its own: the HMAC that says GitHub really sent the event is checked before anything reaches a socket (in juancode, by the oracle sidecar), and the most a frame that got past it can do is ask for a fetch. Matching is by the repo identity a watch resolved through `gh`, compared case-insensitively because GitHub slugs are, falling back to the owner/name in the watch's own PR url for one that has not resolved yet. Answered by the `trackedPrs` list if the refresh moves it and by nothing at all if it does not, so a repo and number no watch matches is an ordinary no-op rather than an error: a webhook fires for every PR in a repo and a core watches a handful. A burst - one push fires a push, a check_suite and a check_run per job within moments - coalesces into one refresh per PR rather than a round of `gh` spawns each."
     },
     "untrackPr": {
       "required": [

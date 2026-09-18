@@ -3,7 +3,7 @@
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.14.0",
+  "specRevision": "1.15.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -21,7 +21,8 @@
     "spawnPreset",
     "isolateWorktree",
     "globalPause",
-    "trackPrInSession"
+    "trackPrInSession",
+    "prWebhook"
   ],
   "scenarios": {
     "handshake": {
@@ -204,6 +205,11 @@
       "note": "core does not advertise the \"sessionSearch\" capability"
     },
     "track-pr-in-session": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "pr-webhook": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

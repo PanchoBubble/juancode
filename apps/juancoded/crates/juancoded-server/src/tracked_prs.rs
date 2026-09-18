@@ -26,10 +26,16 @@
 //!    Re-announcing either one races whatever the client asked for next, which is how a
 //!    client that untracks a PR gets answered by a snapshot that still lists it.
 //!
-//! Not ported from the Swift engine, and deliberately: the webhook ingest
-//! (`ingestWebhook`, the debounce, `findByRepoNumber`), because the trigger for it is an
-//! HTTP endpoint this daemon does not serve — with no `/api/pr-webhook` here there is
-//! nothing to debounce, and the poll is this core's only update path. The respawn ladder
+//! The webhook ingest IS ported, though the daemon still serves no HTTP: the trigger
+//! reaches it as a wire frame instead (`prWebhook`), translated from the desktop's
+//! `/api/pr-webhook` by the relay that already fronts this core for the sidecar. Without
+//! it the poll was the only update path and a review comment took up to a minute to
+//! land (juancode-rnx6). The poll interval below is deliberately NOT demoted to the
+//! Swift core's webhook-assisted 300s: the secret that says whether webhooks are
+//! actually configured lives in the sidecar's process, not this one, and a poll slowed
+//! on an assumption that turns out false is a watch that updates every five minutes.
+//!
+//! The respawn ladder
 //! (`respawn`, which opens a REPLACEMENT session on a fresh worktree when the original
 //! conversation cannot be resumed) is also absent: this core revives the recorded
 //! session and, failing that, says so through a notification rather than silently
@@ -46,8 +52,8 @@ use tracing::{debug, info, warn};
 use juancoded_core::gh;
 use juancoded_core::model::{now_ms, ProviderId};
 use juancoded_core::pr::{
-    auto_fix_prompt, classify_pr_activity, stalled_ci_fix_reason, track_seed_prompt,
-    BranchWorktree, PrActivity, TrackEvent, TrackNotification, TrackedPr,
+    auto_fix_prompt, classify_pr_activity, repo_slug_from_pr_url, stalled_ci_fix_reason,
+    track_seed_prompt, BranchWorktree, PrActivity, TrackEvent, TrackNotification, TrackedPr,
 };
 use juancoded_core::worktree;
 use juancoded_persistence::SessionStore;
@@ -61,6 +67,13 @@ use crate::seed::{deliver_text, log_outcome, Precondition, SeedTiming};
 /// webhooks are delivering changes in near-real-time, and this core has no webhook path
 /// to be the fast half of that pair.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a webhook-triggered refresh waits before it runs. One push fires several
+/// GitHub events within moments — a `push`, a `check_suite`, a `check_run` per job — and
+/// each costing its own round of `gh` spawns is how a busy PR turns into a fork storm.
+/// The burst coalesces into one refresh per PR. Matches the Swift engine's
+/// `webhookDebounce`.
+pub const WEBHOOK_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// The grid a tracked PR's agent is spawned at. It has no viewport of its own until
 /// somebody opens it, and whatever the CLI prints in its first turn is wrapped at the
@@ -118,6 +131,11 @@ pub struct TrackedPrs {
     /// up to a whole interval later.
     poll: Mutex<Option<JoinHandle<()>>>,
     poll_interval: Duration,
+    /// Debounce timers for webhook-triggered refreshes, keyed by [`TrackedPr::key`].
+    /// An entry here means "a refresh for this PR is already coming", which is what
+    /// makes a burst of events one refresh.
+    pending_refresh: Mutex<BTreeMap<String, JoinHandle<()>>>,
+    webhook_debounce: Duration,
     seed_timing: SeedTiming,
 }
 
@@ -147,6 +165,8 @@ impl TrackedPrs {
             tracked: Mutex::new(tracked),
             poll: Mutex::new(None),
             poll_interval,
+            pending_refresh: Mutex::new(BTreeMap::new()),
+            webhook_debounce: WEBHOOK_DEBOUNCE,
             seed_timing: SeedTiming::default(),
         })
     }
@@ -366,6 +386,11 @@ impl TrackedPrs {
         if self.held().remove(tracked_id).is_none() {
             return false;
         }
+        // A refresh already scheduled for it would spend `gh` spawns on a watch that no
+        // longer exists, and `apply` would find no row to write to anyway.
+        if let Some(pending) = self.pending().remove(tracked_id) {
+            pending.abort();
+        }
         if let Err(e) = self.store.untrack_pr(tracked_id) {
             warn!(tracked = tracked_id, "could not persist the untrack: {e:#}");
         }
@@ -421,6 +446,98 @@ impl TrackedPrs {
         if let Some(handle) = self.poll.lock().unwrap_or_else(|e| e.into_inner()).take() {
             handle.abort();
         }
+    }
+
+    /// A webhook said something happened to `number` in `nwo`: refresh every watch it
+    /// matches, and answer how many that was.
+    ///
+    /// The event is a TRIGGER, never a payload. Nothing in it is stored and nothing in
+    /// it is believed — the refresh re-reads the PR through `gh` on the same
+    /// classify-inject-notify path a poll uses, so a forged or stale event can only
+    /// cost a fetch. That is also why this needs no auth of its own: the sidecar
+    /// verifies GitHub's HMAC before anything reaches the wire, and the worst a frame
+    /// that got past it can do is ask this core to look at GitHub sooner.
+    ///
+    /// Zero matches is the ordinary answer, not an error: a webhook fires for every PR
+    /// in a repo and this core watches a handful.
+    pub fn ingest_webhook(self: &Arc<Self>, nwo: &str, number: i64) -> usize {
+        let matched = self.find_by_repo_number(nwo, number);
+        for key in &matched {
+            self.schedule_refresh(key.clone());
+        }
+        if !matched.is_empty() {
+            info!(
+                repo = nwo,
+                pr = number,
+                watches = matched.len(),
+                "a webhook moved a tracked pull request"
+            );
+        }
+        matched.len()
+    }
+
+    /// The keys of every watch a webhook's repo + number names.
+    ///
+    /// `repo_nwo` is compared case-insensitively, because GitHub slugs are. A watch
+    /// whose identity has not resolved yet falls back to the owner/name in its own PR
+    /// url: the resolve is a `gh` round trip fired off the track path, so the first
+    /// minute of every watch would otherwise match nothing at all.
+    fn find_by_repo_number(&self, nwo: &str, number: i64) -> Vec<String> {
+        let want = nwo.trim().to_lowercase();
+        self.held()
+            .values()
+            .filter(|e| e.number == number)
+            .filter(|e| match &e.repo_nwo {
+                Some(stored) => stored.to_lowercase() == want,
+                None => repo_slug_from_pr_url(&e.url).is_some_and(|slug| slug == want),
+            })
+            .map(|e| e.id.clone())
+            .collect()
+    }
+
+    /// Queue one PR's refresh, folding an event into the refresh already coming for it.
+    fn schedule_refresh(self: &Arc<Self>, key: String) {
+        let mut pending = self.pending();
+        if pending.get(&key).is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        let me = Arc::clone(self);
+        let delay = self.webhook_debounce;
+        let id = key.clone();
+        pending.insert(
+            key,
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                // Cleared before the work, not after: a second burst arriving while the
+                // fetch is in flight is about activity this refresh may already have
+                // read past, and it deserves a refresh of its own.
+                me.pending().remove(&id);
+                me.refresh_one(&id).await;
+            }),
+        );
+    }
+
+    /// One PR's fetch-classify-apply, the poll's inner pass for a single watch.
+    async fn refresh_one(self: &Arc<Self>, key: &str) {
+        let Some(entry) = self.held().get(key).cloned() else {
+            return;
+        };
+        let activity = gh::pr_activity(&entry.cwd, entry.number).await;
+        let viewer = gh::viewer_login(&entry.cwd).await;
+        let nwo = match entry.repo_nwo {
+            Some(_) => None,
+            None => gh::repo_nwo(&entry.cwd).await,
+        };
+        let Some(activity) = activity else {
+            // `gh` missing, unauthenticated, offline, rate-limited: this refresh knows
+            // nothing, so it changes nothing. The poll is still behind it.
+            debug!(tracked = %key, "no activity on the webhook refresh");
+            return;
+        };
+        self.apply(key, activity, &viewer, nwo).await;
+        // Rule 2 again: published unconditionally, silent on the wire unless the list a
+        // connection would send actually moved.
+        self.publish_list();
     }
 
     /// One pass over every tracked PR: fetch its activity, classify what changed, type
@@ -658,6 +775,12 @@ impl TrackedPrs {
         self.persist(&entry);
         // Deliberately no `publish_list`: `repoNwo` is not on the wire, so the list a
         // client would be sent has not moved.
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, JoinHandle<()>>> {
+        self.pending_refresh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn persist(&self, entry: &TrackedPr) {
@@ -908,6 +1031,101 @@ mod tests {
             .is_none());
         assert!(engine.list().is_empty());
         assert_eq!(sessions.ids().len(), before, "and nothing was spawned");
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// A webhook names a repo and a number; what it has to find is the WATCH, and the
+    /// two ways a watch knows its repo both have to answer. `repo_nwo` is the resolved
+    /// one and is compared case-insensitively; the PR url is the fallback that covers
+    /// the first minute of every watch, before the `gh` round trip off the track path
+    /// has come back (juancode-rnx6).
+    #[tokio::test]
+    async fn a_webhook_finds_a_watch_by_its_repo_and_number() {
+        let (engine, _sessions) = engine();
+        let root = repo("webhook-match");
+        let cwd = root.to_string_lossy().to_string();
+        let mut req = request(&cwd, 4242);
+        req.url = "https://github.com/PanchoBubble/juancode/pull/4242".into();
+        let entry = engine.track(req).await.expect("a watch");
+
+        // Nothing has resolved `repo_nwo` yet: the url is what answers.
+        assert_eq!(engine.ingest_webhook("PanchoBubble/juancode", 4242), 1);
+        assert_eq!(
+            engine.ingest_webhook("panchobubble/JUANCODE", 4242),
+            1,
+            "GitHub slugs are case-insensitive and so is this"
+        );
+        assert_eq!(
+            engine.ingest_webhook("PanchoBubble/juancode", 99),
+            0,
+            "another PR in the same repo is not this watch"
+        );
+        assert_eq!(
+            engine.ingest_webhook("someone/else", 4242),
+            0,
+            "the same number in another repo is not this watch either"
+        );
+
+        // And once it has resolved, the stored identity is what answers — including for
+        // a watch whose url says nothing (a PR tracked from a url this core cannot read).
+        engine.set_repo_nwo(&entry.id, "PanchoBubble/juancode".into());
+        assert_eq!(engine.ingest_webhook("PanchoBubble/juancode", 4242), 1);
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// One push fires a `push`, a `check_suite` and a `check_run` per job within
+    /// moments. Each one costing its own round of `gh` spawns is how a busy PR turns
+    /// into a fork storm, so the burst has to coalesce into one pending refresh.
+    #[tokio::test]
+    async fn a_burst_of_webhooks_coalesces_into_one_pending_refresh() {
+        let (engine, _sessions) = engine();
+        let root = repo("webhook-burst");
+        let cwd = root.to_string_lossy().to_string();
+        let mut req = request(&cwd, 4242);
+        req.url = "https://github.com/PanchoBubble/juancode/pull/4242".into();
+        let entry = engine.track(req).await.expect("a watch");
+
+        for _ in 0..5 {
+            assert_eq!(engine.ingest_webhook("PanchoBubble/juancode", 4242), 1);
+        }
+        assert_eq!(engine.pending().len(), 1, "five events, one refresh");
+
+        // And untracking cancels it: a refresh for a watch that no longer exists would
+        // spend the `gh` spawns and have no row to write to.
+        assert!(engine.untrack(&entry.id));
+        assert!(engine.pending().is_empty());
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// The whole point of the fast path: an event does not wait for the poll. With `gh`
+    /// pointed at /usr/bin/false the refresh learns nothing and so changes nothing —
+    /// what is asserted is that it RAN, off the debounce and without a poll pass.
+    #[tokio::test]
+    async fn a_webhook_refresh_runs_without_waiting_for_a_poll() {
+        let (engine, _sessions) = engine();
+        let root = repo("webhook-refresh");
+        let cwd = root.to_string_lossy().to_string();
+        let mut req = request(&cwd, 4242);
+        req.url = "https://github.com/PanchoBubble/juancode/pull/4242".into();
+        engine.track(req).await.expect("a watch");
+
+        assert_eq!(engine.ingest_webhook("PanchoBubble/juancode", 4242), 1);
+        assert_eq!(engine.pending().len(), 1);
+        // The poll interval this engine was built with is an hour, so anything that
+        // happens here happened because of the webhook.
+        for _ in 0..100 {
+            if engine.pending().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            engine.pending().is_empty(),
+            "the debounced refresh never ran"
+        );
 
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }

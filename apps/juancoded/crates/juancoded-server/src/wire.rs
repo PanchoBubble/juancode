@@ -202,6 +202,10 @@ pub const CAPABILITIES: &[&str] = &[
     // (juancode-jlhz). No quoted strings in here: the drift test reads this array's
     // capability names with a regex over its string literals.
     "trackPrInSession",
+    // The webhook fast path (juancode-rnx6). Advertised because the frame is what the
+    // desktop relay needs to see before it will serve `/api/pr-webhook` at all: without
+    // it the relay answers 501 and the poll stays this core's only update path.
+    "prWebhook",
 ];
 
 /// One queued occurrence on the wire.
@@ -533,6 +537,23 @@ pub enum ClientMessage {
         pr: TrackPrInput,
         session_id: String,
     },
+    /// A GitHub webhook said something happened to PR `number` in repo `repo`
+    /// (`owner/name`): refresh every watch it matches, sooner than the poll would.
+    ///
+    /// A TRIGGER, not a payload. The event body never crosses this wire and nothing in
+    /// it is stored: the core re-reads the PR through `gh` on its ordinary
+    /// classify-inject-notify path, so the most a frame can do is ask for a fetch. The
+    /// HMAC that says GitHub really sent it is checked in the sidecar, before anything
+    /// reaches a socket, and the desktop's relay is what turns its
+    /// `POST /api/pr-webhook` into this frame — this core serves no HTTP of its own.
+    ///
+    /// Answered by the `trackedPrs` list if the refresh moves it, and by nothing at all
+    /// if it does not: a repo and number no watch matches is an ordinary no-op, because
+    /// a webhook fires for every PR in a repo and a core watches a handful.
+    PrWebhook {
+        repo: String,
+        number: i64,
+    },
     /// Stop watching the PR whose `TrackedPr::key` is `tracked_id`. The agent's session
     /// is left alone: the watch is over, the conversation is not.
     UntrackPr {
@@ -667,6 +688,10 @@ struct RawClient {
     request_id: Option<String>,
     #[serde(default)]
     pr: Option<TrackPrInput>,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    number: Option<i64>,
     #[serde(rename = "trackedId", default)]
     tracked_id: Option<String>,
     #[serde(rename = "notificationId", default)]
@@ -852,6 +877,10 @@ impl ClientMessage {
                 cwd: raw.cwd.ok_or("missing cwd")?,
                 pr: raw.pr.ok_or("missing pr")?,
                 session_id: need_session()?,
+            }),
+            "prWebhook" => Ok(Self::PrWebhook {
+                repo: raw.repo.ok_or("missing repo")?,
+                number: raw.number.ok_or("missing number")?,
             }),
             "untrackPr" => Ok(Self::UntrackPr {
                 tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
@@ -1694,6 +1723,7 @@ mod tests {
             r#"{"type":"subscribeTrackedPrs"}"#,
             r#"{"type":"trackPr","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
             r#"{"type":"trackPrInSession","cwd":"/tmp","sessionId":"s","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#,
+            r#"{"type":"prWebhook","repo":"owner/name","number":7}"#,
             r#"{"type":"untrackPr","trackedId":"/tmp#7"}"#,
             r#"{"type":"resolveTrackNotification","trackedId":"/tmp#7","notificationId":"n-1"}"#,
             // And for `sessionSearch`: falling through to `Unknown` would leave a
@@ -1765,6 +1795,7 @@ mod tests {
                     "stuck",
                     "sessionSearch",
                     "trackPrInSession",
+                    "prWebhook",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

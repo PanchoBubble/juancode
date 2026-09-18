@@ -1365,6 +1365,19 @@ fn handle_client_message(
             start_track(engine, cwd, pr, Some(session_id), client);
         }
 
+        ClientMessage::PrWebhook { repo, number } => {
+            let Some(engine) = tracked_prs else {
+                outbound.push(tracked_unavailable());
+                return;
+            };
+            // Synchronous and unanswered: matching is a map lookup, and the refresh it
+            // schedules is what takes the time. A count goes to the log rather than back
+            // down the socket — the answer a client acts on is the list, and a client
+            // that learns "0 matched" has nothing to do with it that the list does not
+            // already say.
+            engine.ingest_webhook(&repo, number);
+        }
+
         ClientMessage::UntrackPr { tracked_id } => {
             let Some(engine) = tracked_prs else {
                 outbound.push(tracked_unavailable());

@@ -133,6 +133,22 @@ pub struct TrackedPr {
     pub created_at: i64,
 }
 
+/// The `owner/name` a PR url names, lowercased, or `None` when the url is not a
+/// GitHub PR url.
+///
+/// The fallback half of webhook matching: a watch stores its repo identity only once
+/// a `gh repo view` has resolved it, so a PR tracked seconds ago — or one written
+/// before the field existed — has `repo_nwo: None` and would match no event at all.
+/// The url it was tracked with names the same repo and needs no round trip.
+pub fn repo_slug_from_pr_url(url: &str) -> Option<String> {
+    let rest = url.split_once("github.com/")?.1;
+    let mut parts = rest.split('/');
+    let owner = parts.next().filter(|s| !s.is_empty())?;
+    let name = parts.next().filter(|s| !s.is_empty())?;
+    // Only a PR url, so a repo url or an issue url cannot be read as one.
+    (parts.next() == Some("pull")).then(|| format!("{owner}/{name}").to_lowercase())
+}
+
 impl TrackedPr {
     /// The identity of a watch: one PR number in one checkout. Two clones of a repo
     /// tracking the same PR are two watches, because their agents stand in different
@@ -615,6 +631,28 @@ mod tests {
 
         let bare = track_seed_prompt(7, "t", "feature", "u", None);
         assert!(!bare.contains("worktree"), "{bare}");
+    }
+
+    /// The fallback half of webhook matching. Lowercased on the way out, because the
+    /// thing it is compared against is a webhook's slug and GitHub's are case-insensitive.
+    #[test]
+    fn a_pr_url_names_the_repo_a_webhook_would_call_it() {
+        assert_eq!(
+            repo_slug_from_pr_url("https://github.com/PanchoBubble/juancode/pull/42"),
+            Some("panchobubble/juancode".into())
+        );
+        assert_eq!(
+            repo_slug_from_pr_url("https://github.com/o/n/pull/1/files#r7"),
+            Some("o/n".into())
+        );
+        // Not a PR url, so not an answer: an issue and the repo root both name the repo
+        // and neither is a pull request this core could be watching.
+        assert_eq!(
+            repo_slug_from_pr_url("https://github.com/o/n/issues/1"),
+            None
+        );
+        assert_eq!(repo_slug_from_pr_url("https://github.com/o/n"), None);
+        assert_eq!(repo_slug_from_pr_url(""), None);
     }
 
     #[test]

@@ -12,6 +12,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     case queue
     case trackedPrs
     case trackPrInSession
+    case prWebhook
     case editor
     case terminal
     case adoptExternal
@@ -31,6 +32,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
         case .queue: return "Message queue"
         case .trackedPrs: return "Tracked PRs"
         case .trackPrInSession: return "Track a PR in an existing session"
+        case .prWebhook: return "GitHub webhook fast path"
         case .editor: return "Editor sessions"
         case .terminal: return "Terminal panel"
         case .adoptExternal: return "Adopt external session"
@@ -56,6 +58,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
             return "PRs cannot be tracked: Track and Track & send are disabled, and the tracked-PR list stays empty."
         case .trackPrInSession:
             return "A PR can only be watched by an agent spawned for it: Track PR in This Session is disabled, because a core that ignores the session would put a second agent on the same branch rather than handing the watch to the conversation that opened it."
+        case .prWebhook:
+            return "A GitHub webhook has nowhere to land, so POST /api/pr-webhook answers 501 and a tracked PR only notices a review comment or a CI result on its next poll, up to a minute later."
         case .editor:
             return "Open-in-editor is unavailable: no editor pty can be opened for a session."
         case .terminal:

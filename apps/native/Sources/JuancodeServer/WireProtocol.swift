@@ -118,6 +118,12 @@ public enum ClientMessage: Sendable {
     /// same branch. An unknown type is ignored whole, which is a silence the client
     /// can see (juancode-jlhz). Gated by `trackPrInSession`.
     case trackPrInSession(cwd: String, pr: PullRequest, sessionId: String)
+    /// A GitHub webhook says PR `number` in `repo` (`owner/name`) moved: refresh
+    /// every watch it matches, sooner than the poll would. A trigger, not a
+    /// payload — the engine re-reads the PR through `gh` — so nothing in the event
+    /// is stored or believed, and the HMAC that says GitHub sent it is checked in
+    /// the sidecar before anything reaches a socket.
+    case prWebhook(repo: String, number: Int)
     /// Stop tracking the PR whose `TrackedPr.key` is `trackedId`.
     case untrackPr(trackedId: String)
     /// Dismiss a surfaced needs-decision notification.
@@ -139,7 +145,7 @@ extension ClientMessage: Decodable {
         // Oracle dispatch over WS (juancode-2kz.1).
         case dispatchId
         // Tracked-PR registry (juancode-bt2).
-        case pr, trackedId, notificationId
+        case pr, trackedId, notificationId, repo, number
         // Per-session message queue (oracle-cj3 / juancode-r82).
         case text, messageId
     }
@@ -234,6 +240,9 @@ extension ClientMessage: Decodable {
             self = .trackPrInSession(cwd: try c.decode(String.self, forKey: .cwd),
                                      pr: try c.decode(PullRequest.self, forKey: .pr),
                                      sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "prWebhook":
+            self = .prWebhook(repo: try c.decode(String.self, forKey: .repo),
+                              number: try c.decode(Int.self, forKey: .number))
         case "untrackPr":
             self = .untrackPr(trackedId: try c.decode(String.self, forKey: .trackedId))
         case "resolveTrackNotification":
@@ -260,7 +269,8 @@ public enum WireProtocol {
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
-                                      "isolateWorktree", "globalPause", "trackPrInSession"]
+                                      "isolateWorktree", "globalPause", "trackPrInSession",
+                                      "prWebhook"]
 
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.

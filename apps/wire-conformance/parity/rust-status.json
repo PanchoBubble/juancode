@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.14.0",
+  "specRevision": "1.15.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -30,7 +30,8 @@
     "sessionList",
     "sessionDelete",
     "sessionSearch",
-    "trackPrInSession"
+    "trackPrInSession",
+    "prWebhook"
   ],
   "scenarios": {
     "handshake": {
@@ -224,6 +225,11 @@
       "passes": 3
     },
     "track-pr-in-session": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "pr-webhook": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

@@ -289,7 +289,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             kill: { [weak self] id in self?.kill(id) },
             deleteSession: { [weak self] id in self?.deleteSession(id) },
             backendName: backendName,
-            globalPause: globalPause)
+            globalPause: globalPause,
+            forwardPrWebhook: { [weak self] repo, number in
+                self?.forwardPrWebhook(repo: repo, number: number) ?? false
+            })
         let upstream = baseURL
         Task.detached {
             do {
@@ -996,6 +999,19 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         NSLog("juancode: the \(backendName) core did not report PR #\(pr.number) as tracked within "
               + "\(Int(Self.trackTimeout))s")
         return nil
+    }
+
+    /// Forward a GitHub webhook trigger to the core's watch list.
+    ///
+    /// `false` when this core has no frame for it, which is what keeps the relay's
+    /// `/api/pr-webhook` an honest 501 rather than a 200 that dropped the trigger on the
+    /// floor. Fire-and-forget otherwise: the refresh it schedules is answered by the
+    /// tracked-PR list every subscriber already gets, so there is nothing for the
+    /// sidecar to wait on and nothing a `matched` count would let it do (juancode-rnx6).
+    public func forwardPrWebhook(repo: String, number: Int) -> Bool {
+        guard supports(.trackedPrs), supports(.prWebhook) else { return false }
+        connection.send(["type": "prWebhook", "repo": repo, "number": number])
+        return true
     }
 
     public func untrackPr(_ trackedId: String) async {

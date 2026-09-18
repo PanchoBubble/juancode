@@ -59,13 +59,25 @@ public enum CoreProxyServer {
         /// and `globalPause` is never advertised.
         public let globalPause: GlobalPauseBook?
 
+        /// Hand a GitHub webhook trigger (`owner/name`, PR number) to the core, and say
+        /// whether it got there. The sidecar has already checked GitHub's HMAC; this
+        /// only translates its `POST /api/pr-webhook` into the frame the daemon's watch
+        /// list listens on, because that core serves no HTTP of its own.
+        ///
+        /// `false` — or nil, for a core with no frame for it at all — keeps the 501 this
+        /// route used to always answer. A 200 that dropped the trigger would read as a
+        /// working webhook chain while every tracked PR quietly waited for its next poll
+        /// (juancode-rnx6).
+        public let forwardPrWebhook: (@Sendable (String, Int) -> Bool)?
+
         public init(sessions: @escaping @Sendable () -> [SessionMeta],
                     session: @escaping @Sendable (String) -> SessionMeta?,
                     searchSessions: @escaping @Sendable (String, Int) -> [SearchHit],
                     kill: @escaping @Sendable (String) -> Void,
                     deleteSession: @escaping @Sendable (String) -> Void,
                     backendName: String,
-                    globalPause: GlobalPauseBook? = nil) {
+                    globalPause: GlobalPauseBook? = nil,
+                    forwardPrWebhook: (@Sendable (String, Int) -> Bool)? = nil) {
             self.sessions = sessions
             self.session = session
             self.searchSessions = searchSessions
@@ -73,6 +85,7 @@ public enum CoreProxyServer {
             self.deleteSession = deleteSession
             self.backendName = backendName
             self.globalPause = globalPause
+            self.forwardPrWebhook = forwardPrWebhook
         }
     }
 
@@ -363,6 +376,29 @@ public enum CoreProxyServer {
             }
         }
 
+        // The webhook fast path. Registered only when the core behind this relay can
+        // take the trigger: otherwise the route falls through to the 501 below, which
+        // is the honest answer for a core that would have dropped it.
+        //
+        // The trigger is forwarded and nothing is awaited. `matched` is deliberately
+        // absent from the reply the Swift core's own route carries: the count lives on
+        // the far side of a fire-and-forget frame, the sidecar never reads it, and a
+        // number invented here would be worse than no number.
+        if let forward = source.forwardPrWebhook {
+            router.post("/api/pr-webhook") { req, ctx -> Response in
+                let body = try await req.decode(as: RelayPrWebhookBody.self, context: ctx)
+                let repo = body.repo.trimmingCharacters(in: .whitespaces)
+                guard !repo.isEmpty, body.number > 0 else {
+                    throw APIError(.badRequest, "repo (owner/name) and positive number required")
+                }
+                guard forward(repo, body.number) else {
+                    throw APIError(.notImplemented,
+                                   unservedMessage("/api/pr-webhook", core: source.backendName))
+                }
+                return jsonResponse(RelayPrWebhookResponse(ok: true))
+            }
+        }
+
         // Everything else the Swift core serves. A 404 here would read as "wrong
         // URL"; this says which core is running and what it does not have.
         for method: HTTPRequest.Method in [.get, .post, .put, .delete, .patch] {
@@ -422,7 +458,10 @@ public enum CoreProxyServer {
     static func unservedMessage(_ path: String, core: String) -> String {
         let reason: String
         switch path {
-        case "/api/pr-webhook", "/api/tracked-prs":
+        case "/api/pr-webhook":
+            reason = "this core has no frame for a webhook trigger, so the trigger would be "
+                + "dropped and the watch list would wait for its next poll"
+        case "/api/tracked-prs":
             reason = "PR tracking runs in the desktop's own core, which this launch is not using"
         case "/presence":
             reason = "desktop presence is tracked by the in-process core, which this launch is not using"
@@ -432,6 +471,14 @@ public enum CoreProxyServer {
         return "\(path) is not served with the \(core) core: \(reason)."
     }
 }
+
+/// Body of the relay's `POST /api/pr-webhook`: the repo the event names and the PR
+/// number in it. The event itself never crosses the relay — the core re-reads the PR
+/// through `gh` — so this is the whole of what a webhook is worth forwarding.
+struct RelayPrWebhookBody: Decodable { let repo: String; let number: Int }
+
+/// Its reply. No `matched`: see the route.
+struct RelayPrWebhookResponse: Encodable { let ok: Bool }
 
 /// `/api/health` on the relay says which core answers and where its ptys live, so
 /// a bug report is never ambiguous about which process was in play.

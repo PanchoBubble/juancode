@@ -1,0 +1,115 @@
+{
+  "id": "pr-webhook",
+  "title": "a webhook trigger reaches the watch list",
+  "asserts": "a prWebhook frame is accepted without an error frame, for a PR under watch and for one nobody tracks, and neither one re-announces the list — the refresh it schedules is answered by a trackedPrs frame only if it actually moved the list, which a run whose gh cannot reach GitHub never does.",
+  "requires": [
+    "pty",
+    "git"
+  ],
+  "capabilities": [
+    "trackedPrs",
+    "prWebhook"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "created",
+    "attached",
+    "sessionMeta",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "subscribeTrackedPrs"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      }
+    },
+    {
+      "send": {
+        "type": "trackPr",
+        "cwd": "$gitCwd",
+        "pr": {
+          "number": 4444,
+          "title": "conformance fixture PR",
+          "url": "https://github.com/conformance/fixture/pull/4444",
+          "branch": "main",
+          "draft": false,
+          "checks": "none",
+          "checkCount": 0,
+          "passedCount": 0,
+          "unresolvedComments": 0,
+          "author": "nobody",
+          "assignees": [],
+          "reviewRequests": []
+        }
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": [
+          {
+            "id": {
+              "$type": "string"
+            },
+            "number": 4444,
+            "cwd": "$gitCwd",
+            "state": "watching"
+          }
+        ]
+      },
+      "bind": {
+        "trackedId": "tracked.0.id"
+      },
+      "timeoutMs": 30000
+    },
+    {
+      "send": {
+        "type": "prWebhook",
+        "repo": "conformance/fixture",
+        "number": 4444
+      },
+      "note": "the repo is not stored on the watch until a gh round trip resolves it, and this run's gh cannot reach GitHub, so what has to match here is the owner/name in the PR url the watch was tracked with"
+    },
+    {
+      "send": {
+        "type": "prWebhook",
+        "repo": "conformance/fixture",
+        "number": 9999
+      },
+      "note": "a PR nobody watches: a webhook fires for every PR in a repo, so this is an ordinary no-op and must not be an error"
+    },
+    {
+      "expectNone": {
+        "type": "error"
+      },
+      "withinMs": 2000
+    },
+    {
+      "expectNone": {
+        "type": "trackedPrs"
+      },
+      "withinMs": 6000,
+      "note": "past the debounce and the refresh behind it: gh fails, so the refresh learns nothing, and a list that did not change is not re-announced. This is what an accepted trigger looks like from the wire when GitHub is unreachable — the frame is taken, the fetch happens, and nothing is claimed."
+    },
+    {
+      "send": {
+        "type": "untrackPr",
+        "trackedId": "$trackedId"
+      }
+    },
+    {
+      "expect": {
+        "type": "trackedPrs",
+        "tracked": []
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

@@ -135,6 +135,15 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(pr.number, 7)
     }
 
+    func testDecodesPrWebhook() throws {
+        guard case let .prWebhook(repo, number) = try decode(
+            #"{"type":"prWebhook","repo":"owner/name","number":42}"#) else {
+            return XCTFail("expected .prWebhook")
+        }
+        XCTAssertEqual(repo, "owner/name")
+        XCTAssertEqual(number, 42)
+    }
+
     // ── Version/capability handshake + graceful degrade (juancode-tgc) ───────────
 
     func testAdvertisesTheNewCapabilities() {
@@ -148,6 +157,10 @@ final class WireProtocolTests: XCTestCase {
         // second agent for it, so the menu item is enabled everywhere and fails on the
         // click (juancode-jlhz).
         XCTAssertTrue(WireProtocol.capabilities.contains("trackPrInSession"))
+        // And the webhook fast path: the relay reads this string to decide whether to
+        // serve `/api/pr-webhook` at all, so a core that cannot take the trigger keeps
+        // answering 501 instead of a 200 that dropped it (juancode-rnx6).
+        XCTAssertTrue(WireProtocol.capabilities.contains("prWebhook"))
     }
 
     func testUnknownTypeDegradesToUnknown() throws {

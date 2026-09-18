@@ -39,6 +39,25 @@ final class CoreProxyServerTests: XCTestCase {
                 deleteSession: { [self] id in rows.removeAll { $0.id == id } },
                 backendName: "rust")
         }
+
+        /// Repo + number of every trigger the relay handed on, and whether the core
+        /// behind it would take one at all.
+        var forwarded: [(String, Int)] = []
+        var canForward = false
+
+        func forwardingSource() -> CoreProxyServer.Source {
+            var source = self.source()
+            source = CoreProxyServer.Source(
+                sessions: source.sessions, session: source.session,
+                searchSessions: source.searchSessions, kill: source.kill,
+                deleteSession: source.deleteSession, backendName: source.backendName,
+                globalPause: source.globalPause,
+                forwardPrWebhook: { [self] repo, number in
+                    forwarded.append((repo, number))
+                    return canForward
+                })
+            return source
+        }
     }
 
     private static func json(_ res: TestResponse) -> Any? {
@@ -52,8 +71,15 @@ final class CoreProxyServerTests: XCTestCase {
         _ mirror: FakeMirror,
         _ body: @escaping @Sendable (any TestClientProtocol) async throws -> Void
     ) async throws {
+        try await withProxy(source: mirror.source(), body)
+    }
+
+    private func withProxy(
+        source: CoreProxyServer.Source,
+        _ body: @escaping @Sendable (any TestClientProtocol) async throws -> Void
+    ) async throws {
         let app = Application(router: CoreProxyServer.buildRouter(
-            source: mirror.source(), upstreamBaseURL: "http://127.0.0.1:4290"))
+            source: source, upstreamBaseURL: "http://127.0.0.1:4290"))
         try await app.test(.router) { client in try await body(client) }
     }
 
@@ -145,7 +171,62 @@ final class CoreProxyServerTests: XCTestCase {
     func testUnservedMessageNamesTheEndpoint() {
         let m = CoreProxyServer.unservedMessage("/api/pr-webhook", core: "rust")
         XCTAssertTrue(m.hasPrefix("/api/pr-webhook is not served with the rust core"), m)
-        XCTAssertTrue(m.contains("PR tracking"), m)
+        XCTAssertTrue(m.contains("webhook trigger"), m)
+        let tracked = CoreProxyServer.unservedMessage("/api/tracked-prs", core: "rust")
+        XCTAssertTrue(tracked.contains("PR tracking"), tracked)
+    }
+
+    // MARK: - The webhook fast path (juancode-rnx6)
+
+    /// The sidecar's trigger reaches the core through the relay, and the reply says so.
+    /// The whole point: without this the poll is the core's only update path and a
+    /// review comment waits up to a minute.
+    func testAWebhookTriggerIsForwardedToTheCore() async throws {
+        let mirror = FakeMirror([])
+        mirror.canForward = true
+        try await withProxy(source: mirror.forwardingSource()) { client in
+            try await client.execute(
+                uri: "/api/pr-webhook", method: .post,
+                body: ByteBuffer(string: #"{"repo":"owner/name","number":42}"#)) { res in
+                XCTAssertEqual(res.status, .ok)
+                XCTAssertEqual((Self.json(res) as? [String: Any])?["ok"] as? Bool, true)
+            }
+        }
+        XCTAssertEqual(mirror.forwarded.count, 1)
+        XCTAssertEqual(mirror.forwarded.first?.0, "owner/name")
+        XCTAssertEqual(mirror.forwarded.first?.1, 42)
+    }
+
+    /// A core that cannot take the trigger keeps the 501. A 200 here would read as a
+    /// working webhook chain while every tracked PR quietly waited for its next poll,
+    /// which is the failure this whole path exists to end.
+    func testACoreThatCannotTakeTheTriggerStillAnswers501() async throws {
+        let mirror = FakeMirror([])
+        mirror.canForward = false
+        try await withProxy(source: mirror.forwardingSource()) { client in
+            try await client.execute(
+                uri: "/api/pr-webhook", method: .post,
+                body: ByteBuffer(string: #"{"repo":"owner/name","number":42}"#)) { res in
+                XCTAssertEqual(res.status, .notImplemented)
+            }
+        }
+    }
+
+    /// A trigger that names no PR is refused before it costs the core anything: a
+    /// number of 0 would match every watch's "not this one" and an empty repo would
+    /// match by url fallback alone.
+    func testAWebhookTriggerNeedsARepoAndAPositiveNumber() async throws {
+        let mirror = FakeMirror([])
+        mirror.canForward = true
+        try await withProxy(source: mirror.forwardingSource()) { client in
+            for body in [#"{"repo":"  ","number":42}"#, #"{"repo":"owner/name","number":0}"#] {
+                try await client.execute(uri: "/api/pr-webhook", method: .post,
+                                         body: ByteBuffer(string: body)) { res in
+                    XCTAssertEqual(res.status, .badRequest, body)
+                }
+            }
+        }
+        XCTAssertTrue(mirror.forwarded.isEmpty)
     }
 
     // MARK: - Upstream URL
