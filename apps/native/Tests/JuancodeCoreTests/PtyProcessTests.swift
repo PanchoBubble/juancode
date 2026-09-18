@@ -201,4 +201,32 @@ import Testing
             "helper \(helper) outlived the session; killing a session has to reap the whole group"
         )
     }
+
+    /// juancode-toew: a Ctrl-C byte has to reach the child as a SIGNAL, not just as
+    /// an echoed `^C`.
+    ///
+    /// SIG_IGN and the blocked mask survive exec, and both servers that spawn ptys
+    /// ignore signals before installing a source for them — so the child used to
+    /// inherit SIGINT/SIGTERM/SIGHUP as ignored and nothing could reach it. This
+    /// sets up exactly that parent state, which is why the spawn has to reset every
+    /// disposition itself rather than rely on the process it forked from.
+    @Test func aChildIsSignallableEvenWhenTheParentIgnoresTheSignal() async throws {
+        let previous = signal(SIGINT, SIG_IGN)
+        defer { signal(SIGINT, previous ?? SIG_DFL) }
+
+        let out = Collector()
+        // Cooked mode, echo on: the shape the divergence was measured in, where the
+        // byte is visibly delivered to the line discipline. `read` so the shell is
+        // parked on stdin the way a CLI at its prompt is.
+        let proc = try #require(spawn("printf READY; read ignored", into: out))
+        defer { proc.terminate() }
+        #expect(await poll { out.bytesSeen > 0 }, "the child never started")
+
+        proc.write([0x03])
+
+        #expect(
+            await poll(3.0) { out.didExit },
+            "0x03 was written to the pty but the child never took the SIGINT: an ignored disposition was inherited through exec"
+        )
+    }
 }

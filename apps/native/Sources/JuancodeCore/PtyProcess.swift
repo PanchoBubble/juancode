@@ -120,6 +120,31 @@ public final class PtyProcess: @unchecked Sendable {
 
         if childPid == 0 {
             // ---- child ---- (async-signal-safe calls only)
+            // Give the child the signal state a terminal would: every disposition
+            // back to SIG_DFL and nothing blocked.
+            //
+            // A handler is reset by exec, but SIG_IGN and the blocked mask are NOT —
+            // they are inherited straight through it. Both servers that spawn ptys
+            // ignore signals before installing a source for them: the GUI app does it
+            // by hand (`signal(sig, SIG_IGN)` in App.swift, because SIG_IGN is what
+            // disables the OS default so the dispatch source is the only exit path)
+            // and `juancode-serve` gets it from swift-service-lifecycle's graceful
+            // shutdown. So every CLI we spawned inherited SIGINT, SIGTERM and SIGHUP
+            // as ignored, and nothing downstream could reach it with a signal: a
+            // Ctrl-C byte was echoed by the line discipline and generated a SIGINT
+            // the child then discarded, `terminate()`'s polite SIGTERM did nothing
+            // so every stop escalated to SIGKILL (no transcript flush), and closing
+            // the master hung up a child that stayed alive (juancode-toew). The Rust
+            // core never diverged here because portable-pty resets dispositions in
+            // its own pre-exec.
+            //
+            // `signal`/`sigprocmask` are on the async-signal-safe list; SIGKILL and
+            // SIGSTOP just answer SIG_ERR, which is fine to ignore.
+            var sig: Int32 = 1
+            while sig < NSIG { signal(sig, SIG_DFL); sig += 1 }
+            var unblocked = sigset_t()
+            sigemptyset(&unblocked)
+            sigprocmask(SIG_SETMASK, &unblocked, nil)
             // Close every inherited fd above the pty stdio (0/1/2, which forkpty just
             // wired to the slave). Without this the child inherits the parent's open
             // descriptors — most damagingly the embedded server's 127.0.0.1:4280 NIO

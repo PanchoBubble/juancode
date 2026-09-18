@@ -1,7 +1,7 @@
 {
   "id": "named-keys",
   "title": "named control keys reach the pty raw",
-  "asserts": "a `key` frame resolves NAMES to bytes in the core and writes them to the pty without bracketed paste, which is what makes them keystrokes rather than text: a Backspace erases the character before it and an Enter submits the line, so the title the stand-in then sets is proof both bytes were read by the line discipline and neither was pasted. An unknown name is refused with an `error` and writes NOTHING - the failure the frame exists to prevent is the word \"Escape\" landing in an agent's prompt box - and a key is never worth reviving a dead session for.",
+  "asserts": "a `key` frame resolves NAMES to bytes in the core and writes them to the pty without bracketed paste, which is what makes them keystrokes rather than text: a Backspace erases the character before it and an Enter submits the line, so the title the stand-in then sets is proof both bytes were read by the line discipline and neither was pasted. An unknown name is refused with an `error` and writes NOTHING - the failure the frame exists to prevent is the word \"Escape\" landing in an agent's prompt box - and a key is never worth reviving a dead session for. And a C-c is a SIGNAL, not a byte that gets echoed: the child takes SIGINT and the core reports the exit, which is the half a core can pass the rest of this scenario while silently failing (juancode-toew).",
   "requires": [
     "pty"
   ],
@@ -133,6 +133,25 @@
         }
       },
       "note": "unlike an `input`, which revives a dead session to deliver a message: there is no prompt in a fresh process for a keystroke to answer"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "C-c"
+        ]
+      },
+      "note": "last, because it is meant to end the session"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": -1
+      },
+      "timeoutMs": 15000,
+      "note": "0x03 was INTR for the child's foreground group, not a character it read. exitCode -1 is the wire's \"a signal took it\" - an exit code of its own would mean the shell read the byte and fell out of its loop. The assertion this scenario was shipped without: both cores echoed the ^C, and only one of them delivered the signal, because a SIG_IGN the server installed for its own shutdown was inherited through exec into every pty child (juancode-toew)."
     }
   ]
 }
