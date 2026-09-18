@@ -499,6 +499,9 @@ private struct ToolsMenu: View {
             showing = true
             // So the Heavy Queue row's count is current the moment the menu opens.
             model.refreshHeavyQueue()
+            // Same for the GitHub count — floored, so opening the menu repeatedly
+            // costs one search, not one per open.
+            model.refreshViewerPrs()
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
@@ -537,6 +540,14 @@ private struct ToolsMenu: View {
                 toolButton("point.3.filled.connected.trianglepath.dotted", "Dispatch Chains") {
                     model.showingDispatchGraph = true
                 }
+                // Your GitHub queue across every repo — authored PRs and the reviews
+                // you owe — not just the folders juancode has open.
+                toolButton("arrow.triangle.pull", "GitHub PRs",
+                           tint: model.viewerPrsNeedingYouCount > 0 ? Color.orange : nil,
+                           trailing: model.viewerPrCount == 0 ? nil : "\(model.viewerPrCount)") {
+                    model.openViewerPrQueue()
+                }
+                .help(githubHelp)
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
                 Divider().padding(.vertical, 2)
@@ -548,6 +559,18 @@ private struct ToolsMenu: View {
             .padding(6)
             .frame(width: 240)
         }
+    }
+
+    /// What the GitHub row promises, given what the queue currently holds.
+    private var githubHelp: String {
+        guard model.viewerPrs.available else {
+            return model.viewerPrs.error ?? "Your open PRs and the reviews you owe"
+        }
+        let needs = model.viewerPrsNeedingYouCount
+        let mine = model.viewerPrs.mine.count
+        let reviewing = model.viewerPrs.reviewing.count
+        let base = "\(mine) yours · \(reviewing) to review"
+        return needs > 0 ? "\(base) · \(needs) need\(needs == 1 ? "s" : "") you" : base
     }
 
     /// A popover row that opens a sheet then dismisses the popover.

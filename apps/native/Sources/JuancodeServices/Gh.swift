@@ -853,8 +853,9 @@ public struct GhError: Error, Sendable {
 
 /// Turn a process failure into a short, user-facing reason. Mirrors the TS
 /// `ghErrorReason`: ENOENT → not installed, then auth/repo heuristics on stderr,
-/// else the first line of stderr (or a generic fallback).
-private func ghErrorReason(_ err: Error) -> String {
+/// else the first line of stderr (or a generic fallback). Module-internal so the
+/// viewer-queue service reports its failures in the same words.
+func ghErrorReason(_ err: Error) -> String {
     // launchFailed ≈ Node's `code === "ENOENT"` (binary not found).
     var stderr = ""
     if let e = err as? ProcessError {

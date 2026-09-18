@@ -49,3 +49,46 @@ import Testing
         #expect(due(-3600, focused: false))
     }
 }
+
+/// The viewer queue's cadence (Tools → GitHub). One search answers the whole
+/// queue, so this is a single clock — but it runs whether or not the view is open,
+/// which is what the floor and the background backoff are for.
+@Suite struct ViewerPrFreshnessTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func due(_ ageSeconds: TimeInterval?, focused: Bool = true,
+                     force: Bool = false) -> Bool {
+        viewerPrRefreshDue(lastFetched: ageSeconds.map { now.addingTimeInterval(-$0) },
+                           now: now, focused: focused, force: force)
+    }
+
+    @Test func neverFetchedIsAlwaysDue() {
+        #expect(due(nil))
+        #expect(due(nil, focused: false))
+    }
+
+    @Test func theFloorHoldsEvenForAManualRefresh() {
+        #expect(!due(viewerPrRefreshFloor - 1))
+        #expect(!due(viewerPrRefreshFloor - 1, force: true))
+    }
+
+    @Test func forceFetchesOncePastTheFloor() {
+        #expect(!due(viewerPrRefreshFloor + 1))
+        #expect(due(viewerPrRefreshFloor + 1, force: true))
+    }
+
+    @Test func focusedRefreshesOnTheFiveMinuteCadence() {
+        #expect(!due(viewerPrRefreshInterval - 1))
+        #expect(due(viewerPrRefreshInterval))
+    }
+
+    @Test func backgroundBacksOff() {
+        #expect(!due(viewerPrRefreshInterval + 1, focused: false))
+        #expect(due(viewerPrBackgroundRefreshInterval, focused: false))
+    }
+
+    @Test func aClockThatWentBackwardsRefetches() {
+        #expect(viewerPrRefreshDue(lastFetched: now.addingTimeInterval(60), now: now,
+                                   focused: false))
+    }
+}

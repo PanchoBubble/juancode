@@ -33,3 +33,35 @@ public func prDetailRefreshDue(lastFetched: Date?, now: Date, focused: Bool,
     if pollerActivity { return true }
     return age >= (focused ? prDetailRefreshInterval : prDetailBackgroundRefreshInterval)
 }
+
+// Freshness policy for the viewer's own PR queue (the Tools-menu GitHub count).
+// One GitHub search round trip answers the whole queue, so this is a single
+// cadence rather than a per-PR one — but it runs whether or not the GitHub view is
+// open, so the background rate has to be genuinely cheap.
+
+/// Cadence while the app is frontmost — the count you might glance at.
+public let viewerPrRefreshInterval: TimeInterval = 300
+/// Backoff while the app is in the background. Nobody is looking at the count, and
+/// anything urgent still arrives through the tracked-PR poller and notifications.
+public let viewerPrBackgroundRefreshInterval: TimeInterval = 1200
+/// Floor between two fetches, whatever the trigger (opening the Tools menu, opening
+/// the GitHub view, the tick). The search costs seconds, so a burst of triggers
+/// must collapse into one call.
+public let viewerPrRefreshFloor: TimeInterval = 60
+
+/// Whether the viewer PR queue should be refetched now.
+///
+/// - `lastFetched`: when the queue last landed, nil if never.
+/// - `focused`: whether the app is frontmost.
+/// - `force`: a manual refresh — still floored, so a held-down refresh button can't
+///   stampede `gh`.
+public func viewerPrRefreshDue(lastFetched: Date?, now: Date, focused: Bool,
+                               force: Bool = false) -> Bool {
+    guard let lastFetched else { return true }
+    let age = now.timeIntervalSince(lastFetched)
+    // Clock moved backwards (sleep/wake, NTP step): the age says nothing, so refetch.
+    if age < 0 { return true }
+    if age < viewerPrRefreshFloor { return false }
+    if force { return true }
+    return age >= (focused ? viewerPrRefreshInterval : viewerPrBackgroundRefreshInterval)
+}
