@@ -21,7 +21,7 @@ private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
-/// UserDefaults key for the idle-session sleep window driving the `SessionReaper`,
+/// UserDefaults key for the idle-session sleep window driving the core's reaper,
 /// in minutes (`0` = never / disabled). Key name predates the reaper.
 private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 
@@ -1443,7 +1443,7 @@ final class AppModel {
         }
     }
 
-    /// Idle window (minutes) after which the `SessionReaper` puts a session to
+    /// Idle window (minutes) after which the core's reaper puts a session to
     /// sleep: it kills the CLI process tree to free RAM once the session has been
     /// *verifiably* idle for this long, leaving a dormant, resumable tile. `0`
     /// means never — reaping is off. Persisted and edited from Settings → Sessions

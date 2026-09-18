@@ -274,13 +274,14 @@ public final class SwiftCoreClient: CoreClient, @unchecked Sendable {
         return state.activityLog.logPath
     }
 
-    public func setReaperIdleWindow(minutes: Int) async {
-        await state.sessionReaper.setIdleWindow(minutes: minutes)
-    }
+    // Reaping lives in the Rust core (`juancoded-state/src/reaper.rs`). This core
+    // holds no reaper, does not advertise the `reaper` capability, and answers both
+    // setters so the app's Settings pane needs no branch on which core it got. A
+    // session left idle here stays awake; that is what picking this core now means.
 
-    public func setReaperProtectedIds(_ ids: Set<String>) async {
-        await state.sessionReaper.setProtectedIds(ids)
-    }
+    public func setReaperIdleWindow(minutes: Int) async {}
+
+    public func setReaperProtectedIds(_ ids: Set<String>) async {}
 
     public func shutdown() { state.shutdown() }
 

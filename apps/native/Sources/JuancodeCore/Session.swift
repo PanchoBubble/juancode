@@ -52,8 +52,10 @@ public struct SessionEnvironment: Sendable {
     /// `JuancodeServices` (`deriveSessionTitle`) so the core stays dependency-free;
     /// defaults to nil (no title polling). `(provider, cliSessionId) -> title?`.
     public var deriveTitle: @Sendable (_ provider: ProviderId, _ cliSessionId: String) async -> String?
-    /// Read the CLI transcript's token usage. Injected from `JuancodeServices`
-    /// (`deriveSessionUsage`); defaults to nil. `(provider, cliSessionId) -> usage?`.
+    /// Read the CLI transcript's token usage. Nothing injects this any more — the
+    /// Swift reader was deleted with the rest of the fork and usage is the Rust
+    /// core's (`juancoded-core/src/usage.rs`), so on this core it stays at its
+    /// default of nil. `(provider, cliSessionId) -> usage?`.
     public var deriveUsage: @Sendable (_ provider: ProviderId, _ cliSessionId: String) async -> SessionUsage?
     /// Start tailing the CLI's stream-json transcript for structured activity pulses
     /// (juancode-1c9), the preferred wording-independent busy/idle signal. Injected

@@ -1,6 +1,7 @@
 // Settings → Sessions pane: sleep idle sessions. Once a session has been verifiably
-// idle for the chosen duration, the `SessionReaper` kills its CLI process tree to
-// free RAM, leaving a dormant tile that resumes on demand. The duration is editable;
+// idle for the chosen duration, the core's reaper kills its CLI process tree to
+// free RAM, leaving a dormant tile that resumes on demand. Only the Rust core holds
+// one, so on the Swift core this pane edits a window nothing acts on. The duration is editable;
 // the toggle off (0 min) disables it entirely. Backed by
 // `AppModel.autoCloseIdleMinutes`, which drives the reaper's window live. Surfaced
 // via the standard ⌘, window.
