@@ -399,7 +399,7 @@ it buys a client, the capabilities and environment it needs, and steps.
 
 Steps: `open` (a second connection), `close` (drop one, which is how a core's
 disconnect behaviour gets driven), `send`, `raw` (a non-JSON frame), `expect`,
-`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`, `descendant`. `expect` consumes
+`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`, `descendant`, `get`. `expect` consumes
 frames with a cursor, so consecutive expects assert **order**; a frame that is
 neither the match nor in `ignore` fails the step. `bind` reads a value out of a
 matched frame (`{"session": "session.id"}`) for later `$session` references.
@@ -422,6 +422,17 @@ reaping a process group produces no frame and deliberately never will (see
 The two polarities are a pair: `reaped` refuses to run when the pid file names
 nothing, because a `SPAWN` that silently did nothing would otherwise satisfy it, so
 the `alive` step before the kill is what makes the assertion mean anything.
+
+`get` is the other step that is not about a frame:
+`{"get": "/api/sessions/$session/screen?json=1", "status": 200, "expectBody": {…}}`
+reads one of the core's own HTTP routes. Those routes are wire surface — the sidecar
+and the phone console reach a session through them, and `/screen` is the only
+width-correct way to look at a session without holding a subscription open — but they
+are requests and replies rather than frames on the shared socket, so no `expect` can
+see them. `status` defaults to 200. The body is asserted with the same matcher
+language a frame gets, as decoded JSON (`expectBody`) or as raw text (`expectText`);
+`bind` works off the JSON body. This is the one place `$name` is substituted INSIDE a
+string, because a URL is the one place a bound id has to sit in the middle of one.
 
 `requires` gates a scenario on the environment (`pty`, `git`, `gh`);
 `capabilities` gates it on what the core advertises. Either way the scenario is

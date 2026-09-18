@@ -144,6 +144,11 @@ export function seedVars(
 
 export interface RunContext {
   wsUrl: string;
+  /** Where the core's HTTP surface lives, for the `get` step. Derived from `wsUrl`
+   *  when a caller does not say: both listeners are the same process on the same
+   *  port, and a suite that let them disagree could report a read against a core it
+   *  was not driving. */
+  httpBase?: string;
   workspace: Workspace;
   /** Capabilities the core advertised, for gating. */
   capabilities: string[];
@@ -531,7 +536,86 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     );
     return;
   }
+  if ("get" in step) {
+    await readOverHttp(step, s);
+    return;
+  }
   throw new Error(`unrecognised step: ${JSON.stringify(step)}`);
+}
+
+/** Substitute `$name` INSIDE a string, which `resolveVars` deliberately does not do.
+ *
+ *  Everywhere else in a scenario a variable is a whole value — a frame's `sessionId`
+ *  is `"$session"` and nothing more — so whole-value substitution is the right rule
+ *  and interpolating would make a literal `$` in a prompt a hazard. A URL is the one
+ *  place the id has to sit inside a longer string, so the path gets this and nothing
+ *  else does. The value is percent-encoded: a session id is a path SEGMENT. */
+export function interpolate(path: string, vars: Vars): string {
+  return path.replace(/\$([a-zA-Z][a-zA-Z0-9]*)/g, (whole, name: string) =>
+    name in vars ? encodeURIComponent(String(vars[name])) : whole,
+  );
+}
+
+/** The HTTP half of the wire: `${wsUrl}` minus `/ws`, plus the path a step names. */
+export function httpBaseOf(ctx: RunContext): string {
+  if (ctx.httpBase) return ctx.httpBase.replace(/\/$/, "");
+  return ctx.wsUrl
+    .replace(/^ws/, "http")
+    .replace(/\/ws$/, "")
+    .replace(/\/$/, "");
+}
+
+/** One `get` step: read the path, assert the status, assert the body.
+ *
+ *  The body is matched with the same `matchValue` a frame gets, so a scenario asserts
+ *  a read the way it asserts everything else. `expectBody` decodes JSON first and
+ *  fails loudly on a body that is not JSON — a core answering `text/plain` where a
+ *  scenario asked for a document is a conformance failure, not a parse accident. */
+async function readOverHttp(
+  step: { get: string; status?: number; expectBody?: unknown; expectText?: unknown; bind?: Record<string, string> },
+  s: StepContext,
+): Promise<void> {
+  const path = interpolate(step.get, s.vars);
+  const url = `${httpBaseOf(s.ctx)}${path.startsWith("/") ? "" : "/"}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new WireProtocolError(`GET ${url} did not answer: ${e instanceof Error ? e.message : e}`);
+  }
+  const text = await res.text();
+  const want = step.status ?? 200;
+  if (res.status !== want) {
+    throw new WireProtocolError(
+      `GET ${path} answered ${res.status}, expected ${want}\n  body: ${text.slice(0, 400)}`,
+    );
+  }
+  if (step.expectText !== undefined) {
+    const result = matchValue(text, resolveVars(step.expectText, s.vars), s.vars);
+    if (!result.ok) {
+      throw new WireProtocolError(
+        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+      );
+    }
+  }
+  if (step.expectBody === undefined && !step.bind) return;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new WireProtocolError(
+      `GET ${path} did not answer with JSON\n  got: ${text.slice(0, 400)}`,
+    );
+  }
+  if (step.expectBody !== undefined) {
+    const result = matchValue(body, resolveVars(step.expectBody, s.vars), s.vars);
+    if (!result.ok) {
+      throw new WireProtocolError(
+        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+      );
+    }
+  }
+  if (step.bind) Object.assign(s.vars, readBindings(body as Frame, step.bind));
 }
 
 /** The pid the fake agent's helper recorded, or null while the file is absent or

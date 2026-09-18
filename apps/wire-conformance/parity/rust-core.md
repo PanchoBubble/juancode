@@ -8,7 +8,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Attempts behind each verdict: 3 per scenario
 - As of: 2026-09-18
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, sessionEdit, globalPause, restartFresh, editor, terminal, trackedPrs, spawnModel, spawnPreset, stuck, sessionList, sessionDelete, sessionSearch, trackPrInSession, prWebhook
-- Unmet scenarios: 0 of 40
+- Unmet scenarios: 0 of 41
 
 ## What is not satisfied yet (0)
 
@@ -56,3 +56,4 @@ Nothing: this core passes every scenario in the spec.
 - session-search: 3/3 - a core that holds the history is the one that answers what is in it
 - track-pr-in-session: 3/3 - a PR tracked by a session that already exists
 - pr-webhook: 3/3 - a webhook trigger reaches the watch list
+- session-screen: 3/3 - the rendered screen, read once over HTTP

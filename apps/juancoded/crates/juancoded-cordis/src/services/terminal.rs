@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use juancoded_vt::{Snapshot, TerminalModel};
+use juancoded_vt::{ScreenPeek, Snapshot, TerminalModel};
 
 use crate::service::Service;
 
@@ -29,6 +29,13 @@ pub trait TerminalApi: Send + Sync {
     fn take_title(&self, session: &str) -> Option<String>;
     fn resize(&self, session: &str, cols: usize, rows: usize);
     fn snapshot(&self, session: &str) -> Option<Snapshot>;
+    /// A one-shot rendered read: the visible grid, `scrollback_rows` of history above
+    /// it, and the retained window title, all taken under the one lock.
+    ///
+    /// Beside `snapshot` rather than composed from it by the caller, because the three
+    /// parts are one picture: a feed landing between two locked reads scrolls a row
+    /// across the seam, and the seam is the row a reader would misplace.
+    fn peek(&self, session: &str, scrollback_rows: usize) -> Option<ScreenPeek>;
     /// The visible screen as text, which is what activity detection and search want.
     fn text(&self, session: &str) -> Option<String>;
     fn close(&self, session: &str);
@@ -98,6 +105,10 @@ impl TerminalApi for VtTerminals {
 
     fn snapshot(&self, session: &str) -> Option<Snapshot> {
         self.grids().get(session).map(|m| m.snapshot())
+    }
+
+    fn peek(&self, session: &str, scrollback_rows: usize) -> Option<ScreenPeek> {
+        self.grids().get(session).map(|m| m.peek(scrollback_rows))
     }
 
     fn text(&self, session: &str) -> Option<String> {

@@ -353,9 +353,9 @@ final class CoreProxyServerTests: XCTestCase {
         }
     }
 
-    // MARK: - The three per-session reads, proxied to the daemon
+    // MARK: - The per-session reads, proxied to the daemon
 
-    /// A stand-in daemon's HTTP half: it answers the three reads the way juancoded
+    /// A stand-in daemon's HTTP half: it answers the reads the way juancoded
     /// does, and says which path it was asked for so the relay cannot be caught
     /// answering locally.
     private func makeReadingDaemon(status: HTTPResponse.Status = .ok) -> some ApplicationProtocol {
@@ -375,12 +375,12 @@ final class CoreProxyServerTests: XCTestCase {
             configuration: .init(address: .hostname("127.0.0.1", port: 0), serverName: "reading-daemon"))
     }
 
-    /// The bug this closes: all three answered 501 on the rust core, so everything
+    /// The bug this closes: every one of them answered 501 on the rust core, so everything
     /// that reads a session remotely saw an empty session rather than an outage
     /// (juancode-ag1e). They have to reach the daemon, and the grid the bytes were
     /// parsed at has to survive the hop — a byte ring replayed at the wrong width is
     /// garbled in every line that reached the right margin.
-    func testTheThreeSessionReadsReachTheDaemonWithTheirGridIntact() async throws {
+    func testTheSessionReadsReachTheDaemonWithTheirGridIntact() async throws {
         let mirror = FakeMirror([Self.meta("s1")])
         try await makeReadingDaemon().test(.live) { daemonClient in
             let daemonPort = try XCTUnwrap(daemonClient.port)

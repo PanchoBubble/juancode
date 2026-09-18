@@ -84,6 +84,10 @@ beforeAll(async () => {
   daemon = (first as Record<string, unknown>).daemon as Record<string, unknown> | undefined;
   ctx = {
     wsUrl: core.wsUrl,
+    // The same process, said the way the `get` steps address it: the HTTP reads are
+    // wire surface too, and taking the base from the boot rather than deriving it
+    // keeps a scenario from reading one core while it drives another.
+    httpBase: core.httpBase,
     workspace,
     capabilities: info.capabilities,
     available: detectAvailable(),

@@ -213,6 +213,11 @@
       "status": "passed",
       "attempts": 3,
       "passes": 3
+    },
+    "session-screen": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
     }
   }
 }

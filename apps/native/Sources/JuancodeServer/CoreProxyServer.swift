@@ -352,7 +352,7 @@ public enum CoreProxyServer {
             return Response(status: .noContent)
         }
 
-        // The three per-session reads, proxied to the daemon verbatim.
+        // The four per-session reads, proxied to the daemon verbatim.
         //
         // Not answered here, and deliberately not answered off the desktop's mirror:
         // the mirror is a cache of rows, it holds no transcript at all, and the
@@ -412,7 +412,11 @@ public enum CoreProxyServer {
 
     /// The per-session reads the daemon serves and this relay forwards. Kept as one
     /// list so the route table and the proxy cannot drift apart.
-    static let sessionReadLeaves = ["transcript", "messages", "scrollback"]
+    ///
+    /// `screen` is the rendered one (juancode-s96g): it is why the byte-log fallback
+    /// beside it exists at all, so a relay that forwarded the log and not the picture
+    /// would hand every caller the garbling input this route was added to retire.
+    static let sessionReadLeaves = ["transcript", "messages", "scrollback", "screen"]
 
     /// Forward one read to the daemon and hand its answer back unchanged.
     ///
