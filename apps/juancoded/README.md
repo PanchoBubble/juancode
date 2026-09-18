@@ -323,6 +323,50 @@ Launch the daemon from a **plain terminal**, not from inside a `claude` session:
 inheritance is faithful, so a `CLAUDE_CODE_CHILD_SESSION` marker in the parent is
 passed straight through and the spawned CLI turns transcript saving off.
 
+## Notifications: the daemon fires one webhook, the Node sidecar keeps Telegram
+
+**Decided, and not to be re-opened** (juancode-52e8.14.7). `apps/oracle-mcp` stays where
+it is. It is 14,481 lines of TypeScript across 54 files — the Telegram bridge
+(`telegram.ts`, 1,302), the phone web console (`ui.ts`, 1,508), voice transcription,
+triggers, cron, the dispatch registry and the MCP server. None of that is core work and
+none of it is better in Rust. The sidecar keeps one long-lived WS client to this daemon
+(`apps/oracle-mcp/src/native-events.ts`) and fans session events out in-process. That
+seam already survived the core swap; the daemon absorbs nothing of it.
+
+What the daemon owes the sidecar is a complete event stream, and it has one. Measured
+2026-09-18 against `native-events.ts`: the bridge keys on `activity`
+(`sessionId` / `state` / `notify` / `changes` / `dispatchId`) plus `stuck`, `sessionMeta`,
+`pauseState`, `heavyQueue` and `screen`, and this core emits every one of them with every
+field. The two holes recorded in the older notes are closed or were never holes — `exit`
+is broadcast (`SessionEvent::Exit` → `ServerMessage::Exit`), and neither core has ever put
+a `prompt` field on `activity`, so there is nothing to catch up to. **No wire frame was
+added by this ticket.**
+
+The one notification the daemon sends itself is the user's outbound webhook
+(`juancoded-core/src/notify.rs`, fired by `juancoded-server/src/notify_hook.rs`). It used
+to be `AppModel`'s, which meant the notification whose entire job is to reach you away
+from the Mac only fired while the Mac's UI was open. `NotificationWebhook.swift` and its
+test are gone; the body, the wording and the key set are byte-identical, because a webhook
+somebody already points at Slack must not start saying something new.
+
+- **Where the URL comes from:** `juancoded`'s own config, never `UserDefaults`. Either
+  `JUANCODE_NOTIFY_WEBHOOK_URL`, or `notify.json` beside the store
+  (`~/.juancode/rust-core/notify.json`, `{"webhookUrl": "https://…"}`). Settings →
+  Sessions still edits it; the app writes that file (`JuancodeCore/NotifyConfig.swift`)
+  instead of POSTing. Re-read on every fire, so setting a webhook never needs a daemon
+  restart — and a restart ends every live session.
+- **One task, not one per connection.** `conn.rs` runs per connected client, so firing
+  there would send the same notification once per open socket. The hook is a daemon-wide
+  watcher beside the reaper, the stall sweep and the heavy watch.
+- **Delivery is `curl`**, for the same reason `gh.rs` shells out: no HTTP client crate in
+  this workspace, and a handful of POSTs an hour does not justify a TLS stack. The URL
+  and the body travel in a curl config on stdin, never in argv — a Slack webhook URL is
+  a bearer credential and argv is readable.
+- **Two of the three events fire.** `waiting_input` and `turn_end` are live.
+  `work_at_risk` has its wording here but nothing raises it: the detector behind it
+  (`WorkAtRisk.swift`) is juancode-52e8.14.5's port, and the desktop's in-app notice is
+  unaffected. Tracked, not forked.
+
 ## Deliberately not here
 
 No queue **delivery**: `subscribeQueue` / `unsubscribeQueue` / `queueMessage` /

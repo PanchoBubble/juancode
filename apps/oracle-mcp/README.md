@@ -58,6 +58,17 @@ ensure `claude` is on PATH and logged in.
 
 ## Architecture
 
+**This sidecar stays** — decided in juancode-52e8.14.7 and not to be re-opened. As the
+Swift core is retired in favour of `apps/juancoded` (Rust), the daemon absorbs nothing of
+what is here: Telegram, the phone console, voice transcription, triggers, cron, the
+dispatch registry and the MCP server are not core work and gain nothing from Rust. The
+seam is the one long-lived WS in `src/native-events.ts`, and it already survived the core
+swap. The daemon owes this sidecar a complete `activity` stream, which it emits; the one
+thing it now sends itself is the user's outbound notification webhook, because that has
+to keep firing with the desktop app closed. See `apps/juancoded/README.md` →
+"Notifications".
+
+
 ```
 Phone (Claude app, custom connector)
   │  MCP over HTTPS  +  OAuth via Cloudflare Access

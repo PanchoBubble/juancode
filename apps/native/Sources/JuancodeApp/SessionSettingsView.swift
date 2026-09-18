@@ -78,16 +78,17 @@ struct SessionSettingsView: View {
 
                 Divider().padding(.vertical, 4)
 
-                // Notification routing (juancode-xac): POST a Slack-compatible JSON
-                // to this URL on turn-end / needs-input. Empty = off; nothing sends
-                // without a URL. Gated by the turn-end notifications toggle above.
+                // Notification routing (juancode-xac): a Slack-compatible JSON POSTed
+                // on turn-end / needs-input. Empty = off; nothing sends without a URL.
+                // The POST is the daemon's, so this field writes the daemon's own
+                // config file rather than being read by this process at send time.
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Notification webhook")
                     TextField("https://hooks.slack.com/services/…", text: Binding(
                         get: { model.notifyWebhookUrl },
                         set: { model.notifyWebhookUrl = $0 }))
                         .textFieldStyle(.roundedBorder)
-                    Text("POSTs a Slack-compatible JSON on turn-end / needs-input so background work reaches you off-device. Any incoming-webhook URL works.")
+                    Text("POSTs a Slack-compatible JSON on turn-end / needs-input so background work reaches you off-device. Sent by the core, so it keeps firing with this app closed. Any incoming-webhook URL works.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

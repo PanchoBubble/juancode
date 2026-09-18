@@ -24,6 +24,7 @@ use crate::conn;
 use crate::global_pause::GlobalPause;
 use crate::heavy_watch::HeavyWatch;
 use crate::identity::{self, DaemonIdentity};
+use crate::notify_hook;
 use crate::queue_delivery;
 use crate::reads;
 use crate::seed::SeedTiming;
@@ -263,6 +264,15 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     // And the last, which is the only one that reads something no session owns: the
     // shared `heavy` registry. A no-op tick until a client subscribes.
     let _heavy = handles.heavy.spawn();
+    // And the outbound one: the user's notification webhook, fired by the DAEMON so
+    // background work reaches them with the desktop app closed (juancode-52e8.14.7).
+    // One per daemon rather than one per connection — see `notify_hook`. Everything
+    // else about notifications stays in the Node sidecar, which reads the same
+    // `activity` broadcast over its own socket.
+    let _notify = notify_hook::spawn(
+        Arc::clone(&handles.sessions),
+        juancoded_core::notify::config_path(),
+    );
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {

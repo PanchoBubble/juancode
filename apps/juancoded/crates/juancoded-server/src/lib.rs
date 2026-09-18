@@ -12,6 +12,7 @@ pub mod global_pause;
 pub mod heavy_watch;
 pub mod identity;
 pub mod named_key;
+pub mod notify_hook;
 pub mod owner;
 pub mod queue_delivery;
 pub mod reads;

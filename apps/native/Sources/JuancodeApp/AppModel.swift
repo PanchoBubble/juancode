@@ -1372,9 +1372,21 @@ final class AppModel {
     /// Outbound notification webhook URL (juancode-xac). When set, a turn-end /
     /// needs-input event POSTs a Slack-compatible JSON body here so background work
     /// reaches you off-device. Empty = off. Nothing is ever sent without this URL.
-    /// Persisted; edited from Settings → Sessions.
-    var notifyWebhookUrl: String = UserDefaults.standard.string(forKey: notifyWebhookUrlKey) ?? "" {
-        didSet { UserDefaults.standard.set(notifyWebhookUrl, forKey: notifyWebhookUrlKey) }
+    /// Edited from Settings → Sessions.
+    ///
+    /// The POST itself is the DAEMON's now (juancode-52e8.14.7), so this field is a
+    /// view onto the daemon's own config file rather than the source of truth: it
+    /// seeds from `notify.json` and writes every edit straight back there. The
+    /// `UserDefaults` copy is kept only so a fresh install that has never had a daemon
+    /// still shows what was typed. That is the whole point of the move — a webhook the
+    /// app fired stopped firing the moment you quit the app, which is exactly when you
+    /// need it.
+    var notifyWebhookUrl: String = NotifyConfig.webhookURL()
+        ?? UserDefaults.standard.string(forKey: notifyWebhookUrlKey) ?? "" {
+        didSet {
+            UserDefaults.standard.set(notifyWebhookUrl, forKey: notifyWebhookUrlKey)
+            NotifyConfig.setWebhookURL(notifyWebhookUrl)
+        }
     }
 
     /// Light / dark / follow-system appearance (juancode light/dark toggle). Persisted;
@@ -1672,7 +1684,6 @@ final class AppModel {
         unreadSessions.insert(sessionId)
         updateDockBadge()
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
-        fireNotificationWebhook(sessionId: sessionId, state: state)
     }
 
     /// Deliver (or replace) the OS notification for a background session at a turn
@@ -1707,30 +1718,6 @@ final class AppModel {
             selection = id
             flashFocusRim() // land the eye on the pane the notification pointed at
         }
-    }
-
-    /// POST a Slack-compatible notification to the user's configured webhook, if any
-    /// (juancode-xac). Fired on the same turn-end/needs-input edge as the Dock
-    /// bounce, so it respects the same "not the session you're watching" suppression.
-    /// Best-effort and fire-and-forget — a webhook failure never touches the UI.
-    private func fireNotificationWebhook(sessionId: String, state: SessionActivity) {
-        let meta = (sessions + externalSessions).first { $0.id == sessionId }
-        postNotificationWebhook(event: state == .waitingInput ? .waitingInput : .turnEnd,
-                                title: meta?.title ?? "", sessionId: sessionId, cwd: meta?.cwd ?? "")
-    }
-
-    /// The shared webhook POST: build the body and fire-and-forget it at the
-    /// configured URL (no-op when none is set). Used by turn-end and work-at-risk.
-    private func postNotificationWebhook(event: NotificationEvent, title: String,
-                                         sessionId: String, cwd: String) {
-        let raw = notifyWebhookUrl.trimmingCharacters(in: .whitespaces)
-        guard !raw.isEmpty, let url = URL(string: raw), url.scheme?.hasPrefix("http") == true else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = webhookBody(event: event, title: title, sessionId: sessionId, cwd: cwd)
-        req.timeoutInterval = 10
-        Task.detached { _ = try? await URLSession.shared.data(for: req) }
     }
 
     /// The most recently-created live session rooted in `cwd`, if any. Used to find
@@ -5551,9 +5538,12 @@ final class AppModel {
             workAtRiskNotices.removeAll { $0.sessionId == meta.id }
             workAtRiskNotices.append(WorkAtRiskNotice(
                 sessionId: meta.id, title: meta.title, path: risk.path, createdAt: nowMs()))
-            postNotificationWebhook(event: .workAtRisk, title: meta.title,
-                                    sessionId: meta.id, cwd: risk.path)
             raised = true
+            // In-app only for now. The webhook leg of this moved to the daemon with
+            // the other two events, and the daemon cannot raise this one until the
+            // detector behind it is ported (juancode-52e8.14.5 owns WorkAtRisk) — so
+            // a `work_at_risk` POST is the one thing the move costs, and it is tracked
+            // rather than forked back into this process.
         }
         if raised { NSApp.requestUserAttention(.informationalRequest) }
     }

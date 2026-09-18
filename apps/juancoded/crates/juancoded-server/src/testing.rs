@@ -97,6 +97,12 @@ impl FakeChild {
     pub fn api(self: &Arc<Self>) -> Arc<dyn SessionsApi> {
         self.clone()
     }
+
+    /// Put an event on this fake's bus, for the watchers that key on one rather than
+    /// on bytes. Ignores "nobody is listening", like every publisher in the registry.
+    pub fn publish(&self, event: SessionEvent) {
+        let _ = self.events.send(event);
+    }
 }
 
 impl SessionsApi for FakeChild {
