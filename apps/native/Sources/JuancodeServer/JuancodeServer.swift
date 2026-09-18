@@ -171,6 +171,32 @@ public enum JuancodeServer {
             return Response(status: .noContent)
         }
 
+        // Block until the session's screen shows `text`, or its pty output has been
+        // quiet for `idleMs` (juancode-9umy) — the primitive that replaces
+        // sleep-and-poll for anything scripted against a session. Long-polls up to
+        // `timeoutMs` (durations may also be spelled "500ms"/"2s"/"1m"/"4h"/"1d").
+        // The four outcomes are an enum in the body, never a message to match on;
+        // a 404 carries `outcome: "session_gone"` in the same shape.
+        router.post("/api/sessions/:id/wait") { req, ctx in
+            let id = try param(ctx, "id")
+            let body = (try? await req.decode(as: WaitBody.self, context: ctx)) ?? WaitBody()
+            let wait: SessionWaitRequest
+            switch SessionWaitParse.request(text: body.text, idleMs: body.idleMs, idle: body.idle,
+                                            timeoutMs: body.timeoutMs, timeout: body.timeout) {
+            case .failure(let bad): throw APIError(.badRequest, bad.reason)
+            case .success(let request): wait = request
+            }
+            guard let session = state.registry.get(id) else {
+                let gone = store.get(id) == nil
+                return jsonResponse(WaitResponse(outcome: gone ? .sessionGone : .sessionExited, waitedMs: 0),
+                                    status: gone ? .notFound : .ok)
+            }
+            let startedMs = nowMs()
+            let outcome = await SessionWait.run(condition: wait.condition, timeoutMs: wait.timeoutMs,
+                                                probe: session.waitProbe)
+            return jsonResponse(WaitResponse(outcome: outcome, waitedMs: nowMs() - startedMs))
+        }
+
         // Permanently delete a session: kill its pty, drop from sqlite, remove
         // its auto-created worktree (best-effort).
         router.delete("/api/sessions/:id") { _, ctx in
@@ -521,6 +547,18 @@ struct CommitBody: Decodable { let message: String; let cwd: String? }
 struct PrBody: Decodable { let title: String; let body: String?; let draft: Bool?; let cwd: String? }
 struct CommentBody: Decodable { let file: String; let side: String; let line: Int; let endLine: Int?; let body: String }
 struct PrWebhookBody: Decodable { let repo: String; let number: Int }
+
+/// Body of `POST /api/sessions/:id/wait` (juancode-9umy). `idle`/`timeout` are the
+/// string duration spellings of `idleMs`/`timeoutMs`; all fields are optional so a
+/// malformed body fails the same validation as an empty one.
+struct WaitBody: Decodable {
+    var text: String?
+    var idleMs: Int?
+    var idle: String?
+    var timeoutMs: Int?
+    var timeout: String?
+}
+struct WaitResponse: Encodable { let outcome: SessionWaitOutcome; let waitedMs: Int }
 
 /// Body of `POST /api/tracked-prs`: the project's absolute path + PR number.
 struct TrackPrBody: Decodable { let cwd: String; let number: Int }

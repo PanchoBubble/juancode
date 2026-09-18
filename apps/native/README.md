@@ -164,6 +164,27 @@ subscriber to the same registry (no WS hop).
 and used directly as the `PersistentStore` for queries), the `SessionRegistry`
 (built with `SessionEnvironment.live`), and the ephemeral editor/terminal ptys.
 
+### `POST /api/sessions/:id/wait` — block on a condition (`juancode-9umy`)
+
+The primitive that replaces sleep-and-poll for anything scripted against a
+session. Body: `{"text": "..."} | {"idleMs": 2000}` (mutually exclusive), plus an
+optional `timeoutMs` — `idle`/`timeout` take the string spellings `500ms`, `2s`,
+`1m`, `4h`, `1d`; the default bound is 30s and the ceiling is 1d.
+
+```
+curl -XPOST localhost:4280/api/sessions/$ID/wait -d '{"text":"esc to interrupt","timeout":"2m"}'
+{"outcome":"matched","waitedMs":4210}
+```
+
+`outcome` is one of `matched`, `timed_out`, `session_exited`, `session_gone` —
+four cases a caller branches on without matching a message (a `session_gone`
+answer also carries HTTP 404). Text is matched on `SessionTerminalModel`'s parsed
+grid, both as separate lines and flowed back at full width, so a line the
+terminal wrapped still matches and no escape sequence can split one; rows that
+scrolled off between polls are searched too. `idleMs` means no pty output for
+that window — deliberately NOT the provider heuristic (`ActivityDetector`), which
+answers a different question.
+
 ## `JuancodeApp` — the SwiftUI shell (`juancode-u34.4`)
 
 The native app (`swift run juancode`): the local shell AND the host of the
