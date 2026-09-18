@@ -50,27 +50,16 @@ struct RootView: View {
         // Worktrees live in the window toolbar — reachable from any session.
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                // How much is actually running, with the list (and a kill for each
-                // one) behind a click. Took the core pill's slot; the core moved
-                // into this popover's footer (juancode-52e8.2).
+                // Three items, and each one owns a whole family: how much is
+                // running (with the list, a kill for each, the global pause and the
+                // core's health behind a click), what wants your attention, and the
+                // utilities. Everything else moved — Keep Awake / Recurring Tasks /
+                // Worktrees / Kill Port / MCP status / AI settings into Tools; Open in
+                // Editor into the session-row hover menu; Tracked Issues into the
+                // sidebar; Appearance into the ⌘, Settings window. The Oracle has the
+                // right-edge rail and ⌃Space, so it does not need a slot here too.
                 RunningSessionsBadge()
-                // Slimmed top bar (juancode-v4ep): notifications, the Oracle AI, an
-                // AI-settings prompt, and a Tools popover. Everything else moved —
-                // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP status
-                // into Tools; Open in Editor into the session-row hover menu; Tracked Issues into
-                // the sidebar; Appearance into the ⌘, Settings window.
                 NotificationsBell()
-                GlobalPauseButton()
-                Button { oracle.open(tab: .chat) } label: {
-                    Label("Oracle", systemImage: "sparkles")
-                }
-                .help("Oracle — global orchestration (⌃Space)")
-                .clickCursor()
-                Button { model.showingSettingsAI = true } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .help("Ask AI to change your settings")
-                .clickCursor()
                 ToolsMenu()
             }
         }
@@ -374,68 +363,6 @@ enum SessionFacet: String, CaseIterable, Identifiable {
 /// listing every session with a pending turn-end notification. Clicking a row jumps
 /// to that session (which clears its unread). Hidden-from-sidebar Oracle sessions are
 /// excluded — the Oracle dock clears those itself.
-/// Global pause / play (juancode): one button that sleeps every live agent and
-/// brings the same set back.
-///
-/// Pause is the existing per-session sleep applied to all of them, so it genuinely
-/// returns the RAM — the reason to reach for it is usually memory pressure or
-/// walking away. Play resumes each conversation with `--resume`, which is a reload,
-/// not a continuation of the turn that was in flight, so the confirmation says so
-/// rather than letting the pause look free.
-private struct GlobalPauseButton: View {
-    @Environment(AppModel.self) private var model
-    @State private var confirming = false
-
-    /// Live agents a pause would sleep right now, and how many are mid-turn. Both
-    /// come off the model's projection rather than a filter over every session here:
-    /// a toolbar body that read each session's activity would re-render on every
-    /// keystroke echo anywhere in the app (juancode-2n0). Zero pausable means there
-    /// is nothing to pause, and the button goes quiet rather than pretending
-    /// otherwise.
-    private var pausable: Int { model.runningSessionCount }
-    private var busy: Int { model.busySessionCount }
-
-    /// The number on the button: what a pause would stop, or — once paused — what a
-    /// play would bring back, so the badge never goes blank while the pause holds.
-    private var badge: Int { model.isGloballyPaused ? model.pausedSessionCount : pausable }
-
-    var body: some View {
-        Button {
-            if model.isGloballyPaused { model.resumeAllSessions() } else { confirming = true }
-        } label: {
-            // A plain Label would render icon-only in the toolbar, so the count is its
-            // own view next to the glyph.
-            HStack(spacing: 3) {
-                Image(systemName: model.isGloballyPaused ? "play.circle.fill" : "pause.circle")
-                if badge > 0 {
-                    Text("\(badge)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                }
-            }
-            .accessibilityLabel(model.isGloballyPaused
-                                ? "Resume All, \(badge) paused"
-                                : "Pause All, \(pausable) running")
-        }
-        .disabled(!model.isGloballyPaused && pausable == 0)
-        // Orange while paused; while running, orange only when an agent is actually
-        // working, so the count reads at a glance as "something is still going".
-        .foregroundStyle(model.isGloballyPaused || busy > 0 ? Color.orange : Color.primary)
-        .help(model.isGloballyPaused
-              ? "Resume the \(model.pausedSessionCount) session(s) the pause put to sleep"
-              : "Pause all — sleep \(pausable) running session(s) "
-                + "(\(busy) working right now) and free their memory")
-        .clickCursor()
-        .confirmationDialog("Pause \(pausable) running session(s)?",
-                            isPresented: $confirming, titleVisibility: .visible) {
-            Button("Pause All") { model.pauseAllSessions() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Each agent is stopped and its memory freed. Resume reloads the "
-                 + "conversation with --resume, so a turn that is mid-flight now is lost.")
-        }
-    }
-}
-
 private struct NotificationsBell: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
@@ -557,9 +484,10 @@ private struct NotificationsBell: View {
 }
 
 /// Top-bar "Tools" popover (juancode-v4ep): the utilities that used to be their own
-/// toolbar buttons — Keep Awake, Recurring Tasks, Worktrees, Kill Port, and Auth &
-/// MCP status. The wrench icon turns orange when a worktree holds at-risk work, so
-/// the old worktree warning stays visible at a glance without opening the popover.
+/// toolbar buttons — Keep Awake, Recurring Tasks, Worktrees, Kill Port, Auth & MCP
+/// status, and the AI-settings prompt. The wrench icon turns orange when a worktree
+/// holds at-risk work, so the old worktree warning stays visible at a glance without
+/// opening the popover.
 private struct ToolsMenu: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
@@ -577,7 +505,7 @@ private struct ToolsMenu: View {
         .foregroundStyle(atRisk ? Color.orange : Color.primary)
         .help(atRisk
               ? "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work"
-              : "Tools — keep awake, recurring tasks, worktrees, kill port, MCP status")
+              : "Tools — keep awake, recurring tasks, worktrees, kill port, MCP status, settings")
         .clickCursor()
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
@@ -611,6 +539,11 @@ private struct ToolsMenu: View {
                 }
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
+                Divider().padding(.vertical, 2)
+                // The gear had its own toolbar slot for one sheet; it is an ordinary
+                // tool. ⌘, opens the real Settings window, which is a separate thing.
+                toolButton("gearshape", "Settings") { model.showingSettingsAI = true }
+                    .help("Ask AI to change your settings")
             }
             .padding(6)
             .frame(width: 240)

@@ -1,5 +1,10 @@
-// The toolbar's running-sessions badge: how many agents are alive right now, and
-// the list behind it, with a kill for each one.
+// The toolbar's running-sessions badge: how many agents are alive right now, the
+// list behind it with a kill for each one, and the global pause on top of that list.
+//
+// The pause used to be its own toolbar button next to this one, reading the same
+// count off the same projection and drawing it in a second glyph. It is one control
+// now: the number here is what a pause would sleep, and once the pause holds it is
+// what a resume would bring back.
 //
 // It stands where the core pill used to (juancode). The pill was a permanent
 // answer to a question asked about once a week — which core produced this window —
@@ -14,6 +19,9 @@ import JuancodeCore
 struct RunningSessionsBadge: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
+    /// The pause confirmation. It lives here rather than on the popover row so the
+    /// dialog survives the popover closing underneath it.
+    @State private var confirmingPause = false
 
     /// Live agents, and how many are mid-turn. Both come off the model's
     /// projection: a toolbar body that filtered sessions itself would re-render on
@@ -27,6 +35,17 @@ struct RunningSessionsBadge: View {
     private var running: Int { model.runningSessionCount }
     private var busy: Int { model.busySessionCount }
 
+    /// The global pause, folded in from the toolbar button that used to sit next to
+    /// this one showing the same number in a second glyph. While it holds there is
+    /// nothing running, so the badge speaks for the sleeping set instead: the count
+    /// becomes what a resume would bring back, not a zero.
+    private var paused: Bool { model.isGloballyPaused }
+    private var pausedCount: Int { model.pausedSessionCount }
+
+    /// What the badge counts: the live agents, or — under a global pause — the ones
+    /// asleep waiting for the resume.
+    private var badgeCount: Int { paused ? pausedCount : running }
+
     /// The core's own health still owns the colour when something is wrong with it —
     /// a stale daemon mirroring a two-hour-old core has to stay visible now that the
     /// pill is gone.
@@ -36,28 +55,50 @@ struct RunningSessionsBadge: View {
     private var tint: Color {
         if coreDown { return .red }
         if coreStale { return .yellow }
-        return busy > 0 ? .orange : .primary
+        return paused || busy > 0 ? .orange : .primary
+    }
+
+    /// Core health outranks the pause: a daemon that has gone stale or unreachable
+    /// has to stay visible even while everything is asleep, so it keeps the glyph.
+    private var glyph: String {
+        if coreDown || coreStale { return "exclamationmark.triangle.fill" }
+        if paused { return "pause.circle.fill" }
+        return busy > 0 ? "bolt.horizontal.circle.fill" : "bolt.horizontal.circle"
+    }
+
+    private var badgeLabel: String {
+        paused
+            ? "\(pausedCount) paused session(s), all agents asleep"
+            : "\(running) running session(s), \(busy) working"
     }
 
     var body: some View {
         Button { showing = true } label: {
             HStack(spacing: 3) {
-                Image(systemName: coreDown || coreStale
-                      ? "exclamationmark.triangle.fill"
-                      : (busy > 0 ? "bolt.horizontal.circle.fill" : "bolt.horizontal.circle"))
-                Text("\(running)")
+                Image(systemName: glyph)
+                Text("\(badgeCount)")
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
             }
-            .accessibilityLabel("\(running) running session(s), \(busy) working")
+            .accessibilityLabel(badgeLabel)
         }
         .foregroundStyle(tint)
         .help(helpText)
         .clickCursor()
+        .confirmationDialog("Pause \(running) running session(s)?",
+                            isPresented: $confirmingPause, titleVisibility: .visible) {
+            Button("Pause All") { model.pauseAllSessions() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Each agent is stopped and its memory freed. Resume reloads the "
+                 + "conversation with --resume, so a turn that is mid-flight now is lost.")
+        }
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
+                pauseRow
+                Divider().padding(.vertical, 2)
                 header
                 if model.runningSessionMetas.isEmpty {
-                    Text("Nothing running.")
+                    Text(paused ? "All asleep — resume brings them back." : "Nothing running.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                         .padding(.horizontal, 10).padding(.bottom, 8)
                 } else {
@@ -71,6 +112,54 @@ struct RunningSessionsBadge: View {
             .frame(width: 300)
             .padding(.bottom, 6)
         }
+    }
+
+    /// The global pause, first thing in the popover.
+    ///
+    /// Pause is the per-session sleep applied to all of them, so it genuinely returns
+    /// the RAM — the reason to reach for it is memory pressure or walking away. It
+    /// asks first, because resume runs `--resume`, a reload rather than a
+    /// continuation of the turn in flight. Resume itself is one click.
+    ///
+    /// With nothing to pause the row goes disabled rather than disappearing, so the
+    /// popover keeps its shape whatever the app is doing.
+    private var pauseRow: some View {
+        Button {
+            showing = false
+            if paused {
+                model.resumeAllSessions()
+            } else {
+                // One runloop turn after the popover closes: a confirmation raised in
+                // the same update as the dismissal can be swallowed by it.
+                DispatchQueue.main.async { confirmingPause = true }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: paused ? "play.circle.fill" : "pause.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(paused ? Color.orange : .secondary)
+                    .frame(width: 18)
+                Text(paused ? "Resume (\(pausedCount))" : "Pause all (\(running))")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer(minLength: 8)
+                if !paused, busy > 0 {
+                    Text("\(busy) working")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .accessibilityLabel(paused
+                                ? "Resume All, \(pausedCount) paused"
+                                : "Pause All, \(running) running")
+        }
+        .buttonStyle(.plain)
+        .disabled(!paused && running == 0)
+        .clickCursor()
+        .help(paused
+              ? "Resume the \(pausedCount) session(s) the pause put to sleep"
+              : "Pause all — sleep \(running) running session(s) "
+                + "(\(busy) working right now) and free their memory")
     }
 
     private var header: some View {
@@ -191,7 +280,9 @@ struct RunningSessionsBadge: View {
     }
 
     private var helpText: String {
-        var parts = ["\(running) running session(s), \(busy) working"]
+        var parts = [paused
+                     ? "paused — \(pausedCount) session(s) asleep"
+                     : "\(running) running session(s), \(busy) working"]
         if let down = model.coreConnectionDown { parts.append("core connection down: \(down)") }
         else if coreStale { parts.append("the daemon is stale") }
         return parts.joined(separator: " · ")
