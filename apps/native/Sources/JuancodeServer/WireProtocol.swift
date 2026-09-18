@@ -294,6 +294,15 @@ public enum ServerMessage: Sendable {
     /// see who is driving but not whether that is itself.
     case serverInfo(protocolVersion: Int, capabilities: [String], clientId: String)
     case created(session: SessionMeta)
+    /// The client is now on this session, with the redraw that lands its terminal on
+    /// the session's current screen.
+    ///
+    /// `scrollback` is a string of terminal bytes — the shape it has always had — but
+    /// since juancode-r5cf it is RECONSTRUCTED from parsed VT state rather than
+    /// replayed off the retained byte log, so it is well-formed at any client width
+    /// and carries styles, cursor, screen mode, input modes and window title. See
+    /// `AttachReplay`. Empty for a session created by this same message pair: there
+    /// is nothing to replay yet.
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
     /// A frame of the live rendered-screen stream (juancode-a2h.3), projected from

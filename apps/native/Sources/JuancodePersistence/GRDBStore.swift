@@ -97,6 +97,15 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             if !cols.contains("mid_turn") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN mid_turn INTEGER NOT NULL DEFAULT 0")
             }
+            // The grid the `scrollback` column was PARSED at (juancode-r5cf). 0 means
+            // "never recorded" — a row written before this column existed, which a
+            // reader must treat as unknown rather than as a width.
+            if !cols.contains("scrollback_cols") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN scrollback_cols INTEGER NOT NULL DEFAULT 0")
+            }
+            if !cols.contains("scrollback_rows") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN scrollback_rows INTEGER NOT NULL DEFAULT 0")
+            }
 
             // A covering index over exactly `metaColumns`, so `list()` reads the
             // sidebar's session list straight out of the index and never opens a
@@ -352,6 +361,30 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                 arguments: [text, updatedAt, id]
             )
         }
+    }
+
+    /// Record the grid the stored scrollback was parsed at. Written on the grid's own
+    /// edge (spawn, resize), not per flush — see `SessionStore.setScrollbackGrid`.
+    public func setScrollbackGrid(_ id: String, cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE sessions SET scrollback_cols = ?, scrollback_rows = ? WHERE id = ?",
+                arguments: [cols, rows, id]
+            )
+        }
+    }
+
+    public func getScrollbackGrid(_ id: String) -> (cols: Int, rows: Int)? {
+        try? dbQueue.read { db -> (cols: Int, rows: Int)? in
+            guard let row = try Row.fetchOne(
+                db, sql: "SELECT scrollback_cols, scrollback_rows FROM sessions WHERE id = ?",
+                arguments: [id])
+            else { return nil }
+            let c: Int = row["scrollback_cols"] ?? 0
+            let r: Int = row["scrollback_rows"] ?? 0
+            return c > 0 && r > 0 ? (c, r) : nil
+        } ?? nil
     }
 
     public func setCliSessionId(_ id: String, cliSessionId: String) {

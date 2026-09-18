@@ -92,6 +92,26 @@ final class GRDBStoreTests: XCTestCase {
         XCTAssertEqual(store.getScrollback(m.id), bytes)
     }
 
+    func testScrollbackGridRoundTripsAndIsUnknownUntilRecorded() {
+        // The width the stored bytes were parsed at (juancode-r5cf). A row that never
+        // reported one must read as UNKNOWN, not as a plausible-looking zero — a
+        // reader that invents a width garbles exactly what this exists to prevent.
+        let m = meta()
+        store.insert(m)
+        store.update(m, scrollback: Array("hello".utf8))
+        XCTAssertNil(store.getScrollbackGrid(m.id))
+
+        store.setScrollbackGrid(m.id, cols: 132, rows: 43)
+        let got = store.getScrollbackGrid(m.id)
+        XCTAssertEqual(got?.cols, 132)
+        XCTAssertEqual(got?.rows, 43)
+
+        // A nonsense grid is refused rather than overwriting a real one.
+        store.setScrollbackGrid(m.id, cols: 0, rows: 0)
+        XCTAssertEqual(store.getScrollbackGrid(m.id)?.cols, 132)
+        XCTAssertNil(store.getScrollbackGrid("no-such-session"))
+    }
+
     func testUsageRoundTrips() {
         let usage = SessionUsage(inputTokens: 10, outputTokens: 20, cacheReadTokens: 5,
                                  cacheWriteTokens: 1, totalTokens: 36, costUsd: 0.0123)

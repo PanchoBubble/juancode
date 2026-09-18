@@ -37,6 +37,21 @@ public protocol SessionStore: AnyObject, Sendable {
     /// it must not ride the meta writes (or the wire) that every keystroke can
     /// trigger.
     func setMidTurn(_ id: String, _ midTurn: Bool)
+    /// Record the grid the stored scrollback bytes were PARSED at (juancode-r5cf).
+    /// Without it the log is unreplayable: hard wraps and absolute cursor moves only
+    /// land in the right cell at the width the CLI emitted them for, so a reader that
+    /// does not know that width can only guess — which is the garbling failure.
+    ///
+    /// Written when the grid CHANGES, not alongside every scrollback flush: the grid
+    /// moves on resize, the bytes move constantly, and this must stay off the hot
+    /// output path.
+    func setScrollbackGrid(_ id: String, cols: Int, rows: Int)
+}
+
+public extension SessionStore {
+    /// Default for stores that keep no grid (test doubles that only count writes).
+    /// The real stores — in-memory and GRDB — both implement it.
+    func setScrollbackGrid(_ id: String, cols: Int, rows: Int) {}
 }
 
 /// The full persistence surface the HTTP/WS server needs: the `SessionStore`
@@ -62,6 +77,10 @@ public protocol PersistentStore: SessionStore {
     /// clearing in the same transaction means a marker is consumed exactly once, so
     /// a session that was busy two crashes ago can't keep offering to continue.
     @discardableResult func takeMidTurnIds() -> Set<String>
+    /// The grid `setScrollbackGrid` last recorded for `id`, or nil when the session
+    /// predates the column / never reported one. A reader with no recorded grid must
+    /// say so rather than invent a width (juancode-r5cf).
+    func getScrollbackGrid(_ id: String) -> (cols: Int, rows: Int)?
 
     // inline diff comments
     func addComment(_ c: DiffComment)
@@ -83,6 +102,7 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
     private var comments: [String: [DiffComment]] = [:]
     private var reviews: [String: ReviewResult] = [:]
     private var midTurn: Set<String> = []
+    private var scrollbackGrids: [String: (cols: Int, rows: Int)] = [:]
 
     public init() {}
 
@@ -146,6 +166,15 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         lock.withLock { scrollbacks[id] }
     }
 
+    public func setScrollbackGrid(_ id: String, cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        lock.withLock { scrollbackGrids[id] = (cols, rows) }
+    }
+
+    public func getScrollbackGrid(_ id: String) -> (cols: Int, rows: Int)? {
+        lock.withLock { scrollbackGrids[id] }
+    }
+
     public func setMidTurn(_ id: String, _ midTurn: Bool) {
         lock.withLock {
             if midTurn { self.midTurn.insert(id) } else { self.midTurn.remove(id) }
@@ -192,6 +221,7 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
             comments[id] = nil
             reviews[id] = nil
             scrollbacks[id] = nil
+            scrollbackGrids[id] = nil
             return metas.removeValue(forKey: id) != nil
         }
     }

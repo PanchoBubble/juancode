@@ -173,6 +173,10 @@ public final class Session: @unchecked Sendable {
     private var desiredRows = 0
     /// Backing store for `bootGridSettled`. Guarded by `lock`.
     private var _bootGridSettled = false
+    /// The grid last written to the store as the scrollback's parse width
+    /// (juancode-r5cf), so a resize that changes nothing costs no SQLite write.
+    /// Guarded by `lock`.
+    private var persistedGrid: (cols: Int, rows: Int)?
 
     /// Previous activity, tracked to fire the queue flush on the edge into idle
     /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
@@ -537,6 +541,10 @@ public final class Session: @unchecked Sendable {
             } else {
                 env.store.update(meta, scrollback: scroll.replay)
             }
+            // The spawn grid is the width everything the CLI prints from here is
+            // parsed at, so record it now rather than waiting for a resize that a
+            // headless session may never get (juancode-r5cf).
+            recordScrollbackGrid(cols: cols, rows: rows)
         }
 
         // The transcript-driven machinery below (codex id discovery, title/usage
@@ -1308,7 +1316,27 @@ public final class Session: @unchecked Sendable {
     public func resize(cols: Int, rows: Int) -> Bool {
         let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
         terminalModel.resize(cols: cols, rows: rows)
+        recordScrollbackGrid(cols: cols, rows: rows)
         return applied
+    }
+
+    /// Keep the store's record of the grid the retained scrollback was parsed at in
+    /// step with the model (juancode-r5cf). On the grid's own edge, never per flush:
+    /// the bytes move constantly and the grid almost never does, and a client that
+    /// attaches after the pty is gone can only replay that log at the width it was
+    /// produced for.
+    private func recordScrollbackGrid(cols: Int, rows: Int) {
+        guard persistEnabled, cols > 0, rows > 0 else { return }
+        let changed = lock.withLock { () -> Bool in
+            guard persistedGrid?.cols != cols || persistedGrid?.rows != rows else { return false }
+            persistedGrid = (cols, rows)
+            return true
+        }
+        guard changed else { return }
+        let id = meta.id
+        Self.persistQueue.async { [weak self] in
+            self?.env.store.setScrollbackGrid(id, cols: cols, rows: rows)
+        }
     }
 
     /// Arbitrated grid resize for a specific client (juancode-1th.1). Only the

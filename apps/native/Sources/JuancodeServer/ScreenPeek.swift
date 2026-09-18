@@ -27,6 +27,10 @@ import JuancodeCore
 /// Best-effort atomicity: the grid and the history tail are two locked reads, so a feed
 /// landing between them can scroll one row across the seam. A snapshot of a live pty is
 /// approximate by nature; this only matters for the boundary row.
+///
+/// The WS attach redraw reads the same model for the same reason — see `AttachReplay`,
+/// which differs only in encoding it as VT bytes (what a terminal client renders)
+/// rather than as styled rows (juancode-r5cf).
 struct ScreenPeek {
     let snapshot: TerminalSnapshot
     /// Scrollback history above the visible grid, oldest first. Empty unless asked for.

@@ -55,6 +55,26 @@ import Testing
 
     private var cwd: String { FileManager.default.temporaryDirectory.path }
 
+    /// The grid the retained scrollback was parsed at is recorded next to it
+    /// (juancode-r5cf) — without it, a client attaching after the pty is gone can
+    /// only guess the width those bytes are readable at. Written on the grid's own
+    /// edge, so a resize that changes nothing costs no write.
+    @Test func spawnAndResizeRecordTheScrollbackParseGrid() async throws {
+        let store = InMemorySessionStore()
+        let reg = SessionRegistry(env: env(script: makeScript("cat\n"), store: store))
+        let s = try reg.create(provider: .claude, cwd: cwd, cols: 100, rows: 30)
+        defer { s.kill() }
+
+        // The store write is queued off the caller's thread.
+        await poll { store.getScrollbackGrid(s.id) != nil }
+        #expect(store.getScrollbackGrid(s.id)?.cols == 100)
+        #expect(store.getScrollbackGrid(s.id)?.rows == 30)
+
+        _ = s.resize(cols: 132, rows: 43)
+        await poll { store.getScrollbackGrid(s.id)?.cols == 132 }
+        #expect(store.getScrollbackGrid(s.id)?.rows == 43)
+    }
+
     @Test func spawnsAndFansOutToManySubscribers() async throws {
         let reg = SessionRegistry(env: env(script: makeScript("printf 'READY\\n'\ncat\n")))
         let s = try reg.create(provider: .codex, cwd: cwd, cols: 80, rows: 24)

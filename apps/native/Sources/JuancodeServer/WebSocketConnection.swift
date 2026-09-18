@@ -275,13 +275,14 @@ final class WebSocketConnection: @unchecked Sendable {
     }
 
     /// Repaint an overflowed session (its incremental output was dropped to keep
-    /// the buffer bounded) by re-sending `attached` with current scrollback. Live
-    /// sessions only — ephemeral editor/terminal ptys have no scrollback to replay,
-    /// so a stalled one simply drops the missed bytes.
+    /// the buffer bounded) by re-sending `attached` with a fresh redraw off the
+    /// session's VT state (juancode-r5cf). Live sessions only — ephemeral
+    /// editor/terminal ptys have no model to replay from, so a stalled one simply
+    /// drops the missed bytes.
     private func resync(_ id: String) {
         guard let live = state.registry.get(id) else { return }
         send(.attached(sessionId: id,
-                       scrollback: String(decoding: live.getScrollback(), as: UTF8.self),
+                       scrollback: AttachReplay.live(live.terminalModel),
                        session: live.meta))
     }
 
@@ -436,14 +437,21 @@ final class WebSocketConnection: @unchecked Sendable {
                 _ = live.resizeGrid(owner: clientId, cols: cols, rows: rows)
                 subscribe(sessionId)
                 send(.attached(sessionId: sessionId,
-                               scrollback: String(decoding: live.getScrollback(), as: UTF8.self),
+                               scrollback: AttachReplay.live(live.terminalModel),
                                session: live.meta))
                 return
             }
             guard let meta = state.store.get(sessionId) else {
                 send(.error(sessionId: sessionId, message: "Session not found")); return
             }
-            let scroll = String(decoding: state.store.getScrollback(sessionId) ?? [], as: UTF8.self)
+            // No live model — its pty is gone. The stored byte log is all there is,
+            // so it is replayed here at the grid the store recorded for it and
+            // re-encoded as a redraw, rather than handed to the client as a log to
+            // parse at whatever width it happens to be (juancode-r5cf).
+            let scroll = AttachReplay.stored(
+                state.store.getScrollback(sessionId) ?? [],
+                parsedAt: state.store.getScrollbackGrid(sessionId),
+                presentedAt: (cols: cols, rows: rows))
             send(.attached(sessionId: sessionId, scrollback: scroll, session: meta))
             send(.exit(sessionId: sessionId, exitCode: meta.exitCode))
 
@@ -462,7 +470,7 @@ final class WebSocketConnection: @unchecked Sendable {
                 let session = revival.session
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
-                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               scrollback: AttachReplay.live(session.terminalModel),
                                session: session.meta))
             case .failure(.unresumable):
                 send(.unresumable(sessionId: sessionId, reason: ReviveFailure.unresumable.message))
@@ -491,7 +499,7 @@ final class WebSocketConnection: @unchecked Sendable {
                 let session = try state.registry.restartFresh(meta, cols: cols, rows: rows)
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
-                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               scrollback: AttachReplay.live(session.terminalModel),
                                session: session.meta))
             } catch {
                 send(.error(sessionId: sessionId,
@@ -513,7 +521,7 @@ final class WebSocketConnection: @unchecked Sendable {
                 send(.created(session: session.meta))
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
-                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               scrollback: AttachReplay.live(session.terminalModel),
                                session: session.meta))
             } catch {
                 send(.error(sessionId: meta.id, message: "Failed to resume: \(errMsg(error))"))
@@ -531,7 +539,7 @@ final class WebSocketConnection: @unchecked Sendable {
                     sessionId, skipPermissions: skip, cols: cols, rows: rows)
                 subscribe(session.id)
                 send(.attached(sessionId: session.id,
-                               scrollback: String(decoding: session.getScrollback(), as: UTF8.self),
+                               scrollback: AttachReplay.live(session.terminalModel),
                                session: session.meta))
             } catch {
                 // Flip failed before killing the pty — re-subscribe to the still-live one.
