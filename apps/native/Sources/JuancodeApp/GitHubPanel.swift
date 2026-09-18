@@ -21,7 +21,10 @@ final class GitHubModel {
     /// PR list, or the selected PR's detail. Full width each — the old side-by-side
     /// split squeezed the detail into whatever a 300pt list left over, and kept a
     /// hundred PR rows on screen when you only wanted the one you're reading.
-    enum Tab: String, CaseIterable { case list, detail }
+    /// `mine` is the viewer queue (your PRs + the reviews you owe, across every
+    /// repo, from one GitHub search); `list` is the folder-grouped list of every
+    /// open PR in the projects juancode has open.
+    enum Tab: String, CaseIterable { case mine, list, detail }
 
     /// Which tab is showing. Lives here (not in the view) so it survives the view
     /// being dismissed and re-opened, like the selection and filters do.
@@ -414,6 +417,11 @@ struct GitHubView: View {
             tabBar
             Divider()
             switch model.github.tab {
+            case .mine:
+                viewerBar
+                Divider()
+                viewerList
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .list:
                 filterBar
                 Divider()
@@ -432,6 +440,12 @@ struct GitHubView: View {
         .onExitCommand {
             if model.github.tab == .detail { model.github.backToList() }
             else { model.showingGitHub = false }
+        }
+        // Opening on the viewer queue (Tools → GitHub) must not show yesterday's
+        // answer: ask for a refresh, which the freshness floor collapses when the
+        // queue is already current.
+        .task(id: model.github.tab) {
+            if model.github.tab == .mine { model.refreshViewerPrs() }
         }
         // Opening with a filter still active (persisted across dismiss/reopen): fold
         // in the matches beyond the newest-100 firehose so the count is right from the
@@ -456,6 +470,9 @@ struct GitHubView: View {
             Button("") { if model.github.selectedKey != nil { model.github.tab = .detail } }
                 .keyboardShortcut("2", modifiers: .command)
                 .opacity(0).frame(width: 0, height: 0)
+            Button("") { model.github.tab = .mine }
+                .keyboardShortcut("3", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0)
         }
     }
 
@@ -465,6 +482,10 @@ struct GitHubView: View {
     /// is noise once you've picked a PR, and the detail wants the whole window.
     private var tabBar: some View {
         HStack(spacing: 6) {
+            tabChip(.mine, icon: "person.crop.circle",
+                    title: "Mine & reviews",
+                    trailing: model.viewerPrCount == 0 ? nil : "\(model.viewerPrCount)",
+                    help: "Your open PRs and the reviews you owe, across every repo (⌘3)")
             tabChip(.list, icon: "list.bullet",
                     title: "Pull requests",
                     trailing: model.github.filterActive ? "\(shownPrTotal)" : "\(scopedPrTotal)",
@@ -740,6 +761,107 @@ struct GitHubView: View {
         Binding(
             get: { model.github.assignedOnly },
             set: { model.github.assignedOnly = $0; model.github.applyFilters(model: model) })
+    }
+
+    // MARK: viewer queue (the "Mine & reviews" tab)
+
+    /// The queue's own status bar: what it holds, when it last landed, and a manual
+    /// refresh. The queue is one GitHub search rather than the folder-by-folder
+    /// `gh pr list` the next tab runs, so its freshness is a single fact and belongs
+    /// here rather than on every row.
+    private var viewerBar: some View {
+        HStack(spacing: 8) {
+            Text(viewerSummary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            if model.viewerPrsLoading {
+                ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 12, height: 12)
+            }
+            Spacer(minLength: 0)
+            Button { model.refreshViewerPrs(force: true) } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh your queue now (at most once a minute)")
+            .clickCursor()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private var viewerSummary: String {
+        let q = model.viewerPrs
+        guard q.available else { return q.error ?? "Loading your queue…" }
+        let needs = model.viewerPrsNeedingYouCount
+        var parts = ["\(q.mine.count) yours", "\(q.reviewing.count) to review"]
+        if needs > 0 { parts.append("\(needs) need\(needs == 1 ? "s" : "") you") }
+        if let at = model.viewerPrsFetchedAt {
+            parts.append("updated \(relativeTime(Int(at.timeIntervalSince1970 * 1000)))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The queue, grouped by repo. Rows in a repo juancode has open render as
+    /// ordinary PR rows — selectable, trackable, with the full detail pane behind
+    /// them. Rows in a repo you have no checkout of still show their checks and open
+    /// on github.com: a PR waiting on your review is worth seeing whether or not you
+    /// happen to have cloned it.
+    private var viewerList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                ForEach(groupViewerPrsByRepo(model.viewerPrs.rows), id: \.repo) { group in
+                    Section {
+                        ForEach(group.rows) { row in
+                            viewerRow(row)
+                            Divider()
+                        }
+                    } header: {
+                        viewerRepoHeader(group.repo, count: group.rows.count)
+                    }
+                }
+                if model.viewerPrs.rows.isEmpty {
+                    Text(model.viewerPrs.available
+                         ? "Nothing on your plate — no open PRs of yours, no reviews waiting."
+                         : (model.viewerPrs.error ?? "Loading your queue…"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(12)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func viewerRow(_ row: ViewerPr) -> some View {
+        let reason = prAttentionReason(row.pr, viewer: model.viewerPrs.viewer)
+        if let cwd = model.folder(forRepo: row.repo) {
+            GitHubPrRow(pr: row.pr, cwd: cwd, reason: reason)
+        } else {
+            ViewerPrRow(row: row, reason: reason)
+        }
+    }
+
+    private func viewerRepoHeader(_ repo: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "book.closed")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(repo.isEmpty ? "unknown repo" : repo)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+            if model.folder(forRepo: repo) == nil {
+                Text("not open here")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .help("No local checkout in juancode — these rows open on github.com")
+            }
+            Spacer(minLength: 4)
+            Text("\(count)")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.appSurface)
     }
 
     // MARK: PR list (the list tab)
@@ -1060,6 +1182,125 @@ private struct GitHubPrRow: View {
         case .reviewRequired, .none:
             EmptyView()
         }
+    }
+
+    private func chip(_ icon: String, _ text: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 8))
+            Text(text).font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 4).padding(.vertical, 1)
+        .background(color.opacity(0.16))
+        .clipShape(Capsule())
+    }
+
+    private var checkColor: Color {
+        switch pr.checks {
+        case .passing: return .green
+        case .failing: return .red
+        case .pending: return .orange
+        case .none: return .secondary
+        }
+    }
+
+    private var checkIcon: String {
+        switch pr.checks {
+        case .passing: return "checkmark.circle.fill"
+        case .failing: return "xmark.circle.fill"
+        case .pending: return "clock.fill"
+        case .none: return "minus.circle"
+        }
+    }
+
+    private var checksText: String {
+        pr.checkCount == 0 ? "No checks" : "\(pr.passedCount)/\(pr.checkCount)"
+    }
+}
+
+/// A queue row for a repo juancode has no checkout of. Same vocabulary as
+/// `GitHubPrRow` — check dot, counts, review verdict, age — minus everything that
+/// needs a working tree: no selection, no detail pane, no tracking (an agent has
+/// nowhere to run). Clicking opens the PR on github.com.
+private struct ViewerPrRow: View {
+    let row: ViewerPr
+    var reason: PrAttentionReason? = nil
+
+    private var pr: PullRequest { row.pr }
+
+    var body: some View {
+        Button { open() } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Circle().fill(checkColor).frame(width: 7, height: 7)
+                    Text("#\(pr.number)").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(pr.title).font(.system(size: 12)).lineLimit(1).help(pr.title)
+                    if pr.draft {
+                        Text("draft")
+                            .font(.system(size: 9))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.2))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .help("Open on github.com")
+                }
+                HStack(spacing: 6) {
+                    if let reason {
+                        Text(reason.rawValue)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.16))
+                            .clipShape(Capsule())
+                    }
+                    HStack(spacing: 3) {
+                        Image(systemName: checkIcon).font(.system(size: 9))
+                        Text(checksText).font(.system(size: 10).monospacedDigit())
+                    }
+                    .foregroundStyle(checkColor)
+                    if pr.unresolvedComments > 0 {
+                        HStack(spacing: 3) {
+                            Image(systemName: "bubble.left.fill").font(.system(size: 8))
+                            Text("\(pr.unresolvedComments)").font(.system(size: 10))
+                        }
+                        .foregroundStyle(.orange)
+                    }
+                    if pr.reviewDecisionKind == .approved {
+                        chip("checkmark.seal.fill", "approved", .green)
+                    } else if pr.reviewDecisionKind == .changesRequested {
+                        chip("arrow.uturn.backward", "changes", .orange)
+                    }
+                    if let age = prAgeLabel(pr.createdAt) {
+                        Text(age)
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .help("Opened \(age) ago by \(pr.author.isEmpty ? "someone" : pr.author)")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 13)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .contextMenu {
+            Button("Open in Browser") { open() }
+            Button("Copy URL") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pr.url, forType: .string)
+            }
+        }
+    }
+
+    private func open() {
+        if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
     }
 
     private func chip(_ icon: String, _ text: String, _ color: Color) -> some View {

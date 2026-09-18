@@ -674,6 +674,7 @@ final class AppModel {
         startHealthLoop() // periodic sweep for dead/stale sessions (juancode-0me pillar 3)
         applyReaperWindow() // the user's idle window (not the boot default) drives the reaper
         startWorkAtRiskLoop() // event-driven dirty/unpushed tracking (juancode-rxu, -78c4)
+        startViewerPrLoop() // your PRs + reviews you owe, for the Tools row's count
         runStoreMaintenance() // reclaim freelist + compact the FTS index (juancode-hv06)
         applyKeepAwake() // honour a persisted "keep awake" state on launch
         // Returning to the app clears the badge for whatever session you land on,
@@ -2243,6 +2244,109 @@ final class AppModel {
     func toggleGitHubView() {
         if showingGitHub && githubScope == nil { showingGitHub = false }
         else { openGitHub(scope: nil) }
+    }
+
+    /// The Tools-menu GitHub row: open the view on the viewer queue (your PRs and
+    /// the reviews you owe, across every repo), unscoped, and kick a refresh if the
+    /// queue has gone stale.
+    func openViewerPrQueue() {
+        github.tab = .mine
+        githubScope = nil
+        showingGitHub = true
+        refreshViewerPrs()
+    }
+
+    // MARK: - viewer PR queue (Tools → GitHub)
+
+    /// Your open PRs plus the reviews you owe, across every repo — one GitHub
+    /// search, not the per-folder `gh pr list` the rest of the view uses.
+    private(set) var viewerPrs = ViewerPrResult(available: false)
+    /// When the queue last landed, nil until the first successful fetch. Drives the
+    /// freshness policy and the "updated …" stamp.
+    private(set) var viewerPrsFetchedAt: Date?
+    /// Set while a queue fetch is in flight, so the tick, the Tools menu and the
+    /// view's refresh button can't stampede one `gh` search into three.
+    private(set) var viewerPrsLoading = false
+    @ObservationIgnored private var viewerPrLoop: Task<Void, Never>?
+
+    /// Rows in the queue — the Tools row's count.
+    var viewerPrCount: Int { viewerPrs.rows.count }
+
+    /// Rows in the queue that actually want something from you, for the Tools row's
+    /// tint (a long queue is not the same as an urgent one).
+    var viewerPrsNeedingYouCount: Int { viewerPrsNeedingYou(viewerPrs) }
+
+    /// Fetch the queue when the freshness policy says it's due. Every trigger goes
+    /// through here — the tick, opening the Tools menu, opening the view — so the
+    /// floor holds across all of them.
+    func refreshViewerPrs(force: Bool = false) {
+        guard !viewerPrsLoading else { return }
+        guard viewerPrRefreshDue(lastFetched: viewerPrsFetchedAt, now: Date(),
+                                 focused: NSApp.isActive, force: force) else { return }
+        viewerPrsLoading = true
+        Task {
+            let result = await Task.detached(priority: .utility) { await getViewerPrs() }.value
+            // A failed search keeps the last good queue on screen rather than
+            // blanking the count on one flaky round trip; the error still lands so
+            // the view can say what went wrong.
+            if result.available || !viewerPrs.available { viewerPrs = result }
+            else { viewerPrs.error = result.error }
+            if result.available { viewerPrsFetchedAt = Date() }
+            viewerPrsLoading = false
+            resolveRepoIdentities()
+        }
+    }
+
+    /// The ticking loop behind the queue. Short tick, cheap body: the policy decides
+    /// whether a fetch actually happens, so regaining focus refreshes within a tick
+    /// instead of at the next background-interval edge.
+    private func startViewerPrLoop() {
+        guard viewerPrLoop == nil else { return }
+        viewerPrLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshViewerPrs()
+                await Nap.duration(.seconds(30))
+            }
+        }
+    }
+
+    /// Repo identity (`owner/name`) per project folder, resolved once per launch.
+    /// This is what maps a queue row — which knows a repo, not a path — back onto a
+    /// local checkout, so a row in a repo you have open gets the full tracked/detail
+    /// path instead of only "open on GitHub".
+    private(set) var repoNwoByCwd: [String: String] = [:]
+    @ObservationIgnored private var repoNwoResolving: Set<String> = []
+
+    /// The local checkout a queue row belongs to, when juancode has one open.
+    /// Answered from the resolved identities, falling back to the repo slug lifted
+    /// from a folder's already-cached PR urls (free, and right whenever that folder
+    /// has any open PR loaded).
+    func folder(forRepo nwo: String) -> String? {
+        let want = nwo.lowercased()
+        guard !want.isEmpty else { return nil }
+        for (cwd, slug) in repoNwoByCwd where slug.lowercased() == want { return cwd }
+        for (cwd, result) in prsByCwd {
+            guard result.available else { continue }
+            for pr in result.prs {
+                guard let slug = repoSlug(fromPrUrl: pr.url) else { continue }
+                if "\(slug.owner)/\(slug.name)".lowercased() == want { return cwd }
+            }
+        }
+        return nil
+    }
+
+    /// Resolve the repo identity of every project folder we don't know yet, one
+    /// `gh repo view` each, once per launch. Kicked when the queue lands — that's
+    /// the only consumer, and doing it then keeps it off the boot path.
+    private func resolveRepoIdentities() {
+        for cwd in githubFolders where repoNwoByCwd[cwd] == nil && !repoNwoResolving.contains(cwd) {
+            repoNwoResolving.insert(cwd)
+            Task {
+                let nwo = await Task.detached(priority: .utility) { await getRepoNwo(cwd) }.value
+                if let nwo { repoNwoByCwd[cwd] = nwo }
+                repoNwoResolving.remove(cwd)
+            }
+        }
     }
 
     /// The per-project GitHub button: open the view scoped to `cwd`, and when
