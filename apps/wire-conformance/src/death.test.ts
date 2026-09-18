@@ -99,6 +99,13 @@ describe("a core that dies mid-run", () => {
     expect(death.afterScenarioId).toBe("02-second");
     expect(death.log).toContain("fake-core: booting");
     expect(death.log).toContain("fake-core: this line is on stderr");
+    // How long it had been up, so a reader can tell a death on a timer from a death
+    // on a bug: the daemon's own lifetime watchdog ends it a fixed grace after its
+    // owner goes, and 120.0s is a very different report from 41.3s.
+    expect(death.upMs).not.toBeNull();
+    expect(death.upMs ?? 0).toBeGreaterThan(0);
+    // SIGKILL writes no crash report, so nothing went looking for one.
+    expect(death.crashReport).toBeNull();
 
     // Once latched, no further scenario pays for a connection attempt.
     expect(driver.calls()).toBe(3);
@@ -117,6 +124,8 @@ describe("a core that dies mid-run", () => {
     expect(md).toContain("## The core died mid-run");
     expect(md).toContain("Died after: 02-second");
     expect(md).toContain("Noticed by: 03-discovers");
+    expect(md).toMatch(/Uptime at death: \d+\.\ds \(exact: node saw the exit\)/);
+    expect(md).not.toContain("### Crash report");
     expect(md).toContain("SIGKILL");
     // The core's own output, in the report, for a death that was not a boot failure.
     expect(md).toContain("fake-core: this line is on stderr");

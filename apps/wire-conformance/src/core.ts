@@ -17,10 +17,19 @@
 // oracle control dir, its own unix socket, and fake provider binaries.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +57,28 @@ export interface CoreDeath {
   signal: string | null;
   /** Tail of the core's stdout+stderr for the whole run, not just boot. */
   log: string;
+  /** How long the core had been up, in ms, or null for a core we did not boot.
+   *
+   *  Here because a death at a round number is a different bug from a death at a
+   *  random one: the daemon's own lifetime watchdog ends it a fixed grace after its
+   *  owner goes (120s by default), a lease or a timer looks the same way, and a
+   *  crash does not. Without this the report says which scenario noticed, which is a
+   *  position in a run and not a duration. Exact when node saw the exit; otherwise it
+   *  is when the harness FOUND the core gone, which the death is at or before. */
+  upMs: number | null;
+  /** The head of the macOS crash report the kernel wrote for this process, or null.
+   *
+   *  The gap it fills: a core that dies on SIGSEGV/SIGABRT prints nothing on its way
+   *  out, so the 64KB ring is empty for exactly the deaths that most need explaining,
+   *  and the backtrace is in a file nobody thought to look in. */
+  crashReport: string | null;
+}
+
+/** A process exit as node saw it, with the clock reading that makes it a duration. */
+interface ExitRecord {
+  code: number | null;
+  signal: string | null;
+  atMs: number;
 }
 
 export interface CoreUnderTest {
@@ -94,6 +125,65 @@ export function makeLogRing(limit = LOG_LIMIT_BYTES): {
     },
     text: () => buf,
   };
+}
+
+/** Where macOS leaves a crash report. Per-user, so no privilege is involved. */
+export const CRASH_REPORT_DIR = join(homedir(), "Library", "Logs", "DiagnosticReports");
+
+/** How much of a crash report to carry. The head, because the exception, the
+ *  termination reason and the faulting thread are at the top of an `.ips` and the
+ *  rest is every other thread's stack. */
+const CRASH_REPORT_CHARS = 6000;
+
+/** The signals that make the kernel write a crash report. SIGKILL and SIGTERM are
+ *  deliberately absent: nothing is written for them, so looking would only ever find
+ *  an unrelated file. */
+const CRASH_SIGNALS = ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS"];
+
+/** The head of the crash report macOS wrote for `exeName` since `sinceMs`, or null.
+ *
+ *  Matched by name and by time, and never by pid: the pid IS in the report body but
+ *  the filename is `<exe>-<date>-<time>.ips`, and reading every report in the
+ *  directory to find one would be reading the developer's other crashes. `sinceMs`
+ *  is the boot time of the core we are asking about, so a report from an earlier run
+ *  of the same binary cannot be picked up as this death's.
+ *
+ *  Best effort by design: ReportCrash writes the file a second or two after the
+ *  process is gone, so a death the suite notices immediately can legitimately find
+ *  nothing here, and the log and exit signal remain the primary evidence. */
+export function findCrashReport(
+  exeName: string,
+  sinceMs: number,
+  dir = CRASH_REPORT_DIR,
+): string | null {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    // No such directory (not macOS, or a sandbox): nothing to report.
+    return null;
+  }
+  const candidates = names
+    .filter((n) => n.startsWith(`${exeName}-`) && n.endsWith(".ips"))
+    .map((n) => {
+      const path = join(dir, n);
+      try {
+        return { path, at: statSync(path).mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter((c): c is { path: string; at: number } => c !== null && c.at >= sinceMs)
+    .sort((a, b) => b.at - a.at);
+  const newest = candidates[0];
+  if (!newest) return null;
+  try {
+    const body = readFileSync(newest.path, "utf8");
+    const head = body.slice(0, CRASH_REPORT_CHARS);
+    return `${newest.path}\n\n${head}${body.length > head.length ? "\n… (truncated)" : ""}`;
+  } catch {
+    return null;
+  }
 }
 
 /** One line naming how a process ended. */
@@ -193,6 +283,45 @@ export function seedPresets(dir: string): string {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "conformance.md"), "PRESET-MARKER-conformance\n", "utf8");
   return dir;
+}
+
+/** The core knobs a run is allowed to inherit from whoever started it. Exactly one,
+ *  and it changes how loud the core is rather than what it does — which is the bar
+ *  for being on this list, because the point of the list below is that a knob a core
+ *  READS is a knob a run must SET. */
+export const CORE_ENV_PASSTHROUGH = ["JUANCODED_LOG"];
+
+/** The parent environment with every core knob removed.
+ *
+ *  A booted core inherits the shell that started the suite, and both cores read a
+ *  pile of `JUANCODE_*` / `JUANCODED_*` variables. Anything this boot does not set
+ *  explicitly therefore arrives from the developer's session, which is the opposite
+ *  of the "its own everything" the boot promises — and several of those knobs are
+ *  not cosmetic:
+ *
+ *    * `JUANCODE_OWNER_PID` arms the Rust daemon's lifetime watchdog. A core that
+ *      reads one ends ITSELF a grace period (120s by default) after that process is
+ *      gone, through the orderly shutdown path — no panic, no crash, no last words,
+ *      just a daemon that stops answering mid-run. That is the exact shape of
+ *      juancode-jyl9, and the variable is in the environment of every agent session
+ *      the launcher's daemon spawned, because a pty child inherits it.
+ *    * `JUANCODE_OPENCODE_DB` points a core at a real opencode store.
+ *    * `JUANCODE_REAP_SWEEP_MS` re-times the reaper the boot deliberately disabled.
+ *
+ *  So the rule is the whole prefix rather than a list of the ones that have bitten:
+ *  a knob added to a core later must not be able to arrive from a developer's shell
+ *  without anybody noticing. `JUANCODE_CONFORMANCE_*` goes too — those are read by
+ *  this process, never by a core. */
+export function isolatedParentEnv(
+  parent: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (value === undefined) continue;
+    if (/^JUANCODED?_/.test(key) && !CORE_ENV_PASSTHROUGH.includes(key)) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /** The environment a booted core runs with. Every knob here exists so the golden
@@ -405,6 +534,11 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
               code: null,
               signal: null,
               log: "",
+              // Somebody else's process: we did not start it, so we cannot say how
+              // long it had been up, and its crash report is not ours to go looking
+              // for under a name we never spawned.
+              upMs: null,
+              crashReport: null,
             };
       },
       stop: async () => {},
@@ -448,10 +582,11 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   const dataDir = mkdtempSync(join(tmpdir(), "juancode-conformance-data-"));
   const oracleDir = mkdtempSync(join(tmpdir(), "juancode-conformance-oracle-"));
   const env = {
-    ...process.env,
+    ...isolatedParentEnv(),
     ...coreEnv(port, dataDir, oracleDir),
     ...recipe.isolation(port, dataDir),
   };
+  const bootedAtMs = Date.now();
   const child: ChildProcess = spawn(exe, [], {
     cwd: dataDir,
     env,
@@ -468,8 +603,8 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
   child.stderr?.on("data", record);
   // A holder rather than a bare `let`: the exit lands on a callback, and the
   // narrowing TypeScript does to a captured `let` would type it away.
-  const state: { exit: { code: number | null; signal: string | null } | null } = { exit: null };
-  child.on("exit", (code, signal) => (state.exit = { code, signal }));
+  const state: { exit: ExitRecord | null } = { exit: null };
+  child.on("exit", (code, signal) => (state.exit = { code, signal, atMs: Date.now() }));
 
   try {
     await waitHealthy(httpBase, 60_000, () =>
@@ -489,28 +624,33 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
     pid: child.pid ?? null,
     log: () => ring.text(),
     death: async () => {
+      // A crash report is only ever looked for when the signal says the kernel
+      // wrote one, so a death by SIGKILL or a clean exit never reads the
+      // developer's crash directory at all.
+      const forensics = (exit: ExitRecord | null, reason: string): CoreDeath => ({
+        reason,
+        code: exit?.code ?? null,
+        signal: exit?.signal ?? null,
+        log: ring.text(),
+        upMs: (exit?.atMs ?? Date.now()) - bootedAtMs,
+        crashReport:
+          exit?.signal && CRASH_SIGNALS.includes(exit.signal)
+            ? findCrashReport(basename(exe), bootedAtMs)
+            : null,
+      });
       const exit = state.exit;
-      if (exit) {
-        return {
-          reason: describeExit(exit.code, exit.signal),
-          code: exit.code,
-          signal: exit.signal,
-          log: ring.text(),
-        };
-      }
+      if (exit) return forensics(exit, describeExit(exit.code, exit.signal));
       // No exit event yet — ask the socket instead. A core that refuses a
       // connection is gone whether or not node has reaped it.
       const why = await confirmUnreachable(httpBase);
       if (why === null) return null;
-      const late = state.exit as { code: number | null; signal: string | null } | null;
-      return {
-        reason: late
+      const late = state.exit as ExitRecord | null;
+      return forensics(
+        late,
+        late
           ? describeExit(late.code, late.signal)
           : `the core stopped answering ${httpBase} (${why})`,
-        code: late?.code ?? null,
-        signal: late?.signal ?? null,
-        log: ring.text(),
-      };
+      );
     },
     stop: async () => {
       if (!state.exit) stopGroup(child);

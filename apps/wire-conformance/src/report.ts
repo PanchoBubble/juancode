@@ -183,7 +183,7 @@ const DEATH_LOG_CHARS = 8000;
  *  reader came for — before this existed, a death left no core log at all. */
 function deathSection(death: CoreDeathRecord): string[] {
   const tail = death.log.length > DEATH_LOG_CHARS ? death.log.slice(-DEATH_LOG_CHARS) : death.log;
-  return [
+  const lines = [
     "## The core died mid-run",
     "",
     "The core process went away while the suite was running, so the scenarios after",
@@ -194,6 +194,7 @@ function deathSection(death: CoreDeathRecord): string[] {
     `- Noticed by: ${death.discoveredBy}`,
     `- How: ${death.reason}`,
     `- Exit status: ${death.code ?? "none"}, signal: ${death.signal ?? "none"}`,
+    `- ${describeUptime(death)}`,
     "",
     "### Core output",
     "",
@@ -202,6 +203,37 @@ function deathSection(death: CoreDeathRecord): string[] {
     "```",
     "",
   ];
+  if (death.crashReport) {
+    lines.push(
+      "### Crash report",
+      "",
+      "The kernel wrote one, which is where the backtrace is: a core that dies on a",
+      "signal prints nothing on its way out, so the output above is empty for exactly",
+      "the deaths that need explaining most.",
+      "",
+      "```",
+      death.crashReport.trimEnd(),
+      "```",
+      "",
+    );
+  }
+  return lines;
+}
+
+/** The uptime line: how long the core had been running, and how firm that is.
+ *
+ *  Worth a sentence rather than a number because the two cases are different
+ *  evidence. An exit node SAW is the moment the process ended; without one, all the
+ *  harness knows is when it found the socket refusing, and the death is at or before
+ *  that. A run comparing a death against a fixed grace period (the daemon's own
+ *  lifetime watchdog ends it 120s after its owner goes) needs to know which it has. */
+function describeUptime(death: CoreDeathRecord): string {
+  if (death.upMs === null) return "Uptime at death: unknown (this run did not boot the core)";
+  const secs = (death.upMs / 1000).toFixed(1);
+  const sawExit = death.code !== null || death.signal !== null;
+  return sawExit
+    ? `Uptime at death: ${secs}s (exact: node saw the exit)`
+    : `Uptime when found gone: ${secs}s (the exit was never seen, so the death is at or before this)`;
 }
 
 export function renderRunMarkdown(report: RunReport, at: string): string {

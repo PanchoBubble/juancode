@@ -162,3 +162,51 @@ describe("what a run report says about repetition", () => {
     expect(md).toContain("- tracked-prs: NO (1/3) - tracked PRs");
   });
 });
+
+describe("what a mid-run death reports beyond the core's own log", () => {
+  const report = (over: Partial<RunReport["coreDeath"]> = {}): RunReport => ({
+    core: "rust",
+    url: "ws://127.0.0.1:4295/ws",
+    specRevision: "1.15.0",
+    protocolVersion: 1,
+    capabilities: [],
+    repeat: 1,
+    outcomes: [{ status: "unmeasured", scenarioId: "queue-edit", reason: "the core was gone" }],
+    coreDeath: {
+      reason: "the core was killed by SIGSEGV",
+      code: null,
+      signal: "SIGSEGV",
+      log: "",
+      upMs: 41_300,
+      crashReport: null,
+      afterScenarioId: "transcript",
+      discoveredBy: "queue-edit",
+      ...over,
+    },
+  });
+
+  it("says how long the core had been up, because a death on a timer is a different bug", () => {
+    expect(renderRunMarkdown(report(), "2026-09-18")).toContain(
+      "Uptime at death: 41.3s (exact: node saw the exit)",
+    );
+  });
+
+  it("says so when it only knows when the core was FOUND gone", () => {
+    const md = renderRunMarkdown(report({ code: null, signal: null, upMs: 120_400 }), "2026-09-18");
+    expect(md).toContain("Uptime when found gone: 120.4s");
+    expect(md).toContain("at or before this");
+  });
+
+  it("carries the crash report, which is the only evidence a signal death leaves", () => {
+    const md = renderRunMarkdown(
+      report({ crashReport: "/tmp/juancoded-2026-09-18.ips\n\nEXC_BAD_ACCESS (SIGSEGV)" }),
+      "2026-09-18",
+    );
+    expect(md).toContain("### Crash report");
+    expect(md).toContain("EXC_BAD_ACCESS (SIGSEGV)");
+  });
+
+  it("has no crash section when the kernel wrote none", () => {
+    expect(renderRunMarkdown(report(), "2026-09-18")).not.toContain("### Crash report");
+  });
+});

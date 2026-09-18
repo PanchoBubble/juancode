@@ -7,12 +7,22 @@
 //
 // It prints on both streams at boot, deliberately: the thing under test is
 // whether the harness still has that output in hand after the process is gone.
+//
+// It also prints the core knobs it was handed, because "which JUANCODE_* variables
+// reach a booted core" is itself a thing the harness has to be able to assert: a
+// leaked JUANCODE_OWNER_PID arms the real daemon's lifetime watchdog and makes it
+// end itself mid-run.
 
 import { createServer } from "node:http";
 
 const port = Number(process.env.JUANCODE_PORT ?? process.env.JUANCODED_PORT ?? 0);
 
+const knobs = Object.keys(process.env)
+  .filter((k) => /^JUANCODED?_/.test(k))
+  .sort();
+
 console.log("fake-core: booting");
+console.log(`fake-core: core env ${knobs.join(",") || "(none)"}`);
 console.error("fake-core: this line is on stderr");
 
 const server = createServer((req, res) => {

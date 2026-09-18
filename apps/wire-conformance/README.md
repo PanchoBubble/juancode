@@ -148,6 +148,23 @@ it: the Rust daemon takes its port from `JUANCODED_PORT` and its socket from
 silently land on the default 4290 and take the developer's own socket away from
 their daemon.
 
+**A booted core inherits no `JUANCODE_*` / `JUANCODED_*` variable it was not
+handed.** The boot strips the whole prefix out of the parent environment before
+applying its own (`isolatedParentEnv`), keeping only `JUANCODED_LOG`, which
+changes how loud a core is and nothing else. The prefix rather than a list of the
+ones that have bitten, because a knob added to a core later must not be able to
+arrive from a developer's shell without anybody noticing.
+
+The one that made this a rule: `JUANCODE_OWNER_PID` arms the Rust daemon's
+lifetime watchdog, and a core that reads one ends **itself** a grace period (120s
+by default) after that process is gone — through the orderly shutdown path, so it
+exits 0 with no panic and no crash report, and every later scenario sees
+`ECONNREFUSED`. That variable is in the environment of every agent session a
+launcher-owned daemon spawned, because a pty child inherits it, so a suite run
+inside one used to boot a core owned by the developer's launcher. Measured
+2026-09-18 against `juancoded` with a six-second grace: owner killed, daemon gone
+seven seconds later, exit status 0.
+
 ## Ids, and why a second run does not collide
 
 A scenario claims ids inside the core that outlive the scenario: a dispatch id it
