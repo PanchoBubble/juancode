@@ -47,7 +47,7 @@ use juancoded_core::usage::UsageFold;
 use juancoded_core::worktree;
 use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
-use juancoded_vt::Snapshot;
+use juancoded_vt::{ScreenPeek, Snapshot};
 
 use crate::grid::{ClientId, GridState, ResizeOutcome};
 use crate::reaper::ReapProbe;
@@ -580,6 +580,19 @@ impl SessionRegistry {
         let live = self.get(id)?;
         self.ensure_replay_grid(id, &live);
         self.inner.terminal.snapshot(id)
+    }
+
+    /// The session's rendered screen plus `scrollback_rows` of the history above it
+    /// and the window title the CLI set — the one-shot read behind
+    /// `GET /api/sessions/:id/screen`.
+    ///
+    /// Same replay guarantee as [`Self::snapshot`]: a dead session's grid is rebuilt
+    /// from its persisted bytes at the grid they were WRITTEN at, so the history rows
+    /// are laid out at the width the CLI used rather than at whatever a reader guessed.
+    pub fn peek(&self, id: &str, scrollback_rows: usize) -> Option<ScreenPeek> {
+        let live = self.get(id)?;
+        self.ensure_replay_grid(id, &live);
+        self.inner.terminal.peek(id, scrollback_rows)
     }
 
     /// Sessions whose history mentions `query`, newest first — the answer to a

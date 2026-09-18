@@ -1,0 +1,157 @@
+{
+  "id": "named-keys",
+  "title": "named control keys reach the pty raw",
+  "asserts": "a `key` frame resolves NAMES to bytes in the core and writes them to the pty without bracketed paste, which is what makes them keystrokes rather than text: a Backspace erases the character before it and an Enter submits the line, so the title the stand-in then sets is proof both bytes were read by the line discipline and neither was pasted. An unknown name is refused with an `error` and writes NOTHING - the failure the frame exists to prevent is the word \"Escape\" landing in an agent's prompt box - and a key is never worth reviving a dead session for. And a C-c is a SIGNAL, not a byte that gets echoed: the child takes SIGINT and the core reports the exit, which is the half a core can pass the rest of this scenario while silently failing (juancode-toew).",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "namedKeys",
+    "sessionMeta",
+    "inputAck"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE keys-landedX"
+      },
+      "note": "no trailing newline, and one character too many"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Backspace"
+        ],
+        "seq": 1
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 1
+      },
+      "note": "a sequenced key acks like a sequenced input"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Enter"
+        ],
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "inputAck",
+        "sessionId": "$session",
+        "seq": 2
+      }
+    },
+    {
+      "expect": {
+        "type": "sessionMeta",
+        "sessionId": "$session",
+        "session": {
+          "title": "keys-landed"
+        }
+      },
+      "timeoutMs": 40000,
+      "note": "the X is gone and the line ran, so 0x7f was ERASE and 0x0d was a carriage return - not the words Backspace and Enter typed into the line"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "Up",
+          "Excape",
+          "Enter"
+        ]
+      },
+      "note": "one bad name in a batch, which refuses the whole batch"
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "$session",
+        "message": {
+          "$contains": "Unknown key"
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "conformance-missing",
+        "keys": [
+          "Escape"
+        ]
+      }
+    },
+    {
+      "expect": {
+        "type": "error",
+        "sessionId": "conformance-missing",
+        "message": {
+          "$contains": "not running"
+        }
+      },
+      "note": "unlike an `input`, which revives a dead session to deliver a message: there is no prompt in a fresh process for a keystroke to answer"
+    },
+    {
+      "send": {
+        "type": "key",
+        "sessionId": "$session",
+        "keys": [
+          "C-c"
+        ]
+      },
+      "note": "last, because it is meant to end the session"
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session",
+        "exitCode": -1
+      },
+      "timeoutMs": 15000,
+      "note": "0x03 was INTR for the child's foreground group, not a character it read. exitCode -1 is the wire's \"a signal took it\" - an exit code of its own would mean the shell read the byte and fell out of its loop. The assertion this scenario was shipped without: both cores echoed the ^C, and only one of them delivered the signal, because a SIG_IGN the server installed for its own shutdown was inherited through exec into every pty child (juancode-toew)."
+    }
+  ]
+}

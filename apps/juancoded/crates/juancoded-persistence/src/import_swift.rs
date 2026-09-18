@@ -24,9 +24,12 @@
 //!    and must never write there.
 //!
 //! What does NOT come across, and why: the Swift store's `diff_comments`,
-//! `diff_reviews` and `message_queue`. The first two are an app-side review cache with
-//! no table on this side, and a queue belongs to a session somebody is still steering —
-//! every row being imported here exited months ago.
+//! `diff_reviews` and `message_queue`. All three belong to a session somebody is still
+//! working in, and every row being imported here exited months ago: a staged diff
+//! comment names a line in a tree that has moved on, a cached review is a verdict on a
+//! diff nobody can see, and a queued message is steering for a conversation that ended.
+//! This side does now have `diff_comments` and `diff_reviews` tables
+//! (juancode-52e8.14.6) — they are simply not what an import of dead sessions is for.
 
 use std::path::Path;
 

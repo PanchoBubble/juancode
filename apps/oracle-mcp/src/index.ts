@@ -36,6 +36,7 @@ import {
   oracleChat,
   oracleChatStream,
   resetChat,
+  sendKeys,
 } from "./oracle.ts";
 import {
   digest,
@@ -57,10 +58,20 @@ import {
 } from "./observer-trigger.ts";
 import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
+import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
-import { startActivityListener } from "./native-events.ts";
+import {
+  heavyCancel,
+  heavyMoveToFrontPriority,
+  heavyQueue,
+  heavySetPriority,
+  heavySetSlots,
+  startActivityListener,
+  subscribeHeavyQueue,
+  supportsHeavyQueue,
+} from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
@@ -330,6 +341,36 @@ function buildServer(): McpServer {
   );
 
   server.registerTool(
+    "oracle_session_keys",
+    {
+      title: "Send control keys to a session",
+      description:
+        "Press named control keys in a running agent session's terminal — Escape to interrupt a turn, C-c to signal the CLI, Up/Down + Enter to answer a permission prompt. Unlike a reply, which is pasted as literal text, these arrive as real keystrokes. Use this when asked to 'interrupt', 'stop', 'escape', 'press ctrl-c', or to pick an option in a prompt. The native app must be running. Known keys: " +
+        KEY_NAMES.join(", "),
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id to send keys to (from oracle_list_sessions)"),
+        keys: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Key names, pressed in this order, e.g. [\"Down\", \"Enter\"]"),
+      },
+    },
+    async (args) => {
+      const bad = unknownKey(args.keys);
+      if (bad !== null) return fail(unknownKeyMessage(bad));
+      try {
+        await sendKeys(args.sessionId, args.keys);
+        return ok(`Sent ${args.keys.join(", ")} to session ${args.sessionId}.`);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
     "oracle_observe_session",
     {
       title: "Observe a session (Telegram alerts)",
@@ -540,6 +581,68 @@ app.post("/api/sessions/delete", async (req: Request, res: Response) => {
   } catch (e) {
     sendErr(res, e);
   }
+});
+
+// ── Heavy queue ──────────────────────────────────────────────────────────────
+// The phone's view of the global `heavy` slot queue. The core owns the registry and
+// pushes the whole queue, so the first GET subscribes and later ones read the frame
+// the core has already sent — no polling of anything on disk from here.
+
+app.get("/api/heavy", (_req: Request, res: Response) => {
+  if (!supportsHeavyQueue()) {
+    res.json({ supported: false, queue: null });
+    return;
+  }
+  subscribeHeavyQueue();
+  res.json({ supported: true, queue: heavyQueue() });
+});
+
+app.post("/api/heavy/priority", (req: Request, res: Response) => {
+  const { pid, prio, front } = req.body ?? {};
+  if (typeof pid !== "number") {
+    res.status(400).send("pid is required");
+    return;
+  }
+  const queue = heavyQueue();
+  // `front: true` is "run this next" without the phone having to know the
+  // arithmetic; an explicit `prio` wins when a caller has its own number.
+  const target =
+    typeof prio === "number" ? prio : front && queue ? heavyMoveToFrontPriority(queue) : null;
+  if (target === null) {
+    res.status(400).send("prio or front is required");
+    return;
+  }
+  if (!heavySetPriority(pid, target)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true, prio: target });
+});
+
+app.post("/api/heavy/slots", (req: Request, res: Response) => {
+  const slots = (req.body ?? {}).slots;
+  if (typeof slots !== "number" || slots < 1) {
+    res.status(400).send("slots must be a number >= 1");
+    return;
+  }
+  if (!heavySetSlots(slots)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/heavy/cancel", (req: Request, res: Response) => {
+  const pid = (req.body ?? {}).pid;
+  if (typeof pid !== "number") {
+    res.status(400).send("pid is required");
+    return;
+  }
+  if (!heavyCancel(pid)) {
+    res.status(501).send("this core has no heavy queue");
+    return;
+  }
+  res.json({ ok: true });
 });
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {
@@ -767,6 +870,38 @@ app.post("/api/reply", async (req: Request, res: Response) => {
       return;
     }
     await deliverReply(sessionId, text);
+    res.json({ ok: true });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Send named control keys into a live session's pty (juancode-uigs) — Esc, Ctrl-C, an
+// arrow. Separate from /api/reply because that path bracketed-pastes its text, and a
+// paste is literal by definition: this is the route that can interrupt a runaway agent
+// or answer a permission prompt, which claude drives with arrows + Enter. Accepts
+// `keys: string[]` (or a single `key`); an unknown name is a 400 naming the vocabulary
+// rather than text typed into the agent's prompt box.
+app.post("/api/keys", async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const sessionId = body.sessionId;
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    const raw: unknown[] = Array.isArray(body.keys) ? body.keys : [body.key];
+    const keys = raw.filter((k): k is string => typeof k === "string" && k.trim().length > 0);
+    if (keys.length === 0) {
+      res.status(400).send("keys (a non-empty string array) or key is required");
+      return;
+    }
+    const bad = unknownKey(keys);
+    if (bad !== null) {
+      res.status(400).send(unknownKeyMessage(bad));
+      return;
+    }
+    await sendKeys(sessionId, keys);
     res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);

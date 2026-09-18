@@ -88,27 +88,6 @@ import Testing
         #expect(OpencodeStore.title("ses_missing", db: db) == nil)
     }
 
-    @Test func usageReadsTheRunningTotalsAndOpencodesOwnCost() {
-        let db = makeDb()
-        insertSession(db, id: "ses_u", dir: "/repo", title: "t", created: 1,
-                      input: 100, output: 20, reasoning: 5,
-                      cacheRead: 900, cacheWrite: 50, cost: 0.42)
-        let usage = OpencodeStore.usage("ses_u", db: db)
-        #expect(usage?.inputTokens == 100)
-        // Reasoning tokens are billed as output, so they're folded into it.
-        #expect(usage?.outputTokens == 25)
-        #expect(usage?.cacheReadTokens == 900)
-        #expect(usage?.cacheWriteTokens == 50)
-        #expect(usage?.totalTokens == 1075)
-        #expect(usage?.costUsd == 0.42)
-    }
-
-    @Test func usageIsNilBeforeTheFirstTurn() {
-        let db = makeDb()
-        insertSession(db, id: "ses_fresh", dir: "/repo", title: "t", created: 1)
-        #expect(OpencodeStore.usage("ses_fresh", db: db) == nil)
-    }
-
     @Test func listsResumableSessionsForAFolderNewestFirst() {
         let db = makeDb()
         insertSession(db, id: "ses_1", dir: "/repo", title: "one", created: 1_000)
@@ -133,7 +112,6 @@ import Testing
     @Test func aMissingDatabaseReadsAsEmptyRatherThanThrowing() {
         let missing = "/tmp/juancode-no-such-opencode-\(UUID().uuidString).db"
         #expect(OpencodeStore.session("ses_x", db: missing) == nil)
-        #expect(OpencodeStore.usage("ses_x", db: missing) == nil)
         #expect(OpencodeStore.recentSessions(limit: 5, db: missing).isEmpty)
         #expect(OpencodeStore.scanOnce(cwd: "/repo", sinceMs: 0, db: missing) == nil)
     }

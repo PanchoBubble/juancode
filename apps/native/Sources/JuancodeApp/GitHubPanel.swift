@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import JuancodeClient
 import JuancodeCore
 import JuancodeServices
 import MarkdownUI
@@ -50,7 +51,7 @@ final class GitHubModel {
     /// PR keys with a detail fetch in flight, so selection doesn't stampede.
     private(set) var loading: Set<String> = []
     /// Failing-step CI logs per PR (fetched once, on demand — "Show logs").
-    private(set) var ciLogs: [String: String] = [:]
+    private(set) var ciLogs: [String: ActionsLog] = [:]
     /// PR keys with a CI-log fetch in flight (spinner on the checks row).
     private(set) var ciLogsLoading: Set<String> = []
     /// PR keys with a `gh run rerun` in flight (disables the rerun buttons).
@@ -255,19 +256,19 @@ final class GitHubModel {
         }
     }
 
-    /// Fetch the failing-step CI logs for a PR (once — cached until the app
-    /// restarts; the checks row offers a reload). Off-main: shells into
-    /// `gh run view --log-failed` per failing run.
-    func loadCiLogs(cwd: String, pr: PullRequest) {
+    /// Fetch the failing-step CI logs for a PR (once — cached until the app restarts;
+    /// the checks row offers a reload), already parsed into steps and folds by the
+    /// core (juancode-52e8.14.6).
+    ///
+    /// An empty log is stored as one rather than as a sentence: a green PR has no
+    /// failing build, and the block draws "no failing steps" from the empty value.
+    func loadCiLogs(cwd: String, pr: PullRequest, reads: GitHubReads?) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
-        guard !ciLogsLoading.contains(key) else { return }
+        guard !ciLogsLoading.contains(key), let reads else { return }
         ciLogsLoading.insert(key)
         let number = pr.number
         Task {
-            let logs = await Task.detached(priority: .utility) {
-                await getFailedCheckLogs(cwd, number: number)
-            }.value
-            ciLogs[key] = logs.isEmpty ? "No failing-step logs available." : logs
+            ciLogs[key] = await reads.actionsLog(cwd: cwd, number: number) ?? ActionsLog()
             ciLogsLoading.remove(key)
         }
     }
@@ -2060,7 +2061,7 @@ private struct GitHubChecksSection: View {
             if run.failed {
                 Button(showLogs ? "Hide logs" : "Show logs") {
                     showLogs.toggle()
-                    if showLogs { model.github.loadCiLogs(cwd: cwd, pr: pr) }
+                    if showLogs { model.github.loadCiLogs(cwd: cwd, pr: pr, reads: model.core.github) }
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 10))
@@ -2092,8 +2093,8 @@ private struct GitHubChecksSection: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 4)
-            } else if let logs = model.github.ciLogs[key] {
-                ActionsLogView(text: logs)
+            } else if let log = model.github.ciLogs[key] {
+                ActionsLogView(log: log)
             }
         }
     }

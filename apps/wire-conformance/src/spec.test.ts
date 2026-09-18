@@ -165,7 +165,13 @@ describe("scenarios", () => {
       // handshake, so a connection's own grid-ownership token counts as bound the
       // moment it is opened.
       const bound = new Set([
-        ...Object.keys(seedVars({ cwd: "", gitCwd: "", missingCwd: "", file: "" }, s.id, 1)),
+        ...Object.keys(
+          seedVars(
+            { cwd: "", gitCwd: "", gitRemoteCwd: "", ghCwd: "", missingCwd: "", file: "" },
+            s.id,
+            1,
+          ),
+        ),
         clientVar("a"),
       ]);
       for (const step of s.steps) {

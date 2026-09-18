@@ -1,0 +1,167 @@
+{
+  "id": "session-screen",
+  "title": "the rendered screen, read once over HTTP",
+  "asserts": "a caller that only wants to LOOK at a session gets the parsed grid rather than a byte log it would have to replay: text/plain by default, the screen frame's own styled rows under ?json=1 carrying the cols/rows they were rendered at, scrollback history above the screen at NEGATIVE row indices so the visible rows keep the 0 \u2026 rows-1 a screen frame uses, a 404 for an id the core never held, and a 409 once the pty is gone \u2014 which is what tells a caller to fall back to the stored scrollback on purpose rather than read an empty grid as an empty session.",
+  "requires": [
+    "pty"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "screen"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TITLE peeked\r"
+      },
+      "note": "a CLI naming its own window; the read reports that name, and it has to survive the core ADOPTING it as the session title \u2014 a title stolen by the adoption would leave every peek at a long-running session reporting a nameless window"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO screen-peek-marker\r"
+      }
+    },
+    {
+      "sleep": 1500,
+      "note": "the pty round trip plus the parse; nothing about this read is a subscription, so there is no frame to wait on instead"
+    },
+    {
+      "get": "/api/sessions/$session/screen",
+      "expectText": {
+        "$contains": "screen-peek-marker"
+      },
+      "note": "the default body is the screen as a human reads it: no JSON envelope, no escapes, no replay"
+    },
+    {
+      "get": "/api/sessions/$session/screen?json=1",
+      "expectBody": {
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24,
+        "alt": false,
+        "title": "peeked",
+        "scrollback": 0,
+        "cursor": {
+          "x": {
+            "$type": "number"
+          },
+          "y": {
+            "$type": "number"
+          },
+          "visible": {
+            "$type": "boolean"
+          }
+        },
+        "lines": {
+          "$length": 24,
+          "$every": {
+            "row": {
+              "$gte": 0
+            }
+          },
+          "$some": {
+            "segs": {
+              "$some": {
+                "text": {
+                  "$contains": "screen-peek-marker"
+                }
+              }
+            }
+          }
+        }
+      },
+      "note": "cols/rows are the grid these rows were LAID OUT at, and `rows` stays the grid height rather than doubling as the length of `lines` \u2014 the two differ the moment history is asked for"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO scrolled row 0\rECHO scrolled row 1\rECHO scrolled row 2\rECHO scrolled row 3\rECHO scrolled row 4\rECHO scrolled row 5\rECHO scrolled row 6\rECHO scrolled row 7\rECHO scrolled row 8\rECHO scrolled row 9\rECHO scrolled row 10\rECHO scrolled row 11\rECHO scrolled row 12\rECHO scrolled row 13\rECHO scrolled row 14\rECHO scrolled row 15\rECHO scrolled row 16\rECHO scrolled row 17\rECHO scrolled row 18\rECHO scrolled row 19\rECHO scrolled row 20\rECHO scrolled row 21\rECHO scrolled row 22\rECHO scrolled row 23\rECHO scrolled row 24\rECHO scrolled row 25\rECHO scrolled row 26\rECHO scrolled row 27\rECHO scrolled row 28\rECHO scrolled row 29\r"
+      },
+      "note": "30 lines into a 24-row grid, so there is history above the screen to ask for"
+    },
+    {
+      "sleep": 2000
+    },
+    {
+      "get": "/api/sessions/$session/screen?scrollback=5&json=1",
+      "expectBody": {
+        "rows": 24,
+        "scrollback": 5,
+        "lines": {
+          "$length": 29,
+          "$every": {
+            "row": {
+              "$gte": -5
+            }
+          },
+          "$some": {
+            "row": -5
+          }
+        }
+      },
+      "note": "history is prepended at -5 \u2026 -1, which leaves the visible grid at exactly 0 \u2026 23: one client decoder reads a peek and a live screen frame alike, and there is no ambiguity about where history ends"
+    },
+    {
+      "get": "/api/sessions/$session/screen?scrollback=5",
+      "expectText": {
+        "$contains": "scrolled row"
+      },
+      "note": "the text body flows the same history in above the same screen"
+    },
+    {
+      "get": "/api/sessions/no-such-session-here/screen",
+      "status": 404,
+      "note": "an id the core never held is a 404 \u2014 a distinct answer from the 409 below, because only one of the two means there is a stored scrollback worth falling back to"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "get": "/api/sessions/$session/screen",
+      "status": 409,
+      "note": "the screen is live state: it died with the pty. A 200 with an empty grid would be indistinguishable from a session that simply has nothing on it, and the caller would never know to read the stored bytes instead. The byte-log read that 409 points at is not asserted here because it is not a route both cores serve: the Swift core only relays /scrollback to a daemon, it answers none itself"
+    }
+  ]
+}

@@ -87,6 +87,27 @@ export type Step =
    *  `reaped` step whose pid file names nothing passes for the wrong reason, so the
    *  `alive` step is what makes the assertion mean anything. */
   | { descendant: "alive" | "reaped"; pidFile: string; withinMs?: number; note?: string }
+  /** The other assertion that is not about a frame: one HTTP read of the core's own
+   *  `/api/...` surface.
+   *
+   *  Those routes are wire surface — the sidecar and the phone console reach a
+   *  session through them, and one of them (`/screen`) is the ONLY width-correct way
+   *  to look at a session without holding a subscription open. But they are requests
+   *  and replies, not frames on the shared socket, so no `expect` can see them. A
+   *  scenario spells the path (variables resolved, so `$session` works) and asserts
+   *  the status plus either the decoded JSON body (`expectBody`) or the raw text one
+   *  (`expectText`), with the same matcher language a frame gets.
+   *
+   *  `status` defaults to 200: a read whose status a scenario does not name is a read
+   *  it expects to have worked. */
+  | {
+      get: string;
+      status?: number;
+      expectBody?: Record<string, unknown>;
+      expectText?: unknown;
+      bind?: Record<string, string>;
+      note?: string;
+    }
   | { sleep: number; note?: string };
 
 /** Environment a scenario needs beyond a bare core: a pty child, git, gh. */

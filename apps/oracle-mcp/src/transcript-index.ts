@@ -15,6 +15,36 @@
 // The index is local-only and lives next to the native app's DB under ~/.juancode/data.
 // Transcripts contain confidential tool output, so nothing here fans out on its own —
 // callers decide what to surface.
+//
+// ## Why this is a third index and not a call into the daemon (juancode-52e8.14.4)
+//
+// The Rust core answers a `searchSessions` frame over the same claude jsonl its
+// transcript pump reads, and the obvious saving is to delete this file and ask it. It
+// was measured on 2026-09-18 and is the wrong trade, for three reasons in order of
+// weight.
+//
+// 1. **The daemon's corpus is a subset.** It can only hold a session it ran or adopted.
+//    There are 849 claude transcripts on this disk; the daemon knows 674 of them by
+//    `cli_session_id`. The other 175 — 21% — are `claude` run in a plain terminal, and
+//    the daemon has no row for them at all. `oracle_session_search` is asked "have I
+//    hit this before", and silently losing a fifth of the answer is worse than a
+//    second index.
+// 2. **Different grain.** The daemon answers with one hit per SESSION and one snippet.
+//    These tools answer with one hit per MESSAGE — role, timestamp, project, branch —
+//    and `oracle_session_excerpt` then fetches that message's full text plus its
+//    neighbouring turns. That two-step is the whole reason recall is cheap in tokens.
+//    Serving it from the daemon means two new frames and a per-record identity on the
+//    wire that nothing else needs.
+// 3. **It is not the juancode-5bwj duplicate.** `entries_fts` is `content='entries'` —
+//    external content, so fts5 keeps its index and NOT a second copy of the text. The
+//    189 MB file measured on 2026-09-18 is 80.5 MB of extracted conversation text
+//    (120,431 entries over 934 sessions), 28.5 MB of fts index, and the rest page
+//    overhead and freelist. The mirror's fts5 next door was the contentless-in-name
+//    kind that stores everything twice; this one already has the shape 5bwj asks for.
+//
+// Also, this runs when the native app does not. The sidecar's recall is a local read
+// with no socket in it, and making it depend on a daemon being up would take recall
+// away exactly when somebody is asking a phone what was decided last week.
 
 import { DatabaseSync } from "node:sqlite";
 import {

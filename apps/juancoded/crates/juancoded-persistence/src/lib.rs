@@ -23,6 +23,7 @@ use juancoded_core::model::{ProviderId, SessionKind, SessionMeta, SessionStatus,
 
 pub mod discovery;
 pub mod import_swift;
+pub mod review_store;
 pub mod schema;
 pub mod search;
 
@@ -292,6 +293,13 @@ impl SqliteStore {
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The same connection, reachable from the review surface in its own module.
+    /// `pub(crate)` rather than `pub`: one lock over one connection is an invariant of
+    /// this crate, and a handle handed outside it would be a second writer.
+    pub(crate) fn conn_for_reviews(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn()
     }
 }
 

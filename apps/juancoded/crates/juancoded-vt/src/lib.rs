@@ -134,19 +134,45 @@ impl Dimensions for Size {
 /// ever sees `&self`, so the slot is a mutex even though exactly one thread feeds a
 /// model. `ResetTitle` is dropped: a reset is the absence of a name, and there is
 /// nothing there to adopt.
+///
+/// Two slots, not one. `pending` is what the registry TAKES, because adopting a name
+/// is a one-time act and a TUI repaints its title many times a turn. `last` is what a
+/// reader READS, because a one-shot screen read has to be able to report the title the
+/// program is currently flying without stealing the registry's adoption — and after the
+/// first take, `pending` is empty while the window is still named.
+#[derive(Default)]
+struct TitleState {
+    pending: Option<String>,
+    last: Option<String>,
+}
+
 #[derive(Clone, Default)]
-struct TitleSink(Arc<Mutex<Option<String>>>);
+struct TitleSink(Arc<Mutex<TitleState>>);
 
 impl TitleSink {
     fn take(&self) -> Option<String> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .take()
+    }
+
+    fn last(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last
+            .clone()
     }
 }
 
 impl EventListener for TitleSink {
     fn send_event(&self, event: Event) {
         if let Event::Title(title) = event {
-            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(title);
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.pending = Some(title.clone());
+            state.last = Some(title);
         }
     }
 }
@@ -229,35 +255,7 @@ impl TerminalModel {
         let mut lines = Vec::with_capacity(self.rows);
 
         for row in 0..self.rows {
-            let line = Line(row as i32 - display_offset as i32);
-            let mut cells: Vec<Cell> = Vec::with_capacity(self.cols);
-            for col in 0..self.cols {
-                let cell = &grid[Point::new(line, Column(col))];
-                let flags = cell.flags;
-                // alacritty keeps a spacer cell after a wide glyph; the Swift model
-                // drops it and widens the lead cell instead.
-                if flags.contains(Flags::WIDE_CHAR_SPACER)
-                    || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                cells.push(Cell {
-                    ch: cell.c,
-                    width: if flags.contains(Flags::WIDE_CHAR) {
-                        2
-                    } else {
-                        1
-                    },
-                    fg: map_color(cell.fg, ColorRole::Fg),
-                    bg: map_color(cell.bg, ColorRole::Bg),
-                    style: map_style(flags),
-                });
-            }
-            let mut text: String = cells.iter().map(|c| c.ch).collect();
-            while text.ends_with(' ') {
-                text.pop();
-            }
-            lines.push(Row { cells, text });
+            lines.push(self.row_at(Line(row as i32 - display_offset as i32)));
         }
 
         let cursor = grid.cursor.point;
@@ -270,6 +268,146 @@ impl TerminalModel {
             cursor_visible: mode.contains(TermMode::SHOW_CURSOR),
             alt: mode.contains(TermMode::ALT_SCREEN),
         }
+    }
+
+    /// The newest OSC 0/2 window title, WITHOUT consuming it — the title the program
+    /// is currently flying. [`Self::take_title`] is the registry's adoption path and
+    /// empties its slot on the first call; a reader that used it would both steal that
+    /// adoption and report `None` for every window whose name was already taken.
+    pub fn title(&self) -> Option<String> {
+        self.titles.last()
+    }
+
+    /// How many scrollback rows the model retains ABOVE the visible screen. Zero on
+    /// the alternate buffer, which keeps no history by construction.
+    pub fn scrollback_rows(&self) -> usize {
+        let grid = self.term.grid();
+        grid.history_size().saturating_sub(grid.display_offset())
+    }
+
+    /// The last `count` scrollback rows, oldest first, styled — the Rust half of
+    /// `SessionTerminalModel.styledScrollbackTail`. Fewer than asked for when that is
+    /// all the history there is; empty when `count` is 0.
+    pub fn styled_scrollback_tail(&self, count: usize) -> Vec<Row> {
+        let available = self.scrollback_rows();
+        let n = count.min(available);
+        if n == 0 {
+            return Vec::new();
+        }
+        let display_offset = self.term.grid().display_offset() as i32;
+        // The row just above the visible top is `-display_offset - 1`, so the last `n`
+        // history rows run from `-n - display_offset` up to `-1 - display_offset`.
+        (0..n)
+            .map(|i| self.row_at(Line(i as i32 - n as i32 - display_offset)))
+            .collect()
+    }
+
+    /// A one-shot read of everything `GET /api/sessions/:id/screen` answers with,
+    /// taken under ONE borrow of the model: the visible grid, the history rows above
+    /// it, and the retained window title.
+    ///
+    /// One call rather than three, because the three are a picture: a feed landing
+    /// between a history read and a grid read scrolls one row across the seam, and the
+    /// seam is exactly the row a reader would misplace.
+    pub fn peek(&self, scrollback_rows: usize) -> ScreenPeek {
+        ScreenPeek {
+            history: self.styled_scrollback_tail(scrollback_rows),
+            snapshot: self.snapshot(),
+            title: self.title(),
+        }
+    }
+
+    /// One grid line as a value row. `line` is alacritty's own index: `0` is the top
+    /// of the viewport when nothing is scrolled, and history runs negative.
+    fn row_at(&self, line: Line) -> Row {
+        let grid = self.term.grid();
+        let mut cells: Vec<Cell> = Vec::with_capacity(self.cols);
+        for col in 0..self.cols {
+            let cell = &grid[Point::new(line, Column(col))];
+            let flags = cell.flags;
+            // alacritty keeps a spacer cell after a wide glyph; the Swift model
+            // drops it and widens the lead cell instead.
+            if flags.contains(Flags::WIDE_CHAR_SPACER)
+                || flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            cells.push(Cell {
+                ch: cell.c,
+                width: if flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                },
+                fg: map_color(cell.fg, ColorRole::Fg),
+                bg: map_color(cell.bg, ColorRole::Bg),
+                style: map_style(flags),
+            });
+        }
+        let mut text: String = cells.iter().map(|c| c.ch).collect();
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        Row { cells, text }
+    }
+}
+
+/// A one-shot rendered read of a session: the visible grid, the scrollback history
+/// asked for above it, and the window title the program set.
+///
+/// The Rust half of `ScreenPeek.swift`. Its whole reason for existing is that the
+/// alternative — replaying a stored byte log — has no record of the width those bytes
+/// were parsed at, so every hard wrap in the replay lands in the wrong cell. These
+/// rows were laid out by the parser that wrote them, at the width it wrote them at.
+#[derive(Debug, Clone, Default)]
+pub struct ScreenPeek {
+    pub snapshot: Snapshot,
+    /// Scrollback above the visible grid, oldest first. Empty unless asked for.
+    pub history: Vec<Row>,
+    /// The last OSC 0/2 title the program set, if any.
+    pub title: Option<String>,
+}
+
+impl ScreenPeek {
+    /// History (when asked for) above the visible screen, rows joined by "\n" with the
+    /// screen's trailing blank rows dropped — the `text/plain` body.
+    pub fn text(&self) -> String {
+        let visible = self.snapshot.text();
+        if self.history.is_empty() {
+            return visible;
+        }
+        let past = self
+            .history
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if visible.is_empty() {
+            past
+        } else {
+            format!("{past}\n{visible}")
+        }
+    }
+
+    /// Styled rows in the `screen` frame's own encoding: history at -n … -1, the
+    /// visible grid at 0 … rows-1. Negative indices rather than a second array,
+    /// so one decoder reads a peek and a stream frame alike.
+    pub fn lines(&self) -> Vec<wire::PeekRow> {
+        let n = self.history.len() as i64;
+        let mut out = Vec::with_capacity(self.history.len() + self.snapshot.lines.len());
+        for (i, row) in self.history.iter().enumerate() {
+            out.push(wire::PeekRow {
+                row: i as i64 - n,
+                segs: wire::segments(row),
+            });
+        }
+        for row in wire::full_lines(&self.snapshot) {
+            out.push(wire::PeekRow {
+                row: row.row as i64,
+                segs: row.segs,
+            });
+        }
+        out
     }
 }
 
@@ -369,5 +507,91 @@ mod tests {
         let mut m = TerminalModel::new(20, 3, 100);
         m.feed(b"\x1b]0;first\x07\x1b]2;second\x07");
         assert_eq!(m.take_title().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn reading_a_title_survives_the_adoption_that_takes_it() {
+        // The registry adopts a name once; a screen read has to be able to report it
+        // afterwards, or every peek at a long-running session says the window is
+        // nameless.
+        let mut m = TerminalModel::new(20, 3, 100);
+        assert_eq!(m.title(), None);
+        m.feed(b"\x1b]2;the cli named itself\x07");
+        assert_eq!(m.take_title().as_deref(), Some("the cli named itself"));
+        assert_eq!(m.take_title(), None, "the adoption slot is still one-shot");
+        assert_eq!(m.title().as_deref(), Some("the cli named itself"));
+    }
+
+    #[test]
+    fn the_scrollback_tail_is_the_rows_just_above_the_screen_oldest_first() {
+        let mut m = TerminalModel::new(20, 3, 100);
+        for i in 0..8 {
+            m.feed(format!("line {i}\r\n").as_bytes());
+        }
+        // 8 lines written plus the cursor's own row into a 3-row screen: rows 0..5
+        // scrolled off, 6 and 7 are visible with the cursor parked below them.
+        assert_eq!(m.scrollback_rows(), 6);
+        assert_eq!(m.snapshot().lines[0].text, "line 6");
+
+        let tail: Vec<String> = m
+            .styled_scrollback_tail(3)
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert_eq!(tail, vec!["line 3", "line 4", "line 5"]);
+
+        // Asking for more than there is takes everything, and zero takes nothing.
+        assert_eq!(m.styled_scrollback_tail(99).len(), 6);
+        assert!(m.styled_scrollback_tail(0).is_empty());
+    }
+
+    #[test]
+    fn the_alternate_buffer_has_no_history_to_read() {
+        let mut m = TerminalModel::new(20, 3, 100);
+        for i in 0..8 {
+            m.feed(format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(m.scrollback_rows(), 6);
+        m.feed(b"\x1b[?1049h");
+        assert_eq!(m.scrollback_rows(), 0, "the alt screen keeps none");
+        assert!(m.peek(200).history.is_empty());
+    }
+
+    #[test]
+    fn a_peek_puts_history_at_negative_rows_and_the_screen_at_zero_up() {
+        let mut m = TerminalModel::new(20, 3, 100);
+        m.feed(b"\x1b]2;peeked\x07");
+        for i in 0..6 {
+            m.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let peek = m.peek(2);
+        assert_eq!(peek.title.as_deref(), Some("peeked"));
+        assert_eq!(peek.history.len(), 2);
+
+        let rows: Vec<i64> = peek.lines().iter().map(|l| l.row).collect();
+        assert_eq!(
+            rows,
+            vec![-2, -1, 0, 1, 2],
+            "history below zero, screen at 0.."
+        );
+
+        // The text body is the same rows in the same order, history first.
+        assert_eq!(peek.text(), "line 2\nline 3\nline 4\nline 5");
+        // A peek with no history asked for is exactly the visible screen.
+        assert_eq!(m.peek(0).text(), m.snapshot().text());
+    }
+
+    #[test]
+    fn a_peek_row_encodes_exactly_as_a_stream_row_does() {
+        let mut m = TerminalModel::new(20, 2, 100);
+        m.feed(b"\x1b[31mred\r\n");
+        m.feed(b"plain\r\n");
+        let peek = m.peek(1);
+        let history = &peek.lines()[0];
+        assert_eq!(history.row, -1);
+        assert_eq!(
+            serde_json::to_string(history).unwrap(),
+            r#"{"row":-1,"segs":[{"text":"red","fg":1}]}"#
+        );
     }
 }

@@ -36,7 +36,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// Where the daemon is, for error text and the active-core badge.
     public let baseURL: String
 
-    private let connection: WireConnection
+    let connection: WireConnection
     private let mirror: GRDBStore
     private let activityLog: SessionActivityLog
     /// The editor and shell panes this connection has open in the daemon. Not
@@ -44,7 +44,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// the pane that asked for them, or as long as the socket, whichever ends first.
     private let ephemeral: RemoteEphemeralPtys
 
-    private let lock = NSLock()
+    let lock = NSLock()
     private var handles: [String: RemoteLiveSession] = [:]
     private var createdListeners: [Int: (any LiveSession) -> Void] = [:]
     private var nextListenerToken = 1
@@ -112,11 +112,36 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// rather than with a reply of their own.
     private var trackedWaiters: [FrameWaiter] = []
 
+    /// Heavy-queue watchers on this client, and whether `heavyQueueSubscribe` has
+    /// gone out on THIS socket. Per connection on the daemon's side like every other
+    /// watch here, so a reconnect has to send it again — and the daemon reads the
+    /// shared registry only while somebody is subscribed, so the last unsubscribe is
+    /// what stops the polling.
+    private var heavyListeners: [Int: @Sendable (HeavyQueueSnapshot) -> Void] = [:]
+    private var heavySubscribed = false
+    /// One-shot waiters for `review` and `diffComments`, keyed by session id.
+    ///
+    /// Keyed by session rather than by a request id, because neither frame carries
+    /// one: a second review of the same session while the first is running is the same
+    /// question asked twice, and both callers want the answer that arrives.
+    private var reviewWaiters: [String: [GitHubWaiter<ReviewPass?>]] = [:]
+    private var commentWaiters: [String: [GitHubWaiter<[StagedDiffComment]>]] = [:]
+    /// The queue as the daemon last sent it, or nil while this connection has never
+    /// been sent one. Handed to a new subscriber so a second panel does not have to
+    /// wait out a change for its first draw.
+    private var heavySnapshot: HeavyQueueSnapshot?
+
     /// Searches waiting on the daemon, keyed by the `requestId` they went out under.
     /// Keyed rather than a list because a search box sends a frame per keystroke: the
     /// id is what tells this client's answer from the two stale ones behind it.
     private var searchWaiters: [String: SearchWaiter] = [:]
     private var nextSearchId = 1
+
+    /// Git writes waiting on the daemon, keyed by their `requestId`. Same reason the
+    /// searches are keyed: a panel can have a commit and a message draft in flight at
+    /// once, and a draft takes seconds while a commit takes milliseconds.
+    var changesWaiters: [String: ChangesWaiter] = [:]
+    var nextChangesId = 1
 
     /// Each session's steering queue as the daemon last sent it, keyed by session id.
     /// A missing key and an empty array are different answers: the daemon answers
@@ -301,7 +326,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             globalPause: globalPause,
             forwardPrWebhook: { [weak self] repo, number in
                 self?.forwardPrWebhook(repo: repo, number: number) ?? false
-            })
+            },
+            // The phone's Commit/Push/Discard, turned into the frames the daemon takes.
+            // Nil when this core does not advertise `changes`, which leaves the relay
+            // answering 501 and naming that — rather than 200 for a write nothing made.
+            gitWrite: gitWriteRelay())
         let upstream = baseURL
         Task.detached {
             do {
@@ -310,6 +339,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             } catch {
                 NSLog("juancode: core proxy server did not start: \(error)")
             }
+        }
+    }
+
+    /// The relay's working-tree writes, or nil when this core does not advertise
+    /// `changes` — in which case the relay does not register the routes at all and the
+    /// 501 that names the missing capability stands.
+    private func gitWriteRelay() -> (@Sendable (CoreProxyServer.GitWrite) async -> CoreProxyServer.GitWriteOutcome)? {
+        guard supports(.changes) else { return nil }
+        return { [weak self] request in
+            guard let self else { return .failed("the app is shutting down") }
+            return await self.relayGitWrite(request)
         }
     }
 
@@ -582,60 +622,50 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     /// Search every session this core holds, not only the ones this Mac has opened.
     ///
-    /// Two stores answer, and they have to. The mirror learns a session's bytes by
-    /// attaching to it over the socket, so on its own it indexes the title of every
-    /// session and the text of only the ones somebody clicked here: a dispatched
-    /// session, or any session older than the switch to this core, matched on its name
-    /// and nothing that was ever said in it (juancode-rz4c). The daemon holds the
-    /// history for all of them and answers from it. Neither side is a superset —
-    /// measured on the real pair on 2026-09-17, 857 sessions: the mirror had scrollback
-    /// for 508 and the daemon transcripts or bytes for 765, and 392 of the mirror's
-    /// were rows the daemon has no bytes for at all — so a search that asked only one
-    /// of them would lose the other's.
+    /// One store answers: the daemon's. It is the side that holds the history — every
+    /// session's transcript records and its own copy of the pty scrollback — where
+    /// this mirror only ever learns the bytes of a session somebody attached to here,
+    /// so a dispatched session, or any session older than the switch to this core,
+    /// matched on its name and nothing that was ever said in it (juancode-rz4c).
     ///
-    /// Ordered by recency across both, rather than the mirror's bm25 first and the
-    /// daemon's after: "which session was this about" is answered by the newest one
-    /// that mentions it, and interleaving two rankings would put every locally-opened
-    /// session above every dispatched one, which is the bias this whole method exists
-    /// to remove.
+    /// This used to merge the two, because neither was a superset. Measured on the
+    /// real pair on 2026-09-18, 882 sessions: the daemon answers for 797 (788 with
+    /// transcript records, 156 with scrollback bytes) and the mirror holds scrollback
+    /// for 520, of which 27 — 537 KB, every one of them a session that exited before
+    /// 2026-09-09 — are text the daemon has none of. That set is closed, not growing:
+    /// nothing since lands bytes here that the daemon does not also hold.
+    /// `juancoded import-swift ~/.juancode/data/juancode-rust.db` moves them across
+    /// and is the way to close it; it needs the daemon stopped, so it is a thing the
+    /// person does once rather than something this client can do behind them.
+    ///
+    /// The mirror is still the answer when the daemon has none to give: a core that
+    /// does not advertise `sessionSearch`, or one that did not answer in time. That is
+    /// a fallback, not a merge — when the daemon answers, its answer stands, including
+    /// when it is empty. Merging an empty one with the mirror's hits is how a search
+    /// for a word only this Mac's scrollback holds used to look like it worked.
     ///
     /// Blocking, because `CoreClient.searchSessions` is. Both callers already run it
     /// off the main actor — `AppModel.search` on a detached task, the proxy route on
-    /// the server's own — and a timeout degrades to the mirror's hits rather than
-    /// failing.
+    /// the server's own.
     public func searchSessions(_ query: String, limit: Int) -> [SearchHit] {
-        let local = mirror.search(query, limit: limit)
-        guard info.has(Self.sessionSearchCapability) else { return local }
-        let remote = daemonSearch(query, limit: limit)
-        guard !remote.isEmpty else { return local }
-
-        var snippets: [String: String] = [:]
-        var metas: [String: SessionMeta] = [:]
-        for hit in local {
-            metas[hit.meta.id] = hit.meta
-            snippets[hit.meta.id] = hit.snippet
+        guard info.has(Self.sessionSearchCapability) else {
+            return mirror.search(query, limit: limit)
         }
-        for hit in remote {
-            // The daemon's snippet wins where both matched: it is cut out of what was
-            // actually said, where the mirror's is cut out of raw pty bytes and comes
-            // back carrying whatever escape sequences were around the word.
-            if !hit.snippet.isEmpty { snippets[hit.sessionId] = hit.snippet }
-            if metas[hit.sessionId] == nil, let meta = mirror.get(hit.sessionId) {
-                metas[hit.sessionId] = meta
-            }
+        guard let remote = daemonSearch(query, limit: limit) else {
+            return mirror.search(query, limit: limit)
         }
         // A hit with no row is dropped rather than drawn: the backfill puts the
         // daemon's whole list in the mirror, so this is a session deleted between the
         // search and its answer.
-        return metas.values
-            .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
-            .prefix(limit)
-            .map { SearchHit(meta: $0, snippet: snippets[$0.id] ?? "") }
+        return remote.compactMap { hit in
+            mirror.get(hit.sessionId).map { SearchHit(meta: $0, snippet: hit.snippet) }
+        }
     }
 
-    /// Ask the daemon, and wait. An empty answer and a timeout are the same value on
-    /// purpose: both mean "nothing to add to the mirror's hits".
-    private func daemonSearch(_ query: String, limit: Int) -> [(sessionId: String, snippet: String)] {
+    /// Ask the daemon, and wait. `nil` is a timeout — the one case that falls back to
+    /// the mirror. An empty array is an answer, and means the daemon looked and found
+    /// nothing.
+    private func daemonSearch(_ query: String, limit: Int) -> [(sessionId: String, snippet: String)]? {
         let waiter = SearchWaiter()
         let requestId = lock.withLock { () -> String in
             let id = "search-\(nextSearchId)"
@@ -649,10 +679,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         lock.withLock { searchWaiters[requestId] = nil }
         if hits == nil {
             NSLog("juancode: the \(backendName) core did not answer a search within "
-                  + "\(Int(Self.searchTimeout))s; the sessions this Mac has not opened "
-                  + "are matched on their titles only")
+                  + "\(Int(Self.searchTimeout))s; falling back to the sessions this "
+                  + "Mac has opened")
         }
-        return hits ?? []
+        return hits
     }
 
     /// Nothing, deliberately: on this core the cap is the daemon's, and a client that
@@ -1079,6 +1109,143 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         }
     }
 
+    // MARK: - Heavy command queue (capability: heavyQueue)
+
+    /// One subscription per connection, sent once and again after a reconnect.
+    private func ensureHeavySubscription() {
+        guard supports(.heavyQueue) else { return }
+        let send: Bool = lock.withLock {
+            guard !heavySubscribed, !heavyListeners.isEmpty else { return false }
+            heavySubscribed = true
+            return true
+        }
+        if send { connection.send(["type": "heavyQueueSubscribe"]) }
+    }
+
+    public func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void {
+        guard supports(.heavyQueue) else {
+            // An empty queue is the honest answer for a core that cannot read one, and
+            // the panel greys itself out off the capability rather than off this.
+            onSnapshot(HeavyQueueSnapshot())
+            return {}
+        }
+        let (token, known) = lock.withLock { () -> (Int, HeavyQueueSnapshot?) in
+            let t = nextListenerToken
+            nextListenerToken += 1
+            heavyListeners[t] = onSnapshot
+            return (t, heavySnapshot)
+        }
+        ensureHeavySubscription()
+        // When this connection already holds a queue, hand it over now; when it does
+        // not, the hand-over IS the daemon's answer to the subscribe just sent, and
+        // the listener is already registered to receive it.
+        if let known { onSnapshot(known) }
+        return { [weak self] in
+            guard let self else { return }
+            let stop: Bool = lock.withLock {
+                heavyListeners[token] = nil
+                guard heavyListeners.isEmpty, heavySubscribed else { return false }
+                heavySubscribed = false
+                heavySnapshot = nil
+                return true
+            }
+            // Told, rather than left holding a watch nobody reads: the daemon polls
+            // the shared registry only while a subscriber is out.
+            if stop { connection.send(["type": "heavyQueueUnsubscribe"]) }
+        }
+    }
+
+    public func heavySetPriority(pid: Int, prio: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavySetPriority", "pid": pid, "prio": prio])
+    }
+
+    public func heavySetSlots(_ slots: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavySetSlots", "slots": slots])
+    }
+
+    public func heavyCancel(pid: Int) {
+        guard supports(.heavyQueue) else { return }
+        connection.send(["type": "heavyCancel", "pid": pid])
+    }
+
+    // MARK: - The GitHub surface (capability: github)
+
+    /// The daemon's own HTTP root — the one the sidecar and the phone console read
+    /// through. There is exactly one, so there is exactly one PR list.
+    public var httpBaseURL: String? { baseURL }
+
+    public func review(sessionId: String, refresh: Bool) async throws -> ReviewPass? {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        let waiter = GitHubWaiter<ReviewPass?>()
+        lock.withLock { reviewWaiters[sessionId, default: []].append(waiter) }
+        connection.send(["type": "sessionReview", "sessionId": sessionId, "refresh": refresh])
+        // A refresh is a model turn. The budget is the daemon's own review timeout
+        // plus a margin, so this gives up after the pass would have, never before it.
+        let budget: TimeInterval = refresh ? 300 : 20
+        guard let answer = await waiter.landed(within: budget) else {
+            lock.withLock { reviewWaiters[sessionId]?.removeAll { $0 === waiter } }
+            throw CoreOperationUnsupported(
+                operation: "Review with Claude", backend: backendName,
+                detail: "the core did not answer within \(Int(budget))s")
+        }
+        return answer
+    }
+
+    @discardableResult
+    public func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                               endLine: Int?, body: String, quote: String?,
+                               commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment] {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        var frame: [String: Any] = [
+            "type": "diffCommentAdd", "sessionId": sessionId, "file": file,
+            "side": side, "line": line, "body": body,
+        ]
+        if let endLine { frame["endLine"] = endLine }
+        if let quote { frame["quote"] = quote }
+        if let commitSha { frame["commitSha"] = commitSha }
+        if let commitSubject { frame["commitSubject"] = commitSubject }
+        return try await awaitComments(sessionId: sessionId, frame: frame)
+    }
+
+    @discardableResult
+    public func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment] {
+        guard supports(.github) else {
+            throw CoreCapabilityError(.github, backend: backendName)
+        }
+        var frame: [String: Any] = ["type": "diffCommentDelete", "sessionId": sessionId]
+        if let commentId { frame["commentId"] = commentId }
+        return try await awaitComments(sessionId: sessionId, frame: frame)
+    }
+
+    /// Send a comment mutation and wait for the list it is answered with.
+    ///
+    /// Both mutations are answered by the WHOLE list rather than by what they changed,
+    /// so this is one helper rather than two: the caller replaces what it holds either
+    /// way, which is the only thing that keeps two surfaces staging against one session
+    /// from drifting apart.
+    private func awaitComments(sessionId: String,
+                               frame: [String: Any]) async throws -> [StagedDiffComment] {
+        let waiter = GitHubWaiter<[StagedDiffComment]>()
+        lock.withLock { commentWaiters[sessionId, default: []].append(waiter) }
+        connection.send(frame)
+        guard let list = await waiter.landed(within: 20) else {
+            lock.withLock { commentWaiters[sessionId]?.removeAll { $0 === waiter } }
+            throw CoreOperationUnsupported(
+                operation: "Staging a diff comment", backend: backendName,
+                detail: "the core did not answer within 20s")
+        }
+        return list
+    }
+
     // MARK: - Presence, diagnostics, lifecycle
 
     /// No `/presence` on the daemon. The push gate it feeds is the sidecar's, which
@@ -1224,7 +1391,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if let scrollback {
             mirror.update(meta, scrollback: scrollback)
         } else {
-            mirror.updateMeta(meta, reindexTitleFts: true)
+            mirror.updateMeta(meta)
         }
     }
 
@@ -1285,7 +1452,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 row.status = .exited
                 row.exitCode = code
                 row.updatedAt = nowMs()
-                mirror.updateMeta(row, reindexTitleFts: false)
+                mirror.updateMeta(row)
             }
 
         case "resizeAck":
@@ -1406,6 +1573,32 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             for l in listeners { l(.trackedPrs(list)) }
             for w in waiters { w.arrived() }
 
+        case "review":
+            guard let id = sessionId else { return }
+            // Absent rather than null is "nothing has reviewed this", and both spellings
+            // reach here: the core omits the key, an older one could send null.
+            let pass = Self.decodeJSON(ReviewPass.self, body["result"])
+            for w in lock.withLock({ reviewWaiters.removeValue(forKey: id) ?? [] }) {
+                w.deliver(pass)
+            }
+
+        case "diffComments":
+            guard let id = sessionId else { return }
+            let list = (body["comments"] as? [Any] ?? [])
+                .compactMap { Self.decodeJSON(StagedDiffComment.self, $0) }
+            for w in lock.withLock({ commentWaiters.removeValue(forKey: id) ?? [] }) {
+                w.deliver(list)
+            }
+
+        case "heavyQueue":
+            guard let snapshot = HeavyQueueSnapshot(wire: body) else { return }
+            let listeners = lock.withLock { () -> [@Sendable (HeavyQueueSnapshot) -> Void] in
+                heavySnapshot = snapshot
+                return Array(heavyListeners.values)
+            }
+            // Replace wholesale: the frame is the complete queue and never a delta.
+            for l in listeners { l(snapshot) }
+
         case "trackNotification":
             guard let trackedId = body["trackedId"] as? String,
                   let prNumber = body["prNumber"] as? Int,
@@ -1484,6 +1677,14 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             let waiter = lock.withLock { searchWaiters.removeValue(forKey: requestId) }
             waiter?.deliver(hits)
 
+        case "changesResult":
+            // Correlated on the requestId and nothing else. A discard and a commit can
+            // be in flight together, and reading one's answer as the other's would tell
+            // somebody their file came back when what happened was a push.
+            guard let requestId = body["requestId"] as? String else { return }
+            let waiter = lock.withLock { changesWaiters.removeValue(forKey: requestId) }
+            waiter?.deliver(body)
+
         case "inputAck", "screen":
             // Either not subscribed to (screen), or a capability this client does not
             // use against a core that does not advertise it. Ignored, not fatal.
@@ -1539,6 +1740,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return ids
             }
             for id in queues { ensureQueueSubscription(id) }
+            // And the heavy queue, for the same two reasons: the watch is per
+            // connection, and the cached snapshot is dropped rather than kept, because
+            // jobs have started and finished while this socket was down.
+            let heavyAgain: Bool = lock.withLock {
+                guard !heavyListeners.isEmpty else { return false }
+                heavySubscribed = false
+                heavySnapshot = nil
+                return true
+            }
+            if heavyAgain { ensureHeavySubscription() }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
             // The daemon's editor and shell ptys belong to the connection and die with
@@ -1550,15 +1761,17 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // the socket that would have carried the confirmation is gone, so the write
             // is unconfirmable and the caller has to be told while the user is still
             // looking at the thing they pressed.
-            let (orphaned, stranded, searches) = lock.withLock {
-                () -> ([QueueWrite], [FrameWaiter], [SearchWaiter]) in
+            let (orphaned, stranded, searches, changes) = lock.withLock {
+                () -> ([QueueWrite], [FrameWaiter], [SearchWaiter], [ChangesWaiter]) in
                 let writes = queueWrites.values.flatMap { $0 }
                 let waiters = queueFrameWaiters.values.flatMap { $0 }
                 let searches = Array(searchWaiters.values)
+                let changes = Array(changesWaiters.values)
                 queueWrites.removeAll()
                 queueFrameWaiters.removeAll()
                 searchWaiters.removeAll()
-                return (writes, waiters, searches)
+                changesWaiters.removeAll()
+                return (writes, waiters, searches, changes)
             }
             for write in orphaned { write.refuse("the connection dropped: \(reason)") }
             for waiter in stranded { waiter.expire() }
@@ -1566,6 +1779,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // carried it is gone, so it is told now and falls back to the mirror's own
             // hits rather than standing there.
             for search in searches { search.expire() }
+            // A commit or a discard whose answer is not coming must fail NOW, while the
+            // person is still looking at the button they pressed. Silence here is the
+            // failure mode juancode-rzl7 was about, pointed at a destructive action.
+            for change in changes {
+                change.fail("the connection dropped: \(reason)")
+            }
         }
         for l in listeners { l(up, reason) }
     }
@@ -1592,7 +1811,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if mirror.get(meta.id) == nil {
             mirror.insert(meta)
         } else {
-            mirror.updateMeta(meta, reindexTitleFts: true)
+            mirror.updateMeta(meta)
         }
         if !isNew { handle.apply(meta: meta) }
         if isNew { for l in listeners { l(handle) } }
@@ -1626,7 +1845,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // a reconnect costs reads and no writes. Each write here is its own
             // transaction, and a few hundred needless ones is a visible boot pause.
             guard existing != meta else { continue }
-            mirror.updateMeta(meta, reindexTitleFts: existing.title != meta.title)
+            mirror.updateMeta(meta)
             updated += 1
         }
         let live = lock.withLock { Set(handles.keys) }
@@ -1964,4 +2183,56 @@ private final class LifecycleWaiter: @unchecked Sendable {
 /// exists. Written once rather than repeated per closure.
 private final class SelfBox: @unchecked Sendable {
     weak var value: RustCoreClient?
+}
+
+/// A one-shot handoff for a GitHub frame the client asked for, with a deadline.
+///
+/// One-shot is the whole contract, the same as `FrameWaiter` above: the frame and the
+/// expiry race, and the loser must not be able to resume a continuation the winner
+/// already used. Generic rather than two near-identical classes because the two frames
+/// differ only in what they carry — `review` a pass that may be absent, `diffComments`
+/// a list that may be empty — and both of those are legitimate answers.
+private final class GitHubWaiter<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+    private var settled = false
+
+    /// The answer, or nil when the budget ran out.
+    func landed(within budget: TimeInterval) async -> Value? {
+        let answer = await withCheckedContinuation { (c: CheckedContinuation<Value?, Never>) in
+            let alreadyDone = lock.withLock { () -> Bool in
+                if settled { return true }
+                continuation = c
+                return false
+            }
+            if alreadyDone { c.resume(returning: nil) }
+        }
+        return answer
+    }
+
+    func deliver(_ value: Value) { settle(value) }
+
+    private func settle(_ value: Value?) {
+        let waiting = lock.withLock { () -> CheckedContinuation<Value?, Never>? in
+            guard !settled else { return nil }
+            settled = true
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: value)
+    }
+}
+
+/// Decode one wire value into a `Codable` shape, or nil.
+///
+/// Through `JSONSerialization` and back rather than a hand-written decoder per type,
+/// because the frames arrive as `[String: Any]` and the shapes they carry are the
+/// core's own — a hand decoder here would be a second spelling of a schema that already
+/// exists on the other side.
+extension RustCoreClient {
+    static func decodeJSON<T: Decodable>(_ type: T.Type, _ value: Any?) -> T? {
+        guard let value, !(value is NSNull) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
 }

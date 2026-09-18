@@ -15,8 +15,10 @@ use serde_json::{json, Value};
 use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
 use juancoded_core::changes::ChangeStat;
+use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use juancoded_core::pr::{TrackNotification, TrackedPr};
+use juancoded_core::review::{DiffComment, ReviewResult};
 use juancoded_persistence::SearchHit;
 use juancoded_state::{ClientId, StuckAlert};
 use juancoded_vt::wire::RowUpdate;
@@ -195,6 +197,10 @@ pub const CAPABILITIES: &[&str] = &[
     "sessionList",
     "sessionDelete",
     "sessionSearch",
+    // The remote surface's keystrokes (juancode-uigs): advertised because the frame
+    // resolves the whole vocabulary and writes it raw, so a client that switches its
+    // Esc button on gets an Esc and not the word.
+    "namedKeys",
     // Advertised separately from `trackedPrs` because a core can watch PRs perfectly
     // well and still have no way to put the watch into a session that already exists,
     // and a client that could not tell the two apart offered the track-in-this-session
@@ -206,6 +212,29 @@ pub const CAPABILITIES: &[&str] = &[
     // desktop relay needs to see before it will serve `/api/pr-webhook` at all: without
     // it the relay answers 501 and the poll stays this core's only update path.
     "prWebhook",
+    // The global `heavy` slot queue (juancode-52e8.14.3). Advertised because the whole
+    // of it answers here: the line is read from the shared registry, pushed on every
+    // change rather than polled, reorderable by a priority rewrite the waiting wrapper
+    // picks up on its own, and widenable by a config write that preserves every rule
+    // beside it. It moved out of the desktop for the reason every port in this epic
+    // has: the queue is machine state that outlives an app launch, and a Mac you have
+    // walked away from is exactly when you want to know what is holding the slot.
+    "heavyQueue",
+    // The git working tree (juancode-52e8.14.5). Advertised because the whole surface
+    // answers here: the diff, the branch state, the worktree listing and a file's
+    // contents over HTTP, and the four writes — commit, push, discard, draft a message
+    // — as frames, so a refusal names a reason and a discard is ordered against the
+    // session's other traffic rather than racing it. The Swift core kept this for
+    // itself, which meant the answer only existed on the Mac the app was running on.
+    "changes",
+    // The GitHub data layer and the review surface (juancode-52e8.14.6). Advertised
+    // because all of it answers here now — the PR list with its triage and order, the
+    // conversation, the merged timeline, the parsed Actions log, and a review pass over
+    // a session's working tree with the staged comments it was steered by. A core
+    // without it is a core whose GitHub panel would have to shell out to `gh` from
+    // whichever machine the app happens to be on, which is exactly what the phone
+    // console cannot do.
+    "github",
 ];
 
 /// One queued occurrence on the wire.
@@ -327,6 +356,19 @@ pub enum ClientMessage {
     Input {
         session_id: String,
         data: String,
+        seq: Option<i64>,
+    },
+    /// Named control keys for a pty — Esc, Ctrl-C, an arrow (juancode-uigs). The
+    /// names are resolved to bytes by [`crate::named_key`] and written to the pty RAW,
+    /// never through bracketed paste: that wrapper is what makes `input` literal, and
+    /// is exactly why a remote client could not send a keystroke before this.
+    ///
+    /// Its own frame rather than a flag on `input`, because a core that ignored such a
+    /// flag would TYPE "Escape" into the agent's prompt box while answering exactly as
+    /// it would have for a real keystroke. `seq` acks like `input`'s does.
+    Key {
+        session_id: String,
+        keys: Vec<String>,
         seq: Option<i64>,
     },
     Resize {
@@ -607,6 +649,95 @@ pub enum ClientMessage {
         session_id: String,
         message_id: String,
     },
+    /// Watch the global `heavy` slot queue: the whole queue now, and the whole queue
+    /// again whenever it changes, until `heavyQueueUnsubscribe` or the socket closes.
+    ///
+    /// Per connection, and lazily: nothing reads the registry while nobody is
+    /// subscribed, so a daemon nobody has asked does no filesystem work for this at
+    /// all. The frame is one small snapshot for the whole machine rather than a
+    /// per-session stream, so there is no id to address and nothing to page.
+    HeavyQueueSubscribe,
+    HeavyQueueUnsubscribe,
+    /// Move a job in line by rewriting its registry entry's priority. Higher runs
+    /// sooner; ties break on how long the job has been queued.
+    ///
+    /// Not a move-up/move-down pair, because the queue is not this daemon's to order:
+    /// the waiting wrapper re-reads its own priority every poll and admits itself, so
+    /// the only thing anybody can do to the line is change a number in it. A client
+    /// that wants "run this next" computes the number off the snapshot it is already
+    /// holding.
+    ///
+    /// Answered by the queue, like every other mutation here, and by an `error` when
+    /// there is no entry for `pid` — a job that finished between a client's snapshot
+    /// and its click.
+    HeavySetPriority {
+        pid: i32,
+        prio: i64,
+    },
+    /// How many heavy jobs may run at once. Written into the wrapper's own config,
+    /// preserving every other key in it — the rules in particular, which belong to
+    /// the wrapper and are read by other tooling on the machine.
+    ///
+    /// Raising it lets jobs already in line through, because the waiting wrappers
+    /// re-read the capacity on every poll; it is not a knob that only applies to new
+    /// jobs. Anything below one slot is refused: a queue that admits nothing forever
+    /// is not a narrower queue, it is a broken one.
+    HeavySetSlots {
+        slots: i64,
+    },
+    /// SIGTERM a job's wrapper, which takes the command down with it and frees its
+    /// slot.
+    ///
+    /// Refused for a pid this queue does not hold, and that refusal is load-bearing
+    /// rather than tidy: without it the frame is an arbitrary-signal gadget aimed at
+    /// any process on the machine by anything that can reach this socket.
+    HeavyCancel {
+        pid: i32,
+    },
+    /// A session's review: the cached one, or a fresh pass when `refresh` is set.
+    ///
+    /// A frame rather than only the HTTP route because a refresh is a whole model turn:
+    /// held open as a request it would be a socket blocked for minutes, and answered
+    /// here it is a frame that arrives when the pass is done, off this connection's own
+    /// task, with the pty bytes on the same socket still flowing the whole time.
+    ///
+    /// `refresh: false` (or absent) is a read and costs nothing. `refresh: true` spends
+    /// a model turn, which is why it is a flag on this frame and not a separate one: a
+    /// client that means "show me the review" and a client that means "review it again"
+    /// are asking about the same thing and must not be able to confuse the two.
+    SessionReview {
+        session_id: String,
+        refresh: bool,
+    },
+    /// Stage an inline comment against a session's diff.
+    ///
+    /// `side` is required rather than defaulted: a comment on the wrong side of a hunk
+    /// hangs off a line the author never wrote. A backwards range is normalised rather
+    /// than refused — a selection dragged upwards is a selection, not a mistake.
+    ///
+    /// Answered by the whole comment list, like every mutation in this protocol that
+    /// changes a set: a client that patched its own copy of a set two surfaces write to
+    /// would drift from it.
+    DiffCommentAdd {
+        session_id: String,
+        file: String,
+        side: String,
+        line: i64,
+        end_line: Option<i64>,
+        body: String,
+        quote: Option<String>,
+        commit_sha: Option<String>,
+        commit_subject: Option<String>,
+    },
+    /// Drop one staged comment, or — with no `commentId` — all of a session's.
+    ///
+    /// One frame and not two, because "unstage this" and "discard the review I was
+    /// composing" are the same operation at two scopes, and a separate clear frame is a
+    /// second way to get the set wrong.
+    DiffCommentDelete {
+        session_id: String,
+        comment_id: Option<String>,
+    },
     /// What of this core's history mentions `query`.
     ///
     /// `requestId` is required and echoed back in `searchResults`, for the reason
@@ -619,6 +750,48 @@ pub enum ClientMessage {
     SearchSessions {
         query: String,
         limit: usize,
+        request_id: String,
+    },
+    /// Stage everything in the session's tree and commit it.
+    ///
+    /// A frame rather than an HTTP POST, and that is the whole reason the four writes
+    /// below are here at all: a commit is ordered against the session's other traffic
+    /// on the same socket, and a refusal ("Nothing to commit.", a hook's own words)
+    /// comes back naming itself instead of as a status code somebody has to map.
+    ///
+    /// `cwd` names another worktree of the same repo, validated against that repo's
+    /// own listing; absent means the session's own tree.
+    SessionCommit {
+        session_id: String,
+        message: String,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Push the session's current branch, setting the upstream on the first push.
+    SessionPush {
+        session_id: String,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Discard uncommitted work: one file, or one hunk of one file when `hunkIndex`
+    /// is present.
+    ///
+    /// The destructive one. `path` is validated inside the target worktree before
+    /// anything runs — see `juancoded_core::git::scoped_relative_path`, which is what
+    /// stops this frame being a write primitive aimed at the whole filesystem.
+    SessionRevert {
+        session_id: String,
+        path: String,
+        hunk_index: Option<usize>,
+        cwd: Option<String>,
+        request_id: String,
+    },
+    /// Draft a commit message for what is currently uncommitted, by asking the genuine
+    /// `claude` CLI in headless print mode. Slow by nature — seconds, not
+    /// milliseconds — which is why it is correlated and answered out of band.
+    SessionCommitMessage {
+        session_id: String,
+        cwd: Option<String>,
         request_id: String,
     },
     /// A well-formed frame this core doesn't implement. Ignored, not fatal.
@@ -704,6 +877,43 @@ struct RawClient {
     query: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Named control keys (juancode-uigs).
+    #[serde(default)]
+    keys: Option<Vec<String>>,
+    #[serde(default)]
+    message: Option<String>,
+    /// The path a `sessionRevert` names. `file` is accepted as the same thing, because
+    /// that is what the Swift core's `POST /revert` body called it and a client moved
+    /// across must not have its discard silently widened into a missing-path refusal.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "hunkIndex", default)]
+    hunk_index: Option<usize>,
+    #[serde(default)]
+    pid: Option<i32>,
+    #[serde(default)]
+    prio: Option<i64>,
+    #[serde(default)]
+    slots: Option<i64>,
+    /// The review surface (juancode-52e8.14.6).
+    #[serde(default)]
+    refresh: Option<bool>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(rename = "endLine", default)]
+    end_line: Option<i64>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    quote: Option<String>,
+    #[serde(rename = "commitSha", default)]
+    commit_sha: Option<String>,
+    #[serde(rename = "commitSubject", default)]
+    commit_subject: Option<String>,
+    #[serde(rename = "commentId", default)]
+    comment_id: Option<String>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -784,6 +994,11 @@ impl ClientMessage {
                 data: raw.data.ok_or("missing data")?,
                 seq: raw.seq,
             }),
+            "key" => Ok(Self::Key {
+                session_id: need_session()?,
+                keys: raw.keys.ok_or("missing keys")?,
+                seq: raw.seq,
+            }),
             "resize" => Ok(Self::Resize {
                 session_id: need_session()?,
                 cols: raw.cols.ok_or("missing cols")?,
@@ -816,6 +1031,38 @@ impl ClientMessage {
                 archived: raw.archived,
             }),
             "listSessions" => Ok(Self::ListSessions),
+            "heavyQueueSubscribe" => Ok(Self::HeavyQueueSubscribe),
+            "heavyQueueUnsubscribe" => Ok(Self::HeavyQueueUnsubscribe),
+            "heavySetPriority" => Ok(Self::HeavySetPriority {
+                pid: raw.pid.ok_or("missing pid")?,
+                prio: raw.prio.ok_or("missing prio")?,
+            }),
+            "heavySetSlots" => Ok(Self::HeavySetSlots {
+                slots: raw.slots.ok_or("missing slots")?,
+            }),
+            "heavyCancel" => Ok(Self::HeavyCancel {
+                pid: raw.pid.ok_or("missing pid")?,
+            }),
+            "sessionReview" => Ok(Self::SessionReview {
+                session_id: need_session()?,
+                refresh: raw.refresh.unwrap_or(false),
+            }),
+            "diffCommentAdd" => Ok(Self::DiffCommentAdd {
+                session_id: need_session()?,
+                file: raw.file.ok_or("missing file")?,
+                side: raw.side.ok_or("missing side")?,
+                line: raw.line.ok_or("missing line")?,
+                end_line: raw.end_line,
+                body: raw.body.ok_or("missing body")?,
+                quote: raw.quote,
+                commit_sha: raw.commit_sha,
+                commit_subject: raw.commit_subject,
+            }),
+            // No `commentId` is the whole set, deliberately: see the frame.
+            "diffCommentDelete" => Ok(Self::DiffCommentDelete {
+                session_id: need_session()?,
+                comment_id: raw.comment_id,
+            }),
             // `limit` defaults rather than being required: a client that asks a
             // question without saying how many answers it wants gets a screenful,
             // and a client that asks for none is taken at its word.
@@ -826,6 +1073,46 @@ impl ClientMessage {
             }),
             "deleteSession" => Ok(Self::DeleteSession {
                 session_id: need_session()?,
+            }),
+            // All four carry a `requestId`: a panel can have a commit and a message
+            // draft in flight at once, and a draft takes seconds, so an answer with no
+            // way to say which question it belongs to is not an answer.
+            "sessionCommit" => Ok(Self::SessionCommit {
+                session_id: need_session()?,
+                // Refused rather than defaulted to something: a commit with no message
+                // is a commit nobody can read back, and inventing one here would put
+                // this core's words in somebody's history.
+                message: raw
+                    .message
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .ok_or("missing message")?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionPush" => Ok(Self::SessionPush {
+                session_id: need_session()?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionRevert" => Ok(Self::SessionRevert {
+                session_id: need_session()?,
+                // A revert with no path is refused and never widened into "the tree":
+                // the one thing this frame must never mean is `git checkout .`.
+                path: raw
+                    .file
+                    .or(raw.path)
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .ok_or("missing path")?,
+                hunk_index: raw.hunk_index,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
+            }),
+            "sessionCommitMessage" => Ok(Self::SessionCommitMessage {
+                session_id: need_session()?,
+                cwd: raw.cwd,
+                request_id: raw.request_id.ok_or("missing requestId")?,
             }),
             "subscribeScreen" => Ok(Self::SubscribeScreen {
                 session_id: need_session()?,
@@ -981,6 +1268,24 @@ pub enum ServerMessage {
         request_id: String,
         hits: Vec<SearchHit>,
     },
+    /// The answer to one of the four `session*` git writes.
+    ///
+    /// One frame for all four rather than four, because a client does exactly the same
+    /// thing with each: match the `requestId`, and then either draw the result or show
+    /// the reason. `op` says which write it answers so a late reply cannot be read as
+    /// the wrong one, and `error` is present exactly when the write did not happen —
+    /// a refusal that arrived as a success is the failure mode this shape exists to
+    /// make impossible.
+    ChangesResult {
+        request_id: String,
+        session_id: String,
+        /// `commit`, `push`, `revert` or `commitMessage`.
+        op: &'static str,
+        /// The write's own payload, absent on a refusal.
+        result: Option<Value>,
+        /// Git's first useful line, or this core's, present only on a refusal.
+        error: Option<String>,
+    },
     /// The shell pty is up, and `requestId` is the client's own, echoed back
     /// unchanged. Without it a client with two opens in flight has two `terminalReady`
     /// frames and no way to say which pane either belongs to.
@@ -1019,6 +1324,42 @@ pub enum ServerMessage {
     /// multi-megabyte handshake for bytes a sidebar never draws.
     Sessions {
         sessions: Vec<SessionMeta>,
+    },
+    /// The whole `heavy` slot queue: its capacity and the two ordered lists, running
+    /// first by slot and waiting in the order the wrappers will admit themselves.
+    ///
+    /// Sent once in answer to `heavyQueueSubscribe`, and after that only when the
+    /// registry actually moved — the poll runs on a timer, so "nothing changed" is the
+    /// common case and an identical snapshot carries no information. Always complete;
+    /// replace wholesale. Empty lists mean nothing is queued, which is a queue and not
+    /// a missing one.
+    ///
+    /// `slots` is how many may run at once and `workerCap` how many test-runner
+    /// workers each admitted job may fan out to; both are the wrapper's own config,
+    /// reported rather than invented, so a client never disagrees with the shell
+    /// script about what the capacity is.
+    HeavyQueue {
+        snapshot: Arc<HeavyQueueSnapshot>,
+    },
+    /// A session's review — the cached one, or the pass that has just finished.
+    ///
+    /// Answered out of band on the connection that asked, because a refresh takes as
+    /// long as a model turn and the socket it arrived on is the one carrying every
+    /// attached session's bytes. `result` is absent for a session nothing has reviewed:
+    /// a client draws "not reviewed yet" from that, which is a different thing from a
+    /// pass that found nothing.
+    Review {
+        session_id: String,
+        result: Option<Arc<ReviewResult>>,
+    },
+    /// A session's staged diff comments, complete.
+    ///
+    /// Always the whole list and never a delta, for the reason every set in this
+    /// protocol is: two surfaces stage comments against the same session, so a client
+    /// applying a patch to its own copy would drift from the set the composer reads.
+    DiffComments {
+        session_id: String,
+        comments: Arc<Vec<DiffComment>>,
     },
     /// The set a global pause is holding asleep, sorted.
     ///
@@ -1312,6 +1653,28 @@ impl ServerMessage {
             } => json!({
                 "type": "terminalReady", "terminalId": terminal_id, "requestId": request_id,
             }),
+            Self::ChangesResult {
+                request_id,
+                session_id,
+                op,
+                result,
+                error,
+            } => {
+                let mut v = json!({
+                    "type": "changesResult",
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "op": op,
+                    "ok": error.is_none(),
+                });
+                if let Some(result) = result {
+                    v["result"] = result.clone();
+                }
+                if let Some(error) = error {
+                    v["error"] = json!(error);
+                }
+                v
+            }
             Self::SearchResults { request_id, hits } => json!({
                 "type": "searchResults",
                 "requestId": request_id,
@@ -1384,6 +1747,22 @@ impl ServerMessage {
             }),
             Self::PauseState { paused } => json!({
                 "type": "pauseState", "paused": paused,
+            }),
+            Self::Review { session_id, result } => json!({
+                "type": "review", "sessionId": session_id, "result": result,
+            }),
+            Self::DiffComments {
+                session_id,
+                comments,
+            } => json!({
+                "type": "diffComments", "sessionId": session_id, "comments": comments,
+            }),
+            Self::HeavyQueue { snapshot } => json!({
+                "type": "heavyQueue",
+                "slots": snapshot.slots,
+                "workerCap": snapshot.worker_cap,
+                "running": snapshot.running,
+                "waiting": snapshot.waiting,
             }),
             Self::SessionDeleted {
                 session_id,
@@ -1645,6 +2024,28 @@ mod tests {
     }
 
     #[test]
+    fn a_key_frame_carries_a_batch_of_names_and_an_optional_seq() {
+        // Names on the wire, bytes nowhere near it (juancode-uigs): the resolution is
+        // this core's, so a client cannot spell an escape sequence of its own.
+        let with_seq = ClientMessage::decode(
+            r#"{"type":"key","sessionId":"s","keys":["Up","Enter"],"seq":4}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_seq,
+            ClientMessage::Key {
+                session_id: "s".into(),
+                keys: vec!["Up".into(), "Enter".into()],
+                seq: Some(4)
+            }
+        );
+        let without =
+            ClientMessage::decode(r#"{"type":"key","sessionId":"s","keys":["C-c"]}"#).unwrap();
+        assert!(matches!(without, ClientMessage::Key { seq: None, .. }));
+        assert!(ClientMessage::decode(r#"{"type":"key","sessionId":"s"}"#).is_err());
+    }
+
+    #[test]
     fn reactivate_is_its_own_message_not_an_attach() {
         // Decoding it as `attach` made `unresumable` unreachable: attach only reads,
         // and only a reactivate can be told there is nothing left to resume.
@@ -1729,6 +2130,36 @@ mod tests {
             // And for `sessionSearch`: falling through to `Unknown` would leave a
             // search box waiting forever on an answer nothing is coming for.
             r#"{"type":"searchSessions","query":"the reaper","requestId":"r"}"#,
+            // And for `namedKeys`: a phone Esc button that fell through to `Unknown`
+            // is a tap that does nothing, on the one surface where the alternative was
+            // typing the word "Escape" into the agent's prompt box.
+            r#"{"type":"key","sessionId":"s","keys":["Escape"]}"#,
+            // And for `heavyQueue`, all five: a client feature-detecting off the
+            // capability draws a queue, a reorder, a slot stepper and a cancel, and any
+            // one of them reaching `Unknown` is a control that does nothing and says
+            // nothing.
+            r#"{"type":"heavyQueueSubscribe"}"#,
+            r#"{"type":"heavyQueueUnsubscribe"}"#,
+            r#"{"type":"heavySetPriority","pid":4242,"prio":5}"#,
+            r#"{"type":"heavySetSlots","slots":2}"#,
+            r#"{"type":"heavyCancel","pid":4242}"#,
+            // And for `changes`, all four writes: a client feature-detecting off the
+            // capability draws Commit, Push, Discard and "draft me a message", and any
+            // one of them reaching `Unknown` is a button that does nothing and says
+            // nothing on the one panel where doing nothing quietly is indistinguishable
+            // from having discarded the file.
+            r#"{"type":"sessionCommit","sessionId":"s","message":"feat: x","requestId":"r"}"#,
+            r#"{"type":"sessionPush","sessionId":"s","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","path":"a.txt","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","file":"a.txt","hunkIndex":1,"requestId":"r"}"#,
+            r#"{"type":"sessionCommitMessage","sessionId":"s","requestId":"r"}"#,
+            // And for `github`, all three: a client feature-detecting off the
+            // capability draws a review button, a comment composer and an unstage, and
+            // any one of them reaching `Unknown` is a control that does nothing and
+            // says nothing.
+            r#"{"type":"sessionReview","sessionId":"s"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentDelete","sessionId":"s"}"#,
         ] {
             assert!(
                 !matches!(
@@ -1745,6 +2176,39 @@ mod tests {
             r#"{"type":"trackPrInSession","cwd":"/tmp","pr":{"number":7,"title":"t","url":"u","branch":"b"}}"#
         )
         .is_err());
+
+        // A comment with nothing to hang off is rejected rather than defaulted. Every
+        // one of these fields decides where the note lands, and a default for any of
+        // them is a note on a line nobody wrote.
+        for frame in [
+            r#"{"type":"diffCommentAdd","sessionId":"s","side":"new","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","line":3,"body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","body":"why"}"#,
+            r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","line":3}"#,
+            r#"{"type":"sessionReview"}"#,
+        ] {
+            assert!(ClientMessage::decode(frame).is_err(), "{frame}");
+        }
+
+        // A heavy mutation with nothing to act on is rejected rather than defaulted:
+        // a `heavyCancel` that lost its pid must not become a cancel of pid 0, and a
+        // `heavySetSlots` with no number must not become a capacity somebody invented.
+        for frame in [
+            r#"{"type":"heavyCancel"}"#,
+            r#"{"type":"heavySetPriority","pid":4242}"#,
+            r#"{"type":"heavySetSlots"}"#,
+            // And a git write with nothing to act on. A `sessionRevert` that lost its
+            // path must NOT become a discard of the tree, and a `sessionCommit` with a
+            // blank message must not put words this core invented into a history.
+            r#"{"type":"sessionRevert","sessionId":"s","requestId":"r"}"#,
+            r#"{"type":"sessionRevert","sessionId":"s","path":"  ","requestId":"r"}"#,
+            r#"{"type":"sessionCommit","sessionId":"s","message":"   ","requestId":"r"}"#,
+            r#"{"type":"sessionCommit","sessionId":"s","requestId":"r"}"#,
+            // And one with nowhere to send the answer.
+            r#"{"type":"sessionPush","sessionId":"s"}"#,
+        ] {
+            assert!(ClientMessage::decode(frame).is_err(), "{frame}");
+        }
 
         // `isolateWorktree` gates a FIELD, not a frame, so the lie it could tell is
         // one level down: the create still decodes, minus the flag, and the session
@@ -1796,6 +2260,10 @@ mod tests {
                     "sessionSearch",
                     "trackPrInSession",
                     "prWebhook",
+                    "namedKeys",
+                    "heavyQueue",
+                    "changes",
+                    "github",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

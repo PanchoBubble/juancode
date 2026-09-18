@@ -5,24 +5,18 @@ import Foundation
 /// GRDB/SQLite store lands in u34.5 behind this same protocol.
 public protocol SessionStore: AnyObject, Sendable {
     func insert(_ meta: SessionMeta)
-    /// Full write: metadata columns + scrollback + FTS reindex. The heavy path, so
-    /// callers reserve it for moments that need fresh search (busy->idle edge, exit,
-    /// resume/seed). Use `updateMeta` / `updateScrollback` for the hot paths.
+    /// Full write: metadata columns + scrollback. The heavy path, so callers reserve
+    /// it for moments that need fresh search (busy->idle edge, exit, resume/seed).
+    /// Use `updateMeta` / `updateScrollback` for the hot paths.
     func update(_ meta: SessionMeta, scrollback: [UInt8])
     /// Persist a metadata edit (title / usage / status / flags) WITHOUT rewriting the
-    /// (potentially 256KiB) scrollback column (juancode-5qw.1). Pass
-    /// `reindexTitleFts: true` when the title changed so search reflects the rename;
-    /// the reindex reuses the already-stored scrollback text, never re-serializing
-    /// the live ring.
-    func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool)
+    /// (potentially 256KiB) scrollback column (juancode-5qw.1).
+    func updateMeta(_ meta: SessionMeta)
     /// Persist scrollback only — the periodic crash-safety flush of a running
-    /// session. Skips the metadata columns and, deliberately, the FTS reindex: a busy
-    /// session's searchable scrollback is refreshed on the busy->idle edge / exit via
-    /// `update` (its live output is already visible, so second-fresh search of a
-    /// running session isn't needed).
+    /// session. Skips the metadata columns.
     func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int)
     func setCliSessionId(_ id: String, cliSessionId: String)
-    /// Rename a session: persist a new title (also refreshes the FTS index).
+    /// Rename a session: persist a new title.
     func setTitle(_ id: String, title: String)
     /// Archive / unarchive a session: hides it from the default sidebar list
     /// while keeping its row + scrollback intact.
@@ -37,6 +31,21 @@ public protocol SessionStore: AnyObject, Sendable {
     /// it must not ride the meta writes (or the wire) that every keystroke can
     /// trigger.
     func setMidTurn(_ id: String, _ midTurn: Bool)
+    /// Record the grid the stored scrollback bytes were PARSED at (juancode-r5cf).
+    /// Without it the log is unreplayable: hard wraps and absolute cursor moves only
+    /// land in the right cell at the width the CLI emitted them for, so a reader that
+    /// does not know that width can only guess — which is the garbling failure.
+    ///
+    /// Written when the grid CHANGES, not alongside every scrollback flush: the grid
+    /// moves on resize, the bytes move constantly, and this must stay off the hot
+    /// output path.
+    func setScrollbackGrid(_ id: String, cols: Int, rows: Int)
+}
+
+public extension SessionStore {
+    /// Default for stores that keep no grid (test doubles that only count writes).
+    /// The real stores — in-memory and GRDB — both implement it.
+    func setScrollbackGrid(_ id: String, cols: Int, rows: Int) {}
 }
 
 /// The full persistence surface the HTTP/WS server needs: the `SessionStore`
@@ -62,6 +71,10 @@ public protocol PersistentStore: SessionStore {
     /// clearing in the same transaction means a marker is consumed exactly once, so
     /// a session that was busy two crashes ago can't keep offering to continue.
     @discardableResult func takeMidTurnIds() -> Set<String>
+    /// The grid `setScrollbackGrid` last recorded for `id`, or nil when the session
+    /// predates the column / never reported one. A reader with no recorded grid must
+    /// say so rather than invent a width (juancode-r5cf).
+    func getScrollbackGrid(_ id: String) -> (cols: Int, rows: Int)?
 
     // inline diff comments
     func addComment(_ c: DiffComment)
@@ -83,6 +96,7 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
     private var comments: [String: [DiffComment]] = [:]
     private var reviews: [String: ReviewResult] = [:]
     private var midTurn: Set<String> = []
+    private var scrollbackGrids: [String: (cols: Int, rows: Int)] = [:]
 
     public init() {}
 
@@ -97,9 +111,8 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
         }
     }
 
-    public func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
-        // Scrollback map left untouched; the naive search reads titles live so the
-        // `reindexTitleFts` hint is a no-op here.
+    public func updateMeta(_ meta: SessionMeta) {
+        // Scrollback map left untouched; the naive search reads titles live.
         lock.withLock { metas[meta.id] = meta }
     }
 
@@ -144,6 +157,15 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
 
     public func getScrollback(_ id: String) -> [UInt8]? {
         lock.withLock { scrollbacks[id] }
+    }
+
+    public func setScrollbackGrid(_ id: String, cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        lock.withLock { scrollbackGrids[id] = (cols, rows) }
+    }
+
+    public func getScrollbackGrid(_ id: String) -> (cols: Int, rows: Int)? {
+        lock.withLock { scrollbackGrids[id] }
     }
 
     public func setMidTurn(_ id: String, _ midTurn: Bool) {
@@ -192,6 +214,7 @@ public final class InMemorySessionStore: PersistentStore, @unchecked Sendable {
             comments[id] = nil
             reviews[id] = nil
             scrollbacks[id] = nil
+            scrollbackGrids[id] = nil
             return metas.removeValue(forKey: id) != nil
         }
     }

@@ -3,7 +3,7 @@
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.15.0",
+  "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [
     "queue",
@@ -22,7 +22,8 @@
     "isolateWorktree",
     "globalPause",
     "trackPrInSession",
-    "prWebhook"
+    "prWebhook",
+    "namedKeys"
   ],
   "scenarios": {
     "handshake": {
@@ -213,6 +214,28 @@
       "status": "passed",
       "attempts": 3,
       "passes": 3
+    },
+    "session-screen": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "named-keys": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "heavy-queue": {
+      "status": "skipped",
+      "note": "core does not advertise the \"heavyQueue\" capability"
+    },
+    "changes": {
+      "status": "skipped",
+      "note": "core does not advertise the \"changes\" capability"
+    },
+    "github": {
+      "status": "skipped",
+      "note": "core does not advertise the \"github\" capability"
     }
   }
 }

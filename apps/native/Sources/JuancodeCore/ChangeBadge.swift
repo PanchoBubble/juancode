@@ -21,6 +21,12 @@ public struct ChangeStat: Sendable, Equatable {
 
     public var isEmpty: Bool { files == 0 }
 
+    /// Nothing changed — and also what a caller shows when the core could not answer,
+    /// because an unanswered rollup and a clean tree are the same badge: none.
+    public static var empty: ChangeStat {
+        ChangeStat(files: 0, additions: 0, deletions: 0, signature: "")
+    }
+
     /// Compact label like `3 files · +120 −44`. Uses the real minus sign (−).
     public var summary: String {
         "\(files) file\(files == 1 ? "" : "s") · +\(additions) −\(deletions)"

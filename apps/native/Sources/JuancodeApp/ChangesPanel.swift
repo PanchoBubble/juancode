@@ -199,14 +199,8 @@ struct ChangesPanel: View {
                         .controlSize(.small).clickCursor()
                     }
                 }
-                if let logs = model.prCiLogs(sessionId) {
-                    ScrollView {
-                        Text(logs)
-                            .font(.system(size: 10, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 180)
+                if let log = model.prCiLogs(sessionId) {
+                    ActionsLogView(log: log)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

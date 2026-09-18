@@ -1,4 +1,4 @@
-//! The three per-session reads a remote client makes once, over HTTP.
+//! The four per-session reads a remote client makes once, over HTTP.
 //!
 //! Everything else about a session is a subscription: a pane attaches and follows the
 //! byte stream, a transcript panel subscribes and follows the records. That shape is
@@ -8,7 +8,7 @@
 //! app's relay serves `/api/sessions`, and every per-session read under it fell through
 //! to a 501 (juancode-ag1e).
 //!
-//! Three routes, all read-only, all keyed by session id:
+//! Four routes, all read-only, all keyed by session id:
 //!
 //! * `GET /api/sessions/{id}/scrollback` — the retained pty bytes **and the grid they
 //!   were parsed at**. Never one without the other: a byte ring replayed at the wrong
@@ -22,8 +22,16 @@
 //! * `GET /api/sessions/{id}/messages` — those same records projected into chat shape.
 //!   A derived view, never a second source: a reader with no VT emulator (Telegram, a
 //!   notification, a script) needs prose and who said it, not a grid.
+//! * `GET /api/sessions/{id}/screen` — the **rendered** screen: the parsed grid, not
+//!   the bytes. This is what the scrollback read is a fallback for. A byte ring has to
+//!   be replayed to be looked at, and a replay at the wrong width lands every hard wrap
+//!   in the wrong cell; these rows were laid out by the parser that wrote them, at the
+//!   width it wrote them at, so there is nothing left to get wrong (juancode-tyd9).
+//!   `text/plain` by default, `?scrollback=N` to flow history in above the screen,
+//!   `?json=1` for the `screen` frame's own row encoding with history at NEGATIVE row
+//!   indices.
 //!
-//! None of the three touches the session. A read must not resize the desktop's
+//! None of the four touches the session. A read must not resize the desktop's
 //! terminal to see it, which is why the scrollback route reads the ring and the grid
 //! directly instead of going through `attach`.
 
@@ -36,6 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use juancoded_transcripts::{TranscriptEvent, TranscriptRecord};
+use juancoded_vt::wire::PeekRow;
 
 use crate::serve::CoreHandles;
 
@@ -49,7 +58,16 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/sessions/{id}/scrollback", get(scrollback))
         .route("/api/sessions/{id}/transcript", get(transcript))
         .route("/api/sessions/{id}/messages", get(messages))
+        .route("/api/sessions/{id}/screen", get(screen))
 }
+
+/// How much history a bare `?scrollback` asks for — the same number the Swift model
+/// seeds a reattaching pane with (`SessionTerminalModel.defaultSeedScrollbackRows`).
+pub const DEFAULT_SCREEN_SCROLLBACK_ROWS: usize = 500;
+
+/// The most history any one read will answer with, however large a number is asked
+/// for. A peek is a look, not an export; `/scrollback` is the route for the whole ring.
+pub const SCREEN_SCROLLBACK_CAP: usize = 5_000;
 
 /// `?limit=` on the two transcript reads: how much of the tail to answer with. `0`
 /// means the whole history the daemon kept, which is what the store already means by
@@ -80,6 +98,69 @@ pub struct ScrollbackBody {
     /// The bytes, lossily decoded — the same decoding the `attached` frame does, so a
     /// client gets one representation of this plane rather than two.
     pub scrollback: String,
+}
+
+/// `?scrollback` / `?json` on the screen read. Both are strings rather than typed
+/// values because both are FLAGS first: `?json` with no value has to read as true, and
+/// `?scrollback` with no value has to mean the default depth. A `bool`/`usize` field
+/// would reject the bare form outright.
+#[derive(Debug, Default, Deserialize)]
+pub struct ScreenParams {
+    pub scrollback: Option<String>,
+    pub json: Option<String>,
+}
+
+/// `?scrollback` / `=1` / `=true` → [`DEFAULT_SCREEN_SCROLLBACK_ROWS`]; `?scrollback=N`
+/// (N > 1) → that many rows, capped; absent, `=0` or `=false` → none. A boolean flag
+/// with a row count as the refinement, matching `ScreenPeek.scrollbackRows` in Swift.
+pub fn scrollback_rows(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else { return 0 };
+    let v = raw.trim().to_ascii_lowercase();
+    if v == "0" || v == "false" || v == "no" {
+        return 0;
+    }
+    match v.parse::<usize>() {
+        Ok(n) if n > 1 => n.min(SCREEN_SCROLLBACK_CAP),
+        _ => DEFAULT_SCREEN_SCROLLBACK_ROWS,
+    }
+}
+
+/// Present-means-true, the way `?json` reads, with an explicit `0`/`false` honoured.
+pub fn flag(raw: Option<&str>) -> bool {
+    match raw {
+        None => false,
+        Some(raw) => {
+            let v = raw.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "no")
+        }
+    }
+}
+
+/// `?json=1` body, field for field the Swift core's `ScreenSnapshotWire`.
+///
+/// `rows` is the GRID HEIGHT, as in a `screen` frame, rather than doubling as the
+/// length of `lines` — `lines` is longer than `rows` whenever history was asked for,
+/// and `scrollback` says by how many.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenBody {
+    pub session_id: String,
+    pub cols: usize,
+    pub rows: usize,
+    pub cursor: ScreenCursor,
+    pub alt: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// How many of `lines` are history rows — all of them at negative indices.
+    pub scrollback: usize,
+    pub lines: Vec<PeekRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScreenCursor {
+    pub x: usize,
+    pub y: usize,
+    pub visible: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +241,71 @@ async fn messages(
     Json(MessagesBody {
         session_id: id,
         messages: chat(&records),
+    })
+    .into_response()
+}
+
+/// The rendered screen, as text or as styled rows.
+///
+/// Two failure modes, deliberately distinct. An id this core has never heard of is a
+/// 404. A session it holds whose pty is gone is a **409**: the screen is live state,
+/// and a caller told "conflict" knows to fall back to the stored scrollback on purpose
+/// rather than reading an empty grid as an empty session.
+///
+/// This core could in fact answer for a dead session — `screen_peek` rebuilds a replay
+/// grid from the persisted bytes at the width they were written at. It deliberately
+/// does not, because the Swift core cannot (its model dies with the pty) and one URL
+/// may not mean two things while both cores serve it. See juancode-s96g's follow-up.
+async fn screen(
+    Path(id): Path<String>,
+    Query(params): Query<ScreenParams>,
+    State(handles): State<CoreHandles>,
+) -> Response {
+    if handles.sessions.meta(&id).is_none() {
+        return not_found(&id);
+    }
+    if !handles.sessions.is_running(&id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "session is not running — its screen died with the pty"
+            })),
+        )
+            .into_response();
+    }
+    let rows = scrollback_rows(params.scrollback.as_deref());
+    let Some(peek) = handles.sessions.screen_peek(&id, rows) else {
+        // Known, running, and no grid: nothing to draw and nothing to fall back to.
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": format!("session {id} has no rendered screen") })),
+        )
+            .into_response();
+    };
+    if !flag(params.json.as_deref()) {
+        return (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            peek.text(),
+        )
+            .into_response();
+    }
+    Json(ScreenBody {
+        session_id: id,
+        cols: peek.snapshot.cols,
+        rows: peek.snapshot.rows,
+        cursor: ScreenCursor {
+            x: peek.snapshot.cursor_x,
+            y: peek.snapshot.cursor_y,
+            visible: peek.snapshot.cursor_visible,
+        },
+        alt: peek.snapshot.alt,
+        title: peek.title.clone(),
+        scrollback: peek.history.len(),
+        lines: peek.lines(),
     })
     .into_response()
 }
@@ -335,6 +481,13 @@ mod tests {
     /// what a client reaches, and a route that only exists in its own `Router` is a
     /// 404 in production.
     async fn get(handles: &CoreHandles, path: &str) -> (StatusCode, Value) {
+        let (status, _, body) = get_text(handles, path).await;
+        (status, serde_json::from_str(&body).unwrap_or(Value::Null))
+    }
+
+    /// The same request, kept as bytes: `/screen` answers `text/plain` by default, and
+    /// the content type is part of what that default promises.
+    async fn get_text(handles: &CoreHandles, path: &str) -> (StatusCode, Option<String>, String) {
         let response = crate::serve::router(handles.clone())
             .oneshot(
                 Request::builder()
@@ -345,11 +498,39 @@ mod tests {
             .await
             .expect("routed");
         let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
             .expect("body");
-        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
+        (
+            status,
+            content_type,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    /// Put bytes on a session's grid the way its pty would.
+    ///
+    /// Straight at the `terminal` service rather than through `input`, because what is
+    /// being measured is the RENDERED read and not the pty round trip: a test that
+    /// waits on `/bin/cat` to echo measures scheduling. The read is asked for once
+    /// first so the grid exists to be fed — the registry opens one on demand.
+    fn paint(
+        loader: &juancoded_cordis::Loader,
+        handles: &CoreHandles,
+        session: &str,
+        bytes: &[u8],
+    ) {
+        handles.sessions.screen_peek(session, 0);
+        loader
+            .services()
+            .resolve::<juancoded_cordis::services::terminal::TerminalService>()
+            .expect("the terminal service mounts")
+            .feed(session, bytes);
     }
 
     #[tokio::test]
@@ -377,7 +558,7 @@ mod tests {
         let (_loader, handles) = scratch.boot();
         let session = create(&handles, &scratch.cwd(), 100, 30);
 
-        for leaf in ["scrollback", "transcript", "messages"] {
+        for leaf in ["scrollback", "transcript", "messages", "screen"] {
             let (status, _) = get(&handles, &format!("/api/sessions/{session}/{leaf}")).await;
             assert_eq!(status, StatusCode::OK, "{leaf}");
         }
@@ -385,11 +566,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_session_is_a_404_on_all_three_reads() {
+    async fn an_unknown_session_is_a_404_on_every_read() {
         let scratch = Scratch::new("missing");
         let (_loader, handles) = scratch.boot();
 
-        for leaf in ["scrollback", "transcript", "messages"] {
+        for leaf in ["scrollback", "transcript", "messages", "screen"] {
             let (status, body) = get(&handles, &format!("/api/sessions/nope/{leaf}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{leaf}");
             assert!(
@@ -397,6 +578,152 @@ mod tests {
                 "{leaf}: {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_screen_read_answers_at_the_grid_it_was_rendered_at() {
+        // The point of the route. A byte log has no width and has to be replayed to be
+        // looked at; these rows were laid out by the parser, and the grid they were
+        // laid out at travels with them so nothing downstream has to guess.
+        let scratch = Scratch::new("screen-grid");
+        let (loader, handles) = scratch.boot();
+        let session = create(&handles, &scratch.cwd(), 90, 20);
+        paint(&loader, &handles, &session, b"rendered here");
+
+        let (status, body) = get(&handles, &format!("/api/sessions/{session}/screen?json=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sessionId"], session.as_str());
+        assert_eq!(body["cols"], 90);
+        assert_eq!(body["rows"], 20);
+        assert_eq!(body["alt"], false);
+        assert_eq!(body["scrollback"], 0);
+        assert_eq!(body["cursor"]["visible"], true);
+        // `rows` is the GRID HEIGHT and `lines` is every one of them, at 0 … rows-1.
+        let lines = body["lines"].as_array().expect("lines");
+        assert_eq!(lines.len(), 20);
+        assert_eq!(lines[0]["row"], 0);
+        assert_eq!(lines[0]["segs"][0]["text"], "rendered here");
+        assert_eq!(lines[19]["row"], 19);
+    }
+
+    #[tokio::test]
+    async fn the_default_screen_body_is_the_plain_text_of_the_grid() {
+        let scratch = Scratch::new("screen-text");
+        let (loader, handles) = scratch.boot();
+        let session = create(&handles, &scratch.cwd(), 40, 6);
+        paint(
+            &loader,
+            &handles,
+            &session,
+            b"first line\r\nsecond line\r\n",
+        );
+
+        let (status, content_type, body) =
+            get_text(&handles, &format!("/api/sessions/{session}/screen")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("text/plain; charset=utf-8"));
+        // Trailing blank rows are dropped, so a 6-row grid with two lines on it reads
+        // as two lines rather than as four empty ones.
+        assert_eq!(body, "first line\nsecond line");
+    }
+
+    #[tokio::test]
+    async fn history_arrives_above_the_screen_at_negative_row_indices() {
+        // The whole reason a peek can carry history at all: the visible rows have to
+        // stay at exactly the indices a `screen` frame uses, so one client decoder
+        // reads both. Negative indices leave no ambiguity about where history ends.
+        let scratch = Scratch::new("screen-history");
+        let (loader, handles) = scratch.boot();
+        let session = create(&handles, &scratch.cwd(), 40, 3);
+        let painted: String = (0..9).map(|i| format!("row {i}\r\n")).collect();
+        paint(&loader, &handles, &session, painted.as_bytes());
+
+        let (status, body) = get(
+            &handles,
+            &format!("/api/sessions/{session}/screen?scrollback=2&json=1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["rows"], 3, "`rows` stays the grid height");
+        assert_eq!(body["scrollback"], 2);
+        let rows: Vec<i64> = body["lines"]
+            .as_array()
+            .expect("lines")
+            .iter()
+            .map(|l| l["row"].as_i64().expect("row"))
+            .collect();
+        assert_eq!(rows, vec![-2, -1, 0, 1, 2]);
+
+        // And the text body flows the same history in above the same screen.
+        let (_, _, text) = get_text(
+            &handles,
+            &format!("/api/sessions/{session}/screen?scrollback=2"),
+        )
+        .await;
+        assert_eq!(text, "row 5\nrow 6\nrow 7\nrow 8");
+
+        // No `?scrollback` at all is the screen and nothing above it.
+        let (_, body) = get(&handles, &format!("/api/sessions/{session}/screen?json=1")).await;
+        assert_eq!(body["scrollback"], 0);
+        assert_eq!(body["lines"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_pty_is_gone_is_a_409_rather_than_an_empty_screen() {
+        // A caller has to be able to tell "nothing on screen" from "nothing left to
+        // look at": the second one means fall back to the stored scrollback on
+        // purpose, and an empty 200 would hide that decision.
+        let scratch = Scratch::new("screen-dead");
+        let (_loader, handles) = scratch.boot();
+        let session = create(&handles, &scratch.cwd(), 80, 24);
+        handles.sessions.kill(&session).expect("killed");
+        // The kill signals; the pty slot clears when the child is reaped. Waiting for
+        // the fact rather than for a duration, so a loaded machine does not turn this
+        // into a race (`exec` alone costs a quarter-second here).
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while handles.sessions.is_running(&session) {
+            assert!(Instant::now() < deadline, "the pty never went away");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let (status, body) = get(&handles, &format!("/api/sessions/{session}/screen")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not running"),
+            "{body}"
+        );
+
+        // The byte-log read is exactly what a 409 tells a caller to fall back to, so
+        // it must still answer for the same session.
+        let (status, _) = get(&handles, &format!("/api/sessions/{session}/scrollback")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[test]
+    fn scrollback_is_a_flag_first_and_a_row_count_second() {
+        assert_eq!(scrollback_rows(None), 0);
+        assert_eq!(scrollback_rows(Some("0")), 0);
+        assert_eq!(scrollback_rows(Some("false")), 0);
+        assert_eq!(scrollback_rows(Some("no")), 0);
+        // A bare `?scrollback` arrives as an empty value and means "the usual depth".
+        assert_eq!(scrollback_rows(Some("")), DEFAULT_SCREEN_SCROLLBACK_ROWS);
+        assert_eq!(
+            scrollback_rows(Some("true")),
+            DEFAULT_SCREEN_SCROLLBACK_ROWS
+        );
+        assert_eq!(scrollback_rows(Some("1")), DEFAULT_SCREEN_SCROLLBACK_ROWS);
+        assert_eq!(scrollback_rows(Some("200")), 200);
+        assert_eq!(scrollback_rows(Some(" 200 ")), 200);
+        assert_eq!(scrollback_rows(Some("999999")), SCREEN_SCROLLBACK_CAP);
+
+        assert!(!flag(None));
+        assert!(!flag(Some("0")));
+        assert!(!flag(Some("false")));
+        assert!(flag(Some("")));
+        assert!(flag(Some("1")));
     }
 
     #[tokio::test]

@@ -3,7 +3,11 @@ import JuancodeCore
 import SQLite3
 
 /// Read-only view of opencode's own database — the opencode analogue of the JSONL
-/// transcripts `SessionTitle`/`SessionUsage`/`RecoverSession` read for claude and codex.
+/// transcripts `SessionTitle`/`RecoverSession` read for claude and codex.
+///
+/// It reads rows and titles, and no longer reads usage or message parts: those were
+/// the opencode halves of the Swift usage reader and activity tail, both deleted in
+/// favour of `juancoded-core/src/usage.rs` and `juancoded-transcripts`.
 ///
 /// opencode keeps everything in one SQLite file (default
 /// `~/.local/share/opencode/opencode.db`): a `session` row per conversation with its
@@ -190,7 +194,7 @@ public enum OpencodeStore {
         }
     }
 
-    // MARK: - title + usage
+    // MARK: - title
 
     /// opencode names a brand-new conversation `New session - <ISO timestamp>` until the
     /// model summarizes it. That's less useful than our own "opencode · <folder>"
@@ -205,72 +209,6 @@ public enum OpencodeStore {
         let raw = row.title.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.isEmpty || isPlaceholderTitle(raw) { return nil }
         return tidy(raw)
-    }
-
-    /// Token usage + cost as opencode itself accounts for them: the `session` row keeps
-    /// running totals, so there's nothing to fold or dedup. Unlike Claude (where we
-    /// price the turns ourselves) the cost here is the CLI's own figure.
-    public static func usage(_ id: String, db: String = defaultPath) -> SessionUsage? {
-        guard let r = session(id, db: db) else { return nil }
-        // Reasoning tokens are billed as output; opencode counts them separately.
-        let output = r.outputTokens + r.reasoningTokens
-        let total = r.inputTokens + output + r.cacheReadTokens + r.cacheWriteTokens
-        guard total > 0 else { return nil }  // no turn has run yet
-        return SessionUsage(
-            inputTokens: r.inputTokens,
-            outputTokens: output,
-            cacheReadTokens: r.cacheReadTokens,
-            cacheWriteTokens: r.cacheWriteTokens,
-            totalTokens: total,
-            costUsd: r.costUsd > 0 ? r.costUsd : nil)
-    }
-
-    // MARK: - structured activity
-
-    /// One message part, flattened into what the activity mapping needs.
-    struct PartRow {
-        let id: String
-        let updatedMs: Int
-        /// `part.data`, parsed.
-        let data: [String: Any]
-        /// The role of the message this part belongs to ("user" / "assistant").
-        let role: String
-    }
-
-    /// The newest `time_updated` among a session's parts, or nil when it has none. Lets
-    /// a tail set its watermark without loading the conversation's whole history.
-    static func latestPartMs(sessionId: String, db: String = defaultPath) -> Int? {
-        OpencodeSqlite.query(
-            db, "SELECT MAX(time_updated) FROM part WHERE session_id = ?1", [.text(sessionId)]
-        ).first?.first?.int
-    }
-
-    /// Parts of `sessionId` touched at/after `sinceMs`, oldest first. A tool part is
-    /// rewritten in place as it runs (pending → running → completed), so the cursor is
-    /// on `time_updated`, not `time_created`.
-    static func parts(
-        sessionId: String, sinceMs: Int, db: String = defaultPath
-    ) -> [PartRow] {
-        OpencodeSqlite.query(
-            db,
-            """
-            SELECT p.id, p.time_updated, p.data, m.data FROM part p
-            JOIN message m ON m.id = p.message_id
-            WHERE p.session_id = ?1 AND p.time_updated >= ?2
-            ORDER BY p.time_updated ASC, p.id ASC
-            """,
-            [.text(sessionId), .int(sinceMs)]
-        ).compactMap { r in
-            guard r.count >= 4, let id = r[0].text,
-                  let partJson = r[2].text, let data = jsonObject(partJson) else { return nil }
-            let role = r[3].text.flatMap(jsonObject)?["role"] as? String ?? ""
-            return PartRow(id: id, updatedMs: r[1].int ?? 0, data: data, role: role)
-        }
-    }
-
-    private static func jsonObject(_ raw: String) -> [String: Any]? {
-        guard let data = raw.data(using: .utf8) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }
 

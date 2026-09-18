@@ -58,6 +58,17 @@ ensure `claude` is on PATH and logged in.
 
 ## Architecture
 
+**This sidecar stays** — decided in juancode-52e8.14.7 and not to be re-opened. As the
+Swift core is retired in favour of `apps/juancoded` (Rust), the daemon absorbs nothing of
+what is here: Telegram, the phone console, voice transcription, triggers, cron, the
+dispatch registry and the MCP server are not core work and gain nothing from Rust. The
+seam is the one long-lived WS in `src/native-events.ts`, and it already survived the core
+swap. The daemon owes this sidecar a complete `activity` stream, which it emits; the one
+thing it now sends itself is the user's outbound notification webhook, because that has
+to keep firing with the desktop app closed. See `apps/juancoded/README.md` →
+"Notifications".
+
+
 ```
 Phone (Claude app, custom connector)
   │  MCP over HTTPS  +  OAuth via Cloudflare Access
@@ -146,6 +157,26 @@ Transport is long-poll `getUpdates` (no webhook), so it works behind the existin
 `claude` session id (separate from the browser thread, no cross-talk); `/new` (or
 `/start`) resets it. Replies are chunked to Telegram's 4096-char limit. Only users in
 `ALLOWED_USER_IDS` are answered; everyone else is silently ignored.
+
+#### Control keys (juancode-uigs)
+
+A reply — typed or tapped — is **bracketed-pasted**, which is what makes it literal: the
+CLI keeps the bytes and never reads them as keystrokes. So Esc, Ctrl-C and the arrows
+needed a path of their own, and without it two things were unreachable from a phone:
+interrupting a runaway agent, and answering a permission prompt, which is exactly what
+claude stops on and drives with arrows + Enter.
+
+A needs-input ping and a stuck advisory now carry a keypad (`Esc  ⌃C  ↑  ↓  ⏎`), and
+`/keys <n|id>` posts one for any session. The phone console's live session view has the
+same row, and `POST /api/keys {sessionId, keys}` / the `oracle_session_keys` MCP tool are
+the programmatic forms.
+
+The buttons send key **names**, never bytes: the vocabulary (`Enter`, `Escape`, `Tab`,
+`Backspace`, `Space`, `Up`, `Down`, `Left`, `Right`, `C-a` … `C-z`) belongs to the core,
+which resolves it on the `key` wire frame behind the `namedKeys` capability. A core too
+old to know that frame gets the bytes resolved here instead — still raw, still never
+bracketed-pasted. An unknown name is refused rather than typed into the agent's prompt
+box.
 
 Config is read from the process env, with a fallback `apps/oracle-mcp/.env`
 (gitignored) loaded at startup — a real shell export always wins over the file. Copy

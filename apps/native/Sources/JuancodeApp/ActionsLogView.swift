@@ -1,23 +1,31 @@
 import SwiftUI
-import JuancodeServices
+import JuancodeClient
 
 /// Failing CI logs the way the Actions web UI shows them: the errors up front, the
-/// setup noise folded away, ANSI colour kept — so a red build can be diagnosed in
-/// the GitHub panel instead of on the site. Parsing is `parseActionsLog`; this file
-/// only maps the parse onto views and SGR codes onto colours (the same split as
-/// `VimSyntaxPalette`).
+/// setup noise folded away, ANSI colour kept — so a red build can be diagnosed in the
+/// GitHub panel instead of on the site.
+///
+/// The parse is the core's (`juancoded-core/src/actions_log.rs`, juancode-52e8.14.6);
+/// this file maps it onto views and SGR codes onto colours, which is the same split
+/// `VimSyntaxPalette` has. It used to parse the raw text here, which meant the only
+/// machine that could read a red build was the one the app happened to be running on.
 struct ActionsLogView: View {
-    /// Raw text from `getFailedCheckLogs`.
-    let text: String
+    /// The parsed log, as the core handed it over. An empty one is an answer — a green
+    /// PR has no failing build — and reads as one.
+    let log: ActionsLog
 
-    @State private var log: ActionsLog?
     @State private var showTimestamps = false
     /// Group ids the user has toggled away from their default fold state.
     @State private var toggled: Set<Int> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let log, !log.isEmpty {
+            if log.isEmpty {
+                Text("No failing-step logs available.")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
                 header(log)
                 errorSummary(log)
                 ScrollView {
@@ -29,23 +37,11 @@ struct ActionsLogView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 260)
-            } else {
-                // Still parsing, or nothing that looks like an Actions log (e.g. the
-                // "No failing-step logs available." placeholder) — show it verbatim.
-                Text(text)
-                    .font(.system(size: 10, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(6)
         .background(Color.red.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .task(id: text) {
-            // 20k chars of log is cheap to parse but not free — keep it off main.
-            let raw = text
-            log = await Task.detached(priority: .utility) { parseActionsLog(raw) }.value
-        }
     }
 
     private func header(_ log: ActionsLog) -> some View {
@@ -164,7 +160,7 @@ struct ActionsLogView: View {
         ForEach(group.lines) { line in
             HStack(alignment: .top, spacing: 4) {
                 if showTimestamps {
-                    Text(line.timestamp.map(logTimeFormatter.string(from:)) ?? "")
+                    Text(line.date.map(logTimeFormatter.string(from:)) ?? "")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .frame(width: 52, alignment: .leading)

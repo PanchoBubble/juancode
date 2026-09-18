@@ -10,9 +10,10 @@
 use std::sync::Arc;
 
 use juancoded_cordis::Service;
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_persistence::{QueuedMessage, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
-use juancoded_vt::Snapshot;
+use juancoded_vt::{ScreenPeek, Snapshot};
 
 use juancoded_core::model::{SessionActivity, SessionMeta};
 use tokio::sync::broadcast;
@@ -40,6 +41,21 @@ pub trait SessionsApi: Send + Sync {
     fn is_running(&self, id: &str) -> bool;
     fn activity(&self, id: &str) -> Option<SessionActivity>;
     fn snapshot(&self, id: &str) -> Option<Snapshot>;
+    /// The rendered screen plus `scrollback_rows` of history above it and the window
+    /// title, as one read — what `GET /api/sessions/:id/screen` answers with.
+    ///
+    /// Defaulted for the same reason `search` is: the stand-ins the reaper's and the
+    /// stuck detector's tests hold have no VT behind them at all, and "this core keeps
+    /// no rendered history" is the honest answer for one of those rather than a hole a
+    /// `todo!()` falls into. The default still carries the visible grid, so a caller
+    /// never has to special-case it. The real registry overrides it.
+    fn screen_peek(&self, id: &str, _scrollback_rows: usize) -> Option<ScreenPeek> {
+        Some(ScreenPeek {
+            snapshot: self.snapshot(id)?,
+            history: Vec::new(),
+            title: None,
+        })
+    }
     /// Sessions whose history mentions `query`, newest first, at most `limit`.
     ///
     /// Defaulted to nothing rather than required, unlike everything else here: the
@@ -222,6 +238,20 @@ impl Service for StoreService {
     type Api = dyn SessionStore;
 }
 
+/// `ctx.resolve::<ReviewStoreService>()` yields `Arc<dyn ReviewStore>` — a session's
+/// staged diff comments and its last review pass.
+///
+/// A key of its own rather than a widening of `SessionStore`, because they are two
+/// different promises. Everything behind `store` is what a session *is*, and this is
+/// what somebody wrote about one. A tree can mount a registry without a review surface
+/// and the frames will say so, which is the whole reason the services are keyed.
+pub struct ReviewStoreService;
+
+impl Service for ReviewStoreService {
+    const KEY: &'static str = "review-store";
+    type Api = dyn ReviewStore;
+}
+
 impl SessionsApi for SessionRegistry {
     fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         SessionRegistry::subscribe(self)
@@ -249,6 +279,10 @@ impl SessionsApi for SessionRegistry {
 
     fn snapshot(&self, id: &str) -> Option<Snapshot> {
         SessionRegistry::snapshot(self, id)
+    }
+
+    fn screen_peek(&self, id: &str, scrollback_rows: usize) -> Option<ScreenPeek> {
+        SessionRegistry::peek(self, id, scrollback_rows)
     }
 
     fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {

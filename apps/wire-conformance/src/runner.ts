@@ -16,7 +16,7 @@ import {
 } from "./client.ts";
 import { matchValue, readBindings, resolveVars, type Vars } from "./match.ts";
 import { negotiate, SUITE_REQUIREMENTS } from "./negotiate.ts";
-import type { CoreDeath } from "./core.ts";
+import { HEAVY_PIDS, type CoreDeath } from "./core.ts";
 import type { Requirement, Scenario, Step } from "./spec.ts";
 
 /** Per-run scratch space the scenarios address through bound variables. */
@@ -26,6 +26,19 @@ export interface Workspace {
   /** A git repo with one commit and one uncommitted file, for the settle-edge
    *  change rollup and for the tracked-PR worktree path. */
   gitCwd: string;
+  /** A SECOND git repo, with a local bare remote already wired up as `origin` and
+   *  a 40-line file committed, for the working-tree scenario (juancode-52e8.14.5).
+   *
+   *  Its own repo rather than a remote bolted onto `gitCwd`: a commit and a push are
+   *  writes, and running them against the tree that scenario 30 branches worktrees off
+   *  would make an isolation test depend on what a changes test left behind. The bare
+   *  remote is local, so the push is a file copy and the suite needs no network. */
+  gitRemoteCwd: string;
+  /** A checkout `fake-gh.sh` answers for: a plain directory carrying a
+   *  `.gh-fixtures/` of recorded gh output. The stub keys off the cwd rather than off
+   *  a variable so both of its behaviours are live in one core boot - 14-tracked-prs
+   *  needs a `gh` that fails, 45-github needs one that answers. */
+  ghCwd: string;
   /** A path that does not exist, for the create-guard error. */
   missingCwd: string;
   /** A file inside `cwd`, for openEditor. */
@@ -62,14 +75,267 @@ export function makeWorkspace(): Workspace {
   // there is something to report.
   writeFileSync(join(gitCwd, "committed.txt"), "base\nchanged\n");
 
+  // The changes fixture: its own repo, its own bare remote, and a file wide enough
+  // that two edits far apart produce two hunks rather than one — which is what a
+  // per-hunk discard has to be measured against.
+  const gitRemoteCwd = join(root, "remote-repo");
+  const bare = join(root, "origin.git");
+  mkdirSync(gitRemoteCwd);
+  const gitRemote = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: gitRemoteCwd,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "conformance",
+        GIT_AUTHOR_EMAIL: "conformance@localhost",
+        GIT_COMMITTER_NAME: "conformance",
+        GIT_COMMITTER_EMAIL: "conformance@localhost",
+      },
+    });
+  execFileSync("git", ["init", "--quiet", "--bare", bare], { stdio: "ignore" });
+  gitRemote("init", "--quiet", "--initial-branch=main");
+  writeFileSync(
+    join(gitRemoteCwd, "wide.txt"),
+    Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n",
+  );
+  gitRemote("add", "wide.txt");
+  gitRemote("commit", "--quiet", "-m", "base");
+  gitRemote("remote", "add", "origin", bare);
+  gitRemote("push", "--quiet", "-u", "origin", "main");
+
   return {
     cwd,
     gitCwd,
+    gitRemoteCwd,
+    ghCwd: seedGhFixtures(join(root, "gh-repo")),
     missingCwd: join(root, "definitely-not-here"),
     file,
     dispose: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+/** The recorded `gh` output 45-github reads, in the directory `fake-gh.sh` answers
+ *  for.
+ *
+ *  Recorded shapes, not invented ones: every field here is one the parsers in
+ *  `juancoded_core::gh` / `gh_convo` / `actions_log` actually read, spelled the way gh
+ *  spells it. Three of them carry a deliberate awkwardness, because a fixture that is
+ *  only the happy path tests nothing:
+ *
+ *   * PR #7 is somebody else's with the viewer's review requested, and #42 is the
+ *     viewer's own with red CI — so the triage answer has to order two different
+ *     reasons rather than repeat one.
+ *   * The conversation carries a bare COMMENTED review that is only the record of an
+ *     inline reply, which the timeline has to drop.
+ *   * The Actions log carries seven fractional digits, an unterminated `##[group]` and
+ *     an ANSI-coloured line, all of which the real thing does. */
+function seedGhFixtures(dir: string): string {
+  const fixtures = join(dir, ".gh-fixtures");
+  mkdirSync(fixtures, { recursive: true });
+  const write = (name: string, body: unknown) =>
+    writeFileSync(
+      join(fixtures, name),
+      typeof body === "string" ? body : `${JSON.stringify(body, null, 2)}\n`,
+      "utf8",
+    );
+  const url = (n: number) => `https://github.com/conformance/repo/pull/${n}`;
+  const inline = (id: string, databaseId: number, login: string, body: string, at: string) => ({
+    id,
+    databaseId,
+    author: { login },
+    body,
+    createdAt: at,
+    url: `${url(42)}#discussion_r${databaseId}`,
+    path: "Sources/App/Login.swift",
+    line: 42,
+    ...(id === "RC_1" ? { diffHunk: "@@ -38,6 +38,7 @@ func load() {" } : {}),
+  });
+
+  write("viewer.txt", "octocat\n");
+  write("repo-nwo.txt", "conformance/repo\n");
+  write("pr-list.json", [
+    {
+      number: 42,
+      title: "Fix the login redirect",
+      url: url(42),
+      headRefName: "octocat/fix-login",
+      isDraft: false,
+      statusCheckRollup: [
+        { status: "COMPLETED", conclusion: "SUCCESS" },
+        { status: "COMPLETED", conclusion: "FAILURE" },
+      ],
+      author: { login: "octocat" },
+      assignees: [{ login: "octocat" }],
+      createdAt: "2026-09-01T09:00:00Z",
+      reviewDecision: "REVIEW_REQUIRED",
+      reviewRequests: [{ login: "hubber" }],
+      additions: 120,
+      deletions: 9,
+      changedFiles: 4,
+    },
+    {
+      number: 7,
+      title: "Bump the flake",
+      url: url(7),
+      headRefName: "hubber/bump",
+      isDraft: false,
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+      author: { login: "hubber" },
+      assignees: [],
+      createdAt: "2026-08-20T09:00:00Z",
+      reviewRequests: [{ login: "octocat" }, { slug: "platform" }],
+      additions: 2,
+      deletions: 2,
+      changedFiles: 1,
+    },
+  ]);
+  write("pr-for-branch.json", [
+    {
+      number: 42,
+      title: "Fix the login redirect",
+      url: url(42),
+      headRefName: "octocat/fix-login",
+      isDraft: false,
+      statusCheckRollup: [],
+      author: { login: "octocat" },
+    },
+  ]);
+  write("pr-search.json", []);
+  write("thread-counts.json", {
+    data: {
+      repository: {
+        pullRequests: {
+          nodes: [
+            { number: 42, reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }] } },
+            { number: 7, reviewThreads: { nodes: [] } },
+          ],
+        },
+      },
+    },
+  });
+  write("pr-activity.json", {
+    state: "OPEN",
+    author: { login: "octocat" },
+    statusCheckRollup: [{ status: "COMPLETED", conclusion: "FAILURE" }],
+    comments: [],
+    reviews: [],
+  });
+  write("pr-checks.json", [
+    {
+      name: "build",
+      state: "SUCCESS",
+      bucket: "pass",
+      link: "https://github.com/conformance/repo/actions/runs/900/job/1",
+    },
+    {
+      name: "test",
+      state: "FAILURE",
+      bucket: "fail",
+      link: "https://github.com/conformance/repo/actions/runs/901/job/2",
+    },
+  ]);
+  write("conversation.json", {
+    data: {
+      repository: {
+        pullRequest: {
+          state: "OPEN",
+          body: "Fixes the redirect loop.",
+          comments: {
+            nodes: [
+              {
+                id: "IC_1",
+                databaseId: 111,
+                author: { login: "hubber", avatarUrl: "https://avatars.invalid/hubber.png" },
+                body: "Looks good overall",
+                createdAt: "2026-09-01T12:00:00Z",
+                url: `${url(42)}#issuecomment-111`,
+                reactionGroups: [
+                  { content: "THUMBS_UP", reactors: { totalCount: 2 } },
+                  { content: "CONFUSED", reactors: { totalCount: 0 } },
+                ],
+              },
+            ],
+          },
+          reviews: {
+            nodes: [
+              {
+                id: "PRR_1",
+                author: { login: "hubber" },
+                state: "CHANGES_REQUESTED",
+                body: "Needs a test",
+                createdAt: "2026-09-01T13:00:00Z",
+                url: `${url(42)}#pullrequestreview-1`,
+                comments: {
+                  nodes: [
+                    inline("RC_1", 222, "hubber", "This can crash on nil", "2026-09-01T13:01:00Z"),
+                  ],
+                },
+              },
+              {
+                id: "PRR_2",
+                author: { login: "octocat" },
+                state: "COMMENTED",
+                body: "",
+                createdAt: "2026-09-01T13:05:00Z",
+                url: `${url(42)}#pullrequestreview-2`,
+                comments: {
+                  nodes: [inline("RC_2", 333, "octocat", "Fixed", "2026-09-01T13:05:00Z")],
+                },
+              },
+            ],
+          },
+          reviewThreads: {
+            nodes: [
+              {
+                id: "RT_1",
+                isResolved: false,
+                isOutdated: false,
+                path: "Sources/App/Login.swift",
+                line: 42,
+                comments: {
+                  nodes: [
+                    inline("RC_1", 222, "hubber", "This can crash on nil", "2026-09-01T13:01:00Z"),
+                    inline("RC_2", 333, "octocat", "Fixed", "2026-09-01T13:05:00Z"),
+                  ],
+                },
+              },
+            ],
+          },
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: "abc123def4567890",
+                  abbreviatedOid: "abc123d",
+                  messageHeadline: "fix the redirect",
+                  committedDate: "2026-09-01T11:00:00Z",
+                  authors: { nodes: [{ name: "Octo Cat", user: { login: "octocat" } }] },
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const esc = "";
+  write(
+    "run-log.txt",
+    [
+      "build\tRun tests\t2026-09-01T09:41:02.1234567Z ##[group]Run pnpm test",
+      "build\tRun tests\t2026-09-01T09:41:02.2000000Z pnpm test",
+      "build\tRun tests\t2026-09-01T09:41:02.3000000Z ##[endgroup]",
+      "build\tRun tests\t2026-09-01T09:41:09.0000000Z FAIL src/login.spec.ts",
+      "build\tRun tests\t2026-09-01T09:41:09.5000000Z ##[error]Process completed with exit code 1.",
+      "build\tLint\t2026-09-01T09:42:00.0000000Z ##[group]Never closed",
+      `build\tLint\t2026-09-01T09:42:01.0000000Z ${esc}[1;31mwarning${esc}[0m: 2 warnings`,
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
+
 
 /** A token unique to this suite process.
  *
@@ -115,6 +381,8 @@ export function seedVars(
   return {
     cwd: workspace.cwd,
     gitCwd: workspace.gitCwd,
+    gitRemoteCwd: workspace.gitRemoteCwd,
+    ghCwd: workspace.ghCwd,
     missingCwd: workspace.missingCwd,
     file: workspace.file,
     dispatchId: `conformance-${scenarioId}-${stamp}`,
@@ -136,6 +404,13 @@ export function seedVars(
     // The preset `seedPresets` wrote, and a name it deliberately did not: a core has to
     // error on a name it cannot resolve rather than spawn without it. Fixed rather than
     // stamped, because the file is written at boot and every attempt reads the same one.
+    // The two pids `seedHeavyQueue` wrote registry entries for, and one the queue
+    // does not hold. Fixed rather than stamped: the entries are written at boot and
+    // every attempt reads the same two. The missing one is `0`, which no process can
+    // have — a core that treated it as a job would be signalling its own group.
+    heavyPidA: HEAVY_PIDS.a,
+    heavyPidB: HEAVY_PIDS.b,
+    heavyMissingPid: HEAVY_PIDS.missing,
     presetName: "conformance",
     presetMarker: "PRESET-MARKER-conformance",
     missingPresetName: "conformance-missing",
@@ -144,6 +419,11 @@ export function seedVars(
 
 export interface RunContext {
   wsUrl: string;
+  /** Where the core's HTTP surface lives, for the `get` step. Derived from `wsUrl`
+   *  when a caller does not say: both listeners are the same process on the same
+   *  port, and a suite that let them disagree could report a read against a core it
+   *  was not driving. */
+  httpBase?: string;
   workspace: Workspace;
   /** Capabilities the core advertised, for gating. */
   capabilities: string[];
@@ -531,7 +811,86 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     );
     return;
   }
+  if ("get" in step) {
+    await readOverHttp(step, s);
+    return;
+  }
   throw new Error(`unrecognised step: ${JSON.stringify(step)}`);
+}
+
+/** Substitute `$name` INSIDE a string, which `resolveVars` deliberately does not do.
+ *
+ *  Everywhere else in a scenario a variable is a whole value — a frame's `sessionId`
+ *  is `"$session"` and nothing more — so whole-value substitution is the right rule
+ *  and interpolating would make a literal `$` in a prompt a hazard. A URL is the one
+ *  place the id has to sit inside a longer string, so the path gets this and nothing
+ *  else does. The value is percent-encoded: a session id is a path SEGMENT. */
+export function interpolate(path: string, vars: Vars): string {
+  return path.replace(/\$([a-zA-Z][a-zA-Z0-9]*)/g, (whole, name: string) =>
+    name in vars ? encodeURIComponent(String(vars[name])) : whole,
+  );
+}
+
+/** The HTTP half of the wire: `${wsUrl}` minus `/ws`, plus the path a step names. */
+export function httpBaseOf(ctx: RunContext): string {
+  if (ctx.httpBase) return ctx.httpBase.replace(/\/$/, "");
+  return ctx.wsUrl
+    .replace(/^ws/, "http")
+    .replace(/\/ws$/, "")
+    .replace(/\/$/, "");
+}
+
+/** One `get` step: read the path, assert the status, assert the body.
+ *
+ *  The body is matched with the same `matchValue` a frame gets, so a scenario asserts
+ *  a read the way it asserts everything else. `expectBody` decodes JSON first and
+ *  fails loudly on a body that is not JSON — a core answering `text/plain` where a
+ *  scenario asked for a document is a conformance failure, not a parse accident. */
+async function readOverHttp(
+  step: { get: string; status?: number; expectBody?: unknown; expectText?: unknown; bind?: Record<string, string> },
+  s: StepContext,
+): Promise<void> {
+  const path = interpolate(step.get, s.vars);
+  const url = `${httpBaseOf(s.ctx)}${path.startsWith("/") ? "" : "/"}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new WireProtocolError(`GET ${url} did not answer: ${e instanceof Error ? e.message : e}`);
+  }
+  const text = await res.text();
+  const want = step.status ?? 200;
+  if (res.status !== want) {
+    throw new WireProtocolError(
+      `GET ${path} answered ${res.status}, expected ${want}\n  body: ${text.slice(0, 400)}`,
+    );
+  }
+  if (step.expectText !== undefined) {
+    const result = matchValue(text, resolveVars(step.expectText, s.vars), s.vars);
+    if (!result.ok) {
+      throw new WireProtocolError(
+        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+      );
+    }
+  }
+  if (step.expectBody === undefined && !step.bind) return;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new WireProtocolError(
+      `GET ${path} did not answer with JSON\n  got: ${text.slice(0, 400)}`,
+    );
+  }
+  if (step.expectBody !== undefined) {
+    const result = matchValue(body, resolveVars(step.expectBody, s.vars), s.vars);
+    if (!result.ok) {
+      throw new WireProtocolError(
+        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+      );
+    }
+  }
+  if (step.bind) Object.assign(s.vars, readBindings(body as Frame, step.bind));
 }
 
 /** The pid the fake agent's helper recorded, or null while the file is absent or

@@ -13,10 +13,18 @@ public enum CoreBackendPreference {
     public static let defaultsKey = "juancode.core.backend"
 
     /// The core the next launch will use, absent an env override. Defaults to
-    /// `swift`: the Rust core is not at parity, so it is opt-in.
+    /// `rust`, which is now the ahead core rather than the opt-in one: measured
+    /// 2026-09-18 against spec 1.15.0, rust passes 40 of 40 conformance scenarios
+    /// and swift 29 of 40, and swift no longer holds a reaper, a usage reader or a
+    /// structured transcript tail at all — those were deleted rather than
+    /// dual-maintained. Nobody should land on it by doing nothing.
+    ///
+    /// It is still the fallback when the daemon does not answer, and `boot` says so
+    /// loudly on the returned selection, because a launch with no core is worse than
+    /// a launch on the lesser one.
     public static var persisted: CoreBackend {
         guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
-              let backend = CoreBackend(rawValue: raw) else { return .swift }
+              let backend = CoreBackend(rawValue: raw) else { return .rust }
         return backend
     }
 

@@ -4,7 +4,7 @@ import JuancodeCore
 
 /// Sleeping a session on demand: kill the CLI process tree to free its RAM while
 /// keeping the row, its scrollback and its resume id, so selecting it brings the
-/// conversation back. This is what the idle `SessionReaper` does on a timer —
+/// conversation back. This is what the core's idle reaper does on a timer —
 /// exposed here so a machine under memory pressure doesn't have to wait out an
 /// idle window (or hunt sessions down and kill them, which loses the dormant flag
 /// the sidebar reads to tell "asleep" from "died").

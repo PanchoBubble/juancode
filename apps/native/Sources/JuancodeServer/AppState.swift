@@ -19,9 +19,6 @@ public final class AppState: @unchecked Sendable {
     /// Server-side tracked-PR engine (juancode-bt2) — drives PR tracking over the
     /// wire for the remote web/phone client, mirroring the GUI's in-process tracking.
     public let prTracking: PrTrackingEngine
-    /// Idle-session reaper (juancode-lgq) — kills verifiably idle CLI process
-    /// trees to free RAM, leaving each session dormant and resumable on demand.
-    public let sessionReaper: SessionReaper
     /// The paused set a global pause is holding asleep, and the driver that puts
     /// sessions there (juancode-tnxx). One book per launch: the toolbar button and a
     /// remote `pauseAll` both go through it, so a pause taken on the phone is the set
@@ -60,18 +57,17 @@ public final class AppState: @unchecked Sendable {
         let messageQueue = MessageQueue(persistence: store)
         self.messageQueue = messageQueue
         // The registry's session env carries the real seams: login-shell binary
-        // resolution, this store, the message queue, Codex id discovery, and
-        // title/usage polling.
+        // resolution, this store, the message queue, Codex id discovery, and title
+        // polling. Usage and structured transcript activity are not among them any
+        // more — see `SessionEnvironment.live`.
         let registry = SessionRegistry(env: .live(store: store, messageQueue: messageQueue,
                                                   log: activityLog))
         self.registry = registry
         self.prTracking = PrTrackingEngine(registry: registry, store: store, activityLog: activityLog)
-        // The reaper writes its own trail into the same log the sessions use, so a
-        // kill and the session's last minutes read in one file.
-        let sessionReaper = SessionReaper(registry: registry, messageQueue: messageQueue,
-                                          log: activityLog)
-        self.sessionReaper = sessionReaper
-        Task { await sessionReaper.start() }
+        // No idle-session reaper here. Reaping is the Rust core's
+        // (`juancoded-state/src/reaper.rs`), which is why this core does not advertise
+        // the `reaper` capability and why the conformance suite skips 29-reaper
+        // against it. `CoreClient.setReaper*` is answered, and does nothing.
         // Any session still "running" in the db is stale — its pty died with the
         // previous process (crash or hard kill). Mark them exited-but-dormant so
         // they read as "sleeping, resumable" tiles rather than dead ones, and keep

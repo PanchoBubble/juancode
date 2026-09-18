@@ -43,10 +43,11 @@ what keeps the spec from becoming documentation.
 ### The catalogue is the union, and the gate says which core
 
 The two cores do not implement the same set. Both have `restartFresh`, `spawnModel`,
-`spawnPreset`, `editor`, `terminal`, `trackedPrs`, `trackPrInSession`, `prWebhook` and
+`spawnPreset`, `editor`, `terminal`, `trackedPrs`, `trackPrInSession`, `prWebhook`,
+`namedKeys` and
 `globalPause`; the Rust core has
 `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
-`sessionSleep` and `sessionEdit` on top of that. The catalogue describes **all** of it, and a
+`sessionSleep`, `sessionEdit` and `heavyQueue` on top of that. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
 measured against the subset its own advertised capability list entails:
 
@@ -355,6 +356,18 @@ claude's mechanism puts the body in the CLI's argv and the scenario matches it o
 name it cannot resolve rather than spawn without it. Unset, a core would read the
 developer's real presets and the run would depend on what they happen to have written.
 
+The `heavy-queue` scenario needs the same kind of thing and for the same reason, one
+level up: the queue is a shared filesystem registry, and a scenario cannot write a
+file. `coreEnv` points every booted core at its own `JUANCODE_HEAVY_ROOT` and seeds
+two waiting entries in it (`seedHeavyQueue`), for this process's pid and its parent's
+— two pids that are alive for the length of the run, because a core filters the
+registry on liveness and a dead entry is in no snapshot. That variable moves the
+capacity config with the registry, which is what keeps `heavySetSlots` from
+rewriting the developer's live `~/.claude/heavy-queue.json`; unset, a run would be
+reordering their real jobs. Nothing in the scenario signals either pid: `heavyCancel`
+is exercised against a pid the queue does **not** hold, which is the refusal that
+keeps that frame from being an arbitrary-signal gadget.
+
 **How a real provider differs.** Everything the suite asserts about the wire is
 identical, but three things change with a real CLI:
 
@@ -399,7 +412,7 @@ it buys a client, the capabilities and environment it needs, and steps.
 
 Steps: `open` (a second connection), `close` (drop one, which is how a core's
 disconnect behaviour gets driven), `send`, `raw` (a non-JSON frame), `expect`,
-`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`, `descendant`. `expect` consumes
+`expectHandshake`, `expectFirstFrame`, `expectNone`, `sleep`, `descendant`, `get`. `expect` consumes
 frames with a cursor, so consecutive expects assert **order**; a frame that is
 neither the match nor in `ignore` fails the step. `bind` reads a value out of a
 matched frame (`{"session": "session.id"}`) for later `$session` references.
@@ -422,6 +435,17 @@ reaping a process group produces no frame and deliberately never will (see
 The two polarities are a pair: `reaped` refuses to run when the pid file names
 nothing, because a `SPAWN` that silently did nothing would otherwise satisfy it, so
 the `alive` step before the kill is what makes the assertion mean anything.
+
+`get` is the other step that is not about a frame:
+`{"get": "/api/sessions/$session/screen?json=1", "status": 200, "expectBody": {…}}`
+reads one of the core's own HTTP routes. Those routes are wire surface — the sidecar
+and the phone console reach a session through them, and `/screen` is the only
+width-correct way to look at a session without holding a subscription open — but they
+are requests and replies rather than frames on the shared socket, so no `expect` can
+see them. `status` defaults to 200. The body is asserted with the same matcher
+language a frame gets, as decoded JSON (`expectBody`) or as raw text (`expectText`);
+`bind` works off the JSON body. This is the one place `$name` is substituted INSIDE a
+string, because a URL is the one place a bound id has to sit in the middle of one.
 
 `requires` gates a scenario on the environment (`pty`, `git`, `gh`);
 `capabilities` gates it on what the core advertises. Either way the scenario is

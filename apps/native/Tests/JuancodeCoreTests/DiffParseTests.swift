@@ -1,0 +1,362 @@
+import XCTest
+@testable import JuancodeCore
+
+/// Unit tests for the pure unified-diff parser + review-prompt composer backing the
+/// native ChangesPanel (juancode-3bq). No git here — only string parsing.
+final class DiffParseTests: XCTestCase {
+
+    // MARK: - parseUnifiedDiff
+
+    func testEmptyDiffYieldsNoHunks() {
+        XCTAssertTrue(parseUnifiedDiff("").isEmpty)
+        XCTAssertTrue(parseUnifiedDiff("diff --git a/x b/x\nindex 0..1 100644\n").isEmpty)
+    }
+
+    func testParsesLineNumbersAndKinds() {
+        let diff = """
+        diff --git a/f.txt b/f.txt
+        index 111..222 100644
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1,3 +1,4 @@
+         one
+        -two
+        +TWO
+        +two-and-a-half
+         three
+        """
+        let hunks = parseUnifiedDiff(diff)
+        XCTAssertEqual(hunks.count, 1)
+        let lines = hunks[0].lines
+        // context "one" at old 1 / new 1
+        XCTAssertEqual(lines[0].kind, .context)
+        XCTAssertEqual(lines[0].oldLine, 1)
+        XCTAssertEqual(lines[0].newLine, 1)
+        XCTAssertEqual(lines[0].text, "one")
+        // delete "two" at old 2, no new
+        XCTAssertEqual(lines[1].kind, .delete)
+        XCTAssertEqual(lines[1].oldLine, 2)
+        XCTAssertNil(lines[1].newLine)
+        // insert "TWO" at new 2, no old
+        XCTAssertEqual(lines[2].kind, .insert)
+        XCTAssertNil(lines[2].oldLine)
+        XCTAssertEqual(lines[2].newLine, 2)
+        // insert "two-and-a-half" at new 3
+        XCTAssertEqual(lines[3].kind, .insert)
+        XCTAssertEqual(lines[3].newLine, 3)
+        // context "three" at old 3 / new 4
+        XCTAssertEqual(lines[4].kind, .context)
+        XCTAssertEqual(lines[4].oldLine, 3)
+        XCTAssertEqual(lines[4].newLine, 4)
+    }
+
+    func testAnchorPrefersNewSideForInsertsAndContext() {
+        let insert = DiffLine(kind: .insert, oldLine: nil, newLine: 7, text: "x")
+        XCTAssertEqual(insert.anchor?.side, .new)
+        XCTAssertEqual(insert.anchor?.line, 7)
+        let delete = DiffLine(kind: .delete, oldLine: 5, newLine: nil, text: "x")
+        XCTAssertEqual(delete.anchor?.side, .old)
+        XCTAssertEqual(delete.anchor?.line, 5)
+        let context = DiffLine(kind: .context, oldLine: 3, newLine: 9, text: "x")
+        XCTAssertEqual(context.anchor?.side, .new)
+        XCTAssertEqual(context.anchor?.line, 9)
+    }
+
+    func testIgnoresNoNewlineMarkerAndHandlesMultipleHunks() {
+        let diff = """
+        @@ -1,1 +1,1 @@
+        -a
+        \\ No newline at end of file
+        +a
+        \\ No newline at end of file
+        @@ -10,2 +10,2 @@
+         keep
+        -drop
+        +DROP
+        """
+        let hunks = parseUnifiedDiff(diff)
+        XCTAssertEqual(hunks.count, 2)
+        // First hunk: the "\ No newline" markers are skipped, leaving one - and one +.
+        XCTAssertEqual(hunks[0].lines.map(\.kind), [.delete, .insert])
+        // Second hunk starts numbering at 10.
+        XCTAssertEqual(hunks[1].lines[0].oldLine, 10)
+        XCTAssertEqual(hunks[1].lines[0].newLine, 10)
+        XCTAssertEqual(hunks[1].lines[1].oldLine, 11) // delete "drop"
+        XCTAssertEqual(hunks[1].lines[2].newLine, 11) // insert "DROP"
+    }
+
+    // MARK: - parseMultiFileDiff (PR diffs, juancode-49w)
+
+    func testParseMultiFileDiffEmptyAndHeaderless() {
+        XCTAssertTrue(parseMultiFileDiff("").isEmpty)
+        // No `diff --git` header → nothing parsed.
+        XCTAssertTrue(parseMultiFileDiff("just some text\nno header here\n").isEmpty)
+    }
+
+    func testParseMultiFileDiffSplitsModifiedAddedDeleted() {
+        let patch = """
+        diff --git a/keep.txt b/keep.txt
+        index 111..222 100644
+        --- a/keep.txt
+        +++ b/keep.txt
+        @@ -1,2 +1,3 @@
+         one
+         two
+        +three
+        diff --git a/new.txt b/new.txt
+        new file mode 100644
+        index 000..333
+        --- /dev/null
+        +++ b/new.txt
+        @@ -0,0 +1,1 @@
+        +fresh
+        diff --git a/gone.txt b/gone.txt
+        deleted file mode 100644
+        index 444..000
+        --- a/gone.txt
+        +++ /dev/null
+        @@ -1,1 +0,0 @@
+        -remove me
+        """
+        let files = parseMultiFileDiff(patch)
+        var byPath: [String: DiffFile] = [:]
+        for f in files { byPath[f.path] = f }
+
+        XCTAssertEqual(byPath.count, 3)
+        XCTAssertEqual(byPath["keep.txt"]?.status, .modified)
+        XCTAssertEqual(byPath["keep.txt"]?.additions, 1)
+        XCTAssertEqual(byPath["keep.txt"]?.deletions, 0)
+        XCTAssertNil(byPath["keep.txt"]?.oldPath)
+        XCTAssertTrue(byPath["keep.txt"]?.diff.contains("@@ -1,2 +1,3 @@") ?? false)
+
+        XCTAssertEqual(byPath["new.txt"]?.status, .added)
+        XCTAssertEqual(byPath["new.txt"]?.additions, 1)
+
+        XCTAssertEqual(byPath["gone.txt"]?.status, .deleted)
+        XCTAssertEqual(byPath["gone.txt"]?.deletions, 1)
+    }
+
+    func testParseMultiFileDiffDetectsRename() {
+        let patch = """
+        diff --git a/old/name.txt b/new/name.txt
+        similarity index 95%
+        rename from old/name.txt
+        rename to new/name.txt
+        index 111..222 100644
+        --- a/old/name.txt
+        +++ b/new/name.txt
+        @@ -1,1 +1,1 @@
+        -hello
+        +hello world
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].status, .renamed)
+        XCTAssertEqual(files[0].path, "new/name.txt")
+        XCTAssertEqual(files[0].oldPath, "old/name.txt")
+    }
+
+    func testParseMultiFileDiffMarksBinaryWithZeroCounts() {
+        let patch = """
+        diff --git a/logo.png b/logo.png
+        new file mode 100644
+        index 000..abc
+        Binary files /dev/null and b/logo.png differ
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files[0].path, "logo.png")
+        XCTAssertTrue(files[0].binary)
+        XCTAssertEqual(files[0].additions, 0)
+        XCTAssertEqual(files[0].deletions, 0)
+        XCTAssertEqual(files[0].diff, "") // body dropped for binary
+    }
+
+    func testParseMultiFileDiffIgnoresLeadingPreamble() {
+        // gh sometimes prefaces the patch with non-diff lines — they're skipped.
+        let patch = """
+        Some preamble line
+        diff --git a/f.txt b/f.txt
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1 +1 @@
+        -a
+        +b
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.map(\.path), ["f.txt"])
+        XCTAssertEqual(files[0].additions, 1)
+        XCTAssertEqual(files[0].deletions, 1)
+    }
+
+    /// A mailbox patch series (one patch per commit) repeats a file's chunk once per
+    /// commit that touched it. Those must fold into one entry: duplicates downstream
+    /// are duplicate `ForEach` ids, which render as blank rows in the diff list.
+    func testParseMultiFileDiffCoalescesRepeatedPaths() {
+        let patch = """
+        From aaa Mon Sep 17 00:00:00 2001
+        Subject: [PATCH 1/2] first
+
+        diff --git a/dup.txt b/dup.txt
+        --- a/dup.txt
+        +++ b/dup.txt
+        @@ -1 +1,2 @@
+         one
+        +two
+        diff --git a/solo.txt b/solo.txt
+        --- a/solo.txt
+        +++ b/solo.txt
+        @@ -1 +1 @@
+        -x
+        +y
+        From bbb Mon Sep 17 00:00:00 2001
+        Subject: [PATCH 2/2] second
+
+        diff --git a/dup.txt b/dup.txt
+        --- a/dup.txt
+        +++ b/dup.txt
+        @@ -1,2 +1,3 @@
+         one
+         two
+        +three
+        """
+        let files = parseMultiFileDiff(patch)
+        XCTAssertEqual(files.map(\.path), ["dup.txt", "solo.txt"])
+        // Counts sum across the commits rather than describing only the first.
+        XCTAssertEqual(files[0].additions, 2)
+        XCTAssertEqual(files[0].deletions, 0)
+        // Both commits' hunks survive in the merged body.
+        XCTAssertEqual(parseUnifiedDiff(files[0].diff).count, 2)
+    }
+
+    // MARK: - commentRangeLabel
+
+    func testRangeLabel() {
+        XCTAssertEqual(commentRangeLabel(side: .new, line: 10, endLine: 10), "L10")
+        XCTAssertEqual(commentRangeLabel(side: .new, line: 10, endLine: 14), "L10–14")
+        XCTAssertEqual(commentRangeLabel(side: .old, line: 10, endLine: 10), "L10 (old)")
+    }
+
+    // MARK: - drag-select hit-testing (juancode-eba)
+
+    func testDiffLineIndexForOffsetMapsAndClamps() {
+        // 5 rows, 20pt tall each: offset 0 → row 0, 25 → row 1, 99 → row 4.
+        XCTAssertEqual(diffLineIndex(forOffset: 0, rowHeight: 20, count: 5), 0)
+        XCTAssertEqual(diffLineIndex(forOffset: 25, rowHeight: 20, count: 5), 1)
+        XCTAssertEqual(diffLineIndex(forOffset: 39, rowHeight: 20, count: 5), 1)
+        XCTAssertEqual(diffLineIndex(forOffset: 40, rowHeight: 20, count: 5), 2)
+        XCTAssertEqual(diffLineIndex(forOffset: 99, rowHeight: 20, count: 5), 4)
+        // Overshoot top/bottom clamps into range.
+        XCTAssertEqual(diffLineIndex(forOffset: -10, rowHeight: 20, count: 5), 0)
+        XCTAssertEqual(diffLineIndex(forOffset: 9999, rowHeight: 20, count: 5), 4)
+    }
+
+    func testDiffLineIndexEdgeCases() {
+        XCTAssertNil(diffLineIndex(forOffset: 10, rowHeight: 20, count: 0))
+        XCTAssertNil(diffLineIndex(forOffset: 10, rowHeight: 0, count: 5))
+    }
+
+    func testNormalizedLineRangeOrdersEndpoints() {
+        XCTAssertEqual(normalizedLineRange(anchor: 2, current: 6), 2...6)
+        XCTAssertEqual(normalizedLineRange(anchor: 6, current: 2), 2...6) // upward drag
+        XCTAssertEqual(normalizedLineRange(anchor: 4, current: 4), 4...4) // single line
+    }
+
+    func testRangeLabelReflectsDraggedRange() {
+        // The label the range composer/comment shows for a 10→14 drag on the new side.
+        XCTAssertEqual(commentRangeLabel(side: .new, line: 10, endLine: 14), "L10–14")
+    }
+
+    // MARK: - quotedDiffLines (juancode-ck4)
+
+    /// The parsed flat lines of a small mixed hunk: context "one", delete "two",
+    /// inserts "TWO"/"two-and-a-half", context "three".
+    private func sampleFlatLines() -> [DiffLine] {
+        let diff = """
+        diff --git a/f.txt b/f.txt
+        index 111..222 100644
+        --- a/f.txt
+        +++ b/f.txt
+        @@ -1,3 +1,4 @@
+         one
+        -two
+        +TWO
+        +two-and-a-half
+         three
+        """
+        return parseUnifiedDiff(diff).flatMap(\.lines)
+    }
+
+    func testQuotedDiffLinesSingleInsertKeepsMarker() {
+        let lines = sampleFlatLines()
+        // New line 2 is the "+TWO" insert.
+        XCTAssertEqual(quotedDiffLines(lines, side: .new, from: 2, through: 2), "+TWO")
+    }
+
+    func testQuotedDiffLinesRangeSpansNewSide() {
+        let lines = sampleFlatLines()
+        // New lines 1–3: context "one", insert "TWO", insert "two-and-a-half".
+        XCTAssertEqual(
+            quotedDiffLines(lines, side: .new, from: 1, through: 3),
+            " one\n+TWO\n+two-and-a-half")
+    }
+
+    func testQuotedDiffLinesOldSidePicksDelete() {
+        let lines = sampleFlatLines()
+        // Old line 2 is the "-two" delete.
+        XCTAssertEqual(quotedDiffLines(lines, side: .old, from: 2, through: 2), "-two")
+    }
+
+    func testQuotedDiffLinesNormalizesReversedRange() {
+        let lines = sampleFlatLines()
+        XCTAssertEqual(
+            quotedDiffLines(lines, side: .new, from: 3, through: 1),
+            quotedDiffLines(lines, side: .new, from: 1, through: 3))
+    }
+
+    func testQuotedDiffLinesEmptyWhenNoMatch() {
+        XCTAssertEqual(quotedDiffLines(sampleFlatLines(), side: .new, from: 99, through: 99), "")
+    }
+
+    // MARK: - review-comment hunks
+
+    /// The shape GitHub's `diffHunk` comes in: one `@@` header, context, then the
+    /// change the comment was left on — five content lines in all.
+    private let commentHunk = """
+    @@ -38,6 +38,7 @@ func load() {
+         let a = 1
+         let b = 2
+         let c = 3
+    -    return a
+    +    return unwrap(a)
+    """
+
+    func testReviewHunkKeepsTheTailAndCountsWhatItHid() {
+        let hunk = reviewHunk(commentHunk, visible: 4)
+        XCTAssertEqual(hunk.lines.count, 4)
+        XCTAssertEqual(hunk.hiddenAbove, 1)
+        // The commented line (the insert) is last — that's why the tail is the
+        // interesting end of a diffHunk.
+        XCTAssertEqual(hunk.lines.last?.kind, .insert)
+        XCTAssertEqual(hunk.lines.last?.text, "    return unwrap(a)")
+        XCTAssertEqual(hunk.lines.first?.text, "    let b = 2")
+        // Line numbers survive the trim, so the gutter is still right.
+        XCTAssertEqual(hunk.lines.last?.newLine, 41)
+    }
+
+    func testReviewHunkVisibleZeroOrLargerThanHunkKeepsEverything() {
+        for visible in [0, -1, 5, 99] {
+            let hunk = reviewHunk(commentHunk, visible: visible)
+            XCTAssertEqual(hunk.lines.count, 5, "visible: \(visible)")
+            XCTAssertEqual(hunk.hiddenAbove, 0, "visible: \(visible)")
+        }
+    }
+
+    func testReviewHunkEmptyForBlankOrHeaderlessHunk() {
+        for input in ["", "not a diff", "     let a = 1"] {
+            let hunk = reviewHunk(input, visible: 4)
+            XCTAssertTrue(hunk.lines.isEmpty, "input: \(input)")
+            XCTAssertEqual(hunk.hiddenAbove, 0)
+        }
+    }
+}

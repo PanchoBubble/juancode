@@ -6,10 +6,15 @@
 //! needs no FFI: the boundary the Swift app would talk over already exists and
 //! remote clients already use it.
 
+pub mod changes;
 pub mod conn;
 pub mod ephemeral;
+pub mod github;
 pub mod global_pause;
+pub mod heavy_watch;
 pub mod identity;
+pub mod named_key;
+pub mod notify_hook;
 pub mod owner;
 pub mod queue_delivery;
 pub mod reads;

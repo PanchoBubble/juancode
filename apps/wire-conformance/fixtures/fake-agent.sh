@@ -12,6 +12,8 @@
 #   ARGS             print the argv this process was spawned with
 #   CWD              print the working directory this process was spawned in
 #   ECHO <text>      print text and a CRLF
+#   WRITE <path> <text>     write one line into <path>, relative to the cwd
+#   EDIT <path> <n> <text>  replace line <n> of <path> (1-based)
 #   BUSY             print the working footer both real CLIs paint while a turn runs
 #   PROMPT           print a yes/no question on the bottom row (a waiting-input screen)
 #   CLEAR            erase the screen and home the cursor (ends a busy turn)
@@ -98,6 +100,37 @@ while IFS= read -r line; do
     ;;
   ECHO)
     printf '%s\r\n' "$arg"
+    ;;
+  WRITE)
+    # An agent changing a file in the tree it was given: the whole premise of the
+    # changes scenario. The path is refused unless it is relative and free of `..`,
+    # so a scenario cannot turn this stand-in into a write-anywhere gadget.
+    wpath=${arg%% *}
+    wtext=${arg#"$wpath"}
+    wtext=${wtext# }
+    if [[ "$wpath" == /* || "$wpath" == *..* || -z "$wpath" ]]; then
+      printf 'refused: %s\r\n' "$wpath"
+    else
+      printf '%s\n' "$wtext" >"$wpath"
+      printf 'wrote: %s\r\n' "$wpath"
+    fi
+    ;;
+  EDIT)
+    # One line of one file, so two EDITs far apart make two HUNKS — which is the only
+    # way to measure a per-hunk discard against a whole-file one.
+    epath=${arg%% *}
+    rest=${arg#"$epath"}
+    rest=${rest# }
+    eline=${rest%% *}
+    etext=${rest#"$eline"}
+    etext=${etext# }
+    if [[ "$epath" == /* || "$epath" == *..* || -z "$epath" || ! -f "$epath" ]]; then
+      printf 'refused: %s\r\n' "$epath"
+    else
+      awk -v n="$eline" -v t="$etext" 'NR==n { print t; next } { print }' \
+        "$epath" >"$epath.tmp" && mv "$epath.tmp" "$epath"
+      printf 'edited: %s:%s\r\n' "$epath" "$eline"
+    fi
     ;;
   BUSY)
     # "esc to interrupt" is the wording-independent working marker the activity

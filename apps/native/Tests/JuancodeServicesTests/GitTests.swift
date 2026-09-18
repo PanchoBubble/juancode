@@ -2,9 +2,13 @@ import XCTest
 import JuancodeCore
 @testable import JuancodeServices
 
-/// Ported from `apps/server/src/git.test.ts`. Like the TS, every test stands up a
-/// real temp git repo and shells out to real `git` (via ProcessRunner), then makes
-/// the same assertions against the ported functions.
+/// The Swift core's own worktree plumbing, against a real temp git repo and real
+/// `git` (via ProcessRunner).
+///
+/// What used to be all of `GitTests` — the diff, state, commit, push and discard
+/// tests — went with the surface they covered, into `juancoded-core/src/git.rs`
+/// (juancode-52e8.14.5). What is left covers what this core still has to do for
+/// itself: cut an isolation worktree, adopt one, remove one.
 final class GitTests: XCTestCase {
     var dir: String = ""
 
@@ -69,124 +73,6 @@ final class GitTests: XCTestCase {
         super.tearDown()
     }
 
-    // MARK: - getDiff
-
-    func testGetDiffReturnsGitFalseForNonGitDir() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { rmrf(plain) }
-        let r = try await getDiff(plain)
-        XCTAssertEqual(r, DiffResult(git: false, files: []))
-    }
-
-    func testGetDiffReportsModifiedAddedDeleted() async throws {
-        writeFile(join(dir, "keep.txt"), "one\ntwo\nthree\n")
-        writeFile(join(dir, "gone.txt"), "remove me\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-
-        writeFile(join(dir, "keep.txt"), "one\ntwo\nthree\nfour\n") // modified
-        writeFile(join(dir, "new.txt"), "fresh\n")                  // untracked
-        rmrf(join(dir, "gone.txt"))                                 // deleted
-
-        let r = try await getDiff(dir)
-        XCTAssertTrue(r.git)
-        var byPath: [String: DiffFile] = [:]
-        for f in r.files { byPath[f.path] = f }
-
-        XCTAssertEqual(byPath["keep.txt"]?.status, .modified)
-        XCTAssertEqual(byPath["keep.txt"]?.additions, 1)
-        XCTAssertEqual(byPath["new.txt"]?.status, .untracked)
-        XCTAssertEqual(byPath["new.txt"]?.additions, 1)
-        XCTAssertEqual(byPath["gone.txt"]?.status, .deleted)
-        XCTAssertEqual(byPath["gone.txt"]?.deletions, 1)
-    }
-
-    func testGetDiffDoesNotMisclassifyTextMentioningBinaryMarker() async throws {
-        // Regression: binary detection must only inspect unprefixed header lines,
-        // not added/removed content that happens to contain the marker string.
-        writeFile(join(dir, "talk.txt"), "Binary files differ\nGIT binary patch\nnormal text\n")
-        let r = try await getDiff(dir)
-        let f = r.files.first(where: { $0.path == "talk.txt" })
-        XCTAssertEqual(f?.binary, false)
-        XCTAssertEqual(f?.additions, 3)
-        XCTAssertGreaterThan(f?.diff.count ?? 0, 0)
-    }
-
-    func testGetDiffWorksInFreshRepoNoCommits() async throws {
-        writeFile(join(dir, "first.txt"), "hello\n")
-        try runGit(["add", "-A"]) // staged but no commit yet — HEAD does not exist
-
-        let r = try await getDiff(dir)
-        XCTAssertTrue(r.git)
-        let f = r.files.first(where: { $0.path == "first.txt" })
-        XCTAssertEqual(f?.additions, 1)
-    }
-
-    // MARK: - getBaseDiff (juancode-49w)
-
-    func testGetBaseDiffReturnsGitFalseForNonGitDir() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { rmrf(plain) }
-        let r = try await getBaseDiff(plain, base: nil)
-        XCTAssertFalse(r.result.git)
-        XCTAssertEqual(r.base, "")
-    }
-
-    func testGetBaseDiffShowsOnlyBranchChangesAgainstMergeBase() async throws {
-        // main: shared.txt committed. branch feature adds feat.txt; main later moves on.
-        writeFile(join(dir, "shared.txt"), "base\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "base"])
-        // Capture the default branch name (main or master depending on git config).
-        let mainBranch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        try runGit(["checkout", "-qb", "feature"])
-        writeFile(join(dir, "feat.txt"), "feature work\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "feat"])
-
-        // main advances after the branch diverged — must NOT appear in the base diff.
-        try runGit(["checkout", "-q", mainBranch])
-        writeFile(join(dir, "shared.txt"), "base changed on main\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "advance main"])
-        try runGit(["checkout", "-q", "feature"])
-
-        let r = try await getBaseDiff(dir, base: mainBranch)
-        XCTAssertEqual(r.base, mainBranch)
-        XCTAssertTrue(r.result.git)
-        let paths = Set(r.result.files.map(\.path))
-        XCTAssertTrue(paths.contains("feat.txt"), "branch's own change should show")
-        XCTAssertFalse(paths.contains("shared.txt"), "post-divergence main change must not show")
-    }
-
-    func testGetBaseDiffIncludesUncommittedBranchWork() async throws {
-        writeFile(join(dir, "a.txt"), "one\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "base"])
-        let mainBranch = try runGit(["rev-parse", "--abbrev-ref", "HEAD"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        try runGit(["checkout", "-qb", "feature"])
-        // Uncommitted new file on the branch.
-        writeFile(join(dir, "scratch.txt"), "wip\n")
-
-        let r = try await getBaseDiff(dir, base: mainBranch)
-        XCTAssertTrue(r.result.files.contains(where: { $0.path == "scratch.txt" }))
-    }
-
-    func testGetBaseDiffThrowsWhenBaseMissing() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        do {
-            _ = try await getBaseDiff(dir, base: "no-such-branch")
-            XCTFail("expected throw")
-        } catch is GitError {
-            // expected — no merge-base with a non-existent ref.
-        }
-    }
-
     func testDefaultBaseBranchPrefersLocalMainOrMaster() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
         try runGit(["add", "-A"])
@@ -198,61 +84,12 @@ final class GitTests: XCTestCase {
         XCTAssertEqual(inferred, mainBranch)
     }
 
-    // MARK: - getGitState
-
-    func testGetGitStateReturnsGitFalseForNonGitDir() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { rmrf(plain) }
-        let s = await getGitState(plain)
-        XCTAssertFalse(s.git)
-    }
-
-    func testGetGitStateReportsDirtyTreeNoRemote() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        let s = await getGitState(dir)
-        XCTAssertTrue(s.git)
-        XCTAssertTrue(s.dirty)
-        XCTAssertFalse(s.remote)
-        XCTAssertNil(s.upstream)
-    }
-
-    func testGetGitStateCleanAndAheadWithNoUpstream() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        let s = await getGitState(dir)
-        XCTAssertFalse(s.dirty)
-        XCTAssertEqual(s.ahead, 1)
-    }
-
-    // MARK: - commitAll
-
-    func testCommitAllStagesEverythingLeavingCleanTree() async throws {
-        writeFile(join(dir, "a.txt"), "one\n")
-        writeFile(join(dir, "b.txt"), "two\n")
-        let r = try await commitAll(dir, "feat: add a and b")
-        XCTAssertEqual(r.subject, "feat: add a and b")
-        XCTAssertNotNil(r.sha.range(of: "^[0-9a-f]{7,}$", options: .regularExpression))
-        let s = await getGitState(dir)
-        XCTAssertFalse(s.dirty)
-    }
-
-    func testCommitAllRejectsWhenNothingToCommit() async throws {
-        writeFile(join(dir, "a.txt"), "one\n")
-        _ = try await commitAll(dir, "init")
-        do {
-            _ = try await commitAll(dir, "again")
-            XCTFail("expected throw")
-        } catch let e as GitError {
-            XCTAssertNotNil(e.message.range(of: "nothing to commit", options: .caseInsensitive))
-        }
-    }
-
     // MARK: - createWorktree / removeWorktree
 
     func testCreateAndRemoveWorktree() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
 
         let wt = try await createWorktree(dir, "abc123de")
         defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
@@ -276,7 +113,8 @@ final class GitTests: XCTestCase {
     /// git is asked anything. Sanitising it instead would make a tree nobody named.
     func testCreateWorktreeRefusesANameThatIsReallyAPath() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         for name in ["../escape", "a/b", "", "-rf", ".git"] {
             do {
                 let wt = try await createWorktree(dir, name)
@@ -297,14 +135,16 @@ final class GitTests: XCTestCase {
     /// agent while you sit on a feature branch hands it that branch's half-done work.
     func testCreateWorktreeBranchesFromDefaultBranchNotCheckedOutHead() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try runGit(["branch", "-M", "main"])
         let mainSha = try runGit(["rev-parse", "main"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Somebody's in-progress branch, checked out in the main tree.
         try runGit(["checkout", "-q", "-b", "feature/wip"])
         writeFile(join(dir, "wip.txt"), "half done\n")
-        _ = try await commitAll(dir, "wip")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "wip"], cwd: dir)
         let wipSha = try runGit(["rev-parse", "HEAD"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -324,7 +164,8 @@ final class GitTests: XCTestCase {
     /// tracked it would aim a later push at main.
     func testCreateWorktreeFetchesOriginBeforeBranching() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try runGit(["branch", "-M", "main"])
         let remote = mkdtemp("juancode-remote-")
         defer { rmrf(remote) }
@@ -367,7 +208,8 @@ final class GitTests: XCTestCase {
     /// already had, which is the point.
     func testCreateWorktreeDoesNotWaitOutASlowRemote() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try runGit(["branch", "-M", "main"])
         let remote = mkdtemp("juancode-remote-")
         defer { rmrf(remote) }
@@ -395,7 +237,8 @@ final class GitTests: XCTestCase {
     /// checked out, so the worktree gets it attached and the agent can just push.
     func testCreateWorktreeChecksOutAnExistingBranch() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try runGit(["branch", "feature/pr-99"])
 
         let wt = try await createWorktree(dir, "pr-99", checkingOut: "feature/pr-99")
@@ -412,7 +255,8 @@ final class GitTests: XCTestCase {
     /// that branch's head rather than failing the track.
     func testCreateWorktreeFallsBackToDetachedWhenBranchIsCheckedOutElsewhere() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         // Check the branch out in the main worktree, so it is genuinely taken.
         try runGit(["checkout", "-q", "-b", "feature/taken"])
         let head = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -431,7 +275,8 @@ final class GitTests: XCTestCase {
     /// must not collide: `git worktree add` refuses an existing path.
     func testCreateWorktreeAvoidsAnExistingDirectory() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try runGit(["branch", "feature/pr-7"])
         try runGit(["branch", "feature/pr-7-b"])
 
@@ -447,7 +292,8 @@ final class GitTests: XCTestCase {
     /// a half-made worktree.
     func testCreateWorktreeThrowsForAnUnknownBranch() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
 
         do {
             let wt = try await createWorktree(dir, "pr-404", checkingOut: "nope/missing")
@@ -464,7 +310,8 @@ final class GitTests: XCTestCase {
     func testCreateWorktreeLinksNodeModules() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
         writeFile(join(dir, ".gitignore"), "node_modules\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         let pkg = join(join(dir, "apps"), "oracle")
         try FileManager.default.createDirectory(atPath: join(pkg, "node_modules"),
                                                 withIntermediateDirectories: true)
@@ -473,7 +320,8 @@ final class GitTests: XCTestCase {
         writeFile(join(join(dir, "node_modules"), "marker.txt"), "root\n")
         // Tracked, so `apps/oracle` exists in the worktree for its link to land in.
         writeFile(join(pkg, "index.ts"), "export {}\n")
-        _ = try await commitAll(dir, "pkg")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "pkg"], cwd: dir)
 
         let wt = try await createWorktree(dir, "deps")
         defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
@@ -492,7 +340,8 @@ final class GitTests: XCTestCase {
     /// it — otherwise tearing down one session wipes the main checkout's dependencies.
     func testRemoveWorktreeLeavesTheSourceNodeModulesIntact() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         try FileManager.default.createDirectory(atPath: join(dir, "node_modules"),
                                                 withIntermediateDirectories: true)
         let marker = join(join(dir, "node_modules"), "marker.txt")
@@ -511,47 +360,14 @@ final class GitTests: XCTestCase {
 
     func testRemoveWorktreeForceRemovesWithUncommittedChanges() async throws {
         writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
+        try runGit(["add", "-A"], cwd: dir)
+        try runGit(["commit", "-q", "-m", "init"], cwd: dir)
         let wt = try await createWorktree(dir, "dirtywt")
         defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
 
         writeFile(join(wt.path, "scratch.txt"), "uncommitted\n")
         try await removeWorktree(wt.path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: wt.path))
-    }
-
-    func testDetectAgentWorktreeMatchesLockReasonPid() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
-        // Mirror Claude Code's EnterWorktree: a linked worktree under
-        // `.claude/worktrees/` locked with a reason embedding the agent's pid.
-        let wtDir = join(join(join(dir, ".claude"), "worktrees"), "fix-thing")
-        try runGit(["worktree", "add", "-b", "worktree-fix-thing", wtDir])
-        try runGit(["worktree", "lock", "--reason",
-                    "claude session fix-thing (pid 4242 start Fri Jul 10 15:36:13 2026)", wtDir])
-
-        let trees = await listWorktrees(dir)
-        let locked = trees.first(where: { resolvePath($0.path) == resolvePath(wtDir) })
-        XCTAssertNotNil(locked?.lockedReason?.range(of: "pid 4242"))
-
-        let hit = await detectAgentWorktree(dir, childPid: 4242)
-        XCTAssertEqual(hit.map(resolvePath), resolvePath(wtDir))
-        // A different pid must not match — nor may 4242 match pid 42421 anywhere.
-        let miss = await detectAgentWorktree(dir, childPid: 424)
-        XCTAssertNil(miss)
-    }
-
-    func testDetectAgentWorktreeNilWithoutLockedWorktrees() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        _ = try await commitAll(dir, "init")
-        let noTrees = await detectAgentWorktree(dir, childPid: 4242)
-        XCTAssertNil(noTrees)
-
-        // An unlocked linked worktree still doesn't match any pid.
-        let wt = try await createWorktree(dir, "plainwt")
-        defer { rmrf((wt.path as NSString).deletingLastPathComponent) }
-        let unlocked = await detectAgentWorktree(dir, childPid: 4242)
-        XCTAssertNil(unlocked)
     }
 
     func testCreateWorktreeRejectsNonGitDir() async throws {
@@ -562,259 +378,6 @@ final class GitTests: XCTestCase {
             XCTFail("expected throw")
         } catch let e as GitError {
             XCTAssertNotNil(e.message.range(of: "not a git repository", options: .caseInsensitive))
-        }
-    }
-
-    // MARK: - pushCurrent
-
-    func testPushCurrentSetsUpstreamOnFirstPush() async throws {
-        let remote = mkdtemp("juancode-remote-")
-        defer { rmrf(remote) }
-        try TempGitRepo.initializeBare(at: remote)
-        try runGit(["remote", "add", "origin", remote])
-        writeFile(join(dir, "a.txt"), "one\n")
-        _ = try await commitAll(dir, "init")
-        let before = await getGitState(dir)
-        XCTAssertNil(before.upstream)
-
-        let r = try await pushCurrent(dir)
-        XCTAssertFalse(r.branch.isEmpty)
-
-        let after = await getGitState(dir)
-        XCTAssertTrue(after.upstream?.contains("origin/") ?? false)
-        XCTAssertEqual(after.ahead, 0)
-    }
-
-    // MARK: - listRecentCommits (juancode-5u2)
-
-    func testListRecentCommitsNewestFirst() async throws {
-        for (i, msg) in ["first", "second", "third"].enumerated() {
-            writeFile(join(dir, "f.txt"), "v\(i)\n")
-            try runGit(["add", "-A"])
-            try runGit(["commit", "-qm", msg])
-        }
-        let commits = await listRecentCommits(dir)
-        XCTAssertEqual(commits.map(\.subject), ["third", "second", "first"])
-        for c in commits {
-            XCTAssertEqual(c.sha.count, 40)
-            XCTAssertTrue(c.sha.hasPrefix(c.shortSha))
-            XCTAssertFalse(c.relativeAge.isEmpty)
-        }
-    }
-
-    func testListRecentCommitsMarksAheadOfBase() async throws {
-        writeFile(join(dir, "f.txt"), "base\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "on main"])
-        try runGit(["branch", "-M", "main"])
-        try runGit(["checkout", "-qb", "feature"])
-        for i in 1...2 {
-            writeFile(join(dir, "f.txt"), "feature \(i)\n")
-            try runGit(["commit", "-aqm", "feature \(i)"])
-        }
-        let commits = await listRecentCommits(dir)
-        XCTAssertEqual(commits.map(\.aheadOfBase), [true, true, false])
-    }
-
-    func testListRecentCommitsEmptyForNonGitAndEmptyRepo() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { rmrf(plain) }
-        let nonGit = await listRecentCommits(plain)
-        XCTAssertTrue(nonGit.isEmpty)
-        // `dir` is a fresh repo with no commits (no HEAD) at this point.
-        let emptyRepo = await listRecentCommits(dir)
-        XCTAssertTrue(emptyRepo.isEmpty)
-    }
-
-    // MARK: - getCommitDiff (juancode-5u2)
-
-    func testGetCommitDiffRootCommit() async throws {
-        writeFile(join(dir, "a.txt"), "alpha\nbeta\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "root"])
-        let sha = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let r = try await getCommitDiff(dir, sha: sha)
-        XCTAssertTrue(r.git)
-        XCTAssertEqual(r.files.count, 1)
-        XCTAssertEqual(r.files.first?.path, "a.txt")
-        XCTAssertEqual(r.files.first?.status, .added)
-        XCTAssertEqual(r.files.first?.additions, 2)
-    }
-
-    func testGetCommitDiffOrdinaryCommit() async throws {
-        writeFile(join(dir, "a.txt"), "one\ntwo\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        writeFile(join(dir, "a.txt"), "one\ntwo\nthree\n")
-        try runGit(["commit", "-aqm", "grow"])
-        let sha = try runGit(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Dirty the working tree to prove the diff is the commit's, not the tree's.
-        writeFile(join(dir, "a.txt"), "unrelated\n")
-
-        let r = try await getCommitDiff(dir, sha: sha)
-        XCTAssertTrue(r.git)
-        XCTAssertEqual(r.files.count, 1)
-        XCTAssertEqual(r.files.first?.status, .modified)
-        XCTAssertEqual(r.files.first?.additions, 1)
-        XCTAssertEqual(r.files.first?.deletions, 0)
-    }
-
-    func testGetCommitDiffUnknownShaThrowsGitError() async throws {
-        writeFile(join(dir, "a.txt"), "x\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        do {
-            _ = try await getCommitDiff(dir, sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-            XCTFail("expected GitError")
-        } catch let e as GitError {
-            XCTAssertTrue(e.message.contains("deadbee"))
-        }
-    }
-
-    func testGetCommitDiffNonGitDir() async throws {
-        let plain = mkdtemp("juancode-plain-")
-        defer { rmrf(plain) }
-        let r = try await getCommitDiff(plain, sha: "deadbeef")
-        XCTAssertEqual(r, DiffResult(git: false, files: []))
-    }
-
-    // MARK: - revert scope guard (pure)
-
-    func testRevertScopeGuardAcceptsInTreePath() {
-        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "src/a.txt"), "src/a.txt")
-        // A leading ./ normalizes; a request with the root prefix as an absolute path works too.
-        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "./src/a.txt"), "src/a.txt")
-        XCTAssertEqual(revertScopedRelativePath(root: "/repo", requested: "/repo/src/a.txt"), "src/a.txt")
-    }
-
-    func testRevertScopeGuardRefusesUnscopedOrEscaping() {
-        // Empty / whitespace → unscoped.
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: ""))
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "   "))
-        // The worktree root itself is not a single file — refuse (would be the whole tree).
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "."))
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/repo"))
-        // Traversal out of the tree.
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "../secret"))
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "src/../../secret"))
-        // Absolute path outside the tree.
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/etc/passwd"))
-        // A sibling that merely shares a name prefix must not pass the prefix check.
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "/repo-other/a.txt"))
-        // Newline / NUL injection.
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "a\nb"))
-        XCTAssertNil(revertScopedRelativePath(root: "/repo", requested: "a\0b"))
-    }
-
-    // MARK: - single-hunk patch extraction (pure)
-
-    func testSingleHunkPatchExtractsHeaderPlusOneHunk() {
-        let patch = """
-        diff --git a/f.txt b/f.txt
-        index 111..222 100644
-        --- a/f.txt
-        +++ b/f.txt
-        @@ -1,2 +1,2 @@
-        -one
-        +ONE
-         two
-        @@ -10,2 +10,2 @@
-        -ten
-        +TEN
-         eleven
-        """
-        let first = singleHunkPatch(patch, index: 0)
-        XCTAssertNotNil(first)
-        XCTAssertTrue(first!.contains("--- a/f.txt"))
-        XCTAssertTrue(first!.contains("@@ -1,2 +1,2 @@"))
-        XCTAssertTrue(first!.contains("+ONE"))
-        XCTAssertFalse(first!.contains("+TEN"))       // second hunk excluded
-        XCTAssertTrue(first!.hasSuffix("\n"))
-        let second = singleHunkPatch(patch, index: 1)
-        XCTAssertTrue(second!.contains("+TEN"))
-        XCTAssertFalse(second!.contains("+ONE"))
-        // Out of range / negative → nil.
-        XCTAssertNil(singleHunkPatch(patch, index: 2))
-        XCTAssertNil(singleHunkPatch(patch, index: -1))
-        XCTAssertNil(singleHunkPatch("", index: 0))
-    }
-
-    // MARK: - revert (real git)
-
-    func testRevertFileRestoresTrackedModification() async throws {
-        writeFile(join(dir, "a.txt"), "one\ntwo\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        writeFile(join(dir, "a.txt"), "one\ntwo\nthree\n")   // uncommitted change
-        try runGit(["add", "a.txt"])                          // even staged
-        let r = try await revertFile(dir, path: "a.txt")
-        XCTAssertEqual(r, RevertResult(path: "a.txt", reverted: true))
-        let restored = try String(contentsOfFile: join(dir, "a.txt"), encoding: .utf8)
-        XCTAssertEqual(restored, "one\ntwo\n")
-        // No diff remains for the file.
-        let diff = try await getDiff(dir)
-        XCTAssertFalse(diff.files.contains { $0.path == "a.txt" })
-    }
-
-    func testRevertFileDeletesUntracked() async throws {
-        writeFile(join(dir, "seed.txt"), "x\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        writeFile(join(dir, "new.txt"), "fresh\n")            // untracked
-        let r = try await revertFile(dir, path: "new.txt")
-        XCTAssertTrue(r.reverted)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: join(dir, "new.txt")))
-    }
-
-    func testRevertFileRefusesOutOfTreePath() async throws {
-        writeFile(join(dir, "a.txt"), "one\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        do {
-            _ = try await revertFile(dir, path: "../escape.txt")
-            XCTFail("expected refusal")
-        } catch let e as GitError {
-            XCTAssertTrue(e.message.lowercased().contains("unscoped") || e.message.lowercased().contains("out-of-tree"))
-        }
-    }
-
-    func testRevertHunkDiscardsOneHunkKeepsOthers() async throws {
-        // Ten lines committed; edit line 1 and line 10 → two separate hunks.
-        let base = (1...10).map { "line\($0)" }.joined(separator: "\n") + "\n"
-        writeFile(join(dir, "f.txt"), base)
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        var lines = (1...10).map { "line\($0)" }
-        lines[0] = "LINE1-changed"
-        lines[9] = "LINE10-changed"
-        writeFile(join(dir, "f.txt"), lines.joined(separator: "\n") + "\n")
-
-        // Sanity: two hunks present.
-        let before = try await getDiff(dir)
-        let file = try XCTUnwrap(before.files.first { $0.path == "f.txt" })
-        XCTAssertEqual(hunkCount(inDiff: file.diff), 2)
-
-        // Revert only the first hunk (line 1) — the line-10 change must survive.
-        let r = try await revertHunk(dir, path: "f.txt", hunkIndex: 0)
-        XCTAssertTrue(r.reverted)
-        let after = try String(contentsOfFile: join(dir, "f.txt"), encoding: .utf8)
-        XCTAssertTrue(after.contains("line1\n"))            // restored
-        XCTAssertFalse(after.contains("LINE1-changed"))     // first hunk gone
-        XCTAssertTrue(after.contains("LINE10-changed"))     // second hunk kept
-    }
-
-    func testRevertHunkRefusesUntracked() async throws {
-        writeFile(join(dir, "seed.txt"), "x\n")
-        try runGit(["add", "-A"])
-        try runGit(["commit", "-qm", "init"])
-        writeFile(join(dir, "new.txt"), "a\nb\n")            // untracked
-        do {
-            _ = try await revertHunk(dir, path: "new.txt", hunkIndex: 0)
-            XCTFail("expected refusal for untracked file")
-        } catch is GitError {
-            // expected
         }
     }
 

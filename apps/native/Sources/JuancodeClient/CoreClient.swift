@@ -232,6 +232,60 @@ public protocol CoreClient: AnyObject, Sendable {
     func subscribeTrackedPrs(
         _ onEvent: @escaping @Sendable (TrackedPrEvent) -> Void) async -> @Sendable () -> Void
 
+    // MARK: - Heavy command queue (wire: heavyQueueSubscribe, heavySetPriority,
+    //         heavySetSlots, heavyCancel)
+
+    /// Watch the global `heavy` slot queue (wire `heavyQueueSubscribe`). The
+    /// subscriber is handed the current queue as soon as the core answers, and the
+    /// whole queue again on every change; replace wholesale. Returns a cancel handle,
+    /// which also stops the core reading the registry when it is the last one.
+    func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void
+
+    /// Move a job in line by rewriting its priority (wire `heavySetPriority`). Higher
+    /// runs sooner; the waiting wrapper picks it up on its own next poll.
+    func heavySetPriority(pid: Int, prio: Int)
+
+    /// How many heavy jobs may run at once (wire `heavySetSlots`). Written into the
+    /// wrapper's own config, so raising it lets jobs already in line through.
+    func heavySetSlots(_ slots: Int)
+
+    /// Stop a queued or running heavy job (wire `heavyCancel`).
+    func heavyCancel(pid: Int)
+
+    // MARK: - The GitHub surface (capability: github)
+
+    /// The core's HTTP root, for the GitHub reads that are requests rather than
+    /// subscriptions. Nil for a core with no HTTP surface of its own.
+    ///
+    /// On the protocol rather than only on the client that has one, because the reads
+    /// it serves are the same reads the sidecar and the phone console make: one URL,
+    /// three callers, and no second answer to "where does a PR list come from".
+    var httpBaseURL: String? { get }
+
+    /// A session's review — the cached one, or a fresh pass when `refresh` is true
+    /// (wire `sessionReview` → `review`).
+    ///
+    /// Nil is "nothing has reviewed this", which is a different thing from a pass that
+    /// found nothing and draws a different panel. A refresh is a whole model turn, so
+    /// this can take minutes; it is off the socket's own task on the far side, so the
+    /// panes on this connection keep painting while it runs.
+    func review(sessionId: String, refresh: Bool) async throws -> ReviewPass?
+
+    /// Stage an inline comment against a session's diff (wire `diffCommentAdd`).
+    /// Answered with the whole list, because two surfaces stage against one session.
+    @discardableResult
+    func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                        endLine: Int?, body: String, quote: String?,
+                        commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment]
+
+    /// Drop one staged comment, or — with no id — every one of the session's
+    /// (wire `diffCommentDelete`).
+    @discardableResult
+    func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment]
+
     // MARK: - Launch state
 
     /// Sessions that were live when the previous process died or quit. Kept
@@ -241,6 +295,34 @@ public protocol CoreClient: AnyObject, Sendable {
     /// Of `crashOrphanIds`, the ones whose agent was mid-turn, which get the
     /// "Continue" offer on their restored pane.
     var midTurnOrphanIds: Set<String> { get }
+
+    // MARK: - Working-tree changes (HTTP: /api/git/**, wire: session{Commit,Push,Revert,CommitMessage})
+
+    /// The git working tree of a session's cwd. Every member is REQUIRED here rather
+    /// than left in the extension beside its default, and that is not a style choice:
+    /// a member that exists only in a protocol extension is dispatched STATICALLY, so
+    /// a call through `any CoreClient` would reach the "this core cannot" default even
+    /// on a core that implements it. The whole surface would be silently dead.
+    ///
+    /// `ChangesClient.swift` holds the defaults — all of them throw
+    /// `CoreCapabilityError(.changes)` — and the doc comment for each.
+    func diff(cwd: String) async throws -> DiffResult
+    func baseDiff(cwd: String, base: String?) async throws -> BaseDiffResult
+    func commitDiff(cwd: String, sha: String) async throws -> DiffResult
+    func gitState(cwd: String) async throws -> GitState
+    func recentCommits(cwd: String, limit: Int) async throws -> [RecentCommit]
+    func worktrees(cwd: String) async throws -> [Worktree]
+    func worktreeStatus(cwd: String) async throws -> [WorktreeStatusEntry]
+    func trackedFiles(cwd: String, limit: Int) async throws -> [String]
+    func changeStat(cwd: String) async throws -> ChangeStat
+    func readFile(cwd: String, path: String) async throws -> String
+    func probeAtRisk(path: String) async throws -> AtRiskProbe?
+    func agentWorktree(cwd: String, childPid: Int32) async throws -> String?
+    func commitAll(sessionId: String, cwd: String?, message: String) async throws -> CommitResult
+    func push(sessionId: String, cwd: String?) async throws -> PushResult
+    func revert(sessionId: String, cwd: String?, path: String,
+                hunkIndex: Int?) async throws -> RevertResult
+    func draftCommitMessage(sessionId: String, cwd: String?) async throws -> String
 
     // MARK: - Presence, diagnostics, lifecycle
 
@@ -275,6 +357,54 @@ public protocol CoreClient: AnyObject, Sendable {
 }
 
 public extension CoreClient {
+    /// What a core with no `heavyQueue` capability does: nothing, visibly.
+    ///
+    /// Defaults rather than four no-op methods on every client, because the queue has
+    /// exactly one implementation — the daemon that owns the registry — and a core
+    /// without it has nothing to fall back to. The panel reads
+    /// `unavailableReason(.heavyQueue)` and greys itself out with that sentence, so
+    /// none of these is reached from a working build; they exist so a client is not
+    /// forced to write a stub that would be a second answer to the same question.
+    func subscribeHeavyQueue(
+        _ onSnapshot: @escaping @Sendable (HeavyQueueSnapshot) -> Void) -> @Sendable () -> Void {
+        onSnapshot(HeavyQueueSnapshot())
+        return {}
+    }
+
+    func heavySetPriority(pid: Int, prio: Int) {}
+    func heavySetSlots(_ slots: Int) {}
+    func heavyCancel(pid: Int) {}
+
+    /// What a core with no `github` capability does: refuse, by name.
+    ///
+    /// Thrown rather than silently answered with nil, for the reason
+    /// `CoreCapabilityError` exists: a caller that reached a gated operation anyway is
+    /// a UI bug, and an invented empty answer hides it. The panel reads
+    /// `unavailableReason(.github)` and greys itself out with that sentence, so none of
+    /// these is reached from a working build.
+    var httpBaseURL: String? { nil }
+
+    func review(sessionId: String, refresh: Bool) async throws -> ReviewPass? {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    @discardableResult
+    func addDiffComment(sessionId: String, file: String, side: String, line: Int,
+                        endLine: Int?, body: String, quote: String?,
+                        commitSha: String?, commitSubject: String?)
+        async throws -> [StagedDiffComment] {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    @discardableResult
+    func removeDiffComments(sessionId: String, commentId: String?)
+        async throws -> [StagedDiffComment] {
+        throw CoreCapabilityError(.github, backend: info.daemon == nil ? "in-process" : "connected")
+    }
+
+    /// The GitHub reads, when this core has an HTTP surface to make them against.
+    var github: GitHubReads? { httpBaseURL.map { GitHubReads(baseURL: $0) } }
+
     /// Track `pr` the default way: spawn a dedicated agent session for it.
     func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int) async -> TrackedPr? {
         await trackPr(pr, cwd: cwd, cols: cols, rows: rows, adoptSessionId: nil)

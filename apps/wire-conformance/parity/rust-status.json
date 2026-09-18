@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-09-18",
-  "specRevision": "1.15.0",
+  "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -30,8 +30,12 @@
     "sessionList",
     "sessionDelete",
     "sessionSearch",
+    "namedKeys",
     "trackPrInSession",
-    "prWebhook"
+    "prWebhook",
+    "heavyQueue",
+    "changes",
+    "github"
   ],
   "scenarios": {
     "handshake": {
@@ -230,6 +234,31 @@
       "passes": 3
     },
     "pr-webhook": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-screen": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "named-keys": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "heavy-queue": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "changes": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "github": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

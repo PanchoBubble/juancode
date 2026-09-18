@@ -21,7 +21,7 @@ private let notifyWebhookUrlKey = "juancode.notify.webhookUrl"
 /// UserDefaults key for the "keep awake" toggle (block idle system sleep).
 private let keepAwakeDefaultsKey = "juancode.keepAwake"
 
-/// UserDefaults key for the idle-session sleep window driving the `SessionReaper`,
+/// UserDefaults key for the idle-session sleep window driving the core's reaper,
 /// in minutes (`0` = never / disabled). Key name predates the reaper.
 private let autoCloseIdleMinutesKey = "juancode.autoCloseIdleMinutes"
 
@@ -863,8 +863,7 @@ final class AppModel {
                     """
                     db maintenance: freelist \(report.freelistPagesBefore, privacy: .public) pages before, \
                     \(report.pageCountAfter, privacy: .public) pages after, \
-                    vacuumed=\(report.vacuumed, privacy: .public) \
-                    optimizedFts=\(report.optimizedFts, privacy: .public)
+                    vacuumed=\(report.vacuumed, privacy: .public)
                     """)
             } catch {
                 storeMaintenanceLog.error("db maintenance failed: \(error, privacy: .public)")
@@ -912,7 +911,7 @@ final class AppModel {
         Task {
             var additions: [String: String] = [:]
             for cwd in cwds {
-                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 for t in trees { additions[t.path] = main.path }
             }
@@ -1373,9 +1372,21 @@ final class AppModel {
     /// Outbound notification webhook URL (juancode-xac). When set, a turn-end /
     /// needs-input event POSTs a Slack-compatible JSON body here so background work
     /// reaches you off-device. Empty = off. Nothing is ever sent without this URL.
-    /// Persisted; edited from Settings → Sessions.
-    var notifyWebhookUrl: String = UserDefaults.standard.string(forKey: notifyWebhookUrlKey) ?? "" {
-        didSet { UserDefaults.standard.set(notifyWebhookUrl, forKey: notifyWebhookUrlKey) }
+    /// Edited from Settings → Sessions.
+    ///
+    /// The POST itself is the DAEMON's now (juancode-52e8.14.7), so this field is a
+    /// view onto the daemon's own config file rather than the source of truth: it
+    /// seeds from `notify.json` and writes every edit straight back there. The
+    /// `UserDefaults` copy is kept only so a fresh install that has never had a daemon
+    /// still shows what was typed. That is the whole point of the move — a webhook the
+    /// app fired stopped firing the moment you quit the app, which is exactly when you
+    /// need it.
+    var notifyWebhookUrl: String = NotifyConfig.webhookURL()
+        ?? UserDefaults.standard.string(forKey: notifyWebhookUrlKey) ?? "" {
+        didSet {
+            UserDefaults.standard.set(notifyWebhookUrl, forKey: notifyWebhookUrlKey)
+            NotifyConfig.setWebhookURL(notifyWebhookUrl)
+        }
     }
 
     /// Light / dark / follow-system appearance (juancode light/dark toggle). Persisted;
@@ -1444,7 +1455,7 @@ final class AppModel {
         }
     }
 
-    /// Idle window (minutes) after which the `SessionReaper` puts a session to
+    /// Idle window (minutes) after which the core's reaper puts a session to
     /// sleep: it kills the CLI process tree to free RAM once the session has been
     /// *verifiably* idle for this long, leaving a dormant, resumable tile. `0`
     /// means never — reaping is off. Persisted and edited from Settings → Sessions
@@ -1673,7 +1684,6 @@ final class AppModel {
         unreadSessions.insert(sessionId)
         updateDockBadge()
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
-        fireNotificationWebhook(sessionId: sessionId, state: state)
     }
 
     /// Deliver (or replace) the OS notification for a background session at a turn
@@ -1708,30 +1718,6 @@ final class AppModel {
             selection = id
             flashFocusRim() // land the eye on the pane the notification pointed at
         }
-    }
-
-    /// POST a Slack-compatible notification to the user's configured webhook, if any
-    /// (juancode-xac). Fired on the same turn-end/needs-input edge as the Dock
-    /// bounce, so it respects the same "not the session you're watching" suppression.
-    /// Best-effort and fire-and-forget — a webhook failure never touches the UI.
-    private func fireNotificationWebhook(sessionId: String, state: SessionActivity) {
-        let meta = (sessions + externalSessions).first { $0.id == sessionId }
-        postNotificationWebhook(event: state == .waitingInput ? .waitingInput : .turnEnd,
-                                title: meta?.title ?? "", sessionId: sessionId, cwd: meta?.cwd ?? "")
-    }
-
-    /// The shared webhook POST: build the body and fire-and-forget it at the
-    /// configured URL (no-op when none is set). Used by turn-end and work-at-risk.
-    private func postNotificationWebhook(event: NotificationEvent, title: String,
-                                         sessionId: String, cwd: String) {
-        let raw = notifyWebhookUrl.trimmingCharacters(in: .whitespaces)
-        guard !raw.isEmpty, let url = URL(string: raw), url.scheme?.hasPrefix("http") == true else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = webhookBody(event: event, title: title, sessionId: sessionId, cwd: cwd)
-        req.timeoutInterval = 10
-        Task.detached { _ = try? await URLSession.shared.data(for: req) }
     }
 
     /// The most recently-created live session rooted in `cwd`, if any. Used to find
@@ -2591,15 +2577,14 @@ final class AppModel {
     /// The cached branch/state for `cwd`, if loaded yet.
     func folderGitState(_ cwd: String) -> GitState? { gitStateByCwd[cwd] }
 
-    /// Load (or refresh) the git state for `cwd` via `getGitState` (a light
-    /// `symbolic-ref` shell-out). Runs off the main actor; coalesces concurrent
-    /// calls. Non-git folders resolve to `git: false` (branch nil), so the label
-    /// just stays hidden. Mirrors `loadPrs`/`loadBeads`.
+    /// Load (or refresh) the git state for `cwd` from the core. Coalesces concurrent
+    /// calls. A non-git folder — and a core with no `changes` capability — resolve to
+    /// `git: false`, so the label just stays hidden. Mirrors `loadPrs`/`loadBeads`.
     func loadFolderGitState(_ cwd: String) {
         guard !gitStateCwdLoading.contains(cwd) else { return }
         gitStateCwdLoading.insert(cwd)
         Task {
-            let state = await Task.detached(priority: .utility) { await getGitState(cwd) }.value
+            let state = (try? await core.gitState(cwd: cwd)) ?? GitState.unknown
             gitStateByCwd[cwd] = state
             gitStateCwdLoading.remove(cwd)
         }
@@ -3971,9 +3956,13 @@ final class AppModel {
     var changesBaseBySession: [String: String] = [:]
     /// A per-session diff-load error (base/PR fetch failures), shown in the panel.
     var changesErrorBySession: [String: String] = [:]
-    /// Per-session failing-CI logs for the PR currently shown in its ChangesPanel,
-    /// fetched on demand via `gh run view --log-failed` (juancode-49w).
-    var prCiLogsBySession: [String: String] = [:]
+    /// Per-session failing-CI logs for the PR currently shown in its ChangesPanel
+    /// (juancode-49w), read from the core already parsed into steps and folds.
+    ///
+    /// The core reads and parses it, not this process (juancode-52e8.14.6). A red
+    /// build is exactly the thing somebody wants to ask about from a phone, and a
+    /// phone cannot shell out to `gh run view`.
+    var prCiLogsBySession: [String: ActionsLog] = [:]
     /// Sessions whose CI-log fetch is in flight (for the banner spinner).
     private var prCiLogsLoading: Set<String> = []
     /// Recent commits for the ChangesPanel's commit picker (juancode-5u2), per session.
@@ -3991,7 +3980,7 @@ final class AppModel {
     func changesSource(_ id: String) -> ChangesSource { changesSourceBySession[id] ?? .workingTree }
     func changesBaseLabel(_ id: String) -> String? { changesBaseBySession[id] }
     func changesError(_ id: String) -> String? { changesErrorBySession[id] }
-    func prCiLogs(_ id: String) -> String? { prCiLogsBySession[id] }
+    func prCiLogs(_ id: String) -> ActionsLog? { prCiLogsBySession[id] }
     func isLoadingPrCiLogs(_ id: String) -> Bool { prCiLogsLoading.contains(id) }
     func recentCommits(_ id: String) -> [RecentCommit] { recentCommitsBySession[id] ?? [] }
     func isLoadingRecentCommits(_ id: String) -> Bool { recentCommitsLoading.contains(id) }
@@ -4002,25 +3991,25 @@ final class AppModel {
         guard let cwd = gitCwd(of: id), !recentCommitsLoading.contains(id) else { return }
         recentCommitsLoading.insert(id)
         Task {
-            let commits = await Task.detached(priority: .utility) {
-                await listRecentCommits(cwd, limit: 50)
-            }.value
+            let commits = (try? await core.recentCommits(cwd: cwd, limit: 50)) ?? []
             recentCommitsBySession[id] = commits
             recentCommitsLoading.remove(id)
         }
     }
 
-    /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel
-    /// (`gh run view --log-failed` for each red Actions check). Off the main actor;
-    /// coalesces. A "no logs" result is shown rather than left blank.
+    /// Fetch the failing-step CI logs for a PR shown in a session's ChangesPanel,
+    /// already parsed into steps and folds by the core. Coalesces.
+    ///
+    /// An empty log is an answer and is stored as one: a green PR has no failing
+    /// build, and the panel says so rather than spinning. A core with no `github`
+    /// capability stores nothing, and the banner reads the reason off the capability.
     func loadPrCiLogs(_ id: String, number: Int) {
         guard let cwd = cwd(of: id), !prCiLogsLoading.contains(id) else { return }
+        guard let reads = core.github else { return }
         prCiLogsLoading.insert(id)
         Task {
-            let logs = await Task.detached(priority: .utility) {
-                await getFailedCheckLogs(cwd, number: number)
-            }.value
-            prCiLogsBySession[id] = logs.isEmpty ? "No failing-step logs available." : logs
+            let log = await reads.actionsLog(cwd: cwd, number: number)
+            prCiLogsBySession[id] = log ?? ActionsLog()
             prCiLogsLoading.remove(id)
         }
     }
@@ -4063,9 +4052,7 @@ final class AppModel {
     private func resolveAgentWorktree(_ id: String) async {
         guard let session = liveSession(id), let pid = session.childPid else { return }
         let cwd = session.meta.cwd
-        let detected = await Task.detached(priority: .utility) {
-            await detectAgentWorktree(cwd, childPid: pid)
-        }.value
+        let detected = try? await core.agentWorktree(cwd: cwd, childPid: pid)
         let previous = agentWorktreeBySession[id]
         agentWorktreeBySession[id] = detected
         // The diff watcher is rooted at gitCwd — re-arm it when that just moved.
@@ -4110,9 +4097,7 @@ final class AppModel {
         Task {
             await resolveAgentWorktree(id)
             guard let cwd = agentWorktreeBySession[id] ?? effectiveCwd(of: id) else { return }
-            let stat = await Task.detached(priority: .utility) {
-                await computeChangeStat(cwd)
-            }.value
+            let stat = (try? await core.changeStat(cwd: cwd)) ?? ChangeStat.empty
             changeStatBySession[id] = stat.isEmpty ? nil : stat
             if !stat.isEmpty, isChangesPanelOpen(for: id) {
                 viewedChangeSignatureBySession[id] = stat.signature
@@ -4164,6 +4149,14 @@ final class AppModel {
     /// from `changesSource`. Coalesces concurrent calls. Mirrors `loadPrs`.
     func loadChanges(_ id: String) {
         guard cwd(of: id) != nil, !diffInFlight.contains(id) else { return }
+        // A core with no working tree to read is said out loud, once, in the panel's
+        // own error slot — rather than by an empty diff, which reads as "the agent
+        // changed nothing" and is the one wrong thing this panel can say.
+        if let reason = core.unavailableReason(.changes) {
+            changesErrorBySession[id] = reason
+            diffLoading.remove(id)
+            return
+        }
         let source = changesSource(id)
         diffInFlight.insert(id)
         diffLoading.insert(id)
@@ -4174,9 +4167,8 @@ final class AppModel {
             guard let cwd = gitCwd(of: id) else {
                 diffLoading.remove(id); diffInFlight.remove(id); return
             }
-            async let stateTask = Task.detached(priority: .utility) { await getGitState(cwd) }.value
-            let loaded = await Task.detached(priority: .utility) { await loadDiffForSource(cwd, source) }.value
-            let state = await stateTask
+            let loaded = await loadDiffForSource(core, cwd, source)
+            let state = (try? await core.gitState(cwd: cwd)) ?? GitState.unknown
             if let d = loaded.diff { diffBySession[id] = d }
             if let base = loaded.base { changesBaseBySession[id] = base }
             changesErrorBySession[id] = loaded.error
@@ -4215,9 +4207,7 @@ final class AppModel {
 
     private func refreshWorktreeStatus(_ path: String) {
         Task {
-            let entries = await Task.detached(priority: .utility) {
-                await computeWorktreeStatus(path)
-            }.value
+            let entries = (try? await core.worktreeStatus(cwd: path)) ?? []
             worktreeStatusByPath[path] = entries
         }
     }
@@ -4245,9 +4235,7 @@ final class AppModel {
     private func loadFileIndex(_ path: String) {
         quickOpenLoading = true
         Task {
-            let files = await Task.detached(priority: .userInitiated) {
-                await listTrackedFiles(path)
-            }.value
+            let files = (try? await core.trackedFiles(cwd: path, limit: 20_000)) ?? []
             fileIndex.store(files, for: path)
             if quickOpenCwd == path { quickOpenFiles = files }
             quickOpenLoading = false
@@ -4340,9 +4328,7 @@ final class AppModel {
             if let cached = fileIndex.files(for: path) {
                 files = cached
             } else {
-                files = await Task.detached(priority: .userInitiated) {
-                    await listTrackedFiles(path)
-                }.value
+                files = (try? await core.trackedFiles(cwd: path, limit: 20_000)) ?? []
                 fileIndex.store(files, for: path)
             }
             let tree = await Task.detached(priority: .userInitiated) {
@@ -4657,9 +4643,7 @@ final class AppModel {
     func revertFile(_ id: String, path: String) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.revertFile(cwd, path: path)
-            }.value
+            let r = try await core.revert(sessionId: id, cwd: cwd, path: path, hunkIndex: nil)
             gitNoteBySession[id] = GitNote(ok: true, text: "Reverted \(r.path)")
             loadChanges(id)
         } catch {
@@ -4672,9 +4656,8 @@ final class AppModel {
     func revertHunk(_ id: String, path: String, hunkIndex: Int) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.revertHunk(cwd, path: path, hunkIndex: hunkIndex)
-            }.value
+            let r = try await core.revert(sessionId: id, cwd: cwd, path: path,
+                                         hunkIndex: hunkIndex)
             gitNoteBySession[id] = GitNote(ok: true, text: "Reverted a hunk in \(r.path)")
             loadChanges(id)
         } catch {
@@ -4682,25 +4665,79 @@ final class AppModel {
         }
     }
 
-    /// Run an AI review pass over the session's working-tree diff (juancode-7ha):
-    /// feed the diff (+ any staged inline comments as steering context) to the real
-    /// `claude` CLI via the existing `BinaryResolver` — same auth/binary as a
-    /// session, no shadow HOME — and cache the structured findings to overlay on the
-    /// diff. Coalesces concurrent runs; mirrors the web "Review with Claude". No-op
-    /// without a cwd. The runner is async and shells out, so we hop off the main
-    /// actor and publish the result back on it.
+    /// Run an AI review pass over the session's working-tree diff (juancode-7ha).
+    ///
+    /// The pass belongs to the core now (juancode-52e8.14.6): it reads the tree, builds
+    /// the prompt and launches the user's own `claude` with their environment untouched
+    /// — the same promise this app made when it ran the pass itself, kept by the
+    /// process that outlives the app rather than by the app. What changes here is who
+    /// can ask: a review started from the phone lands in the same cached row.
+    ///
+    /// The staged basket is pushed across first. The core reviews the comments IT
+    /// holds, which is the only arrangement in which the phone and the desktop are
+    /// steering the same pass; leaving them here would mean a review that silently
+    /// ignored what the reviewer had already written down.
+    ///
+    /// Coalesces concurrent runs. A core with no `github` capability surfaces the
+    /// capability's own sentence rather than running nothing and saying nothing.
     func runReview(_ id: String) {
-        guard let cwd = gitCwd(of: id), !reviewRunning.contains(id) else { return }
-        let files = diffBySession[id]?.files ?? []
-        let comments = comments(id)
+        guard gitCwd(of: id) != nil, !reviewRunning.contains(id) else { return }
+        let staged = comments(id)
         reviewRunning.insert(id)
         Task {
-            let now = Int(Date().timeIntervalSince1970 * 1000)
-            let result = await JuancodeServices.runReview(
-                cwd: cwd, files: files, comments: comments, now: now)
-            reviewBySession[id] = result
+            do {
+                try await pushStagedComments(id, staged)
+                let pass = try await core.review(sessionId: id, refresh: true)
+                reviewBySession[id] = pass.map(Self.reviewResult(from:))
+            } catch {
+                reviewBySession[id] = ReviewResult(
+                    status: .error, findings: [], summary: nil,
+                    createdAt: Int(Date().timeIntervalSince1970 * 1000),
+                    error: error.localizedDescription)
+            }
             reviewRunning.remove(id)
         }
+    }
+
+    /// Replace the core's staged comments with this session's basket.
+    ///
+    /// Replace rather than merge: the basket here is the one the reviewer is looking
+    /// at, and a merge would re-add comments they had already unstaged.
+    private func pushStagedComments(_ id: String, _ staged: [DiffComment]) async throws {
+        try await core.removeDiffComments(sessionId: id, commentId: nil)
+        for c in staged {
+            try await core.addDiffComment(
+                sessionId: id, file: c.file, side: c.side.rawValue, line: c.line,
+                endLine: c.endLine, body: c.body, quote: c.quote,
+                commitSha: c.commitSha, commitSubject: c.commitSubject)
+        }
+    }
+
+    /// One review pass off the wire, in the shape the diff overlay already renders.
+    ///
+    /// A mapping rather than a shared type because the two are owned by different
+    /// sides: `ReviewResult` is what this app's panels are written against, and
+    /// `ReviewPass` is what the core serves to every client including the phone.
+    private static func reviewResult(from pass: ReviewPass) -> ReviewResult {
+        let status: ReviewResult.Status
+        switch pass.status {
+        case .ok: status = .ok
+        case .empty: status = .empty
+        case .error: status = .error
+        }
+        return ReviewResult(
+            status: status,
+            findings: pass.findings.map { f in
+                ReviewFinding(
+                    file: f.file,
+                    side: f.side == "old" ? .old : .new,
+                    line: f.line,
+                    severity: ReviewSeverity(rawValue: f.severity.rawValue) ?? .info,
+                    title: f.title, note: f.note)
+            },
+            summary: pass.summary,
+            createdAt: pass.createdAt,
+            error: pass.error)
     }
 
     /// Stage everything and commit, off the main actor. Refreshes the diff + git
@@ -4711,9 +4748,7 @@ final class AppModel {
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !msg.isEmpty else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await commitAll(cwd, msg)
-            }.value
+            let r = try await core.commitAll(sessionId: id, cwd: cwd, message: msg)
             gitNoteBySession[id] = GitNote(ok: true, text: "Committed \(r.sha) · \(r.subject)")
             loadChanges(id)
         } catch {
@@ -4725,9 +4760,7 @@ final class AppModel {
     func push(_ id: String) async {
         guard let cwd = gitCwd(of: id) else { return }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await pushCurrent(cwd)
-            }.value
+            let r = try await core.push(sessionId: id, cwd: cwd)
             gitNoteBySession[id] = GitNote(ok: true, text: "Pushed \(r.branch).")
             loadChanges(id)
         } catch {
@@ -4758,11 +4791,11 @@ final class AppModel {
     /// main actor. Returns the message, or nil on failure (note set).
     func generateCommitMessage(_ id: String) async -> String? {
         guard let cwd = gitCwd(of: id) else { return nil }
-        let files = diffBySession[id]?.files ?? []
         do {
-            return try await Task.detached(priority: .userInitiated) {
-                try await JuancodeServices.generateCommitMessage(cwd, files)
-            }.value
+            // Drafted from the diff the CORE reads, not the one this panel happens to
+            // be holding: a message written against a snapshot taken a minute ago
+            // describes changes that may no longer be there.
+            return try await core.draftCommitMessage(sessionId: id, cwd: cwd)
         } catch {
             gitNoteBySession[id] = GitNote(ok: false, text: gitErrorText(error))
             return nil
@@ -4773,7 +4806,7 @@ final class AppModel {
     private func gitErrorText(_ error: Error) -> String {
         if let e = error as? GitError { return e.message }
         if let e = error as? GhError { return e.message }
-        if let e = error as? CommitMessageError { return e.message }
+        if let e = error as? ChangesError { return e.reason }
         return String(describing: error)
     }
 
@@ -4800,41 +4833,72 @@ final class AppModel {
         }
     }
 
-    // MARK: - Heavy command queue (juancode-ik11)
+    // MARK: - Heavy command queue (juancode-ik11, moved to the core in juancode-52e8.14.3)
 
     /// The global `heavy` slot queue — memory-heavy commands (CI, integration tests)
-    /// serialized across every Claude session on this Mac. Read from the shared
-    /// filesystem registry; empty when nothing is queued.
+    /// serialized across every Claude session on this Mac.
+    ///
+    /// Pushed by the core, not read here: the registry belongs to the daemon now, so
+    /// this is the last `heavyQueue` frame and nothing in the app touches
+    /// `/tmp/claude-heavy-$UID`. A core with no `heavyQueue` capability leaves it
+    /// empty and the panel greys itself out with the capability's own sentence.
     var heavyQueue = HeavyQueueSnapshot()
+    /// The live subscription's cancel handle, so the watch is dropped when the panel
+    /// and the Tools menu are both done with it — the daemon reads the shared
+    /// registry only while somebody is subscribed.
+    private var heavyQueueCancel: (@Sendable () -> Void)?
+    private var heavyQueueWatchers = 0
 
-    /// Reload the queue off the main actor. Cheap (a handful of small JSON files),
-    /// so the panel can poll it and the Tools menu can refresh on open.
-    func refreshHeavyQueue() {
-        Task {
-            heavyQueue = await Task.detached(priority: .utility) {
-                HeavyQueue.shared.snapshot()
-            }.value
+    /// Start (or join) the watch. Balanced by `releaseHeavyQueue()`: the panel holds
+    /// one for as long as it is open, the Tools menu one for as long as it is.
+    func watchHeavyQueue() {
+        heavyQueueWatchers += 1
+        guard heavyQueueCancel == nil, supportsHeavyQueue else { return }
+        heavyQueueCancel = core.subscribeHeavyQueue { [weak self] snapshot in
+            Task { @MainActor in self?.heavyQueue = snapshot }
         }
     }
+
+    /// Drop this watcher's claim, and the subscription with the last one.
+    func releaseHeavyQueue() {
+        heavyQueueWatchers = max(0, heavyQueueWatchers - 1)
+        guard heavyQueueWatchers == 0, let cancel = heavyQueueCancel else { return }
+        heavyQueueCancel = nil
+        cancel()
+        // Not cleared: the last queue drawn is a better first frame than an empty one
+        // the next open would flash before the core answers.
+    }
+
+    /// Whether the connected core reads the slot registry at all.
+    var supportsHeavyQueue: Bool { core.supports(.heavyQueue) }
+
+    /// Whether the connected core reads the session's git working tree at all. Every
+    /// Changes affordance — Commit, Push, Discard, the worktree rail, the at-risk
+    /// badges — is the same answer, so they share one question.
+    var supportsChanges: Bool { core.supports(.changes) }
 
     /// Jump a waiting job to the head of the line. The wrapper re-reads its priority
     /// every poll, so it takes effect within a few seconds without signalling it.
     func heavyQueueMoveToFront(_ pid: Int) {
-        HeavyQueue.shared.moveToFront(pid: pid, in: heavyQueue)
-        refreshHeavyQueue()
+        core.heavySetPriority(pid: pid, prio: heavyQueue.moveToFrontPriority)
     }
 
     /// Move a waiting job one place up or down the line.
     func heavyQueueNudge(_ pid: Int, up: Bool) {
-        HeavyQueue.shared.nudge(pid: pid, up: up, in: heavyQueue)
-        refreshHeavyQueue()
+        for step in heavyQueue.nudgePriorities(pid: pid, up: up) {
+            core.heavySetPriority(pid: step.pid, prio: step.prio)
+        }
+    }
+
+    /// Change how many heavy jobs may run at once.
+    func setHeavySlots(_ slots: Int) {
+        core.heavySetSlots(slots)
     }
 
     /// Cancel a queued or running heavy job (SIGTERM to its wrapper, which takes the
     /// command down with it and frees the slot).
     func cancelHeavyJob(_ pid: Int) {
-        HeavyQueue.shared.cancel(pid: pid)
-        refreshHeavyQueue()
+        core.heavyCancel(pid: pid)
     }
 
     // MARK: - Worktree cleanup (juancode-q6q)
@@ -4858,7 +4922,7 @@ final class AppModel {
             var seenRepos = Set<String>()
             var groups: [WorktreeGroup] = []
             for cwd in cwds {
-                let trees = await Task.detached(priority: .utility) { await listWorktrees(cwd) }.value
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 guard seenRepos.insert(main.path).inserted else { continue }
                 let children = trees.filter { !$0.main }
@@ -5374,19 +5438,29 @@ final class AppModel {
         }
     }
 
+    /// Ask the core about one folder and run the classifier over its answer.
+    ///
+    /// `nonisolated static` so the wide sweep can call it from inside its detached
+    /// task without hopping back onto the main actor per folder — the probe itself is
+    /// the core's work now, and the classification is pure.
+    nonisolated static func classifyAtRisk(_ core: any CoreClient,
+                                           _ root: WorkAtRiskScan.RootRef) async -> WorkAtRisk? {
+        guard let probed = (try? await core.probeAtRisk(path: root.path)) ?? nil else {
+            return nil
+        }
+        return WorkAtRiskScan.classify(root, state: probed.state,
+                                       dirtyFiles: probed.dirtyFiles,
+                                       aheadOfBase: probed.aheadOfBase,
+                                       headOnRemote: probed.headOnRemote)
+    }
+
     /// Probe one root and publish the delta.
     private func runWorkAtRiskProbe(_ root: String) async {
         workAtRiskProbed.insert(root)
         let sessionIds = workAtRiskSessionIdsByRoot[root] ?? []
         let repoRoot = workAtRiskRepoRootCache[root] ?? worktreeRepoRoots[root] ?? ""
         let ref = WorkAtRiskScan.RootRef(path: root, repoRoot: repoRoot, sessionIds: sessionIds)
-        let risk = await Task.detached(priority: .utility) { () -> WorkAtRisk? in
-            guard let probed = await probeWorkAtRisk(root) else { return nil }
-            return WorkAtRiskScan.classify(ref, state: probed.state,
-                                           dirtyFiles: probed.dirtyFiles,
-                                           aheadOfBase: probed.aheadOfBase,
-                                           headOnRemote: probed.headOnRemote)
-        }.value
+        let risk = await Self.classifyAtRisk(core, ref)
         // `publishWorkAtRisk` drops an unchanged result. A probe fires on every
         // settled write in the folder, and an agent mid-turn changes files
         // constantly — but the answer ("3 dirty files, 1 unpushed commit") usually
@@ -5430,6 +5504,7 @@ final class AppModel {
         let cachedRepoRoots = workAtRiskRepoRootCache
         let watched = Set(workAtRiskWatchTokens.keys)
 
+        let core = self.core
         let (results, discoveredRepoRoots) = await Task.detached(priority: .utility) {
             () -> ([String: WorkAtRisk], [String: String]) in
             // One worktree listing per repo: `git worktree list` from any worktree
@@ -5441,7 +5516,7 @@ final class AppModel {
             let folders = Set(sessionRefs.map(\.cwd) + sessionRefs.compactMap(\.worktreePath))
             for cwd in folders.sorted() {
                 if let known = cachedRepoRoots[cwd], worktreesByRepo[known] != nil { continue }
-                let trees = await listWorktrees(cwd)
+                let trees = (try? await core.worktrees(cwd: cwd)) ?? []
                 guard let main = trees.first(where: { $0.main }) else { continue }
                 if worktreesByRepo[main.path] == nil { worktreesByRepo[main.path] = trees }
                 learned[cwd] = main.path
@@ -5460,13 +5535,7 @@ final class AppModel {
                 func enqueue() {
                     guard next < roots.count else { return }
                     let root = roots[next]; next += 1
-                    group.addTask {
-                        guard let probed = await probeWorkAtRisk(root.path) else { return nil }
-                        return WorkAtRiskScan.classify(root, state: probed.state,
-                                                       dirtyFiles: probed.dirtyFiles,
-                                                       aheadOfBase: probed.aheadOfBase,
-                                                       headOnRemote: probed.headOnRemote)
-                    }
+                    group.addTask { await AppModel.classifyAtRisk(core, root) }
                 }
                 for _ in 0..<4 { enqueue() }
                 while let risk = await group.next() {
@@ -5526,9 +5595,12 @@ final class AppModel {
             workAtRiskNotices.removeAll { $0.sessionId == meta.id }
             workAtRiskNotices.append(WorkAtRiskNotice(
                 sessionId: meta.id, title: meta.title, path: risk.path, createdAt: nowMs()))
-            postNotificationWebhook(event: .workAtRisk, title: meta.title,
-                                    sessionId: meta.id, cwd: risk.path)
             raised = true
+            // In-app only for now. The webhook leg of this moved to the daemon with
+            // the other two events, and the daemon cannot raise this one until the
+            // detector behind it is ported (juancode-52e8.14.5 owns WorkAtRisk) — so
+            // a `work_at_risk` POST is the one thing the move costs, and it is tracked
+            // rather than forked back into this process.
         }
         if raised { NSApp.requestUserAttention(.informationalRequest) }
     }
@@ -5542,16 +5614,20 @@ private struct LoadedDiff: Sendable {
     var error: String?
 }
 
-/// Resolve a `ChangesSource` to its diff off the main actor (juancode-49w). The
-/// working-tree path keeps the old "swallow errors, keep prior diff" behaviour;
-/// the base/PR paths surface a clean error string the panel can show.
-private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) async -> LoadedDiff {
+/// Resolve a `ChangesSource` to its diff (juancode-49w). Three of the four come from
+/// the core that owns the session's tree; the PR one still comes from `gh`, which is
+/// the desktop's own until juancode-52e8.14.6 moves it.
+///
+/// The working-tree path keeps the old "swallow errors, keep the prior diff"
+/// behaviour; the base/PR/commit paths surface a clean error string the panel shows.
+private func loadDiffForSource(_ core: any CoreClient, _ cwd: String,
+                               _ source: AppModel.ChangesSource) async -> LoadedDiff {
     switch source {
     case .workingTree:
-        return LoadedDiff(diff: try? await getDiff(cwd), base: nil, error: nil)
+        return LoadedDiff(diff: try? await core.diff(cwd: cwd), base: nil, error: nil)
     case .base:
         do {
-            let bd = try await getBaseDiff(cwd)
+            let bd = try await core.baseDiff(cwd: cwd, base: nil)
             return LoadedDiff(diff: bd.result, base: bd.base, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
@@ -5564,7 +5640,8 @@ private func loadDiffForSource(_ cwd: String, _ source: AppModel.ChangesSource) 
         }
     case .commit(let sha, _):
         do {
-            return LoadedDiff(diff: try await getCommitDiff(cwd, sha: sha), base: nil, error: nil)
+            return LoadedDiff(diff: try await core.commitDiff(cwd: cwd, sha: sha),
+                              base: nil, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
         }

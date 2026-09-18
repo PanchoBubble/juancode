@@ -16,13 +16,17 @@ use juancoded_cordis::services::pty::{PtySpawnApi, PtySpawnService};
 use juancoded_cordis::services::queue::{QueueApi, QueueService};
 use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
+use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::{
-    ReaperConfig, ReaperProbes, SessionReaper, SessionsApi, StallPolicy, StoreService, StuckWatch,
+    ReaperConfig, ReaperProbes, ReviewStoreService, SessionReaper, SessionsApi, StallPolicy,
+    StoreService, StuckWatch,
 };
 
 use crate::conn;
 use crate::global_pause::GlobalPause;
+use crate::heavy_watch::HeavyWatch;
 use crate::identity::{self, DaemonIdentity};
+use crate::notify_hook;
 use crate::queue_delivery;
 use crate::reads;
 use crate::seed::SeedTiming;
@@ -73,6 +77,15 @@ pub struct CoreHandles {
     /// is the set the desktop plays, so both read this object. Always present — a pause
     /// needs only the registry, and the store leg is what makes it survive a restart.
     pub global_pause: Arc<GlobalPause>,
+    /// The `heavy` slot queue. One per daemon and never per connection: the registry
+    /// is machine state shared with every other `heavy` on this Mac, so two readers
+    /// would be two answers to when it changed. Always present — it needs nothing from
+    /// the tree, only a directory.
+    pub heavy: Arc<HeavyWatch>,
+    /// A session's staged diff comments and its last review. `None` when the tree
+    /// mounted no store for them, and the review routes then say so rather than
+    /// answering with an empty list — an empty list is a promise nothing was staged.
+    pub reviews: Option<Arc<dyn ReviewStore>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -92,6 +105,7 @@ impl CoreHandles {
             .zip(loader.services().resolve::<StoreService>().ok())
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
         let queue = loader.services().resolve::<QueueService>().ok();
+        let reviews = loader.services().resolve::<ReviewStoreService>().ok();
         let pty = loader.services().resolve::<PtySpawnService>().ok();
         // The reaper reads the transcripts hub directly for its size probe: the hub
         // already holds every binding it has resolved, so one call per sweep replaces a
@@ -121,7 +135,14 @@ impl CoreHandles {
             .services()
             .resolve::<StoreService>()
             .ok()
-            .map(|store| TrackedPrs::new(Arc::clone(&sessions), store, tracked_prs::POLL_INTERVAL));
+            .map(|store| {
+                TrackedPrs::new(
+                    Arc::clone(&sessions),
+                    store,
+                    tracked_prs::POLL_INTERVAL,
+                    loader.bus().clone(),
+                )
+            });
         // Same store, and `None` only costs the pause its persistence: the frames work
         // over the registry alone, so a tree with no store still answers a phone.
         let global_pause = GlobalPause::new(
@@ -137,7 +158,13 @@ impl CoreHandles {
             stuck,
             pty,
             tracked_prs,
+            reviews,
             global_pause,
+            // Its root and its config come from the environment, so a conformance run
+            // (or a test) points `JUANCODE_HEAVY_ROOT` at a directory of its own rather
+            // than reordering the developer's real queue and rewriting the live config
+            // beside it.
+            heavy: HeavyWatch::from_env(),
             bus: loader.bus().clone(),
             // The retention the registry actually applies, not a second read of the
             // environment: those differ for any tree built with a config of its own,
@@ -203,6 +230,12 @@ pub(crate) fn router(handles: CoreHandles) -> Router {
         // because the daemon is the one process that holds the bytes and the grid they
         // were parsed at; the relay proxies these paths through unchanged.
         .merge(reads::routes())
+        // The git working tree, both session-addressed (which the relay forwards) and
+        // path-addressed (which it does not — see `changes.rs`).
+        .merge(crate::changes::routes())
+        // The GitHub reads and the review surface. Same reason as the reads above: the
+        // relay 501s them, so without these the phone console has no PR view at all.
+        .merge(crate::github::routes())
         .with_state(handles)
 }
 
@@ -249,6 +282,18 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.
     let _reaper = handles.reaper.as_ref().map(|reaper| reaper.spawn());
+    // And the last, which is the only one that reads something no session owns: the
+    // shared `heavy` registry. A no-op tick until a client subscribes.
+    let _heavy = handles.heavy.spawn();
+    // And the outbound one: the user's notification webhook, fired by the DAEMON so
+    // background work reaches them with the desktop app closed (juancode-52e8.14.7).
+    // One per daemon rather than one per connection — see `notify_hook`. Everything
+    // else about notifications stays in the Node sidecar, which reads the same
+    // `activity` broadcast over its own socket.
+    let _notify = notify_hook::spawn(
+        Arc::clone(&handles.sessions),
+        juancoded_core::notify::config_path(),
+    );
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {

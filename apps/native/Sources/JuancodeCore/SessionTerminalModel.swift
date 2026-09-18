@@ -392,6 +392,8 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     ///   re-attached pane had dead wheel-scroll and normal-mode arrows inside TUIs.
     ///   Modes are only *set* (never reset): the contract is a freshly-created,
     ///   default-state surface.
+    /// - The window title the program announced (OSC 2) is re-asserted, so a client
+    ///   that arrives long after the title was set still shows it (juancode-r5cf).
     public func seedBytes(maxScrollbackRows: Int = SessionTerminalModel.defaultSeedScrollbackRows) -> [UInt8] {
         lock.withLock {
             let cols = terminal.cols
@@ -400,6 +402,7 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
             let cursor = terminal.getCursorLocation()
             var enc = TerminalSeedEncoder()
             enc.reset()
+            if let lastTitle { enc.setTitle(lastTitle) }
             enc.setAlternateBuffer(alt)
             enc.clearScreen()
             if !alt {
@@ -443,6 +446,30 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     /// frame with the one the CLI actually drew.
     public func screenRepaintBytes() -> [UInt8] {
         seedBytes(maxScrollbackRows: 0)
+    }
+
+    /// Rebuild a model by REPLAYING a stored byte log at the grid it was produced
+    /// for (juancode-r5cf). The one way back to VT state for a session whose pty —
+    /// and with it, its live model — is gone: a restored-after-restart or reaped
+    /// session has nothing but its retained bytes.
+    ///
+    /// `parsedCols`/`parsedRows` must be the grid the CLI emitted those bytes for.
+    /// Getting it right is the whole point: a byte log carries hard wraps and
+    /// absolute cursor moves that only land in the right cell at that width, which
+    /// is why the store records the grid next to the bytes. Replay at the wrong
+    /// width and the reconstruction is garbled in exactly the way replaying the log
+    /// straight at the client already was.
+    ///
+    /// Resize afterwards to present the result at a different size: the reflow then
+    /// happens over PARSED rows, which is the correction a client re-rendering raw
+    /// bytes can never make.
+    public static func replaying(
+        _ bytes: [UInt8], parsedCols: Int, parsedRows: Int, scrollbackLines: Int = 2000
+    ) -> SessionTerminalModel {
+        let model = SessionTerminalModel(
+            cols: parsedCols, rows: parsedRows, scrollbackLines: scrollbackLines)
+        if !bytes.isEmpty { model.feed(bytes) }
+        return model
     }
 
     /// The number of scrollback history rows the model currently retains above the

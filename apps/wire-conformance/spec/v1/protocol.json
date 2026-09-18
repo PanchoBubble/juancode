@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.15.0",
+  "specRevision": "1.20.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -42,7 +42,11 @@
       "globalPause",
       "sessionSearch",
       "trackPrInSession",
-      "prWebhook"
+      "prWebhook",
+      "namedKeys",
+      "heavyQueue",
+      "changes",
+      "github"
     ],
     "gates": {
       "queue": [
@@ -144,6 +148,31 @@
       ],
       "prWebhook": [
         "prWebhook"
+      ],
+      "namedKeys": [
+        "key"
+      ],
+      "heavyQueue": [
+        "heavyQueueSubscribe",
+        "heavyQueueUnsubscribe",
+        "heavySetPriority",
+        "heavySetSlots",
+        "heavyCancel",
+        "heavyQueue"
+      ],
+      "changes": [
+        "sessionCommit",
+        "sessionPush",
+        "sessionRevert",
+        "sessionCommitMessage",
+        "changesResult"
+      ],
+      "github": [
+        "sessionReview",
+        "diffCommentAdd",
+        "diffCommentDelete",
+        "review",
+        "diffComments"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
@@ -230,6 +259,17 @@
         "seq"
       ],
       "notes": "seq present means the core must reply with a matching inputAck; absent means no ack."
+    },
+    "key": {
+      "required": [
+        "sessionId",
+        "keys"
+      ],
+      "optional": [
+        "seq"
+      ],
+      "capability": "namedKeys",
+      "notes": "Named control keys for a pty - Esc, Ctrl-C, an arrow (juancode-uigs). `keys` are NAMES, never bytes: the vocabulary and its resolution belong to the CORE, so a client cannot invent an escape sequence and the two cores cannot disagree about one. The vocabulary is Enter, Escape, Tab, Backspace, Space, Up, Down, Left, Right and C-a .. C-z; resolution is case-insensitive, `ctrl-c` resolves wherever `C-c` is spelled, and `esc` / `return` are aliases. Arrows are the normal-mode CSI forms (ESC [ A .. ESC [ D), because no client can know which cursor mode the pty is in. The resolved bytes reach the pty RAW - a key is never bracketed-pasted, which is what `input` is for and what made every remote keystroke arrive as literal text, leaving a session stopped on a permission prompt (arrows + Enter) unreachable from a phone. A batch is all or nothing: an unrecognised name is answered with `error` and writes NOTHING, because a half-applied `Up, Up, Enter` answers a prompt on the wrong row. Its own frame rather than a flag on `input`, because a core that ignored such a flag would type the word \"Escape\" into the agent's prompt box while answering exactly as it would for a real keystroke. `seq` present means the core must reply with a matching inputAck, as `input` does."
     },
     "resize": {
       "required": [
@@ -457,6 +497,128 @@
       "optional": [],
       "capability": "globalPause",
       "notes": "Revive exactly the set the last `pauseAll` recorded, then clear it. Read-and-clear in one step, so a pause landing mid-play cannot have its set half-consumed, and so a revival that fails leaves a sleeping row somebody can click rather than a pause that never lifts. A session in the set that came back on its own meanwhile is skipped, and a session that is not in the set is never woken. Answered like `pauseAll`: `pauseState` with the now-empty set, then each revived session's `attached`. Not spelled `wakeAll` beside a `sleepAll`, because the per-session halves are already `sleepSession` and `reactivate` - see the `sleepAndWake` decision."
+    },
+    "heavyQueueSubscribe": {
+      "required": [],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "Watch the global `heavy` slot queue: the whole queue now, and the whole queue again whenever it changes, until `heavyQueueUnsubscribe` or the socket closes. The queue is not the core's own state - it is a shared filesystem registry that every `heavy` wrapper on the machine writes, and the wrappers admit themselves from it - so the answer to a subscribe is the registry read NOW rather than whatever the last change happened to be. Per connection, and lazily on purpose: a core reads the registry only while somebody is subscribed, so a daemon nobody has asked does no filesystem work for this at all. One small snapshot for the whole machine rather than a per-session stream, so there is no id to address and nothing to page."
+    },
+    "heavyQueueUnsubscribe": {
+      "required": [],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "Stop the queue frames for this connection. It really stops them, and it is also what releases the core's registry poll when it is the last watch: a client that only stopped drawing would leave a core stat-ing a directory forever for nobody."
+    },
+    "heavySetPriority": {
+      "required": [
+        "pid",
+        "prio"
+      ],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "Move a job in line by rewriting its registry entry's priority. Higher runs sooner; ties break on how long the job has been queued. Not a move-up/move-down pair, because the line is not the core's to order: the waiting wrapper re-reads its own priority every poll (~3s) and admits itself, so a number in that file is the only thing anybody can change, and no signal is needed for it to take effect. A client that wants \"run this next\" computes the number off the snapshot it is already holding. Answered by the queue rather than by a reply of its own, and by `error` when there is no entry for `pid` - a job that finished between a client's snapshot and its click."
+    },
+    "heavySetSlots": {
+      "required": [
+        "slots"
+      ],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "How many heavy jobs may run at once, written into the `heavy` wrapper's own config. Every other key in that file is preserved - the rules in particular, which belong to the wrapper and are read by other tooling on the machine. Raising it lets jobs already in line through, because the waiting wrappers re-read the capacity on every poll; it is not a knob that only applies to new jobs. Anything below one slot is answered with `error` rather than clamped: a queue that admits nothing forever is not a narrower queue, and a client that asked for zero is better told than silently given one."
+    },
+    "heavyCancel": {
+      "required": [
+        "pid"
+      ],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "SIGTERM a job's wrapper, which forwards it to the running command and frees its slot. Refused with `error` for a pid the core's own snapshot does not hold, and that refusal is the frame's safety property rather than tidiness: without it this is an arbitrary-signal gadget aimed at any process on the machine by anything that can reach the socket. The check is membership in the queue, so the worst a client can do is stop a job in the list it was just sent. Answered by the queue when the job goes."
+    },
+    "sessionCommit": {
+      "required": [
+        "sessionId",
+        "message",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Stage everything in the session's working tree and commit it. A frame rather than an HTTP POST so it is ordered against the session's other traffic on the same socket, and so a refusal can carry git's own first useful line - a hook's rejection, or \"Nothing to commit.\", which is the whole answer and is not recoverable from a status code. A blank or absent `message` is refused rather than defaulted: a commit message this core invented would be in somebody's history forever. `cwd` names another worktree of the same repo and is validated against that repo's own `git worktree list`; anything git has not just listed falls back to the session's own tree."
+    },
+    "sessionPush": {
+      "required": [
+        "sessionId",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Push the branch checked out in the session's tree, setting the upstream to origin on the first push. A detached HEAD is refused by name rather than pushed to whatever the last upstream was."
+    },
+    "sessionRevert": {
+      "required": [
+        "sessionId",
+        "path",
+        "requestId"
+      ],
+      "optional": [
+        "file",
+        "hunkIndex",
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Discard uncommitted work: one file, or one hunk of it when `hunkIndex` is present. The destructive frame, and the one with a guard that is load-bearing rather than tidy - `path` is resolved lexically against the target worktree's root and refused unless it lands strictly inside it, so `../`, an absolute path elsewhere, and the root itself are all rejected before git runs. Without that this frame is an arbitrary write primitive aimed at the whole filesystem by anything that can reach the socket. A missing path is refused and never widened into the tree: the one thing this must not become is `git checkout .`. `file` is accepted as a synonym for `path`, because that is what the Swift core's own POST body called it."
+    },
+    "sessionCommitMessage": {
+      "required": [
+        "sessionId",
+        "requestId"
+      ],
+      "optional": [
+        "cwd"
+      ],
+      "capability": "changes",
+      "notes": "Draft a commit message for what is currently uncommitted, by running the genuine `claude` CLI in headless print mode against the diff the CORE reads - not one the client sends, which would describe a snapshot that may already be stale. Seconds rather than milliseconds, and answered out of band, so it does not hold up the pty bytes on the same socket."
+    },
+    "sessionReview": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "refresh"
+      ],
+      "capability": "github",
+      "notes": "A session's review: the cached one, or a fresh pass when `refresh` is true. A frame rather than only `GET /api/sessions/{id}/review` because a refresh is a whole model turn over the session's working tree - held open as an HTTP request it would block for minutes, and answered as a frame it arrives when the pass is done while the pty bytes on the same socket keep flowing. `refresh` absent or false is a read and costs nothing. The two are one frame rather than two because 'show me the review' and 'review it again' are questions about the same thing, and a client must not be able to confuse them. Answered by `review`, and by `error` for a session this core does not hold or a tree that mounted no review store."
+    },
+    "diffCommentAdd": {
+      "required": [
+        "sessionId",
+        "file",
+        "side",
+        "line",
+        "body"
+      ],
+      "optional": [
+        "endLine",
+        "quote",
+        "commitSha",
+        "commitSubject"
+      ],
+      "capability": "github",
+      "notes": "Stage an inline comment against a session's diff. `side` is required rather than defaulted and anything but `old`/`new` is answered with `error`: a comment on the wrong side of a hunk hangs off a line the author never wrote. A backwards range (endLine < line) is NORMALISED rather than refused, because a selection dragged upwards is a selection. An empty body after trimming is refused. Answered by `diffComments` with the whole list."
+    },
+    "diffCommentDelete": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "commentId"
+      ],
+      "capability": "github",
+      "notes": "Drop one staged comment, or - with no `commentId` - every one of the session's. One frame at two scopes rather than two frames, because a separate clear is a second way to get the same set wrong. A `commentId` this session does not hold is answered with `error` as well as the list: the client was holding a comment this core does not have, which is worth it knowing. Answered by `diffComments` with the whole list."
     }
   },
   "serverMessages": {
@@ -570,7 +732,7 @@
       ],
       "optional": [],
       "capability": "sessionMeta",
-      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta \u2014 replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
+      "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta — replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
     },
     "sessions": {
       "required": [
@@ -687,6 +849,50 @@
       "optional": [],
       "capability": "globalPause",
       "notes": "The set a global pause is holding asleep, sorted. Sent once right after `serverInfo` to a connection that arrives while a pause is IN EFFECT, so a client joining mid-pause starts from the truth rather than assuming nothing is paused - and not sent at all when the set is empty, the same rule `gridChange` follows for an unclaimed grid: a connect-time snapshot is for state that exists, and to a client whose button starts out reading \"pause\" no frame and the empty set say the same thing. and broadcast to every connection whenever the set changes - whichever surface changed it, which is the point: the desktop button and a remote `pauseAll` write the same set. Always complete; replace wholesale. Empty means no pause is in effect. It is NOT the set of `dormant` rows: dormancy has four other producers (the idle reaper, the live-session cap, a graceful quit, a per-session `sleepSession`), so a play driven off `dormant` would wake sessions somebody slept themselves weeks ago."
+    },
+    "heavyQueue": {
+      "required": [
+        "slots",
+        "workerCap",
+        "running",
+        "waiting"
+      ],
+      "optional": [],
+      "capability": "heavyQueue",
+      "notes": "The whole `heavy` slot queue: its capacity and the two ordered lists - running first by slot, waiting in the order the wrappers will admit themselves (priority first, then how long each has been queued). Sent once in answer to `heavyQueueSubscribe`, and after that only when the registry actually moved: the core polls on a timer, so \"nothing changed\" is the common case and an identical snapshot carries no information. Always complete; replace wholesale, never a patch - the registry has other writers, so a delta a client applied to its own copy would drift from the line the wrappers are reading. Empty lists mean nothing is queued, which is a queue and not a missing one. `slots` is how many may run at once and `workerCap` how many test-runner workers each admitted job may fan out to; both are read out of the wrapper's own config rather than invented, so a client never disagrees with the shell script about the capacity. Each job is { pid, child?, prio, since, started?, slot, cmd, cwd }: `pid` is the wrapper's, which is the registry filename and the id a cancel names; `child` and `started` are absent while a job waits; `slot` is 0 for a waiting job and its slot index for a running one."
+    },
+    "changesResult": {
+      "required": [
+        "requestId",
+        "sessionId",
+        "op",
+        "ok"
+      ],
+      "optional": [
+        "result",
+        "error"
+      ],
+      "capability": "changes",
+      "notes": "The answer to one of the four `session*` git writes. One frame for all four because a client does the same thing with each: match the `requestId`, then draw the result or show the reason. `op` is `commit`, `push`, `revert` or `commitMessage`, so a late answer cannot be read as the wrong one. `error` is present exactly when the write did NOT happen, and `result` exactly when it did - a refusal that arrived looking like a success is the failure mode this shape exists to make impossible, and it is pointed at a destructive action."
+    },
+    "review": {
+      "required": [
+        "sessionId"
+      ],
+      "optional": [
+        "result"
+      ],
+      "capability": "github",
+      "notes": "A session's review - the cached one, or the pass that has just finished. `result` is ABSENT for a session nothing has reviewed, which is a different thing from a pass that found nothing and draws a different panel. Sent on the connection that asked, out of band for a refresh because the pass takes as long as a model turn. The result is { status: ok|empty|error, findings[], summary?, createdAt, error? }; each finding is { file, side, line?, severity, title, note } with severity one of critical/high/medium/low/info. A failed pass is cached and reported like any other: 'the last pass errored, and this is why' is what the panel shows, and losing it would make a failure look like a review nobody ran."
+    },
+    "diffComments": {
+      "required": [
+        "sessionId",
+        "comments"
+      ],
+      "optional": [],
+      "capability": "github",
+      "notes": "A session's staged diff comments, oldest first, ALWAYS complete and never a delta - two surfaces stage comments against one session, so a client applying a patch to its own copy would drift from the set the composer reads. Each is { id, sessionId, file, side, line, endLine, body, createdAt, quote?, commitSha?, commitSubject? }. Empty means nothing is staged, which is a set and not a missing one."
     }
   },
   "enums": {
@@ -745,8 +951,8 @@
     "SESSION_LIST_IS_A_SNAPSHOT: a `sessions` frame is the complete list, replaced wholesale, and a client reconciles deletions against it - a row it holds that the frame does not list is a row the core does not have. That is the half a delta stream cannot supply: `created`, `sessionMeta` and `exit` only ever add or amend, so a client fed by those alone converges on a superset of the truth and never learns what went away. It is not a subscription either, and a core sends exactly one per `listSessions`: what changes afterwards changes through the deltas, and a second unsolicited snapshot would race whatever the client asks for next."
   ],
   "decisions": {
-    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire \u2014 so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
-    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side \u2014 the core knows both the pid and the cwd \u2014 and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
+    "process-group reap": "No frame, and the `orphan-reap` scenario asserts it off the wire instead. Whether a kill reached the helpers the agent spawned is a fact about a process tree, and `childPid` below already settles that a pid does not cross the wire — so there is nothing a client could be told here that it could act on. The `exit` frame is the closest thing, and it deliberately reports the CHILD's status: a core that killed only the child would still send an identical exit, which is exactly the bug the scenario exists to catch, so widening `exit` would hide it rather than express it. The assertion instead reads the pid the fake agent records, the same side channel `TRANSCRIPT` uses in the other direction. Both cores answer it today with `killpg` escalating to SIGKILL (`PtyProcess.terminate`, `pty.rs::signal_group`); the scenario is what stops the Rust port of JuancodeServices from quietly dropping it.",
+    "childPid": "Deliberately never on the wire. A pid from another process is not addressable, and from another machine it is meaningless. The one caller (the desktop's agent-worktree detection, which matches `git worktree list` output against the pty child's pid) degrades to no detection when a core answers nil, and falls back to the session cwd. If that detection has to work against a remote core, the operation moves core-side — the core knows both the pid and the cwd — and the answer surfaces as a SessionMeta field, so still no pid crosses the wire.",
     "submit / insert": "Core-side, not composed by the client. They are not `input` plus a delay: the core delivers a bracketed paste and verifies it landed against the session's headless VT model, retrying on the checks in between, and reports a PasteOutcome. A client reimplementing that needs the model, the retry timing and the failure taxonomy. The remote path is a client frame asking the core to run it, plus an outcome frame; neither exists yet.",
     "autoSubmit": "Core-side, same reasoning as submit, more strongly: it retries across the CLI's boot window until the input box exists. Today it is reachable over the wire only at create time, via create.initialInput, which cannot serve a session that already exists.",
     "kickQueue": "Core-side. The pending-message queue lives in the core and flushes on the idle edge; there is nothing for a client to compose. It needs a client frame of its own (the `queue` capability's fourth verb), which does not exist yet.",

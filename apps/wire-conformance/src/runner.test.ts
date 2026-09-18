@@ -5,6 +5,8 @@ import {
   announcedSessionIds,
   bumpAttempt,
   frameSessionId,
+  httpBaseOf,
+  interpolate,
   makeSessionScope,
   repeatCount,
   seedVars,
@@ -13,6 +15,8 @@ import {
 const workspace = {
   cwd: "/w/plain",
   gitCwd: "/w/repo",
+  gitRemoteCwd: "/w/remote-repo",
+  ghCwd: "/w/gh-repo",
   missingCwd: "/w/nope",
   file: "/w/note.txt",
 };
@@ -128,5 +132,30 @@ describe("how many times each scenario is measured", () => {
     for (const raw of ["0", "-1", "2.5", "three"]) {
       expect(() => repeatCount({ JUANCODE_CONFORMANCE_REPEAT: raw })).toThrow(/positive integer/);
     }
+  });
+});
+
+describe("addressing a core's HTTP reads", () => {
+  it("derives the base from the socket URL, because they are one process", () => {
+    expect(httpBaseOf({ wsUrl: "ws://127.0.0.1:4300/ws" } as never)).toBe("http://127.0.0.1:4300");
+    expect(httpBaseOf({ wsUrl: "wss://host/ws" } as never)).toBe("https://host");
+  });
+
+  it("prefers a base the boot handed it over one it could guess", () => {
+    const ctx = { wsUrl: "ws://127.0.0.1:4300/ws", httpBase: "http://127.0.0.1:9/" } as never;
+    expect(httpBaseOf(ctx)).toBe("http://127.0.0.1:9");
+  });
+
+  it("substitutes a bound id INSIDE a path, which a frame value never needs", () => {
+    expect(interpolate("/api/sessions/$session/screen?json=1", { session: "s-1" })).toBe(
+      "/api/sessions/s-1/screen?json=1",
+    );
+    // A session id is one path segment, so it is encoded as one.
+    expect(interpolate("/api/sessions/$session/screen", { session: "a/b c" })).toBe(
+      "/api/sessions/a%2Fb%20c/screen",
+    );
+    // Nothing bound is left alone rather than blanked: the failure then names the
+    // path the scenario actually asked for.
+    expect(interpolate("/api/sessions/$nope/screen", {})).toBe("/api/sessions/$nope/screen");
   });
 });

@@ -25,6 +25,33 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(rows, 40)
     }
 
+    // ── Named control keys (juancode-uigs) ───────────────────────────────────────
+
+    func testDecodesKeyBatchWithSeq() throws {
+        // Names on the wire, bytes nowhere near it: the resolution is the server's, so
+        // a client cannot spell an escape sequence of its own.
+        let json = #"{"type":"key","sessionId":"s-1","keys":["Up","Enter"],"seq":4}"#
+        guard case let .key(sessionId, keys, seq) = try decode(json) else {
+            return XCTFail("expected .key")
+        }
+        XCTAssertEqual(sessionId, "s-1")
+        XCTAssertEqual(keys, ["Up", "Enter"])
+        XCTAssertEqual(seq, 4)
+    }
+
+    func testDecodesKeyWithoutSeq() throws {
+        let json = #"{"type":"key","sessionId":"s-1","keys":["C-c"]}"#
+        guard case let .key(_, keys, seq) = try decode(json) else {
+            return XCTFail("expected .key")
+        }
+        XCTAssertEqual(keys, ["C-c"])
+        XCTAssertNil(seq)
+    }
+
+    func testAKeyFrameWithoutKeysIsADecodeErrorNotAnEmptyBatch() throws {
+        XCTAssertThrowsError(try decode(#"{"type":"key","sessionId":"s-1"}"#))
+    }
+
     // ── Dispatch-flavored create (juancode-2kz.1) ────────────────────────────────
 
     func testDecodesCreateWithDispatchId() throws {

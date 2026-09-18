@@ -52,8 +52,10 @@ public struct SessionEnvironment: Sendable {
     /// `JuancodeServices` (`deriveSessionTitle`) so the core stays dependency-free;
     /// defaults to nil (no title polling). `(provider, cliSessionId) -> title?`.
     public var deriveTitle: @Sendable (_ provider: ProviderId, _ cliSessionId: String) async -> String?
-    /// Read the CLI transcript's token usage. Injected from `JuancodeServices`
-    /// (`deriveSessionUsage`); defaults to nil. `(provider, cliSessionId) -> usage?`.
+    /// Read the CLI transcript's token usage. Nothing injects this any more — the
+    /// Swift reader was deleted with the rest of the fork and usage is the Rust
+    /// core's (`juancoded-core/src/usage.rs`), so on this core it stays at its
+    /// default of nil. `(provider, cliSessionId) -> usage?`.
     public var deriveUsage: @Sendable (_ provider: ProviderId, _ cliSessionId: String) async -> SessionUsage?
     /// Start tailing the CLI's stream-json transcript for structured activity pulses
     /// (juancode-1c9), the preferred wording-independent busy/idle signal. Injected
@@ -173,6 +175,10 @@ public final class Session: @unchecked Sendable {
     private var desiredRows = 0
     /// Backing store for `bootGridSettled`. Guarded by `lock`.
     private var _bootGridSettled = false
+    /// The grid last written to the store as the scrollback's parse width
+    /// (juancode-r5cf), so a resize that changes nothing costs no SQLite write.
+    /// Guarded by `lock`.
+    private var persistedGrid: (cols: Int, rows: Int)?
 
     /// Previous activity, tracked to fire the queue flush on the edge into idle
     /// (oracle-cj3 / juancode-r82). Guarded by `lock`.
@@ -537,6 +543,10 @@ public final class Session: @unchecked Sendable {
             } else {
                 env.store.update(meta, scrollback: scroll.replay)
             }
+            // The spawn grid is the width everything the CLI prints from here is
+            // parsed at, so record it now rather than waiting for a resize that a
+            // headless session may never get (juancode-r5cf).
+            recordScrollbackGrid(cols: cols, rows: rows)
         }
 
         // The transcript-driven machinery below (codex id discovery, title/usage
@@ -1308,7 +1318,27 @@ public final class Session: @unchecked Sendable {
     public func resize(cols: Int, rows: Int) -> Bool {
         let applied = isRunning ? (proc?.resize(cols: cols, rows: rows) ?? false) : false
         terminalModel.resize(cols: cols, rows: rows)
+        recordScrollbackGrid(cols: cols, rows: rows)
         return applied
+    }
+
+    /// Keep the store's record of the grid the retained scrollback was parsed at in
+    /// step with the model (juancode-r5cf). On the grid's own edge, never per flush:
+    /// the bytes move constantly and the grid almost never does, and a client that
+    /// attaches after the pty is gone can only replay that log at the width it was
+    /// produced for.
+    private func recordScrollbackGrid(cols: Int, rows: Int) {
+        guard persistEnabled, cols > 0, rows > 0 else { return }
+        let changed = lock.withLock { () -> Bool in
+            guard persistedGrid?.cols != cols || persistedGrid?.rows != rows else { return false }
+            persistedGrid = (cols, rows)
+            return true
+        }
+        guard changed else { return }
+        let id = meta.id
+        Self.persistQueue.async { [weak self] in
+            self?.env.store.setScrollbackGrid(id, cols: cols, rows: rows)
+        }
     }
 
     /// Arbitrated grid resize for a specific client (juancode-1th.1). Only the
@@ -1466,7 +1496,7 @@ public final class Session: @unchecked Sendable {
         // row from the reader thread. A deferred write would race that, and since the
         // meta path rewrites the whole row, the loser resurrects `status = .running`
         // with a nil exit code over a session whose pty is already gone.
-        if persistEnabled { env.store.updateMeta(meta, reindexTitleFts: false) }
+        if persistEnabled { env.store.updateMeta(meta) }
         emitMetaChange(meta)
     }
 
@@ -1668,7 +1698,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: true) }
+        if changed { persistMeta() }
     }
 
     /// Archive / unarchive the live session and persist the flag.
@@ -1678,18 +1708,12 @@ public final class Session: @unchecked Sendable {
             _meta.archived = archived
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     /// Adopt an OSC 0/2 window title the CLI set (via `terminalModel.onTitleChange`)
     /// as the session title, unless the user pinned a manual name. Once one lands,
     /// the transcript poll stops writing the title (see `titleFromOsc`).
-    ///
-    /// Deliberately does NOT reindex the FTS title: a CLI repaints its window title
-    /// many times per turn, and `reindexTitleFts` re-reads the stored scrollback and
-    /// re-tokenizes the whole ring — per repaint. Search picks the new title up on the
-    /// next full flush (the busy->idle edge / exit), exactly as scrollback already
-    /// does. A manual rename still reindexes immediately (juancode-c438).
     private func adoptOscTitle(_ raw: String) {
         let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
@@ -1700,7 +1724,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     /// Read the CLI's generated title (or first prompt) and persist if changed.
@@ -1716,7 +1740,7 @@ public final class Session: @unchecked Sendable {
             _meta.title = title
             return true
         }
-        if changed { persistMeta(titleChanged: true) }
+        if changed { persistMeta() }
     }
 
     /// Read the CLI transcript's token usage and persist if it changed.
@@ -1732,7 +1756,7 @@ public final class Session: @unchecked Sendable {
             _meta.usage = usage
             return true
         }
-        if changed { persistMeta(titleChanged: false) }
+        if changed { persistMeta() }
     }
 
     // MARK: - post-spawn cli id discovery + persistence
@@ -1817,10 +1841,9 @@ public final class Session: @unchecked Sendable {
     }
 
     /// Persist a metadata edit (title/usage/archive/dormant) via the meta-only write
-    /// path so it doesn't rewrite the scrollback column or re-tokenize its FTS row
-    /// (juancode-5qw.1). `titleChanged` reindexes the FTS title (reusing the stored
-    /// scrollback). Always notifies — a meta edit moves the sidebar.
-    private func persistMeta(titleChanged: Bool) {
+    /// path so it doesn't rewrite the scrollback column (juancode-5qw.1). Always
+    /// notifies — a meta edit moves the sidebar.
+    private func persistMeta() {
         let meta = lock.withLock { () -> SessionMeta in
             _meta.updatedAt = nowMs()
             return _meta
@@ -1838,15 +1861,14 @@ public final class Session: @unchecked Sendable {
                 // the whole row, so an edit that queued before the session exited and
                 // ran after it would put `status = .running` back on a dead session.
                 // Latest-wins is the only safe rule for a full-row write.
-                self.env.store.updateMeta(self.lock.withLock { self._meta },
-                                          reindexTitleFts: titleChanged)
+                self.env.store.updateMeta(self.lock.withLock { self._meta })
             }
         }
         emitMetaChange(meta)
     }
 
-    /// Full persist: metadata + scrollback + FTS reindex — the heavy write, reserved
-    /// for the busy->idle edge and exit, where search needs to catch up. Pass
+    /// Full persist: metadata + scrollback — the heavy write, reserved for the
+    /// busy->idle edge and exit, where search needs to catch up. Pass
     /// `notify: true` to rebuild the sidebar.
     ///
     /// Called on `persistQueue` for the turn boundary (via `enqueuePersist`) and

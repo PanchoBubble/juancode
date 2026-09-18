@@ -56,6 +56,19 @@ public enum ClientMessage: Sendable {
     /// matching `inputAck` after writing, so the client can buffer unacked input
     /// and resend it on reconnect. Nil for older clients / fire-and-forget writes.
     case input(sessionId: String, data: String, seq: Int?)
+    /// Named control keys for a pty — Esc, Ctrl-C, an arrow (juancode-uigs). The
+    /// names are resolved to bytes server-side by `NamedKey`, and the bytes go to
+    /// the pty RAW: never through bracketed paste, which is the wrapper that makes
+    /// `input` literal and is exactly why a remote client could not send a keystroke
+    /// before this. `seq` acks like `input`'s does.
+    ///
+    /// Its own case rather than a flag on `input`, because the two carry different
+    /// things — a name to resolve vs. bytes to write — and a core that ignored such a
+    /// flag would TYPE "Escape" into the agent's prompt box while answering exactly as
+    /// it would have for a real keystroke. An unknown `type` is ignored whole, which
+    /// is a silence the client can see (juancode-jlhz), and the capability
+    /// `namedKeys` is what a client feature-detects on.
+    case key(sessionId: String, keys: [String], seq: Int?)
     /// Resize a pty's grid. `seq` is an optional per-connection monotonic id
     /// (juancode-uz6): when present the server replies with a matching `resizeAck`
     /// reporting whether the grid reached a live pty, so the client can re-assert a
@@ -148,6 +161,8 @@ extension ClientMessage: Decodable {
         case pr, trackedId, notificationId, repo, number
         // Per-session message queue (oracle-cj3 / juancode-r82).
         case text, messageId
+        // Named control keys (juancode-uigs).
+        case keys
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +211,10 @@ extension ClientMessage: Decodable {
             self = .input(sessionId: try c.decode(String.self, forKey: .sessionId),
                           data: try c.decode(String.self, forKey: .data),
                           seq: try c.decodeIfPresent(Int.self, forKey: .seq))
+        case "key":
+            self = .key(sessionId: try c.decode(String.self, forKey: .sessionId),
+                        keys: try c.decode([String].self, forKey: .keys),
+                        seq: try c.decodeIfPresent(Int.self, forKey: .seq))
         case "resize":
             self = .resize(sessionId: try c.decode(String.self, forKey: .sessionId),
                            cols: try c.decode(Int.self, forKey: .cols),
@@ -270,19 +289,25 @@ public enum WireProtocol {
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
                                       "isolateWorktree", "globalPause", "trackPrInSession",
-                                      "prWebhook"]
+                                      "prWebhook", "namedKeys"]
 
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.
     ///
-    /// `globalPause` is the only one so far. The desktop's pause button does not go
+    /// `globalPause` is the first. The desktop's pause button does not go
     /// through a core frame on either core — it goes through `CoreClient.globalPause`,
     /// the book both surfaces share — so a `CoreCapability` case for it would have
     /// the settings panel report "global pause unavailable" on the Rust core, which
     /// pauses perfectly well. The string exists for the phone, which genuinely cannot
     /// send `pauseAll` to an endpoint that does not serve it. Same reasoning as the
     /// `sessionSleep` / `reaper` string constants on `RustCoreClient`, mirrored.
-    public static let remoteOnlyCapabilities: Set<String> = ["globalPause"]
+    ///
+    /// `namedKeys` is the second, and for the sharper version of the same reason: the
+    /// desktop has a keyboard. It writes an Escape into the pty as the byte it is, so
+    /// it sends `input` and never `key`, and nothing in `JuancodeClient` spells that
+    /// frame at all. The capability is for a phone, whose alternative is typing the
+    /// word "Escape" into the agent's prompt box.
+    public static let remoteOnlyCapabilities: Set<String> = ["globalPause", "namedKeys"]
 }
 
 public enum ServerMessage: Sendable {
@@ -294,6 +319,15 @@ public enum ServerMessage: Sendable {
     /// see who is driving but not whether that is itself.
     case serverInfo(protocolVersion: Int, capabilities: [String], clientId: String)
     case created(session: SessionMeta)
+    /// The client is now on this session, with the redraw that lands its terminal on
+    /// the session's current screen.
+    ///
+    /// `scrollback` is a string of terminal bytes — the shape it has always had — but
+    /// since juancode-r5cf it is RECONSTRUCTED from parsed VT state rather than
+    /// replayed off the retained byte log, so it is well-formed at any client width
+    /// and carries styles, cursor, screen mode, input modes and window title. See
+    /// `AttachReplay`. Empty for a session created by this same message pair: there
+    /// is nothing to replay yet.
     case attached(sessionId: String, scrollback: String, session: SessionMeta)
     case output(sessionId: String, data: String)
     /// A frame of the live rendered-screen stream (juancode-a2h.3), projected from

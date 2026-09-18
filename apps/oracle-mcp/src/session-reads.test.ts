@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   digest,
+  fetchDiff,
+  fetchGitState,
   fetchMessages,
   fetchScreen,
   fetchScreenText,
   fetchScrollback,
   fetchTranscript,
+  fetchWorktreeFile,
+  fetchWorktrees,
   NoSuchSession,
   SessionNotRunning,
   UnservedRead,
@@ -103,6 +107,60 @@ describe("the native server's per-session reads", () => {
       "http://native.test/api/sessions/s1/screen",
       "http://native.test/api/sessions/s1/screen?scrollback=200",
     ]);
+  });
+
+  // The git reads (juancode-52e8.14.5). The distinction that matters here is the same
+  // one the transcript reads make and for a sharper reason: a 501 rendered as an empty
+  // diff tells somebody the agent changed nothing, which is the one wrong thing a
+  // Changes view can say.
+  it("reads the working tree, and tells a core that cannot from a tree with nothing in it", async () => {
+    const { urls } = stubFetch(200, {
+      git: true,
+      root: "/repo",
+      files: [
+        {
+          path: "a.txt",
+          status: "modified",
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          diff: "@@ -1 +1,2 @@\n keep\n+added\n",
+          truncated: false,
+        },
+      ],
+    });
+    const diff = await fetchDiff("s1");
+    expect(diff.git).toBe(true);
+    expect(diff.files[0]?.path).toBe("a.txt");
+    expect(urls).toEqual(["http://native.test/api/sessions/s1/diff"]);
+
+    stubFetch(200, { git: true, files: [] });
+    await expect(fetchDiff("s1")).resolves.toEqual({ git: true, files: [] });
+
+    stubFetch(501, { error: "the swift core does not serve /diff" });
+    await expect(fetchDiff("s1")).rejects.toBeInstanceOf(UnservedRead);
+  });
+
+  it("reads branch state, the worktree list and one file out of the tree", async () => {
+    const { urls } = stubFetch(200, {
+      git: true,
+      branch: "main",
+      detached: false,
+      upstream: null,
+      ahead: 1,
+      behind: 0,
+      dirty: true,
+      remote: false,
+    });
+    expect((await fetchGitState("s1")).branch).toBe("main");
+
+    stubFetch(200, [{ path: "/repo", branch: "main", head: "abc", main: true }]);
+    expect((await fetchWorktrees("s1"))[0]?.main).toBe(true);
+
+    const file = stubFetch(200, { path: "a.txt", content: "one\n" });
+    expect((await fetchWorktreeFile("s1", "a.txt")).content).toBe("one\n");
+    expect(file.urls).toEqual(["http://native.test/api/sessions/s1/file?path=a.txt"]);
+    expect(urls).toEqual(["http://native.test/api/sessions/s1/git"]);
   });
 
   it("asks for the stream's row shape with json=1", async () => {

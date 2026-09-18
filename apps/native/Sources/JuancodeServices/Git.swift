@@ -1,17 +1,21 @@
 import Foundation
 import JuancodeCore
 
-/// Git working-tree services for a session's cwd — diff, state, worktrees, and the
-/// commit/push write paths. Ported faithfully from `apps/server/src/git.ts`: every
-/// shell-out goes through `ProcessRunner` (which inherits the environment verbatim,
-/// the prime directive) using a bare `"git"` command resolved via PATH, exactly as
-/// the Node `execFile("git", …)` did.
+/// The Swift core's own git plumbing: cutting a session's isolation worktree,
+/// adopting one, removing it, and the change rollup that rides the settle edge.
+///
+/// What is left of what used to be all of `Git.swift`. The working-tree SURFACE —
+/// diff, branch state, commit, push, discard, the file and commit listings — moved
+/// into the daemon in juancode-52e8.14.5 (`juancoded_core::git`), and the app reaches
+/// it through `CoreClient` now. What stays here is the part that is not a surface at
+/// all: it is how THIS core keeps the promises it advertises (`isolateWorktree`, and
+/// the `changes` rollup on `activity`), and the parent epic's rule is that a Swift
+/// implementation of a capability the Swift core still claims is not a fork to delete.
+/// It goes when the Swift core goes — juancode-nqpm — and not before.
+///
+/// Every shell-out goes through `ProcessRunner`, which inherits the environment
+/// verbatim: the prime directive.
 
-/// Empty-tree object — used as the diff base when a repo has no commits yet.
-private let EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
-private let MAX_FILES = 300
-private let MAX_DIFF_BYTES = 400_000 // per-file cap; larger diffs are summarized, not sent
 private let MAX_BUFFER = 64 * 1024 * 1024
 
 /// A freshly created session worktree — its checkout path and the branch on it.
@@ -79,109 +83,6 @@ private func gitErr(_ err: Error, _ fallback: String) -> String {
     return firstUseful ?? fallback
 }
 
-private func countChanges(_ diff: String) -> (additions: Int, deletions: Int, binary: Bool) {
-    var additions = 0
-    var deletions = 0
-    for line in diff.components(separatedBy: "\n") {
-        // Binary markers appear as unprefixed header lines — guard against matching
-        // the same text occurring inside an added/removed (+/-) content line.
-        if line.hasPrefix("Binary files ") || line.hasPrefix("GIT binary patch") {
-            return (0, 0, true)
-        }
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { additions += 1 }
-        else if line.hasPrefix("-") && !line.hasPrefix("---") { deletions += 1 }
-    }
-    return (additions, deletions, false)
-}
-
-private let STATUS_MAP: [String: FileStatus] = ["M": .modified, "A": .added, "D": .deleted]
-
-/// Compute the working-tree diff vs HEAD for a session's cwd: every tracked
-/// change (staged + unstaged) plus untracked files, each as its own unified
-/// diff. Returns `{ git: false }` for a non-git cwd rather than throwing.
-/// Note: like the TS, only the *work-tree confirmation* is guarded — it returns
-/// `{ git: false }` for a non-git cwd. After that point an unexpected git failure
-/// (a genuine error in a known repo) propagates, so this is `async throws`.
-public func getDiff(_ cwd: String) async throws -> DiffResult {
-    // Confirm this is a git work tree.
-    let root: String
-    do {
-        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if inside != "true" { return DiffResult(git: false, files: []) }
-        root = try await git(cwd, ["rev-parse", "--show-toplevel"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        return DiffResult(git: false, files: [])
-    }
-
-    // Diff base: HEAD if it exists, else the empty tree (fresh repo, no commits).
-    var base = "HEAD"
-    do {
-        _ = try await git(cwd, ["rev-parse", "--verify", "HEAD"])
-    } catch {
-        base = EMPTY_TREE
-    }
-
-    return try await collectDiff(cwd, root: root, base: base)
-}
-
-/// Result of diffing the current branch against a base branch (juancode-49w):
-/// the base ref actually used (e.g. `origin/main`) plus the diff against the
-/// merge-base. Carries `base` so the UI can label what it's comparing against.
-public struct BaseDiffResult: Sendable, Equatable {
-    /// The base ref the diff was computed against (empty when not a git repo).
-    public let base: String
-    public let result: DiffResult
-    public init(base: String, result: DiffResult) {
-        self.base = base; self.result = result
-    }
-}
-
-/// Diff the current branch against its base branch — everything this branch
-/// introduced (committed *and* uncommitted) relative to where it diverged from
-/// `base`. When `base` is nil the repo's default branch is inferred (origin/HEAD,
-/// then main/master/develop). Returns a `{ git: false }` shape for a non-git cwd
-/// (mirroring `getDiff`); throws `GitError` when no base branch or no shared
-/// history can be found.
-public func getBaseDiff(_ cwd: String, base requestedBase: String? = nil) async throws -> BaseDiffResult {
-    // Confirm this is a git work tree.
-    let root: String
-    do {
-        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if inside != "true" { return BaseDiffResult(base: "", result: DiffResult(git: false, files: [])) }
-        root = try await git(cwd, ["rev-parse", "--show-toplevel"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        return BaseDiffResult(base: "", result: DiffResult(git: false, files: []))
-    }
-
-    // Resolve the base ref: the caller's choice, else the inferred default branch.
-    let base: String
-    if let requestedBase, !requestedBase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        base = requestedBase.trimmingCharacters(in: .whitespacesAndNewlines)
-    } else if let inferred = await defaultBaseBranch(cwd) {
-        base = inferred
-    } else {
-        throw GitError("No base branch found to diff against.")
-    }
-
-    // The merge-base is where this branch diverged from `base`; diffing against it
-    // shows just this branch's changes (not commits that landed on base since).
-    let mergeBase: String
-    do {
-        mergeBase = try await git(cwd, ["merge-base", base, "HEAD"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        throw GitError("No base branch found to diff against.")
-    }
-    if mergeBase.isEmpty { throw GitError("No common history with \(base).") }
-
-    let result = try await collectDiff(cwd, root: root, base: mergeBase)
-    return BaseDiffResult(base: base, result: result)
-}
-
 /// Infer the repo's default/base branch: the `origin/HEAD` symbolic ref first
 /// (e.g. `origin/main`), then the first of main/master/develop that exists as a
 /// remote or local ref. Returns nil when none can be found. Never throws.
@@ -200,132 +101,6 @@ public func defaultBaseBranch(_ cwd: String) async -> String? {
         }
     }
     return nil
-}
-
-/// One commit in the ChangesPanel's commit picker (juancode-5u2), newest first.
-public struct RecentCommit: Sendable, Equatable, Identifiable {
-    public var id: String { sha }
-    public let sha: String         // full %H
-    public let shortSha: String    // %h
-    public let subject: String     // %s
-    public let relativeAge: String // %cr, e.g. "3 hours ago"
-    /// Whether the commit is in `<base>..HEAD`, i.e. not on the base branch yet.
-    public let aheadOfBase: Bool
-
-    public init(sha: String, shortSha: String, subject: String, relativeAge: String,
-                aheadOfBase: Bool) {
-        self.sha = sha; self.shortSha = shortSha; self.subject = subject
-        self.relativeAge = relativeAge; self.aheadOfBase = aheadOfBase
-    }
-}
-
-/// Last `limit` commits of HEAD, newest first, with the ones not yet on the base
-/// branch marked. Never throws — returns [] for a non-git cwd, an empty repo
-/// (no HEAD), or any git failure, so the picker just shows an empty state.
-public func listRecentCommits(_ cwd: String, limit: Int = 50) async -> [RecentCommit] {
-    guard let inside = try? await git(cwd, ["rev-parse", "--is-inside-work-tree"]),
-          inside.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
-    else { return [] }
-
-    // Unit-separator field delimiter: subjects can contain tabs/spaces.
-    guard let log = try? await git(
-        cwd, ["log", "-n", String(limit), "--format=%H%x1f%h%x1f%s%x1f%cr"])
-    else { return [] }
-
-    // Commits ahead of the inferred base branch. The --max-count cap is safe: any
-    // base..HEAD commit within the first `limit` log entries is also within the
-    // first `limit` rev-list entries. Failures just leave every mark false.
-    var ahead: Set<String> = []
-    if let base = await defaultBaseBranch(cwd),
-       let revs = try? await git(cwd, ["rev-list", "--max-count=\(limit)", "\(base)..HEAD"]) {
-        ahead = Set(revs.split(separator: "\n").map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        })
-    }
-
-    return log.split(separator: "\n").compactMap { line in
-        let fields = line.components(separatedBy: "\u{1f}")
-        guard fields.count >= 4 else { return nil }
-        return RecentCommit(sha: fields[0], shortSha: fields[1], subject: fields[2],
-                            relativeAge: fields[3], aheadOfBase: ahead.contains(fields[0]))
-    }
-}
-
-/// The diff a single commit introduced, in the same per-file shape `getDiff`
-/// produces (juancode-5u2). Root commits diff against the empty tree; merge
-/// commits diff against their FIRST parent (a plain two-point `git diff` — `git
-/// show` emits combined `@@@` hunks for merges that `parseMultiFileDiff` can't
-/// parse). Returns `{ git: false }` for a non-git cwd; throws `GitError` when the
-/// sha doesn't resolve (e.g. rewritten or rebased away).
-public func getCommitDiff(_ cwd: String, sha: String) async throws -> DiffResult {
-    guard let inside = try? await git(cwd, ["rev-parse", "--is-inside-work-tree"]),
-          inside.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
-    else { return DiffResult(git: false, files: []) }
-
-    let parents: String
-    do {
-        parents = try await git(cwd, ["rev-list", "--parents", "-n", "1", sha])
-    } catch {
-        throw GitError("Commit \(sha.prefix(7)) not found — it may have been rewritten or rebased away.")
-    }
-    let tokens = parents.trimmingCharacters(in: .whitespacesAndNewlines)
-        .split(separator: " ").map(String.init)
-    guard !tokens.isEmpty else {
-        throw GitError("Commit \(sha.prefix(7)) not found — it may have been rewritten or rebased away.")
-    }
-    let parent = tokens.count > 1 ? tokens[1] : EMPTY_TREE
-
-    let patch = try await git(cwd, ["diff", "-M", parent, tokens[0]])
-    var files = parseMultiFileDiff(patch)
-    let truncatedFiles = files.count > MAX_FILES
-    if truncatedFiles { files = Array(files.prefix(MAX_FILES)) }
-    files.sort { $0.path.localizedCompare($1.path) == .orderedAscending }
-    return DiffResult(git: true, root: nil, files: files, truncatedFiles: truncatedFiles)
-}
-
-/// Build the per-file diff set of a known git work tree against `base`: every
-/// tracked change (name-status, renames via -M) plus untracked files, each as its
-/// own unified diff. Shared by the working-tree diff (`getDiff`, base = HEAD) and
-/// the base-branch diff (`getBaseDiff`, base = merge-base).
-private func collectDiff(_ cwd: String, root: String, base: String) async throws -> DiffResult {
-    var files: [DiffFile] = []
-
-    // Tracked changes vs base, via name-status (handles renames with -M).
-    let nameStatus = try await git(cwd, ["diff", "--name-status", "-M", base])
-    for raw in nameStatus.components(separatedBy: "\n") {
-        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-        if files.count >= MAX_FILES { break }
-        let parts = raw.components(separatedBy: "\t")
-        let code = parts.indices.contains(0) ? parts[0] : ""
-        if code.hasPrefix("R"),
-           parts.indices.contains(1), !parts[1].isEmpty,
-           parts.indices.contains(2), !parts[2].isEmpty {
-            let oldPath = parts[1]
-            let newPath = parts[2]
-            let diff = try await git(cwd, ["diff", "-M", base, "--", oldPath, newPath])
-            files.append(buildFile(newPath, oldPath, .renamed, diff))
-        } else if parts.indices.contains(1), !parts[1].isEmpty {
-            let path = parts[1]
-            let firstChar = code.isEmpty ? "" : String(code[code.startIndex])
-            let status = STATUS_MAP[firstChar] ?? .modified
-            let diff = try await git(cwd, ["diff", base, "--", path])
-            files.append(buildFile(path, nil, status, diff))
-        }
-    }
-
-    // Untracked files — shown as full additions via diff against /dev/null.
-    let untracked = try await git(cwd, ["ls-files", "--others", "--exclude-standard"])
-    for path in untracked.components(separatedBy: "\n") {
-        if path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-        if files.count >= MAX_FILES { break }
-        // --no-index exits 1 when files differ; git() tolerates that.
-        let diff = try await git(cwd, ["diff", "--no-index", "--", "/dev/null", path])
-        files.append(buildFile(path, nil, .untracked, diff))
-    }
-
-    files.sort { $0.path.localizedCompare($1.path) == .orderedAscending }
-    let truncatedFiles = files.count >= MAX_FILES
-    return DiffResult(git: true, root: root, files: files, truncatedFiles: truncatedFiles)
 }
 
 /// List the linked worktrees of the repo containing `cwd` (the main worktree is
@@ -370,23 +145,6 @@ public func listWorktrees(_ cwd: String) async -> [Worktree] {
         }
     }
     return trees
-}
-
-/// Find the linked worktree that the agent process `childPid` created for itself
-/// from inside its pty — e.g. Claude Code's EnterWorktree, which makes a worktree
-/// under `<repo>/.claude/worktrees/<name>` and locks it with a reason embedding
-/// its own pid ("claude session <name> (pid 123 start …)"). Matching on the pid
-/// keeps the mapping exact when several sessions share one repo. Returns the last
-/// match (an agent that hopped worktrees leaves earlier ones locked too), or nil
-/// when the agent never left `cwd`.
-public func detectAgentWorktree(_ cwd: String, childPid: pid_t) async -> String? {
-    let trees = await listWorktrees(cwd)
-    guard trees.count > 1 else { return nil }
-    let pattern = "\\bpid \(childPid)\\b"
-    return trees.dropFirst().last { tree in
-        guard let reason = tree.lockedReason else { return false }
-        return reason.range(of: pattern, options: .regularExpression) != nil
-    }?.path
 }
 
 /// The ref a fresh session worktree branches from: the repo's default branch,
@@ -653,115 +411,12 @@ public func removeWorktree(_ worktreePath: String) async throws {
     }
 }
 
-/// Working-tree git state for `cwd`: branch, upstream, ahead/behind counts, and
-/// whether the tree is dirty — everything the commit/push/PR CTAs need to decide
-/// what's actionable. Returns a `{ git: false }` shape (never throws) for a
-/// non-git cwd, mirroring `getDiff`.
-public func getGitState(_ cwd: String) async -> GitState {
-    let none = GitState(git: false, branch: nil, detached: false, upstream: nil,
-                        ahead: 0, behind: 0, dirty: false, remote: false)
-    do {
-        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if inside != "true" { return none }
-    } catch {
-        return none
-    }
-
-    // Branch (fails on a detached HEAD).
-    var branch: String? = nil
-    var detached = false
-    do {
-        let b = try await git(cwd, ["symbolic-ref", "--short", "HEAD"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        branch = b.isEmpty ? nil : b
-    } catch {
-        detached = true
-    }
-
-    var remote = false
-    do {
-        remote = try await git(cwd, ["remote"])
-            .trimmingCharacters(in: .whitespacesAndNewlines).count > 0
-    } catch {
-        /* no remotes */
-    }
-
-    // Upstream + ahead/behind. With no upstream, treat every local commit as ahead.
-    var upstream: String? = nil
-    var ahead = 0
-    var behind = 0
-    do {
-        let u = try await git(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        upstream = u.isEmpty ? nil : u
-    } catch {
-        upstream = nil
-    }
-    if let upstream {
-        do {
-            let counts = try await git(cwd, ["rev-list", "--left-right", "--count", "\(upstream)...HEAD"])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            // Split on whitespace (TS: /\s+/), parse to ints, default 0.
-            let nums = counts.split(whereSeparator: { $0 == " " || $0 == "\t" || $0.isWhitespace })
-                .map { Int($0) ?? 0 }
-            let b = nums.indices.contains(0) ? nums[0] : 0
-            let a = nums.indices.contains(1) ? nums[1] : 0
-            behind = b
-            ahead = a
-        } catch {
-            /* leave zero */
-        }
-    } else {
-        do {
-            let c = try await git(cwd, ["rev-list", "--count", "HEAD"])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            ahead = Int(c) ?? 0
-        } catch {
-            /* no commits yet */
-        }
-    }
-
-    var dirty = false
-    do {
-        dirty = try await git(cwd, ["status", "--porcelain"])
-            .trimmingCharacters(in: .whitespacesAndNewlines).count > 0
-    } catch {
-        /* leave clean */
-    }
-
-    return GitState(git: true, branch: branch, detached: detached, upstream: upstream,
-                    ahead: ahead, behind: behind, dirty: dirty, remote: remote)
-}
-
 /// Whole-tree change snapshot for `cwd` via `git status --porcelain` — the light
 /// model a live file-tree / Quick Open index consumes, refreshed by the worktree
 /// watcher. Never throws: returns `[]` for a non-git cwd or any git failure.
 public func computeWorktreeStatus(_ cwd: String) async -> [WorktreeStatusEntry] {
     guard let out = try? await git(cwd, ["status", "--porcelain"]) else { return [] }
     return parseWorktreeStatus(out)
-}
-
-/// The Quick Open file index for `cwd`: tracked files plus untracked-but-not-ignored
-/// files, worktree-relative, deduped and sorted. `git ls-files` is fast and honours
-/// `.gitignore` (so `node_modules`/`.build` never enter the list) — cheaper and safer
-/// than walking the tree. `-z` keeps unusual filenames intact. Capped at `limit` so a
-/// pathological repo can't blow up the palette. Never throws: returns `[]` for a
-/// non-git cwd or any git failure.
-public func listTrackedFiles(_ cwd: String, limit: Int = 20_000) async -> [String] {
-    guard let out = try? await git(
-        cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-    else { return [] }
-    var seen = Set<String>()
-    var files: [String] = []
-    for raw in out.split(separator: "\0", omittingEmptySubsequences: true) {
-        let path = String(raw)
-        if path.isEmpty || !seen.insert(path).inserted { continue }
-        files.append(path)
-        if files.count >= limit { break }
-    }
-    files.sort { $0.localizedCompare($1) == .orderedAscending }
-    return files
 }
 
 /// A cheap change summary for `cwd`: the changed-file count + total line
@@ -789,209 +444,6 @@ public func computeChangeStat(_ cwd: String) async -> ChangeStat {
     }
     return ChangeStat(files: entries.count, additions: additions, deletions: deletions,
                       signature: changeStatSignature(entries))
-}
-
-/// Stage every change (`git add -A`) and commit it with `message`.
-public func commitAll(_ cwd: String, _ message: String) async throws -> CommitResult {
-    _ = try await gitStrict(cwd, ["add", "-A"])
-    let staged = try await gitStrict(cwd, ["diff", "--cached", "--name-only"]).stdout
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    if staged.isEmpty {
-        throw GitError("Nothing to commit.")
-    }
-    do {
-        _ = try await gitStrict(cwd, ["commit", "-m", message])
-    } catch {
-        throw GitError(gitErr(error, "Commit failed"))
-    }
-    let sha = try await gitStrict(cwd, ["rev-parse", "--short", "HEAD"]).stdout
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    let subject = try await gitStrict(cwd, ["log", "-1", "--pretty=%s"]).stdout
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    return CommitResult(sha: sha, subject: subject)
-}
-
-/// Push the current branch, setting the upstream to origin on first push.
-public func pushCurrent(_ cwd: String) async throws -> PushResult {
-    // TS: `.catch(() => ({ stdout: "" }))` — a detached HEAD makes symbolic-ref
-    // fail, which we swallow into an empty branch string.
-    let branch: String
-    do {
-        branch = try await gitStrict(cwd, ["symbolic-ref", "--short", "HEAD"]).stdout
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        branch = ""
-    }
-    if branch.isEmpty { throw GitError("Detached HEAD — checkout a branch to push.") }
-    var hasUpstream = true
-    do {
-        _ = try await gitStrict(cwd, ["rev-parse", "--abbrev-ref", "@{upstream}"])
-    } catch {
-        hasUpstream = false
-    }
-    let args = hasUpstream ? ["push"] : ["push", "-u", "origin", branch]
-    do {
-        let (stdout, stderr) = try await gitStrict(cwd, args)
-        // git reports a successful push on stderr; fall back to a friendly default.
-        let combined = "\(stdout)\(stderr)".trimmingCharacters(in: .whitespacesAndNewlines)
-        return PushResult(branch: branch, output: combined.isEmpty ? "Pushed." : combined)
-    } catch {
-        throw GitError(gitErr(error, "Push failed"))
-    }
-}
-
-// MARK: - Revert (discard uncommitted work) — precise, guarded, destructive
-
-/// The outcome of a revert: the worktree-relative path acted on, and whether the
-/// discard actually ran. Codable so the HTTP route can hand it straight back.
-public struct RevertResult: Codable, Sendable, Equatable {
-    public let path: String
-    public let reverted: Bool
-    public init(path: String, reverted: Bool) { self.path = path; self.reverted = reverted }
-}
-
-/// Validate that `requested` names a single file STRICTLY inside `root`, returning
-/// the worktree-relative path (never empty, never escaping) when safe, else nil.
-/// Pure and unit-testable: the revert entry points refuse anything this rejects, so
-/// a traversal (`../`), an absolute path outside the tree, an empty/unscoped request,
-/// or the worktree root itself can never reach `git checkout` / `git apply`. This is
-/// the guard that keeps a destructive discard pinned to exactly one intended file.
-public func revertScopedRelativePath(root: String, requested: String) -> String? {
-    let trimmed = requested.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return nil }
-    // No NUL / newline injection into a path passed to git.
-    guard !trimmed.contains("\0"), !trimmed.contains("\n") else { return nil }
-    let rootPath = URL(fileURLWithPath: root).standardizedFileURL.path
-    // Join under the worktree root (absolute requests are taken as-is), then collapse
-    // `.`/`..` via standardization so the prefix check below sees the real target.
-    let joined = trimmed.hasPrefix("/") ? trimmed : rootPath + "/" + trimmed
-    let candidate = URL(fileURLWithPath: joined).standardizedFileURL.path
-    // Must be strictly inside root: not the root itself (that would be the whole tree),
-    // not a sibling/parent, not an escape.
-    guard candidate != rootPath, candidate.hasPrefix(rootPath + "/") else { return nil }
-    let rel = String(candidate.dropFirst(rootPath.count + 1))
-    return rel.isEmpty ? nil : rel
-}
-
-/// Confirm `cwd` is inside a git work tree and return its top-level path. Throws a
-/// clean `GitError` otherwise — the revert paths refuse to touch a non-repo.
-private func worktreeRoot(_ cwd: String) async throws -> String {
-    do {
-        let inside = try await git(cwd, ["rev-parse", "--is-inside-work-tree"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard inside == "true" else { throw GitError("Not a git repository.") }
-        return try await git(cwd, ["rev-parse", "--show-toplevel"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch let e as GitError {
-        throw e
-    } catch {
-        throw GitError("Not a git repository.")
-    }
-}
-
-/// Whether `rel` is a tracked path in `cwd` (`ls-files --error-unmatch` exits non-zero
-/// for an untracked path, which `gitStrict` surfaces as a throw).
-private func isTracked(_ cwd: String, _ rel: String) async -> Bool {
-    (try? await gitStrict(cwd, ["ls-files", "--error-unmatch", "--", rel])) != nil
-}
-
-/// Discard the uncommitted changes to ONE file, scoped precisely to that path and
-/// nothing else. A tracked file is restored from HEAD (`git checkout HEAD -- <path>`,
-/// discarding staged and unstaged edits); an untracked file is removed. Refuses any
-/// path `revertScopedRelativePath` rejects. Never `git checkout .` / `git reset
-/// --hard` — the blast radius is exactly the requested file.
-public func revertFile(_ cwd: String, path requested: String) async throws -> RevertResult {
-    let root = try await worktreeRoot(cwd)
-    guard let rel = revertScopedRelativePath(root: root, requested: requested) else {
-        throw GitError("Refusing to revert an unscoped or out-of-tree path.")
-    }
-    if await isTracked(root, rel) {
-        do {
-            _ = try await gitStrict(root, ["checkout", "HEAD", "--", rel])
-        } catch {
-            // A fresh repo has no HEAD to restore from; fall back to the index.
-            do { _ = try await gitStrict(root, ["checkout", "--", rel]) }
-            catch { throw GitError(gitErr(error, "Revert failed")) }
-        }
-    } else {
-        // Untracked: discarding a brand-new file means deleting it. Still scoped to
-        // the one validated path inside the worktree.
-        let abs = (root as NSString).appendingPathComponent(rel)
-        do { try FileManager.default.removeItem(atPath: abs) }
-        catch { throw GitError("Could not remove untracked file: \(rel)") }
-    }
-    return RevertResult(path: rel, reverted: true)
-}
-
-/// Discard ONE hunk of a tracked file's uncommitted change, leaving the rest intact.
-/// Re-derives the authoritative current patch (`git diff <base> -- <path>`), extracts
-/// exactly the requested hunk, and reverse-applies just that hunk to the working tree
-/// (`git apply --reverse`). Refuses an unscoped path or an out-of-range hunk; untracked
-/// files aren't supported at hunk granularity (revert the whole file instead).
-public func revertHunk(_ cwd: String, path requested: String, hunkIndex: Int) async throws -> RevertResult {
-    let root = try await worktreeRoot(cwd)
-    guard let rel = revertScopedRelativePath(root: root, requested: requested) else {
-        throw GitError("Refusing to revert an unscoped or out-of-tree path.")
-    }
-    guard hunkIndex >= 0 else { throw GitError("Invalid hunk index.") }
-    guard await isTracked(root, rel) else {
-        throw GitError("Per-hunk revert isn't supported for untracked files — revert the whole file.")
-    }
-    var base = "HEAD"
-    if (try? await gitStrict(root, ["rev-parse", "--verify", "HEAD"])) == nil { base = EMPTY_TREE }
-    let patch = try await git(root, ["diff", base, "--", rel])
-    guard let single = singleHunkPatch(patch, index: hunkIndex) else {
-        throw GitError("That hunk no longer exists — the file changed since the diff was shown.")
-    }
-    do {
-        _ = try await gitStrict(root, ["apply", "--reverse", "--recount"], stdin: single)
-    } catch {
-        throw GitError(gitErr(error, "Revert hunk failed"))
-    }
-    return RevertResult(path: rel, reverted: true)
-}
-
-/// Reassemble a single-hunk patch from a one-file unified diff: the file header (every
-/// line before the first `@@`) plus the hunk at `index`. Returns nil for an empty patch
-/// or an out-of-range index. Pure — unit-tested without git.
-public func singleHunkPatch(_ patch: String, index: Int) -> String? {
-    guard index >= 0, !patch.isEmpty else { return nil }
-    var header: [String] = []
-    var hunks: [[String]] = []
-    var cur: [String]? = nil
-    for line in patch.components(separatedBy: "\n") {
-        if line.hasPrefix("@@") {
-            if let c = cur { hunks.append(c) }
-            cur = [line]
-        } else if cur != nil {
-            cur?.append(line)
-        } else {
-            header.append(line)
-        }
-    }
-    if let c = cur { hunks.append(c) }
-    guard index < hunks.count else { return nil }
-    var out = header
-    out.append(contentsOf: hunks[index])
-    var joined = out.joined(separator: "\n")
-    if !joined.hasSuffix("\n") { joined += "\n" }
-    return joined
-}
-
-private func buildFile(_ path: String, _ oldPath: String?, _ status: FileStatus, _ diff: String) -> DiffFile {
-    let (additions, deletions, binary) = countChanges(diff)
-    // TS uses `diff.length` (UTF-16 code units in JS). Use utf16 count to match byte-
-    // for-byte the same truncation threshold the web server applies.
-    let tooLarge = diff.utf16.count > MAX_DIFF_BYTES
-    return DiffFile(
-        path: path,
-        oldPath: oldPath,
-        status: status,
-        additions: additions,
-        deletions: deletions,
-        binary: binary,
-        diff: (binary || tooLarge) ? "" : diff,
-        truncated: tooLarge)
 }
 
 // MARK: - small helpers (regex utilities mirroring TS string ops)

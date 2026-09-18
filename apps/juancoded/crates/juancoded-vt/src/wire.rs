@@ -57,6 +57,18 @@ pub struct RowUpdate {
     pub segs: Vec<Segment>,
 }
 
+/// One row of a one-shot screen READ, whose index may be negative.
+///
+/// A separate type from [`RowUpdate`] only because of that sign: a `screen` frame
+/// only ever carries visible rows, so its `row` is a `usize` and must stay one, while
+/// a peek prepends history at -n … -1. The `segs` encoding is identical, which is the
+/// point — one client decoder covers both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PeekRow {
+    pub row: i64,
+    pub segs: Vec<Segment>,
+}
+
 /// Run-length compress a row into wire segments.
 pub fn segments(row: &Row) -> Vec<Segment> {
     let mut cells = &row.cells[..];

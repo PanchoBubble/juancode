@@ -19,9 +19,13 @@ import XCTest
 ///
 /// 1. A session the mirror has no text for is found by what was said in it, because
 ///    the daemon answered.
-/// 2. A daemon that does not advertise the capability is not asked, and the mirror's
+/// 2. When the daemon answers, its answer stands — the mirror's own hits are not
+///    merged into it (juancode-52e8.14.4). The merge was there because neither store
+///    was a superset; one store answers now.
+/// 3. A daemon that does not advertise the capability is not asked, and the mirror's
 ///    own hits are still returned — the old behaviour, not an empty list.
-/// 3. A daemon that never answers costs the mirror's hits and not the search.
+/// 4. A daemon that never answers falls back to the mirror's hits rather than to
+///    nothing, and an empty answer is not a timeout.
 final class RustCoreSearchTests: XCTestCase {
 
     /// The whole ticket: two sessions in the daemon's list, neither with a byte of
@@ -41,21 +45,42 @@ final class RustCoreSearchTests: XCTestCase {
         }
     }
 
-    /// Recency across both stores, not the mirror's ranking and then the daemon's:
-    /// interleaving two rankings is what would put every locally-opened session above
-    /// every dispatched one.
-    func testHitsFromBothStoresComeBackNewestFirst() async throws {
+    /// The daemon's answer stands, in the daemon's order, and the mirror's own hits
+    /// are not folded in — even though the mirror can match this word too.
+    ///
+    /// This is the merge that used to be here (juancode-52e8.14.4). It existed because
+    /// neither store was a superset: measured 2026-09-18 on the real pair, the daemon
+    /// answers for 797 of 882 sessions and the mirror holds text for 520, 27 of which
+    /// the daemon had none of. `juancoded import-swift` moves that closed set across,
+    /// and after it one store holds everything — so a second one answering alongside
+    /// is a second ranking over the same rows, which is what made a dispatched session
+    /// sort below a locally-opened one.
+    func testTheDaemonsAnswerStandsAloneWhenItAnswers() async throws {
         let daemon = SearchDaemon()
         daemon.hits = [("s-older", "…the [reaper] sweep…")]
         try await withSearchDaemon(daemon) { core in
             // A row the mirror itself can match: written through the client, which is
-            // the only path that puts scrollback in the mirror at all.
+            // the only path that puts scrollback in the mirror at all. It is also the
+            // NEWER row, so a merge would have sorted it first.
             let local = try XCTUnwrap(core.session("s-dispatched"))
             core.updateSession(local, scrollback: Array("the reaper is awake".utf8))
 
-            let hits = core.searchSessions("reaper", limit: 50)
-            XCTAssertEqual(hits.map(\.meta.id), ["s-dispatched", "s-older"],
-                           "updatedAt 3000 before updatedAt 2000")
+            XCTAssertEqual(core.searchSessions("reaper", limit: 50).map(\.meta.id), ["s-older"])
+        }
+    }
+
+    /// And an empty answer is an answer. A daemon that looked and found nothing used
+    /// to be indistinguishable from a daemon that never spoke, so the mirror's hits
+    /// came back and a search for a word only this Mac's scrollback held looked like
+    /// it had worked.
+    func testAnEmptyAnswerIsNotATimeout() async throws {
+        let daemon = SearchDaemon()
+        daemon.hits = []
+        try await withSearchDaemon(daemon) { core in
+            let local = try XCTUnwrap(core.session("s-dispatched"))
+            core.updateSession(local, scrollback: Array("the reaper is awake".utf8))
+
+            XCTAssertTrue(core.searchSessions("reaper", limit: 50).isEmpty)
         }
     }
 

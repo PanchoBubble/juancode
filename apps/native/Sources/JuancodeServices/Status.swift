@@ -232,6 +232,37 @@ func opencodeHealth(_ label: String) -> McpHealth {
 /// so a server is a bullet line (name + status) plus the next non-empty indented line
 /// (its URL or command). The output is coloured and drawn with box characters, both of
 /// which are stripped before matching.
+/// Every ANSI escape sequence dropped, so a coloured CLI listing can be matched as
+/// text.
+///
+/// Here rather than shared, and deliberately smaller than the one that used to live in
+/// `ActionsLog.swift`: that parser kept the colours because an Actions log means
+/// something by them, and it moved into the core with the rest of the GitHub data
+/// layer (juancode-52e8.14.6). This caller only needs the characters, so it only does
+/// the one thing.
+func stripAnsi(_ s: String) -> String {
+    guard s.contains("\u{1B}") else { return s }
+    var out = ""
+    var i = s.startIndex
+    while i < s.endIndex {
+        guard s[i] == "\u{1B}", s.index(after: i) < s.endIndex,
+              s[s.index(after: i)] == "[" else {
+            out.append(s[i])
+            i = s.index(after: i)
+            continue
+        }
+        // CSI … final-byte: scan to the first byte in @-~, which ends the sequence.
+        var j = s.index(i, offsetBy: 2)
+        while j < s.endIndex, !("\u{40}"..."\u{7E}").contains(s[j]) {
+            j = s.index(after: j)
+        }
+        // A truncated escape at the end of the string drops rather than leaking an ESC.
+        guard j < s.endIndex else { break }
+        i = s.index(after: j)
+    }
+    return out
+}
+
 public func parseOpencodeList(_ stdout: String) -> [McpServerStatus] {
     var servers: [(name: String, status: String)] = []
     var details: [Int: String] = [:]  // index into `servers` → detail line

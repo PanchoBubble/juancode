@@ -418,6 +418,301 @@ function emitPauseState(paused: string[]): void {
   }
 }
 
+// ── Named control keys (juancode-uigs) ───────────────────────────────────────
+// The client→server mirror of `ClientMessage.key` in WireProtocol.swift:
+//
+//   { type: "key", sessionId: string, keys: string[], seq?: number }
+//
+// `keys` are NAMES ("Escape", "C-c", "Up"), never bytes: the vocabulary and its
+// resolution belong to the core, so a client cannot invent an escape sequence and the
+// two cores cannot disagree about one. The resolved bytes reach the pty raw — a `key`
+// is never bracketed-pasted, which is what `input` does and what made every remote
+// keystroke arrive as literal text. An unknown name is answered with `error` and
+// writes nothing. Gated by the `namedKeys` capability.
+//
+// The sending itself lives in oracle.ts (`sendKeys`), on a short-lived socket like the
+// other one-shot writes — so it feature-detects on that socket's own handshake rather
+// than on this module's cached capability list, and works while this one is between
+// reconnects. The table of names is keys.ts.
+//
+// ── Working-tree changes, capability `changes` (juancode-52e8.14.5) ──────────
+//
+// Deliberately NOT mirrored in this module, and the reason is worth writing down so
+// the next person does not "fix" it. The `changes` surface is split by transport:
+//
+//   * The READS are HTTP — `GET /api/sessions/:id/{diff,git,worktrees,file}` — and
+//     their client is session-reads.ts, beside the transcript and screen reads it
+//     already owns. Nothing about them belongs on this socket.
+//   * The WRITES are frames — `sessionCommit`, `sessionPush`, `sessionRevert`,
+//     `sessionCommitMessage`, each answered by one `changesResult` correlated on
+//     `requestId`. The sidecar does not send them: the phone console has no Commit,
+//     Push or Discard, and mirroring frames nothing sends would be a second copy of
+//     the protocol to keep in step for no caller. The desktop relay translates the
+//     phone's POSTs into them (`CoreProxyServer.gitWrite`), so the HTTP shape the
+//     Swift core served is still what a remote client sees.
+//
+// If a Changes view is ever built on the phone, its writes go through the relay's
+// POSTs, not through here.
+//
+// ── The GitHub surface (juancode-52e8.14.6) ──────────────────────────────────
+// The GitHub data layer lives in the core, so the phone reads a PR list, a
+// conversation, a merged timeline and a parsed failing-CI log the same way the desktop
+// does: over the core's own HTTP routes, through the relay on :4280. Those are plain
+// requests and are made where they are needed (oracle.ts, the phone console) rather
+// than mirrored here — nothing about them is a stream.
+//
+// What DOES belong on the socket is the review surface, because a refresh is a whole
+// model turn: held open as a request it would block for minutes. Two client frames
+// stage and unstage an inline comment, one asks for the review, and the core answers
+// with `review` and `diffComments`. Both answers are ALWAYS complete — a whole comment
+// list, never a delta, because two surfaces stage against one session — so a listener
+// replaces what it holds rather than patching it.
+//
+// Gated by the `github` capability: the Swift core advertises none of this and the
+// frames would be `error` there.
+
+/** One review finding, anchored to the file and line it concerns. */
+export interface ReviewFinding {
+  file: string;
+  /** `old` or `new` — which side of the hunk the line is on. */
+  side: string;
+  /** Absent for a file-level finding with no single line. */
+  line?: number;
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
+  note: string;
+}
+
+/** One cached review pass. `error` is present when the pass could not run or its
+ *  output could not be read — cached like any other result, because "the last pass
+ *  failed, and this is why" is an answer and losing it looks like no review at all. */
+export interface ReviewPass {
+  status: "ok" | "empty" | "error";
+  findings: ReviewFinding[];
+  summary?: string;
+  createdAt: number;
+  error?: string;
+}
+
+/** One inline comment staged against a session's diff. */
+export interface DiffComment {
+  id: string;
+  sessionId: string;
+  file: string;
+  side: string;
+  line: number;
+  endLine: number;
+  body: string;
+  createdAt: number;
+  quote?: string;
+  commitSha?: string;
+  commitSubject?: string;
+}
+
+/** Whether the connected core has the GitHub data layer at all. */
+export function supportsGithub(): boolean {
+  return nativeCapabilities.includes("github");
+}
+
+type ReviewListener = (sessionId: string, pass: ReviewPass | null) => void;
+type CommentsListener = (sessionId: string, comments: DiffComment[]) => void;
+const reviewListeners = new Set<ReviewListener>();
+const commentListeners = new Set<CommentsListener>();
+
+/** Watch review passes. Fires on every `review` frame; `null` is a session nothing has
+ *  reviewed, which is not the same as a pass that found nothing. */
+export function onReview(listener: ReviewListener): () => void {
+  reviewListeners.add(listener);
+  return () => reviewListeners.delete(listener);
+}
+
+/** Watch staged diff comments. Always the whole list; replace wholesale. */
+export function onDiffComments(listener: CommentsListener): () => void {
+  commentListeners.add(listener);
+  return () => commentListeners.delete(listener);
+}
+
+/** Ask for a session's review — the cached one, or a fresh pass with `refresh`. */
+export function requestReview(sessionId: string, refresh = false): void {
+  sendToNative({ type: "sessionReview", sessionId, refresh });
+}
+
+/** A `review` frame, or null if it is not one. `result` absent and `result: null` say
+ *  the same thing, and both spellings reach here. */
+function parseReview(msg: Record<string, unknown>): { sessionId: string; pass: ReviewPass | null } | null {
+  if (msg.type !== "review" || typeof msg.sessionId !== "string") return null;
+  const raw = msg.result;
+  if (raw === undefined || raw === null) return { sessionId: msg.sessionId, pass: null };
+  if (typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const status = r.status;
+  if (status !== "ok" && status !== "empty" && status !== "error") return null;
+  return {
+    sessionId: msg.sessionId,
+    pass: {
+      status,
+      findings: Array.isArray(r.findings) ? (r.findings as ReviewFinding[]) : [],
+      summary: typeof r.summary === "string" ? r.summary : undefined,
+      createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
+      error: typeof r.error === "string" ? r.error : undefined,
+    },
+  };
+}
+
+/** A `diffComments` frame, or null if it is not one. */
+function parseDiffComments(
+  msg: Record<string, unknown>,
+): { sessionId: string; comments: DiffComment[] } | null {
+  if (msg.type !== "diffComments" || typeof msg.sessionId !== "string") return null;
+  if (!Array.isArray(msg.comments)) return null;
+  return { sessionId: msg.sessionId, comments: msg.comments as DiffComment[] };
+}
+
+// ── Heavy command queue (juancode-52e8.14.3) ─────────────────────────────────
+// The phone's view of the global `heavy` slot queue: memory-heavy commands (CI,
+// integration tests) serialized across every agent session on the Mac. The CORE
+// owns the shared registry and pushes the whole queue on every change, so this
+// module never reads a directory — it mirrors the last `heavyQueue` frame, and the
+// subscription is what tells the core somebody is looking.
+
+/** One job in the queue. `child` and `started` are absent while a job waits. */
+export interface HeavyJob {
+  /** The wrapper's pid: the registry filename, and the id a cancel names. */
+  pid: number;
+  child?: number;
+  /** Higher runs sooner; ties break on how long the job has been queued. */
+  prio: number;
+  /** Epoch seconds when it joined the queue. */
+  since: number;
+  started?: number;
+  /** Slot index it holds, or 0 while waiting. */
+  slot: number;
+  cmd: string;
+  cwd: string;
+}
+
+/** The whole queue: capacity, and the two lists already ordered by the core. */
+export interface HeavyQueue {
+  slots: number;
+  workerCap: number;
+  running: HeavyJob[];
+  waiting: HeavyJob[];
+}
+
+/** The queue as the endpoint last sent it, or null before it has said. Distinct
+ *  from an empty queue, which means nothing is running and nothing is waiting. */
+let heavyQueueState: HeavyQueue | null = null;
+/** Whether `heavyQueueSubscribe` has gone out on THIS socket. Per connection on the
+ *  core's side, so a reconnect has to send it again. */
+let heavySubscribed = false;
+
+type HeavyListener = (queue: HeavyQueue) => void;
+const heavyListeners: HeavyListener[] = [];
+
+/** Whether the connected endpoint reads the slot registry. False before the
+ *  handshake, so a caller fails closed rather than sending into the dark. */
+export function supportsHeavyQueue(): boolean {
+  return nativeCapabilities.includes("heavyQueue");
+}
+
+/** Ask the core to start pushing the queue. Idempotent per connection, and a no-op
+ *  on an endpoint with no such frame. */
+export function subscribeHeavyQueue(): boolean {
+  if (!supportsHeavyQueue()) return false;
+  if (heavySubscribed) return true;
+  heavySubscribed = true;
+  sendToNative({ type: "heavyQueueSubscribe" });
+  return true;
+}
+
+/** The queue the endpoint last sent, or null before it has sent one. */
+export function heavyQueue(): HeavyQueue | null {
+  return heavyQueueState;
+}
+
+/** Watch the queue. Fires on every `heavyQueue` frame, which is always the complete
+ *  queue — replace wholesale. Listener errors are isolated. */
+export function onHeavyQueue(listener: HeavyListener): void {
+  heavyListeners.push(listener);
+}
+
+/** Move a job in line. Fire-and-forget: the answer is the queue frame that follows.
+ *  Higher priority runs sooner. */
+export function heavySetPriority(pid: number, prio: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavySetPriority", pid, prio });
+  return true;
+}
+
+/** How many heavy jobs may run at once. Raising it lets jobs already in line
+ *  through, because the waiting wrappers re-read the capacity every poll. */
+export function heavySetSlots(slots: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavySetSlots", slots });
+  return true;
+}
+
+/** Stop a queued or running job. The core refuses a pid its own queue does not
+ *  hold, so this can only reach a job in the list above. */
+export function heavyCancel(pid: number): boolean {
+  if (!supportsHeavyQueue()) return false;
+  sendToNative({ type: "heavyCancel", pid });
+  return true;
+}
+
+/** The priority that puts a job at the head of the line: one better than the best
+ *  currently queued. The core's only mutation is a priority write, so this is what
+ *  turns "run this next" into a number. */
+export function heavyMoveToFrontPriority(queue: HeavyQueue): number {
+  return Math.max(...queue.waiting.map((j) => j.prio), 0) + 1;
+}
+
+/** Parse a `heavyQueue` frame, or null if it is not one. Lenient like the rest of
+ *  this module: a malformed frame is dropped, never thrown. */
+export function parseHeavyQueue(msg: Record<string, unknown>): HeavyQueue | null {
+  if (msg.type !== "heavyQueue") return null;
+  if (typeof msg.slots !== "number") return null;
+  return {
+    slots: msg.slots,
+    workerCap: typeof msg.workerCap === "number" ? msg.workerCap : 4,
+    running: parseHeavyJobs(msg.running),
+    waiting: parseHeavyJobs(msg.waiting),
+  };
+}
+
+function parseHeavyJobs(raw: unknown): HeavyJob[] {
+  if (!Array.isArray(raw)) return [];
+  const jobs: HeavyJob[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.pid !== "number") continue;
+    const job: HeavyJob = {
+      pid: row.pid,
+      prio: typeof row.prio === "number" ? row.prio : 0,
+      since: typeof row.since === "number" ? row.since : 0,
+      slot: typeof row.slot === "number" ? row.slot : 0,
+      cmd: typeof row.cmd === "string" ? row.cmd : "",
+      cwd: typeof row.cwd === "string" ? row.cwd : "",
+    };
+    if (typeof row.child === "number") job.child = row.child;
+    if (typeof row.started === "number") job.started = row.started;
+    jobs.push(job);
+  }
+  return jobs;
+}
+
+function emitHeavyQueue(queue: HeavyQueue): void {
+  heavyQueueState = queue;
+  for (const listener of heavyListeners) {
+    try {
+      listener(queue);
+    } catch (e) {
+      console.warn("oracle-mcp heavy listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
     try {
@@ -460,6 +755,10 @@ function connect(): void {
     for (const sessionId of screenListeners.keys()) {
       sendToNative({ type: "subscribeScreen", sessionId });
     }
+    // And the heavy queue, for the same reason: the watch is per connection on the
+    // core's side, so a reconnect has to ask again or the queue silently stops
+    // updating. Only when something is actually watching.
+    if (heavyListeners.length > 0) subscribeHeavyQueue();
   });
 
   sock.on("message", (data) => {
@@ -472,6 +771,11 @@ function connect(): void {
     // whose capabilities or paused set we still know.
     nativeCapabilities = [];
     pausedSessionIds = null;
+    // Dropped rather than kept: jobs have started and finished while this socket was
+    // down, and a stale queue is worse than none — it is what a reorder would be
+    // computed against.
+    heavyQueueState = null;
+    heavySubscribed = false;
     scheduleReconnect();
   });
 
@@ -504,6 +808,21 @@ function handleMessage(raw: string): void {
   if (msg.type === "pauseState") {
     const paused = parsePauseState(msg);
     if (paused) emitPauseState(paused);
+    return;
+  }
+  if (msg.type === "heavyQueue") {
+    const queue = parseHeavyQueue(msg);
+    if (queue) emitHeavyQueue(queue);
+    return;
+  }
+  if (msg.type === "review") {
+    const ev = parseReview(msg);
+    if (ev) for (const l of reviewListeners) l(ev.sessionId, ev.pass);
+    return;
+  }
+  if (msg.type === "diffComments") {
+    const ev = parseDiffComments(msg);
+    if (ev) for (const l of commentListeners) l(ev.sessionId, ev.comments);
     return;
   }
   if (msg.type === "screen") {

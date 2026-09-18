@@ -131,7 +131,8 @@ public enum Config {
     /// process tree to free RAM, leaving a dormant, resumable tile.
     /// `JUANCODE_REAP_IDLE_MINUTES`, default 30. Only the boot default — the GUI
     /// re-applies the user's Settings value (or the env override) via
-    /// `SessionReaper.setIdleWindow` right after launch.
+    /// `CoreClient.setReaperIdleWindow` right after launch, which reaches the Rust
+    /// core's reaper and is a no-op on the Swift one, which has none.
     public static var reapIdleMinutes: Int {
         reapIdleMinutesOverride ?? 30
     }

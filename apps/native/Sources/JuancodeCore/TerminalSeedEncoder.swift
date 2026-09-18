@@ -72,6 +72,21 @@ struct TerminalSeedEncoder {
 
     mutating func setCursorVisible(_ visible: Bool) { csi(visible ? "?25h" : "?25l") }
 
+    /// Re-assert the window title the program set (OSC 2), so a client that arrives
+    /// after the title was announced shows it instead of whatever the surface was
+    /// created with. ST-terminated rather than BEL-terminated, and a title carrying a
+    /// control character is dropped rather than emitted half-escaped.
+    mutating func setTitle(_ title: String) {
+        guard !title.isEmpty, !title.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { return }
+        bytes.append(esc)
+        bytes.append(UInt8(ascii: "]"))
+        bytes.append(contentsOf: "2;".utf8)
+        bytes.append(contentsOf: title.utf8)
+        bytes.append(esc)
+        bytes.append(UInt8(ascii: "\\"))
+    }
+
     /// Emit a row's styled cells at the cursor. Trailing plain-blank cells are
     /// dropped (the target line is already blank), so a mostly-empty row stays cheap.
     private mutating func paintCells(_ row: TerminalRow) {

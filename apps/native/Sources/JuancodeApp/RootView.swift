@@ -486,10 +486,9 @@ private struct ToolsMenu: View {
     var body: some View {
         Button {
             showing = true
-            // So the Heavy Queue row's count is current the moment the menu opens.
-            model.refreshHeavyQueue()
-            // Same for the GitHub count — floored, so opening the menu repeatedly
-            // costs one search, not one per open.
+            // The GitHub count — floored, so opening the menu repeatedly costs one
+            // search, not one per open. The Heavy Queue row's count needs no refresh
+            // here: it is pushed by the core, and the watch below is what asks for it.
             model.refreshViewerPrs()
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
@@ -499,6 +498,10 @@ private struct ToolsMenu: View {
               ? "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work"
               : "Tools — keep awake, recurring tasks, worktrees, kill port, MCP status, settings")
         .clickCursor()
+        // The Heavy Queue row's count is pushed by the core, so the menu holds a watch
+        // for as long as it can draw one rather than asking for a snapshot on open.
+        .onAppear { model.watchHeavyQueue() }
+        .onDisappear { model.releaseHeavyQueue() }
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 // Keep Awake is a toggle, so it shows its live state rather than

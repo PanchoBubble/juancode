@@ -2,12 +2,21 @@ import Foundation
 import JuancodeCore
 
 public extension SessionEnvironment {
-    /// A fully production-wired session environment: the real login-shell binary
-    /// resolver, the given persistent store, real post-spawn session-id discovery for
-    /// the providers that need it (Codex's rollout files, opencode's database), and
-    /// live title/usage polling backed by this target's transcript readers
-    /// (`deriveSessionTitle` / `deriveSessionUsage`). The core can't depend on
+    /// A production-wired session environment for the Swift core: the real
+    /// login-shell binary resolver, the given persistent store, real post-spawn
+    /// session-id discovery for the providers that need it (Codex's rollout files,
+    /// opencode's database), and live title polling backed by this target's
+    /// transcript readers (`deriveSessionTitle`). The core can't depend on
     /// JuancodeServices, so these seams are injected here.
+    ///
+    /// Two seams are deliberately NOT injected any more. Token usage and structured
+    /// transcript activity are served by the Rust core (`juancoded-core/src/usage.rs`,
+    /// `juancoded-transcripts`), and the Swift core never advertised either over the
+    /// wire — `usage`, `transcript` and `transcript-activity` are skipped in
+    /// `parity/swift-status.json` because it does not claim the capability. Their
+    /// Swift readers were the fork this leaves behind, so they are gone and the
+    /// environment falls back to what it documents as the default: no usage, and
+    /// screen-only busy/idle detection.
     static func live(
         store: SessionStore,
         messageQueue: MessageQueue = MessageQueue(),
@@ -30,23 +39,6 @@ public extension SessionEnvironment {
                 }
             },
             deriveTitle: { provider, id in await deriveSessionTitle(provider, id) },
-            deriveUsage: { provider, id in await deriveSessionUsage(provider, id) },
-            startActivityTail: { provider, getId, onBatch in
-                // opencode's turns live in its database, not an append-only transcript,
-                // so it gets its own tail over the same listener contract.
-                if provider == .opencode {
-                    let tail = OpencodeActivityTail(cliSessionId: getId, listener: onBatch)
-                    tail.start()
-                    return { tail.stop() }
-                }
-                let tail = TranscriptActivityTail(
-                    provider: provider,
-                    cliSessionId: getId,
-                    listener: onBatch
-                )
-                tail.start()
-                return { tail.stop() }
-            },
             log: log
         )
     }

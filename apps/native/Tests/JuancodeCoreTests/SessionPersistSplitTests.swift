@@ -26,9 +26,9 @@ import Testing
             lock.withLock { fullUpdates += 1 }
             backing.update(meta, scrollback: scrollback)
         }
-        func updateMeta(_ meta: SessionMeta, reindexTitleFts: Bool) {
+        func updateMeta(_ meta: SessionMeta) {
             lock.withLock { metaUpdates += 1 }
-            backing.updateMeta(meta, reindexTitleFts: reindexTitleFts)
+            backing.updateMeta(meta)
         }
         func updateScrollback(_ id: String, scrollback: [UInt8], updatedAt: Int) {
             lock.withLock { scrollbackFlushes += 1 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   chunkMessage,
   handleUpdate,
+  keyPadRow,
   isAllowed,
   newBridgeState,
   notifySessionEvent,
@@ -167,6 +168,7 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
     originChat: vi.fn(async () => null),
     deliver: vi.fn(async () => {}),
     queue: vi.fn(async () => {}),
+    keys: vi.fn(async () => {}),
     transcribe: vi.fn(async () => "transcribed text"),
     pause: {
       supported: () => true,
@@ -624,7 +626,9 @@ describe("notifySessionEvent", () => {
     );
     expect(deps.originChat).toHaveBeenCalledWith("d-1");
     expect(deps.send).toHaveBeenCalledTimes(1);
-    expect(deps.send).toHaveBeenCalledWith(300, expect.stringContaining("needs your input"));
+    expect(deps.send).toHaveBeenCalledWith(300, expect.stringContaining("needs your input"), {
+      keyboard: [keyPadRow("aaaa-1111")],
+    });
     // The ping is reply-able like any observer notification.
     expect(deps.outbound.record).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 300, sessionId: "aaaa-1111" }),
@@ -1105,5 +1109,114 @@ describe("/pauseall and /playall", () => {
     for (const call of (deps.send as ReturnType<typeof vi.fn>).mock.calls) {
       expect(call[1]).toContain("no global pause");
     }
+  });
+});
+
+// ── Control keys from a phone (juancode-uigs) ────────────────────────────────
+
+describe("the control-key pad", () => {
+  const allowed = new Set([5]);
+  const cb = (data: string, userId = 5): TgUpdate => ({
+    update_id: 1,
+    callback_query: { id: "cb-1", from: { id: userId }, message: { chat: { id: 100 } }, data },
+  });
+
+  it("stays inside Telegram's 64-byte callback_data limit for a uuid session", () => {
+    // A truncated callback_data is a button that resolves to the wrong key, or to
+    // none, and Telegram truncates silently.
+    for (const b of keyPadRow("2e6f1a64-9b0d-4a51-8f7c-1d2e3f4a5b6c")) {
+      expect(Buffer.byteLength(b.data, "utf8")).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("offers Esc, Ctrl-C, the arrows and Enter — the keys a permission prompt needs", () => {
+    expect(keyPadRow("s1").map((b) => b.data)).toEqual([
+      "k:Escape:s1",
+      "k:C-c:s1",
+      "k:Up:s1",
+      "k:Down:s1",
+      "k:Enter:s1",
+    ]);
+  });
+
+  it("sends the pressed key by NAME, never as text", async () => {
+    const deps = makeDeps();
+    await handleUpdate(cb("k:Escape:s1"), allowed, deps);
+    expect(deps.keys).toHaveBeenCalledWith("s1", ["Escape"]);
+    expect(deps.deliver).not.toHaveBeenCalled();
+    expect(deps.answerCallback).toHaveBeenCalledWith("cb-1", "⌨️ Escape");
+  });
+
+  it("refuses a key name no core knows instead of sending it", async () => {
+    const deps = makeDeps();
+    await handleUpdate(cb("k:Excape:s1"), allowed, deps);
+    expect(deps.keys).not.toHaveBeenCalled();
+    expect(deps.answerCallback).toHaveBeenCalledWith("cb-1", expect.stringContaining("Excape"));
+  });
+
+  it("ignores a press from a user who is not allowed", async () => {
+    const deps = makeDeps();
+    await handleUpdate(cb("k:C-c:s1", 999), allowed, deps);
+    expect(deps.keys).not.toHaveBeenCalled();
+  });
+
+  it("says why when the app cannot be reached", async () => {
+    const deps = makeDeps({
+      keys: vi.fn(async () => {
+        throw new Error("app is down");
+      }),
+    });
+    await handleUpdate(cb("k:Enter:s1"), allowed, deps);
+    expect(deps.answerCallback).toHaveBeenCalledWith("cb-1", expect.stringContaining("app is down"));
+  });
+
+  it("rides along on a needs-input ping, which is the prompt you cannot type at", async () => {
+    const deps = makeDeps({
+      observers: {
+        list: vi.fn(async () => []),
+        add: vi.fn(async () => {}),
+        remove: vi.fn(async () => 1),
+        chatsFor: vi.fn(async () => [100]),
+      },
+    });
+    const state = newBridgeState();
+    await notifySessionEvent(
+      { sessionId: "s1", state: "waiting_input", notify: true },
+      deps,
+      state,
+    );
+    const opts = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[2];
+    expect(opts?.keyboard).toEqual([keyPadRow("s1")]);
+  });
+
+  it("stays off a finish ping, where there is nothing to steer", async () => {
+    const deps = makeDeps({
+      observers: {
+        list: vi.fn(async () => []),
+        add: vi.fn(async () => {}),
+        remove: vi.fn(async () => 1),
+        chatsFor: vi.fn(async () => [100]),
+      },
+    });
+    await notifySessionEvent({ sessionId: "s1", state: "idle", notify: true }, deps, newBridgeState());
+    const opts = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[2];
+    expect(opts).toBeUndefined();
+  });
+
+  it("posts a standalone pad for /keys <n>", async () => {
+    const deps = makeDeps();
+    const state = newBridgeState();
+    await handleUpdate(msg(5, "/sessions"), allowed, deps, state);
+    await handleUpdate(msg(5, "/keys 1"), allowed, deps, state);
+    const last = (deps.send as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+    expect(last?.[1]).toContain("Tap a key");
+    expect(last?.[2]?.keyboard).toEqual([keyPadRow(SESSIONS[0]!.id)]);
+  });
+
+  it("says so when /keys names nothing", async () => {
+    const deps = makeDeps();
+    await handleUpdate(msg(5, "/keys nope"), allowed, deps, newBridgeState());
+    const last = (deps.send as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+    expect(last?.[1]).toContain("No session matches");
   });
 });

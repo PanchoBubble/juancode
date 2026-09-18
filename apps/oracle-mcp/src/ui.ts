@@ -164,6 +164,14 @@ export const consoleHtml = /* html */ `<!doctype html>
   .b-p2 { background: rgba(252,192,67,.14); color: var(--warn); box-shadow: inset 0 0 0 1px rgba(252,192,67,.22); }
   .b-p3,.b-p4 { background: rgba(152,162,182,.10); color: var(--faint); box-shadow: inset 0 0 0 1px var(--line-soft); }
   .spacer { margin-left: auto; }
+  /* The heavy queue's slot stepper: small enough to sit inside a section head,
+     still a 28px tap target. */
+  .slot-step {
+    flex: none; min-width: 28px; min-height: 28px; padding: 0; border: 0;
+    border-radius: 999px; background: var(--panel); color: var(--dim);
+    box-shadow: inset 0 0 0 1px var(--line-soft); font-size: 15px; line-height: 1;
+  }
+  .slot-step:active { transform: scale(.94); }
 
   /* ── Forms ────────────────────────────────────────────── */
   label { display: block; font-size: 12px; font-weight: 600; color: var(--dim); margin: 12px 0 5px; }
@@ -477,6 +485,17 @@ export const consoleHtml = /* html */ `<!doctype html>
   .live-foot .lq:active, .live-foot .ls:active { transform: scale(.94); }
   .live-foot button:disabled { opacity: .45; }
 
+  /* Control keys (juancode-uigs): a reply is pasted literally, so a prompt driven by
+     arrows + Enter — which is what claude stops on — is only answerable from here. */
+  .live-keys { display: flex; gap: 6px; padding: 8px 0 0; }
+  .live-keys button {
+    flex: 1; min-width: 0; height: 34px; border: 0; border-radius: 9px;
+    background: var(--panel-2); color: var(--txt); font-size: 13px; font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--line); transition: transform .08s, opacity .15s;
+  }
+  .live-keys button:active { transform: scale(.94); }
+  .live-keys button:disabled { opacity: .45; }
+
   /* ── Settings (keyboard shortcuts) ── */
   .gear {
     flex: none; margin-left: 8px; width: 34px; height: 34px; border-radius: 999px;
@@ -585,6 +604,13 @@ export const consoleHtml = /* html */ `<!doctype html>
 
       <div class="sec-head">Running &amp; recent <span id="s-count" class="count" hidden></span></div>
       <div id="sessions-list"></div>
+      <div class="sec-head" id="heavy-head" hidden>Heavy queue
+        <span id="h-count" class="count" hidden></span>
+        <span class="count" id="h-slots" title="running / slots"></span>
+        <button class="slot-step" id="h-less" aria-label="Fewer slots">&minus;</button>
+        <button class="slot-step" id="h-more" aria-label="More slots">+</button>
+      </div>
+      <div id="heavy-list"></div>
     </section>
 
     <!-- ── Chat ───────────────────────────────────────── -->
@@ -628,6 +654,14 @@ export const consoleHtml = /* html */ `<!doctype html>
       <button id="live-close" class="lx" aria-label="Close live view">✕</button>
     </div>
     <div id="live-screen" class="live-screen"><pre id="live-pre"></pre></div>
+    <div id="live-keys" class="live-keys">
+      <button data-key="Escape" title="Escape (interrupt the turn)">Esc</button>
+      <button data-key="C-c" title="Ctrl-C (signal the CLI)">⌃C</button>
+      <button data-key="Up" title="Arrow up">↑</button>
+      <button data-key="Down" title="Arrow down">↓</button>
+      <button data-key="Tab" title="Tab">⇥</button>
+      <button data-key="Enter" title="Enter (submit)">⏎</button>
+    </div>
     <div class="live-foot">
       <textarea id="live-in" placeholder="Reply into this session…" rows="1"></textarea>
       <button id="live-queue" class="lq" aria-label="Queue for next idle" title="Queue for next idle">⏳</button>
@@ -701,7 +735,7 @@ document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x === b));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === b.dataset.tab));
   if (b.dataset.tab === "issues") loadIssues();
-  if (b.dataset.tab === "sessions") loadSessions();
+  if (b.dataset.tab === "sessions") { loadSessions(); loadHeavy(); }
   if (b.dataset.tab === "chat") $("#c-input").focus();
 });
 
@@ -710,7 +744,7 @@ document.addEventListener("click", (e) => {
   const r = e.target.closest && e.target.closest("[data-retry]");
   if (!r) return;
   if (r.dataset.retry === "issues") loadIssues();
-  if (r.dataset.retry === "sessions") loadSessions();
+  if (r.dataset.retry === "sessions") { loadSessions(); loadHeavy(); }
 });
 
 // ── Issues ────────────────────────────────────────────────
@@ -780,6 +814,83 @@ async function loadSessions(){
     if (pendingReplyId) { openSessionReply(pendingReplyId); pendingReplyId = null; }
   } catch(e){ setConn(false); el.innerHTML = errState(e.message, "sessions"); }
 }
+
+// ── Heavy queue ───────────────────────────────────────────
+// The machine's shared "heavy" slot queue, as the core reports it. Memory-heavy
+// commands (CI, integration tests) are serialized across every agent session on
+// that Mac, so "why is nothing moving" is often answered here and nowhere else.
+// Read-through: the core owns the registry, this only draws it and asks.
+async function loadHeavy(){
+  const el = $("#heavy-list"), head = $("#heavy-head");
+  try {
+    const data = await api("/api/heavy");
+    if (!data.supported) {
+      head.hidden = true; el.innerHTML = "";
+      return;
+    }
+    head.hidden = false;
+    const q = data.queue;
+    // Null is "the core has not answered the subscribe yet", which is a beat rather
+    // than an empty queue: this GET is what subscribes.
+    if (!q) { el.innerHTML = skeletons(1); setTimeout(loadHeavy, 700); return; }
+    setCount("#h-count", q.running.length + q.waiting.length);
+    $("#h-slots").textContent = q.running.length + "/" + q.slots;
+    if (!q.running.length && !q.waiting.length) {
+      el.innerHTML = emptyState("⚡", "Nothing queued", "Heavy commands run one at a time; anything waiting shows up here in the order it will run.");
+      return;
+    }
+    const row = (j, place) => {
+      const label = place === null
+        ? '<span class="badge b-ready">slot '+j.slot+'</span>'
+        : '<span class="badge b-open">#'+place+'</span>';
+      const front = place !== null && place > 1
+        ? '<button class="hfront" data-front="'+j.pid+'">↑ Next</button>' : '';
+      return '<div class="card item">'
+        + '<div class="row"><span class="title mono">'+esc(j.cmd||"(unknown job)")+'</span>'
+        + '<span class="spacer"></span>'+label
+        + front
+        + '<button class="sdel" data-hcancel="'+j.pid+'" aria-label="Cancel job">✕</button></div>'
+        + '<div class="meta"><span class="mono">'+esc(j.cwd||"")+'</span>'
+        + '<span class="mono">pid '+j.pid+'</span>'
+        + (j.prio ? '<span class="badge b-open">prio '+j.prio+'</span>' : '')
+        + '</div></div>';
+    };
+    el.innerHTML = q.running.map((j) => row(j, null)).join("")
+      + q.waiting.map((j, i) => row(j, i + 1)).join("");
+  } catch(e){ head.hidden = true; el.innerHTML = ""; }
+}
+
+$("#heavy-list").addEventListener("click", async (e) => {
+  const front = e.target.closest("[data-front]"), cancel = e.target.closest("[data-hcancel]");
+  if (front) {
+    // front:true rather than a number: the arithmetic for "run this next" is one
+    // better than the best queued priority, and the sidecar computes it off the
+    // queue the core last sent rather than off whatever this page is showing.
+    await api("/api/heavy/priority", { method:"POST", body: JSON.stringify({ pid: Number(front.dataset.front), front: true }) }).catch(() => {});
+    setTimeout(loadHeavy, 400);
+    return;
+  }
+  if (cancel) {
+    const pid = Number(cancel.dataset.hcancel);
+    if (!confirm("Stop this heavy job? The session that started it sees the command fail.")) return;
+    await api("/api/heavy/cancel", { method:"POST", body: JSON.stringify({ pid }) }).catch(() => {});
+    setTimeout(loadHeavy, 400);
+  }
+});
+
+$("#h-more").onclick = async () => {
+  const q = (await api("/api/heavy").catch(() => null))?.queue;
+  if (!q) return;
+  await api("/api/heavy/slots", { method:"POST", body: JSON.stringify({ slots: Math.min(8, q.slots + 1) }) }).catch(() => {});
+  setTimeout(loadHeavy, 400);
+};
+$("#h-less").onclick = async () => {
+  const q = (await api("/api/heavy").catch(() => null))?.queue;
+  if (!q || q.slots <= 1) return;
+  await api("/api/heavy/slots", { method:"POST", body: JSON.stringify({ slots: q.slots - 1 }) }).catch(() => {});
+  setTimeout(loadHeavy, 400);
+};
+
 $("#d-go").onclick = async () => {
   const project = $("#d-project").value.trim(), prompt = $("#d-prompt").value.trim();
   if (!project || !prompt) { alert("Project path and prompt are both required."); return; }
@@ -947,6 +1058,25 @@ async function liveDeliver(queue){
   } catch(e){ setConn(false); alert("Couldn't deliver: " + e.message); }
   sb.disabled = qb.disabled = false;
 }
+// Named control keys (juancode-uigs). The button sends a NAME; the core owns the
+// vocabulary and resolves it to bytes, so nothing here spells an escape sequence and
+// nothing goes through bracketed paste — which is what makes /api/reply literal.
+async function liveKey(name){
+  const id = $("#live-view").dataset.id;
+  if (!id) return;
+  const pad = $("#live-keys");
+  pad.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  try {
+    await api("/api/keys", { method:"POST", body: JSON.stringify({ sessionId: id, keys: [name] }) });
+    setConn(true);
+    flashLiveStatus(name + " ✓");
+  } catch(e){ setConn(false); alert("Couldn't send " + name + ": " + e.message); }
+  pad.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+}
+$("#live-keys").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-key]");
+  if (b) liveKey(b.dataset.key);
+});
 $("#live-close").onclick = closeLiveView;
 $("#live-send").onclick = () => liveDeliver(false);
 $("#live-queue").onclick = () => liveDeliver(true);
@@ -1386,7 +1516,7 @@ function reloadActiveTab(){
   const active = document.querySelector("nav button.active");
   const tab = active && active.dataset.tab;
   if (tab === "issues") loadIssues();
-  else if (tab === "sessions") loadSessions();
+  else if (tab === "sessions") { loadSessions(); loadHeavy(); }
   // Chat has no list to refresh; its SSE turn is one-shot per send.
 }
 const onResume = () => {
