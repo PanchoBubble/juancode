@@ -111,9 +111,16 @@ public struct TerminalDamage: Sendable, Equatable {
 /// become cheap projections of this model — see `snapshot()` and the damage stream.
 ///
 /// Phase 1 of juancode-a2h: this stands up ALONGSIDE the existing byte ring and the
-/// byte-fed `ActivityDetector`; it does not yet replace either. It is read-only with
-/// respect to the pty — `send` (host device-query responses) is intentionally a
-/// no-op so the model never double-answers a query the live view already handled.
+/// byte-fed `ActivityDetector`; it does not yet replace either.
+///
+/// Device queries (juancode-roi0): a child that asks the terminal a question —
+/// DSR (`ESC[6n`), primary DA, XTWINOPS size — blocks until it gets an answer. When
+/// a live view is on the session that view answers, and this model must stay quiet
+/// or the child reads the reply twice. When NOTHING is attached (headless
+/// `juancode-serve`, a pane that was never revealed, every unattended session) there
+/// is no view to answer, so the model answers from its own VT state instead of
+/// leaving the child hung forever. `setDeviceQueryResponder` installs the pty sink;
+/// `claimDeviceQueries` is how an attached view takes the duty back.
 ///
 /// Thread-safety: SwiftTerm's `Terminal` is not thread-safe, so every access (feed,
 /// resize, and all reads) goes through `lock`. Feed happens on the session workQueue;
@@ -126,6 +133,8 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     /// executor before touching UI.
     public typealias DamageListener = @Sendable (_ damage: TerminalDamage) -> Void
     public typealias TitleListener = @Sendable (_ title: String) -> Void
+    /// Sink for an answered device query — the session's pty writer.
+    public typealias DeviceQueryResponder = @Sendable (_ response: [UInt8]) -> Void
 
     private let lock = NSRecursiveLock()
     private var terminal: Terminal!
@@ -143,6 +152,21 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
     /// detector, and the main thread's own feed behind a SQLite write (juancode-c438).
     private var pendingTitles: [String] = []
 
+    /// Where an answered device query goes: the session's pty writer, installed by
+    /// `Session` once the child is spawned. Nil means nothing can be answered (a
+    /// bare model in a test, the detector's private mirror), so `send` drops.
+    private var deviceQueryResponder: DeviceQueryResponder?
+    /// Outstanding `claimDeviceQueries` handles. While this is non-zero a live view
+    /// is answering the child itself, so the model stays the no-op it always was.
+    private var deviceQueryClaims = 0
+    /// Replies the parser produced during the current feed, written out by
+    /// `drainPendingResponses` once both locks are released — same reason as
+    /// `pendingTitles` (juancode-c438): a pty write inside `terminal.feed` would hold
+    /// the global parse lock across a syscall that can block on a full input buffer.
+    private var pendingResponses: [[UInt8]] = []
+    /// How many device queries this model has answered, for tests and diagnostics.
+    private var _answeredDeviceQueries = 0
+
     /// - Parameters:
     ///   - cols/rows: initial grid, seeded with the pty's spawn size.
     ///   - scrollbackLines: cap on retained scrollback lines (bounds per-session
@@ -155,6 +179,71 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         opts.rows = max(1, rows)
         opts.scrollback = max(0, scrollbackLines)
         self.terminal = Terminal(delegate: self, options: opts)
+    }
+
+    // MARK: - device queries (juancode-roi0)
+
+    /// Install (or clear) the sink an answered device query is written to. `Session`
+    /// points it at the pty once the child is spawned; with no responder the model
+    /// keeps the read-only behaviour it had before — every query is dropped.
+    public func setDeviceQueryResponder(_ responder: DeviceQueryResponder?) {
+        lock.withLock { deviceQueryResponder = responder }
+    }
+
+    /// Claim device-query duty for an attached live view: while the returned handle
+    /// is outstanding this model answers nothing, because that view answers the child
+    /// itself and two replies would land in the pty as garbage keystrokes. Release the
+    /// handle when the view detaches and the model takes the duty back.
+    ///
+    /// Claims nest (two panes on one session) and the handle is idempotent.
+    ///
+    /// Atomicity: this takes `lock`, the same lock `feed` holds for the whole parse.
+    /// So a claim taken or released while a chunk is being parsed lands strictly
+    /// before or strictly after every query in that chunk — each one is answered by
+    /// the model or by the view, never by both.
+    @discardableResult
+    public func claimDeviceQueries() -> Cancel {
+        lock.withLock { deviceQueryClaims += 1 }
+        let released = OnceFlag()
+        return { [weak self] in
+            guard released.take(), let self else { return }
+            lock.withLock { deviceQueryClaims = max(0, deviceQueryClaims - 1) }
+        }
+    }
+
+    /// True while some live view holds a `claimDeviceQueries` handle.
+    public var hasDeviceQueryClaim: Bool { lock.withLock { deviceQueryClaims > 0 } }
+
+    /// True when a query arriving right now would be answered by this model.
+    public var answersDeviceQueries: Bool {
+        lock.withLock { deviceQueryClaims == 0 && deviceQueryResponder != nil }
+    }
+
+    /// How many device queries this model has answered.
+    public var answeredDeviceQueries: Int { lock.withLock { _answeredDeviceQueries } }
+
+    /// Write out the replies the last parse produced, with no lock held — a pty write
+    /// can block on a full input buffer, and holding the global parse lock across that
+    /// would stall every other session's parse (juancode-c438). A no-op (one
+    /// uncontended lock acquisition) for the overwhelming majority of feeds, which
+    /// carry no query at all.
+    private func drainPendingResponses() {
+        let (responses, responder) = lock.withLock { () -> ([[UInt8]], DeviceQueryResponder?) in
+            guard !pendingResponses.isEmpty else { return ([], nil) }
+            guard let responder = deviceQueryResponder else {
+                // The sink went away between the parse and here (session exiting):
+                // drop the replies rather than hold them for a later responder, which
+                // would answer a query the child asked minutes ago.
+                pendingResponses.removeAll(keepingCapacity: true)
+                return ([], nil)
+            }
+            let out = pendingResponses
+            pendingResponses.removeAll(keepingCapacity: true)
+            _answeredDeviceQueries += out.count
+            return (out, responder)
+        }
+        guard let responder else { return }
+        for r in responses { responder(r) }
     }
 
     // MARK: - feed / resize (write side, on the session workQueue)
@@ -179,6 +268,10 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
                 return TerminalDamage(startY: range.startY, endY: range.endY)
             }
         }
+        // A query the child is BLOCKED on goes out first, ahead of the damage
+        // listeners (one of which persists to sqlite) — same workQueue block as the
+        // feed, so the reply is in the pty before the next chunk is parsed.
+        drainPendingResponses()
         // Both listener kinds fire with no lock held, so a listener can do real work
         // (persist, read the screen back) without stalling every other parse.
         if let damage {
@@ -197,6 +290,7 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         SwiftTermParse.locked {
             lock.withLock { terminal.resize(cols: cols, rows: rows) }
         }
+        drainPendingResponses() // a reflow can answer a pending query too
         drainPendingTitles() // a reflow can dispatch a queued OSC too
     }
 
@@ -536,10 +630,19 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
 
     // MARK: - TerminalDelegate
 
-    // Host device-query responses (DA, DSR, cursor reports). Intentionally dropped:
-    // this is a read-only mirror; the live view answers these, and answering twice
-    // would corrupt the pty input stream.
-    public func send(source: Terminal, data: ArraySlice<UInt8>) {}
+    // Host device-query responses (DA, DSR, cursor reports, XTWINOPS size). Answered
+    // only when this model is the session's sole VT — see `claimDeviceQueries`. The
+    // decision is taken here, under the lock that `feed` holds for the whole parse,
+    // so a claim taken or released concurrently lands strictly before or strictly
+    // after this query: it is answered by the model or by the view, exactly once,
+    // never twice. The bytes themselves go out in `drainPendingResponses`, after the
+    // parse, so no pty write happens under the parse lock.
+    public func send(source: Terminal, data: ArraySlice<UInt8>) {
+        lock.withLock {
+            guard deviceQueryClaims == 0, deviceQueryResponder != nil else { return }
+            pendingResponses.append(Array(data))
+        }
+    }
 
     public func showCursor(source: Terminal) { lock.withLock { cursorVisible = true } }
     public func hideCursor(source: Terminal) { lock.withLock { cursorVisible = false } }
@@ -567,6 +670,20 @@ public final class SessionTerminalModel: NSObject, TerminalDelegate, @unchecked 
         }
         for title in titles {
             for l in listeners { l(title) }
+        }
+    }
+}
+
+/// A one-shot latch, so a cancel handle called twice only undoes its work once.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+    /// True the first time it is called, false every time after.
+    func take() -> Bool {
+        lock.withLock {
+            if taken { return false }
+            taken = true
+            return true
         }
     }
 }

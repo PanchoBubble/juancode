@@ -195,6 +195,16 @@ public enum Config {
     public static var useModelSeed: Bool {
         env["JUANCODE_RAW_REPLAY"] != "1"
     }
+
+    /// Answer VT device queries (DSR `ESC[6n`, primary DA, XTWINOPS size) out of the
+    /// session's headless VT model while no live view is attached (juancode-roi0) —
+    /// otherwise a child that asks the terminal a question with nobody watching waits
+    /// for a reply that never comes. On by default; set `JUANCODE_VT_RESPOND=0` to go
+    /// back to dropping them, which is the right switch if a core ever streams raw
+    /// bytes to a view whose own replies this can't see.
+    public static var answerDetachedDeviceQueries: Bool {
+        env["JUANCODE_VT_RESPOND"] != "0"
+    }
 }
 
 /// Which harness core a launch drives: the in-process Swift core, or the

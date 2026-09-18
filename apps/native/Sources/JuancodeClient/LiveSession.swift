@@ -114,6 +114,13 @@ public protocol LiveSession: AnyObject, Sendable {
     func repaintFromModel(matching grid: (cols: Int, rows: Int)?,
                           _ onBytes: @escaping OutputListener)
 
+    /// Tell the core a live view is attached and answers the child's VT device
+    /// queries itself, so the core's headless model stops answering them
+    /// (juancode-roi0). Release the handle on detach. Claim before subscribing,
+    /// release after cancelling — see `Session.attachLiveView`.
+    @discardableResult
+    func attachLiveView() -> Cancel
+
     // MARK: - Lifecycle and meta (wire: kill, exit, activity)
 
     /// Terminate the pty.
@@ -157,6 +164,13 @@ public extension LiveSession {
     func insert(_ text: String) { insert(text, onResult: nil) }
 
     func autoSubmit(_ text: String) { autoSubmit(text, onResult: nil) }
+
+    /// A remote core is not told about the claim: the wire has no op for it, and the
+    /// only core behind it today (`juancoded`) does not answer device queries out of
+    /// its own VT state. Followed up in its own ticket; until then a view over the
+    /// wire answers exactly as it always did.
+    @discardableResult
+    func attachLiveView() -> Cancel { {} }
 }
 
 /// The in-process core's session *is* the handle, so conformance is declarative.

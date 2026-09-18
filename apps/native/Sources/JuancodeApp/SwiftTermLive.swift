@@ -849,6 +849,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         var onOpenPath: ((String, Int?) -> Void)?
         private weak var view: TerminalView?
         private var cancel: (() -> Void)?
+        /// Device-query duty, held for as long as this view is fed (juancode-roi0).
+        /// While we hold it the core's headless model answers nothing: this view's
+        /// own `send` answers the child, and two replies would land as keystrokes.
+        private var deviceQueries: (() -> Void)?
         /// Batches pty output into one `feed()` per runloop turn (juancode-kdn).
         private var feedCoalescer: TerminalFeedCoalescer?
         private var wheelMonitor: Any?
@@ -930,6 +934,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                 }
             }
             self.heal = heal
+            // Claim before subscribing, so no chunk is ever answered by both this
+            // view and the headless model (`Session.attachLiveView`).
+            deviceQueries = session.attachLiveView()
             if Config.useModelSeed {
                 // The seed is synthesized at the MODEL's grid (== the pty's). Record
                 // it so the settle check below can tell whether the seed is still
@@ -1134,6 +1141,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             heal?.disarm(); heal = nil
             cancel?()
             cancel = nil
+            // After the cancel: the model takes device-query duty back only once no
+            // further chunk can reach this view.
+            deviceQueries?()
+            deviceQueries = nil
         }
 
         // MARK: TerminalViewDelegate

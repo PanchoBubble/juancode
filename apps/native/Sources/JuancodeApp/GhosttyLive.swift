@@ -312,6 +312,11 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private weak var view: TerminalView?
         private var gsession: InMemoryTerminalSession?
         private var cancel: (() -> Void)?
+        /// Device-query duty, held for exactly as long as `streaming` (juancode-roi0).
+        /// An occluded pane's surface stops seeing the child's queries, so the core's
+        /// headless model has to answer them again — which is what releasing this on
+        /// suspend arranges.
+        private var deviceQueries: (() -> Void)?
         private var cancelGrid: (() -> Void)?
         private var streaming = false
         /// Batches pty output into one `receive()` per runloop turn (juancode-kdn).
@@ -456,6 +461,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 self?.heal.noteOutput()
             }
             feedCoalescer = coalescer
+            // Claim before subscribing, so no chunk is ever answered by both this
+            // surface and the headless model (`Session.attachLiveView`).
+            deviceQueries = session.attachLiveView()
             if Config.useModelSeed {
                 // Seed and subscribe atomically on the session workQueue: the clean
                 // seed and the live stream partition with no gap, so a brand-new
@@ -564,6 +572,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         private func suspendStreaming() {
             guard streaming else { return }
             cancel?(); cancel = nil
+            deviceQueries?(); deviceQueries = nil
             feedCoalescer = nil
             streaming = false
         }
@@ -583,6 +592,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
                 self?.heal.noteOutput()
             }
             feedCoalescer = coalescer
+            deviceQueries = session.attachLiveView()
             cancel = session.subscribeFromModelSeed { bytes in coalescer.append(bytes) }
         }
 
@@ -654,6 +664,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             resizeWork?.cancel(); resizeWork = nil
             heal.disarm()
             cancel?(); cancel = nil
+            deviceQueries?(); deviceQueries = nil
             cancelGrid?(); cancelGrid = nil
             streaming = false
             gsession = nil

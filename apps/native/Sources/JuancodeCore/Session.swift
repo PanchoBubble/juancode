@@ -520,6 +520,14 @@ public final class Session: @unchecked Sendable {
             throw SessionError.spawnFailed
         }
         self.proc = proc
+        // With no live view on this session, the headless model is the only VT the
+        // child has — so let it answer the child's device queries (juancode-roi0).
+        // An attached pane takes the duty back via `attachLiveView`.
+        if Config.answerDetachedDeviceQueries {
+            terminalModel.setDeviceQueryResponder { [weak self] response in
+                self?.respondToDeviceQuery(response)
+            }
+        }
         logEvent("spawn", ["mode": spawnMode, "provider": meta.provider.rawValue,
                            "cols": "\(cols)", "rows": "\(rows)"])
 
@@ -724,6 +732,31 @@ public final class Session: @unchecked Sendable {
 
     public func write(_ text: String) {
         write(Array(text.utf8))
+    }
+
+    /// A device-query reply from the headless model, on its way to the child. Not
+    /// `write`: the terminal answering a question the child asked is not the user
+    /// typing, so it must not move `lastInputMs` — the reaper reads that as "someone
+    /// is here", and a TUI that polls the cursor position would keep an abandoned
+    /// session looking attended forever.
+    private func respondToDeviceQuery(_ response: [UInt8]) {
+        guard isRunning, !response.isEmpty else { return }
+        proc?.write(response)
+    }
+
+    /// Announce that a live view is attached to this session and answers the child's
+    /// VT device queries itself, so the headless model stops answering them
+    /// (juancode-roi0). Release the returned handle when the view detaches — a
+    /// pool-hidden pane that stopped feeding counts as detached, since its surface no
+    /// longer sees the queries.
+    ///
+    /// Claim BEFORE subscribing, release AFTER cancelling: the overlap costs at worst
+    /// an unanswered query in the chunk that straddles the attach, and the child
+    /// re-asks. The reverse order would let one chunk be answered twice, which lands
+    /// in the pty as garbage keystrokes.
+    @discardableResult
+    public func attachLiveView() -> Cancel {
+        terminalModel.claimDeviceQueries()
     }
 
     // MARK: - seeding a fresh session (autoSubmit)
