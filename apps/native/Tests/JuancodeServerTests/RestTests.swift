@@ -149,6 +149,33 @@ final class RestTests: XCTestCase {
         }
     }
 
+    /// The distinction juancode-p8kx was filed for. This core serves none of the three
+    /// per-session reads itself — it only relays them — and a router miss is a bare 404,
+    /// which is the SAME answer it gives for a session id it does not hold. A client
+    /// cannot act on a status that means two things, and one did not: the sidecar read
+    /// the 404 from `/scrollback` as "no such session" and told callers a live session
+    /// was gone. An unserved path says so instead.
+    func testAnUnservedApiPathIs501AndNamesItself() async throws {
+        try await withServer { client, store in
+            store.insert(Self.sampleMeta("s1"))
+            for leaf in ["scrollback", "transcript", "messages"] {
+                try await client.execute(uri: "/api/sessions/s1/\(leaf)", method: .get) { res in
+                    XCTAssertEqual(res.status, .notImplemented, leaf)
+                    let error = (Self.json(res) as? [String: Any])?["error"] as? String
+                    XCTAssertEqual(error?.contains("/api/sessions/s1/\(leaf)"), true, leaf)
+                }
+            }
+            // And nothing above it moved: a served route still answers, and a session
+            // the store does not hold is still a 404 on one.
+            try await client.execute(uri: "/api/health", method: .get) { res in
+                XCTAssertEqual(res.status, .ok)
+            }
+            try await client.execute(uri: "/api/sessions/no-such", method: .get) { res in
+                XCTAssertEqual(res.status, .notFound)
+            }
+        }
+    }
+
     func testDeleteSession() async throws {
         try await withServer { client, store in
             store.insert(Self.sampleMeta("s1"))

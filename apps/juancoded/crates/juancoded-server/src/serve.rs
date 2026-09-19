@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{ws::WebSocketUpgrade, State};
-use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::Router;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{any, get};
+use axum::{Json, Router};
 use tracing::{info, warn};
 
 use juancoded_cordis::services::pty::{PtySpawnApi, PtySpawnService};
@@ -236,7 +237,31 @@ pub(crate) fn router(handles: CoreHandles) -> Router {
         // The GitHub reads and the review surface. Same reason as the reads above: the
         // relay 501s them, so without these the phone console has no PR view at all.
         .merge(crate::github::routes())
+        // Everything else under `/api`. A router miss here would be a bare 404, which
+        // is the SAME answer this core gives for a session id it does not hold — and a
+        // client cannot act on a status that means two things: the sidecar read one as
+        // the other and told callers a live session did not exist (juancode-p8kx). A
+        // 501 naming the path says which of the two it is, and it is what the Swift
+        // relay already answers for a path the core behind it does not serve.
+        .route("/api/{*rest}", any(unserved))
         .with_state(handles)
+}
+
+/// The honest answer for an `/api` path this core has no route for.
+///
+/// Worded like `CoreProxyServer.unservedMessage` on the Swift side, because a client
+/// reads one sentence shape whichever process answered it.
+async fn unserved(uri: axum::http::Uri) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": format!(
+                "{} is not served with the rust core: this daemon has no route for it.",
+                uri.path()
+            )
+        })),
+    )
+        .into_response()
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(handles): State<CoreHandles>) -> impl IntoResponse {
@@ -357,6 +382,39 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn status_of(path: &str) -> (StatusCode, String) {
+        let response = router(crate::testing::handles())
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .expect("routed");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// The distinction juancode-p8kx was filed for: a path this core has no route for
+    /// is a 501 naming it, NOT the 404 that a session id this core does not hold gets.
+    /// A client that cannot tell those apart reports a live session as missing.
+    #[tokio::test]
+    async fn an_api_path_with_no_route_is_a_501_and_a_real_route_still_answers() {
+        let (status, body) = status_of("/api/sessions/nope/does-not-exist").await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert!(body.contains("/api/sessions/nope/does-not-exist"), "{body}");
+
+        // The wildcard must not shadow the routes merged before it.
+        let (status, body) = status_of("/api/health").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // And a session id nobody holds is still a 404 on a route that does exist.
+        let (status, body) = status_of("/api/sessions/nope/scrollback").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
 
     #[tokio::test]
     async fn a_missing_or_stale_socket_is_not_live_but_a_bound_one_is() {

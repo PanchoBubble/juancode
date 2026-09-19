@@ -168,13 +168,14 @@ final class CoreProxyServerTests: XCTestCase {
     func testUnservedEndpointsSayWhyIn501() async throws {
         let mirror = FakeMirror([])
         try await withProxy(mirror) { client in
-            // `/diff` moved OFF this list on 2026-09-18 (juancode-52e8.14.5): the
-            // daemon serves the working tree now, so the relay forwards it rather
-            // than refusing it. `/api/sessions/s1/review` took its place as an
-            // endpoint neither core answers on this relay.
+            // Endpoints leave this list as the daemon grows them: `/diff` went with
+            // juancode-52e8.14.5 and `/review` with juancode-52e8.14.6, both now
+            // forwarded rather than refused. So the one asserted here has to be a path
+            // with NO route on the relay at all — a proxied leaf whose session the
+            // mirror does not hold answers 404, which is a different sentence.
             for (uri, method) in [("/api/pr-webhook", HTTPRequest.Method.post),
                                   ("/api/tracked-prs", .get),
-                                  ("/api/sessions/s1/review", .get),
+                                  ("/api/sessions/s1/beads", .get),
                                   ("/presence", .get)] {
                 try await client.execute(uri: uri, method: method) { res in
                     XCTAssertEqual(res.status, .notImplemented, "\(uri)")

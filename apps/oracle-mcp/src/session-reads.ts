@@ -83,9 +83,6 @@ export interface SessionMessages {
   messages: SessionMessage[];
 }
 
-/** Raised when the core behind the native server does not serve a read (HTTP 501),
- *  so a caller can say "this core cannot" rather than "this session is empty". The
- *  distinction is the whole reason the routes 501 instead of answering `[]`. */
 /** One file's change in a session's working tree, as `GET /api/sessions/:id/diff`
  *  answers it (juancode-52e8.14.5). `diff` is the raw unified patch; it is empty for a
  *  binary file and for one past the core's per-file cap, which `truncated` tells apart
@@ -133,6 +130,9 @@ export interface SessionWorktree {
   lockedReason?: string;
 }
 
+/** Raised when the core behind the native server does not serve a read (HTTP 501),
+ *  so a caller can say "this core cannot" rather than "this session is empty". The
+ *  distinction is the whole reason the routes 501 instead of answering `[]`. */
 export class UnservedRead extends Error {}
 
 /** Raised when the session id is not one the core holds. */
@@ -155,30 +155,62 @@ async function request(id: string, leaf: string, params?: URLSearchParams): Prom
       `Couldn't reach the juancode app at ${nativeApiBase()} — is the native app running on the Mac?`,
     );
   }
-  if (res.status === 404) throw new NoSuchSession(`Session ${id} not found`);
-  if (res.status === 409) throw new SessionNotRunning(await errorText(res));
-  if (res.status === 501) {
-    throw new UnservedRead(
-      `The core serving ${nativeApiBase()} doesn't serve /${leaf} — ${await errorText(res)}`,
-    );
-  }
-  if (!res.ok) throw new Error(`GET /api/sessions/${id}/${leaf} returned ${res.status}`);
-  return res;
+  if (res.ok) return res;
+  const said = await errorText(res);
+  if (res.status === 404) throw notFound(id, leaf, said);
+  if (res.status === 409) throw new SessionNotRunning(said.text);
+  if (res.status === 501) throw unserved(leaf, said.text);
+  throw new Error(`GET /api/sessions/${id}/${leaf} returned ${res.status}`);
 }
 
 async function read<T>(id: string, leaf: string, params?: URLSearchParams): Promise<T> {
   return (await (await request(id, leaf, params)).json()) as T;
 }
 
+/** A 404 is two answers wearing one status, and which one it is decides what a caller
+ *  says to a person: "that session is gone" or "this core cannot answer that".
+ *
+ *  A route the core SERVES answers a not-found with an error of its own — both cores
+ *  render `{"error": …}` for it. A path the core has no route for is a router miss,
+ *  which carries no such body, and that is what the Swift core answered for
+ *  `/scrollback`, `/transcript` and `/messages`: routes it only ever relayed to a
+ *  daemon (juancode-p8kx). Read as "no such session" it told callers a live session
+ *  did not exist.
+ *
+ *  Both cores now answer 501 for a path they do not serve, so this is the fallback for
+ *  one that predates that — and for an intermediary that 404s before the core is even
+ *  reached, where "this route is not served here" is the truer of the two anyway. */
+function notFound(id: string, leaf: string, said: ErrorBody): NoSuchSession | UnservedRead {
+  if (said.fromCore) return new NoSuchSession(`Session ${id} not found`);
+  return unserved(
+    leaf,
+    `it answered 404 with no error of its own, which is a route that was never ` +
+      `registered rather than a session it does not hold`,
+  );
+}
+
+function unserved(leaf: string, why: string): UnservedRead {
+  return new UnservedRead(`The core serving ${nativeApiBase()} doesn't serve /${leaf} — ${why}`);
+}
+
+/** What an error response said, and whether the core itself is what said it. */
+interface ErrorBody {
+  text: string;
+  /** True when the body is the `{"error": …}` document both cores render for a
+   *  request a route of theirs refused — as opposed to an empty router miss or an
+   *  intermediary's page. */
+  fromCore: boolean;
+}
+
 /** The `error` field of a JSON error body, or the status line when there isn't one. */
-async function errorText(res: Response): Promise<string> {
+async function errorText(res: Response): Promise<ErrorBody> {
   try {
     const body = (await res.json()) as { error?: unknown };
-    if (typeof body.error === "string") return body.error;
+    if (typeof body.error === "string") return { text: body.error, fromCore: true };
   } catch {
     // A non-JSON body from an intermediary; the status is all there is to report.
   }
-  return `HTTP ${res.status}`;
+  return { text: `HTTP ${res.status}`, fromCore: false };
 }
 
 /** A session's retained pty bytes and the grid they were parsed at. */

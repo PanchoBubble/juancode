@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import HummingbirdWebSocket
+import HTTPTypes
 import NIOCore
 import JuancodeCore
 import JuancodeServices
@@ -368,6 +369,22 @@ public enum JuancodeServer {
                 .map { DirEntry(name: $0, path: (path as NSString).appendingPathComponent($0)) }
                 .sorted { $0.name.localizedCompare(b: $1.name) }
             return DirsResponse(path: base.path, parent: base.parent, entries: entries, search: false)
+        }
+
+        // Every other `/api` path. Registered last, so it only catches what nothing
+        // above claimed — and it has to catch them, because a router miss here is a
+        // bare 404: the same answer this core gives for a session id it does not hold.
+        // A client cannot act on a status that means two things, and one did not —
+        // the sidecar read the 404 from the unserved `/scrollback` as "no such
+        // session" and told callers a live session was gone (juancode-p8kx). This is
+        // the answer `CoreProxyServer` already gives for a path the core behind a
+        // relay does not serve, so both launches say the same thing.
+        for method: HTTPRequest.Method in [.get, .post, .put, .delete, .patch] {
+            router.on("/api/**", method: method) { req, _ -> Response in
+                throw APIError(.notImplemented,
+                               "\(req.uri.path) is not served with the swift core: "
+                                 + "this core has no route for it.")
+            }
         }
 
         return router

@@ -97,6 +97,22 @@ describe("the native server's per-session reads", () => {
     await expect(fetchMessages("s1")).resolves.toEqual({ sessionId: "s1", messages: [] });
   });
 
+  // The 404 that meant two things (juancode-p8kx). A core that SERVES the route and
+  // does not hold the id says so in an error body; a core with no route for the path
+  // at all misses its router, which carries no body — and reading that as "no such
+  // session" is how a caller was told a live session was gone. Both cores now 501 a
+  // path they do not serve; this is what a core that predates that still gets right.
+  it("reads a bodyless 404 as a route the core does not serve", async () => {
+    globalThis.fetch = (async () => new Response("", { status: 404 })) as unknown as typeof fetch;
+    const err = await fetchScrollback("s1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnservedRead);
+    expect((err as Error).message).toContain("doesn't serve /scrollback");
+
+    // And the one that IS a missing session stays a missing session.
+    stubFetch(404, { error: "no session s1" });
+    await expect(fetchScrollback("s1")).rejects.toBeInstanceOf(NoSuchSession);
+  });
+
   // The rendered screen is the read that does NOT need a width to travel with it: it
   // is the parsed grid, so there is nothing left to replay at the wrong one.
   it("reads the rendered screen as text, with history only when asked for", async () => {

@@ -1,0 +1,183 @@
+{
+  "id": "session-reads",
+  "title": "the three one-shot session reads, over HTTP",
+  "asserts": "the reads a client makes when it asks once and leaves \u2014 the retained pty bytes WITH the grid they were parsed at, the stored transcript records, and those records in chat shape \u2014 answer for a session the core holds, cut to the tail a `?limit` names, 404 for an id the core never held, and keep answering after the pty is gone, which is what makes the 409 on `/screen` an instruction to fall back rather than a dead end.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "transcript"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "sessionMeta",
+    "gridChange",
+    "screen",
+    "transcript"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "TRANSCRIPT hello\r"
+      },
+      "note": "the fake agent writes this turn into claude's own jsonl, which is what the transcript reads answer from; the pty bytes it also prints are the OTHER plane, and the scrollback read below is the one that answers from those"
+    },
+    {
+      "sleep": 6000,
+      "note": "a core's first bind attempt lands on the spawn banner, before this turn's file exists, so it backs off for BIND_RETRY; this outlasts that back-off"
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO reads-marker\r"
+      },
+      "note": "two jobs: a bound transcript is only polled for a session that has produced output, so this is what gets the turn read at all - and it is the byte the scrollback read is asserted on"
+    },
+    {
+      "sleep": 1500,
+      "note": "one pump tick plus room, so the turn has landed in the store these reads answer from"
+    },
+    {
+      "get": "/api/sessions/$session/scrollback",
+      "expectBody": {
+        "sessionId": "$session",
+        "cols": 80,
+        "rows": 24,
+        "scrollback": {
+          "$contains": "reads-marker"
+        }
+      },
+      "note": "cols/rows are not decoration: a byte ring replayed at a width it was not parsed at lands every hard wrap and absolute cursor move in the wrong cell, and the width is not recoverable from the bytes. They travel WITH them or the read is unusable"
+    },
+    {
+      "get": "/api/sessions/$session/transcript",
+      "expectBody": {
+        "sessionId": "$session",
+        "records": {
+          "$length": 3,
+          "$every": {
+            "session": "$session",
+            "source": "claude-jsonl",
+            "seq": {
+              "$type": "number"
+            }
+          },
+          "$some": {
+            "kind": "turnStart",
+            "prompt": "hello"
+          }
+        }
+      },
+      "note": "the same three records one turn makes on the wire - the prompt that opened it, the model request, and the prose - answered to a caller holding no subscription"
+    },
+    {
+      "get": "/api/sessions/$session/transcript?limit=1",
+      "expectBody": {
+        "records": {
+          "$length": 1,
+          "$every": {
+            "kind": "assistant"
+          }
+        }
+      },
+      "note": "`limit` is the TAIL, not the head: what a phone shows first is the end of the conversation"
+    },
+    {
+      "get": "/api/sessions/$session/messages",
+      "expectBody": {
+        "sessionId": "$session",
+        "messages": {
+          "$length": 2,
+          "$every": {
+            "seq": {
+              "$type": "number"
+            }
+          },
+          "$some": {
+            "role": "user",
+            "text": "hello"
+          }
+        }
+      },
+      "note": "the chat projection of the SAME records, not a second source: the step record carries no prose and is dropped, which is why two messages come out of three records - and `seq` survives the projection, because it is what a client pages and de-duplicates by"
+    },
+    {
+      "get": "/api/sessions/no-such-session-here/scrollback",
+      "status": 404
+    },
+    {
+      "get": "/api/sessions/no-such-session-here/transcript",
+      "status": 404
+    },
+    {
+      "get": "/api/sessions/no-such-session-here/messages",
+      "status": 404,
+      "note": "an id the core never held is a 404 on all three. A core that does not SERVE one of these paths must not answer 404 either - that status already means \"no such session\" here, and a client that cannot tell the two apart reports a live session as gone (juancode-p8kx). It 501s instead"
+    },
+    {
+      "send": {
+        "type": "kill",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "expect": {
+        "type": "exit",
+        "sessionId": "$session"
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "get": "/api/sessions/$session/scrollback",
+      "expectBody": {
+        "sessionId": "$session",
+        "scrollback": {
+          "$contains": "reads-marker"
+        }
+      },
+      "note": "the point of the whole read: these are STORED bytes, so they outlive the pty. `/screen` answers 409 once the pty is gone precisely so a caller comes here instead - a scrollback that died with the process would leave that 409 pointing at nothing"
+    },
+    {
+      "get": "/api/sessions/$session/messages",
+      "expectBody": {
+        "messages": {
+          "$some": {
+            "role": "assistant",
+            "text": {
+              "$contains": "answered hello"
+            }
+          }
+        }
+      },
+      "note": "and so does the transcript: a notification quoting what the agent said is written after the session ends more often than during it"
+    }
+  ]
+}
