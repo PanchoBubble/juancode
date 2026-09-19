@@ -218,8 +218,9 @@ func isCodexReviewLimitNotice(_ body: String) -> Bool {
 }
 
 /// Comma-join distinct, non-empty `@author`s in first-seen order (for summaries).
-/// Shared with the Linear issue tracker (`classifyIssueActivity`).
-func orderedUniqueAuthors(_ logins: [String]) -> String {
+/// `public` because the Linear issue tracker (`classifyIssueActivity`) shares it from
+/// `JuancodeDesktop` — it used to be a same-module call.
+public func orderedUniqueAuthors(_ logins: [String]) -> String {
     var seen = Set<String>()
     var out: [String] = []
     for l in logins where !l.isEmpty && seen.insert(l).inserted { out.append("@\(l)") }

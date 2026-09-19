@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// Port of `apps/server/src/beads.ts`. Lists a work folder's bd (beads) issues,
 /// flagged ready/blocked, degrading gracefully (never throwing) when bd is

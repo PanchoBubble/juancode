@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// Linear GraphQL access for the tracked-issue engine (juancode-z4v). The twin of
 /// the `gh`-shelling functions in `Gh.swift`, but Linear has no CLI so we talk to

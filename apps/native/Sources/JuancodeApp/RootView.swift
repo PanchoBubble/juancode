@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 import JuancodeClient
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 struct RootView: View {

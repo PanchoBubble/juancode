@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 // MARK: - Prompt-template palette (juancode-2vd)

@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// Tracked-issue engine for juancode-z4v — the Linear twin of the tracked-PR engine
 /// (`TrackedPr.swift`). Once a Linear issue is "tracked", a dedicated agent session

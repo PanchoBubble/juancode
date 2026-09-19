@@ -4,6 +4,7 @@ import AppKit
 import SwiftUI
 import OSLog
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 import JuancodeClient
 

@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "JuancodePersistence", targets: ["JuancodePersistence"]),
         .library(name: "JuancodeServices", targets: ["JuancodeServices"]),
         .library(name: "JuancodeServer", targets: ["JuancodeServer"]),
+        .library(name: "JuancodeDesktop", targets: ["JuancodeDesktop"]),
         .library(name: "JuancodeClient", targets: ["JuancodeClient"]),
         .executable(name: "juancode-smoke", targets: ["Smoke"]),
         // Headless server runner — answers port 4280 without the GUI. Boots the
@@ -83,6 +84,24 @@ let package = Package(
             name: "JuancodeServices",
             dependencies: ["JuancodeCore"]
         ),
+        // Desktop-local logic (juancode-rr6m): the non-UI half of features that only
+        // ever run where the SwiftUI app runs — MCP/auth health, bd reads, Linear issue
+        // tracking, AI settings patching, recurring tasks, session/prompt templates.
+        //
+        // Its own target rather than a corner of `JuancodeServices` because the epic's
+        // "no permanent forks" rule needs `ls Sources/JuancodeServices` to be an honest
+        // answer to "what is left to port". Nothing here has a Rust counterpart and
+        // nothing here is meant to get one, so it must not be reachable from a core
+        // path: `JuancodeApp` is the ONLY target allowed to depend on this. Adding it
+        // to `JuancodeServer` or `JuancodeClient` is the mistake this target exists to
+        // make impossible.
+        //
+        // Not `Sources/JuancodeApp`, which is an executable target with no test target
+        // of its own — moving these there would have dropped 857 lines of tests.
+        .target(
+            name: "JuancodeDesktop",
+            dependencies: ["JuancodeCore", "JuancodeServices"]
+        ),
         // Embedded WS+HTTP server (juancode-u34.3): Hummingbird app serving the
         // protocol.ts wire format over /ws (mirrors ws.ts) + the REST endpoints
         // (mirrors index.ts). Remote browser/phone clients subscribe to registry
@@ -125,6 +144,7 @@ let package = Package(
             name: "JuancodeApp",
             dependencies: [
                 "JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeClient",
+                "JuancodeDesktop",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 // SPIKE: GhosttyKit (libghostty) GPU-rendered terminal, the default
                 // live surface; JUANCODE_SWIFTTERM=1 falls back to SwiftTerm for
@@ -144,6 +164,10 @@ let package = Package(
         .testTarget(
             name: "JuancodeServicesTests",
             dependencies: ["JuancodeServices"]
+        ),
+        .testTarget(
+            name: "JuancodeDesktopTests",
+            dependencies: ["JuancodeDesktop"]
         ),
         .testTarget(
             name: "JuancodeClientTests",

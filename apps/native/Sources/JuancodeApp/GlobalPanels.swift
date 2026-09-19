@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 // MARK: - Worktrees (juancode-q6q)

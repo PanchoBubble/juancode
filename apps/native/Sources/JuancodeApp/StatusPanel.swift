@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 /// Per-provider auth + MCP-server health — the native analogue of the web

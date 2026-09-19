@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Covers the pure health → presentation mapping (the Swift analogue of the web
 /// `StatusPanel.tsx` `HEALTH` map) and the row's display-status fallback.

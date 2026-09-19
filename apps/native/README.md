@@ -113,7 +113,6 @@ the prime directive).
 | `Git`                              | `git.ts` (diff, state, worktrees, commit, push) |
 | `Gh` / `Commit`                    | `gh.ts` / `commit.ts` (PRs; AI commit message)  |
 | `Review`                           | `review.ts` ('Review with Claude')              |
-| `Beads` / `Status`                 | `beads.ts` / `status.ts` (bd issues; MCP/auth)  |
 | `SessionTitle` / `SessionUsage`    | `sessionTitle.ts` / `sessionUsage.ts`           |
 | `RecoverSession`                   | `recoverSession.ts` (recover an old CLI id)     |
 | `EphemeralPty`                     | `editor.ts` + `terminal.ts` (editor/shell ptys) |
@@ -123,6 +122,28 @@ the prime directive).
 
 Title/usage polling is injected into `Session` via `SessionEnvironment` (the core
 stays dependency-free); use `SessionEnvironment.live(store:)` for the real seams.
+
+## `JuancodeDesktop` — desktop-local logic (`juancode-rr6m`)
+
+The non-UI half of features that only ever run where the SwiftUI app runs. Nothing
+here has a Rust counterpart in `apps/juancoded`, and nothing here is meant to get
+one — these are the app's own features, not core concerns the daemon happens not to
+have reached yet.
+
+| Swift (`Sources/JuancodeDesktop`)   | what it is                                          |
+| ----------------------------------- | --------------------------------------------------- |
+| `Status` / `StatusPresentation`     | MCP + auth health per provider, and its colour map   |
+| `Beads`                             | `bd` reads for the Issues panel and the Oracle dock  |
+| `Linear` / `LinearIssueTracker`     | Linear issue reads + the "track this issue" tracker  |
+| `SettingsAI`                        | AI-assisted settings patching (the Settings sheet)   |
+| `RecurringTask`                     | interval scheduling math; retired by `juancode-52e8.10` |
+| `SessionTemplate` / `PromptTemplate`| the session launcher and ⌘K prompt palette presets   |
+
+**`JuancodeApp` is the only target allowed to depend on this.** That is the point of
+it being a target: `ls Sources/JuancodeServices` has to stay an honest answer to "what
+is left to port to the Rust core" (`juancode-52e8.14`), and a desktop-only feature
+sitting in there makes it a lie. Adding `JuancodeDesktop` to `JuancodeServer` or
+`JuancodeClient` is the mistake the split exists to make impossible.
 
 Usage carries two different things (juancode-lncw). `inputTokens`/`outputTokens`/cache
 and `costUsd` are cumulative — what the session has spent. `contextTokens` /
@@ -157,7 +178,7 @@ subscriber to the same registry (no WS hop).
 | -------------------------------- | ------------------------------------------------------- |
 | `WireProtocol`                   | `protocol.ts` (`ClientMessage`/`ServerMessage` Codable) |
 | `WebSocketConnection`            | `ws.ts` (per-connection subs + activity + routing)      |
-| `JuancodeServer` (routes)        | `index.ts` (REST: diff/git/PR/beads/review/…)           |
+| `JuancodeServer` (routes)        | `index.ts` (REST: diff/git/PR/review/…)                 |
 | `AppState`                       | the `registry` + `sessionDb` + ephemeral singletons     |
 
 `AppState` owns one `GRDBStore` (handed to the registry as the `SessionStore`

@@ -60,8 +60,6 @@ extension PushResult: ResponseEncodable {}
 extension CommitMessageResult: ResponseEncodable {}
 extension PrCreateResult: ResponseEncodable {}
 extension PrListResult: ResponseEncodable {}
-extension BeadsResult: ResponseEncodable {}
 extension ReviewResult: ResponseEncodable {}
 extension DiffComment: ResponseEncodable {}
 extension RevertResult: ResponseEncodable {}
-extension ProviderStatus: ResponseEncodable {}

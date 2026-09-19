@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 /// The global "Oracle" helper (juancode-wjg / juancode-6sw): a right-docked,

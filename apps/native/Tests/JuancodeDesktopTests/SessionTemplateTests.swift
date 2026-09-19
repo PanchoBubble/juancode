@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Unit tests for the session-template ordering/filtering math (juancode-a2r).
 /// Pure — no pty, no UI, no clock.

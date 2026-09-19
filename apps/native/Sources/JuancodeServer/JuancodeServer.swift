@@ -120,8 +120,6 @@ public enum JuancodeServer {
             ProviderId.allCases.map { ProviderInfo(id: $0.rawValue, label: Providers.spec(for: $0).label) }
         }
 
-        router.get("/api/status") { _, _ in await getAllStatus() }
-
         router.get("/api/sessions") { _, _ in store.list() }
 
         // Full-text search over titles + scrollback. <2 chars → empty list.
@@ -286,11 +284,6 @@ public enum JuancodeServer {
             }
             let matched = await state.prTracking.ingestWebhook(repo: repo, number: body.number)
             return jsonResponse(PrWebhookResponse(ok: true, matched: matched))
-        }
-
-        router.get("/api/sessions/:id/beads") { _, ctx in
-            let m = try meta(ctx, store)
-            return await getBeads(m.cwd)
         }
 
         // The cached pass only. Running one moved into the daemon with the rest of the

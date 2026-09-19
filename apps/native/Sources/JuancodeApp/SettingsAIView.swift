@@ -1,4 +1,5 @@
 import SwiftUI
+import JuancodeDesktop
 import JuancodeServices
 
 /// "Ask AI to change my settings" (juancode-bdlq): a small prompt where the user

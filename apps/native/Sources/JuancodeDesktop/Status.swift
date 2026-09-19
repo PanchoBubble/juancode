@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// Port of `apps/server/src/status.ts`. Gathers auth/MCP status for every
 /// provider by shelling out to `claude mcp list` / `codex mcp list --json` /

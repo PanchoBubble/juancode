@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 /// Session templates launcher/manager (juancode-a2r). Lists saved launch presets

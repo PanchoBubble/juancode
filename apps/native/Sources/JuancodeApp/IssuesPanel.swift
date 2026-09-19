@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeCore
+import JuancodeDesktop
 
 /// Self-contained, composable visualization of a folder's bd (beads) issues
 /// (juancode-9s0) — richer than the sidebar `FolderIssues` popover. Designed to

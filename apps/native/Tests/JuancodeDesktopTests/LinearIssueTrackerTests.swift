@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Unit tests for the tracked-issue engine (juancode-z4v): the GraphQL parser, the
 /// pure classifier that diffs issue activity into next-step vs needs-decision events,

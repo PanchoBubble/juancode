@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Unit tests for the recurring-task scheduler math (juancode-dgp): which tasks are
 /// due and when each next fires. Pure — no clock, no pty.

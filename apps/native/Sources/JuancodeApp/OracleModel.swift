@@ -3,6 +3,7 @@ import Observation
 import AppKit
 import JuancodeClient
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 
 /// Drives the global "Oracle" helper (juancode-wjg): bootstraps the control dir,

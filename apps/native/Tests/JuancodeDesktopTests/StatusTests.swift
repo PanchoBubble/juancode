@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Port of `apps/server/src/status.test.ts`. The TS file only exercises the two
 /// pure parsers; we mirror those exactly, then add a `getAllStatus` test that

@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Port of `apps/server/src/beads.test.ts`. The TS gates its tracker-backed
 /// assertion on whether `bd` is on PATH; we keep that, and additionally inject a
