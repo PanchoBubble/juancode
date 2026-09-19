@@ -13,15 +13,22 @@ import JuancodeCore
 /// implementation of a capability the Swift core still claims is not a fork to delete.
 /// It goes when the Swift core goes — juancode-nqpm — and not before.
 ///
-/// Re-measured at f06cb04 (juancode-a2s7), and that last sentence is half true.
-/// `createWorktree` is indeed swift-core-only: `RustCoreClient.makesWorktrees` is
-/// true, so on the rust path the daemon cuts the tree and `AppModel` never calls
-/// this. `removeWorktree` is NOT — it survives nqpm at five sites on the rust path
-/// (`AppModel` worktree cleanup x4 and `CoreProxyServer.swift:399`, the relay's own
-/// `DELETE /api/sessions/:id`), because `juancoded-core::worktree::remove` exists
-/// but is reachable only from the daemon's own session delete, never over HTTP.
-/// So this file outlives the Swift core by exactly one function. Owned by
-/// juancode-yydd, which adds that route and finishes the deletion.
+/// That sentence was half true until juancode-yydd, and it is true now.
+/// `createWorktree` was always swift-core-only — `RustCoreClient.makesWorktrees` is
+/// true, so on the rust path the daemon cuts the tree and `AppModel` takes the other
+/// branch. `removeWorktree` was not: it had five callers on the RUST path, because
+/// `juancoded_core::worktree::remove` existed but was reachable only from the
+/// daemon's own session delete and never over HTTP. It has a route now
+/// (`DELETE /api/git/worktree?cwd=`), `CoreClient.removeWorktree(path:)` reaches it,
+/// and the worktree rail calls that. The two reaps left in `AppModel` and the one
+/// that used to sit in `CoreProxyServer` are gone or guarded on `!makesWorktrees`:
+/// a core that cuts its own trees reaps them in `deleteSession`.
+///
+/// So every remaining caller of this file is one nqpm deletes — `PrTrackingEngine`,
+/// `WebSocketConnection`, the route half of `JuancodeServer.swift`, and the
+/// `!makesWorktrees` branch that dies with the backend switch. Nothing on the rust
+/// path reaches in here any more, which is what the header promised and could not
+/// keep. `WorktreeDeps.swift` has no fate of its own and goes at the same moment.
 ///
 /// Every shell-out goes through `ProcessRunner`, which inherits the environment
 /// verbatim: the prime directive.

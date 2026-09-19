@@ -312,6 +312,7 @@ public protocol CoreClient: AnyObject, Sendable {
     func gitState(cwd: String) async throws -> GitState
     func recentCommits(cwd: String, limit: Int) async throws -> [RecentCommit]
     func worktrees(cwd: String) async throws -> [Worktree]
+    func removeWorktree(path: String) async throws
     func worktreeStatus(cwd: String) async throws -> [WorktreeStatusEntry]
     func trackedFiles(cwd: String, limit: Int) async throws -> [String]
     func changeStat(cwd: String) async throws -> ChangeStat

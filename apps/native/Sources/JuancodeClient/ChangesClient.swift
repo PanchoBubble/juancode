@@ -44,6 +44,13 @@ public extension CoreClient {
     /// Every linked worktree of the repo `cwd` belongs to, main one first.
     func worktrees(cwd: String) async throws -> [Worktree] { throw changesUnsupported }
 
+    /// Remove the linked worktree at `path`, and its directory. The branch is left
+    /// alone, so committed work survives. A tree that is already gone is a success:
+    /// the caller's two states are "there" and "not there", and a sweep over a stale
+    /// listing must not report a leak it did not cause. The repo's MAIN worktree is
+    /// refused — it is the checkout somebody works in.
+    func removeWorktree(path: String) async throws { throw changesUnsupported }
+
     /// The whole-tree `git status --porcelain` snapshot the file tree consumes.
     func worktreeStatus(cwd: String) async throws -> [WorktreeStatusEntry] {
         throw changesUnsupported

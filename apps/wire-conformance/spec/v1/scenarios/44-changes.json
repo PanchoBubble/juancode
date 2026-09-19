@@ -1,7 +1,7 @@
 {
   "id": "changes",
   "title": "the working tree a session is changing",
-  "asserts": "a core that advertises `changes` can answer for the git tree its session works in - the diff, the branch state, the worktree listing, a file out of it - and can commit, push and discard in it, naming a reason when it will not. The two assertions that carry the weight are the destructive ones: a discard is scoped to exactly the path it was given and nothing else, and a path that tries to leave the worktree is REFUSED rather than sanitised, because a revert frame that accepts `../` is a write primitive pointed at the whole filesystem by anything that can reach the socket. The reads are here for a sharper reason than completeness: a core that answers an empty diff where it means `I cannot read this tree` tells somebody the agent changed nothing, which is the one wrong thing a Changes view can say.",
+  "asserts": "a core that advertises `changes` can answer for the git tree its session works in - the diff, the branch state, the worktree listing, a file out of it - and can commit, push and discard in it, naming a reason when it will not. The two assertions that carry the weight are the destructive ones: a discard is scoped to exactly the path it was given and nothing else, and a path that tries to leave the worktree is REFUSED rather than sanitised, because a revert frame that accepts `../` is a write primitive pointed at the whole filesystem by anything that can reach the socket. The reads are here for a sharper reason than completeness: a core that answers an empty diff where it means `I cannot read this tree` tells somebody the agent changed nothing, which is the one wrong thing a Changes view can say. The tree's own removal is here too: a session's worktree outlives the session, and the only caller that can reap the leftovers is one holding a path, so the route is addressed by path and refuses the repository's main worktree by name.",
   "capabilities": [
     "changes",
     "isolateWorktree"
@@ -362,6 +362,55 @@
       "get": "/api/sessions/no-such-session-here/diff",
       "status": 404,
       "note": "and the reads say so the same way"
+    },
+    {
+      "delete": "/api/git/worktree",
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "cwd"
+        }
+      },
+      "note": "the removal route, and the three answers that matter before the one that works. No cwd is a refusal rather than a guess: this verb deletes a directory, and there is no sensible default for which one"
+    },
+    {
+      "delete": "/api/git/worktree?cwd=$gitRemoteCwd",
+      "status": 422,
+      "expectBody": {
+        "error": {
+          "$contains": "main worktree"
+        }
+      },
+      "note": "the assertion this route exists to be safe about. The main worktree is the checkout somebody works in, and a core that let this through would answer 204 to a request that deleted a repository. Refused by name, not by whatever git's error text happens to be this release"
+    },
+    {
+      "get": "/api/git/worktrees?cwd=$gitRemoteCwd",
+      "expectBody": {
+        "$some": {
+          "path": "$sessionCwd",
+          "main": false
+        }
+      },
+      "note": "and the refusal changed nothing: both trees are still listed, the session's among them"
+    },
+    {
+      "delete": "/api/git/worktree?cwd=$sessionCwd",
+      "note": "the linked tree, removed. 204 and no body: the two states a caller has words for are `the tree is there` and `the tree is not`"
+    },
+    {
+      "get": "/api/git/worktrees?cwd=$gitRemoteCwd",
+      "expectBody": {
+        "$every": {
+          "path": {
+            "$not": "$sessionCwd"
+          }
+        }
+      },
+      "note": "git forgot it too. A core that removed the directory and left the administrative entry behind would pass the status assertion and then refuse the next `worktree add` at that path, which is the bug a bare rm -rf is"
+    },
+    {
+      "delete": "/api/git/worktree?cwd=$sessionCwd",
+      "note": "asked twice. A tree that is already gone is the state the caller wanted, so the second answer is the same as the first — a sweep over a stale list must not report leaks it did not cause"
     }
   ]
 }

@@ -385,19 +385,21 @@ public enum CoreProxyServer {
             return meta
         }
 
-        // Kill the pty, drop the row, remove an auto-created worktree best-effort.
-        // Same reach as the desktop's own delete on this core, and no further:
-        // protocol v1 has no frame that tells a core to forget a session, so the
-        // daemon keeps its own row either way.
+        // Kill the pty, then tell the core to forget the session.
+        //
+        // This used to reap the worktree here as well, because "protocol v1 has no
+        // frame that tells a core to forget a session". It has one: `sessionDelete`,
+        // and the promise behind that capability is all four things — the pty, the
+        // row, the conversation's adoptability and the worktree. `deleteSession`
+        // sends it, the daemon's registry removes the directory, and a second removal
+        // from this process was this relay racing the core it fronts for the same
+        // path (juancode-yydd).
         router.delete("/api/sessions/:id") { _, ctx in
-            guard let id = ctx.parameters.get("id"), let meta = source.session(id) else {
+            guard let id = ctx.parameters.get("id"), source.session(id) != nil else {
                 throw APIError(.notFound, "not found")
             }
             source.kill(id)
             source.deleteSession(id)
-            if let wt = meta.worktreePath {
-                try? await removeWorktree(wt)
-            }
             return Response(status: .noContent)
         }
 

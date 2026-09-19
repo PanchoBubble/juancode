@@ -13,6 +13,9 @@
 //!   not any session's cwd: an orphaned worktree whose session was deleted is exactly
 //!   the folder the at-risk badge exists for, and there is no session id to reach it
 //!   by. This family is not in the relay's allowlist and does not leave this machine.
+//!   It is reads plus exactly one write — `DELETE /api/git/worktree` — for the same
+//!   reason: removing an orphaned worktree is an operation on a path, and the session
+//!   that owned it is the thing that is already gone.
 //!
 //! Every handler runs on `spawn_blocking`. These are `git` invocations, and a fork
 //! costs 257ms on this machine before the child runs an instruction — holding the
@@ -21,7 +24,7 @@
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +55,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/git/at-risk", get(path_at_risk))
         .route("/api/git/agent-worktree", get(path_agent_worktree))
         .route("/api/git/file", get(path_file))
+        .route("/api/git/worktree", delete(path_remove_worktree))
 }
 
 /// `?cwd=`, `?base=`, `?commit=`, `?path=`, `?limit=`, `?pid=` — the whole query
@@ -113,6 +117,26 @@ fn target_cwd(session_cwd: &str, requested: Option<&str>) -> String {
 
 fn same_path(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// The same directory on disk, symlinks resolved.
+///
+/// [`same_path`] compares the strings, which is right where both sides came from the
+/// same `git worktree list`. The main-worktree guard cannot afford that: git prints
+/// the real path and a caller may hold the symlinked one (`/var/...` is
+/// `/private/var/...` on macOS), and a guard that compares the spellings would wave
+/// through a delete aimed at the checkout somebody works in.
+fn same_tree(a: &str, b: &str) -> bool {
+    if same_path(a, b) {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(a.trim_end_matches('/')),
+        std::fs::canonicalize(b.trim_end_matches('/')),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// The cwd a session-addressed route acts on, or a 404 when there is no such session.
@@ -270,6 +294,52 @@ async fn path_file(Query(p): Query<GitParams>) -> Response {
         return missing_cwd();
     };
     file_for(cwd, p).await
+}
+
+/// Remove the linked worktree `?cwd=` names, and its directory. The one WRITE in this
+/// family, and the reason it is here rather than on the socket: the caller is the
+/// desktop's worktree rail, acting on a tree whose session is already gone. There is
+/// no session id to address it by and no session traffic to order it against, which
+/// is the whole argument the read family was built on.
+///
+/// `juancoded_core::worktree::remove` does the work — the same function the registry
+/// calls when it forgets a session, so a tree reaped by hand and a tree reaped by a
+/// delete go the same way. Answers 204 with no body: the two states a caller cares
+/// about are "the tree is there" and "the tree is not", and `remove` already treats a
+/// path that is already gone as success.
+///
+/// The main worktree is refused HERE rather than left to git. git does refuse it —
+/// "is a main working tree" — but this route exists to be pointed at a directory by
+/// whatever is holding a path, and a checkout somebody works in should not be one git
+/// version's error message away from being deleted. The refusal is 422 with a sentence
+/// naming what was asked for.
+async fn path_remove_worktree(Query(p): Query<GitParams>) -> Response {
+    let Some(cwd) = required_cwd(&p) else {
+        return missing_cwd();
+    };
+    blocking(move || {
+        if worktree::list(&cwd)
+            .into_iter()
+            .any(|t| t.main && same_tree(&t.path, &cwd))
+        {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!("{cwd} is the repository's main worktree, not a linked one"),
+                })),
+            )
+                .into_response();
+        }
+        match worktree::remove(&cwd) {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": e.0 })),
+            )
+                .into_response(),
+        }
+    })
+    .await
 }
 
 // ── the shared bodies ────────────────────────────────────────────────────────
@@ -601,6 +671,87 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body["error"].as_str().unwrap().contains("base branch"));
+    }
+
+    /// A `DELETE` through the same router, for the one write in the path family.
+    async fn delete_at(handles: &CoreHandles, path: &str) -> (StatusCode, Value) {
+        let response = crate::serve::router(handles.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("routed");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+            .await
+            .expect("body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_linked_worktree_can_be_removed_over_http_and_the_main_one_cannot() {
+        let scratch = Scratch::new("rmworktree");
+        let (_loader, handles) = scratch.boot();
+        let cwd = scratch.cwd();
+        let tree = scratch
+            .dir
+            .join("repo-worktrees")
+            .join("gone")
+            .to_string_lossy()
+            .into_owned();
+        git(
+            Path::new(&cwd),
+            &["worktree", "add", "--quiet", "-b", "junk", &tree],
+        );
+        let (_, body) = get(
+            &handles,
+            &format!("/api/git/worktrees?cwd={}", urlencode(&cwd)),
+        )
+        .await;
+        assert_eq!(body.as_array().unwrap().len(), 2, "the tree was cut");
+
+        // The main worktree is refused by name, and is still there afterwards.
+        let (status, body) = delete_at(
+            &handles,
+            &format!("/api/git/worktree?cwd={}", urlencode(&cwd)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains("main worktree"));
+        assert!(Path::new(&cwd).exists());
+
+        let (status, _) = delete_at(
+            &handles,
+            &format!("/api/git/worktree?cwd={}", urlencode(&tree)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!Path::new(&tree).exists(), "the directory went with it");
+        let (_, body) = get(
+            &handles,
+            &format!("/api/git/worktrees?cwd={}", urlencode(&cwd)),
+        )
+        .await;
+        assert_eq!(body.as_array().unwrap().len(), 1, "and git forgot it");
+
+        // Idempotent: the caller asking twice is the same answer, not a reported leak.
+        let (status, _) = delete_at(
+            &handles,
+            &format!("/api/git/worktree?cwd={}", urlencode(&tree)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, body) = delete_at(&handles, "/api/git/worktree").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "cwd required");
     }
 
     fn urlencode(s: &str) -> String {

@@ -108,6 +108,23 @@ export type Step =
       bind?: Record<string, string>;
       note?: string;
     }
+  /** The same read step, pointed at a route that WRITES.
+   *
+   *  One route needs it — `DELETE /api/git/worktree?cwd=`, how the desktop reaps an
+   *  orphaned worktree whose session is already gone — and it is a verb rather than a
+   *  frame because the thing being addressed is a path and there is no session left to
+   *  order it against. A separate key rather than a `method` on `get` so a scenario
+   *  cannot destroy something while reading as a read.
+   *
+   *  `status` defaults to 204, the answer a delete that did the work gives. */
+  | {
+      delete: string;
+      status?: number;
+      expectBody?: Record<string, unknown>;
+      expectText?: unknown;
+      bind?: Record<string, string>;
+      note?: string;
+    }
   | { sleep: number; note?: string };
 
 /** Environment a scenario needs beyond a bare core: a pty child, git, gh. */

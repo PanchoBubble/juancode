@@ -4950,7 +4950,7 @@ final class AppModel {
     func removeWorktreeAt(_ path: String) {
         Task {
             do {
-                try await removeWorktree(path)
+                try await core.removeWorktree(path: path)
             } catch {
                 errorMessage = "Couldn't remove worktree: \(gitErrorText(error))"
             }
@@ -4979,7 +4979,7 @@ final class AppModel {
         Task {
             var failures = 0
             for path in paths {
-                do { try await removeWorktree(path) } catch { failures += 1 }
+                do { try await core.removeWorktree(path: path) } catch { failures += 1 }
             }
             if failures > 0 {
                 errorMessage = "Couldn't remove \(failures) of \(paths.count) worktree(s)."
@@ -5018,7 +5018,12 @@ final class AppModel {
         clearUnread(id)
         navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
         refresh()
-        if let wt = meta?.worktreePath {
+        // The core that CUT the tree is the core that reaps it. On a core that makes
+        // its own worktrees, `deleteSession` removes the directory as part of
+        // forgetting the session — that is what the capability promises — so a second
+        // removal from here would be this process racing the daemon for the same
+        // path. Only a core the app cut the tree for needs reaping from the app.
+        if !core.makesWorktrees, let wt = meta?.worktreePath {
             Task { try? await removeWorktree(wt) }
         }
     }
@@ -5110,7 +5115,8 @@ final class AppModel {
             clearUnread(id)
         }
         refresh()
-        if !worktrees.isEmpty {
+        // Reaped from here only on a core that does not reap its own — see `delete`.
+        if !worktrees.isEmpty, !core.makesWorktrees {
             Task { for wt in worktrees { try? await removeWorktree(wt) } }
         }
     }

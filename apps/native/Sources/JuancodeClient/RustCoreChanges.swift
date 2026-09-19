@@ -54,6 +54,14 @@ public extension RustCoreClient {
         try await gitGet("/api/git/worktrees", [("cwd", cwd)], as: [Worktree].self)
     }
 
+    /// Remove a linked worktree. The one WRITE that goes over HTTP rather than the
+    /// socket, and for the same reason the path-addressed reads do: the caller is the
+    /// worktree rail reaping a tree whose session is already gone, so there is no
+    /// session id to address it by and no session traffic to order it against.
+    func removeWorktree(path: String) async throws {
+        try await gitDelete("/api/git/worktree", [("cwd", path)])
+    }
+
     func worktreeStatus(cwd: String) async throws -> [WorktreeStatusEntry] {
         try await gitGet("/api/git/status", [("cwd", cwd)], as: [StatusEntryWire].self)
             .map(\.entry)
@@ -155,6 +163,38 @@ public extension RustCoreClient {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw ChangesError("could not read the core's answer to \(path): \(error)")
+        }
+    }
+
+    /// One delete, with nothing to decode. A 204 is the whole answer; anything else
+    /// carries the daemon's own sentence, which is the one worth showing.
+    private func gitDelete(_ path: String, _ query: [(String, String)]) async throws {
+        try requireChanges()
+        guard var comps = URLComponents(string: baseURL) else {
+            throw ChangesError("not a usable core URL: \(baseURL)")
+        }
+        comps.path = path
+        comps.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }
+        guard let url = comps.url else {
+            throw ChangesError("not a usable core URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        // A worktree removal is a `git worktree remove` behind a fork, not a network
+        // round trip, so the read budget covers it with room to spare.
+        request.timeoutInterval = Self.readTimeout
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw ChangesError("the rust core did not answer DELETE \(path): "
+                               + error.localizedDescription)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+        guard (200..<300).contains(status) else {
+            throw ChangesError(Self.errorSentence(data)
+                ?? "the rust core answered \(status) for DELETE \(path)")
         }
     }
 

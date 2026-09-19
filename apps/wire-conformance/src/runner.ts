@@ -812,7 +812,11 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     return;
   }
   if ("get" in step) {
-    await readOverHttp(step, s);
+    await requestOverHttp("GET", step.get, step, s);
+    return;
+  }
+  if ("delete" in step) {
+    await requestOverHttp("DELETE", step.delete, step, s);
     return;
   }
   throw new Error(`unrecognised step: ${JSON.stringify(step)}`);
@@ -840,36 +844,44 @@ export function httpBaseOf(ctx: RunContext): string {
     .replace(/\/$/, "");
 }
 
-/** One `get` step: read the path, assert the status, assert the body.
+/** One `get` or `delete` step: call the path, assert the status, assert the body.
  *
  *  The body is matched with the same `matchValue` a frame gets, so a scenario asserts
  *  a read the way it asserts everything else. `expectBody` decodes JSON first and
  *  fails loudly on a body that is not JSON — a core answering `text/plain` where a
- *  scenario asked for a document is a conformance failure, not a parse accident. */
-async function readOverHttp(
-  step: { get: string; status?: number; expectBody?: unknown; expectText?: unknown; bind?: Record<string, string> },
+ *  scenario asked for a document is a conformance failure, not a parse accident.
+ *
+ *  A `DELETE` that worked answers 204 with no body at all, so the default expected
+ *  status follows the verb and an empty body is only a failure when the step asked
+ *  to match one. */
+async function requestOverHttp(
+  method: "GET" | "DELETE",
+  spec: string,
+  step: { status?: number; expectBody?: unknown; expectText?: unknown; bind?: Record<string, string> },
   s: StepContext,
 ): Promise<void> {
-  const path = interpolate(step.get, s.vars);
+  const path = interpolate(spec, s.vars);
   const url = `${httpBaseOf(s.ctx)}${path.startsWith("/") ? "" : "/"}${path}`;
   let res: Response;
   try {
-    res = await fetch(url);
+    res = await fetch(url, { method });
   } catch (e) {
-    throw new WireProtocolError(`GET ${url} did not answer: ${e instanceof Error ? e.message : e}`);
+    throw new WireProtocolError(
+      `${method} ${url} did not answer: ${e instanceof Error ? e.message : e}`,
+    );
   }
   const text = await res.text();
-  const want = step.status ?? 200;
+  const want = step.status ?? (method === "DELETE" ? 204 : 200);
   if (res.status !== want) {
     throw new WireProtocolError(
-      `GET ${path} answered ${res.status}, expected ${want}\n  body: ${text.slice(0, 400)}`,
+      `${method} ${path} answered ${res.status}, expected ${want}\n  body: ${text.slice(0, 400)}`,
     );
   }
   if (step.expectText !== undefined) {
     const result = matchValue(text, resolveVars(step.expectText, s.vars), s.vars);
     if (!result.ok) {
       throw new WireProtocolError(
-        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+        `${method} ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
       );
     }
   }
@@ -879,14 +891,14 @@ async function readOverHttp(
     body = JSON.parse(text);
   } catch {
     throw new WireProtocolError(
-      `GET ${path} did not answer with JSON\n  got: ${text.slice(0, 400)}`,
+      `${method} ${path} did not answer with JSON\n  got: ${text.slice(0, 400)}`,
     );
   }
   if (step.expectBody !== undefined) {
     const result = matchValue(body, resolveVars(step.expectBody, s.vars), s.vars);
     if (!result.ok) {
       throw new WireProtocolError(
-        `GET ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
+        `${method} ${path} body did not match: ${result.why}\n  got: ${text.slice(0, 400)}`,
       );
     }
   }
