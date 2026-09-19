@@ -121,8 +121,18 @@ say "Importing mirror-only history into the daemon store"
 "$BIN" import-swift "$MIRROR"
 
 # --- 6. Reinstall the job, pinned here -------------------------------------------
-say "Reinstalling the launchd job from $ROOT"
-"$AGENT" install
+# `install` refuses to repoint a plist that names a different checkout without an
+# interactive y/N — and on the first run that prompt ate a stray buffered newline and
+# answered itself "no", leaving the agent pinned to the old worktree after everything
+# else had succeeded. Remove the old plist first: with no prior installation there is
+# nothing to confirm, so the repoint cannot be lost to a keystroke. `uninstall` only
+# prompts when the JOB is running, and by here it is not.
+say "Removing the old launchd job"
+while read -r -t 0.05 -n 4096 _ </dev/tty 2>/dev/null; do :; done   # drain buffered keys
+"$AGENT" uninstall </dev/tty || true
+
+say "Installing the launchd job from $ROOT"
+"$AGENT" install </dev/tty
 
 # --- 7. Show what is actually serving now ----------------------------------------
 say "Result"
