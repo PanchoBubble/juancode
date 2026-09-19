@@ -2422,12 +2422,36 @@ mod tests {
         /// background task — it makes a worktree and spawns a CLI — so the frame arrives
         /// after the handler has already returned. That is the shape of the real thing,
         /// not a test artefact.
+        /// The frames of a change the test is waiting FOR, waited out by content.
+        ///
+        /// A track spawns the driving session, which is a worktree's worth of git and a
+        /// CLI exec before the new list is published: measured at 3.88s on 2026-09-19 on
+        /// a machine whose EndpointSecurity agent charges ~0.7s for every exec, against
+        /// the one second this used to allow — which is the whole of why this was red,
+        /// and none of it was the wire. So the wait ends when the frame arrives, and the
+        /// clock is only here so a genuine hang fails instead of running forever.
         async fn tracked_frames(&mut self, fanout: &mut Fanout) -> Vec<ServerMessage> {
+            let hang = std::time::Instant::now() + Duration::from_secs(60);
             let mut out = Vec::new();
-            let first = tokio::time::timeout(Duration::from_secs(1), self.tracked.recv()).await;
-            if let Ok(Ok(change)) = first {
-                push_tracked(change, fanout, &mut out);
+            while out.is_empty() && std::time::Instant::now() < hang {
+                if let Ok(Ok(change)) =
+                    tokio::time::timeout(Duration::from_millis(100), self.tracked.recv()).await
+                {
+                    push_tracked(change, fanout, &mut out);
+                }
             }
+            out.append(&mut self.queued_tracked_frames(fanout));
+            out
+        }
+
+        /// The frames of the changes already published, and no clock at all.
+        ///
+        /// What "nothing was sent" has to mean for the clauses that assert it. Every
+        /// publisher a test drives here — `poll_once`, `untrack` — has published before
+        /// it returns, so a drain that comes back empty IS the assertion, where a wait
+        /// would only be another measurement of how fast the machine is.
+        fn queued_tracked_frames(&mut self, fanout: &mut Fanout) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
             while let Ok(change) = self.tracked.try_recv() {
                 push_tracked(change, fanout, &mut out);
             }
@@ -3334,7 +3358,7 @@ mod tests {
         // list that did not change is not re-announced.
         wire.tracked_prs().poll_once().await;
         assert!(
-            wire.tracked_frames(&mut fanout).await.is_empty(),
+            wire.queued_tracked_frames(&mut fanout).is_empty(),
             "an unchanged list must not be pushed again"
         );
 
@@ -3421,7 +3445,7 @@ mod tests {
         let mut wire = Wire::new();
         let mut fanout = fanout();
         wire.tracked_prs().untrack("nothing-tracked-under-this-id");
-        assert!(wire.tracked_frames(&mut fanout).await.is_empty());
+        assert!(wire.queued_tracked_frames(&mut fanout).is_empty());
         assert!(fanout.tracked_prs.is_none());
     }
 }

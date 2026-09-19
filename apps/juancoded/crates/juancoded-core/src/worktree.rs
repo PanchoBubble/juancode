@@ -20,6 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -318,12 +319,92 @@ fn main_worktree(cwd: &str) -> Option<String> {
 /// branches off the ref it already has.
 ///
 /// A `git fetch` that has nothing to fetch still costs a full SSH handshake to the
-/// forge — measured at 1.8-2.3s against github.com on this machine, which was 67% of
+/// forge — measured at 2.85-2.98s against github.com on this machine, which was 67% of
 /// the entire cost of starting an isolated session and the single thing that made a
 /// worktree session feel slower than an ordinary one. The budget is set so a fetch
 /// that IS cheap (a local or on-LAN remote) is still waited for, and a handshake to
 /// the internet is not.
+///
+/// It is an upper bound, not the budget itself: see [`budget_for`], which is allowed to
+/// drop it to nothing on a machine where the premise behind it does not hold.
 const FETCH_BUDGET: Duration = Duration::from_millis(250);
+
+/// The cheapest `git` invocation this process has run, in microseconds, or `u64::MAX`
+/// before it has run one.
+///
+/// Taken from the cheap git this module runs anyway — `rev-parse`, `worktree list` —
+/// so the figure costs nothing to keep and a create never spawns a probe to get it.
+/// The minimum rather than an average on purpose: what is wanted is the machine's
+/// structural cost for starting a git at all, not how busy it happens to be.
+static GIT_FLOOR_US: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn note_git_cost(took: Duration) {
+    let us = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+    GIT_FLOOR_US.fetch_min(us, Ordering::Relaxed);
+}
+
+/// What one `git` process costs here before it does any work, once anything has
+/// measured it.
+fn git_process_cost() -> Option<Duration> {
+    match GIT_FLOOR_US.load(Ordering::Relaxed) {
+        u64::MAX => None,
+        us => Some(Duration::from_micros(us)),
+    }
+}
+
+/// The budget to actually use, given what a git process costs on this machine.
+///
+/// [`FETCH_BUDGET`] is a wall-clock constant resting on a premise that is not true
+/// everywhere: that a local fetch is cheap and a forge handshake is not. Measured on
+/// this Mac on 2026-09-19, where an EndpointSecurity agent authorises every exec:
+/// `git --version` 518-921ms, `git fetch` against a bare repo on the same disk
+/// 1.90-2.21s, `git fetch` to github 2.85-2.98s. Local and remote are the same order
+/// of magnitude there, and both are an order above the budget, so no constant can
+/// separate them and waiting 250ms buys exactly nothing — it is 250ms of delay in
+/// front of a person, every create.
+///
+/// So the budget is keyed off the measured cost instead of assumed: a fetch is at
+/// minimum two git processes, the `fetch` and the `upload-pack`/`fetch-pack` it talks
+/// to, so if two of them cannot finish inside the budget then no fetch can, and the
+/// honest wait is none at all. The fetch is still started and still lands for the next
+/// create, which is the fallback this whole refresh is built around. On a machine
+/// without an exec authoriser — 5-10ms a process, and CI is one — nothing changes.
+fn budget_for(cost: Option<Duration>) -> Duration {
+    match cost {
+        Some(cost) if cost * 2 > FETCH_BUDGET => Duration::ZERO,
+        _ => FETCH_BUDGET,
+    }
+}
+
+/// [`budget_for`] against what this process has measured, or a budget a test pinned.
+fn fetch_budget() -> Duration {
+    #[cfg(test)]
+    if let Some(pinned) = pinned_budget() {
+        return pinned;
+    }
+    budget_for(git_process_cost())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A budget pinned for one test, so a test about the SEQUENCING of the refresh is
+    /// not also a measurement of how fast git runs where the test happens to run.
+    ///
+    /// Thread-local because `refresh_base` runs inline on its caller's thread and
+    /// cargo gives each test its own, so a pin can never reach a test beside it.
+    static PINNED_BUDGET: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn pinned_budget() -> Option<Duration> {
+    PINNED_BUDGET.with(|pinned| pinned.get())
+}
+
+#[cfg(test)]
+fn pin_fetch_budget(budget: Duration) {
+    PINNED_BUDGET.with(|pinned| pinned.set(Some(budget)));
+}
 
 /// How long a completed fetch counts as current for.
 ///
@@ -337,7 +418,7 @@ const FETCH_TTL: Duration = Duration::from_secs(60);
 /// the old behaviour) when the repo has no default branch at all.
 ///
 /// The refresh that keeps a new agent off a stale base is NOT waited out. It is
-/// started, given [`FETCH_BUDGET`], and then left to finish on its own while the
+/// started, given [`fetch_budget`], and then left to finish on its own while the
 /// worktree is created off the ref we already have — so the cost a person waits
 /// through is the checkout, and the fetch it used to hide behind lands in time for
 /// the next session instead. Staleness is bounded by how recently a session was
@@ -359,7 +440,7 @@ fn base_ref(repo_cwd: &str) -> Option<String> {
     Some(base)
 }
 
-/// Bring `origin/<branch>` up to date, waiting at most [`FETCH_BUDGET`] for it.
+/// Bring `origin/<branch>` up to date, waiting at most [`fetch_budget`] for it.
 ///
 /// `true` only when the fetch finished, successfully, inside the budget — the one
 /// case where the caller may conclude something about refs it did not have before.
@@ -388,7 +469,7 @@ fn refresh_base(repo_cwd: &str, branch: &str) -> bool {
         fetch_clock().settle(&key, false);
         return false;
     };
-    let deadline = Instant::now() + FETCH_BUDGET;
+    let deadline = Instant::now() + fetch_budget();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -508,11 +589,10 @@ fn siblings_dir(root: &str) -> PathBuf {
 }
 
 fn git(cwd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let started = Instant::now();
+    let out = Command::new("git").args(args).current_dir(cwd).output();
+    note_git_cost(started.elapsed());
+    let out = out.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -883,12 +963,10 @@ mod tests {
         std::fs::remove_dir_all(&parent).ok();
     }
 
-    /// With a remote, the base is what origin has NOW: fetched before branching, so a
-    /// worktree is never cut from a local `main` that is days behind. The new branch
-    /// must also have no upstream, or a later push would aim at main.
-    #[test]
-    fn the_base_is_fetched_from_origin_before_branching() {
-        let (parent, root) = repo("fetched");
+    /// A repo with a bare remote beside it, the remote one commit ahead of the local
+    /// `main`, for the base-branch tests. Returns the sha only `origin` has.
+    fn repo_behind_its_remote(tag: &str) -> (PathBuf, PathBuf, String) {
+        let (parent, root) = repo(tag);
         let remote = parent.join("remote.git");
         run(&parent, &["init", "--bare", "--quiet", "remote.git"]);
         run(
@@ -909,7 +987,57 @@ mod tests {
         run(&other, &["push", "--quiet", "origin", "main"]);
         let landed = sha(&other, "HEAD");
         assert_ne!(landed, sha(&root, "main"), "local main must be behind");
+        (parent, root, landed)
+    }
 
+    /// A fetch is two git processes at best, so a budget less than two of them is a
+    /// wait that cannot ever end in a fetch — and on a machine where that is true, the
+    /// honest budget is none. The numbers here are the two machines this has to be
+    /// right on: an ordinary one, and one whose EDR charges ~0.7s for every exec.
+    #[test]
+    fn a_budget_no_fetch_could_finish_inside_is_not_waited_out() {
+        assert_eq!(
+            budget_for(None),
+            FETCH_BUDGET,
+            "nothing measured yet is not a reason to skip the wait"
+        );
+        assert_eq!(budget_for(Some(Duration::from_millis(8))), FETCH_BUDGET);
+        assert_eq!(budget_for(Some(FETCH_BUDGET / 2)), FETCH_BUDGET);
+        assert_eq!(
+            budget_for(Some(FETCH_BUDGET / 2 + Duration::from_millis(1))),
+            Duration::ZERO
+        );
+        assert_eq!(budget_for(Some(Duration::from_millis(740))), Duration::ZERO);
+    }
+
+    /// The cost is measured off the git this module runs anyway, so by the time a
+    /// create reaches the refresh there is a figure to key the budget off.
+    #[test]
+    fn running_git_at_all_is_what_measures_what_git_costs() {
+        let (parent, root) = repo("gitcost");
+        assert!(default_base_branch(root.to_str().unwrap()).is_some());
+        let cost = git_process_cost().expect("a git has run, so one has been timed");
+        assert!(
+            cost > Duration::ZERO && cost < Duration::from_secs(30),
+            "{cost:?} is not a plausible cost for one git process"
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// With a remote, the base is what origin has NOW: fetched before branching, so a
+    /// worktree is never cut from a local `main` that is days behind. The new branch
+    /// must also have no upstream, or a later push would aim at main.
+    ///
+    /// The budget is pinned wide open, because what is asserted here is the SEQUENCING
+    /// — fetch, then branch off what it brought — and not whether a fetch fits inside
+    /// 250ms on the machine running the test. It does not on this one: a `git fetch`
+    /// against a bare repo on the same disk was measured at 1.90-2.21s on 2026-09-19,
+    /// which is what made this test fail for a reason that was never the code. The
+    /// case where the budget is too small for a fetch has a test of its own below.
+    #[test]
+    fn the_base_is_fetched_from_origin_before_branching() {
+        pin_fetch_budget(Duration::from_secs(60));
+        let (parent, root, landed) = repo_behind_its_remote("fetched");
         let made = create(root.to_str().unwrap(), "fetched1").expect("a worktree");
         let wt = Path::new(&made.path);
         assert_eq!(
@@ -924,12 +1052,60 @@ mod tests {
         std::fs::remove_dir_all(&parent).ok();
     }
 
+    /// The other half, and the one that is true on a machine where a fetch costs more
+    /// than any budget a person would sit through: the create does not wait, it
+    /// branches off the ref it already had — and the fetch it started still lands, so
+    /// the NEXT create in that repo is current. That fallback is the entire reason the
+    /// wait is allowed to be short, so it is worth a test of its own rather than being
+    /// the thing a red clock-based test quietly asserts.
+    #[test]
+    fn a_fetch_too_dear_to_wait_for_still_lands_for_the_next_create() {
+        pin_fetch_budget(Duration::ZERO);
+        let (parent, root, landed) = repo_behind_its_remote("toodear");
+        let stale = sha(&root, "main");
+
+        let made = create(root.to_str().unwrap(), "toodear1").expect("a worktree");
+        assert_eq!(
+            sha(Path::new(&made.path), "HEAD"),
+            stale,
+            "nothing was waited for, so this one branches off what the checkout had"
+        );
+
+        // Started, not skipped: the ref moves on its own, without another create.
+        // Waited on by CONTENT — a machine that charges 0.7s an exec would make any
+        // fixed sleep here a measurement of the machine again.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while sha(&root, "origin/main") != landed && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            sha(&root, "origin/main"),
+            landed,
+            "the abandoned fetch is still the thing that makes the next create current"
+        );
+
+        let next = create(root.to_str().unwrap(), "toodear2").expect("a worktree");
+        assert_eq!(
+            sha(Path::new(&next.path), "HEAD"),
+            landed,
+            "and the next create branches off what it brought"
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
     /// The refresh is best effort, and a forge that is slow to answer must not be
     /// something a person waits through. The remote here takes five seconds to say
-    /// anything at all; a `create` that finishes long before that is a `create` that
-    /// branched off the ref it already had, which is the whole point.
+    /// anything at all, and the refresh must give up long before that.
+    ///
+    /// The clock is read around `refresh_base`, which is the code that owns it, and not
+    /// around `create`. `create` runs two dozen git processes for reasons that have
+    /// nothing to do with the remote, and on a machine that charges ~0.7s for each it
+    /// took 13.2s here on 2026-09-19 with the fetch abandoned correctly — so a bound on
+    /// `create`'s wall clock was measuring the machine, and it is the only thing that
+    /// ever made this test red.
     #[test]
     fn a_slow_remote_does_not_hold_up_the_worktree() {
+        pin_fetch_budget(FETCH_BUDGET);
         let (parent, root) = repo("slowfetch");
         let remote = parent.join("remote.git");
         run(&parent, &["init", "--bare", "--quiet", "remote.git"]);
@@ -945,12 +1121,20 @@ mod tests {
         run(&root, &["remote", "set-url", "origin", "ext::sleep 5"]);
 
         let start = Instant::now();
-        let made = create(root.to_str().unwrap(), "slow1").expect("a worktree");
+        let fetched = refresh_base(root.to_str().unwrap(), "main");
         let waited = start.elapsed();
         assert!(
-            waited < Duration::from_secs(4),
-            "create waited {waited:?} on a remote that answers in 5s"
+            !fetched,
+            "a remote that has not answered has fetched nothing"
         );
+        assert!(
+            waited < Duration::from_secs(4),
+            "the refresh waited {waited:?} on a remote that answers in 5s"
+        );
+
+        // And the create it fronts branches off the ref it already had. The fetch is
+        // in flight from the call above, so this one does not start a second.
+        let made = create(root.to_str().unwrap(), "slow1").expect("a worktree");
         assert_eq!(
             sha(Path::new(&made.path), "HEAD"),
             base,
