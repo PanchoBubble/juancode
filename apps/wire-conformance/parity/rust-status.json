@@ -2,7 +2,7 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-09-18",
+  "measuredAt": "2026-09-19",
   "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [
@@ -259,6 +259,11 @@
       "passes": 3
     },
     "github": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "session-reads": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

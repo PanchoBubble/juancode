@@ -6,11 +6,11 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Spec revision: 1.20.0 (protocol v1)
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
-- As of: 2026-09-18
+- As of: 2026-09-19
 - Capabilities the core advertises: queue, trackedPrs, editor, terminal, adoptExternal, inputAck, resizeAck, screen, sessionMeta, gridOwner, restartFresh, spawnModel, spawnPreset, isolateWorktree, globalPause, trackPrInSession, prWebhook, namedKeys
-- Unmet scenarios: 14 of 45
+- Unmet scenarios: 15 of 46
 
-## What is not satisfied yet (14)
+## What is not satisfied yet (15)
 
 ### transcript
 
@@ -110,6 +110,13 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Why: core does not advertise the "github" capability
 - Asserts: a core that advertises `github` answers the whole PR reading surface itself: the folder's open PRs with the triage question and the order already applied, one PR's conversation, that conversation merged into the chronology it is read in, and a red build parsed into folds and lines. All four are HTTP, because each one is a question somebody asks once and leaves — and all four used to be the desktop's own `gh` calls, which is why a phone had no PR view at all. The decisions are made HERE and not in a client on purpose: 'is this PR waiting on me' is four rules with a priority between them, and 'which of these two comments came first' has three tie-breaks in it, and two clients that implemented either separately would eventually disagree about the same PR. The review surface is the write half and goes over the wire, because a refresh is a whole model turn: held open as a request it would block the socket carrying every attached session's bytes, and answered as a frame it arrives when it is done. A staged comment is answered with the WHOLE list rather than with itself, because two surfaces stage comments against one session. The failures are as load-bearing as the answers: a read with no `cwd` is a 400 rather than a question about no repository, a PR `gh` cannot reach is a 502 rather than a 404 — a client told 'not found' would cache a PR out of existence — and a green PR's Actions log is a 200 with no sections rather than an error, because having no failing build is an answer.
 
+### session-reads
+
+- Status: n/a
+- Needs: transcript, pty
+- Why: core does not advertise the "transcript" capability
+- Asserts: the reads a client makes when it asks once and leaves — the retained pty bytes WITH the grid they were parsed at, the stored transcript records, and those records in chat shape — answer for a session the core holds, cut to the tail a `?limit` names, 404 for an id the core never held, and keep answering after the pty is gone, which is what makes the 409 on `/screen` an instruction to fall back rather than a dead end.
+
 ## Full scenario list
 
 - handshake: 3/3 - Capability handshake
@@ -157,3 +164,4 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - heavy-queue: n/a - the machine's slot queue, readable and reorderable from anything on the wire
 - changes: n/a - the working tree a session is changing
 - github: n/a - the GitHub data layer and the review surface, answered by the core rather than by the machine the app is on
+- session-reads: n/a - the three one-shot session reads, over HTTP

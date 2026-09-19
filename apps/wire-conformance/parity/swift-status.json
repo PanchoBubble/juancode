@@ -2,7 +2,7 @@
   "core": "swift",
   "coreLabel": "apps/native (JuancodeServer), the Swift core",
   "source": "measured",
-  "measuredAt": "2026-09-18",
+  "measuredAt": "2026-09-19",
   "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [
@@ -236,6 +236,10 @@
     "github": {
       "status": "skipped",
       "note": "core does not advertise the \"github\" capability"
+    },
+    "session-reads": {
+      "status": "skipped",
+      "note": "core does not advertise the \"transcript\" capability"
     }
   }
 }
