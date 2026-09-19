@@ -56,6 +56,10 @@ Run from the repo root:
 (`pnpm check` runs all three.) A Husky pre-commit hook runs eslint + prettier + related
 vitest on staged files.
 
+If you changed anything under `scripts/`, also run `pnpm test:scripts` (node:test over
+`scripts/*.test.mjs`). It is deliberately not part of `pnpm check`: it builds real git
+fixtures and spawns real processes, so it takes minutes on a loaded machine.
+
 ## Never leave a background process behind
 
 Several tests here only fail on a loaded machine, so measuring them means generating
@@ -100,6 +104,22 @@ applies to dispatched/background agent sessions.
 - Sidecar: `pnpm dev:oracle` (or `pnpm dev` for every `apps/*` Node package).
 - Requires `claude`, `codex` and/or `opencode` on PATH and authenticated. Override binary
   paths with `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN` if needed.
+
+## Worktree hygiene
+
+Agent sessions each get a worktree and nothing used to prune them; on 2026-09-19 that was
+a full disk (56 worktrees, 214G) and builds failing for reasons unrelated to their ticket.
+
+- `pnpm loose` — what is uncommitted, unpushed, PR-less or prunable across every worktree.
+- `pnpm sweep` — DRY RUN by default: what a sweep would remove, and why it keeps the rest.
+  `--apply` removes. It keeps anything dirty, with unpushed commits, with an open PR, with
+  a running session (asked of the daemon AND of the process table), younger than two days,
+  or that it could not read; and it refuses to remove anything at all when the daemon is
+  not answering, because then it cannot know what is live. Every run appends to
+  `~/.juancode/logs/worktree-sweep.log`.
+- `apps/native/scripts/worktree-sweeper-agent.sh` installs the daily LaunchAgent
+  (`com.juanone.juancode-sweeper`). It installs DISARMED — the daily run is a dry run
+  until `... arm`. Read a dry run first.
 
 <!-- BEGIN BEADS INTEGRATION -->
 

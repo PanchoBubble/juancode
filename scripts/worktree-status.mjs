@@ -7,200 +7,60 @@
 // pushed PRs, so it can never be the primary source: a dirty or unpushed tree
 // is invisible to it. This walks the worktrees, so nothing needs to register.
 //
+// The git/gh/bd reading lives in lib/worktree-scan.mjs, shared with
+// worktree-sweep.mjs — the sweeper deletes trees this scanner calls clean, so
+// they must answer "is anything here unique to this tree?" the same way.
+//
 // Usage:
 //   node scripts/worktree-status.mjs            human table
 //   node scripts/worktree-status.mjs --json     machine output (for agents/hooks)
 //   node scripts/worktree-status.mjs --fetch    refresh remote-tracking refs first (slower)
 //   node scripts/worktree-status.mjs --loose    only rows that need attention (exit 1 if any)
 
-import { execFileSync } from "node:child_process";
+import {
+  bdIdsFromBranch,
+  classifyLooseness,
+  fetchRemotes,
+  inspectWorktree,
+  loadBdById,
+  loadPrsByBranch,
+  parseWorktrees,
+  repoRootOf,
+} from "./lib/worktree-scan.mjs";
 
 const args = new Set(process.argv.slice(2));
 const asJson = args.has("--json");
 const doFetch = args.has("--fetch");
 const looseOnly = args.has("--loose");
 
-const BD_ID_RE = /\b([a-z][a-z0-9]*-[a-z0-9]{3,})\b/g;
-
-function git(cwd, cmdArgs, fallback = "") {
-  try {
-    return execFileSync("git", ["-C", cwd, ...cmdArgs], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 32 * 1024 * 1024,
-    }).trim();
-  } catch {
-    return fallback;
-  }
-}
-
-const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+const repoRoot = repoRootOf(process.cwd());
 if (!repoRoot) {
   console.error("not inside a git repository");
   process.exit(2);
 }
 
-if (doFetch) {
-  try {
-    execFileSync("git", ["-C", repoRoot, "fetch", "--all", "--quiet", "--prune"], {
-      stdio: "ignore",
-    });
-  } catch {
-    /* offline is fine */
-  }
-}
+if (doFetch) fetchRemotes(repoRoot);
 
-// ---- 1. Parse worktrees ---------------------------------------------------
-function parseWorktrees() {
-  const out = git(repoRoot, ["worktree", "list", "--porcelain"]);
-  const trees = [];
-  let cur = null;
-  for (const line of out.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      cur = { path: line.slice(9), head: "", branch: null, detached: false };
-      trees.push(cur);
-    } else if (!cur) {
-      continue;
-    } else if (line.startsWith("HEAD ")) {
-      cur.head = line.slice(5);
-    } else if (line.startsWith("branch ")) {
-      cur.branch = line.slice(7).replace("refs/heads/", "");
-    } else if (line === "detached") {
-      cur.detached = true;
-    }
-  }
-  return trees;
-}
-
-// ---- 2. Enrichment sources (gh + bd), best-effort -------------------------
-function loadPrsByBranch() {
-  const map = new Map();
-  try {
-    const raw = execFileSync(
-      "gh",
-      [
-        "pr",
-        "list",
-        "--state",
-        "all",
-        "--limit",
-        "200",
-        "--json",
-        "number,title,headRefName,state,isDraft,mergedAt,url",
-      ],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    for (const pr of JSON.parse(raw)) map.set(pr.headRefName, pr);
-  } catch {
-    /* gh missing / not authed: PR column stays blank */
-  }
-  return map;
-}
-
-function loadBdById() {
-  const map = new Map();
-  try {
-    // Redirect stdin/stderr: bd's dolt daemon can otherwise hold the pipe open.
-    const raw = execFileSync("sh", ["-c", "bd list --json 2>/dev/null </dev/null"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const parsed = JSON.parse(raw);
-    const list = Array.isArray(parsed) ? parsed : (parsed.issues ?? []);
-    for (const it of list) if (it && it.id) map.set(it.id, it);
-  } catch {
-    /* bd absent/empty: BD column stays blank */
-  }
-  return map;
-}
-
-const prsByBranch = loadPrsByBranch();
+const { prs: prsByBranch } = loadPrsByBranch();
 const bdById = loadBdById();
 
-// ---- 3. Classify each worktree -------------------------------------------
-function bdIdsFromBranch(cwd) {
-  const body = git(cwd, ["log", "origin/main..HEAD", "--format=%B"], "");
-  const ids = new Set();
-  for (const m of body.matchAll(BD_ID_RE)) {
-    // ignore obvious non-ids like short sha-ish tokens; require a letter-led prefix
-    ids.add(m[1]);
-  }
-  return [...ids];
-}
-
 function classify(t) {
-  const short = t.path.includes("-worktrees/")
-    ? "wt:" + t.path.split("-worktrees/").pop()
-    : t.path === repoRoot
-      ? "."
-      : t.path.replace(repoRoot + "/", "");
-  const branch = t.branch ?? (t.detached ? "(detached)" : "?");
-
-  const dirtyLines = t.path
-    ? git(t.path, ["status", "--porcelain"]).split("\n").filter(Boolean)
-    : [];
-  const dirty = dirtyLines.length;
-
-  const aheadMain = Number(git(t.path, ["rev-list", "--count", "origin/main..HEAD"], "0")) || 0;
-
-  // pushed? compare local branch tip to its remote-tracking ref
-  let pushed = null; // null = unknown/no remote branch
-  if (t.branch) {
-    const remoteSha = git(
-      t.path,
-      ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${t.branch}`],
-      "",
-    );
-    if (remoteSha) pushed = remoteSha === t.head;
-  }
-
-  const pr = t.branch ? prsByBranch.get(t.branch) : undefined;
+  const info = inspectWorktree(t, { repoRoot, prs: prsByBranch });
+  const { state, hint } = classifyLooseness(info);
   const bdIds = bdIdsFromBranch(t.path);
-  const bdStatuses = bdIds.map((id) =>
-    bdById.get(id) ? `${id}:${bdById.get(id).status}` : `${id}:gone`,
-  );
-
-  // ---- state machine, most-loose first ----
-  let state, hint;
-  const prMerged = pr && (pr.state === "MERGED" || pr.mergedAt);
-  const isMain = t.branch === "main";
-
-  if (dirty > 0) {
-    state = "DIRTY";
-    hint = `${dirty} uncommitted file(s) — commit or stash`;
-  } else if (aheadMain > 0 && pushed === false) {
-    state = "UNPUSHED";
-    hint = `${aheadMain} commit(s) ahead, local is ahead of origin/${t.branch} — push`;
-  } else if (aheadMain > 0 && pushed === null && !isMain) {
-    state = "UNPUSHED";
-    hint = `${aheadMain} commit(s) ahead, no origin branch — push`;
-  } else if (aheadMain > 0 && !pr && !isMain) {
-    state = "NO_PR";
-    hint = `pushed, ${aheadMain} commit(s) ahead, no PR — open one`;
-  } else if (pr && !prMerged && pr.state === "OPEN") {
-    state = pr.isDraft ? "PR_DRAFT" : "PR_OPEN";
-    hint = `PR #${pr.number} ${pr.isDraft ? "(draft)" : "in review"} — ${pr.url}`;
-  } else if (prMerged && !isMain) {
-    state = "MERGED_STALE";
-    hint = `PR #${pr.number} merged — prune: git worktree remove ${t.path} && git branch -D ${t.branch}`;
-  } else if (!isMain && aheadMain === 0 && dirty === 0) {
-    state = "ORPHAN";
-    hint = `at origin/main, no diff, no changes — prune: git worktree remove ${t.path} && git branch -D ${t.branch}`;
-  } else {
-    state = "CLEAN";
-    hint = isMain ? "main working tree" : "";
-  }
-
+  const bd = bdIds.map((id) => (bdById.get(id) ? `${id}:${bdById.get(id).status}` : `${id}:gone`));
   return {
     state,
-    path: t.path,
-    short,
-    branch,
-    dirty,
-    aheadMain,
-    pushed,
-    pr: pr ? { number: pr.number, state: pr.state, draft: pr.isDraft, url: pr.url } : null,
-    bd: bdStatuses,
+    path: info.path,
+    short: info.short,
+    branch: info.branch,
+    dirty: info.dirty,
+    aheadMain: info.aheadMain,
+    pushed: info.pushed,
+    pr: info.pr
+      ? { number: info.pr.number, state: info.pr.state, draft: info.pr.draft, url: info.pr.url }
+      : null,
+    bd,
     hint,
   };
 }
@@ -217,9 +77,9 @@ const ORDER = {
 };
 const LOOSE = new Set(["DIRTY", "UNPUSHED", "NO_PR", "PR_DRAFT"]);
 
-let rows = parseWorktrees().map(classify);
+let rows = parseWorktrees(repoRoot).map(classify);
 
-// ---- 4. bd tickets in_progress with no matching branch (claimed, not started)
+// ---- bd tickets in_progress with no matching branch (claimed, not started) ----
 const branchBdIds = new Set(rows.flatMap((r) => r.bd.map((s) => s.split(":")[0])));
 const strandedBd = [];
 for (const [id, it] of bdById) {
@@ -232,7 +92,7 @@ for (const [id, it] of bdById) {
 rows.sort((a, b) => ORDER[a.state] - ORDER[b.state] || a.short.localeCompare(b.short));
 if (looseOnly) rows = rows.filter((r) => LOOSE.has(r.state));
 
-// ---- 5. Output ------------------------------------------------------------
+// ---- Output ---------------------------------------------------------------
 if (asJson) {
   console.log(JSON.stringify({ worktrees: rows, strandedBd }, null, 2));
 } else {
