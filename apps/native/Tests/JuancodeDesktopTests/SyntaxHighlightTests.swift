@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Unit tests for the pure single-line syntax tokenizer backing the native
 /// ChangesPanel diff highlighting (juancode-idg). No SwiftUI here — only the

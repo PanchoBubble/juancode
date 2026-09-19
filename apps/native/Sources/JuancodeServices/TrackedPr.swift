@@ -16,6 +16,16 @@ import JuancodeCore
 /// human gate → needs-decision; plain comments, `COMMENTED` reviews, and CI going
 /// red → auto-fix attempts. The injected fix prompt itself instructs the agent to
 /// stop and escalate if it hits genuine ambiguity.
+///
+/// Disposition (juancode-a2s7): STAYS, and is not a fork. `juancoded-core/src/pr.rs`
+/// holds the behaviour twin (`classify_pr_activity`, `derive_track_state`,
+/// `track_seed_prompt`, `auto_fix_prompt`, `stalled_ci_fix_reason`) and
+/// `juancoded-server/src/tracked_prs.rs` runs the engine, so what is left here is the
+/// wire shape the RUST path decodes into — `RustCoreClient` reads `TrackedPr`,
+/// `PrTrackSnapshot` and `TrackNotification`, `JuancodePersistence` stores them and
+/// `JuancodeServer/WireProtocol.swift` carries them. Same standing as
+/// `WireProtocol.swift`: a client-side DTO, not an unported service. The engine
+/// half that IS a fork is `JuancodeServer/PrTrackingEngine.swift`, which nqpm deletes.
 
 // MARK: - state
 

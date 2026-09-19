@@ -1,6 +1,7 @@
 import SwiftUI
 import JuancodeCore
 import JuancodeServices
+import JuancodeDesktop
 
 // MARK: - Session jump palette (juancode-dr0)
 //

@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import JuancodeCore
 import JuancodeServices
+import JuancodeDesktop
 
 /// Native SwiftUI port of the web `ChangesPanel` (+ `GitActions`), re-laid-out as a
 /// VS Code-style "Source Control" view (juancode-dxg): a resizable SIDE panel with a

@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// Unit tests for the cost-budget evaluation math (juancode-qoc). Pure — no store,
 /// no UI.

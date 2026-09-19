@@ -13,6 +13,16 @@ import JuancodeCore
 /// implementation of a capability the Swift core still claims is not a fork to delete.
 /// It goes when the Swift core goes — juancode-nqpm — and not before.
 ///
+/// Re-measured at f06cb04 (juancode-a2s7), and that last sentence is half true.
+/// `createWorktree` is indeed swift-core-only: `RustCoreClient.makesWorktrees` is
+/// true, so on the rust path the daemon cuts the tree and `AppModel` never calls
+/// this. `removeWorktree` is NOT — it survives nqpm at five sites on the rust path
+/// (`AppModel` worktree cleanup x4 and `CoreProxyServer.swift:399`, the relay's own
+/// `DELETE /api/sessions/:id`), because `juancoded-core::worktree::remove` exists
+/// but is reachable only from the daemon's own session delete, never over HTTP.
+/// So this file outlives the Swift core by exactly one function. Owned by
+/// juancode-yydd, which adds that route and finishes the deletion.
+///
 /// Every shell-out goes through `ProcessRunner`, which inherits the environment
 /// verbatim: the prime directive.
 

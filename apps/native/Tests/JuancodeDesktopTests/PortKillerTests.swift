@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// `PortKiller.parseListeners` turns `lsof -Fpc` field output into deduped processes.
 final class PortKillerTests: XCTestCase {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// The comment-body pipeline behind every card the GitHub view draws: the reviewer
 /// priority badge lifted out of a bot's markdown, the inline HTML GitHub emits turned

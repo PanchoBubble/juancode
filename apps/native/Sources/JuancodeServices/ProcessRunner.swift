@@ -1,6 +1,14 @@
 import Foundation
 import Darwin
 
+/// Every shell-out in this target goes through here, inheriting the environment
+/// verbatim — the prime directive.
+///
+/// Disposition (juancode-a2s7): no home of its own. It has no Rust counterpart to
+/// wait for (`juancoded-core/src/proc.rs` is the daemon's equivalent) and it is not
+/// desktop-local — `JuancodeServer` and `JuancodeDesktop` both use it. It is the last
+/// thing out of the room: it dies with `Gh.swift` and `Git.swift`, per juancode-3s4p.
+
 /// Captured result of a finished child process.
 public struct ProcessResult: Sendable {
     public let stdout: String

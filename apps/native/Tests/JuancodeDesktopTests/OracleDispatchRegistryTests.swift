@@ -1,6 +1,6 @@
 import XCTest
 import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// The read side of the sidecar's dispatch registry (juancode-wn64). The file is
 /// written by another process, so every case here is about tolerating what that

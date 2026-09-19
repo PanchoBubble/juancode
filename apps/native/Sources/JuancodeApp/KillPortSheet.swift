@@ -1,5 +1,6 @@
 import SwiftUI
 import JuancodeServices
+import JuancodeDesktop
 
 /// "Kill Port" utility (opened from the sidebar toolbar): free up a stuck local dev
 /// port. Lists the common dev-server ports plus any the user has saved, shows what's

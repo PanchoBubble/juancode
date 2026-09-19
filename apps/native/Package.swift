@@ -80,13 +80,20 @@ let package = Package(
         // server's shell-out+parse modules (git, gh, beads, status, review, commit,
         // session title/usage, recovery) plus the ephemeral editor/terminal ptys.
         // Foundation + JuancodeCore only — no server/UI deps.
+        //
+        // `ls Sources/JuancodeServices` is the answer to "what is left to port", and
+        // juancode-a2s7 made it one again: 10 files, every one of which carries a
+        // disposition in its own header naming the ticket that deletes it. Nothing
+        // desktop-local lives here any more — that is `JuancodeDesktop`, below.
         .target(
             name: "JuancodeServices",
             dependencies: ["JuancodeCore"]
         ),
         // Desktop-local logic (juancode-rr6m): the non-UI half of features that only
         // ever run where the SwiftUI app runs — MCP/auth health, bd reads, Linear issue
-        // tracking, AI settings patching, recurring tasks, session/prompt templates.
+        // tracking, AI settings patching, recurring tasks, session/prompt templates,
+        // and (juancode-a2s7) the Oracle control dir, the terminal-panel tab model, the
+        // diff renderers, the port/process reapers and the cost budget.
         //
         // Its own target rather than a corner of `JuancodeServices` because the epic's
         // "no permanent forks" rule needs `ls Sources/JuancodeServices` to be an honest

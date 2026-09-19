@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 /// `ProcessReaper.parseVitestTrees` groups `ps` output into stuck vitest trees.
 final class ProcessReaperTests: XCTestCase {

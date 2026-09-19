@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import JuancodeClient
 import JuancodeCore
+import JuancodeDesktop
 import JuancodeServices
 import MarkdownUI
 

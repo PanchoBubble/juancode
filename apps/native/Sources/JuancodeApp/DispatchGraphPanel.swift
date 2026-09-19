@@ -1,6 +1,7 @@
 import SwiftUI
 import JuancodeCore
 import JuancodeServices
+import JuancodeDesktop
 
 /// The dispatch-chain graph (juancode-wn64): a read-only DAG of the work in
 /// flight — bd ticket → Oracle dispatch → session → branch/worktree → PR and its

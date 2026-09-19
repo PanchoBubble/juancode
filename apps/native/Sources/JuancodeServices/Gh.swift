@@ -12,6 +12,21 @@ import JuancodeCore
 /// JuancodeCore's `resolveBin`), honouring a `JUANCODE_GH_BIN` override — the same
 /// pattern the other ported services use (`JUANCODE_BD_BIN`, `JUANCODE_CLAUDE_BIN`).
 /// This both fixes GUI/stripped-PATH launches and lets tests inject a fake binary.
+///
+/// Disposition (juancode-a2s7). The port is DONE; the deletion is not, and the gap
+/// is a `JuancodeApp` rewire, not a missing Rust service. Measured at f06cb04,
+/// `juancoded-core/src/gh.rs` already holds a counterpart for almost everything
+/// here — `pr_activity`, `viewer_login`, `repo_nwo`, `open_prs`, `pr_for_branch`,
+/// `search_open_prs`, `pr_backfill_query`, `merge_pr_lists`, `pr_matches_query`,
+/// `pr_attention_reason`, `prs_needing_you`, the two sorts, `pr_age_label`,
+/// `parse_check_runs`, `pr_check_runs`, `comment_on_pr`, `reply_to_review_comment`,
+/// `rerun_checks`, `rollup_checks`, `count_passed_checks` — served under the
+/// `github` capability at `/api/prs` and `/api/pr/*`. What has no Rust twin is
+/// `createPr`, `getPrDiff` and `GhViewerPrs.swift`'s `getViewerPrs`.
+///
+/// It stays for two measured reasons, neither of which nqpm resolves: `TrackedPr.swift`
+/// reads `PrActivity`/`PrCheckRun` in this target, and `JuancodeApp` calls into this
+/// file at ~16 sites regardless of which core is running. Owned by juancode-h0l6.
 
 private let MAX_BUFFER = 16 * 1024 * 1024
 

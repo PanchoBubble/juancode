@@ -16,6 +16,17 @@ import JuancodeCore
 ///
 /// Same prime directive as everything else here: the real `gh` CLI with the user's
 /// own auth and environment, never a shadow env.
+///
+/// Disposition (juancode-a2s7): NOT desktop-local, despite having only in-process
+/// `JuancodeApp` callers today. Measured at f06cb04: `grep -rn viewer_prs
+/// apps/juancoded/crates` still finds nothing, so the daemon has no counterpart —
+/// but this file is `Gh.swift` part two, not an independent renderer. It reads five
+/// symbols that are internal to this target (`ghErrorReason`, `RollupCheck`,
+/// `rollupChecks`, `countPassedChecks`, plus `resolveBin`), so moving it to
+/// `JuancodeDesktop` would mean widening the public surface of the very target this
+/// epic is shrinking, for a `gh` shell-out whose parent has to stay here anyway.
+/// It shares `Gh.swift`'s fate: the daemon grows a `viewer_prs` read, `JuancodeApp`
+/// calls it through `CoreClient`, and both files go in that change (juancode-h0l6).
 
 private let MAX_VIEWER_PRS = 50
 

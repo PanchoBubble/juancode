@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeDesktop
 
 final class TerminalPanelModelTests: XCTestCase {
     func testStartsEmpty() {

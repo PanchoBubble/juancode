@@ -1,5 +1,6 @@
 import Foundation
 import JuancodeCore
+import JuancodeServices
 
 /// Read side of the sidecar's dispatch registry (`oracle-dispatches.json`).
 ///

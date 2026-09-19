@@ -1,6 +1,7 @@
 import SwiftUI
 import JuancodeCore
 import JuancodeServices
+import JuancodeDesktop
 
 /// The bottom shell-terminal panel for ONE workdir, VS Code-style: a tab strip of
 /// plain shell terminals plus the active tab's pane(s). Scope is PER-WORKDIR — the
