@@ -6,7 +6,45 @@ import JuancodeCore
 import JuancodeDesktop
 import JuancodeServices
 
+/// The window's root, and nothing else: the toolbar and the content it sits over.
+///
+/// This body reads NO observable state, and it must stay that way. A SwiftUI
+/// `.popover` anchored to a toolbar item is torn down whenever the view that OWNS
+/// the `.toolbar` modifier re-renders — measured, and specific to a window whose
+/// content is a `NavigationSplitView`: churn inside a child view is harmless, one
+/// re-render of the owner closes the popover mid-click. That is what made the
+/// running-agents badge flash open and shut while agents were working. So the owner
+/// holds no `@State`, no `@AppStorage` and no `model.` read; every one of those
+/// lives in `WindowContent` below, and the toolbar items are each their own view.
 struct RootView: View {
+    var body: some View {
+        WindowContent()
+            // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs
+            // and Worktrees live in the window toolbar — reachable from any session.
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    // Four items, and each one owns a whole family: how much is
+                    // running (with the list, a kill for each, the global pause and
+                    // the core's health behind a click), what wants your attention,
+                    // your GitHub queue, and the utilities. Everything else moved —
+                    // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP
+                    // status / AI settings into Tools; Open in Editor into the
+                    // session-row hover menu; Tracked Issues into the sidebar;
+                    // Appearance into the ⌘, Settings window. The Oracle has the
+                    // right-edge rail and ⌃Space, so it does not need a slot here too.
+                    RunningSessionsBadge()
+                    NotificationsBell()
+                    GitHubQueueBadge()
+                    ToolsMenu()
+                }
+            }
+            // No toolbar material — the top strip stays the window's black (dark
+            // mode) instead of the system gray band over the split view and the rail.
+            .toolbarBackground(.hidden, for: .windowToolbar)
+    }
+}
+
+private struct WindowContent: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
     @Environment(Shortcuts.self) private var shortcuts
@@ -47,26 +85,6 @@ struct RootView: View {
         .background(WindowBackground(color: .appWindow) { model.hostWindow = $0 })
         // Window-scoped key monitor for vim sidebar nav + ⌃H/⌃L pane focus (juancode-vgm).
         .background(PaneNavInstaller(model: model, oracle: oracle, shortcuts: shortcuts).frame(width: 0, height: 0))
-        // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs and
-        // Worktrees live in the window toolbar — reachable from any session.
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                // Three items, and each one owns a whole family: how much is
-                // running (with the list, a kill for each, the global pause and the
-                // core's health behind a click), what wants your attention, and the
-                // utilities. Everything else moved — Keep Awake / Recurring Tasks /
-                // Worktrees / Kill Port / MCP status / AI settings into Tools; Open in
-                // Editor into the session-row hover menu; Tracked Issues into the
-                // sidebar; Appearance into the ⌘, Settings window. The Oracle has the
-                // right-edge rail and ⌃Space, so it does not need a slot here too.
-                RunningSessionsBadge()
-                NotificationsBell()
-                ToolsMenu()
-            }
-        }
-        // No toolbar material — the top strip stays the window's black (dark mode)
-        // instead of the system gray band over the split view and the Oracle rail.
-        .toolbarBackground(.hidden, for: .windowToolbar)
         // The file editor opens as a large, resizable floating window over the whole
         // window (not the narrow Changes side panel a sheet was confined near).
         .overlay { EditorHost() }
@@ -487,10 +505,6 @@ private struct ToolsMenu: View {
     var body: some View {
         Button {
             showing = true
-            // The GitHub count — floored, so opening the menu repeatedly costs one
-            // search, not one per open. The Heavy Queue row's count needs no refresh
-            // here: it is pushed by the core, and the watch below is what asks for it.
-            model.refreshViewerPrs()
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
@@ -533,14 +547,6 @@ private struct ToolsMenu: View {
                 toolButton("point.3.filled.connected.trianglepath.dotted", "Dispatch Chains") {
                     model.showingDispatchGraph = true
                 }
-                // Your GitHub queue across every repo — authored PRs and the reviews
-                // you owe — not just the folders juancode has open.
-                toolButton("arrow.triangle.pull", "GitHub PRs",
-                           tint: model.viewerPrsNeedingYouCount > 0 ? Color.orange : nil,
-                           trailing: model.viewerPrCount == 0 ? nil : "\(model.viewerPrCount)") {
-                    model.openViewerPrQueue()
-                }
-                .help(githubHelp)
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
                 Divider().padding(.vertical, 2)
@@ -552,18 +558,6 @@ private struct ToolsMenu: View {
             .padding(6)
             .frame(width: 240)
         }
-    }
-
-    /// What the GitHub row promises, given what the queue currently holds.
-    private var githubHelp: String {
-        guard model.viewerPrs.available else {
-            return model.viewerPrs.error ?? "Your open PRs and the reviews you owe"
-        }
-        let needs = model.viewerPrsNeedingYouCount
-        let mine = model.viewerPrs.mine.count
-        let reviewing = model.viewerPrs.reviewing.count
-        let base = "\(mine) yours · \(reviewing) to review"
-        return needs > 0 ? "\(base) · \(needs) need\(needs == 1 ? "s" : "") you" : base
     }
 
     /// A popover row that opens a sheet then dismisses the popover.
@@ -2421,32 +2415,11 @@ private struct PrRow: View {
 
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
 
-    private var checkColor: Color {
-        switch pr.checks {
-        case .passing: return .green
-        case .failing: return .red
-        case .pending: return .orange
-        case .none: return .secondary
-        }
-    }
+    private var checkColor: Color { pr.checks.color }
 
-    /// Status-adaptive check glyph paired with the fraction. Colour comes from
-    /// `checkColor`.
-    private var checkIcon: String {
-        switch pr.checks {
-        case .passing: return "checkmark.circle.fill"
-        case .failing: return "xmark.circle.fill"
-        case .pending: return "clock.fill"
-        case .none: return "minus.circle"
-        }
-    }
+    private var checkIcon: String { pr.checks.icon }
 
-    /// The check summary shown in the row: "passed/total" (e.g. "4/11"), or "No
-    /// checks" when there are none. Colour comes from `checkColor`; the full
-    /// passing/failing wording lives in `checkLabel` (tooltip).
-    private var checksText: String {
-        pr.checkCount == 0 ? "No checks" : "\(pr.passedCount)/\(pr.checkCount)"
-    }
+    private var checksText: String { pr.checksText }
 
     private var checkLabel: String {
         guard pr.checkCount > 0 else { return "No checks" }

@@ -1196,27 +1196,11 @@ private struct GitHubPrRow: View {
         .clipShape(Capsule())
     }
 
-    private var checkColor: Color {
-        switch pr.checks {
-        case .passing: return .green
-        case .failing: return .red
-        case .pending: return .orange
-        case .none: return .secondary
-        }
-    }
+    private var checkColor: Color { pr.checks.color }
 
-    private var checkIcon: String {
-        switch pr.checks {
-        case .passing: return "checkmark.circle.fill"
-        case .failing: return "xmark.circle.fill"
-        case .pending: return "clock.fill"
-        case .none: return "minus.circle"
-        }
-    }
+    private var checkIcon: String { pr.checks.icon }
 
-    private var checksText: String {
-        pr.checkCount == 0 ? "No checks" : "\(pr.passedCount)/\(pr.checkCount)"
-    }
+    private var checksText: String { pr.checksText }
 }
 
 /// A queue row for a repo juancode has no checkout of. Same vocabulary as
@@ -1315,27 +1299,11 @@ private struct ViewerPrRow: View {
         .clipShape(Capsule())
     }
 
-    private var checkColor: Color {
-        switch pr.checks {
-        case .passing: return .green
-        case .failing: return .red
-        case .pending: return .orange
-        case .none: return .secondary
-        }
-    }
+    private var checkColor: Color { pr.checks.color }
 
-    private var checkIcon: String {
-        switch pr.checks {
-        case .passing: return "checkmark.circle.fill"
-        case .failing: return "xmark.circle.fill"
-        case .pending: return "clock.fill"
-        case .none: return "minus.circle"
-        }
-    }
+    private var checkIcon: String { pr.checks.icon }
 
-    private var checksText: String {
-        pr.checkCount == 0 ? "No checks" : "\(pr.passedCount)/\(pr.checkCount)"
-    }
+    private var checksText: String { pr.checksText }
 }
 
 /// The shared PR actions, rendered as context-menu items or detail-pane buttons:

@@ -2234,9 +2234,9 @@ final class AppModel {
         else { openGitHub(scope: nil) }
     }
 
-    /// The Tools-menu GitHub row: open the view on the viewer queue (your PRs and
-    /// the reviews you owe, across every repo), unscoped, and kick a refresh if the
-    /// queue has gone stale.
+    /// The GitHub badge's "open the full view": the view on the viewer queue (your
+    /// PRs and the reviews you owe, across every repo), unscoped, and a refresh if
+    /// the queue has gone stale.
     func openViewerPrQueue() {
         github.tab = .mine
         githubScope = nil
@@ -2244,7 +2244,7 @@ final class AppModel {
         refreshViewerPrs()
     }
 
-    // MARK: - viewer PR queue (Tools → GitHub)
+    // MARK: - viewer PR queue (the toolbar's GitHub badge)
 
     /// Your open PRs plus the reviews you owe, across every repo — one GitHub
     /// search, not the per-folder `gh pr list` the rest of the view uses.
@@ -2252,21 +2252,21 @@ final class AppModel {
     /// When the queue last landed, nil until the first successful fetch. Drives the
     /// freshness policy and the "updated …" stamp.
     private(set) var viewerPrsFetchedAt: Date?
-    /// Set while a queue fetch is in flight, so the tick, the Tools menu and the
+    /// Set while a queue fetch is in flight, so the tick, the toolbar badge and the
     /// view's refresh button can't stampede one `gh` search into three.
     private(set) var viewerPrsLoading = false
     @ObservationIgnored private var viewerPrLoop: Task<Void, Never>?
 
-    /// Rows in the queue — the Tools row's count.
+    /// Rows in the queue — the toolbar badge's count.
     var viewerPrCount: Int { viewerPrs.rows.count }
 
-    /// Rows in the queue that actually want something from you, for the Tools row's
+    /// Rows in the queue that actually want something from you, for the badge's
     /// tint (a long queue is not the same as an urgent one).
     var viewerPrsNeedingYouCount: Int { viewerPrsNeedingYou(viewerPrs) }
 
     /// Fetch the queue when the freshness policy says it's due. Every trigger goes
-    /// through here — the tick, opening the Tools menu, opening the view — so the
-    /// floor holds across all of them.
+    /// through here — the tick, opening the badge, opening the view — so the floor
+    /// holds across all of them.
     func refreshViewerPrs(force: Bool = false) {
         guard !viewerPrsLoading else { return }
         guard viewerPrRefreshDue(lastFetched: viewerPrsFetchedAt, now: Date(),

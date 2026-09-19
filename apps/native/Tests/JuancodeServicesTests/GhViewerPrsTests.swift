@@ -148,6 +148,59 @@ final class ViewerPrQueueShapeTests: XCTestCase {
             viewerPrsNeedingYou(ViewerPrResult(available: false, rows: rows, viewer: "me")), 0)
     }
 
+    // MARK: the badge's four chips (juancode GitHub toolbar badge)
+
+    /// Every chip is the queue read through one question, and the counts on them
+    /// have to add up against the rows each one then lists.
+    func testEachSliceListsExactlyWhatItsChipCounts() {
+        let result = ViewerPrResult(available: true, rows: [
+            row(1, repo: "acme/app", reason: .mine),
+            row(2, repo: "acme/app", reason: .mine, checks: .failing),
+            row(3, repo: "acme/app", reason: .reviewRequested, author: "other",
+                reviewRequests: ["me"]),
+        ], viewer: "me")
+        for slice in ViewerPrSlice.allCases {
+            XCTAssertEqual(viewerPrCount(result, slice: slice),
+                           viewerPrRows(result, slice: slice).count, "\(slice)")
+        }
+        XCTAssertEqual(viewerPrRows(result, slice: .all).count, 3)
+        XCTAssertEqual(viewerPrRows(result, slice: .mine).map(\.pr.number).sorted(), [1, 2])
+        XCTAssertEqual(viewerPrRows(result, slice: .review).map(\.pr.number), [3])
+        XCTAssertEqual(viewerPrRows(result, slice: .needsYou).map(\.pr.number).sorted(), [2, 3])
+    }
+
+    /// The point of the list: what wants you is at the top, in the order the triage
+    /// group uses, and everything quiet keeps GitHub's `sort:updated` order below it.
+    func testRowsPutWhatWantsYouFirstAndKeepTheQueueOrderOtherwise() {
+        let result = ViewerPrResult(available: true, rows: [
+            row(1, repo: "acme/app", reason: .mine),                    // quiet, first in
+            row(2, repo: "acme/app", reason: .mine, unresolved: 3),     // rank 2
+            row(3, repo: "acme/app", reason: .reviewRequested, author: "other"),  // rank 3
+            row(4, repo: "acme/app", reason: .mine, reviewDecision: "CHANGES_REQUESTED"), // 0
+            row(5, repo: "acme/app", reason: .mine, checks: .failing),  // rank 1
+            row(6, repo: "acme/app", reason: .mine),                    // quiet, second in
+        ], viewer: "me")
+        XCTAssertEqual(viewerPrRows(result, slice: .all).map(\.pr.number), [4, 5, 2, 3, 1, 6])
+    }
+
+    /// A review you owe is a reason even when the PR itself carries no request we
+    /// can see — the queue answered that by which search returned it.
+    func testAReviewRequestIsItsOwnAttentionReason() {
+        let owed = row(9, repo: "acme/app", reason: .reviewRequested, author: "other")
+        XCTAssertEqual(viewerPrAttention(owed, viewer: "me"), .reviewRequested)
+        XCTAssertNil(viewerPrAttention(row(9, repo: "acme/app", reason: .mine), viewer: "me"))
+    }
+
+    /// Same guards as the count it backs: no viewer, nothing scored; no answer,
+    /// no rows at all.
+    func testSlicesStayQuietWithoutAViewerOrAnAnswer() {
+        let rows = [row(1, repo: "acme/app", reason: .reviewRequested, author: "other")]
+        XCTAssertEqual(viewerPrRows(ViewerPrResult(available: true, rows: rows),
+                                    slice: .needsYou), [])
+        XCTAssertEqual(viewerPrCount(ViewerPrResult(available: false, rows: rows, viewer: "me"),
+                                     slice: .all), 0)
+    }
+
     func testTheTwoSearchesScopeToOpenPrsAndTheViewer() {
         XCTAssertTrue(viewerPrSearch(mine: true).contains("author:@me"))
         XCTAssertTrue(viewerPrSearch(mine: false).contains("review-requested:@me"))

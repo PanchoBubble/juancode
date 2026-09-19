@@ -270,14 +270,56 @@ public func groupViewerPrsByRepo(_ rows: [ViewerPr]) -> [(repo: String, rows: [V
     return order.map { (repo: $0, rows: byRepo[$0] ?? []) }
 }
 
+/// Which slice of the queue a surface is showing — the four questions the toolbar
+/// badge's chips ask: everything, the ones you wrote, the ones you owe a review,
+/// and the ones that actually want something today.
+public enum ViewerPrSlice: String, Sendable, CaseIterable, Identifiable {
+    case all, mine, review, needsYou
+    public var id: String { rawValue }
+}
+
+/// Why a queue row wants the viewer, or nil when it doesn't.
+///
+/// A review request is a reason in itself: `prAttentionReason` can only see the
+/// request when the PR carries it, and the queue has already answered that question
+/// by putting the row in the `reviewRequested` bucket. Pure; exposed for testing.
+public func viewerPrAttention(_ row: ViewerPr, viewer: String) -> PrAttentionReason? {
+    if row.reason == .reviewRequested { return .reviewRequested }
+    return prAttentionReason(row.pr, viewer: viewer)
+}
+
+/// The rows in `slice`, the ones that want you first (by `PrAttentionReason.rank`)
+/// and each group otherwise keeping the queue's own order, which is GitHub's
+/// `sort:updated`. Pure; exposed for testing.
+public func viewerPrRows(_ result: ViewerPrResult, slice: ViewerPrSlice) -> [ViewerPr] {
+    let viewer = result.viewer
+    let kept: [ViewerPr] = result.rows.filter { row in
+        switch slice {
+        case .all: return true
+        case .mine: return row.reason == .mine
+        case .review: return row.reason == .reviewRequested
+        case .needsYou: return !viewer.isEmpty && viewerPrAttention(row, viewer: viewer) != nil
+        }
+    }
+    guard !viewer.isEmpty else { return kept }
+    return kept.enumerated().sorted { a, b in
+        let ra = viewerPrAttention(a.element, viewer: viewer)?.rank ?? Int.max
+        let rb = viewerPrAttention(b.element, viewer: viewer)?.rank ?? Int.max
+        return ra == rb ? a.offset < b.offset : ra < rb
+    }.map(\.element)
+}
+
+/// How many rows a slice holds — the chip counts, and for `needsYou` the badge's
+/// tint: a queue that is merely long is not a queue that is on fire. Zero for every
+/// slice until the queue has actually landed, so a failed search never claims a
+/// number. Pure; exposed for testing.
+public func viewerPrCount(_ result: ViewerPrResult, slice: ViewerPrSlice) -> Int {
+    guard result.available else { return 0 }
+    return viewerPrRows(result, slice: slice).count
+}
+
 /// How many rows in the queue actually want something from you — CI red, changes
-/// requested or open threads on yours, plus every review you owe. Drives the Tools
-/// row's tint: a queue that is merely long is not a queue that is on fire. Pure;
-/// exposed for testing.
+/// requested or open threads on yours, plus every review you owe.
 public func viewerPrsNeedingYou(_ result: ViewerPrResult) -> Int {
-    guard result.available, !result.viewer.isEmpty else { return 0 }
-    return result.rows.filter { row in
-        row.reason == .reviewRequested
-            || prAttentionReason(row.pr, viewer: result.viewer) != nil
-    }.count
+    viewerPrCount(result, slice: .needsYou)
 }
