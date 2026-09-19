@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 final class EphemeralPtyTests: XCTestCase {
     /// The command is resolved against PATH, so assert on the binary name rather

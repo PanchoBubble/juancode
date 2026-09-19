@@ -1,4 +1,5 @@
 import SwiftUI
+import JuancodeCore
 import JuancodeServices
 
 /// The bottom shell-terminal panel for ONE workdir, VS Code-style: a tab strip of

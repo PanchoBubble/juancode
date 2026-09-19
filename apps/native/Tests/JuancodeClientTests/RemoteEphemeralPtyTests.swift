@@ -1,4 +1,5 @@
 import XCTest
+import JuancodeCore
 @testable import JuancodeClient
 
 /// An ephemeral pane on a remote core is a pty handed out before it exists. These

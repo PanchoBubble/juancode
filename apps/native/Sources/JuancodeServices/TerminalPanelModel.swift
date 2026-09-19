@@ -1,4 +1,5 @@
 import Foundation
+import JuancodeCore
 
 /// Stable identifier for one terminal pane (one shell pty). A tab owns one or two
 /// of these; splitting a tab adds a second pane id.

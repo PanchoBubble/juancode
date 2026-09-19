@@ -471,7 +471,7 @@ public final class PtyProcess: @unchecked Sendable {
             // one addresses a process rather than a group, so it could land on a
             // stranger.
             guard !self.reaped.withLock({ $0 }) else { return }
-            _ = kill(self.pid, SIGKILL)
+            _ = Darwin.kill(self.pid, SIGKILL)
         }
         // Healthy-queue path (unchanged for the common case): close the master so
         // a child blocked on stdin EOFs out gracefully. When the queue is wedged

@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Where an ephemeral pty's keystrokes go and who ends it.
 ///
