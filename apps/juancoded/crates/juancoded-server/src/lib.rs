@@ -18,6 +18,7 @@ pub mod notify_hook;
 pub mod owner;
 pub mod queue_delivery;
 pub mod reads;
+pub mod reexec;
 pub mod screen;
 pub mod seed;
 pub mod serve;

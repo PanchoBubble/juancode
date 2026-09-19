@@ -9,6 +9,9 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,6 +51,25 @@ pub struct SpawnSpec {
     pub env_overlay: HashMap<String, String>,
 }
 
+/// Where an [`AdoptSpec`] came from, and what it has to describe: one live pty,
+/// named by the fd it occupies in this process's table and the pid behind it.
+///
+/// Serialisable because the one producer of these writes them to a file and the one
+/// consumer is the next image of the same process, after an `execv`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdoptSpec {
+    /// The master fd, as numbered in *our* fd table. An exec preserves the table, so
+    /// the number still names the same pty on the other side.
+    pub master_fd: i32,
+    pub pid: u32,
+    pub cols: u16,
+    pub rows: u16,
+    /// `ttyname(master_fd)` as it was on the export side. Checked again on adopt: an
+    /// fd number that still exists but names a different tty is the one corruption
+    /// that would otherwise produce a session wired to a stranger.
+    pub tty: Option<String>,
+}
+
 /// A running pty. Cloneable handle; dropping every clone does not end the child
 /// (the registry owns the lifetime and calls `stop` explicitly).
 #[derive(Clone)]
@@ -55,10 +77,229 @@ pub struct PtyHandle {
     inner: Arc<Inner>,
 }
 
+/// The master end of a pty, however this process came by it: opened here, or
+/// inherited across an exec. Two implementations, one contract — nothing above this
+/// line may be able to tell an adopted pty from a spawned one.
+trait MasterEnd: Send {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    /// The master's fd number, for a handoff.
+    #[cfg(unix)]
+    fn raw_fd(&self) -> Option<RawFd>;
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<PathBuf>;
+}
+
+/// A master this process opened, still owned by `portable-pty`.
+struct SpawnedMaster(Box<dyn MasterPty + Send>);
+
+impl MasterEnd for SpawnedMaster {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.0.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn raw_fd(&self) -> Option<RawFd> {
+        self.0.as_raw_fd()
+    }
+
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<PathBuf> {
+        // `tty_name_of` rather than portable-pty's own `tty_name()`, which answers
+        // from a field it recorded at `openpty`. The export side and the adopt side
+        // have to be asking the same question of the same fd, or the check is a
+        // comparison of two different facts that happen to agree most of the time.
+        self.0.as_raw_fd().and_then(tty_name_of)
+    }
+}
+
+/// A master this process did not open: a bare fd carried across an exec.
+///
+/// `portable-pty` has no public constructor for its own `UnixMasterPty` from a raw
+/// fd, so the adopt path owns the fd directly. The one behaviour deliberately NOT
+/// reproduced is `UnixMasterWriter::drop`, which writes `\n` + VEOF to the child —
+/// nothing above this trait depends on a drop that hands a live CLI an EOF.
+#[cfg(unix)]
+struct AdoptedMaster(OwnedFd);
+
+#[cfg(unix)]
+impl MasterEnd for AdoptedMaster {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: a master pty fd we own and a winsize we just built. The kernel
+        // raises SIGWINCH on the foreground group itself, as it does for the ioctl
+        // portable-pty issues for a spawned master.
+        let rc = unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error()).context("TIOCSWINSZ");
+        }
+        Ok(())
+    }
+
+    fn raw_fd(&self) -> Option<RawFd> {
+        Some(self.0.as_raw_fd())
+    }
+
+    fn tty_name(&self) -> Option<PathBuf> {
+        tty_name_of(self.0.as_raw_fd())
+    }
+}
+
+/// The child behind a pty: something to block on until it is reaped, and something to
+/// take out if it will not go.
+trait ChildEnd: Send {
+    /// Block until the child is reaped, and report the code the wire uses: `-1` when
+    /// a signal took it, its own status otherwise, `None` when the wait itself failed.
+    fn wait_code(&mut self) -> Option<i32>;
+    fn kill(&mut self) -> Result<()>;
+}
+
+struct SpawnedChild(Box<dyn portable_pty::Child + Send + Sync>);
+
+impl ChildEnd for SpawnedChild {
+    fn wait_code(&mut self) -> Option<i32> {
+        // A child killed by a signal has no exit status of its own, and portable-pty
+        // reports 1 for it — indistinguishable from a real failure. -1 is the
+        // convention the wire already uses for "a signal took it", so clients can
+        // tell a kill from a crash.
+        self.0.wait().ok().map(|status| {
+            if status.signal().is_some() {
+                -1
+            } else {
+                status.exit_code() as i32
+            }
+        })
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        self.0.kill()?;
+        Ok(())
+    }
+}
+
+/// A child this image did not spawn, waited on by pid.
+///
+/// `waitpid` still works across the exec that brought us here: exec keeps the pid and
+/// the parent/child relationships, so the adopted pid is as much our child as one we
+/// forked ourselves.
+#[cfg(unix)]
+struct AdoptedChild(libc::pid_t);
+
+#[cfg(unix)]
+impl ChildEnd for AdoptedChild {
+    fn wait_code(&mut self) -> Option<i32> {
+        let mut status: libc::c_int = 0;
+        loop {
+            // SAFETY: a pid that is our own child and a status slot we own.
+            let reaped = unsafe { libc::waitpid(self.0, &mut status, 0) };
+            if reaped == self.0 {
+                break;
+            }
+            if reaped < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                // ECHILD: somebody else already reaped it, so there is no status to
+                // report and guessing one would invent an exit code.
+                return None;
+            }
+        }
+        if libc::WIFSIGNALED(status) {
+            Some(-1)
+        } else {
+            Some(libc::WEXITSTATUS(status))
+        }
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        signal_group(self.0 as u32, libc::SIGKILL);
+        Ok(())
+    }
+}
+
+/// A reader over a raw master fd, with `portable-pty`'s one piece of pty-specific
+/// behaviour reproduced: macOS answers a read on a master whose slave has closed with
+/// `EIO` rather than a zero-length read, and treating that as an error rather than as
+/// EOF would leave the pump spinning on a pty nobody is on the other end of.
+#[cfg(unix)]
+struct FdReader(OwnedFd);
+
+#[cfg(unix)]
+impl Read for FdReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: an fd we own and a buffer we were handed; the count is its length.
+        let n = unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EIO) => Ok(0),
+            _ => Err(err),
+        }
+    }
+}
+
+/// A writer over a raw master fd. Closes on drop and nothing more — see
+/// [`AdoptedMaster`] for why the EOF byte is not reproduced.
+#[cfg(unix)]
+struct FdWriter(OwnedFd);
+
+#[cfg(unix)]
+impl Write for FdWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: an fd we own and a buffer we were handed; the count is its length.
+        let n = unsafe { libc::write(self.0.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            Ok(n as usize)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The name of the terminal an fd names.
+///
+/// `ptsname`, not `ttyname`: the fd here is always the MASTER end, and `ttyname` on a
+/// master answers nothing on macOS — which is how the first version of the adopt check
+/// refused every pty it was given. `ptsname` asks the master for its slave's path,
+/// which is the stable name both sides of an exec can compare.
+///
+/// `ptsname` writes into a static buffer, so the result is copied before anything else
+/// can call it. Both callers run once, at a handoff or at boot.
+#[cfg(unix)]
+fn tty_name_of(fd: RawFd) -> Option<PathBuf> {
+    // SAFETY: an fd we own. The returned pointer is into libc's own storage and is
+    // copied out of before this function returns.
+    let raw = unsafe { libc::ptsname(fd) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null return from ptsname is a NUL-terminated path.
+    let name = unsafe { std::ffi::CStr::from_ptr(raw) };
+    Some(PathBuf::from(
+        String::from_utf8_lossy(name.to_bytes()).into_owned(),
+    ))
+}
+
 struct Inner {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Mutex<Box<dyn MasterEnd>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    child: Mutex<Box<dyn ChildEnd>>,
     events: broadcast::Sender<PtyEvent>,
     /// The grid the pty currently believes it has.
     size: Mutex<(u16, u16)>,
@@ -66,6 +307,20 @@ struct Inner {
     /// the exit. The stop ladder waits on this rather than on `child`, which the
     /// reader thread is itself blocked in `wait()` on.
     exited: AtomicBool,
+    /// A receiver made BEFORE the reader thread started, handed to the first consumer
+    /// that asks for it.
+    ///
+    /// A `broadcast::Receiver` only ever sees what is sent after it exists, and
+    /// between a pty starting and its pump subscribing there is a real window. For a
+    /// spawned pty it is short (the child has to start first) and was survivable by
+    /// luck; for an adopted one it is the whole of `hydrate`, including a full replay
+    /// of the stored scrollback into a grid — and the bytes a live CLI printed during
+    /// it came back as a hole in the middle of its answer.
+    first: Mutex<Option<broadcast::Receiver<PtyEvent>>>,
+    /// Asked for on the way to an exec. The reader stops at the next chunk boundary
+    /// and leaves everything after it in the kernel's pty buffer, for the next image
+    /// to read once it has adopted the master. See [`PtyHandle::quiesce`].
+    quiesced: AtomicBool,
     /// Read once at spawn. Asking the child for it later would mean taking the lock
     /// the reader thread holds while it waits, and the signal path must not be able
     /// to block on the thread whose exit it is waiting for.
@@ -107,6 +362,120 @@ fn signal_group_only(pid: u32, sig: libc::c_int) {
     }
 }
 
+/// Start the one thread that reads a pty and publishes what it says.
+///
+/// Shared by [`PtyHandle::spawn`] and [`PtyHandle::adopt`] rather than written twice:
+/// the ordering here — drain to EOF, reap, set `exited`, then publish the exit — is
+/// what the stop ladder waits on, and two copies of it would be two answers to when a
+/// session is over.
+fn start_reader(inner: Arc<Inner>, mut reader: Box<dyn Read + Send>) -> Result<()> {
+    std::thread::Builder::new()
+        .name("juancoded-pty-read".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        // A dropped-receiver error is normal (nobody attached);
+                        // keep draining the pty regardless or the child blocks.
+                        let _ = inner
+                            .events
+                            .send(PtyEvent::Output(Arc::new(buf[..n].to_vec())));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+                if inner.quiesced.load(Ordering::SeqCst) {
+                    // Not an exit, and deliberately silent: the child is alive and is
+                    // about to belong to another image of this process. Publishing an
+                    // `Exit` here would tell every client a live session had ended.
+                    return;
+                }
+            }
+            let code = inner.child.lock().ok().and_then(|mut c| c.wait_code());
+            inner.exited.store(true, Ordering::SeqCst);
+            let _ = inner.events.send(PtyEvent::Exit(code));
+        })
+        .context("failed to start pty reader thread")?;
+    Ok(())
+}
+
+/// Everything about a carried fd that can be checked before a session is called live.
+///
+/// The fd surviving an exec is not the same as the fd still naming the pty it named:
+/// a number is only a number, and a session wired to the wrong one would print to a
+/// stranger. `isatty` rejects anything that is not a terminal, the tty name pins it to
+/// the same terminal, `tcgetpgrp` proves the line discipline still has a foreground
+/// group, and signal 0 proves the child is there to be waited on.
+#[cfg(unix)]
+fn verify_adopted(master: &OwnedFd, spec: &AdoptSpec) -> Result<()> {
+    let fd = master.as_raw_fd();
+    // SAFETY: an fd we own; isatty only inspects it.
+    if unsafe { libc::isatty(fd) } != 1 {
+        anyhow::bail!("fd {fd} is not a terminal");
+    }
+    if let Some(expected) = spec.tty.as_deref() {
+        match tty_name_of(fd) {
+            Some(actual) if actual.to_string_lossy() == expected => {}
+            other => anyhow::bail!(
+                "fd {fd} names {:?}, not the {expected:?} it was exported as",
+                other.as_ref().map(|p| p.display().to_string())
+            ),
+        }
+    }
+    // SAFETY: an fd we own; tcgetpgrp only reads the line discipline's state.
+    if unsafe { libc::tcgetpgrp(fd) } <= 0 {
+        anyhow::bail!("fd {fd} has no foreground process group; nothing is on the other end");
+    }
+    // SAFETY: signal 0 is the documented existence probe and delivers nothing.
+    if unsafe { libc::kill(spec.pid as libc::pid_t, 0) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+    {
+        anyhow::bail!("pid {} is gone", spec.pid);
+    }
+    Ok(())
+}
+
+/// Clear `FD_CLOEXEC` on `fd`, so it survives into the next image of this process.
+///
+/// Every pty fd is close-on-exec by construction: `portable-pty`'s `openpty` sets it
+/// on the master, and the reader and writer dups are made with `F_DUPFD_CLOEXEC`. That
+/// is the right default — a spawned CLI must not inherit another session's master —
+/// and carrying exactly one fd per pty across an exec means clearing it on exactly
+/// that one and letting the other two die with the image.
+#[cfg(unix)]
+pub fn make_inheritable(fd: RawFd) -> Result<()> {
+    set_cloexec(fd, false)
+}
+
+/// Put `FD_CLOEXEC` back. The undo for [`make_inheritable`], for an exec that was
+/// prepared for and then did not happen: leaving a master inheritable would hand the
+/// next CLI this daemon spawns another session's pty.
+#[cfg(unix)]
+pub fn make_cloexec(fd: RawFd) -> Result<()> {
+    set_cloexec(fd, true)
+}
+
+#[cfg(unix)]
+fn set_cloexec(fd: RawFd, on: bool) -> Result<()> {
+    // SAFETY: an fd we own and the two documented fcntl commands for its flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("F_GETFD");
+    }
+    let next = if on {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    // SAFETY: as above; the value is the flags we just read with one bit changed.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("F_SETFD");
+    }
+    Ok(())
+}
+
 impl PtyHandle {
     /// Spawn the program and start pumping its output onto the event bus.
     ///
@@ -140,7 +509,7 @@ impl PtyHandle {
         // sees EOF when the child exits, and the session would hang "running".
         drop(pair.slave);
 
-        let mut reader = pair
+        let reader = pair
             .master
             .try_clone_reader()
             .context("clone reader failed")?;
@@ -148,55 +517,67 @@ impl PtyHandle {
         let (events, _) = broadcast::channel(buffer);
 
         let inner = Arc::new(Inner {
-            master: Mutex::new(pair.master),
+            master: Mutex::new(Box::new(SpawnedMaster(pair.master))),
             writer: Mutex::new(writer),
-            child: Mutex::new(child),
+            child: Mutex::new(Box::new(SpawnedChild(child))),
+            first: Mutex::new(Some(events.subscribe())),
             events: events.clone(),
             size: Mutex::new((spec.cols, spec.rows)),
             exited: AtomicBool::new(false),
+            quiesced: AtomicBool::new(false),
             pid,
         });
 
-        let pump_inner = Arc::clone(&inner);
-        std::thread::Builder::new()
-            .name("juancoded-pty-read".into())
-            .spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            // A dropped-receiver error is normal (nobody attached);
-                            // keep draining the pty regardless or the child blocks.
-                            let _ = pump_inner
-                                .events
-                                .send(PtyEvent::Output(Arc::new(buf[..n].to_vec())));
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    }
-                }
-                // A child killed by a signal has no exit status of its own, and
-                // portable-pty reports 1 for it — indistinguishable from a real
-                // failure. -1 is the convention the wire already uses for "a signal
-                // took it", so clients can tell a kill from a crash.
-                let code = pump_inner
-                    .child
-                    .lock()
-                    .ok()
-                    .and_then(|mut c| c.wait().ok())
-                    .map(|status| {
-                        if status.signal().is_some() {
-                            -1
-                        } else {
-                            status.exit_code() as i32
-                        }
-                    });
-                pump_inner.exited.store(true, Ordering::SeqCst);
-                let _ = pump_inner.events.send(PtyEvent::Exit(code));
-            })
-            .context("failed to start pty reader thread")?;
+        start_reader(Arc::clone(&inner), reader)?;
+        Ok(Self { inner })
+    }
 
+    /// Take over a pty this image did not open: a master fd and a child pid carried
+    /// across an `execv` of ourselves.
+    ///
+    /// The result is a `PtyHandle` in every respect — the same broadcast bus, the same
+    /// `exited` flag, the same `signal_group` stop ladder — because a half-adopted
+    /// handle is worse than a restart: it looks alive and is not. What separates the
+    /// two is only how the ends underneath were obtained.
+    ///
+    /// Everything that can be checked is checked before the handle exists. An fd that
+    /// is not a tty, names a different tty than the one exported, or has no live pid
+    /// behind it is refused, and the caller degrades that session to the ordinary
+    /// exited row.
+    #[cfg(unix)]
+    pub fn adopt(spec: AdoptSpec, buffer: usize) -> Result<Self> {
+        if spec.master_fd <= 2 {
+            anyhow::bail!(
+                "fd {} is a standard stream, not a carried master",
+                spec.master_fd
+            );
+        }
+        // SAFETY: the fd is one this process carried across its own exec, so it is in
+        // our table and unowned by any other value. Taking ownership here is what
+        // makes the eventual drop close it, exactly as a spawned master's drop does.
+        let master = unsafe { OwnedFd::from_raw_fd(spec.master_fd) };
+        verify_adopted(&master, &spec)?;
+        // Put `FD_CLOEXEC` back the moment it has done its job. The handoff cleared it
+        // so the fd would survive the exec; leaving it clear means the next CLI this
+        // daemon spawns inherits another session's master, which is exactly the leak
+        // `openpty` sets the flag to prevent.
+        make_cloexec(master.as_raw_fd())?;
+
+        let reader = FdReader(master.try_clone().context("dup master for the reader")?);
+        let writer = FdWriter(master.try_clone().context("dup master for the writer")?);
+        let (events, _) = broadcast::channel(buffer);
+        let inner = Arc::new(Inner {
+            master: Mutex::new(Box::new(AdoptedMaster(master))),
+            writer: Mutex::new(Box::new(writer)),
+            child: Mutex::new(Box::new(AdoptedChild(spec.pid as libc::pid_t))),
+            first: Mutex::new(Some(events.subscribe())),
+            events,
+            size: Mutex::new((spec.cols, spec.rows)),
+            exited: AtomicBool::new(false),
+            quiesced: AtomicBool::new(false),
+            pid: Some(spec.pid),
+        });
+        start_reader(Arc::clone(&inner), Box::new(reader))?;
         Ok(Self { inner })
     }
 
@@ -204,6 +585,22 @@ impl PtyHandle {
     /// next — scrollback replay is the registry's job, not the pty's.
     pub fn subscribe(&self) -> broadcast::Receiver<PtyEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// The stream from the pty's first byte, for the one consumer that owns its
+    /// history — the registry's pump, and the ephemeral pane's.
+    ///
+    /// Taken once: the receiver behind it was made before the reader thread existed,
+    /// so it is the only one that can have missed nothing. Everyone after gets an
+    /// ordinary [`subscribe`](Self::subscribe), which is what a second viewer wants
+    /// anyway.
+    pub fn stream(&self) -> broadcast::Receiver<PtyEvent> {
+        self.inner
+            .first
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .unwrap_or_else(|| self.subscribe())
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -232,14 +629,52 @@ impl PtyHandle {
             .master
             .lock()
             .map_err(|_| anyhow::anyhow!("master poisoned"))?;
-        master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        master.resize(cols, rows)?;
         *size = (cols, rows);
         Ok(true)
+    }
+
+    /// Stop reading this pty at the next chunk boundary.
+    ///
+    /// Only the exec path calls it, and it is what makes the swap lossless. A reader
+    /// thread that kept going would pull bytes out of the kernel into a 64KB buffer
+    /// that the exec then throws away; stopping leaves them in the pty, where the next
+    /// image reads them the moment it has adopted the master. The chunk the reader is
+    /// already holding is published first, so nothing in flight is dropped either —
+    /// which is why the caller flushes once more after a settle.
+    pub fn quiesce(&self) {
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+    }
+
+    /// Describe this pty well enough for the next image of this process to adopt it,
+    /// and clear `FD_CLOEXEC` on the one fd that is carried across.
+    ///
+    /// Only call this on the way to an `execv`. It leaves an fd inheritable that the
+    /// spawn path deliberately does not, and the very next `spawn` in this image would
+    /// hand a CLI another session's master.
+    #[cfg(unix)]
+    pub fn describe_for_adoption(&self) -> Result<AdoptSpec> {
+        let master = self
+            .inner
+            .master
+            .lock()
+            .map_err(|_| anyhow::anyhow!("master poisoned"))?;
+        let fd = master
+            .raw_fd()
+            .ok_or_else(|| anyhow::anyhow!("this master has no fd to carry"))?;
+        let tty = master.tty_name().map(|p| p.to_string_lossy().into_owned());
+        let pid = self
+            .pid()
+            .ok_or_else(|| anyhow::anyhow!("no child pid to wait on after the exec"))?;
+        make_inheritable(fd)?;
+        let (cols, rows) = self.size();
+        Ok(AdoptSpec {
+            master_fd: fd,
+            pid,
+            cols,
+            rows,
+            tty,
+        })
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -337,8 +772,7 @@ impl PtyHandle {
             .child
             .lock()
             .map_err(|_| anyhow::anyhow!("child poisoned"))?;
-        child.kill()?;
-        Ok(())
+        child.kill()
     }
 }
 
@@ -771,6 +1205,133 @@ mod tests {
         }
         assert!(seen.contains("ping"));
         pty.kill().expect("kill");
+    }
+
+    /// The adopt path, without an exec: a master fd and a child pid with no
+    /// `portable-pty` value anywhere, which is exactly what the next image of a
+    /// re-exec'd daemon wakes up holding.
+    ///
+    /// What it has to prove is that nothing downstream can tell the result from a
+    /// spawned handle — output arrives on the same bus, input reaches the child, the
+    /// grid can be changed, and the exit is reported with the same code the wire
+    /// already means by it.
+    #[cfg(unix)]
+    #[test]
+    fn an_adopted_pty_behaves_exactly_like_a_spawned_one() {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("printf READY; read line; printf 'got:%s' \"$line\"; exit 7");
+        cmd.cwd("/tmp");
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        let pid = child.process_id().expect("a pid");
+        drop(pair.slave);
+
+        let fd = pair.master.as_raw_fd().expect("a master fd");
+        let tty = tty_name_of(fd).map(|p| p.to_string_lossy().into_owned());
+        assert!(
+            tty.is_some(),
+            "a master has to be able to name its terminal"
+        );
+        make_inheritable(fd).expect("clear FD_CLOEXEC");
+        // Leaked exactly as the handoff leaks them: dropping the master's writer
+        // writes \n + the termios VEOF byte, which is an EOF on the child's stdin.
+        std::mem::forget(pair.master);
+        std::mem::forget(child);
+
+        let pty = PtyHandle::adopt(
+            AdoptSpec {
+                master_fd: fd,
+                pid,
+                cols: 80,
+                rows: 24,
+                tty,
+            },
+            256,
+        )
+        .expect("adopt");
+        assert_eq!(pty.pid(), Some(pid), "an adopted handle knows its child");
+
+        let mut rx = pty.stream();
+        let ready = wait_for(&mut rx, "READY", Duration::from_secs(10));
+        assert!(
+            ready.contains("READY"),
+            "no output from the adopted pty: {ready:?}"
+        );
+
+        assert!(
+            pty.resize(100, 30).expect("resize"),
+            "the ioctl reached the pty"
+        );
+        assert_eq!(pty.size(), (100, 30));
+
+        pty.write(b"hello\n").expect("write");
+        let echoed = wait_for(&mut rx, "got:hello", Duration::from_secs(10));
+        assert!(
+            echoed.contains("got:hello"),
+            "input did not reach the adopted child: {echoed:?}"
+        );
+
+        loop {
+            match rx.blocking_recv() {
+                Ok(PtyEvent::Exit(code)) => {
+                    assert_eq!(code, Some(7), "waitpid reported the child's own status");
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("the stream ended without an exit: {e}"),
+            }
+        }
+        assert!(pty.has_exited());
+    }
+
+    /// Everything checkable is checked before a session is called live. An fd that is
+    /// not a terminal is the cheap case; the expensive one is an fd that IS a terminal
+    /// but not the one that was exported, which is what the tty name is for.
+    #[cfg(unix)]
+    #[test]
+    fn adopting_refuses_an_fd_that_is_not_the_pty_it_was_promised() {
+        let file = std::fs::File::open("/dev/null").expect("open");
+        let err = PtyHandle::adopt(
+            AdoptSpec {
+                master_fd: file.as_raw_fd(),
+                pid: std::process::id(),
+                cols: 80,
+                rows: 24,
+                tty: None,
+            },
+            16,
+        )
+        .err()
+        .expect("a non-terminal is not a pty");
+        assert!(err.to_string().contains("not a terminal"), "{err}");
+        // The refusal took ownership of nothing it should not have: the fd is still
+        // ours and still usable.
+        std::mem::forget(file);
+
+        for fd in [0, 1, 2] {
+            assert!(
+                PtyHandle::adopt(
+                    AdoptSpec {
+                        master_fd: fd,
+                        pid: std::process::id(),
+                        cols: 80,
+                        rows: 24,
+                        tty: None,
+                    },
+                    16,
+                )
+                .is_err(),
+                "fd {fd} is a standard stream and must never be adopted"
+            );
+        }
     }
 
     #[test]

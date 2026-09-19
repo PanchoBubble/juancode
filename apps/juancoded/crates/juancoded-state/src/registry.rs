@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use juancoded_cordis::events::{ExitInfo, OutputFrame, SessionExit, SessionOutput};
 use juancoded_cordis::services::pty::PtySpawnApi;
@@ -42,7 +42,7 @@ use juancoded_core::changes::{self, ChangeStat};
 use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
 use juancoded_core::preset::PresetStore;
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
-use juancoded_core::pty::{PtyEvent, PtyHandle, SpawnSpec};
+use juancoded_core::pty::{AdoptSpec, PtyEvent, PtyHandle, SpawnSpec};
 use juancoded_core::usage::UsageFold;
 use juancoded_core::worktree;
 use juancoded_persistence::{discovery, QueuedMessage, Scrollback, SearchHit, SessionStore};
@@ -474,6 +474,14 @@ impl SessionRegistry {
     /// width the window happened to be. The stored pair is kept verbatim in the ring
     /// so nothing downstream mistakes "unknown" for "out of date" and stamps this
     /// process's default over it.
+    ///
+    /// The one exception is a boot that followed a re-exec of this same process
+    /// (juancode-hz7n.2). `execv` keeps the pid, the fd table and the children, so
+    /// for a session named in the handoff file the pty is still there — and the only
+    /// thing that could not be rebuilt from the store, the live fd/pid wiring, came
+    /// across with it. Those rows stay **running**. A named session whose fd turns out
+    /// to be dead, or to name a different tty, degrades to the ordinary exited row: a
+    /// row that looks alive and is not is worse than one that admits it.
     fn hydrate(&self) {
         let rows = match self.inner.store.all() {
             Ok(rows) => rows,
@@ -482,17 +490,57 @@ impl SessionRegistry {
                 return;
             }
         };
+        // Taken, not read: the file names fds in exactly one fd table, so a leftover
+        // read by a later boot would adopt numbers that mean something else.
+        let mut carried: HashMap<String, AdoptSpec> = juancoded_core::reexec::take()
+            .map(|h| {
+                h.sessions
+                    .into_iter()
+                    .map(|s| (s.session, s.spec))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut adopted: Vec<(String, Arc<LiveSession>)> = Vec::new();
         let mut sessions = self.lock_sessions();
         for mut meta in rows {
             let scrollback = self.inner.store.scrollback(&meta.id).ok().flatten();
             // The pair exactly as stored, unknown included: it is what the row says,
             // and `flush_scrollback` compares against it to decide the row is stale.
             let saved_grid = scrollback.as_ref().map(|s| (s.cols, s.rows));
-            let (cols, rows_) = scrollback
+            let (mut cols, mut rows_) = scrollback
                 .as_ref()
                 .and_then(Scrollback::grid)
                 .unwrap_or(self.inner.config.default_grid);
-            if meta.status == SessionStatus::Running {
+            // A pty carried across the exec is the authority on its own grid: it is
+            // the size the CLI is still printing at, which the stored pair only
+            // remembers as of the last flush.
+            let handle = carried.remove(&meta.id).and_then(|spec| {
+                let (spec_cols, spec_rows) = (spec.cols, spec.rows);
+                match self.inner.pty.adopt(&meta.id, spec) {
+                    Ok(handle) => {
+                        cols = spec_cols;
+                        rows_ = spec_rows;
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        warn!(
+                            session = meta.id,
+                            error = %e,
+                            "a pty named in the handoff could not be adopted; this session \
+                             comes back exited"
+                        );
+                        None
+                    }
+                }
+            });
+            if handle.is_some() {
+                if meta.status != SessionStatus::Running {
+                    meta.status = SessionStatus::Running;
+                    meta.exit_code = None;
+                    meta.updated_at = now_ms();
+                    let _ = self.inner.store.upsert(&meta);
+                }
+            } else if meta.status == SessionStatus::Running {
                 meta.status = SessionStatus::Exited;
                 meta.updated_at = now_ms();
                 let _ = self.inner.store.upsert(&meta);
@@ -510,22 +558,61 @@ impl SessionRegistry {
                 model: None,
                 preset: None,
             };
-            sessions.insert(
-                meta.id.clone(),
-                Arc::new(LiveSession {
-                    usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
-                    meta: Mutex::new(meta),
-                    pty: Mutex::new(None),
-                    scrollback: Mutex::new(ring),
-                    grid: Mutex::new(GridState::new(cols, rows_)),
-                    activity: Mutex::new(ActivityDetector::new()),
-                    opts: Mutex::new(opts),
-                    signals: LiveSignals::default(),
-                    epoch: AtomicU64::new(0),
-                }),
+            let id = meta.id.clone();
+            let live = Arc::new(LiveSession {
+                usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
+                meta: Mutex::new(meta),
+                pty: Mutex::new(handle.clone()),
+                scrollback: Mutex::new(ring),
+                grid: Mutex::new(GridState::new(cols, rows_)),
+                activity: Mutex::new(ActivityDetector::new()),
+                opts: Mutex::new(opts),
+                signals: LiveSignals::default(),
+                // An adopted session is already on its first pty as far as every pump
+                // epoch check is concerned; a respawn from here bumps to 2 the way a
+                // respawn of a freshly spawned session bumps to 2.
+                epoch: AtomicU64::new(u64::from(handle.is_some())),
+            });
+            if handle.is_some() {
+                adopted.push((id.clone(), Arc::clone(&live)));
+            }
+            sessions.insert(id, live);
+        }
+        drop(sessions);
+        // After the map lock, because starting a pump publishes and a pump that
+        // published into a half-built registry would be reading a map its own caller
+        // still holds.
+        for (id, live) in adopted {
+            let Some(handle) = live.pty.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+                continue;
+            };
+            let (cols, rows) = {
+                let grid = live.grid.lock().unwrap_or_else(|e| e.into_inner());
+                (grid.cols, grid.rows)
+            };
+            // Give the adopted session the grid a spawned one has from its first byte:
+            // the stored scrollback replayed at the width it was written at, so the
+            // screen is continuous across the swap instead of blank until the CLI
+            // happens to repaint.
+            self.rebuild_replay_grid(&id, &live, cols, rows);
+            let epoch = live.epoch.load(Ordering::SeqCst);
+            self.start_pump(id.clone(), live, epoch, handle);
+            info!(session = id, "adopted a live pty across a re-exec");
+        }
+        debug!(
+            sessions = self.lock_sessions().len(),
+            "rehydrated from the store"
+        );
+        for (orphan, spec) in carried {
+            // Closing it is the point, not the warning: the fd came across the exec
+            // with FD_CLOEXEC cleared, so an entry nobody adopted would stay open for
+            // the life of the daemon and be inherited by every CLI it spawns.
+            juancoded_core::reexec::discard(&spec);
+            warn!(
+                session = orphan,
+                "the handoff named a session this store has no row for; its pty is closed"
             );
         }
-        debug!(sessions = sessions.len(), "rehydrated from the store");
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -1734,7 +1821,7 @@ impl SessionRegistry {
     /// the system. It publishes; it never waits on anyone who reads.
     fn start_pump(&self, id: String, live: Arc<LiveSession>, epoch: u64, pty: PtyHandle) {
         let registry = self.clone();
-        let mut rx = pty.subscribe();
+        let mut rx = pty.stream();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {

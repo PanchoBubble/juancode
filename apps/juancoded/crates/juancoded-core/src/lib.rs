@@ -26,6 +26,7 @@ pub mod pricing;
 pub mod proc;
 pub mod provider;
 pub mod pty;
+pub mod reexec;
 pub mod review;
 pub mod usage;
 pub mod worktree;
@@ -68,7 +69,7 @@ pub use provider::{
 };
 pub use pty::{PtyEvent, PtyHandle, SpawnSpec};
 pub use review::{
-    build_prompt, parse_review_output, run_review, working_tree_files, DiffComment,
-    ReviewFinding, ReviewResult, ReviewSeverity, ReviewStatus,
+    build_prompt, parse_review_output, run_review, working_tree_files, DiffComment, ReviewFinding,
+    ReviewResult, ReviewSeverity, ReviewStatus,
 };
 pub use worktree::{CreatedWorktree, WorktreeError};

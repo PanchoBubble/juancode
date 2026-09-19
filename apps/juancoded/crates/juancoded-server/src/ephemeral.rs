@@ -180,7 +180,7 @@ impl EphemeralPtys {
     /// and it has been listening since the `editorReady`.
     fn pump(&self, id: String, handle: PtyHandle, pty: Arc<dyn PtySpawnApi>) {
         let oob = self.oob.clone();
-        let mut rx = handle.subscribe();
+        let mut rx = handle.stream();
         tokio::spawn(async move {
             let mut carry = Utf8Stream::default();
             loop {

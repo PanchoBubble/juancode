@@ -6,11 +6,13 @@
 //! `PtyHandle::spawn` already guarantees it by construction.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use juancoded_core::pty::{PtyHandle, SpawnSpec, STOP_GRACE};
+use juancoded_core::pty::{AdoptSpec, PtyHandle, SpawnSpec, STOP_GRACE};
+use juancoded_core::reexec::SessionHandoff;
 
 use crate::service::Service;
 
@@ -23,6 +25,23 @@ pub trait PtySpawnApi: Send + Sync {
     /// key is free again the moment this returns, so a respawn can reuse it.
     fn stop(&self, session: &str) -> Result<()>;
     fn live(&self) -> Vec<String>;
+
+    /// Describe every live pty for an `execv` of this process onto a new binary, and
+    /// make the host safe to leave behind.
+    ///
+    /// Two things happen that nothing else here does. Each carried master has its
+    /// `FD_CLOEXEC` cleared, so the fd number still names that pty in the next image.
+    /// And each handle is deliberately LEAKED — a spawned handle's writer writes `\n`
+    /// plus the termios VEOF byte when it drops, so letting the last clone go would
+    /// hand every live CLI an EOF on stdin at the exact moment we were trying not to
+    /// disturb it. The host's own shutdown is disarmed for the same reason.
+    ///
+    /// The index is left intact, so a failed exec leaves a daemon that still works.
+    fn hand_off(&self) -> Vec<SessionHandoff>;
+
+    /// Take over a pty a previous image of this process opened. The handle is a
+    /// `PtyHandle` in every respect; see `PtyHandle::adopt`.
+    fn adopt(&self, session: &str, spec: AdoptSpec) -> Result<PtyHandle>;
 }
 
 /// The contract marker: `ctx.resolve::<PtySpawnService>()` yields `Arc<dyn PtySpawnApi>`.
@@ -37,6 +56,9 @@ impl Service for PtySpawnService {
 pub struct PtyHost {
     buffer: usize,
     live: Mutex<BTreeMap<String, PtyHandle>>,
+    /// Set by [`PtySpawnApi::hand_off`]. Once the children are promised to the next
+    /// image of this process, this one must not end them on its way out.
+    disarmed: AtomicBool,
 }
 
 impl PtyHost {
@@ -44,6 +66,7 @@ impl PtyHost {
         Self {
             buffer,
             live: Mutex::new(BTreeMap::new()),
+            disarmed: AtomicBool::new(false),
         }
     }
 
@@ -88,10 +111,71 @@ impl PtySpawnApi for PtyHost {
     fn live(&self) -> Vec<String> {
         self.live_map().keys().cloned().collect()
     }
+
+    #[cfg(unix)]
+    fn hand_off(&self) -> Vec<SessionHandoff> {
+        let map = self.live_map();
+        let mut carried = Vec::with_capacity(map.len());
+        for (session, handle) in map.iter() {
+            // Before the description, so the reader stops at a chunk boundary rather
+            // than pulling bytes into a buffer the exec is about to throw away.
+            handle.quiesce();
+            match handle.describe_for_adoption() {
+                Ok(spec) => {
+                    // One extra refcount that is never returned, which is the whole
+                    // point: see the trait's note on `UnixMasterWriter::drop`.
+                    std::mem::forget(handle.clone());
+                    carried.push(SessionHandoff {
+                        session: session.clone(),
+                        spec,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session = session,
+                        error = %e,
+                        "this pty cannot be carried across the exec; it will come back exited"
+                    );
+                }
+            }
+        }
+        // After the descriptions, not before: a host disarmed on a path that then
+        // described nothing would be a daemon that had quietly stopped ending its
+        // own children.
+        self.disarmed.store(true, Ordering::SeqCst);
+        carried
+    }
+
+    #[cfg(not(unix))]
+    fn hand_off(&self) -> Vec<SessionHandoff> {
+        Vec::new()
+    }
+
+    #[cfg(unix)]
+    fn adopt(&self, session: &str, spec: AdoptSpec) -> Result<PtyHandle> {
+        if self.live_map().contains_key(session) {
+            return Err(anyhow!("session `{session}` already has a pty"));
+        }
+        let handle = PtyHandle::adopt(spec, self.buffer)?;
+        self.live_map().insert(session.to_string(), handle.clone());
+        Ok(handle)
+    }
+
+    #[cfg(not(unix))]
+    fn adopt(&self, _session: &str, _spec: AdoptSpec) -> Result<PtyHandle> {
+        Err(anyhow!("adopting a pty across an exec is unix-only"))
+    }
 }
 
 impl Drop for PtyHost {
     fn drop(&mut self) {
+        if self.disarmed.load(Ordering::SeqCst) {
+            // The children belong to the next image of this process now. An exec runs
+            // no destructors, so reaching here at all means the exec did not happen —
+            // and ending them then would be this path causing the loss it exists to
+            // prevent.
+            return;
+        }
         // The service owning a child means the service is responsible for it: an
         // unmount that left `claude` processes behind would be a worse leak than any
         // registration this crate protects against.

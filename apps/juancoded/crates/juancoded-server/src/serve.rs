@@ -237,6 +237,11 @@ pub(crate) fn router(handles: CoreHandles) -> Router {
         // The GitHub reads and the review surface. Same reason as the reads above: the
         // relay 501s them, so without these the phone console has no PR view at all.
         .merge(crate::github::routes())
+        // And the one route that replaces this daemon's own code. Off unless the
+        // build is a debug one AND the flag is set; the handler itself says so rather
+        // than the route vanishing, so a client gets an answer instead of a 501 that
+        // means something else.
+        .merge(crate::reexec::routes())
         // Everything else under `/api`. A router miss here would be a bare 404, which
         // is the SAME answer this core gives for a session id it does not hold — and a
         // client cannot act on a status that means two things: the sidecar read one as
