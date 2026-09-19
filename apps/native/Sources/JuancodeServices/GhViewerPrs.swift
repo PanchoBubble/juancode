@@ -21,7 +21,7 @@ private let MAX_VIEWER_PRS = 50
 
 /// Resolve `gh` the way the rest of the GitHub services do — the user's own binary,
 /// honouring `JUANCODE_GH_BIN`, resolved per call so a test can point it at a stub.
-/// File-private like its twins in `Gh.swift` / `GhConversation.swift`.
+/// File-private like its twin in `Gh.swift`.
 private func ghBin() -> String {
     resolveBin("gh", override: ProcessInfo.processInfo.environment["JUANCODE_GH_BIN"])
 }

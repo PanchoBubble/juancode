@@ -7,7 +7,7 @@ import Foundation
 /// headings, lists, `<a>`, `<img>` — into their markdown equivalents, then split
 /// out `<details>`/`<summary>` blocks into native collapsible segments (their
 /// summary labels come out already cleaned, since the translation runs over the
-/// whole body first). Pure + unit-tested (`GhConversationTests`) — no UI, no gh.
+/// whole body first). Pure + unit-tested (`CommentMarkdownTests`) — no UI, no gh.
 
 /// One parsed piece of a comment body: a run of markdown, or a `<details>` block
 /// whose inner content is parsed recursively (so nested disclosures nest).

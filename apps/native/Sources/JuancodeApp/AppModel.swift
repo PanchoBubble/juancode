@@ -618,6 +618,11 @@ final class AppModel {
             requested: .swift, active: .swift, source: .fallbackDefault, unreachableReason: nil,
             databasePath: Config.databasePath(for: .swift), rustCoreURL: Config.rustCoreBaseURL)) {
         self.core = core
+        // The GitHub panel reads the PR surface off the core over HTTP, so it needs the
+        // route and — on a core that advertises no `github` — the sentence saying why
+        // there is none. Handed over once: `core` never changes for the life of a run.
+        self.github.reads = core.github
+        self.github.readsUnavailable = core.unavailableReason(.github)
         self.degradedReason = degradedReason
         self.corruptDbPath = corruptDbPath
         self.coreSelection = coreSelection

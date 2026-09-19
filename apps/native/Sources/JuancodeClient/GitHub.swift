@@ -185,6 +185,23 @@ public struct GitHubReads: Sendable {
         await get("/api/pr/actions-log", [("cwd", cwd), ("number", String(number))])
     }
 
+    /// A PR's conversation, already merged into the chronology it is read in, with each
+    /// review carrying the threads it started. The owner/name is lifted from `prUrl` on
+    /// the far side, which is what saves a `gh repo view` per read.
+    public func timeline(cwd: String, number: Int, prUrl: String) async -> PrTimeline? {
+        await get("/api/pr/timeline",
+                  [("cwd", cwd), ("number", String(number)), ("url", prUrl)])
+    }
+
+    /// A PR's CI checks, each with the outcome its row draws already decided.
+    public func checks(cwd: String, number: Int) async -> [PrCheckRow]? {
+        let body: ChecksBody? = await get("/api/pr/checks",
+                                          [("cwd", cwd), ("number", String(number))])
+        return body?.checks
+    }
+
+    private struct ChecksBody: Decodable { let checks: [PrCheckRow] }
+
     private func get<T: Decodable>(_ path: String, _ query: [(String, String)]) async -> T? {
         guard var comps = URLComponents(string: baseURL.hasSuffix("/")
                                         ? String(baseURL.dropLast()) : baseURL) else { return nil }

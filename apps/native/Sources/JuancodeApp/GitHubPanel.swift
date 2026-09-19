@@ -32,10 +32,17 @@ final class GitHubModel {
     var tab: Tab = .list
     /// The selected PR's key, or nil when nothing is selected.
     var selectedKey: String?
-    /// Fetched conversations (comments / reviews / inline threads) per PR.
-    private(set) var conversations: [String: PrConversation] = [:]
-    /// Fetched CI check runs per PR.
-    private(set) var checks: [String: [PrCheckRun]] = [:]
+    /// Fetched conversations per PR — merged into the chronology they are read in by
+    /// the core, not here.
+    private(set) var timelines: [String: PrTimeline] = [:]
+    /// Fetched CI check runs per PR, each carrying the outcome its row draws.
+    private(set) var checks: [String: [PrCheckRow]] = [:]
+    /// The core's GitHub read surface, handed over by `AppModel` at boot. Nil on a core
+    /// that does not advertise `github`, and then `readsUnavailable` says why.
+    var reads: GitHubReads?
+    /// Why this core cannot answer the PR reads, when it cannot — the sentence the
+    /// detail pane shows in place of a retry it has no route for.
+    var readsUnavailable: String?
     /// When each PR's detail last landed — the "updated …" stamp in the detail
     /// header, and the input to `prDetailRefreshDue`.
     private(set) var fetchedAt: [String: Date] = [:]
@@ -185,12 +192,17 @@ final class GitHubModel {
         loadDetail(cwd: cwd, pr: pr)
     }
 
-    /// Fetch the PR's conversation + check runs off the main actor (both shell
-    /// out to `gh`) and publish back here. Coalesces per PR; a failed
-    /// conversation fetch keeps any previously cached one.
+    /// Fetch the PR's timeline + check runs off the core and publish back here.
+    /// Coalesces per PR; a failed timeline fetch keeps any previously cached one.
+    ///
+    /// Both are HTTP reads against `juancoded` rather than `gh` calls made here: the
+    /// merge into one chronology and the check outcomes are the core's answers, so the
+    /// phone and this pane cannot draw two different versions of one PR. A core with no
+    /// `github` capability has no route to ask, and the pane says so instead of
+    /// spinning.
     func loadDetail(cwd: String, pr: PullRequest) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
-        guard !loading.contains(key) else { return }
+        guard !loading.contains(key), let reads else { return }
         loading.insert(key)
         // This fetch answers whatever the poller flagged; a signal arriving while it
         // is in flight re-flags the key and the next tick picks it up.
@@ -198,15 +210,14 @@ final class GitHubModel {
         let number = pr.number
         let url = pr.url
         Task {
-            async let conversation = Task.detached(priority: .utility) {
-                await getPrConversation(cwd, number: number, prUrl: url)
-            }.value
-            async let runs = Task.detached(priority: .utility) {
-                await getPrCheckRuns(cwd, number: number)
-            }.value
-            let (c, r) = await (conversation, runs)
-            if let c { conversations[key] = c }
-            checks[key] = r
+            async let timeline = reads.timeline(cwd: cwd, number: number, prUrl: url)
+            async let runs = reads.checks(cwd: cwd, number: number)
+            let (t, r) = await (timeline, runs)
+            // nil is a read that failed; an empty list is a PR with no checks. Keeping
+            // the last good answer through a failure is the difference between "CI has
+            // not run" and "we could not ask", and only one of those is true.
+            if let t { timelines[key] = t }
+            if let r { checks[key] = r }
             fetchedAt[key] = Date()
             loading.remove(key)
         }
@@ -1670,7 +1681,7 @@ private struct GitHubPrDetail: View {
 
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
-    private var conversation: PrConversation? { model.github.conversations[key] }
+    private var conversation: PrTimeline? { model.github.timelines[key] }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1876,7 +1887,7 @@ private struct GitHubPrDetail: View {
     @ViewBuilder
     private var conversationSection: some View {
         if let convo = conversation {
-            GitHubConversationSection(pr: pr, cwd: cwd, conversation: convo)
+            GitHubConversationSection(pr: pr, cwd: cwd, timeline: convo)
         } else if model.github.loading.contains(key) {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -1884,6 +1895,13 @@ private struct GitHubPrDetail: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
+        } else if let reason = model.github.readsUnavailable {
+            // No route to ask, so no Retry: a button that re-runs a read this core has
+            // no capability for is a button that can only fail the same way twice.
+            Text(reason)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         } else {
             HStack(spacing: 8) {
                 Text("Couldn't load conversation")
@@ -1970,7 +1988,7 @@ private struct GitHubChecksSection: View {
     @Environment(AppModel.self) private var model
     let pr: PullRequest
     let cwd: String
-    let runs: [PrCheckRun]
+    let runs: [PrCheckRow]
     @State private var showLogs = false
 
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
@@ -2012,8 +2030,8 @@ private struct GitHubChecksSection: View {
         }
     }
 
-    private func checkRow(_ run: PrCheckRun) -> some View {
-        let outcome = checkOutcome(run)
+    private func checkRow(_ run: PrCheckRow) -> some View {
+        let outcome = run.outcome
         return HStack(spacing: 6) {
             Image(systemName: icon(outcome))
                 .font(.system(size: 10))
@@ -2093,31 +2111,31 @@ private struct GitHubChecksSection: View {
 private struct GitHubConversationSection: View {
     let pr: PullRequest
     let cwd: String
-    let conversation: PrConversation
+    /// Already merged, already filtered: a review that carried nothing but replies to
+    /// an existing thread has no item of its own, because its replies show inside that
+    /// thread. That is the core's call, not this view's.
+    let timeline: PrTimeline
     /// The persistent bottom composer is always mounted; this binding satisfies
     /// `ReplyComposer` without ever collapsing it (Cancel is hidden in that mode).
     @State private var composerOpen = true
 
     var body: some View {
-        // Visible, not raw: a review that carried nothing but replies to an existing
-        // thread has no card of its own — its replies show inside that thread.
-        let timeline = prVisibleTimeline(conversation)
         VStack(alignment: .leading, spacing: 10) {
             Text("Conversation")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            if timeline.isEmpty {
+            if timeline.items.isEmpty {
                 Text("No comments yet")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
-            ForEach(timeline) { item in
+            ForEach(timeline.items) { item in
                 switch item {
-                case .review(let review):
-                    ReviewEventRow(pr: pr, cwd: cwd, review: review, conversation: conversation)
-                case .comment(let comment):
+                case .review(let review, let groups, _, _):
+                    ReviewEventRow(pr: pr, cwd: cwd, review: review, threadGroups: groups)
+                case .comment(let comment, _, _):
                     IssueCommentRow(pr: pr, cwd: cwd, comment: comment)
-                case .commit(let commit):
+                case .commit(let commit, _, _):
                     CommitRow(commit: commit, prUrl: pr.url)
                 }
             }
@@ -2213,7 +2231,7 @@ private struct CommitRow: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
-            Text(relativeDate(commit.committedDate))
+            Text(relativeDate(commit.committed))
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
@@ -2369,7 +2387,10 @@ private struct ReviewEventRow: View {
     let pr: PullRequest
     let cwd: String
     let review: PrReviewItem
-    let conversation: PrConversation
+    /// The threads this review *started*, as the core grouped them — a comment that
+    /// only replies to an earlier review's thread is not one of these; it is already on
+    /// screen inside that thread.
+    let threadGroups: [PrThreadGroup]
 
     var body: some View {
         ConversationCard {
@@ -2392,7 +2413,7 @@ private struct ReviewEventRow: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
-                Text(relativeDate(review.createdAt))
+                Text(relativeDate(review.created))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -2401,10 +2422,9 @@ private struct ReviewEventRow: View {
                 CommentMarkdown(text: review.body)
             }
             ReactionsRow(reactions: review.reactions)
-            let groups = reviewThreadGroups(review: review, threads: conversation.threads)
-            if !groups.isEmpty {
+            if !threadGroups.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(groups) { group in
+                    ForEach(threadGroups) { group in
                         ReviewThreadRow(pr: pr, cwd: cwd, group: group)
                     }
                 }
@@ -2527,7 +2547,7 @@ private struct ReviewThreadRow: View {
                 CommentAvatar(url: c.authorAvatarUrl, size: avatarSize)
                 Text(c.author.isEmpty ? "(unknown)" : "@\(c.author)")
                     .font(.system(size: 10, weight: .semibold))
-                Text(relativeDate(c.createdAt))
+                Text(relativeDate(c.created))
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
             }
@@ -2552,7 +2572,7 @@ private struct IssueCommentRow: View {
                 CommentAvatar(url: comment.authorAvatarUrl)
                 Text(comment.author.isEmpty ? "(unknown)" : "@\(comment.author)")
                     .font(.system(size: 11, weight: .semibold))
-                Text(relativeDate(comment.createdAt))
+                Text(relativeDate(comment.created))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 4)

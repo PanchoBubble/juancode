@@ -282,3 +282,70 @@ final class StalledCiRecoveryTests: XCTestCase {
         }
     }
 }
+
+// MARK: - commentTaskPrompt
+
+/// The prompt a review comment is handed to an agent as. It lives beside the rest of
+/// the tracked-PR prompt builders because that is where `commentTaskPrompt` lives; it
+/// only ever sat in the conversation tests because the conversation was what produced
+/// the comment.
+final class CommentTaskPromptTests: XCTestCase {
+    func testCommentTaskPromptCarriesTheComment() {
+        let prompt = commentTaskPrompt(
+            number: 42, path: "Sources/App/Main.swift", line: 17,
+            author: "bob", body: "This can crash on nil",
+            url: "https://github.com/o/r/pull/42#discussion_r222")
+        XCTAssertTrue(prompt.contains("#42"))
+        XCTAssertTrue(prompt.contains("Sources/App/Main.swift:17"))
+        XCTAssertTrue(prompt.contains("@bob"))
+        XCTAssertTrue(prompt.contains("This can crash on nil"))
+        XCTAssertTrue(prompt.contains("https://github.com/o/r/pull/42#discussion_r222"))
+        // Must instruct the agent to close the loop on the thread.
+        XCTAssertTrue(prompt.lowercased().contains("reply"))
+        XCTAssertTrue(prompt.contains("`gh`"))
+    }
+
+    func testCommentTaskPromptCarriesTheDiffHunk() {
+        let prompt = commentTaskPrompt(
+            number: 42, path: "Sources/App/Main.swift", line: 17,
+            author: "bob", body: "This can crash on nil", url: "u",
+            diffHunk: "@@ -15,3 +15,4 @@\n     let a = 1\n-    return a\n+    return unwrap(a)")
+        XCTAssertTrue(prompt.contains("```diff"))
+        XCTAssertTrue(prompt.contains("+    return unwrap(a)"))
+        // The comment body still leads; the hunk is context beneath it.
+        guard let bodyAt = prompt.range(of: "This can crash on nil"),
+              let hunkAt = prompt.range(of: "```diff") else {
+            return XCTFail("prompt missing the body or the hunk")
+        }
+        XCTAssertTrue(bodyAt.lowerBound < hunkAt.lowerBound)
+    }
+
+    func testCommentTaskPromptOmitsEmptyDiffHunk() {
+        for hunk in [nil, "", "   \n  "] as [String?] {
+            let prompt = commentTaskPrompt(
+                number: 42, path: "a.swift", line: 1, author: "bob", body: "note",
+                url: "u", diffHunk: hunk)
+            XCTAssertFalse(prompt.contains("```diff"))
+            XCTAssertFalse(prompt.contains("The code it was left on"))
+        }
+    }
+
+    func testCommentTaskPromptWithoutPathOmitsLocation() {
+        let prompt = commentTaskPrompt(
+            number: 7, path: nil, line: nil,
+            author: "", body: "Top-level note",
+            url: "https://github.com/o/r/pull/7#issuecomment-1")
+        XCTAssertFalse(prompt.contains(" on `"))
+        // Author fallback matches the tracker's "a reviewer" voice.
+        XCTAssertTrue(prompt.contains("a reviewer"))
+        XCTAssertTrue(prompt.contains("#7"))
+    }
+
+    func testCommentTaskPromptWithPathButNoLine() {
+        let prompt = commentTaskPrompt(
+            number: 7, path: "README.md", line: nil,
+            author: "alice", body: "typo", url: "u")
+        XCTAssertTrue(prompt.contains("`README.md`"))
+        XCTAssertFalse(prompt.contains("README.md:"))
+    }
+}
