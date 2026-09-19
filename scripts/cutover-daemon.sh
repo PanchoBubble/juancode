@@ -73,15 +73,38 @@ say "Quitting juancode.app (if it is running)"
 osascript -e 'tell application "juancode" to quit' 2>/dev/null || echo "not running"
 
 # --- 3. Stop the daemon ---------------------------------------------------------
+# There are four ownership states and only one of them answers to launchd. The
+# first pass through this script died here: the launchd job was "loaded but not
+# running" (so `agent.sh stop` had nothing to do) while an UNOWNED daemon — one
+# started outside any script, which nothing on disk claims and no watchdog reaps —
+# held the store anyway. So stop the job, then deal with whatever is still there.
+#
 # The plist is KeepAlive{SuccessfulExit=false}: a clean stop stays stopped, only a
 # crash comes back. import-swift refuses while anything holds the store.
+# NOT pgrep. On this machine `pgrep -f juancoded` returns nothing while the daemon is
+# plainly running (`ps` shows it, `pgrep -af` finds it) — so a pgrep-based guard reports
+# "daemon down" and lets the import run straight into a held store. Match the command
+# path's last component with ps instead, which was verified against the live process.
+daemon_pids() { ps -Ao pid=,command= | awk '$2 ~ /juancoded$/ {print $1}'; }
+
 say "Stopping the launchd daemon"
 "$AGENT" stop || true
-for _ in $(seq 1 30); do
-  pgrep -qf '[j]uancoded( |$)' || break
-  sleep 0.5
-done
-pgrep -qf '[j]uancoded( |$)' && die "juancoded is still running; stop it by hand before importing."
+
+for _ in $(seq 1 20); do [[ -z $(daemon_pids) ]] && break; sleep 0.5; done
+
+# SIGTERM takes juancoded through its orderly shutdown (it flushes scrollback and
+# exits 0), which is why this is a TERM and not a KILL. juancoded.sh's own `stop`
+# is not used here: it prompts, and it only knows a daemon some launch claimed.
+if [[ -n $(daemon_pids) ]]; then
+  say "An unowned juancoded is still holding the store — ending it"
+  for pid in $(daemon_pids); do
+    echo "  SIGTERM $pid ($(ps -o command= -p "$pid" 2>/dev/null | head -c 70))"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 40); do [[ -z $(daemon_pids) ]] && break; sleep 0.5; done
+fi
+
+[[ -n $(daemon_pids) ]] && die "juancoded still running as PID(s) $(daemon_pids | tr '\n' ' ')— stop it by hand."
 echo "daemon down"
 
 # --- 4. Build from main ---------------------------------------------------------
@@ -110,6 +133,17 @@ done
 "$AGENT" status || true
 echo
 echo "daemon source: $ROOT @ $(git -C "$ROOT" rev-parse --short HEAD)"
+
+# The plist is the thing that actually decides what starts at your next login, and
+# it is pinned at install time. A stale WorkingDirectory here is the whole bug this
+# script exists for, so assert it rather than trusting that `install` did its job.
+PINNED="$(python3 -c '
+import plistlib, pathlib
+p = plistlib.loads(pathlib.Path.home().joinpath("Library/LaunchAgents/com.juanone.juancoded.plist").read_bytes())
+print(p.get("WorkingDirectory", ""))
+' 2>/dev/null || echo '?')"
+echo "plist pinned to: $PINNED"
+[[ $PINNED == "$ROOT" ]] || die "plist still points at '$PINNED', not $ROOT — next login would start the wrong daemon."
 echo
 echo "Relaunch the app with: open $ROOT/apps/native/.build/juancode.app"
 echo "(build it first if it is stale: swift build -c release --package-path $ROOT/apps/native"
