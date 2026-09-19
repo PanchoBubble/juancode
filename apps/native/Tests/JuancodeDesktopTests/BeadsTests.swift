@@ -43,8 +43,19 @@ final class BeadsTests: XCTestCase {
 
     func testListsIssuesFromRealTrackerMappedToCamelCase() async throws {
         try XCTSkipUnless(Self.hasBd(), "bd CLI not on PATH")
-        runBd(["init"], in: dir)
-        runBd(["create", "First task", "-t", "task", "-p", "1"], in: dir)
+        // The gate is the operation this test needs, not the binary it needs it from.
+        // `bd version` proves only that bd is installed; making a tracker also needs a
+        // reachable dolt server, and a fresh directory dials the default port — so on a
+        // machine whose server listens somewhere else, bd is present, `bd init` is a
+        // connection refused, and the old gate let the test run and fail. Carrying bd's
+        // own stderr into the skip is what keeps a real regression readable as one.
+        let initialised = runBd(["init"], in: dir)
+        try XCTSkipUnless(
+            initialised.ok,
+            "bd is installed but could not make a tracker here: \(initialised.stderr)"
+        )
+        let created = runBd(["create", "First task", "-t", "task", "-p", "1"], in: dir)
+        XCTAssertTrue(created.ok, "bd create failed in a tracker bd had just made: \(created.stderr)")
 
         let r = await getBeads(dir)
         XCTAssertTrue(r.available)
@@ -168,15 +179,47 @@ final class BeadsTests: XCTestCase {
 
     // MARK: - helpers
 
-    private func runBd(_ args: [String], in cwd: String) {
+    /// What one `bd` invocation did: its exit status, and whatever it said on stderr.
+    private struct BdRun {
+        let status: Int32
+        let stderr: String
+        var ok: Bool { status == 0 }
+    }
+
+    /// Run `bd` in `cwd` and collect its stderr through a FILE rather than a pipe.
+    ///
+    /// A cold `bd` starts a persistent `dolt sql-server` that inherits whatever stderr
+    /// it was handed, so a pipe would never see EOF and the read would block for as
+    /// long as that daemon lives. A file is read after the process has exited, and the
+    /// daemon keeping its end open costs nothing.
+    @discardableResult
+    private func runBd(_ args: [String], in cwd: String) -> BdRun {
+        // Outside `cwd`: `bd init` is being asked about an empty directory, and a
+        // scratch file of ours sitting in it is not a thing this test wants to find out
+        // bd's opinion of.
+        let errPath = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("bd-stderr-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: errPath, contents: nil)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = ["bd"] + args
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
+        let sink = FileHandle(forWritingAtPath: errPath)
+        p.standardError = sink ?? FileHandle.nullDevice
+        do { try p.run() } catch {
+            try? sink?.close()
+            return BdRun(status: -1, stderr: "could not run bd: \(error)")
+        }
         p.waitUntilExit()
+        try? sink?.close()
+        let said = (try? String(contentsOfFile: errPath, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(atPath: errPath)
+        return BdRun(
+            status: p.terminationStatus,
+            stderr: said.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     /// Write an executable shell script and return its absolute path.
