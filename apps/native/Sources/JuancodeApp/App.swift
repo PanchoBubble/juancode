@@ -511,6 +511,11 @@ struct JuancodeApp: App {
                 CoreSettingsView()
                     .environment(model)
                     .tabItem { Label("Core", systemImage: "cpu") }
+                // Worktrees (juancode-ailq): read a dry run of the sweeper, then decide
+                // whether its daily job may remove anything. Nothing is armed by default.
+                WorktreeSweeperSettingsView()
+                    .environment(model)
+                    .tabItem { Label("Worktrees", systemImage: "externaldrive") }
                 AppearanceSettingsView()
                     .environment(model)
                     .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }

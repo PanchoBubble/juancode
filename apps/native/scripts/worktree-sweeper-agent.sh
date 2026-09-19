@@ -36,6 +36,14 @@
 #   JUANCODE_SWEEP_HOUR      hour of the daily run (default 4)
 #   JUANCODE_SWEEP_MINUTE    minute of the daily run (default 30)
 #   JUANCODE_SWEEP_DAYS      age floor in days (default 2)
+#   JUANCODE_SWEEPER_ARM_CONFIRMED=1
+#                            stand in for the interactive "arm?" answer, for a
+#                            caller that asked the human itself. The Settings →
+#                            Worktrees pane sets it, and only after it has shown a
+#                            dry run and put the same question in a dialog. It
+#                            replaces the prompt, never the decision: nothing else
+#                            about arming changes, and an unset variable still
+#                            means a terminal has to answer.
 set -euo pipefail
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,6 +85,14 @@ installed_mode() {
 installed_root() {
   [ -f "$PLIST" ] || return 0
   /usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$PLIST" 2>/dev/null || true
+}
+
+# The age floor baked into the plist, which is not necessarily $DAYS: the job keeps
+# whatever it was installed with until it is rewritten.
+installed_days() {
+  [ -f "$PLIST" ] || return 0
+  /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$PLIST" 2>/dev/null \
+    | sed -n 's/^ *--days=//p' | head -1
 }
 
 # $1: "apply" or "dry"
@@ -175,6 +191,10 @@ confirm_arming() {
   warn "=============================================================="
   warn "Read a dry run first:  $0 run"
   warn "and the log:           $RUN_LOG"
+  if [ "${JUANCODE_SWEEPER_ARM_CONFIRMED:-}" = 1 ]; then
+    say "JUANCODE_SWEEPER_ARM_CONFIRMED=1: the caller has already asked."
+    return 0
+  fi
   [ -t 0 ] || { warn "no terminal to ask on; not arming."; return 1; }
   local answer
   read -r -p "worktree-sweeper: arm the daily sweep of $ROOT? [y/N] " answer >&2 || answer=""
@@ -205,12 +225,15 @@ cmd_uninstall() {
   say "nothing prunes worktrees again; \`pnpm sweep\` still works by hand"
 }
 
+# Every argument after `run` goes to the sweep verbatim, so a caller can ask for
+# `--json` or `--no-fetch` without knowing where node or the checkout are. The
+# sweep's own default is a dry run: only an explicit --apply here removes anything.
 cmd_run() {
   shift || true
-  local extra=()
-  [ "${1:-}" = "--apply" ] && extra=(--apply)
-  say "running the sweep now${extra[0]+ (ARMED)}"
-  "$(node_bin)" "$SWEEP" "--root=$ROOT" "--days=$DAYS" "${extra[@]}"
+  local armed=""
+  for a in "$@"; do [ "$a" = "--apply" ] && armed=" (ARMED)"; done
+  say "running the sweep now$armed"
+  "$(node_bin)" "$SWEEP" "--root=$ROOT" "--days=$DAYS" "$@"
 }
 
 cmd_status() {
@@ -226,6 +249,7 @@ cmd_status() {
     else
       say "  checkout: ${where:-unknown} (this one)"
     fi
+    say "  days:     $(installed_days)"
     say "  schedule: daily at ${HOUR}:$(printf '%02d' "$MINUTE"), RunAtLoad false"
     local pinned
     pinned="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" 2>/dev/null || true)"
