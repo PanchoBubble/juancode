@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Byte-level line handling (`TranscriptChunk`) plus the remembered-offset reader
 /// (`TranscriptReader`) behind the incremental title/usage polls (juancode-dfhg).

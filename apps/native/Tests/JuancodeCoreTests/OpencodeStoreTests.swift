@@ -1,8 +1,7 @@
 import Foundation
-import JuancodeCore
 import Testing
 
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Reads against a fixture database built with opencode's own schema (the columns we
 /// depend on), so these cover the mapping — not opencode itself.

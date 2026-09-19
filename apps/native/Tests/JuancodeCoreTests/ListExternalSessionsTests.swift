@@ -1,6 +1,5 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Tests for `listExternalSessions` (juancode-723): list every resumable Claude +
 /// Codex + opencode conversation for a cwd, newest first, with no time window and no

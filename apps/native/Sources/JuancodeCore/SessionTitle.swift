@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Derives a human-readable "what is this session doing" title from the CLI's own
 /// transcript files — the same data the CLI shows in its own session list.

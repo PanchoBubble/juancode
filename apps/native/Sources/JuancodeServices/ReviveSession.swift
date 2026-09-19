@@ -45,18 +45,6 @@ public enum Revival: Sendable {
     }
 }
 
-/// Whether reviving `meta` must skip `--resume` and boot fresh instead: pinned-id
-/// providers (Claude) write a transcript only once a turn completes, so a session
-/// that booted but never finished a turn has nothing on disk and `--resume` would
-/// just fast-exit into a dead pane. Discovered-id providers (Codex) only ever
-/// capture an id from a transcript that exists, so they're never doomed this way.
-/// The one shared pre-check behind `AppModel.reactivate` and `reviveSession`.
-public func resumeNeedsFreshStart(_ meta: SessionMeta, roots: RecoverRoots = RecoverRoots()) -> Bool {
-    guard Providers.spec(for: meta.provider).pinsSessionId,
-          let cliId = meta.cliSessionId else { return false }
-    return !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd, roots: roots)
-}
-
 /// Lazily revive an exited session: recover its `cliSessionId` when it predates
 /// id capture, seed the persisted scrollback with a `── session resumed ──`
 /// divider, and resume it through the registry. When the pinned id has no

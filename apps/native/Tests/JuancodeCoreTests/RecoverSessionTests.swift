@@ -1,6 +1,5 @@
 import XCTest
-import JuancodeCore
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// Ported 1:1 from `apps/server/src/recoverSession.test.ts`. Each case writes fake
 /// transcript files into a temp dir and points `recoverCliSessionId` at it via the

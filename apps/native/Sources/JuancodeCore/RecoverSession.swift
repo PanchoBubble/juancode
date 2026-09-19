@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Recover the resumable CLI session id for an *old* session that was created
 /// before we started capturing it (Claude) or whose post-spawn discovery never
@@ -287,4 +286,16 @@ public func listExternalSessions(
     let opencode = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
         .map { ResumableCliSession(provider: .opencode, cliSessionId: $0.id, startMs: $0.startMs) }
     return (claude + codex + opencode).sorted { $0.startMs > $1.startMs }
+}
+
+/// Whether reviving `meta` must skip `--resume` and boot fresh instead: pinned-id
+/// providers (Claude) write a transcript only once a turn completes, so a session
+/// that booted but never finished a turn has nothing on disk and `--resume` would
+/// just fast-exit into a dead pane. Discovered-id providers (Codex) only ever
+/// capture an id from a transcript that exists, so they're never doomed this way.
+/// The one shared pre-check behind `AppModel.reactivate` and `reviveSession`.
+public func resumeNeedsFreshStart(_ meta: SessionMeta, roots: RecoverRoots = RecoverRoots()) -> Bool {
+    guard Providers.spec(for: meta.provider).pinsSessionId,
+          let cliId = meta.cliSessionId else { return false }
+    return !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd, roots: roots)
 }

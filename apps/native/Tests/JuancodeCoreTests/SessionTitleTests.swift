@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 final class SessionTitleTests: XCTestCase {
     /// One temp root for the whole suite, removed afterwards (mirrors the TS

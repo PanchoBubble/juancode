@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 import SQLite3
 
 /// Read-only view of opencode's own database — the opencode analogue of the JSONL

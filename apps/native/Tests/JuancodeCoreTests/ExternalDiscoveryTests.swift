@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 /// `discoverExternalSessions` should surface real terminal conversations but hide
 /// harness-internal transcripts — forked subagents and local slash-command runs

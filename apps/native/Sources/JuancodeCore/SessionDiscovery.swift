@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// A CLI conversation found on disk that juancode didn't create — e.g. a claude,
 /// codex or opencode session you started in your terminal. Surfaced (opt-in) in the sidebar so
