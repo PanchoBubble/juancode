@@ -1,4 +1,5 @@
 import Foundation
+import JuancodeCore
 
 /// The GitHub surface as the app reads it off the core, rather than as the app used to
 /// compute it for itself.
@@ -202,27 +203,221 @@ public struct GitHubReads: Sendable {
 
     private struct ChecksBody: Decodable { let checks: [PrCheckRow] }
 
+    // MARK: - the folder's list, and the two reads that reach past its page
+
+    /// One folder's open PRs, with the triage answer and the order already applied.
+    ///
+    /// `tracked` leads the list; `sort: "submitted"` asks for strict newest-first
+    /// instead. `teams` are the viewer's team slugs, which the caller knows and `gh`
+    /// does not report cheaply, so a team review request counts as an ask.
+    public func prs(cwd: String, tracked: [Int] = [], sort: String? = nil,
+                    teams: [String] = []) async -> PrsBody? {
+        var query = [("cwd", cwd)]
+        if !tracked.isEmpty { query.append(("tracked", tracked.map(String.init).joined(separator: ","))) }
+        if let sort { query.append(("sort", sort)) }
+        if !teams.isEmpty { query.append(("teams", teams.joined(separator: ","))) }
+        return await get("/api/prs", query)
+    }
+
+    /// A repo-scoped PR search. The list answers a page of the newest PRs; this is how
+    /// the ones beyond it are reached, and the caller unions the two.
+    public func searchPrs(cwd: String, query: String) async -> [PullRequest]? {
+        let body: SearchBody? = await get("/api/prs/search", [("cwd", cwd), ("q", query)])
+        return body?.prs
+    }
+
+    private struct SearchBody: Decodable { let prs: [PullRequest] }
+
+    /// The open PR for one branch, or nil. Nil is ambiguous on purpose here: "no PR"
+    /// and "could not ask" both mean the header has nothing to link to, and the caller
+    /// caches either answer for the same interval.
+    public func prForBranch(cwd: String, branch: String) async -> PullRequest? {
+        let body: BranchPrBody? = await get("/api/pr/for-branch",
+                                            [("cwd", cwd), ("branch", branch)])
+        return body?.pr
+    }
+
+    private struct BranchPrBody: Decodable { let pr: PullRequest? }
+
+    /// A checkout's repo identity (`owner/name`), or nil when it has no GitHub remote.
+    public func repoNwo(cwd: String) async -> String? {
+        let body: RepoBody? = await get("/api/repo", [("cwd", cwd)])
+        return body?.nwo
+    }
+
+    private struct RepoBody: Decodable { let nwo: String? }
+
+    /// The viewer's own queue: every open PR they authored plus every one that asked
+    /// for their review, across repos this machine may have no clone of.
+    public func viewerPrs(cwd: String? = nil, teams: [String] = []) async -> ViewerPrResult? {
+        var query: [(String, String)] = []
+        if let cwd, !cwd.isEmpty { query.append(("cwd", cwd)) }
+        if !teams.isEmpty { query.append(("teams", teams.joined(separator: ","))) }
+        return await get("/api/prs/viewer", query)
+    }
+
+    /// An open PR's net diff, in the same per-file shape the working tree answers
+    /// with. Throws rather than answering nil: the panel draws the reason.
+    public func prDiff(cwd: String, number: Int) async throws -> DiffResult {
+        try await ask("/api/pr/diff", [("cwd", cwd), ("number", String(number))],
+                      "Could not read the diff for PR #\(number)")
+    }
+
+    // MARK: - the writes
+
+    /// Open a PR for the checkout's current branch. The caller pushes the branch
+    /// first — this core will not push as a side effect of a different verb.
+    public func createPr(cwd: String, title: String, body: String,
+                         draft: Bool) async throws -> PrCreateResult {
+        try await tell("/api/pr/create",
+                       ["cwd": cwd, "title": title, "body": body, "draft": draft],
+                       "Could not open the pull request")
+    }
+
+    /// Comment on a PR. `replyTo` is the REST id of the review comment being replied
+    /// to; absent posts a top-level comment. One call and not two, because the
+    /// composer is one box whose target is whether a thread is open under it.
+    public func comment(cwd: String, number: Int, body: String, replyTo: Int? = nil) async throws {
+        var payload: [String: Any] = ["cwd": cwd, "number": number, "body": body]
+        if let replyTo { payload["replyTo"] = replyTo }
+        let _: OkBody = try await tell("/api/pr/comment", payload,
+                                       "Could not post the comment")
+    }
+
+    /// Re-run a PR's CI, or only its failed jobs.
+    public func rerunChecks(cwd: String, number: Int, failedOnly: Bool) async throws {
+        let _: OkBody = try await tell("/api/pr/rerun",
+                                       ["cwd": cwd, "number": number, "failedOnly": failedOnly],
+                                       "Could not re-run the checks")
+    }
+
+    private struct OkBody: Decodable { let ok: Bool }
+
+    /// A read whose failure the caller shows rather than swallows. The thrown message
+    /// is the core's own sentence when it sent one — which is `gh`'s words for what
+    /// went wrong — and `fallback` only when the request never got that far.
+    private func ask<T: Decodable>(_ path: String, _ query: [(String, String)],
+                                   _ fallback: String) async throws -> T {
+        guard let url = urlFor(path, query) else { throw GitHubError(fallback) }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        return try await send(request, path).get(or: fallback)
+    }
+
+    /// One POST of a JSON body. Separate from a read only in the verb and the body:
+    /// the failure handling, the timeout and the logging are one path, so a write
+    /// cannot start reporting failures differently from a read.
+    private func tell<T: Decodable>(_ path: String, _ payload: [String: Any],
+                                    _ fallback: String) async throws -> T {
+        guard let url = urlFor(path, []),
+              let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            throw GitHubError(fallback)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        return try await send(request, path).get(or: fallback)
+    }
+
     private func get<T: Decodable>(_ path: String, _ query: [(String, String)]) async -> T? {
+        guard let url = urlFor(path, query) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        return try? await send(request, path).get()
+    }
+
+    private func urlFor(_ path: String, _ query: [(String, String)]) -> URL? {
         guard var comps = URLComponents(string: baseURL.hasSuffix("/")
                                         ? String(baseURL.dropLast()) : baseURL) else { return nil }
         comps.path = path
-        comps.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }
-        guard let url = comps.url else { return nil }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = timeout
+        comps.queryItems = query.isEmpty ? nil : query.map { URLQueryItem(name: $0.0, value: $0.1) }
+        return comps.url
+    }
+
+    /// The one request path. `Result` and not `T?` because half these calls draw the
+    /// reason and the other half only need to know there is none, and a second copy of
+    /// this would eventually report the two differently.
+    private func send<T: Decodable>(_ request: URLRequest,
+                                    _ path: String) async -> Result<T, GitHubError> {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             // A non-2xx carries the core's own sentence about what went wrong, which
-            // belongs in a log rather than in a decode that would fail confusingly.
+            // belongs in the thrown message as well as in the log.
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                NSLog("juancode: \(path) answered \(http.statusCode): "
-                      + String(decoding: data.prefix(300), as: UTF8.self))
-                return nil
+                let body = String(decoding: data.prefix(600), as: UTF8.self)
+                NSLog("juancode: \(path) answered \(http.statusCode): \(body)")
+                return .failure(GitHubError(errorSentence(in: data)
+                                            ?? "the core answered \(http.statusCode)"))
             }
-            return try JSONDecoder().decode(T.self, from: data)
+            return .success(try JSONDecoder().decode(T.self, from: data))
         } catch {
             NSLog("juancode: \(path) did not answer: \(error.localizedDescription)")
-            return nil
+            return .failure(GitHubError(error.localizedDescription))
         }
+    }
+
+    /// The `{"error": "..."}` a refused request carries, which is `gh`'s own words for
+    /// what went wrong and the only ones worth showing somebody.
+    private func errorSentence(in data: Data) -> String? {
+        struct ErrorBody: Decodable { let error: String? }
+        let sentence = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
+        return sentence.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }?
+            .isEmpty == false ? sentence : nil
+    }
+}
+
+private extension Result where Failure == GitHubError {
+    /// The value, or the failure's own sentence — falling back to the caller's only
+    /// when the request never produced one.
+    func get(or fallback: String) throws -> Success {
+        switch self {
+        case .success(let value): return value
+        case .failure(let error):
+            throw error.message.isEmpty ? GitHubError(fallback) : error
+        }
+    }
+}
+
+/// A GitHub read or write that failed, carrying the sentence a panel shows.
+///
+/// The app-side twin of the daemon's `GhError`: the reason arrives as JSON on a 502
+/// rather than on a `gh` process's stderr, because the process is in the daemon now.
+public struct GitHubError: Error, Sendable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+}
+
+/// One folder's open PRs, with the triage answer and the order already applied — the
+/// body of `GET /api/prs`.
+public struct PrsBody: Codable, Sendable, Equatable {
+    public var available: Bool
+    public var prs: [PullRequest]
+    public var viewer: String?
+    public var error: String?
+    /// The PRs that need the viewer, most urgent first, each with its reason.
+    public var needsYou: [NeedsYouRow]
+
+    public init(available: Bool, prs: [PullRequest] = [], viewer: String? = nil,
+                error: String? = nil, needsYou: [NeedsYouRow] = []) {
+        self.available = available; self.prs = prs; self.viewer = viewer
+        self.error = error; self.needsYou = needsYou
+    }
+
+    private enum CodingKeys: String, CodingKey { case available, prs, viewer, error, needsYou }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = try c.decodeIfPresent(Bool.self, forKey: .available) ?? false
+        prs = try c.decodeIfPresent([PullRequest].self, forKey: .prs) ?? []
+        viewer = try c.decodeIfPresent(String.self, forKey: .viewer)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        needsYou = try c.decodeIfPresent([NeedsYouRow].self, forKey: .needsYou) ?? []
+    }
+
+    /// The list as the rest of the app already reads one.
+    public var listResult: PrListResult {
+        PrListResult(available: available, prs: prs, viewer: viewer, error: error)
     }
 }

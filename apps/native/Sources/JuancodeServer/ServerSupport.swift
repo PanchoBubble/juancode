@@ -41,7 +41,6 @@ let jsonNullResponse = rawJSONResponse(Data("null".utf8))
 
 func errMsg(_ err: Error) -> String {
     if let g = err as? GitError { return g.message }
-    if let g = err as? GhError { return g.message }
     if let p = err as? ProcessError { return p.message }
     return (err as? LocalizedError)?.errorDescription ?? "\(err)"
 }

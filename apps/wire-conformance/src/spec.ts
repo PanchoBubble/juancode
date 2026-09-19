@@ -125,6 +125,22 @@ export type Step =
       bind?: Record<string, string>;
       note?: string;
     }
+  /** The write half of that same surface: one HTTP POST with a JSON body.
+   *
+   *  A `get` cannot stand in for it. Opening a PR, posting a comment and re-running a
+   *  build are requests with a body and a side effect, and a core that answered them
+   *  on GET would be one a browser could fire by prefetching a link. Everything else
+   *  is the same as `get` — `status` defaults to 200, the reply is asserted with the
+   *  same matcher language a frame gets. */
+  | {
+      post: string;
+      body?: Record<string, unknown>;
+      status?: number;
+      expectBody?: Record<string, unknown>;
+      expectText?: unknown;
+      bind?: Record<string, string>;
+      note?: string;
+    }
   | { sleep: number; note?: string };
 
 /** Environment a scenario needs beyond a bare core: a pty child, git, gh. */

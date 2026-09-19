@@ -249,21 +249,22 @@ final class GitHubModel {
         if includeDiff { loadDiff(cwd: cwd, pr: pr, force: true) }
     }
 
-    /// Fetch the PR's diff (`gh pr diff`, split into per-file `DiffFile`s)
-    /// for the detail's Diff tab. Off-main; cached per PR and coalesced so re-opening
-    /// the tab is instant. A failed fetch leaves the cache empty so the tab retries.
-    /// `force` refetches over a cached diff (the freshness tick, a manual refresh);
-    /// the old diff stays on screen until the new one lands, so the tab never blanks.
+    /// Fetch the PR's net diff, split into the same per-file shape the working tree
+    /// answers with, for the detail's Diff tab. Cached per PR and coalesced so
+    /// re-opening the tab is instant. A failed fetch leaves the cache empty so the tab
+    /// retries. `force` refetches over a cached diff (the freshness tick, a manual
+    /// refresh); the old diff stays on screen until the new one lands, so the tab
+    /// never blanks.
     func loadDiff(cwd: String, pr: PullRequest, force: Bool = false) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard force || diffs[key] == nil, !diffLoading.contains(key) else { return }
+        guard let reads else { return }
         diffLoading.insert(key)
         let number = pr.number
         Task {
-            let result = await Task.detached(priority: .utility) {
-                try? await getPrDiff(cwd, number: number)
-            }.value
-            if let result { diffs[key] = result }
+            if let result = try? await reads.prDiff(cwd: cwd, number: number) {
+                diffs[key] = result
+            }
             diffLoading.remove(key)
         }
     }
@@ -285,22 +286,24 @@ final class GitHubModel {
         }
     }
 
-    /// Re-run a PR's CI checks via `gh run rerun` (`failedOnly` → "Re-run failed
-    /// jobs", else "Re-run all jobs"). Off-main; on success refetches the check
-    /// runs so the row reflects the re-queued state, else surfaces the error.
+    /// Re-run a PR's CI checks (`failedOnly` → "Re-run failed jobs", else "Re-run all
+    /// jobs"). On success refetches the check runs so the row reflects the re-queued
+    /// state, else surfaces the reason the core gave.
     func rerunChecks(cwd: String, pr: PullRequest, failedOnly: Bool) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         guard !rerunning.contains(key) else { return }
+        guard let reads else {
+            actionError = readsUnavailable
+            return
+        }
         rerunning.insert(key)
         actionError = nil
         let number = pr.number
         Task {
             do {
-                try await Task.detached(priority: .utility) {
-                    try await JuancodeServices.rerunChecks(cwd, number: number, failedOnly: failedOnly)
-                }.value
+                try await reads.rerunChecks(cwd: cwd, number: number, failedOnly: failedOnly)
                 loadDetail(cwd: cwd, pr: pr)
-            } catch let e as GhError {
+            } catch let e as GitHubError {
                 actionError = e.message
             } catch {
                 actionError = error.localizedDescription
@@ -315,18 +318,13 @@ final class GitHubModel {
     /// error message to surface inline, or nil on success — in which case the
     /// conversation is refetched so the new comment appears.
     func postReply(cwd: String, pr: PullRequest, replyTargetId: Int?, body: String) async -> String? {
-        let number = pr.number
+        guard let reads else { return readsUnavailable }
         do {
-            try await Task.detached(priority: .utility) {
-                if let target = replyTargetId {
-                    try await replyToReviewComment(cwd, number: number, commentId: target, body: body)
-                } else {
-                    try await commentOnPr(cwd, number: number, body: body)
-                }
-            }.value
+            try await reads.comment(cwd: cwd, number: pr.number, body: body,
+                                    replyTo: replyTargetId)
             loadDetail(cwd: cwd, pr: pr)
             return nil
-        } catch let e as GhError {
+        } catch let e as GitHubError {
             return e.message
         } catch {
             return error.localizedDescription
@@ -846,7 +844,7 @@ struct GitHubView: View {
 
     @ViewBuilder
     private func viewerRow(_ row: ViewerPr) -> some View {
-        let reason = prAttentionReason(row.pr, viewer: model.viewerPrs.viewer)
+        let reason = row.attention
         if let cwd = model.folder(forRepo: row.repo) {
             GitHubPrRow(pr: row.pr, cwd: cwd, reason: reason)
         } else {
@@ -965,13 +963,18 @@ struct GitHubView: View {
     /// The pinned triage rows, keyed for `ForEach` (a PR can only appear once, so the
     /// PR key is unique within the group).
     private var needsYou: [(key: String, cwd: String, pr: PullRequest, reason: PrAttentionReason)] {
-        let byFolder = orderedFolders.compactMap { cwd -> (String, [PullRequest], String)? in
-            guard let r = model.prs(cwd), r.available, let v = r.viewer, !v.isEmpty else { return nil }
-            // Respects the active Mine/Assigned filters, so the group never
-            // contradicts what the list below is showing.
-            return (cwd, model.github.filtered(r.prs, viewer: v), v)
+        // The rows are the core's — one `/api/prs` answer per folder, each carrying the
+        // reason it decided. Only two things happen here: the folders are interleaved
+        // (a route that fanned out over them would pay fork+exec per folder in series),
+        // and the active Mine/Assigned filters are applied, so the pinned group never
+        // contradicts what the list below is showing.
+        let byFolder: [[NeedsYouRow]] = orderedFolders.compactMap { cwd in
+            guard let rows = model.needsYouByCwd[cwd], !rows.isEmpty,
+                  let r = model.prs(cwd), r.available else { return nil }
+            let shown = Set(model.github.filtered(r.prs, viewer: r.viewer ?? "").map(\.number))
+            return rows.filter { shown.contains($0.pr.number) }
         }
-        return prsNeedingYou(byFolder.map { (cwd: $0.0, prs: $0.1, viewer: $0.2) })
+        return mergeNeedsYou(byFolder)
             .map { (key: TrackedPr.key(cwd: $0.cwd, number: $0.pr.number),
                     cwd: $0.cwd, pr: $0.pr, reason: $0.reason) }
     }
@@ -1133,7 +1136,7 @@ private struct GitHubPrRow: View {
                 }
                 HStack(spacing: 6) {
                     if let reason {
-                        Text(reason.rawValue)
+                        Text(reason.label)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 4).padding(.vertical, 1)
@@ -1247,7 +1250,7 @@ private struct ViewerPrRow: View {
                 }
                 HStack(spacing: 6) {
                     if let reason {
-                        Text(reason.rawValue)
+                        Text(reason.label)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 4).padding(.vertical, 1)

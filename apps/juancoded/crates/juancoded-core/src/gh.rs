@@ -21,6 +21,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::diff::parse_multi_file_diff;
+use crate::git::DiffResult;
 use crate::pr::{PrActivity, PrChecks, PrComment, PrReview};
 use crate::provider::resolve_bin;
 
@@ -962,7 +964,7 @@ pub struct RawReviewRequest {
 
 impl RawReviewRequest {
     /// The handle to match a viewer login or a team slug against.
-    fn handle(self) -> Option<String> {
+    pub(crate) fn handle(self) -> Option<String> {
         self.login.or(self.slug).or(self.name)
     }
 }
@@ -1204,6 +1206,461 @@ pub async fn rerun_checks(cwd: &str, number: i64, failed_only: bool) -> Result<(
         gh_write(cwd, &args).await?;
     }
     Ok(())
+}
+
+// ── the writes and the reads the desktop kept for itself ─────────────────────
+//
+// `create_pr`, `pr_diff` and the viewer queue below are the last three `gh` calls the
+// SwiftUI app was still making in its own process (juancode-h0l6). They are here for
+// the reason the rest of this module is: a phone cannot shell out to `gh`, and a
+// second implementation of "did this PR already exist" or "which of my PRs is on
+// fire" would eventually disagree with this one.
+
+/// A PR that was opened, or the one that was already there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCreateResult {
+    pub url: String,
+    /// `false` when a PR already existed for the branch, whose url this is. Not an
+    /// error: the caller asked for a PR to exist and one does.
+    pub created: bool,
+}
+
+/// Open a pull request for the checkout's current branch. The caller pushes first, so
+/// this only creates the PR.
+///
+/// `gh` reports "a PR already exists" as a non-zero exit with the url on stderr, and
+/// that is an answer rather than a failure — the alternative is a client that has to
+/// parse gh's stderr itself to tell the two apart.
+pub async fn create_pr(
+    cwd: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<PrCreateResult, GhError> {
+    let mut args = vec!["pr", "create", "--title", title, "--body", body];
+    if draft {
+        args.push("--draft");
+    }
+    let out = capture_full(cwd, &args).await;
+    if out.ok {
+        let url = first_url(&out.stdout).unwrap_or_else(|| out.stdout.trim().to_string());
+        return Ok(PrCreateResult { url, created: true });
+    }
+    if let Some(existing) = existing_pr_url(&out.stderr) {
+        return Ok(PrCreateResult {
+            url: existing,
+            created: false,
+        });
+    }
+    Err(GhError(gh_error_reason(&out)))
+}
+
+/// The first `http(s)://…` run in `s`.
+fn first_url(s: &str) -> Option<String> {
+    s.split_whitespace()
+        .find(|t| t.starts_with("https://") || t.starts_with("http://"))
+        .map(str::to_string)
+}
+
+/// The url gh names in "a pull request for branch … already exists: <url>", which it
+/// writes to stderr and exits non-zero on.
+fn existing_pr_url(s: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    let at = lower.find("already exists")?;
+    first_url(&s[at + "already exists".len()..])
+}
+
+/// Per-PR-diff cap, the same 300 the working tree uses.
+const MAX_PR_FILES: usize = 300;
+
+/// An open PR's net diff, in the same per-file shape `/api/git/diff` answers with, so
+/// the panel that draws a working tree draws a PR unchanged.
+///
+/// Deliberately not `gh pr diff --patch`: that emits a mailbox patch *series*, one per
+/// commit, so a file touched in three commits parses into three same-path entries —
+/// duplicate ids in the list and per-commit rather than net counts. The plain form is
+/// the PR's net diff.
+pub async fn pr_diff(cwd: &str, number: i64) -> Result<DiffResult, GhError> {
+    let out = capture_full(cwd, &["pr", "diff", &number.to_string()]).await;
+    if !out.ok {
+        return Err(GhError(gh_error_reason(&out)));
+    }
+    let mut files = parse_multi_file_diff(&out.stdout);
+    let truncated = files.len() > MAX_PR_FILES;
+    if truncated {
+        files.truncate(MAX_PR_FILES);
+    }
+    files.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    Ok(DiffResult {
+        git: true,
+        root: None,
+        files,
+        truncated_files: Some(truncated),
+    })
+}
+
+// ── the viewer's own queue ───────────────────────────────────────────────────
+
+/// How many rows each half of the queue returns. GitHub's search caps a page at 100;
+/// 50 each is the window the desktop read and the badge has never wanted more.
+const MAX_VIEWER_PRS: i64 = 50;
+
+/// Why a PR is in your queue. A PR you authored that also lists you as a reviewer is
+/// yours — authorship wins, so each PR appears once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewerPrReason {
+    Mine,
+    ReviewRequested,
+}
+
+/// One row of the viewer queue: the PR, the repo it lives in (`owner/name` — these
+/// rows span repos, so the folder name a folder-scoped row shows does not exist here),
+/// why it is on your plate, and whether it wants something from you.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerPr {
+    pub pr: PullRequest,
+    pub repo: String,
+    pub reason: ViewerPrReason,
+    /// Why this row wants the viewer, decided here rather than in each client for the
+    /// same reason `needs_you` is: it is four rules with a priority between them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<PrAttentionReason>,
+    /// `attention` spelled the way a row shows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_label: Option<String>,
+}
+
+/// The viewer queue as one fetch. `available: false` when gh is missing,
+/// unauthenticated or the search failed, so a client can stay quiet rather than claim
+/// an empty queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerPrResult {
+    pub available: bool,
+    pub rows: Vec<ViewerPr>,
+    pub viewer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ViewerPrResult {
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            rows: Vec::new(),
+            viewer: String::new(),
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// The search qualifiers for each half of the queue.
+pub fn viewer_pr_search(mine: bool) -> String {
+    let base = "is:open is:pr archived:false sort:updated";
+    if mine {
+        format!("{base} author:@me")
+    } else {
+        format!("{base} review-requested:@me")
+    }
+}
+
+/// The two searches as one GraphQL document with aliases — one round trip for both
+/// halves of the queue, returning the same shape `gh pr list --json` does, so a row
+/// renders with no follow-up fetch.
+const VIEWER_PR_QUERY: &str = r#"
+query($mine: String!, $reviews: String!, $first: Int!) {
+  mine: search(query: $mine, type: ISSUE, first: $first) { nodes { ...prBits } }
+  reviews: search(query: $reviews, type: ISSUE, first: $first) { nodes { ...prBits } }
+}
+fragment prBits on PullRequest {
+  number title url isDraft createdAt headRefName additions deletions changedFiles
+  repository { nameWithOwner }
+  author { login }
+  assignees(first: 10) { nodes { login } }
+  reviewDecision
+  reviewRequests(first: 10) {
+    nodes { requestedReviewer { ... on User { login } ... on Team { slug } } }
+  }
+  reviewThreads(first: 100) { nodes { isResolved } }
+  rollup: commits(last: 1) {
+    nodes {
+      commit {
+        statusCheckRollup {
+          contexts(first: 100) {
+            nodes {
+              ... on CheckRun { status conclusion }
+              ... on StatusContext { state }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+/// Every open PR the viewer authored, plus every one that asked for their review,
+/// across all repos — not just the folders a client happens to have open.
+///
+/// `cwd` only has to be a directory that exists: the search is not repo-scoped, which
+/// is the whole point of it next to `open_prs`. `teams` are the viewer's team slugs, so
+/// a team review request counts as an ask, exactly as it does for `needs_you`.
+pub async fn viewer_prs(cwd: &str, teams: &BTreeSet<String>) -> ViewerPrResult {
+    let out = capture_full(
+        cwd,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={VIEWER_PR_QUERY}"),
+            "-f",
+            &format!("mine={}", viewer_pr_search(true)),
+            "-f",
+            &format!("reviews={}", viewer_pr_search(false)),
+            "-F",
+            &format!("first={MAX_VIEWER_PRS}"),
+        ],
+    )
+    .await;
+    if !out.ok {
+        return ViewerPrResult::unavailable(gh_error_reason(&out));
+    }
+    let Some(mut rows) = parse_viewer_prs(&out.stdout) else {
+        return ViewerPrResult::unavailable("Could not parse gh output");
+    };
+    let viewer = viewer_login(cwd).await;
+    for row in &mut rows {
+        // A review request is a reason in itself: `pr_attention_reason` can only see
+        // the request when the PR carries it, and the search has already answered that
+        // by putting the row in the `reviews` bucket.
+        let reason = if row.reason == ViewerPrReason::ReviewRequested {
+            Some(PrAttentionReason::ReviewRequested)
+        } else {
+            pr_attention_reason(&row.pr, &viewer, teams)
+        };
+        row.attention = reason;
+        row.attention_label = reason.map(|r| r.label().to_string());
+    }
+    ViewerPrResult {
+        available: true,
+        rows,
+        viewer,
+        error: None,
+    }
+}
+
+/// gh's GraphQL envelope for the two aliased searches.
+#[derive(Debug, Deserialize)]
+struct ViewerSearchEnvelope {
+    data: Option<ViewerSearchPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewerSearchPayload {
+    mine: Option<ViewerBucket>,
+    reviews: Option<ViewerBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewerBucket {
+    nodes: Option<Vec<RawViewerPr>>,
+}
+
+/// One search hit. Everything past `number` is optional so a field GitHub declines to
+/// serve — or a node that is not a PullRequest at all, which the fragment renders as
+/// `{}` — costs that row and not the whole queue.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawViewerPr {
+    number: Option<i64>,
+    title: Option<String>,
+    url: Option<String>,
+    is_draft: Option<bool>,
+    created_at: Option<String>,
+    head_ref_name: Option<String>,
+    additions: Option<i64>,
+    deletions: Option<i64>,
+    changed_files: Option<i64>,
+    repository: Option<RawViewerRepo>,
+    author: Option<RawListAuthor>,
+    assignees: Option<RawViewerLogins>,
+    review_decision: Option<String>,
+    review_requests: Option<RawViewerRequests>,
+    review_threads: Option<RawViewerThreads>,
+    rollup: Option<RawViewerRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawViewerRepo {
+    name_with_owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerLogins {
+    nodes: Option<Vec<RawListAuthor>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerRequests {
+    nodes: Option<Vec<RawViewerRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawViewerRequest {
+    requested_reviewer: Option<RawReviewRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerThreads {
+    nodes: Option<Vec<RawViewerThread>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawViewerThread {
+    is_resolved: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerRollup {
+    nodes: Option<Vec<RawViewerCommitNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerCommitNode {
+    commit: Option<RawViewerCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawViewerCommit {
+    status_check_rollup: Option<RawViewerStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerStatus {
+    contexts: Option<RawViewerContexts>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerContexts {
+    nodes: Option<Vec<RawCheck>>,
+}
+
+impl RawViewerPr {
+    /// The head commit's check contexts, flattened — the same `[RawCheck]` shape
+    /// `gh pr list --json statusCheckRollup` produces, so one rollup classifies both.
+    fn check_contexts(&self) -> Vec<RawCheck> {
+        self.rollup
+            .as_ref()
+            .and_then(|r| r.nodes.as_ref())
+            .and_then(|n| n.first())
+            .and_then(|n| n.commit.as_ref())
+            .and_then(|c| c.status_check_rollup.as_ref())
+            .and_then(|s| s.contexts.as_ref())
+            .and_then(|c| c.nodes.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Map one search hit onto the wire `PullRequest`, or `None` when it carries no PR
+/// identity.
+fn viewer_pull_request(raw: &RawViewerPr) -> Option<PullRequest> {
+    let number = raw.number?;
+    let url = raw.url.clone()?;
+    let contexts = raw.check_contexts();
+    let unresolved = raw
+        .review_threads
+        .as_ref()
+        .and_then(|t| t.nodes.as_ref())
+        .map(|n| n.iter().filter(|t| t.is_resolved == Some(false)).count() as i64)
+        .unwrap_or(0);
+    Some(PullRequest {
+        number,
+        title: raw.title.clone().unwrap_or_default(),
+        url,
+        branch: raw.head_ref_name.clone().unwrap_or_default(),
+        draft: raw.is_draft.unwrap_or(false),
+        checks: rollup_checks(&contexts),
+        check_count: contexts.len() as i64,
+        passed_count: count_passed_checks(&contexts),
+        unresolved_comments: unresolved,
+        author: raw
+            .author
+            .as_ref()
+            .and_then(|a| a.login.clone())
+            .unwrap_or_default(),
+        assignees: raw
+            .assignees
+            .as_ref()
+            .and_then(|a| a.nodes.as_ref())
+            .map(|n| n.iter().filter_map(|a| a.login.clone()).collect())
+            .unwrap_or_default(),
+        created_at: raw.created_at.clone(),
+        review_decision: raw.review_decision.clone(),
+        review_requests: raw
+            .review_requests
+            .as_ref()
+            .and_then(|r| r.nodes.as_ref())
+            .map(|n| {
+                n.iter()
+                    .filter_map(|r| {
+                        r.requested_reviewer
+                            .clone()
+                            .and_then(RawReviewRequest::handle)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        additions: raw.additions,
+        deletions: raw.deletions,
+        changed_files: raw.changed_files,
+    })
+}
+
+/// Parse the two aliased buckets into one deduped queue: authored PRs first, in the
+/// order GitHub returned them, then review requests that are not already listed.
+///
+/// `None` when the payload is not the envelope we asked for; an empty queue is `[]`,
+/// which is a real answer and not a failure.
+pub fn parse_viewer_prs(stdout: &str) -> Option<Vec<ViewerPr>> {
+    let envelope: ViewerSearchEnvelope = serde_json::from_str(stdout).ok()?;
+    let payload = envelope.data?;
+    let mut rows: Vec<ViewerPr> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (bucket, reason) in [
+        (payload.mine, ViewerPrReason::Mine),
+        (payload.reviews, ViewerPrReason::ReviewRequested),
+    ] {
+        for raw in bucket.and_then(|b| b.nodes).unwrap_or_default() {
+            let Some(pr) = viewer_pull_request(&raw) else {
+                continue;
+            };
+            let repo = raw
+                .repository
+                .as_ref()
+                .and_then(|r| r.name_with_owner.clone())
+                .or_else(|| repo_owner_name(&pr.url).map(|(o, n)| format!("{o}/{n}")))
+                .unwrap_or_default();
+            let key = format!("{repo}#{}", pr.number);
+            if !seen.insert(key) {
+                continue;
+            }
+            rows.push(ViewerPr {
+                pr,
+                repo,
+                reason,
+                attention: None,
+                attention_label: None,
+            });
+        }
+    }
+    Some(rows)
 }
 
 // ── ISO-8601, without a date crate ───────────────────────────────────────────
@@ -1926,5 +2383,126 @@ mod list_tests {
     async fn a_blank_branch_is_answered_without_launching_anything() {
         std::env::set_var("JUANCODE_GH_BIN", "/does/not/exist/gh");
         assert!(pr_for_branch("/tmp", "   ").await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+
+    fn envelope(mine: &str, reviews: &str) -> String {
+        format!(r#"{{"data":{{"mine":{{"nodes":[{mine}]}},"reviews":{{"nodes":[{reviews}]}}}}}}"#)
+    }
+
+    fn node(number: i64, repo: &str, author: &str) -> String {
+        format!(
+            r#"{{"number":{number},"title":"t","url":"https://github.com/{repo}/pull/{number}",
+                 "isDraft":false,"createdAt":"2026-09-01T09:00:00Z","headRefName":"b",
+                 "additions":1,"deletions":2,"changedFiles":3,
+                 "repository":{{"nameWithOwner":"{repo}"}},"author":{{"login":"{author}"}},
+                 "assignees":{{"nodes":[]}},"reviewDecision":null,
+                 "reviewRequests":{{"nodes":[{{"requestedReviewer":{{"login":"octocat"}}}}]}},
+                 "reviewThreads":{{"nodes":[{{"isResolved":false}},{{"isResolved":true}}]}},
+                 "rollup":{{"nodes":[{{"commit":{{"statusCheckRollup":{{"contexts":{{"nodes":[
+                   {{"status":"COMPLETED","conclusion":"SUCCESS"}},
+                   {{"status":"COMPLETED","conclusion":"FAILURE"}}]}}}}}}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_hit_carries_the_same_shape_the_folder_list_does() {
+        let rows = parse_viewer_prs(&envelope(&node(42, "o/r", "octocat"), "")).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.repo, "o/r");
+        assert_eq!(row.reason, ViewerPrReason::Mine);
+        // One green and one red is a red PR with passed_count 1, same rollup as the list.
+        assert_eq!(row.pr.checks, PrChecks::Failing);
+        assert_eq!(row.pr.check_count, 2);
+        assert_eq!(row.pr.passed_count, 1);
+        assert_eq!(row.pr.unresolved_comments, 1);
+        assert_eq!(row.pr.review_requests, vec!["octocat".to_string()]);
+        assert_eq!(row.pr.changed_files, Some(3));
+    }
+
+    #[test]
+    fn authorship_wins_so_a_pr_appears_once() {
+        let same = node(42, "o/r", "octocat");
+        let rows = parse_viewer_prs(&envelope(&same, &same)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason, ViewerPrReason::Mine);
+    }
+
+    #[test]
+    fn the_two_buckets_keep_their_order_and_their_reason() {
+        let rows = parse_viewer_prs(&envelope(
+            &node(42, "o/r", "octocat"),
+            &node(7, "o/r", "hubber"),
+        ))
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.pr.number, r.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (42, ViewerPrReason::Mine),
+                (7, ViewerPrReason::ReviewRequested)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_node_that_is_not_a_pull_request_costs_that_row_only() {
+        let rows = parse_viewer_prs(&envelope(
+            &format!("{{}},{}", node(42, "o/r", "octocat")),
+            "",
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pr.number, 42);
+    }
+
+    #[test]
+    fn a_payload_that_is_not_the_envelope_is_not_an_empty_queue() {
+        assert!(parse_viewer_prs("{\"errors\":[{\"message\":\"bad credentials\"}]}").is_none());
+        assert!(parse_viewer_prs("not json").is_none());
+        // An envelope with empty buckets IS an answer.
+        assert_eq!(parse_viewer_prs(&envelope("", "")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_repo_the_search_did_not_name_is_lifted_from_the_url() {
+        let raw = r#"{"number":9,"url":"https://github.com/lifted/name/pull/9"}"#;
+        let rows = parse_viewer_prs(&envelope(raw, "")).unwrap();
+        assert_eq!(rows[0].repo, "lifted/name");
+    }
+
+    #[test]
+    fn the_two_searches_ask_for_different_halves() {
+        assert!(viewer_pr_search(true).contains("author:@me"));
+        assert!(viewer_pr_search(false).contains("review-requested:@me"));
+        for q in [viewer_pr_search(true), viewer_pr_search(false)] {
+            assert!(q.contains("is:open is:pr archived:false sort:updated"));
+        }
+    }
+
+    #[test]
+    fn an_already_exists_stderr_is_an_answer_and_not_a_failure() {
+        let msg = "a pull request for branch \"x\" into branch \"main\" already exists: \
+                   https://github.com/o/r/pull/12\n";
+        assert_eq!(
+            existing_pr_url(msg),
+            Some("https://github.com/o/r/pull/12".to_string())
+        );
+        assert_eq!(existing_pr_url("gh: not authenticated"), None);
+    }
+
+    #[test]
+    fn the_created_url_is_the_first_url_gh_printed() {
+        assert_eq!(
+            first_url("Creating pull request\nhttps://github.com/o/r/pull/3\n"),
+            Some("https://github.com/o/r/pull/3".to_string())
+        );
+        assert_eq!(first_url("nothing here"), None);
     }
 }

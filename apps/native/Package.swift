@@ -82,9 +82,10 @@ let package = Package(
         // Foundation + JuancodeCore only — no server/UI deps.
         //
         // `ls Sources/JuancodeServices` is the answer to "what is left to port", and
-        // juancode-a2s7 made it one again: 10 files, every one of which carries a
-        // disposition in its own header naming the ticket that deletes it. Nothing
-        // desktop-local lives here any more — that is `JuancodeDesktop`, below.
+        // juancode-a2s7 made it one again: 9 files after juancode-h0l6, every one of
+        // which carries a disposition in its own header naming the ticket that deletes
+        // it. Nothing desktop-local lives here any more — that is `JuancodeDesktop`,
+        // below.
         .target(
             name: "JuancodeServices",
             dependencies: ["JuancodeCore"]

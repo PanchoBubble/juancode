@@ -47,15 +47,23 @@ case "$1 $2" in
     ;;
   "pr view") serve pr-activity.json ;;
   "pr checks") serve pr-checks.json ;;
+  "pr diff") serve pr-diff.patch ;;
+  # The writes. Nothing here reaches GitHub either: the recorded stdout is what gh
+  # prints on success, which is the whole of what the callers read.
+  "pr create") serve pr-create.txt ;;
+  "pr comment") serve pr-comment.txt ;;
   "repo view") serve repo-nwo.txt ;;
   "run view") serve run-log.txt ;;
+  "run rerun") serve run-rerun.txt ;;
   "api user") serve viewer.txt ;;
+  "api --method") serve pr-comment.txt ;;
   "api graphql")
-    # The two GraphQL calls are told apart by what they ask for, which is also the
-    # only thing that distinguishes them on the wire.
+    # The GraphQL calls are told apart by what they ask for, which is also the only
+    # thing that distinguishes them on the wire.
     case " $* " in
       *"pullRequests(states: OPEN"*) serve thread-counts.json ;;
       *"pullRequest(number:"*) serve conversation.json ;;
+      *"search(query: \$mine"*) serve viewer-prs.json ;;
       *) fail "$@" ;;
     esac
     ;;

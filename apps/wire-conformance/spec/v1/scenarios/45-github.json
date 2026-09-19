@@ -1,7 +1,7 @@
 {
   "id": "github",
   "title": "the GitHub data layer and the review surface, answered by the core rather than by the machine the app is on",
-  "asserts": "a core that advertises `github` answers the whole PR reading surface itself: the folder's open PRs with the triage question and the order already applied, one PR's conversation, that conversation merged into the chronology it is read in, and a red build parsed into folds and lines. All four are HTTP, because each one is a question somebody asks once and leaves — and all four used to be the desktop's own `gh` calls, which is why a phone had no PR view at all. The decisions are made HERE and not in a client on purpose: 'is this PR waiting on me' is four rules with a priority between them, and 'which of these two comments came first' has three tie-breaks in it, and two clients that implemented either separately would eventually disagree about the same PR. The review surface is the write half and goes over the wire, because a refresh is a whole model turn: held open as a request it would block the socket carrying every attached session's bytes, and answered as a frame it arrives when it is done. A staged comment is answered with the WHOLE list rather than with itself, because two surfaces stage comments against one session. The failures are as load-bearing as the answers: a read with no `cwd` is a 400 rather than a question about no repository, a PR `gh` cannot reach is a 502 rather than a 404 — a client told 'not found' would cache a PR out of existence — and a green PR's Actions log is a 200 with no sections rather than an error, because having no failing build is an answer.",
+  "asserts": "a core that advertises `github` answers the whole PR surface itself, reads and writes: the folder's open PRs with the triage question and the order already applied, the search that reaches past the page cap, a branch's PR, a checkout's repo identity, one PR's conversation, that conversation merged into the chronology it is read in, a PR's net diff, a red build parsed into folds and lines, and the viewer's own cross-repo queue — plus opening a PR, commenting on one and re-running its build. They are HTTP because each one is a question somebody asks once and leaves, and every one of them used to be a `gh` call inside the desktop app, which is why a phone had no PR view at all. The decisions are made HERE and not in a client on purpose: 'is this PR waiting on me' is four rules with a priority between them, and 'which of these two comments came first' has three tie-breaks in it, and two clients that implemented either separately would eventually disagree about the same PR. The three writes are POSTs and not GETs, because each has a side effect on GitHub and a core that answered them on GET would be one a browser could fire by prefetching a link. The review surface is the other write half and goes over the wire, because a refresh is a whole model turn: held open as a request it would block the socket carrying every attached session's bytes, and answered as a frame it arrives when it is done. A staged comment is answered with the WHOLE list rather than with itself, because two surfaces stage comments against one session. The failures are as load-bearing as the answers: a read with no `cwd` is a 400 rather than a question about no repository, a PR `gh` cannot reach is a 502 rather than a 404 — a client told 'not found' would cache a PR out of existence — and a green PR's Actions log is a 200 with no sections rather than an error, because having no failing build is an answer.",
   "requires": [
     "pty",
     "git"
@@ -247,6 +247,218 @@
         }
       },
       "note": "a 502 and not a 404. The route exists and the PR probably does; what failed is the hop to GitHub, and a client told 'not found' would cache a PR out of existence"
+    },
+    {
+      "get": "/api/prs/search?cwd=$ghCwd&q=author%3A%40me",
+      "expectBody": {
+        "prs": [
+          {
+            "number": 7,
+            "author": "hubber"
+          }
+        ]
+      },
+      "note": "the half of a folder's PRs the page cap hides. A list call answers the newest N and nothing else, so reaching an older PR — one of your own, or one an entered query matches — is a second, repo-scoped call whose result the caller unions in. The search is the caller's qualifiers verbatim: this core does not guess what `author:@me` was meant to mean"
+    },
+    {
+      "get": "/api/prs/search?cwd=$ghCwd",
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "q"
+        }
+      },
+      "note": "a search with no qualifiers is the list route with extra steps, and answering it would make the two indistinguishable to a caller that forgot the parameter"
+    },
+    {
+      "get": "/api/pr/for-branch?cwd=$ghCwd&branch=octocat%2Ffix-login",
+      "expectBody": {
+        "pr": {
+          "number": 42,
+          "branch": "octocat/fix-login"
+        }
+      },
+      "note": "the single-branch lookup, which is a different `gh` call from the page: a session header asks about ONE branch and the list may not contain it"
+    },
+    {
+      "get": "/api/pr/for-branch?cwd=$ghCwd&branch=no-such-branch",
+      "expectBody": {
+        "pr": {
+          "number": 42
+        }
+      },
+      "note": "the stub answers every `--head` the same way, so this asserts only that the route is the lookup and not the page. A branch with no PR is a 200 with `pr: null` — not a 404 — because 'this branch has no PR' is an answer the header draws, and both a hit and a miss are cached by the caller"
+    },
+    {
+      "get": "/api/pr/for-branch?cwd=$ghCwd",
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "branch"
+        }
+      }
+    },
+    {
+      "get": "/api/repo?cwd=$ghCwd",
+      "expectBody": {
+        "nwo": "conformance/repo"
+      },
+      "note": "a checkout's repo identity. This is what maps a cross-repo queue row — which knows a repo and not a path — back onto a local checkout, so a row in a repo you have open gets the full detail pane instead of only 'open on GitHub'"
+    },
+    {
+      "get": "/api/pr/diff?cwd=$ghCwd&number=42",
+      "expectBody": {
+        "git": true,
+        "truncatedFiles": false,
+        "files": [
+          {
+            "path": "docs/README.md",
+            "oldPath": "README.md",
+            "status": "renamed"
+          },
+          {
+            "path": "Sources/App/Login.swift",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0
+          }
+        ]
+      },
+      "note": "a PR's net diff in the same per-file shape the working tree answers with, so one panel draws both. Not `--patch`: that emits a mailbox patch SERIES, one per commit, and a file touched in three commits parses into three same-path entries with per-commit rather than net counts. A rename is ONE entry at its new path carrying the old one, because `gh pr diff` emits `-M` similarity headers and a parser that read them as a delete and an add would draw a file twice. Sorted by path, which is where the moved README lands"
+    },
+    {
+      "get": "/api/pr/diff?cwd=$gitCwd&number=42",
+      "status": 502,
+      "expectBody": {
+        "error": {
+          "$type": "string"
+        }
+      },
+      "note": "a checkout `gh` cannot answer for. A 502 and not a 404 or an empty diff: an empty diff is a claim that the PR changed nothing, and a client shown one would draw a PR out of existence"
+    },
+    {
+      "get": "/api/prs/viewer?cwd=$ghCwd",
+      "expectBody": {
+        "available": true,
+        "viewer": "octocat",
+        "rows": [
+          {
+            "repo": "conformance/repo",
+            "reason": "mine",
+            "attention": "ciFailing",
+            "attentionLabel": "CI failing",
+            "pr": {
+              "number": 42,
+              "checks": "failing",
+              "passedCount": 1,
+              "unresolvedComments": 1
+            }
+          },
+          {
+            "repo": "conformance/other",
+            "reason": "reviewRequested",
+            "attention": "reviewRequested",
+            "pr": {
+              "number": 31,
+              "checks": "passing"
+            }
+          }
+        ]
+      },
+      "note": "the queue the folder list cannot answer: every open PR you wrote and every one that asked for your review, across repos you may have no clone of, out of ONE GraphQL call carrying both searches as aliases. The rows come back in the same shape the folder list produces — rollup, review decision, unresolved threads — so nothing needs a follow-up fetch. Authorship wins when both searches return the same PR, so each appears once. The attention reason is decided here for the same reason `needsYou` is; a review request is a reason in itself, because the search has already answered a question the PR payload cannot"
+    },
+    {
+      "post": "/api/pr/create",
+      "body": {
+        "cwd": "$ghCwd",
+        "title": "Fix the login redirect",
+        "body": "Fixes the redirect loop.",
+        "draft": false
+      },
+      "expectBody": {
+        "url": "https://github.com/conformance/repo/pull/99",
+        "created": true
+      },
+      "note": "a POST and not a GET: this has a side effect on GitHub, and a core that answered it on GET would be one a browser could fire by prefetching a link. The branch is NOT pushed here — the caller pushes first, because a core that pushed a branch as a side effect of a different verb would be one nobody could predict"
+    },
+    {
+      "post": "/api/pr/create",
+      "body": {
+        "cwd": "$ghCwd"
+      },
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "title"
+        }
+      },
+      "note": "a PR with no title is refused rather than opened with an empty one, which is a thing somebody then has to go and fix on github.com"
+    },
+    {
+      "post": "/api/pr/comment",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "body": "Looks right to me."
+      },
+      "expectBody": {
+        "ok": true
+      },
+      "note": "the top-level comment"
+    },
+    {
+      "post": "/api/pr/comment",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "body": "Fixed",
+        "replyTo": 222
+      },
+      "expectBody": {
+        "ok": true
+      },
+      "note": "and the inline reply, on the same route: the composer is one box, and which of the two it posts is whether a thread is open under it. `replyTo` is the REST id of the thread's FIRST comment, because GitHub 422s a reply to a reply"
+    },
+    {
+      "post": "/api/pr/comment",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "body": "   "
+      },
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "body"
+        }
+      },
+      "note": "an empty comment is a comment somebody has to delete"
+    },
+    {
+      "post": "/api/pr/rerun",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "failedOnly": true
+      },
+      "expectBody": {
+        "ok": true
+      },
+      "note": "re-running the red half of a build. The run ids come from the PR's own checks, deduped, because several failing jobs usually belong to one Actions run and re-running it twice is two builds"
+    },
+    {
+      "post": "/api/pr/rerun",
+      "body": {
+        "cwd": "$gitCwd",
+        "number": 42
+      },
+      "status": 502,
+      "expectBody": {
+        "error": {
+          "$type": "string"
+        }
+      },
+      "note": "a checkout with no runs behind it. A 502 carrying gh's own sentence, not a silent success: a button that reports 'done' having done nothing is worse than one that says why"
     },
     {
       "send": {

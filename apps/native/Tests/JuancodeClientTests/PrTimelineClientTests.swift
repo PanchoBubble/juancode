@@ -1,4 +1,5 @@
 import XCTest
+import JuancodeCore
 
 @testable import JuancodeClient
 
@@ -385,5 +386,72 @@ final class GitHubReadsLiveTests: XCTestCase {
         let timeline = await reads.timeline(cwd: cwd, number: 42,
                                             prUrl: "https://example.invalid/not-a-pr")
         XCTAssertNil(timeline)
+    }
+
+    // The reads and writes juancode-h0l6 moved off this machine. Live rather than
+    // fixture-decoded for the same reason the two above are: a fixture cannot prove
+    // the app builds the url the core answers on, and half of these are POSTs whose
+    // body shape only the core can refuse.
+
+    func testTheListComesBackWithTheTriageAnswerAlreadyDecided() async throws {
+        let fetched = await reads.prs(cwd: cwd)
+        let body = try XCTUnwrap(fetched)
+        XCTAssertTrue(body.available)
+        XCTAssertEqual(body.viewer, "octocat")
+        XCTAssertEqual(body.prs.map(\.number), [42, 7])
+        XCTAssertEqual(body.needsYou.map(\.reason), [.ciFailing, .reviewRequested])
+        // The label travels with the reason, so this side keeps no table of them.
+        XCTAssertEqual(body.needsYou.first?.text, "CI failing")
+        XCTAssertEqual(body.listResult.prs.count, 2)
+    }
+
+    func testTheSearchReachesPastThePageAndTheBranchLookupIsItsOwnCall() async throws {
+        let searched = await reads.searchPrs(cwd: cwd, query: "author:@me")
+        let found = try XCTUnwrap(searched)
+        XCTAssertEqual(found.map(\.number), [7])
+        let branch = await reads.prForBranch(cwd: cwd, branch: "octocat/fix-login")
+        XCTAssertEqual(branch?.number, 42)
+    }
+
+    func testTheRepoIdentityComesBack() async {
+        let nwo = await reads.repoNwo(cwd: cwd)
+        XCTAssertEqual(nwo, "conformance/repo")
+    }
+
+    func testThePrDiffIsThePerFileShapeThePanelAlreadyDraws() async throws {
+        let diff = try await reads.prDiff(cwd: cwd, number: 42)
+        XCTAssertTrue(diff.git)
+        XCTAssertEqual(diff.files.map(\.path), ["docs/README.md", "Sources/App/Login.swift"])
+        // A rename is one entry at its new path, not a delete and an add.
+        XCTAssertEqual(diff.files.first?.oldPath, "README.md")
+    }
+
+    func testTheViewerQueueComesBackWithEachRowsAttention() async throws {
+        let fetched = await reads.viewerPrs(cwd: cwd)
+        let queue = try XCTUnwrap(fetched)
+        XCTAssertTrue(queue.available)
+        XCTAssertEqual(queue.viewer, "octocat")
+        XCTAssertEqual(queue.mine.map(\.pr.number), [42])
+        XCTAssertEqual(queue.reviewing.map(\.pr.number), [31])
+        XCTAssertEqual(queue.rows.map(\.attention), [.ciFailing, .reviewRequested])
+        XCTAssertEqual(viewerPrsNeedingYou(queue), 2)
+    }
+
+    func testTheWritesAnswerAndTheirRefusalsCarryAReason() async throws {
+        let created = try await reads.createPr(cwd: cwd, title: "t", body: "b", draft: false)
+        XCTAssertEqual(created.url, "https://github.com/conformance/repo/pull/99")
+        XCTAssertTrue(created.created)
+        try await reads.comment(cwd: cwd, number: 42, body: "looks right")
+        try await reads.comment(cwd: cwd, number: 42, body: "fixed", replyTo: 222)
+        try await reads.rerunChecks(cwd: cwd, number: 42, failedOnly: true)
+
+        // And the refusal path, which is the half a button depends on: the thrown
+        // message has to be the core's sentence, not "the request failed".
+        do {
+            _ = try await reads.createPr(cwd: cwd, title: "  ", body: "b", draft: false)
+            XCTFail("a PR with no title must be refused")
+        } catch let e as GitHubError {
+            XCTAssertTrue(e.message.contains("title"), e.message)
+        }
     }
 }

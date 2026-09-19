@@ -387,6 +387,11 @@ final class AppModel {
     /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
     /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
     var prsByCwd: [String: PrListResult] = [:]
+    /// The triage answer for each folder, as the core decided it: which of that
+    /// folder's PRs want the viewer, and why. Kept beside the list rather than
+    /// recomputed from it, because "is this waiting on me" is four rules with a
+    /// priority between them and the phone reads the same answer off the same route.
+    var needsYouByCwd: [String: [NeedsYouRow]] = [:]
     /// cwds with a PR fetch in flight, so a refresh doesn't stampede.
     private var prsLoading: Set<String> = []
     /// Per-cwd debounce tasks for the PR popover's background scoped re-query.
@@ -2103,26 +2108,32 @@ final class AppModel {
     /// The cached PR list for `cwd`, if loaded yet.
     func prs(_ cwd: String) -> PrListResult? { prsByCwd[cwd] }
 
-    /// Load (or refresh) the open PRs for `cwd` via the real `gh` CLI. Runs off the
-    /// main actor since it shells out, then publishes the result. Coalesces
-    /// concurrent calls for the same cwd. Failures land as `available: false`
-    /// inside `getOpenPrs`, so the popover trigger just stays hidden.
+    /// Load (or refresh) the open PRs for `cwd` off the core's `github` capability.
+    /// Coalesces concurrent calls for the same cwd. A core that cannot answer, and a
+    /// `gh` that could not, both land as `available: false`, so the popover trigger
+    /// just stays hidden.
     func loadPrs(_ cwd: String) {
         guard !prsLoading.contains(cwd) else { return }
+        guard let reads = core.github else {
+            prsByCwd[cwd] = PrListResult(available: false, prs: [],
+                                         error: core.unavailableReason(.github))
+            return
+        }
         prsLoading.insert(cwd)
         let scoped = prsBackfillIntent[cwd]
         Task {
-            var result = await Task.detached(priority: .utility) { await getOpenPrs(cwd) }.value
+            let body = await reads.prs(cwd: cwd)
+            var result = body?.listResult
+                ?? PrListResult(available: false, prs: [], error: "The core did not answer")
             // Fold any active scoped filter (Mine/Assigned/text) into the same pass
             // so the reload publishes the full set at once — matches beyond the
             // newest-100 firehose stay in, and the count doesn't flash back down.
             if result.available, let scoped {
-                let found = await Task.detached(priority: .utility) {
-                    await searchOpenPrs(cwd, search: scoped)
-                }.value
+                let found = await reads.searchPrs(cwd: cwd, query: scoped) ?? []
                 if !found.isEmpty { result.prs = mergePrLists(result.prs, found) }
             }
             prsByCwd[cwd] = result
+            needsYouByCwd[cwd] = body?.needsYou ?? []
             prsLoading.remove(cwd)
             // Settle anything asked while the list was loading — most branches are
             // answered by the list itself, so this rarely reaches gh.
@@ -2153,9 +2164,8 @@ final class AppModel {
         prsBackfillTasks[cwd] = Task { [qualifiers] in
             await Nap.duration(.milliseconds(300))
             if Task.isCancelled { return }
-            let found = await Task.detached(priority: .utility) {
-                await searchOpenPrs(cwd, search: qualifiers)
-            }.value
+            guard let reads = core.github else { return }
+            let found = await reads.searchPrs(cwd: cwd, query: qualifiers) ?? []
             if Task.isCancelled || found.isEmpty { return }
             guard var existing = prsByCwd[cwd], existing.available else { return }
             let merged = mergePrLists(existing.prs, found)
@@ -2276,9 +2286,14 @@ final class AppModel {
         guard !viewerPrsLoading else { return }
         guard viewerPrRefreshDue(lastFetched: viewerPrsFetchedAt, now: Date(),
                                  focused: NSApp.isActive, force: force) else { return }
+        guard let reads = core.github else {
+            viewerPrs.error = core.unavailableReason(.github)
+            return
+        }
         viewerPrsLoading = true
         Task {
-            let result = await Task.detached(priority: .utility) { await getViewerPrs() }.value
+            let result = await reads.viewerPrs()
+                ?? ViewerPrResult(available: false, error: "The core did not answer")
             // A failed search keeps the last good queue on screen rather than
             // blanking the count on one flaky round trip; the error still lands so
             // the view can say what went wrong.
@@ -2332,11 +2347,11 @@ final class AppModel {
     /// `gh repo view` each, once per launch. Kicked when the queue lands — that's
     /// the only consumer, and doing it then keeps it off the boot path.
     private func resolveRepoIdentities() {
+        guard let reads = core.github else { return }
         for cwd in githubFolders where repoNwoByCwd[cwd] == nil && !repoNwoResolving.contains(cwd) {
             repoNwoResolving.insert(cwd)
             Task {
-                let nwo = await Task.detached(priority: .utility) { await getRepoNwo(cwd) }.value
-                if let nwo { repoNwoByCwd[cwd] = nwo }
+                if let nwo = await reads.repoNwo(cwd: cwd) { repoNwoByCwd[cwd] = nwo }
                 repoNwoResolving.remove(cwd)
             }
         }
@@ -2445,11 +2460,10 @@ final class AppModel {
         let key = branchPrKey(cwd: cwd, branch: branch)
         let fresh = branchPrs[key].map { Date().timeIntervalSince($0.at) < Self.branchPrTTL } ?? false
         guard !fresh, !branchPrsLoading.contains(key) else { return }
+        guard let reads = core.github else { return }
         branchPrsLoading.insert(key)
         Task {
-            let found = await Task.detached(priority: .utility) {
-                await getPrForBranch(cwd, branch: branch)
-            }.value
+            let found = await reads.prForBranch(cwd: cwd, branch: branch)
             branchPrs[key] = BranchPrAnswer(pr: found, at: Date())
             branchPrsLoading.remove(key)
         }
@@ -4778,10 +4792,13 @@ final class AppModel {
     /// Returns the result for the UI to show the URL, or nil on failure (note set).
     func createPullRequest(_ id: String, title: String, body: String, draft: Bool) async -> PrCreateResult? {
         guard let cwd = gitCwd(of: id) else { return nil }
+        guard let reads = core.github else {
+            gitNoteBySession[id] = GitNote(ok: false, text: core.unavailableReason(.github)
+                                           ?? "This core cannot open pull requests.")
+            return nil
+        }
         do {
-            let r = try await Task.detached(priority: .userInitiated) {
-                try await createPr(cwd, title: title, body: body, draft: draft)
-            }.value
+            let r = try await reads.createPr(cwd: cwd, title: title, body: body, draft: draft)
             gitNoteBySession[id] = GitNote(
                 ok: true, text: r.created ? "Pull request created." : "A PR already exists for this branch.")
             loadChanges(id)
@@ -4811,7 +4828,7 @@ final class AppModel {
     /// First useful line of any git/gh/commit error, for a clean status note.
     private func gitErrorText(_ error: Error) -> String {
         if let e = error as? GitError { return e.message }
-        if let e = error as? GhError { return e.message }
+        if let e = error as? GitHubError { return e.message }
         if let e = error as? ChangesError { return e.reason }
         return String(describing: error)
     }
@@ -5626,9 +5643,9 @@ private struct LoadedDiff: Sendable {
     var error: String?
 }
 
-/// Resolve a `ChangesSource` to its diff (juancode-49w). Three of the four come from
-/// the core that owns the session's tree; the PR one still comes from `gh`, which is
-/// the desktop's own until juancode-52e8.14.6 moves it.
+/// Resolve a `ChangesSource` to its diff (juancode-49w). All four come from the core
+/// that owns the session's tree — the PR one off the `github` capability, which is why
+/// it is the one that can be refused by name.
 ///
 /// The working-tree path keeps the old "swallow errors, keep the prior diff"
 /// behaviour; the base/PR/commit paths surface a clean error string the panel shows.
@@ -5645,8 +5662,14 @@ private func loadDiffForSource(_ core: any CoreClient, _ cwd: String,
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
         }
     case .pr(let pr):
+        guard let reads = core.github else {
+            return LoadedDiff(diff: nil, base: nil,
+                              error: core.unavailableReason(.github)
+                                  ?? "This core cannot read a PR's diff.")
+        }
         do {
-            return LoadedDiff(diff: try await getPrDiff(cwd, number: pr.number), base: nil, error: nil)
+            return LoadedDiff(diff: try await reads.prDiff(cwd: cwd, number: pr.number),
+                              base: nil, error: nil)
         } catch {
             return LoadedDiff(diff: nil, base: nil, error: diffErrorMessage(error))
         }
@@ -5660,9 +5683,9 @@ private func loadDiffForSource(_ core: any CoreClient, _ cwd: String,
     }
 }
 
-/// The clean message from a GitError/GhError, else a generic description.
+/// The clean message from a GitError/GitHubError, else a generic description.
 private func diffErrorMessage(_ error: Error) -> String {
     if let e = error as? GitError { return e.message }
-    if let e = error as? GhError { return e.message }
+    if let e = error as? GitHubError { return e.message }
     return String(describing: error)
 }

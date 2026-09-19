@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,14 @@ use crate::serve::CoreHandles;
 pub fn routes() -> Router<CoreHandles> {
     Router::new()
         .route("/api/prs", get(prs))
+        .route("/api/prs/search", get(search_prs))
+        .route("/api/prs/viewer", get(viewer_prs))
+        .route("/api/pr/for-branch", get(pr_for_branch))
+        .route("/api/pr/diff", get(pr_diff))
+        .route("/api/pr/create", post(create_pr))
+        .route("/api/pr/comment", post(comment))
+        .route("/api/pr/rerun", post(rerun))
+        .route("/api/repo", get(repo))
         .route("/api/pr/conversation", get(conversation))
         .route("/api/pr/timeline", get(timeline))
         .route("/api/pr/checks", get(checks))
@@ -253,6 +261,228 @@ async fn actions_log(Query(params): Query<PrParams>, State(_): State<CoreHandles
     };
     let raw = gh::failed_check_logs(&cwd, number, 5).await;
     Json(parse_actions_log(&raw)).into_response()
+}
+
+// ── the reads the desktop used to make in its own process ────────────────────
+//
+// juancode-h0l6. Everything below was a `gh` call inside the SwiftUI app: the search
+// that reaches past the page cap, the single-branch lookup, a folder's repo identity,
+// a PR's diff, and the cross-repo queue behind the toolbar badge. They are here for
+// the reason the rest of the module is — a phone cannot shell out — and each is scoped
+// to one `cwd` the caller names, never a fan-out over folders.
+
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    pub cwd: Option<String>,
+    /// The `gh pr list --search` qualifiers, already assembled by the caller.
+    pub q: Option<String>,
+}
+
+/// A repo-scoped PR search. The list route caps at a page of the newest PRs; this is
+/// how a client reaches the ones beyond it — your own older PRs, or an old PR matched
+/// by a query — and the caller unions the two.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBody {
+    pub prs: Vec<gh::PullRequest>,
+}
+
+async fn search_prs(Query(params): Query<SearchParams>, State(_): State<CoreHandles>) -> Response {
+    let Some(cwd) = non_empty(params.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(q) = non_empty(params.q) else {
+        return bad_request("q (the search qualifiers) required");
+    };
+    Json(SearchBody {
+        prs: gh::search_open_prs(&cwd, &q).await,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BranchParams {
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+}
+
+/// The open PR for one branch, or `null`. A 200 with no PR rather than a 404: "this
+/// branch has no PR" is an answer the header draws, and both a hit and a miss are
+/// cached by the caller.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPrBody {
+    pub pr: Option<gh::PullRequest>,
+}
+
+async fn pr_for_branch(
+    Query(params): Query<BranchParams>,
+    State(_): State<CoreHandles>,
+) -> Response {
+    let Some(cwd) = non_empty(params.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(branch) = non_empty(params.branch) else {
+        return bad_request("branch required");
+    };
+    Json(BranchPrBody {
+        pr: gh::pr_for_branch(&cwd, &branch).await,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CwdParams {
+    pub cwd: Option<String>,
+}
+
+/// A checkout's repo identity (`owner/name`), or `null` when it has no GitHub remote.
+/// This is what maps a cross-repo queue row — which knows a repo, not a path — back
+/// onto a local checkout.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoBody {
+    pub nwo: Option<String>,
+}
+
+async fn repo(Query(params): Query<CwdParams>, State(_): State<CoreHandles>) -> Response {
+    let Some(cwd) = non_empty(params.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    Json(RepoBody {
+        nwo: gh::repo_nwo(&cwd).await,
+    })
+    .into_response()
+}
+
+/// An open PR's net diff, in the same per-file shape `/api/git/diff` answers with.
+async fn pr_diff(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
+    let (cwd, number) = match params.parts() {
+        Ok(parts) => parts,
+        Err(response) => return response,
+    };
+    match gh::pr_diff(&cwd, number).await {
+        Ok(diff) => Json(diff).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerPrsParams {
+    /// Any directory that exists. The search is not repo-scoped — that is the point of
+    /// it next to `/api/prs` — so this only decides where `gh` is run, and the daemon's
+    /// own cwd is used when the caller names none.
+    pub cwd: Option<String>,
+    /// The viewer's team slugs, comma-separated, so a team review request counts as an
+    /// ask. Same parameter, same meaning, as on `/api/prs`.
+    pub teams: Option<String>,
+}
+
+async fn viewer_prs(
+    Query(params): Query<ViewerPrsParams>,
+    State(_): State<CoreHandles>,
+) -> Response {
+    let cwd = non_empty(params.cwd).unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "/".into())
+    });
+    let teams = csv_set(params.teams.as_deref());
+    Json(gh::viewer_prs(&cwd, &teams).await).into_response()
+}
+
+// ── the writes ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePrBody {
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+}
+
+/// Open a PR for the checkout's current branch. The caller pushes first — this core
+/// will not push a branch on somebody's behalf as a side effect of a different verb.
+async fn create_pr(State(_): State<CoreHandles>, Json(body): Json<CreatePrBody>) -> Response {
+    let Some(cwd) = non_empty(body.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(title) = non_empty(body.title) else {
+        return bad_request("title required");
+    };
+    match gh::create_pr(&cwd, &title, &body.body.unwrap_or_default(), body.draft).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCommentBody {
+    pub cwd: Option<String>,
+    pub number: Option<i64>,
+    pub body: Option<String>,
+    /// The REST id of the review comment being replied to. Absent posts a top-level
+    /// comment instead. One route and not two, because the composer is one box whose
+    /// target is whether a thread is open under it.
+    pub reply_to: Option<i64>,
+}
+
+async fn comment(State(_): State<CoreHandles>, Json(body): Json<PrCommentBody>) -> Response {
+    let Some(cwd) = non_empty(body.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(number) = body.number.filter(|n| *n > 0) else {
+        return bad_request("a positive PR number required");
+    };
+    let Some(text) = non_empty(body.body) else {
+        return bad_request("body required");
+    };
+    let result = match body.reply_to {
+        Some(id) => gh::reply_to_review_comment(&cwd, number, id, &text).await,
+        None => gh::comment_on_pr(&cwd, number, &text).await,
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerunBody {
+    pub cwd: Option<String>,
+    pub number: Option<i64>,
+    /// GitHub's "re-run failed jobs". Everything otherwise.
+    #[serde(default)]
+    pub failed_only: bool,
+}
+
+async fn rerun(State(_): State<CoreHandles>, Json(body): Json<RerunBody>) -> Response {
+    let Some(cwd) = non_empty(body.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(number) = body.number.filter(|n| *n > 0) else {
+        return bad_request("a positive PR number required");
+    };
+    match gh::rerun_checks(&cwd, number, body.failed_only).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+/// A `gh` write or read that failed, carrying the sentence `gh` gave for it. A 502 for
+/// the same reason `unreachable_pr` is one: the route exists and the request was
+/// well-formed; what failed is the hop to GitHub.
+fn gh_write_failed(e: gh::GhError) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({ "error": e.0 })),
+    )
+        .into_response()
 }
 
 // ── the review surface ───────────────────────────────────────────────────────

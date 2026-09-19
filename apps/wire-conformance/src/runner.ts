@@ -201,7 +201,97 @@ function seedGhFixtures(dir: string): string {
       author: { login: "octocat" },
     },
   ]);
-  write("pr-search.json", []);
+  // The half of a folder's PRs the page cap hides. Only #7 comes back, so a scenario
+  // can tell a search that reached past the cap from a second copy of the list.
+  write("pr-search.json", [
+    {
+      number: 7,
+      title: "Bump the flake",
+      url: url(7),
+      headRefName: "hubber/bump",
+      isDraft: false,
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+      author: { login: "hubber" },
+      assignees: [],
+      createdAt: "2026-08-20T09:00:00Z",
+      reviewRequests: [{ login: "octocat" }],
+      additions: 2,
+      deletions: 2,
+      changedFiles: 1,
+    },
+  ]);
+  // A PR's net diff, as `gh pr diff` prints it: one combined patch, not the mailbox
+  // series `--patch` emits. A rename is one entry with `-M`, which is why the parser
+  // has to read `rename from`/`rename to` rather than a delete and an add.
+  write(
+    "pr-diff.patch",
+    [
+      "diff --git a/Sources/App/Login.swift b/Sources/App/Login.swift",
+      "index 1111111..2222222 100644",
+      "--- a/Sources/App/Login.swift",
+      "+++ b/Sources/App/Login.swift",
+      "@@ -38,6 +38,7 @@ func load() {",
+      "   let session = store.current",
+      "+  guard session.isValid else { return }",
+      "   return session",
+      "diff --git a/README.md b/docs/README.md",
+      "similarity index 96%",
+      "rename from README.md",
+      "rename to docs/README.md",
+      "",
+    ].join("\n"),
+  );
+  // What gh prints when it opens a PR: the url on stdout and nothing else.
+  write("pr-create.txt", `${url(99)}\n`);
+  write("pr-comment.txt", `${url(42)}#issuecomment-999\n`);
+  write("run-rerun.txt", "\u2713 Requested rerun of run 901\n");
+  // The viewer's cross-repo queue: one authored PR with red CI and one somebody else
+  // wrote that asked for the viewer's review, so the two buckets and the two attention
+  // reasons are both exercised by one fetch.
+  const viewerNode = (
+    n: number,
+    repo: string,
+    author: string,
+    rollup: Array<Record<string, string>>,
+  ) => ({
+    number: n,
+    title: `PR ${n}`,
+    url: `https://github.com/${repo}/pull/${n}`,
+    isDraft: false,
+    createdAt: "2026-09-01T09:00:00Z",
+    headRefName: `${author}/work`,
+    additions: 10,
+    deletions: 1,
+    changedFiles: 2,
+    repository: { nameWithOwner: repo },
+    author: { login: author },
+    assignees: { nodes: [] },
+    reviewDecision: null,
+    reviewRequests: { nodes: [{ requestedReviewer: { login: "octocat" } }] },
+    reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }] },
+    rollup: {
+      nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: rollup } } } }],
+    },
+  });
+  write("viewer-prs.json", {
+    data: {
+      mine: {
+        nodes: [
+          viewerNode(42, "conformance/repo", "octocat", [
+            { status: "COMPLETED", conclusion: "SUCCESS" },
+            { status: "COMPLETED", conclusion: "FAILURE" },
+          ]),
+        ],
+      },
+      reviews: {
+        nodes: [
+          viewerNode(31, "conformance/other", "hubber", [
+            { status: "COMPLETED", conclusion: "SUCCESS" },
+          ]),
+        ],
+      },
+    },
+  });
   write("thread-counts.json", {
     data: {
       repository: {
@@ -815,6 +905,10 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     await requestOverHttp("GET", step.get, step, s);
     return;
   }
+  if ("post" in step) {
+    await requestOverHttp("POST", step.post, step, s);
+    return;
+  }
   if ("delete" in step) {
     await requestOverHttp("DELETE", step.delete, step, s);
     return;
@@ -844,7 +938,8 @@ export function httpBaseOf(ctx: RunContext): string {
     .replace(/\/$/, "");
 }
 
-/** One `get` or `delete` step: call the path, assert the status, assert the body.
+/** One `get`, `post` or `delete` step: make the request, assert the status, assert
+ *  the body.
  *
  *  The body is matched with the same `matchValue` a frame gets, so a scenario asserts
  *  a read the way it asserts everything else. `expectBody` decodes JSON first and
@@ -853,18 +948,36 @@ export function httpBaseOf(ctx: RunContext): string {
  *
  *  A `DELETE` that worked answers 204 with no body at all, so the default expected
  *  status follows the verb and an empty body is only a failure when the step asked
- *  to match one. */
+ *  to match one. A `POST` carries a JSON body, because opening a PR or posting a
+ *  comment is a request with a body and a side effect; a core that answered those on
+ *  GET would be one a browser could fire by prefetching a link.
+ *
+ *  One function for all three verbs because everything after `fetch` is identical, and
+ *  three copies would eventually assert three different things about the same reply. */
 async function requestOverHttp(
-  method: "GET" | "DELETE",
+  method: "GET" | "POST" | "DELETE",
   spec: string,
-  step: { status?: number; expectBody?: unknown; expectText?: unknown; bind?: Record<string, string> },
+  step: {
+    body?: unknown;
+    status?: number;
+    expectBody?: unknown;
+    expectText?: unknown;
+    bind?: Record<string, string>;
+  },
   s: StepContext,
 ): Promise<void> {
   const path = interpolate(spec, s.vars);
   const url = `${httpBaseOf(s.ctx)}${path.startsWith("/") ? "" : "/"}${path}`;
   let res: Response;
   try {
-    res = await fetch(url, { method });
+    res =
+      method === "POST"
+        ? await fetch(url, {
+            method,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(resolveVars(step.body ?? {}, s.vars)),
+          })
+        : await fetch(url, { method });
   } catch (e) {
     throw new WireProtocolError(
       `${method} ${url} did not answer: ${e instanceof Error ? e.message : e}`,

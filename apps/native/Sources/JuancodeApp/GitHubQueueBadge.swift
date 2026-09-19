@@ -182,9 +182,7 @@ struct GitHubQueueBadge: View {
         /// The queue under the active chip, most urgent first (see `viewerPrRows`).
         private var rows: [ViewerPr] { viewerPrRows(queue, slice: slice) }
 
-        private func reason(_ row: ViewerPr) -> PrAttentionReason? {
-            viewerPrAttention(row, viewer: queue.viewer)
-        }
+        private func reason(_ row: ViewerPr) -> PrAttentionReason? { row.attention }
 
         private func label(_ s: ViewerPrSlice) -> String {
             switch s {
@@ -261,7 +259,7 @@ struct GitHubQueueBadge: View {
                     }
                     HStack(spacing: 6) {
                         if let reason {
-                            Text(reason.rawValue)
+                            Text(reason.label)
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(.orange)
                                 .padding(.horizontal, 4).padding(.vertical, 1)
