@@ -22,6 +22,10 @@ struct RunningSessionsBadge: View {
     /// The pause confirmation. It lives here rather than on the popover row so the
     /// dialog survives the popover closing underneath it.
     @State private var confirmingPause = false
+    /// Whether the app itself is behind the checkout it was built from (juancode-b06m).
+    /// Kept here rather than on `AppModel` because nothing else needs it and the
+    /// answer costs four `git` execs: this view is the only thing that asks.
+    @State private var buildWarning: AppBuildWarning?
 
     /// Live agents, and how many are mid-turn. Both come off the model's
     /// projection: a toolbar body that filtered sessions itself would re-render on
@@ -52,16 +56,21 @@ struct RunningSessionsBadge: View {
     private var coreDown: Bool { model.coreConnectionDown != nil }
     private var coreStale: Bool { model.coreSelection.daemonIsStale }
 
+    /// The app's own build, held to the same standard as the daemon's. The daemon has
+    /// said "I am older than your checkout" since it became a separate process; the
+    /// app could not, so a landed toolbar fix read as a bug for a day.
+    private var appStale: Bool { buildWarning != nil }
+
     private var tint: Color {
         if coreDown { return .red }
-        if coreStale { return .yellow }
+        if coreStale || appStale { return .yellow }
         return paused || busy > 0 ? .orange : .primary
     }
 
     /// Core health outranks the pause: a daemon that has gone stale or unreachable
     /// has to stay visible even while everything is asleep, so it keeps the glyph.
     private var glyph: String {
-        if coreDown || coreStale { return "exclamationmark.triangle.fill" }
+        if coreDown || coreStale || appStale { return "exclamationmark.triangle.fill" }
         if paused { return "pause.circle.fill" }
         return busy > 0 ? "bolt.horizontal.circle.fill" : "bolt.horizontal.circle"
     }
@@ -73,7 +82,13 @@ struct RunningSessionsBadge: View {
     }
 
     var body: some View {
-        Button { showing = true } label: {
+        Button {
+            showing = true
+            // Opening the badge is the one user-initiated moment worth re-measuring
+            // at: the checkout moves while the app is open (that is the whole
+            // scenario), and the actor's own floor keeps this to once every 5 min.
+            Task { buildWarning = await AppBuildDrift.shared.warning() }
+        } label: {
             HStack(spacing: 3) {
                 Image(systemName: glyph)
                 Text("\(badgeCount)")
@@ -84,6 +99,7 @@ struct RunningSessionsBadge: View {
         .foregroundStyle(tint)
         .help(helpText)
         .clickCursor()
+        .task { buildWarning = await AppBuildDrift.shared.warning() }
         .confirmationDialog("Pause \(running) running session(s)?",
                             isPresented: $confirmingPause, titleVisibility: .visible) {
             Button("Pause All") { model.pauseAllSessions() }
@@ -251,7 +267,15 @@ struct RunningSessionsBadge: View {
                 DaemonPersistenceRow(note: persistence)
             }
             ForEach(model.coreSelection.daemonWarnings) { warning in
-                DaemonWarningRow(warning: warning)
+                BuildWarningRow(warning)
+            }
+            // The app's own staleness sits with the core's because they are the same
+            // question asked of two processes, and because a reader who has learned
+            // that yellow-triangle-here means "the build on screen is not the build
+            // you compiled" should not have to learn a second place for the half of
+            // it that is the app.
+            if let buildWarning {
+                BuildWarningRow(buildWarning)
             }
             Text("Settings → Core has the database path, wire version and capabilities.")
                 .font(.caption2).foregroundStyle(.tertiary)
@@ -290,6 +314,7 @@ struct RunningSessionsBadge: View {
                      : "\(running) running session(s), \(busy) working"]
         if let down = model.coreConnectionDown { parts.append("core connection down: \(down)") }
         else if coreStale { parts.append("the daemon is stale") }
+        if let buildWarning { parts.append(buildWarning.headline) }
         return parts.joined(separator: " · ")
     }
 }

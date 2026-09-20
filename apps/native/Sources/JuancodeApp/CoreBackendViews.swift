@@ -85,7 +85,7 @@ struct CoreSettingsView: View {
                         DaemonPersistenceRow(note: persistence)
                     }
                     ForEach(model.coreSelection.daemonWarnings) { warning in
-                        DaemonWarningRow(warning: warning)
+                        BuildWarningRow(warning)
                     }
                     if let reason = model.coreSelection.unreachableReason {
                         detail("Fell back because", reason)
@@ -178,7 +178,7 @@ struct CoreBadgeLabel: View {
 }
 
 /// That this core's sessions outlive the app, and what they are running on. Shared by
-/// the badge popover and the Settings pane, and deliberately NOT a `DaemonWarningRow`:
+/// the badge popover and the Settings pane, and deliberately NOT a `BuildWarningRow`:
 /// a stated mode doing what it was asked is not a fault, and rendering it in the yellow
 /// that means "you are on an old core" would cost that colour its meaning. The two sit
 /// beside each other when both apply, which is the case worth seeing.
@@ -198,21 +198,38 @@ struct DaemonPersistenceRow: View {
     }
 }
 
-/// One thing wrong with the connected daemon, spelled out. Shared by the badge
-/// popover and the Settings pane so the two can never disagree about it.
-struct DaemonWarningRow: View {
-    let warning: DaemonWarning
+/// One thing wrong with the build on screen — the daemon's or the app's own — spelled
+/// out. Shared by the badge popover and the Settings pane so they can never disagree
+/// about it.
+struct BuildWarningRow: View {
+    let headline: String
+    let detail: String
+
+    /// The daemon is running a build the checkout has moved past.
+    init(_ warning: DaemonWarning) {
+        self.headline = warning.headline
+        self.detail = warning.detail
+    }
+
+    /// The APP is (juancode-b06m). Same row on purpose: to the reader these are one
+    /// fact — what is on screen is not what the checkout would build — and splitting
+    /// them across two designs would make the newer one look like a different class
+    /// of problem than the one it is.
+    init(_ warning: AppBuildWarning) {
+        self.headline = warning.headline
+        self.detail = warning.detail
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10)).foregroundStyle(.yellow)
-                Text(warning.headline)
+                Text(headline)
                     .font(.system(size: 11, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text(warning.detail)
+            Text(detail)
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)

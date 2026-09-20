@@ -25,6 +25,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -f "$BIN" "$APP/Contents/MacOS/juancode"
 [ -f "$NATIVE/AppIcon.icns" ] && cp -f "$NATIVE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# The source identity of this bundle, so the app can notice later that the checkout
+# has moved past it (juancode-b06m). Tolerated failing: an unstamped bundle just makes
+# the runtime check stand down, and a launch must not die over an indicator.
+STAMP="$("$NATIVE/scripts/source-stamp.sh" 2>/dev/null || true)"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -41,6 +45,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+${STAMP}
 </dict>
 </plist>
 PLIST
