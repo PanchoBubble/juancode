@@ -137,4 +137,6 @@ The ticket was dispatched twice, to `1e6aa209` and `ee66b7b3`. `ee66b7b3` took a
 
 The takeover was put to the user rather than taken unilaterally, and approved. The lock owner file now records the takeover, and the dead owner's record is preserved beside it as `owner.stale-ee66b7b3`.
 
+RESOLVED 2026-09-20 (`juancode-cufa`). That lock was still on disk a day later, held by a session gone since 19:22Z, because nothing released it and `mkdir` alone cannot tell a dead holder from a live one. It is now `scripts/lib/run-lock.mjs`: the claim carries a pid, a reader that finds that pid gone takes the lock over and says so in the sweep log, and `--apply` takes it before it scans. The directory this pass left was removed, and its exact bytes are a test case - a claim with no pid at all reads as stale, because "we cannot check" must never mean "held forever".
+
 Unrelated but noticed: `juancode-29ci` was also double-dispatched, to `027e0ce5` and `6b4c890e`, both titled "daily worktree sweeper" and both writing into `scripts/`.

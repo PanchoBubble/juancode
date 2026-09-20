@@ -266,6 +266,9 @@ describe("the sweeper end to end, against the fixture", () => {
   let report;
   let logText;
   const sweepLogDir = join(root, "sweeplog");
+  // Its own lock directory, never ~/.juancode's: an --apply here must not be
+  // refused because a real sweep happens to be running, nor refuse a real one.
+  const sweepLockDir = join(root, "sweep.lock");
 
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -284,7 +287,12 @@ describe("the sweeper end to end, against the fixture", () => {
         cwd: root,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, JUANCODE_LOG_DIR: sweepLogDir, JUANCODE_APP_URL: url },
+        env: {
+          ...process.env,
+          JUANCODE_LOG_DIR: sweepLogDir,
+          JUANCODE_APP_URL: url,
+          JUANCODE_SWEEP_LOCK: sweepLockDir,
+        },
       },
     );
     return JSON.parse(out.slice(out.indexOf("{")));
@@ -453,6 +461,7 @@ describe("the sweeper end to end, against the fixture", () => {
           ...process.env,
           JUANCODE_LOG_DIR: sweepLogDir,
           JUANCODE_APP_URL: daemonUrl,
+          JUANCODE_SWEEP_LOCK: sweepLockDir,
           PATH: `${fakeBin}:${process.env.PATH}`,
         },
       },

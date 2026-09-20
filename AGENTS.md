@@ -115,8 +115,10 @@ a full disk (56 worktrees, 214G) and builds failing for reasons unrelated to the
   `--apply` removes. It keeps anything dirty, with unpushed commits, with an open PR, with
   a running session (asked of the daemon AND of the process table), younger than two days,
   or that it could not read; and it refuses to remove anything at all when the daemon is
-  not answering, because then it cannot know what is live. Every run appends to
-  `~/.juancode/logs/worktree-sweep.log`.
+  not answering, because then it cannot know what is live. `--apply` also takes
+  `~/.juancode/worktree-reclaim.lock` first so two sweeps cannot race; a lock whose owner
+  pid is gone is taken over automatically, so a killed run cannot block the next one.
+  Every run appends to `~/.juancode/logs/worktree-sweep.log`.
 - `apps/native/scripts/worktree-sweeper-agent.sh` installs the daily LaunchAgent
   (`com.juanone.juancode-sweeper`). It installs DISARMED — the daily run is a dry run
   until `... arm`. Read a dry run first.

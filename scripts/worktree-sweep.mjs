@@ -19,6 +19,11 @@
 //   * LIVENESS IS RE-CHECKED IMMEDIATELY BEFORE EACH REMOVAL. The set of live
 //     sessions changes while this script is walking the list; a check done once
 //     at the start is a check that was true a minute ago.
+//   * ONE APPLYING SWEEP AT A TIME. Two of these racing would each re-check
+//     liveness against a tree the other is halfway through removing. --apply
+//     takes ~/.juancode/worktree-reclaim.lock first (lib/run-lock.mjs), and a
+//     lock whose owner pid is gone is taken over rather than believed — a dead
+//     holder must never be able to stop this running again.
 //
 // Every run appends to ~/.juancode/logs/worktree-sweep.log: what it removed,
 // what it skipped, and why. When this eventually deletes something it should
@@ -38,6 +43,8 @@
 // Env:
 //   JUANCODE_APP_URL   where to ask for the running sessions (default :4280)
 //   JUANCODE_LOG_DIR   where the run log goes (default ~/.juancode/logs)
+//   JUANCODE_SWEEP_LOCK  the --apply lock directory (default
+//                        ~/.juancode/worktree-reclaim.lock)
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -57,6 +64,7 @@ import {
   formatAge,
   isUnder,
 } from "./lib/worktree-sweep-core.mjs";
+import { acquire, DEFAULT_LOCK_DIR } from "./lib/run-lock.mjs";
 
 // ---- arguments ------------------------------------------------------------
 const argv = process.argv.slice(2);
@@ -93,6 +101,7 @@ const maxAgeMs = maxAgeDays * DAY_MS;
 const appUrl = (process.env.JUANCODE_APP_URL || "http://127.0.0.1:4280").replace(/\/+$/, "");
 const logDir = process.env.JUANCODE_LOG_DIR || join(homedir(), ".juancode", "logs");
 const logFile = join(logDir, "worktree-sweep.log");
+const lockDir = process.env.JUANCODE_SWEEP_LOCK || DEFAULT_LOCK_DIR;
 
 if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
   console.error(`--days must be a positive number, got ${value("--days", "")}`);
@@ -299,6 +308,30 @@ const nowMs = Date.now();
 const startedAt = new Date(nowMs).toISOString();
 const protectedPaths = daemonPaths();
 
+// Taken before the scan, which costs minutes: a run that may not remove
+// anything should find that out first. A dry run takes nothing — it changes no
+// state, so two of them racing is not a race.
+let lock = null;
+let lockRefusal = null;
+if (apply) {
+  const got = acquire(lockDir, { tool: "worktree-sweep" });
+  if (got.ok) {
+    lock = got;
+    // Released on every exit path, including a throw and a signal, because the
+    // one thing a lock must not do is outlive the run it belongs to — which is
+    // precisely how the leftover this replaces came about.
+    process.on("exit", () => lock?.release());
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+      process.on(sig, () => {
+        lock?.release();
+        process.exit(1);
+      });
+    }
+  } else {
+    lockRefusal = got.why;
+  }
+}
+
 if (!flag("--no-fetch")) fetchRemotes(repoRoot);
 const { prs, ok: ghOk } = loadPrsByBranch();
 
@@ -308,7 +341,7 @@ const daemonDown = live.daemonPaths === null;
 // A missing daemon is not "no sessions are running", it is "we cannot see what
 // is running". The only safe reading of that is to remove nothing. Same for a
 // process table that came back empty.
-const armed = apply && !daemonDown && !skipDaemon && live.fsSampled;
+const armed = apply && !daemonDown && !skipDaemon && live.fsSampled && !lockRefusal;
 
 const rows = [];
 for (const t of parseWorktrees(repoRoot)) {
@@ -403,13 +436,15 @@ const kept = rows.filter((r) => r.verdict !== "remove");
 const wouldRemove = rows.filter((r) => r.verdict === "remove");
 const mode = armed
   ? "APPLY"
-  : apply && skipDaemon
-    ? "REFUSED (--no-daemon cannot arm a removal)"
-    : apply && daemonDown
-      ? "REFUSED (daemon unreachable)"
-      : apply && !live.fsSampled
-        ? "REFUSED (lsof/ps reported nothing)"
-        : "DRY-RUN";
+  : apply && lockRefusal
+    ? `REFUSED (another sweep holds ${lockDir}: ${lockRefusal})`
+    : apply && skipDaemon
+      ? "REFUSED (--no-daemon cannot arm a removal)"
+      : apply && daemonDown
+        ? "REFUSED (daemon unreachable)"
+        : apply && !live.fsSampled
+          ? "REFUSED (lsof/ps reported nothing)"
+          : "DRY-RUN";
 
 function logLines() {
   const out = [];
@@ -419,6 +454,13 @@ function logLines() {
       `${daemonDown ? " daemon=UNREACHABLE" : ""}${live.fsSampled ? "" : " lsof/ps=BLIND"}` +
       `${ghOk ? "" : " gh=UNAVAILABLE"}`,
   );
+  // The takeover is logged rather than performed quietly: it is the one moment
+  // this script overrules a lock somebody else took, and the log is the only
+  // account of it afterwards.
+  if (lock?.tookOver) out.push(`lock  took over a stale claim on ${lockDir}: ${lock.tookOver}`);
+  if (lock?.leftovers?.length)
+    out.push(`lock  removed leftovers from the old scheme: ${lock.leftovers.join(", ")}`);
+  if (lockRefusal) out.push(`lock  refused: ${lockDir} — ${lockRefusal}`);
   for (const r of rows) {
     const what = r.removed ? "REMOVED " : r.verdict === "remove" ? "WOULD-RM" : "kept    ";
     out.push(
@@ -448,6 +490,14 @@ if (asJson) {
         daemonChecked: !skipDaemon,
         processesSampled: live.fsSampled,
         ghAvailable: ghOk,
+        lock: apply
+          ? {
+              dir: lockDir,
+              held: Boolean(lock),
+              tookOver: lock?.tookOver ?? null,
+              why: lockRefusal,
+            }
+          : null,
         logFile,
         removed: removed.map((r) => r.path),
         rows: rows.map((r) => ({
@@ -475,6 +525,14 @@ if (asJson) {
   console.log(
     `${c.bold}worktree sweep${c.rst} ${c.dim}${mode} · ${repoRoot} · older than ${maxAgeDays}d${c.rst}`,
   );
+  if (lockRefusal) {
+    console.log(
+      `${c.red}another sweep holds ${lockDir} (${lockRefusal}) — nothing will be removed${c.rst}`,
+    );
+  }
+  if (lock?.tookOver) {
+    console.log(`${c.dim}took over a stale lock on ${lockDir}: ${lock.tookOver}${c.rst}`);
+  }
   if (daemonDown) {
     console.log(
       `${c.red}the daemon at ${appUrl} did not answer — liveness is unknown, so nothing will be removed${c.rst}`,
