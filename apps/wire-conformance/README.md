@@ -213,6 +213,23 @@ about anybody else's session is skipped rather than failed — and cleanup waits
 for the `exit` of every session it kills instead of sleeping a flat 400ms
 (juancode-a3ck).
 
+### Measure parity on a quiet machine
+
+`REPEAT` raises the odds of catching a flake; it does not make a loaded machine
+behave. Measured 2026-09-20, whole suite, Rust core, `REPEAT=5`, own ephemeral port,
+on a machine running at load average 4.1-4.8 on 14 cores (other agent sessions):
+**45 passed, 4 failed**. Two of the four were assertion defects and are fixed
+(`queue` step 15, `queue-edit`'s unheld busy premise). The other two were not, and
+no rewrite of an assertion reaches them: `activity-notify` step 7 ran out of an
+8000ms budget waiting for the settle after a `CLEAR`, and `session-delete` step 9
+got an `error` frame back from an `isolateWorktree` create instead of a `created`
+(juancode-sag9).
+
+So a parity number that is going to justify something — juancode-nqpm deletes the
+Swift core off one — has to be taken on a machine that is not carrying other agent
+sessions, and the run that produced it has to be named. A score taken under load is
+a lower bound on the core and an upper bound on nothing.
+
 ## When the core dies mid-run
 
 A core process that goes away between two scenarios used to be invisible. The
@@ -455,6 +472,31 @@ Matchers are partial on objects and exact on arrays, with explicit operators for
 anything looser: `$absent`, `$present`, `$type`, `$oneOf`, `$regex`, `$contains`,
 `$notContains`, `$gte`/`$gt`/`$lte`/`$lt`, `$length`, `$exact`, `$not`, `$every`,
 `$some`, `$any`, `$var`. A mistyped operator is an error, not a silent pass.
+
+### `expectNone` may only assert silence where the protocol is silent
+
+`expectNone` is the one step that can be written so it asserts something no core
+ever promised. "No frame of type T for N milliseconds" is a claim when the core is
+contractually quiet about T — after an `unsubscribeQueue`, or for a `sessionDeleted`
+nobody asked for. It is not a claim on a channel something else is allowed to speak
+on: the queue's delivery pump ticks four times a second and owns the
+`pending` -> `inFlight` edge, so a bare `{"expectNone": {"type": "queue"}}` is decided
+by how loaded the machine is rather than by the core. That flaked queue-edit 1 in 5
+(fixed in ce3c770, 2026-09-04) and then failed queue 6 of 6 on a loaded
+machine while the committed parity file still said 3/3 (juancode-45cp).
+
+Scope the matcher to the content that would prove the bug instead — for "a
+whitespace-only message is not queued at all", `items: {"$some": {"text": {"$regex":
+"^\\s*$"}}}` — and an unrelated state transition cannot trip it. Widening `withinMs`
+only moves a flake; forbidding the revision from advancing does not work either,
+because an `inFlight` transition advances it.
+
+The other half of the same lesson is the premise. A scenario that needs a session to
+be busy before it asserts anything has to **wait for the busy edge**, not sleep a flat
+500ms and hope: until the core has seen the turn start, `deliverable` reads the session
+as idle and the pump is free to claim the head of the queue. `{"expect": {"type":
+"activity", "sessionId": "$session", "state": "busy"}}` is the premise stated on the
+wire, and it costs nothing on a quiet machine.
 
 `descendant` is the one step that does not touch the socket:
 `{"descendant": "alive" | "reaped", "pidFile": "$orphanPid", "withinMs": 5000}`

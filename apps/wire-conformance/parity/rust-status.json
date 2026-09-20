@@ -2,7 +2,7 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-09-19",
+  "measuredAt": "2026-09-20",
   "specRevision": "1.20.0",
   "protocolVersion": 1,
   "capabilities": [

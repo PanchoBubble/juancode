@@ -48,7 +48,13 @@
       "note": "hold the session busy so nothing is delivered out from under the snapshots"
     },
     {
-      "sleep": 500
+      "expect": {
+        "type": "activity",
+        "sessionId": "$session",
+        "state": "busy"
+      },
+      "timeoutMs": 20000,
+      "note": "the premise, waited for rather than slept through: until the core has SEEN the turn start, the delivery pump reads the session as idle and is free to claim the head of the queue"
     },
     {
       "send": {
@@ -135,10 +141,18 @@
     },
     {
       "expectNone": {
-        "type": "queue"
+        "type": "queue",
+        "sessionId": "$session",
+        "items": {
+          "$some": {
+            "text": {
+              "$regex": "^\\s*$"
+            }
+          }
+        }
       },
       "withinMs": 600,
-      "note": "a whitespace-only message is not queued at all"
+      "note": "a whitespace-only message is not queued at all, so no snapshot may ever carry an item whose text is blank - trimmed to empty counts. Asserted about content and not about silence, exactly as the refused edit in queue-edit is: the delivery pump owns the pending -> inFlight edge and may broadcast a snapshot inside this window, and a step that forbade any queue frame here would be asserting a property the protocol does not have"
     },
     {
       "send": {

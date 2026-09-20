@@ -6,7 +6,7 @@ edit `parity/<core>-status.json` (or re-measure, see the package README) and reg
 - Spec revision: 1.20.0 (protocol v1)
 - Status source: a real conformance run
 - Attempts behind each verdict: 3 per scenario
-- As of: 2026-09-19
+- As of: 2026-09-20
 - Capabilities the core advertises: inputAck, resizeAck, screen, adoptExternal, sessionMeta, gridOwner, queue, isolateWorktree, queueEdit, transcript, reaper, sessionSleep, sessionEdit, globalPause, restartFresh, editor, terminal, trackedPrs, spawnModel, spawnPreset, stuck, sessionList, sessionDelete, sessionSearch, namedKeys, trackPrInSession, prWebhook, heavyQueue, changes, github
 - Unmet scenarios: 0 of 46
 
