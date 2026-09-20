@@ -13,9 +13,13 @@ import Foundation
 /// *inside* the worktree writes through to the source checkout's `node_modules` —
 /// delete the link first if a worktree genuinely needs different dependencies.
 
-/// Disposition (juancode-a2s7): `Git.swift` is its only caller (4 call sites) and
+/// Disposition (re-measured at this tree, juancode-880y): `Git.swift` is still its
+/// only caller (4 call sites — 351, 427, 432, 439) and
 /// `juancoded-core::worktree::link_node_modules` is its Rust twin. It has no
-/// independent fate — it goes in the same change `Git.swift` does (juancode-yydd).
+/// independent fate: it goes in the same change `Git.swift` does. That change is
+/// juancode-lgaw, inside the juancode-nqpm commit. juancode-yydd, which this line used
+/// to name, landed in 54cb2da and deleted neither file — it added the daemon route
+/// that freed the rust-path callers.
 
 /// The maximum depth below the repo root we look for `node_modules` at. Covers the
 /// root plus monorepo package dirs (`apps/*`, `packages/*/*`) without walking a whole

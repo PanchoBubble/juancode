@@ -11,10 +11,22 @@ import Foundation
 /// outcomes (`JuancodeServer/WebSocketConnection.swift`), and `JuancodeServer`
 /// must not depend on `JuancodeDesktop`.
 ///
-/// Its Rust counterpart already exists: `claim_dispatch` in juancoded-persistence
-/// plus the `dispatch_id` claim in juancoded-state's `create`. So this file shares
-/// `ReviveSession.swift`'s fate — it goes when the in-process server does
-/// (juancode-nqpm / juancode-3s4p), and nothing new should be added to it.
+/// Disposition (re-measured at this tree, juancode-880y): it MOVES, it does not die.
+/// The earlier line here — that it shares `ReviveSession.swift`'s fate and goes when
+/// the in-process server does — was wrong. Only 2 of its 39 references are that server
+/// (`JuancodeServer/WebSocketConnection.swift:359` and `:365`). The other 37 read the
+/// Oracle control dir on either core: `JuancodeDesktop/Oracle.swift` 14,
+/// `OracleDispatchRegistry.swift` 1, and in `JuancodeApp` OracleModel 11, AppModel 6,
+/// RootView 3, JumpPalette 1 — plus `ResumeGrid.swift:48` in this target, which is
+/// moving to the same place. `claim_dispatch` in juancoded-persistence is not the
+/// counterpart it looks like: it dedups the daemon's own dispatch ids, not these
+/// mailbox lines.
+///
+/// Its home is `JuancodeDesktop`, rejoining the half of `Oracle.swift` that
+/// juancode-a2s7 already put there, and the move is juancode-kf8n. It cannot go before
+/// juancode-nqpm deletes `WebSocketConnection.swift`, because `JuancodeServer` may not
+/// depend on `JuancodeDesktop` — which is why juancode-idza left it here in 6e849c5
+/// while moving `ProcessRunner.swift` and `TrackedPr.swift` out.
 
 public enum OraclePaths {
     /// `~/.juancode/oracle`, overridable via `JUANCODE_ORACLE_DIR` (used by tests).

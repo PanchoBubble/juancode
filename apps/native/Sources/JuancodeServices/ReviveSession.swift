@@ -1,6 +1,19 @@
 import Foundation
 import JuancodeCore
 
+/// Bringing an exited session back on the in-process Swift core: `reviveSession` and
+/// the result types the WS handlers report it with.
+///
+/// Disposition (measured at this tree, juancode-880y): juancode-3s4p, inside the
+/// juancode-nqpm commit. Every reader is `JuancodeServer` — six calls to
+/// `reviveSession` (RegistryGlobalPause.swift:66, PrTrackingEngine.swift:230 and :450,
+/// WebSocketConnection.swift:465, :670 and :744) plus `ReviveFailure.unresumable` at
+/// WebSocketConnection.swift:476 — so it goes with them, together with
+/// Tests/JuancodeServicesTests/ReviveSessionTests.swift. The one mention outside that
+/// target, `JuancodeCore/RecoverSession.swift:296`, is a doc comment, not a caller.
+/// `ResumeGrid.swift` is pinned in this target by the `resumeGrid(for:)` call at
+/// line 119 below, and this deletion is what frees it to move under juancode-kf8n.
+
 /// Divider appended after persisted scrollback when a session is revived, so the
 /// carried-forward history is visually separated from the resumed CLI's repaint.
 public let sessionResumedDivider = "\r\n\u{1B}[2m── session resumed ──\u{1B}[0m\r\n"

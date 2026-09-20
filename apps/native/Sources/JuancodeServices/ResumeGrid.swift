@@ -6,10 +6,12 @@ import JuancodeCore
 /// Written by the dock's live surface (`OracleModel.rememberDockGrid`); read here so
 /// the server-side revive paths — which run nowhere near the view layer — share it.
 ///
-/// Disposition (juancode-a2s7): desktop-local by nature, but it cannot move to
-/// `JuancodeDesktop` yet — `ReviveSession.swift:106` calls `resumeGrid(for:)`, and
-/// `ReviveSession` belongs to juancode-3s4p, which deletes it inside the
-/// juancode-nqpm commit. It moves with that deletion, not before.
+/// Disposition (re-measured at this tree, juancode-880y): desktop-local by nature —
+/// its surviving readers are `JuancodeApp/OracleModel.swift:564` and `:573` and
+/// `AppModel.swift:3187` — but it cannot move to `JuancodeDesktop` yet, because
+/// `ReviveSession.swift:119` calls `resumeGrid(for:)` and `ReviveSession` belongs to
+/// juancode-3s4p, which deletes it inside the juancode-nqpm commit. It moves with that
+/// deletion and not before, and the move itself is juancode-kf8n.
 public enum OracleDockGrid {
     private static let colsKey = "oracle.grid.cols"
     private static let rowsKey = "oracle.grid.rows"

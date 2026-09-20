@@ -1,6 +1,12 @@
 import Foundation
 import JuancodeCore
 
+/// Disposition (measured at this tree, juancode-880y): juancode-3s4p, inside the
+/// juancode-nqpm commit. `SessionEnvironment.live` has exactly one caller in the
+/// repo — `JuancodeServer/AppState.swift:63` — and no test file of its own. Every
+/// seam it injects already lives in `JuancodeCore`, so there is nothing here to
+/// relocate: it is a wiring shim for the in-process Swift core and it dies with it.
+
 public extension SessionEnvironment {
     /// A production-wired session environment for the Swift core: the real
     /// login-shell binary resolver, the given persistent store, real post-spawn
