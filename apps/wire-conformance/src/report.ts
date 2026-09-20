@@ -184,16 +184,23 @@ const DEATH_LOG_CHARS = 8000;
 function deathSection(death: CoreDeathRecord): string[] {
   const tail = death.log.length > DEATH_LOG_CHARS ? death.log.slice(-DEATH_LOG_CHARS) : death.log;
   const lines = [
-    "## The core died mid-run",
+    death.stillRunning === true
+      ? "## The core stopped serving mid-run, and did NOT die"
+      : "## The core died mid-run",
     "",
-    "The core process went away while the suite was running, so the scenarios after",
-    "it are **unmeasured**, not failed: nothing about the core's conformance was",
-    "observed for them.",
+    death.stillRunning === true
+      ? "The core stopped answering while the suite was running, but its process was\n" +
+        "still in the process table when the harness looked. So the scenarios after it\n" +
+        "are **unmeasured**, and whatever this is, it is not the process ending."
+      : "The core process went away while the suite was running, so the scenarios after\n" +
+        "it are **unmeasured**, not failed: nothing about the core's conformance was\n" +
+        "observed for them.",
     "",
     `- Died after: ${death.afterScenarioId ?? "boot (no scenario had finished)"}`,
     `- Noticed by: ${death.discoveredBy}`,
     `- How: ${death.reason}`,
     `- Exit status: ${death.code ?? "none"}, signal: ${death.signal ?? "none"}`,
+    `- ${describeProcess(death)}`,
     `- ${describeUptime(death)}`,
     "",
     "### Core output",
@@ -217,7 +224,43 @@ function deathSection(death: CoreDeathRecord): string[] {
       "",
     );
   }
+  if (death.sample) {
+    lines.push(
+      "### Thread sample of the live process",
+      "",
+      "Taken because the process was still there. This is to a core that stopped",
+      "serving what the crash report is to one that crashed: the only evidence of what",
+      "it is doing instead of listening. Busiest thread first.",
+      "",
+      "```",
+      death.sample.trimEnd(),
+      "```",
+      "",
+    );
+  }
   return lines;
+}
+
+/** The process line: whether there was still a process when the harness gave up.
+ *
+ *  The first thing a reader needs and the last thing the report used to say. Every
+ *  other field in this section describes a process that ENDED — the exit status, the
+ *  uptime, the crash report, the core's last words — and all of them are silent, in
+ *  exactly the same way, for a core that is still running and no longer listening.
+ *  Both produce "every scenario after this one got ECONNREFUSED" and an empty log,
+ *  and they are not the same bug. */
+function describeProcess(death: CoreDeathRecord): string {
+  if (death.stillRunning === null) return "Process: unknown (this run did not boot the core)";
+  if (death.stillRunning) {
+    return (
+      "Process: STILL RUNNING when the harness looked, so this is not a death — " +
+      "something stopped serving inside a process that is still there"
+    );
+  }
+  const sawExit = death.code !== null || death.signal !== null;
+  return sawExit
+    ? "Process: gone, and node saw it exit"
+    : "Process: gone from the process table, but node never saw the exit";
 }
 
 /** The uptime line: how long the core had been running, and how firm that is.
@@ -230,6 +273,9 @@ function deathSection(death: CoreDeathRecord): string[] {
 function describeUptime(death: CoreDeathRecord): string {
   if (death.upMs === null) return "Uptime at death: unknown (this run did not boot the core)";
   const secs = (death.upMs / 1000).toFixed(1);
+  // A process that is still there has an uptime and no death to date it against, so
+  // the number means "how long it had been serving", not "when it ended".
+  if (death.stillRunning === true) return `Up for: ${secs}s when it stopped answering`;
   const sawExit = death.code !== null || death.signal !== null;
   return sawExit
     ? `Uptime at death: ${secs}s (exact: node saw the exit)`

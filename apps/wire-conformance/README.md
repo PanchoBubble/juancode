@@ -269,6 +269,35 @@ failure that lets the guard latch rather than the pass it could have averaged
 real process, a real `SIGKILL` between two scenarios, and assertions on the
 report. It does not wait for the flake.
 
+### First question: did it die at all?
+
+`ECONNREFUSED` says nothing is listening. It does not say the process is gone,
+and those are different bugs with the same symptom — the same run of unmeasured
+scenarios, the same empty log. Everything above (the exit status, the uptime, the
+crash report, the core's last words) can only describe a process that ended, so a
+core that is still in the process table and no longer serving used to be reported
+as a death whose exit status the harness had merely missed.
+
+So the record answers that first, with one `kill(pid, 0)`:
+
+```
+- How: the core is STILL RUNNING as pid 41207 and has stopped serving …
+- Process: STILL RUNNING when the harness looked, so this is not a death
+- Up for: 214.8s when it stopped answering
+```
+
+and the section is headed `## The core stopped serving mid-run, and did NOT die`,
+so nobody reads a death off a process that never died. A live core also gets a
+`sample(1)` of its threads attached, which is to this branch what the crash report
+is to a signal death: the only evidence of what it is doing instead of listening.
+
+The exit status is also worth waiting two seconds for. The two health probes take
+a quarter of a second, and a process that ended while they were in flight has its
+`exit` event queued behind them — so a record written the instant the socket
+refused could say `code: none, signal: none` about a core that exited perfectly
+normally, which is exactly what a still-running core says. `settleExit` removes
+that overlap before the liveness check has to arbitrate it.
+
 ## The parity checklist
 
 ```

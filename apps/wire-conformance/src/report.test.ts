@@ -179,6 +179,8 @@ describe("what a mid-run death reports beyond the core's own log", () => {
       log: "",
       upMs: 41_300,
       crashReport: null,
+      stillRunning: false,
+      sample: null,
       afterScenarioId: "transcript",
       discoveredBy: "queue-edit",
       ...over,

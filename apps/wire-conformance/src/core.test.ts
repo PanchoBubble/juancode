@@ -12,8 +12,12 @@ import {
   FIXTURES,
   freePort,
   isolatedParentEnv,
+  listenerPids,
+  processAlive,
   startCore,
+  stopGroup,
   type CoreUnderTest,
+  type StoppableChild,
 } from "./core.ts";
 
 describe("conformancePort", () => {
@@ -96,6 +100,117 @@ describe("isolatedParentEnv", () => {
   it("drops the suite's own variables too, since no core reads them", () => {
     const env = isolatedParentEnv({ JUANCODE_CONFORMANCE_PORT: "0", LANG: "en_GB.UTF-8" });
     expect(env).toEqual({ LANG: "en_GB.UTF-8" });
+  });
+});
+
+describe("who is actually serving the port", () => {
+  it("names this process when it is the one listening", async () => {
+    const holder = createServer();
+    const port = await new Promise<number>((resolve, reject) => {
+      holder.on("error", reject);
+      holder.listen({ host: "127.0.0.1", port: 0 }, () => {
+        const addr = holder.address();
+        if (addr === null || typeof addr === "string") reject(new Error("no port"));
+        else resolve(addr.port);
+      });
+    });
+    try {
+      expect(listenerPids(port)).toContain(process.pid);
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    }
+  });
+
+  it("answers with nothing, rather than throwing, for a port nobody holds", async () => {
+    expect(listenerPids(await freePort())).toEqual([]);
+  });
+
+  it("refuses a boot whose port ends up served by a process this run did not spawn", async () => {
+    // The measured way juancode-jyl9's symptom has actually been produced: a core
+    // loses the race for its port, exits with `Address already in use`, and the
+    // winner answers every probe — so the suite drives a daemon it did not boot and
+    // goes red the moment that daemon's owner stops it. The fixture stands in for the
+    // winner by handing the port to a detached process and leaving.
+    const previous = process.env.FAKE_CORE_HANDOFF;
+    process.env.FAKE_CORE_HANDOFF = "1";
+    let message = "";
+    try {
+      await startCore({ core: "rust", exe: join(FIXTURES, "fake-core.mjs"), port: 0 });
+      throw new Error("the boot was supposed to refuse");
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (previous === undefined) delete process.env.FAKE_CORE_HANDOFF;
+      else process.env.FAKE_CORE_HANDOFF = previous;
+    }
+    expect(message).toContain("not by the core this run spawned");
+    expect(message).toContain("Refusing to score a core this run did not boot");
+    // The squatter self-destructs, but a test that leaves a process behind for thirty
+    // seconds is still a test that left a process behind.
+    const squatter = /handed the port to pid (\d+)/.exec(message)?.[1];
+    expect(squatter).toBeDefined();
+    if (squatter) {
+      try {
+        process.kill(Number(squatter), "SIGKILL");
+      } catch {
+        // Already gone, which is the outcome we wanted.
+      }
+    }
+  }, 90_000);
+});
+
+describe("processAlive", () => {
+  it("says yes to this process and no to a pid nothing can hold", () => {
+    expect(processAlive(process.pid)).toBe(true);
+    // Above any plausible pid ceiling on either platform, so nothing owns it.
+    expect(processAlive(0x7fff_fff0)).toBe(false);
+  });
+});
+
+describe("stopGroup", () => {
+  /** A child that can be told to have exited, and records its `exit` listeners. */
+  function fakeChild(pid: number): StoppableChild & { exit(): void } {
+    const listeners: Array<() => void> = [];
+    const child = {
+      pid,
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      once(_event: "exit", listener: () => void) {
+        listeners.push(listener);
+        return child;
+      },
+      exit() {
+        child.exitCode = 0;
+        for (const l of listeners) l();
+      },
+    };
+    return child;
+  }
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  it("escalates to the group SIGKILL when the core ignored SIGTERM", async () => {
+    const sent: Array<[number, string]> = [];
+    const child = fakeChild(4242);
+    stopGroup(child, (p, s) => void sent.push([p, s]), 20);
+    await sleep(60);
+    expect(sent).toEqual([
+      [-4242, "SIGTERM"],
+      [-4242, "SIGKILL"],
+    ]);
+  });
+
+  it("does not SIGKILL a group whose process already left", async () => {
+    // The hazard the guard is for: `-pid` names a whole process group, and a pid the
+    // kernel has reclaimed can already belong to something else by the time a timer
+    // set a second and a half ago fires. A stale escalation is the harness killing a
+    // stranger's tree, which is the same class of bug as the one this suite reports.
+    const sent: Array<[number, string]> = [];
+    const child = fakeChild(4242);
+    stopGroup(child, (p, s) => void sent.push([p, s]), 20);
+    child.exit();
+    await sleep(60);
+    expect(sent).toEqual([[-4242, "SIGTERM"]]);
   });
 });
 

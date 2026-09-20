@@ -16,7 +16,7 @@
 // real sessions. So the boot pins its own port, its own sqlite dir, its own
 // oracle control dir, its own unix socket, and fake provider binaries.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
@@ -72,6 +72,26 @@ export interface CoreDeath {
    *  out, so the 64KB ring is empty for exactly the deaths that most need explaining,
    *  and the backtrace is in a file nobody thought to look in. */
   crashReport: string | null;
+  /** Whether the core's process still existed once the harness gave up on its socket.
+   *  `null` for a core we did not boot, which has no pid we are entitled to ask about.
+   *
+   *  The first fork in the diagnosis, and until this field the harness could not take
+   *  it. "Every scenario from here on got ECONNREFUSED" has two completely different
+   *  explanations — a process that ENDED, and a process that is still there and no
+   *  longer listening — and every piece of evidence gathered for juancode-jyl9 so far
+   *  (exit status, uptime, crash report, the 64KB ring) can only speak to the first.
+   *  A core stuck unwinding after its listeners went away, or one whose serve task
+   *  ended while the process did not, produces exactly the reported symptom and an
+   *  empty log, and reads today as "died, and node missed the exit". One
+   *  `kill(pid, 0)` separates them, and they are not the same bug. */
+  stillRunning: boolean | null;
+  /** The thread sample of a core that is STILL RUNNING and no longer serving, or null.
+   *
+   *  What the crash report is to a signal death, this is to the other branch: the
+   *  stacks are the only thing that can say what a live process that stopped listening
+   *  is doing instead. Never taken for a process that is gone, so an ordinary death
+   *  pays nothing for it. */
+  sample: string | null;
 }
 
 /** A process exit as node saw it, with the clock reading that makes it a duration. */
@@ -186,6 +206,82 @@ export function findCrashReport(
   }
 }
 
+/** Whether a pid is a process we could signal.
+ *
+ *  `kill(pid, 0)` sends nothing; it only asks. `EPERM` counts as alive on purpose —
+ *  the process exists and is simply not ours to signal, and reading "not mine" as
+ *  "gone" is the one wrong answer here. Mirrors `owner::process_alive` in the Rust
+ *  core, which asks the same question about its own owner for the same reason. */
+export function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The pids holding a loopback TCP port open for listening, as the kernel sees it.
+ *
+ *  `lsof` because it is the one question a health probe cannot answer: a port that
+ *  replies `ok` says something is serving, and the whole hazard is that the something
+ *  might not be the process this run spawned.
+ *
+ *  Returns an empty list rather than throwing when it cannot tell — `lsof` exits 1
+ *  when nothing matches, and on a machine without it every boot would otherwise fail
+ *  over a missing tool. A caller therefore treats "no answer" as "no evidence", never
+ *  as "not ours". */
+export function listenerPids(port: number): number[] {
+  try {
+    const out = execFileSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** How long to keep sampling a live core's threads. One second is ~1000 samples,
+ *  which is a whole stack for every thread and still finishes inside a scenario. */
+const SAMPLE_SECONDS = 1;
+
+/** How much of the sample to carry. The head, for the reason `CRASH_REPORT_CHARS` is
+ *  the head of an `.ips`: a sample orders threads with the busiest first, and a core
+ *  stuck somewhere has that somewhere at the top. */
+const SAMPLE_CHARS = 8000;
+
+/** The head of a thread sample of a live process, or null if it could not be taken.
+ *
+ *  `/usr/bin/sample` and no fallback: this only runs on the branch where a core that
+ *  should be gone is still in the process table, on the machine that just booted it,
+ *  and a harness that could not get a sample must report the death it already has
+ *  rather than fail. Best effort by design — the process can end between the liveness
+ *  check and the sample, which is a race with no wrong outcome. */
+export function sampleThreads(pid: number, seconds = SAMPLE_SECONDS): string | null {
+  const out = join(mkdtempSync(join(tmpdir(), "juancode-conformance-sample-")), "sample.txt");
+  try {
+    execFileSync("/usr/bin/sample", [String(pid), String(seconds), "-file", out], {
+      stdio: "ignore",
+      timeout: (seconds + 30) * 1000,
+    });
+    const body = readFileSync(out, "utf8");
+    const head = body.slice(0, SAMPLE_CHARS);
+    return `${head}${body.length > head.length ? "\n… (truncated)" : ""}`;
+  } catch {
+    // No sample tool, no permission, or the process ended first: the death record is
+    // still worth having without it.
+    return null;
+  } finally {
+    rmSync(dirname(out), { recursive: true, force: true });
+  }
+}
+
 /** One line naming how a process ended. */
 export function describeExit(code: number | null, signal: string | null): string {
   if (signal) return `the core was killed by ${signal}`;
@@ -248,6 +344,29 @@ async function confirmUnreachable(httpBase: string): Promise<string | null> {
   if (first === null) return null;
   await sleep(250);
   return await probeHealth(httpBase);
+}
+
+/** How long to let node's own `exit` event land after the socket has already said the
+ *  core is not serving. Short, because it is a scheduling delay and not a wait for
+ *  anything to happen: the process has already stopped listening. */
+export const EXIT_SETTLE_MS = 2000;
+
+/** The exit as node saw it, waiting up to `limitMs` for a late one.
+ *
+ *  Exists because losing the exit status costs the whole diagnosis. Two failed health
+ *  probes take a quarter of a second and the `fetch`es behind them are microtasks, so
+ *  a process that ended while they were in flight can easily have its `exit` event
+ *  queued behind them — and a record written in that window says `code: null,
+ *  signal: null`, which is the same thing the record says for a process that is still
+ *  running. Waiting turns most of those back into a status. */
+async function settleExit(
+  state: { exit: ExitRecord | null },
+  limitMs = EXIT_SETTLE_MS,
+  tickMs = 100,
+): Promise<ExitRecord | null> {
+  const deadline = Date.now() + limitMs;
+  while (state.exit === null && Date.now() < deadline) await sleep(tickMs);
+  return state.exit;
 }
 
 /** Wait for the core to answer, giving up early when `abort` says the wait is
@@ -342,9 +461,7 @@ export const CORE_ENV_PASSTHROUGH = ["JUANCODED_LOG"];
  *  a knob added to a core later must not be able to arrive from a developer's shell
  *  without anybody noticing. `JUANCODE_CONFORMANCE_*` goes too — those are read by
  *  this process, never by a core. */
-export function isolatedParentEnv(
-  parent: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
+export function isolatedParentEnv(parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(parent)) {
     if (value === undefined) continue;
@@ -573,6 +690,10 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
               // for under a name we never spawned.
               upMs: null,
               crashReport: null,
+              // Nor its pid, so whether it is still running is a question this branch
+              // is not entitled to answer, and `null` says that rather than "no".
+              stillRunning: null,
+              sample: null,
             };
       },
       stop: async () => {},
@@ -644,6 +765,34 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
     await waitHealthy(httpBase, 60_000, () =>
       state.exit ? `the core exited before it answered on ${httpBase}` : null,
     );
+    // A healthy probe says SOMETHING is serving the port. It does not say it is ours.
+    //
+    // The pre-flight check above closes the case where the other core was already
+    // answering when we looked, but there is a window between that probe (or
+    // `freePort`, for an ephemeral one) and this child's `bind`, and a core that loses
+    // that race exits at once with `Address already in use` while the winner keeps
+    // answering. Waiting for our child's exit would not catch it either: the stranger
+    // answers the first probe in milliseconds, and on this machine a fork+exec is a
+    // quarter of a second, so the boot is "healthy" before our core has run its first
+    // instruction. The suite would then measure a daemon it did not boot and go red
+    // the moment that daemon's owner stopped it — which is the one way this symptom
+    // has actually been reproduced (two agents, one port, sixteen ECONNREFUSED
+    // scenarios, juancode-jyl9).
+    //
+    // So the kernel is asked who holds the listening socket, rather than the port
+    // being asked whether it feels well. Lenient when it cannot tell: an empty answer
+    // means no `lsof`, not a stranger, and a boot that failed over a missing tool
+    // would be worse than the race it guards.
+    const listeners = listenerPids(port);
+    if (child.pid && listeners.length > 0 && !listeners.includes(child.pid)) {
+      const gone = state.exit
+        ? ` The core this run spawned is already gone (${describeExit(state.exit.code, state.exit.signal)}).`
+        : "";
+      throw new Error(
+        `${httpBase} is served by pid ${listeners.join(", ")}, not by the core this run ` +
+          `spawned (pid ${child.pid}).${gone} Refusing to score a core this run did not boot.`,
+      );
+    }
   } catch (e) {
     stopGroup(child);
     throw new Error(`${e instanceof Error ? e.message : String(e)}\ncore output:\n${ring.text()}`);
@@ -661,7 +810,14 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
       // A crash report is only ever looked for when the signal says the kernel
       // wrote one, so a death by SIGKILL or a clean exit never reads the
       // developer's crash directory at all.
-      const forensics = (exit: ExitRecord | null, reason: string): CoreDeath => ({
+      const forensics = (
+        exit: ExitRecord | null,
+        reason: string,
+        live: { stillRunning: boolean | null; sample: string | null } = {
+          stillRunning: false,
+          sample: null,
+        },
+      ): CoreDeath => ({
         reason,
         code: exit?.code ?? null,
         signal: exit?.signal ?? null,
@@ -671,19 +827,37 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
           exit?.signal && CRASH_SIGNALS.includes(exit.signal)
             ? findCrashReport(basename(exe), bootedAtMs)
             : null,
+        ...live,
       });
       const exit = state.exit;
       if (exit) return forensics(exit, describeExit(exit.code, exit.signal));
       // No exit event yet — ask the socket instead. A core that refuses a
-      // connection is gone whether or not node has reaped it.
+      // connection has stopped serving whether or not node has reaped it.
       const why = await confirmUnreachable(httpBase);
       if (why === null) return null;
-      const late = state.exit as ExitRecord | null;
+      // Give node's own exit event a moment to land before giving up on the exit
+      // status. It is the most diagnostic field there is and it is usually merely
+      // late: the probes above take a quarter of a second, and a process that ended
+      // during them has its `exit` queued behind the fetches that were in flight.
+      const late = await settleExit(state);
+      if (late) return forensics(late, describeExit(late.code, late.signal));
+      // Still no exit. So is the process actually gone? Until this question was
+      // asked, "the core stopped answering" was the harness's answer to two
+      // different bugs — see `CoreDeath.stillRunning`.
+      const pid = child.pid ?? null;
+      const alive = pid !== null && processAlive(pid);
+      if (!alive) {
+        return forensics(
+          null,
+          `the core is gone from the process table, but node never saw it exit, so ` +
+            `there is no status or signal to report (last probe: ${why})`,
+        );
+      }
       return forensics(
-        late,
-        late
-          ? describeExit(late.code, late.signal)
-          : `the core stopped answering ${httpBase} (${why})`,
+        null,
+        `the core is STILL RUNNING as pid ${pid} and has stopped serving ${httpBase} ` +
+          `(${why}) — this is not a death, and the stacks below are what it is doing instead`,
+        { stillRunning: true, sample: pid === null ? null : sampleThreads(pid) },
       );
     },
     stop: async () => {
@@ -698,19 +872,48 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
 }
 
 /** SIGTERM then SIGKILL the core's whole process group (it holds the fake ptys). */
-function stopGroup(child: ChildProcess): void {
+export const STOP_ESCALATION_MS = 1500;
+
+/** What `stopGroup` needs of a child process, so the escalation can be tested without
+ *  spawning one and waiting a second and a half for it. */
+export interface StoppableChild {
+  pid?: number;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  once(event: "exit", listener: () => void): unknown;
+}
+
+export function stopGroup(
+  child: StoppableChild,
+  kill: (pid: number, signal: NodeJS.Signals) => void = (p, s) => process.kill(p, s),
+  escalateMs = STOP_ESCALATION_MS,
+): void {
   const pid = child.pid;
   if (!pid) return;
   try {
-    process.kill(-pid, "SIGTERM");
+    kill(-pid, "SIGTERM");
   } catch {
     // Already gone.
   }
-  setTimeout(() => {
+  // The escalation is guarded, not unconditional. `-pid` names a whole PROCESS
+  // GROUP, and a pid whose process has been reaped is a number the kernel is free to
+  // hand to something else: firing this at a core that already left would be the
+  // harness killing a stranger's tree a second and a half after it stopped caring.
+  // It is the same reason the Rust core's `signal_group_only` drops the bare-pid
+  // fallback once the child is gone.
+  const escalate = setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     try {
-      process.kill(-pid, "SIGKILL");
+      kill(-pid, "SIGKILL");
     } catch {
       // Already gone.
     }
-  }, 1500);
+  }, escalateMs);
+  // Belt as well as braces: the exit event is the earliest the harness can know, and
+  // clearing on it also stops a finished run from holding node open for a second and
+  // a half waiting to signal a process that is already gone. Deliberately NOT
+  // `unref`ed — a core that ignores SIGTERM needs this timer to outlive the run, and
+  // an unreferenced one would let node exit first and strand it at PPID 1, which is
+  // the failure this repo has a rule about.
+  child.once("exit", () => clearTimeout(escalate));
 }

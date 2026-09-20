@@ -141,6 +141,72 @@ describe("a core that dies mid-run", () => {
   }, 60_000);
 });
 
+// The other branch, and the one nothing in this file used to cover. Every field the
+// section above asserts on — exit status, signal, uptime, crash report, the core's
+// last words — describes a process that ENDED. A core that is still in the process
+// table and no longer listening gives off exactly the same thing the ticket recorded
+// (ECONNREFUSED for every scenario after it, and an empty log), and until the harness
+// asked `kill(pid, 0)` it reported that as a death with a missing exit status. So
+// this drives a real process into that state and asserts the report refuses to call
+// it a death.
+describe("a core that stops serving without dying", () => {
+  let core: CoreUnderTest | undefined;
+  afterAll(async () => {
+    await core?.stop();
+  });
+
+  it("is reported as a live process with its stacks, not as a death with no exit status", async () => {
+    core = await startCore({ core: "rust", exe: FAKE_CORE, port: 0 });
+    const driver = healthDrivenRunner(core.httpBase);
+    const guard = guardCore(core, driver.run);
+
+    expect((await guard.run(scenario("01-first"), ctx, 1)).status).toBe("passed");
+
+    // The listener goes; the process stays.
+    expect(core.pid).not.toBeNull();
+    const pid = core.pid as number;
+    process.kill(pid, "SIGUSR1");
+    await new Promise((r) => setTimeout(r, 500));
+
+    const after = await guard.run(scenario("02-discovers"), ctx, 1);
+    expect(after.status).toBe("unmeasured");
+
+    const death = guard.death;
+    expect(death).not.toBeNull();
+    if (!death) return;
+    // The whole point: a process that is still there.
+    expect(death.stillRunning).toBe(true);
+    expect(death.code).toBeNull();
+    expect(death.signal).toBeNull();
+    expect(death.reason).toContain("STILL RUNNING");
+    expect(death.log).toContain("fake-core: closing the listener and staying alive");
+    // And the stacks, which are the only evidence this branch has. Best effort by
+    // design (`/usr/bin/sample` is macOS), so the assertion is conditional on the
+    // tool being there rather than on the platform the suite happens to run on.
+    if (death.sample !== null) expect(death.sample).toContain(String(pid));
+
+    const report: RunReport = {
+      core: "fake",
+      url: core.wsUrl,
+      specRevision: "test",
+      protocolVersion: 1,
+      capabilities: [],
+      repeat: 1,
+      outcomes: [after],
+      coreDeath: death,
+    };
+    const md = renderRunMarkdown(report, "2026-09-20");
+    expect(md).toContain("## The core stopped serving mid-run, and did NOT die");
+    expect(md).toContain("Process: STILL RUNNING");
+    expect(md).toMatch(/Up for: \d+\.\ds when it stopped answering/);
+    // Specifically NOT the sentence a real death gets: reading "the core died" off a
+    // process that never died is how this ticket stayed open.
+    expect(md).not.toContain("## The core died mid-run");
+    expect(md).not.toContain("Uptime when found gone");
+    if (death.sample !== null) expect(md).toContain("### Thread sample of the live process");
+  }, 60_000);
+});
+
 describe("the core log ring", () => {
   it("keeps the tail rather than a count of chunks", () => {
     const ring = makeLogRing(10);
