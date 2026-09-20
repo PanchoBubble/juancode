@@ -24,11 +24,39 @@ import JuancodeCore
 /// that used to sit in `CoreProxyServer` are gone or guarded on `!makesWorktrees`:
 /// a core that cuts its own trees reaps them in `deleteSession`.
 ///
-/// So every remaining caller of this file is one nqpm deletes — `PrTrackingEngine`,
-/// `WebSocketConnection`, the route half of `JuancodeServer.swift`, and the
-/// `!makesWorktrees` branch that dies with the backend switch. Nothing on the rust
-/// path reaches in here any more, which is what the header promised and could not
-/// keep. `WorktreeDeps.swift` has no fate of its own and goes at the same moment.
+/// Nothing on the rust path reaches in here any more, which is what the header
+/// promised and could not keep. `WorktreeDeps.swift` has no fate of its own and goes
+/// at the same moment.
+///
+/// DISPOSITION: juancode-lgaw, and it is scope for the juancode-nqpm commit rather
+/// than a deletion of its own — `isolateWorktree` is still in this core's measured
+/// capability list (apps/wire-conformance/parity/swift-status.json, spec 1.20.0,
+/// measuredAt 2026-09-19), so removing the implementation before the core makes that
+/// claim false and the parity gate red.
+///
+/// Re-measured at 0b3c725, the callers are NOT all inside nqpm's deletion set, which
+/// the previous version of this paragraph claimed. Three of five are:
+///
+///   PrTrackingEngine.swift    createWorktree 182/513, adoptWorktree 512, BranchWorktree 510
+///   WebSocketConnection.swift createWorktree 405, computeChangeStat 197
+///   JuancodeServer.swift      removeWorktree 207, listWorktrees 413 (the route half)
+///
+/// and the `!makesWorktrees` branches in `AppModel` (1769, 5044, 5137) plus its two
+/// `error as? GitError` sites (4830, 5688) die with the backend switch. The other two
+/// are in files nqpm KEEPS, so the same commit has to carry a fix for each:
+///
+///   JuancodeServer/ServerSupport.swift:43   the `GitError` branch of `errMsg`, in an
+///                                           nqpm STAYS file reached from CoreProxyServer:587
+///   JuancodeServices/TrackedPr.swift:257    `trackSeedPrompt(… worktree: BranchWorktree?)`,
+///                                           in a file juancode-idza says outlives nqpm. Its
+///                                           only non-nil callers are PrTrackingEngine's
+///                                           three, and juancoded-core/src/pr.rs declares its
+///                                           own `BranchWorktree` for `track_seed_prompt` —
+///                                           so either the type moves with `TrackedPr` or the
+///                                           parameter goes with the engine.
+///
+/// `Tests/JuancodeServicesTests/TempGitRepo.swift` (50 lines) is orphaned by the same
+/// deletion: `GitTests.swift` is its only reader.
 ///
 /// Every shell-out goes through `ProcessRunner`, which inherits the environment
 /// verbatim: the prime directive.
@@ -57,7 +85,8 @@ public struct GitError: Error, Sendable {
 }
 
 /// Run git, returning stdout. `git diff` exits 1 when differences exist — not an error.
-/// Internal so sibling services (WorkAtRisk probe) reuse the same runner semantics.
+/// Internal, and as of 0b3c725 no sibling in this target calls it: the WorkAtRisk probe
+/// the old comment named reads the tree through `CoreClient` now.
 func git(_ cwd: String, _ args: [String]) async throws -> String {
     // `capture` returns the result for ANY exit code and only throws on
     // launch-failure/timeout, so we inspect the exit code ourselves: exit 1 with
