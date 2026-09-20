@@ -27,6 +27,12 @@ const started = (over: Partial<DispatchOutcome> = {}): DispatchOutcome => ({
   queued: false,
   sessionId: "s1",
   message: "Started claude session s1.",
+  state: "started",
+  willStart: true,
+  duplicateOf: null,
+  ticket: null,
+  queuedReason: null,
+  advice: "Running now.",
   ...over,
 });
 

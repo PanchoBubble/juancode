@@ -50,6 +50,16 @@ export interface DispatchRecord {
    *  rather than a human. Optional so records written before triggers existed
    *  still validate. */
   trigger?: TriggerOrigin | null;
+  /** The bd ticket this dispatch is for, declared by the caller or read out of the
+   *  prompt. The key the one-live-session-per-ticket guard works on. Optional so
+   *  records written before the guard existed still validate. */
+  ticket?: string | null;
+  /** The request fingerprint a retry of this same dispatch would produce
+   *  (dispatch-guard.ts). Optional for the same reason — it is recomputed from the
+   *  record's own args when absent. */
+  fingerprint?: string | null;
+  /** The caller-supplied idempotency key the fingerprint was taken from, if any. */
+  idempotencyKey?: string | null;
   /** The create's immediate outcome: acked live, queued offline, or rejected. */
   outcome: "started" | "queued" | "rejected";
   sessionId: string | null;
@@ -77,6 +87,11 @@ function isDispatchRecord(v: unknown): v is DispatchRecord {
     (typeof r.sessionId === "string" || r.sessionId === null) &&
     (typeof r.error === "string" || r.error === null) &&
     typeof r.at === "number" &&
+    (r.ticket === undefined || r.ticket === null || typeof r.ticket === "string") &&
+    (r.fingerprint === undefined || r.fingerprint === null || typeof r.fingerprint === "string") &&
+    (r.idempotencyKey === undefined ||
+      r.idempotencyKey === null ||
+      typeof r.idempotencyKey === "string") &&
     (r.trigger === undefined || r.trigger === null || isTriggerOrigin(r.trigger))
   );
 }

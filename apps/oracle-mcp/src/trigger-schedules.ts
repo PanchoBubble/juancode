@@ -109,6 +109,10 @@ export function scheduleRequest(schedule: ScheduleConfig): DispatchRequest {
     provider: schedule.provider ?? "claude",
     worktree: schedule.worktree !== false,
     telegramChatId: schedule.telegramChatId ?? null,
+    // Declared rather than left for the guard to read out of the prompt: a
+    // schedule that fires again while its last agent is still working the ticket
+    // must not put a second one on it.
+    ticket: schedule.ticket ?? null,
   };
 }
 

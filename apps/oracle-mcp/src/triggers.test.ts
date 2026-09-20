@@ -28,6 +28,12 @@ const outcome = (): DispatchOutcome => ({
   queued: false,
   sessionId: "s1",
   message: "Started claude session s1.",
+  state: "started",
+  willStart: true,
+  duplicateOf: null,
+  ticket: null,
+  queuedReason: null,
+  advice: "Running now.",
 });
 
 const origin: TriggerOrigin = { kind: "schedule", id: "nightly", detail: "schedule nightly" };

@@ -47,7 +47,7 @@ import {
   SessionNotRunning,
   UnservedRead,
 } from "./session-reads.ts";
-import { dispatch } from "./dispatch.ts";
+import { dispatch, DispatchConflictError } from "./dispatch.ts";
 import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
@@ -161,7 +161,7 @@ function buildServer(): McpServer {
     {
       title: "Dispatch an agent into a project",
       description:
-        "Spawn (or seed) a real agent session in a project on the Mac. Delivered over the native app's WS with an ack: success returns the real session id, a bad path/provider returns the real error. If the app is down the dispatch is durably queued and starts when the app is next up.",
+        "Spawn (or seed) a real agent session in a project on the Mac. Delivered over the native app's WS with an ack: success returns the real session id, a bad path/provider returns the real error. If the app doesn't ack the dispatch is durably QUEUED and starts by itself — that is an accepted dispatch, not a failed one, so never re-post it. Posting the same request twice inside 10 minutes collapses onto the first dispatch, and a bd ticket that already has a live session is refused.",
       inputSchema: {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
@@ -170,12 +170,24 @@ function buildServer(): McpServer {
           .boolean()
           .optional()
           .describe("Isolate the agent in a fresh git worktree (default: false)"),
+        ticket: z
+          .string()
+          .optional()
+          .describe(
+            "The bd ticket id this dispatch works. Declaring it enforces one live session per ticket; otherwise it is read out of the prompt.",
+          ),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            "Dispatch even when an identical request or the same ticket already has a live session (default: false)",
+          ),
       },
     },
     async (args) => {
       try {
         const outcome = await dispatch(args);
-        return ok(`${outcome.message} (dispatchId: ${outcome.dispatchId})`);
+        return ok(`${outcome.message} ${outcome.advice} (dispatchId: ${outcome.dispatchId})`);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -355,7 +367,7 @@ function buildServer(): McpServer {
         keys: z
           .array(z.string().min(1))
           .min(1)
-          .describe("Key names, pressed in this order, e.g. [\"Down\", \"Enter\"]"),
+          .describe('Key names, pressed in this order, e.g. ["Down", "Enter"]'),
       },
     },
     async (args) => {
@@ -434,7 +446,9 @@ function buildServer(): McpServer {
         project: z
           .string()
           .optional()
-          .describe("Only sessions whose working directory contains this substring, e.g. 'juancode'"),
+          .describe(
+            "Only sessions whose working directory contains this substring, e.g. 'juancode'",
+          ),
         since: z.string().optional().describe("ISO timestamp lower bound, e.g. 2026-07-01"),
         agents: z
           .array(z.string())
@@ -647,7 +661,8 @@ app.post("/api/heavy/cancel", (req: Request, res: Response) => {
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {
   try {
-    const { project, prompt, provider, worktree, telegramChatId } = req.body ?? {};
+    const { project, prompt, provider, worktree, telegramChatId, ticket, idempotencyKey, force } =
+      req.body ?? {};
     if (typeof project !== "string" || typeof prompt !== "string" || !project || !prompt) {
       res.status(400).send("project and prompt are required");
       return;
@@ -660,9 +675,26 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       // The originating Telegram chat, when the caller (the headless Oracle mid-
       // Telegram-turn) knows it — lifecycle pings then route back to that chat.
       telegramChatId: typeof telegramChatId === "number" ? telegramChatId : null,
+      ticket: typeof ticket === "string" && ticket ? ticket : null,
+      idempotencyKey: typeof idempotencyKey === "string" && idempotencyKey ? idempotencyKey : null,
+      force: force === true,
     });
     res.json({ ok: true, ...outcome });
   } catch (e) {
+    // A ticket that already has a live session is a 409, not a 500: the caller
+    // asked for something reasonable and the answer is "you already have one".
+    if (e instanceof DispatchConflictError) {
+      res.status(409).json({
+        ok: false,
+        error: e.message,
+        ticket: e.ticket,
+        conflictingDispatchId: e.conflictingDispatchId,
+        conflictingSessionId: e.conflictingSessionId,
+        advice:
+          'Do not retry this as-is. Track the dispatch named above, or re-post with "force": true.',
+      });
+      return;
+    }
     sendErr(res, e);
   }
 });

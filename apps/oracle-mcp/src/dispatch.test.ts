@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
+import { DispatchConflictError, type DispatchDeps } from "./dispatch.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
 import { dispatchOriginChat, getDispatch, listDispatches } from "./dispatch-registry.ts";
 
@@ -129,6 +130,13 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(out.queued).toBe(true);
     expect(out.sessionId).toBeNull();
     expect(out.message).toMatch(/queued/i);
+    // "queued" must not read as "nothing happened" — that misreading is what put
+    // two agents on one destructive ticket (juancode-nwrb).
+    expect(out.state).toBe("queued");
+    expect(out.willStart).toBe(true);
+    expect(out.queuedReason).toBe("unreachable");
+    expect(out.advice).toMatch(/do NOT post this dispatch again/i);
+    expect(out.duplicateOf).toBeNull();
 
     const lines = mailboxLines();
     expect(lines).toHaveLength(1);
@@ -151,6 +159,10 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     const out = await dispatch({ project: "/abs/repo", prompt: "raced" }, 150);
 
     expect(out.queued).toBe(true);
+    // The app answered the socket and then didn't ack: "loaded", not "down".
+    expect(out.queuedReason).toBe("no-ack");
+    expect(out.message).toMatch(/didn't ack/i);
+    expect(out.willStart).toBe(true);
     const lines = mailboxLines();
     expect(lines).toHaveLength(1);
     // Same id on both paths — the native ledger dedupes if the create DID land.
@@ -229,5 +241,170 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
         dispatchId: "id-2",
       },
     ]);
+  });
+});
+
+// The native ledger dedupes one `dispatchId`, and a retry mints a new one — so a
+// caller that read "queued" as "nothing happened" and posted again got a SECOND
+// agent on the same ticket (juancode-nwrb). These pin the two guards in front of
+// the create: the request fingerprint and the bd ticket id.
+
+describe("dispatch guards (one session per request, one session per ticket)", () => {
+  let dir: string;
+  let wss: WebSocketServer | null = null;
+  let creates: Record<string, unknown>[];
+  let sessions: Record<string, unknown>[];
+  const prevDir = process.env.JUANCODE_ORACLE_DIR;
+  const prevApi = process.env.JUANCODE_API;
+
+  /** Sessions the fake native app reports — the guards' view of "what's live". */
+  const deps: DispatchDeps = { fetchSessions: async () => sessions };
+
+  const startServer = async (delayMs = 0): Promise<void> => {
+    let n = 0;
+    wss = new WebSocketServer({ host: "127.0.0.1", port: 0, path: "/ws" });
+    wss.on("connection", (sock: WsSocket) => {
+      sock.send(JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: [] }));
+      sock.on("message", (data) => {
+        const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (msg.type !== "create") return;
+        creates.push(msg);
+        const id = `s-${++n}`;
+        const reply = () => sock.send(JSON.stringify({ type: "created", session: { id } }));
+        if (delayMs) setTimeout(reply, delayMs);
+        else reply();
+      });
+    });
+    await new Promise<void>((resolve) => wss!.on("listening", () => resolve()));
+    const { port } = wss!.address() as AddressInfo;
+    process.env.JUANCODE_API = `http://127.0.0.1:${port}`;
+  };
+
+  beforeEach(() => {
+    creates = [];
+    sessions = [];
+    dir = mkdtempSync(join(tmpdir(), "oracle-guard-test-"));
+    process.env.JUANCODE_ORACLE_DIR = dir;
+    process.env.JUANCODE_API = "http://127.0.0.1:1";
+  });
+
+  afterEach(async () => {
+    if (prevDir === undefined) delete process.env.JUANCODE_ORACLE_DIR;
+    else process.env.JUANCODE_ORACLE_DIR = prevDir;
+    if (prevApi === undefined) delete process.env.JUANCODE_API;
+    else process.env.JUANCODE_API = prevApi;
+    rmSync(dir, { recursive: true, force: true });
+    if (wss) await new Promise<void>((resolve) => wss!.close(() => resolve()));
+    wss = null;
+  });
+
+  const req = {
+    project: "/abs/repo",
+    prompt: "Implement bd ticket juancode-h1an.",
+    worktree: true,
+  };
+
+  it("collapses a re-post of the same request onto the first dispatch", async () => {
+    await startServer();
+
+    const first = await dispatch(req, 2000, deps);
+    const again = await dispatch(req, 2000, deps);
+
+    expect(first.state).toBe("started");
+    expect(again.state).toBe("duplicate");
+    // The caller gets the id of the dispatch that actually exists, so tracking it
+    // works — and no second session was created.
+    expect(again.dispatchId).toBe(first.dispatchId);
+    expect(again.duplicateOf).toBe(first.dispatchId);
+    expect(again.sessionId).toBe("s-1");
+    expect(again.message).toMatch(/not dispatched again/i);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("collapses a retry that lands while the first create is still unacked", async () => {
+    // The real shape of the bug: the retry arrives inside the ack window, before
+    // any registry row exists to compare against.
+    await startServer(120);
+
+    const [a, b] = await Promise.all([dispatch(req, 2000, deps), dispatch(req, 2000, deps)]);
+
+    expect(creates).toHaveLength(1);
+    const states = [a.state, b.state].sort();
+    expect(states).toEqual(["duplicate", "started"]);
+    expect(a.sessionId).toBe("s-1");
+    expect(b.sessionId).toBe("s-1");
+  });
+
+  it("refuses a differently-worded dispatch of a ticket that already has a live session", async () => {
+    await startServer();
+
+    const first = await dispatch(req, 2000, deps);
+    sessions = [{ id: "s-1", status: "running", dispatchId: first.dispatchId, cwd: "/abs/repo" }];
+
+    const refusal = dispatch(
+      { ...req, prompt: "Please work bd ticket juancode-h1an end-to-end, carefully." },
+      2000,
+      deps,
+    );
+    await expect(refusal).rejects.toThrow(/juancode-h1an already has a live agent session/);
+    // Typed, so the HTTP route can answer 409 instead of 500 — a retrying caller
+    // needs "you already have one", not "something broke".
+    await expect(refusal).rejects.toBeInstanceOf(DispatchConflictError);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("lets the same ticket through once its session has exited", async () => {
+    await startServer();
+
+    const first = await dispatch(req, 2000, deps);
+    sessions = [{ id: "s-1", status: "exited", dispatchId: first.dispatchId, cwd: "/abs/repo" }];
+
+    const second = await dispatch({ ...req, prompt: "Redo bd ticket juancode-h1an." }, 2000, deps);
+    expect(second.state).toBe("started");
+    expect(second.sessionId).toBe("s-2");
+  });
+
+  it("force: true dispatches past both guards", async () => {
+    await startServer();
+
+    const first = await dispatch(req, 2000, deps);
+    sessions = [{ id: "s-1", status: "running", dispatchId: first.dispatchId, cwd: "/abs/repo" }];
+
+    const forced = await dispatch({ ...req, force: true }, 2000, deps);
+    expect(forced.state).toBe("started");
+    expect(forced.sessionId).toBe("s-2");
+    expect(forced.dispatchId).not.toBe(first.dispatchId);
+    expect(creates).toHaveLength(2);
+  });
+
+  it("dedupes on a caller-supplied key even when the prompt was edited", async () => {
+    await startServer();
+
+    const first = await dispatch({ ...req, idempotencyKey: "post-1" }, 2000, deps);
+    const again = await dispatch(
+      { ...req, prompt: "same work, reworded", idempotencyKey: "post-1" },
+      2000,
+      deps,
+    );
+
+    expect(again.state).toBe("duplicate");
+    expect(again.dispatchId).toBe(first.dispatchId);
+    expect(creates).toHaveLength(1);
+  });
+
+  it("records the ticket and fingerprint so a later process can guard on them", async () => {
+    await startServer();
+    const out = await dispatch(req, 2000, deps);
+    const stored = await getDispatch(out.dispatchId);
+    expect(stored).toMatchObject({ ticket: "juancode-h1an", idempotencyKey: null });
+    expect(stored!.fingerprint).toMatch(/^req:[0-9a-f]{32}$/);
+    expect(out.ticket).toBe("juancode-h1an");
+  });
+
+  it("queues a free-form dispatch with no ticket without inventing one", async () => {
+    const out = await dispatch({ project: "/abs/repo", prompt: "tidy the README" }, 2000, deps);
+    expect(out.ticket).toBeNull();
+    expect(out.state).toBe("queued");
+    expect(out.willStart).toBe(true);
   });
 });

@@ -72,23 +72,36 @@ or run `bd ready` and offer the top items. Never guess an id.
 5. **Dispatch** it — `jq -Rs` handles the quoting, so the prompt can contain anything:
 
    ```bash
-   jq -n --arg project "$(git rev-parse --show-toplevel)" \
+   jq -n --arg project "$(git rev-parse --show-toplevel)" --arg ticket "<id>" \
          --rawfile prompt "$SCRATCH/dispatch-<id>.txt" \
-     '{project:$project, prompt:$prompt, provider:"claude", worktree:true}' \
+     '{project:$project, prompt:$prompt, provider:"claude", worktree:true, ticket:$ticket}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
 
-   The response is the truth: `started:true` + `sessionId` → really running;
-   `queued:true` → app down, starts on launch; `ok:false` → a real failure, report it
-   rather than retrying blind. Keep the `dispatchId`.
+   Pass `ticket` — it is what stops a second session landing on the same bd id.
+
+   The response is the truth. Read `state`, and read it as accepted-or-not:
+
+   - `"state":"started"` + `sessionId` → really running.
+   - `"state":"queued"` → **accepted**, the app just didn't ack in time; it starts by
+     itself. This is NOT a failure and NOT something to post again.
+   - `"state":"duplicate"` → this was already dispatched; `dispatchId` is the one that
+     exists. Nothing new was created.
+   - HTTP 409 → that ticket already has a live session. Report it; do not force past
+     it without asking.
+   - `ok:false` / another 4xx → a real failure (bad path, unknown provider). Report it.
+
+   **Never re-post a dispatch.** Re-posting a queued one is exactly how `juancode-h1an`
+   ended up with two agents racing on the same worktree removals. Keep the
+   `dispatchId` and poll step 6 instead.
 
    The Oracle dispatches with permissions skipped, which is what makes the session
    autonomous. `worktree:true` isolates it, so it never collides with this session or
    the other agents in this tree.
 
 6. **Report** to the user: which ticket was dispatched, the session id (or that it's
-   queued), and the dispatch id. Do NOT also do the work yourself — it's dispatched.
+   queued and will start on its own), and the dispatch id. Do NOT also do the work yourself — it's dispatched.
    To follow up later:
 
    ```bash

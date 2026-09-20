@@ -899,10 +899,13 @@ $("#d-go").onclick = async () => {
     const out = await api("/api/dispatch", { method:"POST", body: JSON.stringify({
       project, prompt, provider: $("#d-prov").value, worktree: $("#d-wt").value === "true" }) });
     $("#d-prompt").value = "";
-    // The server acks for real now: distinguish "session started" from "app down,
-    // queued for its next launch" so the phone isn't told a lie either way.
-    btn.textContent = out && out.queued ? "Queued (app offline) ✓" : "Dispatched ✓";
-    setTimeout(() => { btn.textContent = "Dispatch agent"; btn.disabled = false; }, 2000);
+    // The server acks for real now: distinguish "session started" from "queued for
+    // when the app answers" and from "this was a repeat of a dispatch already
+    // running", so the phone isn't told a lie either way — and so a queued dispatch
+    // never reads as "nothing happened, tap again".
+    btn.textContent = out && out.state === "duplicate" ? "Already running ✓"
+      : out && out.queued ? "Queued — will start ✓" : "Dispatched ✓";
+    setTimeout(() => { btn.textContent = "Dispatch agent"; btn.disabled = false; }, 2500);
     await loadSessions();
   } catch(e){ alert("Dispatch failed: "+e.message); btn.textContent = "Dispatch agent"; btn.disabled = false; }
 };

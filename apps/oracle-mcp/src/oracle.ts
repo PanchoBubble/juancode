@@ -503,6 +503,10 @@ const ORACLE_SYSTEM =
   '"provider":"codex"|"opencode", "worktree":true, and "telegramChatId":<id> when told ' +
   "the request came from a Telegram chat). The reply carries the real outcome — dispatchId " +
   "plus sessionId, queued, or the actual error — so report it instead of assuming success. " +
+  'NEVER RE-POST A DISPATCH: `"queued":true` (or `"willStart":true`) means ACCEPTED and ' +
+  "starting by itself, not failed. Posting the same work twice is how two agents ended up " +
+  "on one destructive ticket. Read the reply's `advice` field and follow it; if you really " +
+  'must dispatch the same work again, say so and pass "force":true. ' +
   "DISPATCH BY DEFAULT: you are an orchestrator, not a worker. Any task that touches " +
   "a project's code, files, tests, or git you dispatch to an agent in that project — " +
   "never read, edit, or run a project's contents yourself, even if it seems quick. " +
