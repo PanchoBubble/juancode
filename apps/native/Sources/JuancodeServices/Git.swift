@@ -34,26 +34,27 @@ import JuancodeCore
 /// measuredAt 2026-09-19), so removing the implementation before the core makes that
 /// claim false and the parity gate red.
 ///
-/// Re-measured at 0b3c725, the callers are NOT all inside nqpm's deletion set, which
-/// the previous version of this paragraph claimed. Three of five are:
+/// Re-measured at 0b3c725 and again at 6e849c5, the callers are NOT all inside nqpm's
+/// deletion set, which an earlier version of this paragraph claimed. Three of five are:
 ///
 ///   PrTrackingEngine.swift    createWorktree 182/513, adoptWorktree 512, BranchWorktree 510
 ///   WebSocketConnection.swift createWorktree 405, computeChangeStat 197
 ///   JuancodeServer.swift      removeWorktree 207, listWorktrees 413 (the route half)
 ///
 /// and the `!makesWorktrees` branches in `AppModel` (1769, 5044, 5137) plus its two
-/// `error as? GitError` sites (4830, 5688) die with the backend switch. The other two
-/// are in files nqpm KEEPS, so the same commit has to carry a fix for each:
+/// `error as? GitError` sites (4830, 5688) die with the backend switch.
 ///
-///   JuancodeServer/ServerSupport.swift:43   the `GitError` branch of `errMsg`, in an
-///                                           nqpm STAYS file reached from CoreProxyServer:587
-///   JuancodeServices/TrackedPr.swift:257    `trackSeedPrompt(… worktree: BranchWorktree?)`,
-///                                           in a file juancode-idza says outlives nqpm. Its
-///                                           only non-nil callers are PrTrackingEngine's
-///                                           three, and juancoded-core/src/pr.rs declares its
-///                                           own `BranchWorktree` for `track_seed_prompt` —
-///                                           so either the type moves with `TrackedPr` or the
-///                                           parameter goes with the engine.
+/// One caller is in a file nqpm KEEPS, so the same commit has to carry a fix for it:
+/// `JuancodeServer/ServerSupport.swift:43`, the `GitError` branch of `errMsg`, reached
+/// from CoreProxyServer:587. Drop the branch, the way 297600f already dropped the
+/// `GhError` one; `ServerSupport`'s `JuancodeServices` import goes with it, since
+/// `ProcessError` became a `JuancodeCore` type in 6e849c5.
+///
+/// There was a second one and it is already closed. `trackSeedPrompt(… worktree:
+/// BranchWorktree?)` sat in `TrackedPr.swift`, which juancode-idza says outlives nqpm.
+/// 6e849c5 split it out into `PrTrackClassifier.swift:107`, whose whole disposition is
+/// that it goes with `Git.swift`, `GhPoll.swift` and `PrTrackingEngine.swift` — so the
+/// reader is inside the deletion set now and no type has to move.
 ///
 /// `Tests/JuancodeServicesTests/TempGitRepo.swift` (50 lines) is orphaned by the same
 /// deletion: `GitTests.swift` is its only reader.
