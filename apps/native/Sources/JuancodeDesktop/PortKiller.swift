@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import JuancodeServices
+import JuancodeCore
 
 /// A process LISTENing on a TCP port, as reported by `lsof`.
 public struct PortProcess: Sendable, Identifiable, Equatable {

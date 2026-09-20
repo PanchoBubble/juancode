@@ -1,5 +1,5 @@
 import Foundation
-import JuancodeServices
+import JuancodeCore
 
 /// Settings → Worktrees: the app's front end for the worktree sweeper that
 /// `scripts/worktree-sweep.mjs` implements and

@@ -1,6 +1,5 @@
 import Foundation
 import JuancodeCore
-import JuancodeServices
 
 /// 'Ask AI to change my settings' — run the genuine `claude` CLI in headless print
 /// mode with a JSON schema and return a validated settings *patch* the UI previews

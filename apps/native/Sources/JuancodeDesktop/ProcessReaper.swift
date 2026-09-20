@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import JuancodeServices
+import JuancodeCore
 
 /// A stuck `vitest` process tree: the launcher process plus every `vitest` worker
 /// descended from it, as reported by `ps`.

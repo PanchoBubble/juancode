@@ -19,7 +19,7 @@
 import AppKit
 import SwiftUI
 import JuancodeDesktop
-import JuancodeServices
+import JuancodeCore
 
 struct WorktreeSweeperSettingsView: View {
     @Environment(AppModel.self) private var model

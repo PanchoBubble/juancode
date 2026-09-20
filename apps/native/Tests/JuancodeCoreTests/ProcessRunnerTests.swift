@@ -1,5 +1,5 @@
 import XCTest
-@testable import JuancodeServices
+@testable import JuancodeCore
 
 final class ProcessRunnerTests: XCTestCase {
     func testCapturesStdout() async throws {

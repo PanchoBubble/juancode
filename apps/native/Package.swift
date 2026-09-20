@@ -82,10 +82,20 @@ let package = Package(
         // Foundation + JuancodeCore only — no server/UI deps.
         //
         // `ls Sources/JuancodeServices` is the answer to "what is left to port", and
-        // juancode-a2s7 made it one again: 9 files after juancode-h0l6, every one of
-        // which carries a disposition in its own header naming the ticket that deletes
-        // it. Nothing desktop-local lives here any more — that is `JuancodeDesktop`,
-        // below.
+        // every file here carries a disposition in its own header naming the ticket
+        // that deletes it. Nothing desktop-local lives here any more — that is
+        // `JuancodeDesktop`, below.
+        //
+        // juancode-a2s7 got it to 9 files; juancode-idza took out the two that were
+        // not port questions at all. `ProcessRunner.swift` and the DTO half of
+        // `TrackedPr.swift` went to `JuancodeCore`, which is the only target both
+        // `JuancodeClient` and `JuancodeDesktop` can reach — `JuancodeDesktop` was the
+        // obvious home for `ProcessRunner` until `JuancodeClient/AppBuildStamp.swift`
+        // started calling it (e8b70ee), and `JuancodeClient` may not depend on
+        // `JuancodeDesktop`. `OracleMailbox.swift` and `ResumeGrid.swift` are the same
+        // kind of leftover and belong in `JuancodeDesktop`, but each still has a caller
+        // inside the Swift core (`WebSocketConnection`, `ReviveSession`), so they move
+        // in or after juancode-nqpm.
         .target(
             name: "JuancodeServices",
             dependencies: ["JuancodeCore"]

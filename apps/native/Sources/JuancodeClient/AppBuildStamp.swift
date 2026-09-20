@@ -23,7 +23,7 @@
 // for the one-commit drift you have the moment you commit.
 
 import Foundation
-import JuancodeServices
+import JuancodeCore
 
 /// What the running bundle says about the source it was built from. Nil for a bare
 /// SPM binary (`swift run juancode`), which has no Info.plist to stamp — an honest

@@ -1,13 +1,16 @@
 import Foundation
 import Darwin
 
-/// Every shell-out in this target goes through here, inheriting the environment
+/// Every shell-out on the Swift side goes through here, inheriting the environment
 /// verbatim — the prime directive.
 ///
-/// Disposition (juancode-a2s7): no home of its own. It has no Rust counterpart to
-/// wait for (`juancoded-core/src/proc.rs` is the daemon's equivalent) and it is not
-/// desktop-local — `JuancodeServer` and `JuancodeDesktop` both use it. It is the last
-/// thing out of the room: it dies with `Gh.swift` and `Git.swift`, per juancode-3s4p.
+/// Lives in `JuancodeCore` (juancode-idza) and not in `JuancodeServices`, because it
+/// is not a port question: `juancoded-core/src/proc.rs` is the daemon's own shell-out,
+/// not a replacement for these call sites, and 12 of them outlive the Swift core.
+/// Not `JuancodeDesktop` either, which is where the other desktop-local leftovers go:
+/// `JuancodeClient/AppBuildStamp.swift` calls it (`CheckoutProbe.git(in:)`) and
+/// `JuancodeClient` may not depend on `JuancodeDesktop`. `JuancodeCore` is the only
+/// target below both, and it already shells out (`LoginEnvironment`, `Providers`).
 
 /// Captured result of a finished child process.
 public struct ProcessResult: Sendable {
@@ -31,6 +34,15 @@ public struct ProcessError: Error, Sendable {
     /// The executable couldn't be launched at all (≈ Node's `code === "ENOENT"`).
     public let launchFailed: Bool
     public let timedOut: Bool
+
+    /// Spelled out rather than left to the implicit memberwise init, which stopped
+    /// being reachable when juancode-idza moved this type out of `JuancodeServices`
+    /// and `Git.swift`/`GhPoll.swift` became cross-module callers.
+    public init(code: Int32, stdout: String, stderr: String,
+                launchFailed: Bool, timedOut: Bool) {
+        self.code = code; self.stdout = stdout; self.stderr = stderr
+        self.launchFailed = launchFailed; self.timedOut = timedOut
+    }
 
     public var message: String {
         if launchFailed { return "command not found" }

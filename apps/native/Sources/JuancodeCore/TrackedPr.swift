@@ -1,5 +1,4 @@
 import Foundation
-import JuancodeCore
 
 /// Tracked-PR engine for juancode-it5: once a PR is "tracked", a dedicated agent
 /// session watches it and the poller diffs the PR's reviewable activity each tick.
@@ -17,15 +16,20 @@ import JuancodeCore
 /// red → auto-fix attempts. The injected fix prompt itself instructs the agent to
 /// stop and escalate if it hits genuine ambiguity.
 ///
-/// Disposition (juancode-a2s7): STAYS, and is not a fork. `juancoded-core/src/pr.rs`
-/// holds the behaviour twin (`classify_pr_activity`, `derive_track_state`,
-/// `track_seed_prompt`, `auto_fix_prompt`, `stalled_ci_fix_reason`) and
-/// `juancoded-server/src/tracked_prs.rs` runs the engine, so what is left here is the
-/// wire shape the RUST path decodes into — `RustCoreClient` reads `TrackedPr`,
-/// `PrTrackSnapshot` and `TrackNotification`, `JuancodePersistence` stores them and
-/// `JuancodeServer/WireProtocol.swift` carries them. Same standing as
-/// `WireProtocol.swift`: a client-side DTO, not an unported service. The engine
-/// half that IS a fork is `JuancodeServer/PrTrackingEngine.swift`, which nqpm deletes.
+/// Home (juancode-idza): `JuancodeCore`, because this is a wire DTO and not a port
+/// question. `juancoded-core/src/pr.rs` holds the behaviour twin (`derive_track_state`,
+/// `auto_fix_prompt`, `stalled_ci_fix_reason`) and `juancoded-server/src/tracked_prs.rs`
+/// runs the engine, so what is left here is the shape the RUST path decodes into —
+/// `RustCoreClient` reads `TrackedPr`, `PrTrackSnapshot` and `TrackNotification`,
+/// `JuancodePersistence` stores them (`TrackedPrStore`, which used to be payload-only
+/// precisely because it could not see this type), `JuancodeServer/WireProtocol.swift`
+/// carries them and `JuancodeDesktop/LinearIssueTracker.swift` shares `TrackEvent`.
+/// `JuancodeCore` is the only target all four can reach. `commentTaskPrompt` and
+/// `diffReviewPrompt` have no Rust twin at all — they are the GitHub view's own.
+///
+/// The half that IS still a port question lives next to its argument types in
+/// `JuancodeServices/PrTrackClassifier.swift`; the engine half that IS a fork is
+/// `JuancodeServer/PrTrackingEngine.swift`, which juancode-nqpm deletes.
 
 // MARK: - state
 
@@ -122,87 +126,6 @@ public struct TrackedPr: Sendable, Identifiable, Equatable, Codable {
     }
 }
 
-// MARK: - classifier (pure)
-
-/// Diff a freshly-polled `PrActivity` against the prior baseline and classify what
-/// changed. Pure and deterministic — the heart of the poller, unit-tested without
-/// spawning anything.
-///
-/// On the first poll (`!prev.baselined`) we only record the baseline and emit no
-/// events, so tracking an already-busy PR doesn't replay its whole history.
-///
-/// `viewerLogin` is the authenticated `gh` account the tracking agent posts as. Its
-/// own comments/reviews (the agent's code review, `@mergifyio queue`, replies) are
-/// NOT new activity — reacting to them re-fires the poller and drives the agent to
-/// comment again, an echo loop. So self-authored items are recorded into the
-/// baseline (so they never re-surface) but never generate events. Empty ⇒ no filter.
-public func classifyPrActivity(prev: PrTrackSnapshot, activity: PrActivity,
-                               viewerLogin: String = "") -> PrClassification {
-    let allCommentIds = Set(activity.comments.map(\.id))
-    let allReviewIds = Set(activity.reviews.map(\.id))
-    let next = PrTrackSnapshot(
-        seenCommentIds: allCommentIds,
-        seenReviewIds: allReviewIds,
-        checks: activity.checks,
-        baselined: true)
-
-    // A merged/closed PR is terminal — emit a single `closed` event (even before the
-    // first baseline, so tracking an already-merged PR untracks immediately) and skip
-    // all other classification; there's nothing left to auto-fix or decide on.
-    if activity.state == "MERGED" || activity.state == "CLOSED" {
-        let reason = activity.state == "MERGED"
-            ? "PR was merged — stopped tracking" : "PR was closed — stopped tracking"
-        return PrClassification(snapshot: next, events: [.closed(reason)])
-    }
-
-    guard prev.baselined else {
-        return PrClassification(snapshot: next, events: [])
-    }
-
-    // Case-insensitive "authored by the tracking agent itself".
-    let viewer = viewerLogin.lowercased()
-    func isSelf(_ author: String) -> Bool { !viewer.isEmpty && author.lowercased() == viewer }
-
-    var events: [TrackEvent] = []
-
-    let newComments = activity.comments.filter { !prev.seenCommentIds.contains($0.id) && !isSelf($0.author) }
-    if !newComments.isEmpty {
-        let who = orderedUniqueAuthors(newComments.map(\.author))
-        let n = newComments.count
-        events.append(.autoFix("\(n) new comment\(n == 1 ? "" : "s")\(who.isEmpty ? "" : " from \(who)")"))
-    }
-
-    for r in activity.reviews where !prev.seenReviewIds.contains(r.id) && !isSelf(r.author) {
-        let who = r.author.isEmpty ? "a reviewer" : "@\(r.author)"
-        switch r.state {
-        case "CHANGES_REQUESTED":
-            events.append(.needsDecision("\(who) requested changes"))
-        case "COMMENTED":
-            if !r.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                events.append(.autoFix("New review from \(who)"))
-            }
-        default:
-            break  // APPROVED / DISMISSED / PENDING — informational, no action.
-        }
-    }
-
-    if prev.checks != .failing && activity.checks == .failing {
-        events.append(.autoFix("CI checks are failing"))
-    }
-
-    // Codex normally does the code review before a PR is queued for merge. When it
-    // posts that it's out of review capacity, Claude has to step in and review the PR
-    // itself (see `trackSeedPrompt`), so surface that as its own auto-fix signal.
-    let newReviews = activity.reviews.filter { !prev.seenReviewIds.contains($0.id) && !isSelf($0.author) }
-    let codexTappedOut = newComments.contains { isCodexReviewLimitNotice($0.body) }
-        || newReviews.contains { isCodexReviewLimitNotice($0.body) }
-    if codexTappedOut {
-        events.append(.autoFix("Codex is out of review capacity — review the PR yourself, then `@mergifyio queue`"))
-    }
-
-    return PrClassification(snapshot: next, events: events)
-}
-
 /// Level-triggered recovery for a tracked PR whose CI is red with nobody on it.
 ///
 /// `classifyPrActivity` is edge-triggered: it reports failing CI only on the
@@ -219,12 +142,6 @@ public func stalledCiFixReason(checks: PrChecks, sessionLive: Bool,
                                hasPendingFixes: Bool) -> String? {
     guard checks == .failing, !sessionLive, !hasPendingFixes else { return nil }
     return "CI is still failing and the session that was working this PR is gone"
-}
-
-/// True when a comment/review body is Codex reporting it couldn't review the PR
-/// because it hit its usage limits — the signal for Claude to review it instead.
-func isCodexReviewLimitNotice(_ body: String) -> Bool {
-    body.range(of: "usage limits for code reviews", options: .caseInsensitive) != nil
 }
 
 /// Comma-join distinct, non-empty `@author`s in first-seen order (for summaries).
@@ -250,69 +167,6 @@ public func deriveTrackState(checks: PrChecks, hasOpenDecision: Bool) -> TrackSt
 }
 
 // MARK: - prompt builders
-
-/// The seed prompt handed to the tracking session when the user clicks "Track".
-/// Establishes the PR context and the auto-fix-vs-escalate contract once, up front.
-public func trackSeedPrompt(number: Int, title: String, branch: String, url: String,
-                            worktree: BranchWorktree? = nil) -> String {
-    // Say where the agent is standing. On its own worktree the branch is already
-    // checked out, so "commit and push to `branch`" just works; detached (the branch
-    // was open in another worktree) it has to make its own branch before it can push,
-    // and being told that beats discovering it halfway through a fix.
-    let place: String
-    switch (worktree, worktree?.branch) {
-    case (nil, _):
-        place = ""
-    case let (.some(wt), .some(b)):
-        place = """
-
-
-        You're on a dedicated worktree for this PR at `\(wt.path)`, with `\(b)` \
-        checked out — it's yours, so commit and push here freely without touching the \
-        main checkout.
-        """
-    case let (.some(wt), .none):
-        place = """
-
-
-        You're on a dedicated worktree for this PR at `\(wt.path)`. `\(branch)` is \
-        already checked out elsewhere, so this one is on a DETACHED HEAD at that \
-        branch's head: to push a fix, create your own branch here first and open it \
-        against `\(branch)`, or tell me and I'll free the branch up.
-        """
-    }
-    return """
-    [juancode PR-tracker] You are now tracking pull request #\(number) "\(title)" \
-    (branch `\(branch)`): \(url)\(place)
-
-    I'll periodically tell you when there's new activity on this PR — new review \
-    comments or a change in CI status. When I do:
-    - If it's an obvious fix (a lint/format/type error, a clearly-correct test fix, \
-    or addressing a concrete review comment), make the change, commit, and push to \
-    `\(branch)`.
-    - If it needs a real decision (ambiguous feedback, conflicting requirements, a \
-    risky refactor, or a non-obvious failure), STOP and explain what you need from \
-    me instead of guessing.
-
-    CI flakes: the Dagger checks are known to fail intermittently. If a Dagger check \
-    fails and nothing in its logs points to a real problem in this PR's changes, just \
-    re-run it (`gh run rerun <run-id> --failed`) rather than treating it as something \
-    to fix. Only dig in or escalate if it fails again on the re-run, or the logs show \
-    a real error tied to your changes.
-
-    Codex review fallback: this PR is normally code-reviewed by Codex, and only added \
-    to the Mergify merge queue after that review. If you see a comment saying Codex has \
-    reached its usage limits for code reviews (i.e. it couldn't review this PR), do the \
-    code review yourself: read the full diff, post your review as a PR comment, and fix \
-    anything clearly wrong per the rules above. Once your review is clean and CI is \
-    green, add the PR to the Mergify queue by commenting `@mergifyio queue` on it. If \
-    your review turns up something that needs a real decision, STOP and escalate to me \
-    instead of queueing.
-
-    Start by reviewing the PR and its diff with `gh pr view \(number)` and \
-    `gh pr diff \(number)`.
-    """
-}
 
 /// The prompt injected mid-session when the poller detects auto-fixable activity.
 /// Summarises what changed and re-states the fix-or-escalate contract; the agent

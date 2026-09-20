@@ -39,6 +39,9 @@ func rawJSONResponse(_ data: Data, status: HTTPResponse.Status = .ok) -> Respons
 
 let jsonNullResponse = rawJSONResponse(Data("null".utf8))
 
+/// `ProcessError` is a `JuancodeCore` type since juancode-idza, so it costs the relay
+/// nothing. `GitError` is the one thing this file still needs `JuancodeServices` for;
+/// that branch goes with `Git.swift` (juancode-lgaw), and the import with it.
 func errMsg(_ err: Error) -> String {
     if let g = err as? GitError { return g.message }
     if let p = err as? ProcessError { return p.message }

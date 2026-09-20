@@ -105,11 +105,11 @@ over titles + scrollback — so history and search survive app restarts.
 1:1 Swift `Process` ports of the server's shell-out + parse modules. Foundation +
 `JuancodeCore` only (no server/UI deps). Every shell-out goes through
 `ProcessRunner` (an `execFile` replacement that inherits the environment verbatim —
-the prime directive).
+the prime directive), which lives in `JuancodeCore` since juancode-idza: it is not a
+port question, and `JuancodeClient` calls it too.
 
 | Swift (`Sources/JuancodeServices`) | mirrors (`apps/server/src`)                     |
 | ---------------------------------- | ----------------------------------------------- |
-| `ProcessRunner`                    | `execFile` (the shared shell-out backbone)      |
 | `Git`                              | `git.ts` (diff, state, worktrees, commit, push) |
 | `Gh` / `Commit`                    | `gh.ts` / `commit.ts` (PRs; AI commit message)  |
 | `Review`                           | `review.ts` ('Review with Claude')              |
