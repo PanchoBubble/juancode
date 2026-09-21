@@ -16,10 +16,14 @@ for it.
 
 ## Stack
 
-- **`apps/native`** (primary surface): Swift / SwiftUI macOS app. The app _is_ the server —
-  an in-process registry owns the real ptys (`forkpty`) and fans output to the local
-  SwiftUI view and remote clients over an embedded WebSocket + HTTP server on `:4280`. See
-  [apps/native/README.md](./apps/native/README.md).
+- **`apps/native`** (primary surface): Swift / SwiftUI macOS app — the shell, plus the
+  relay that serves `:4280` over WebSocket + HTTP to the oracle sidecar and any remote
+  client. It does not own the ptys: juancode-nqpm deleted the in-process Swift core, so
+  the app connects to the daemon like every other client and refuses to launch without
+  one. See [apps/native/README.md](./apps/native/README.md).
+- **`apps/juancoded`**: the Rust core (`juancoded`), a separate daemon that owns the real
+  ptys (`forkpty`), the VT grid, the session store and the tracked-PR watch list, and
+  outlives the app. See [apps/juancoded/README.md](./apps/juancoded/README.md).
 - **`apps/oracle-mcp`**: Node sidecar (Express 5 + `ws` + MCP SDK, TypeScript via `tsx`).
   MCP server + Telegram bridge + a small phone web console; talks to the native app's
   embedded server on `:4280`. Telegram is the notification/remote-steering path. It also
@@ -31,9 +35,10 @@ for it.
 
 ## Architecture (one paragraph)
 
-The native app owns the ptys and the wire protocol
-(`apps/native/Sources/JuancodeServer/WireProtocol.swift`), broadcasting session `activity`
-over `/ws`. The oracle sidecar keeps a single long-lived WS client to that server
+The `juancoded` daemon owns the ptys and speaks the wire protocol
+(`apps/native/Sources/JuancodeServer/WireProtocol.swift` is the Swift side of it),
+broadcasting session `activity` over `/ws`. The native app relays `:4280` to it, and the
+oracle sidecar keeps a single long-lived WS client to that relay
 (`apps/oracle-mcp/src/native-events.ts`) and fans session events out in-process to the
 Telegram bridge (`telegram.ts`), which pings the relevant chat when a session needs input
 or finishes and routes replies back into the session's pty. Notifications go over Telegram —

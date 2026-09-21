@@ -375,28 +375,6 @@ build_daemon() {
   fi
 }
 
-# Which core this launch will actually use, decided the same way CoreBoot does:
-# JUANCODE_CORE wins, else the persisted Settings choice, else swift.
-#
-# Two defaults domains, because this repo builds the app under two bundle identifiers —
-# `dev.juancode.app` (apps/native/scripts/dev-app.sh and package-app.sh) and
-# `com.juanone.juancode` (scripts/bundle-app.sh) — and UserDefaults is per-identifier.
-# Reading only one of them is a way to flip the setting to rust in the app, relaunch,
-# and have this script decide there was nothing to start: the exact symptom of
-# juancode-k0bq, from the other end. First domain that has an answer wins; `rust`
-# anywhere is enough, since the cost of starting a daemon the app then ignores is one
-# idle process and the cost of not starting one is the Swift-core fallback.
-selected_core() {
-  local core="${JUANCODE_CORE:-}" domain
-  if [ -z "$core" ]; then
-    for domain in dev.juancode.app com.juanone.juancode; do
-      core="$(defaults read "$domain" juancode.core.backend 2>/dev/null || true)"
-      [ -n "$core" ] && break
-    done
-  fi
-  printf '%s' "${core:-swift}"
-}
-
 # `mode` is empty for the ordinary owned/unowned starts and `persistent` for a daemon
 # this launch is deliberately NOT going to own. It changes three things and nothing
 # else: what is said, which record is written, and the verdict printed on stdout — a
@@ -539,18 +517,12 @@ cmd_status() {
 #   started <pid> | claimed <pid> | persistent <pid> | launchd <pid> | foreign <pid> | none
 #
 # Only `started` and `claimed` arm a trap. `persistent`, `launchd` and `foreign` all
-# mean "connect to it, touch nothing"; `none` means the Swift core, or
-# JUANCODE_DAEMON=off.
+# mean "connect to it, touch nothing"; `none` means JUANCODE_DAEMON=off.
 cmd_ensure() {
   local token="${1:-}" owner_pid="${2:-0}"
   local persist=""; [ "$PERSIST" = "1" ] && persist="persistent"
   if [ "${JUANCODE_DAEMON:-}" = "off" ]; then
     say "JUANCODE_DAEMON=off — not touching the daemon"
-    printf 'none\n'
-    return 0
-  fi
-  if [ "$(selected_core)" != "rust" ]; then
-    # Nothing to manage and nothing to kill: the Swift core is in-process.
     printf 'none\n'
     return 0
   fi

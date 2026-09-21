@@ -64,7 +64,7 @@ enum RustServe {
             searchSessions: { client.searchSessions($0, limit: $1) },
             kill: { client.kill($0) },
             deleteSession: { client.deleteSession($0) },
-            backendName: CoreBackend.rust.rawValue)
+            backendName: "rust")
 
         // Intent, not confirmation: the bind happens inside `run`, and Hummingbird
         // prints its own "Server started and listening on …" once it has succeeded.
@@ -88,12 +88,11 @@ enum RustServe {
 
     /// Connect to the daemon, optionally waiting for it to appear.
     ///
-    /// Deliberately does NOT fall back to the swift core the way `CoreBoot` does.
-    /// The app falls back because a window that does nothing is worse than a window
-    /// on the other core; a relay has the opposite problem. Falling back here would
-    /// leave 4280 answering `/api/sessions` from a *different* database and `/ws`
-    /// from a registry with no ptys in it, and the sidecar has no way to tell that
-    /// apart from the daemon's sessions having vanished.
+    /// There is nothing to fall back to and there never really was: a relay that
+    /// answered `/api/sessions` out of a *different* database and `/ws` out of a
+    /// registry with no ptys in it would be indistinguishable, from the sidecar's
+    /// side, from the daemon's sessions having vanished. Waiting and then failing
+    /// loudly is the only honest answer this process has.
     private static func connect(upstream: String) async throws -> RustCoreClient {
         let deadline = Date().addingTimeInterval(TimeInterval(waitForCoreSeconds))
         var lastError: Error?
@@ -156,4 +155,11 @@ final class ConnectionLog: @unchecked Sendable {
             + "Retrying every \(retryDelaySeconds)s; the relay stays on this port and "
             + "REST reads keep answering from the mirror."
     }
+}
+
+/// One line on stderr, so the two streams stay separable when this runs under a
+/// supervisor: stdout is the "listening on …" banner, stderr is everything that
+/// went wrong or changed underneath.
+func logLine(_ text: String) {
+    FileHandle.standardError.write(Data("juancode-serve: \(text)\n".utf8))
 }

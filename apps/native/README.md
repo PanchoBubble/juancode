@@ -1,9 +1,15 @@
 # juancode native (Swift)
 
-Native macOS port of juancode where **the app is the server** (epic `juancode-u34`).
-A single in-process registry owns the real ptys (claude/codex/opencode via `forkpty`,
-env untouched), fanning pty output out to N subscribers: the local SwiftUI view AND
-remote browser/phone clients over an embedded WS server.
+Native macOS port of juancode (epic `juancode-u34`). The `juancoded` daemon
+(`apps/juancoded`, Rust) owns the real ptys — claude/codex/opencode via `forkpty`,
+env untouched — and this app is the SwiftUI shell on top of it plus the relay that
+serves `:4280`, the one address the oracle sidecar and every remote client know.
+
+There used to be a second core in here: an in-process Swift registry, server and
+store, selected with `JUANCODE_CORE`. juancode-nqpm deleted it. What the sections
+below still describe as "the core" is the daemon, and anything in this package that
+reads like a core is either a shared model (`JuancodeCore`), the desktop-side mirror
+of the daemon's rows (`JuancodePersistence`), or the relay (`JuancodeServer`).
 
 ## `JuancodeCore` — the node-pty replacement (`juancode-u34.2`)
 
@@ -97,31 +103,23 @@ over titles + scrollback — so history and search survive app restarts.
   implementation. Replay stays faithful because trimming happens on byte
   boundaries upstream (`Scrollback`).
 - The only target that depends on GRDB; `JuancodeCore` stays dependency-free.
-  The server holds one `GRDBStore` as both the `SessionStore` (handed to the
-  registry's `SessionEnvironment`) and the richer `PersistentStore` for queries.
+  `RustCoreClient` holds one `GRDBStore` as the desktop-side mirror of the daemon's
+  session rows — the sidebar, the search index and the retention cap read it.
 
-## `JuancodeServices` — auxiliary services (`juancode-u34.6`)
+## `JuancodeServices` — what is left to port (`juancode-u34.6`)
 
-1:1 Swift `Process` ports of the server's shell-out + parse modules. Foundation +
-`JuancodeCore` only (no server/UI deps). Every shell-out goes through
+Once the 1:1 Swift `Process` ports of the old server's shell-out + parse modules.
+Foundation + `JuancodeCore` only, no server or UI deps. Every shell-out goes through
 `ProcessRunner` (an `execFile` replacement that inherits the environment verbatim —
 the prime directive), which lives in `JuancodeCore` since juancode-idza: it is not a
 port question, and `JuancodeClient` calls it too.
 
-| Swift (`Sources/JuancodeServices`) | mirrors (`apps/server/src`)                     |
-| ---------------------------------- | ----------------------------------------------- |
-| `Git`                              | `git.ts` (diff, state, worktrees, commit, push) |
-| `Gh` / `Commit`                    | `gh.ts` / `commit.ts` (PRs; AI commit message)  |
-| `Review`                           | `review.ts` ('Review with Claude')              |
-| `SessionTitle` / `SessionUsage`    | `sessionTitle.ts` / `sessionUsage.ts`           |
-| `RecoverSession`                   | `recoverSession.ts` (recover an old CLI id)     |
-| `EphemeralPty`                     | `editor.ts` + `terminal.ts` (editor/shell ptys) |
-| `OpencodeStore`                    | no TS analogue — reads opencode's own SQLite db  |
-| `OpencodeActivityTail`             | `structuredTranscript.ts`, over `part` rows     |
-| `SessionEnvironment.live(store:)`  | the title/usage poll seam wired into `Session`  |
-
-Title/usage polling is injected into `Session` via `SessionEnvironment` (the core
-stays dependency-free); use `SessionEnvironment.live(store:)` for the real seams.
+`ls Sources/JuancodeServices` is the answer to "what is left to port", and it is
+nearly empty: juancode-nqpm took `Git`, `WorktreeDeps`, `GhPoll`, `PrTrackClassifier`,
+`LiveEnvironment` and `ReviveSession` out with the Swift core, because each of them
+existed to serve it and the daemon has its own. What is left is two files with one
+desktop caller each — `OracleMailbox` and `ResumeGrid` — waiting on juancode-idza to
+move them to `JuancodeDesktop`.
 
 ## `JuancodeDesktop` — desktop-local logic (`juancode-rr6m`)
 
@@ -165,25 +163,30 @@ match `recoverCliSessionId`'s window; and its cost figure is opencode's own acco
 rather than our per-model estimate. Point `JUANCODE_OPENCODE_DB` at a fixture to test
 against one.
 
-## `JuancodeServer` — embedded WS+HTTP server (`juancode-u34.3`)
+## `JuancodeServer` — the `:4280` relay (`juancode-u34.3`, `juancode-bse5`)
 
-A Hummingbird 2 server that folds the server role into the app. Serves the
-`protocol.ts` wire format over `/ws` (mirrors `ws.ts`) and the REST endpoints
-(mirrors `index.ts`), so the existing React web app (`apps/web`) works as a
-remote client almost unchanged. Remote browser/phone clients subscribe to
-registry sessions here; the local SwiftUI view (u34.4) is an in-process
-subscriber to the same registry (no WS hop).
+A Hummingbird 2 server that answers the one address the sidecar and every remote
+client know. It is a relay, not a core:
 
-| Swift (`Sources/JuancodeServer`) | mirrors (`apps/server/src`)                             |
-| -------------------------------- | ------------------------------------------------------- |
-| `WireProtocol`                   | `protocol.ts` (`ClientMessage`/`ServerMessage` Codable) |
-| `WebSocketConnection`            | `ws.ts` (per-connection subs + activity + routing)      |
-| `JuancodeServer` (routes)        | `index.ts` (REST: diff/git/PR/review/…)                 |
-| `AppState`                       | the `registry` + `sessionDb` + ephemeral singletons     |
+- **`/ws` is forwarded verbatim to the daemon.** The daemon owns the ptys, so it is
+  the only thing that can answer `input`, `create` or `subscribeScreen`.
+- **The REST session reads are answered here**, from the desktop's mirror of the
+  daemon's rows, because the daemon does not serve them at all. Everything else
+  answers 501 with the reason rather than a silent empty body.
 
-`AppState` owns one `GRDBStore` (handed to the registry as the `SessionStore`
-and used directly as the `PersistentStore` for queries), the `SessionRegistry`
-(built with `SessionEnvironment.live`), and the ephemeral editor/terminal ptys.
+| Swift (`Sources/JuancodeServer`) | role                                                              |
+| -------------------------------- | ------------------------------------------------------------------ |
+| `WireProtocol`                   | the wire (`ClientMessage`/`ServerMessage` Codable); the TS mirror is `apps/oracle-mcp/src/native-events.ts` |
+| `CoreProxyServer`                | the relay itself: the `/ws` forward, the mirror-backed REST, `/api/health` |
+| `ServerSupport`                  | `APIError`, the JSON response helpers, the `ResponseEncodable` conformances |
+
+This target used to hold a whole second server — `AppState`, `WebSocketConnection`,
+`PrTrackingEngine`, the screen streamer, the REST routes — over an in-process
+registry. juancode-nqpm deleted all of it. The three files above are what the daemon
+path was always running on.
+
+`juancode-serve` (`Sources/Serve`) boots the same relay with no GUI, so `:4280` keeps
+answering with the desktop closed (juancode-eko6).
 
 ### `POST /api/sessions/:id/wait` — block on a condition (`juancode-9umy`)
 
@@ -208,14 +211,13 @@ answers a different question.
 
 ## `JuancodeApp` — the SwiftUI shell (`juancode-u34.4`)
 
-The native app (`swift run juancode`): the local shell AND the host of the
-embedded server. The local UI is an **in-process subscriber** to the same
-`SessionRegistry` the server drives — no WS hop for the local view; remote
-browser/phone clients attach to the identical registry over `/ws`.
+The native app (`swift run juancode`): the local shell AND the host of the relay.
+The local UI and every remote client read the same daemon — the UI over this
+process's `RustCoreClient` socket, remote clients over the relay's `/ws`.
 
 | Swift (`Sources/JuancodeApp`) | role                                                                                               |
 | ----------------------------- | -------------------------------------------------------------------------------------------------- |
-| `JuancodeApp` (`@main`)       | boots `AppState`, starts the embedded server in the background                                     |
+| `JuancodeApp` (`@main`)       | connects to the daemon (refusing to launch if it cannot), starts the relay in the background       |
 | `AppModel`                    | observable bridge to the registry/store (sessions, activity, create/reactivate/delete)             |
 | `RootView` / `SidebarView`    | `NavigationSplitView` sidebar + session detail                                                     |
 | `SwiftTermLive`               | SwiftTerm `TerminalView` fed by `Session.subscribeOutput` (replay + live); keystrokes/resize → pty |
@@ -351,14 +353,12 @@ scripts/dev-daemon.sh …                  # the same thing without pnpm
 
 `scripts/dev-daemon.sh` forwards to `apps/native/scripts/juancoded.sh` (lifetime) and
 `apps/native/scripts/juancoded-agent.sh` (the LaunchAgent). You do not need any of
-them for an ordinary terminal launch: `scripts/dev-app.sh` starts a daemon itself when
-the selected core is rust, and reaps it when the app exits.
+them for an ordinary terminal launch: the launch script starts a daemon itself and
+reaps it when the app exits.
 
-### The Rust daemon's lifetime (`JUANCODE_CORE=rust` only)
+### The daemon's lifetime
 
-On the Swift core there is nothing to manage: the core is in-process and launches and
-dies with the app. On the Rust core, `juancoded` is a separate process — and nothing
-used to own its lifetime. It drifted to `PPID 1` and every later app launch silently
+`juancoded` is a separate process — and nothing used to own its lifetime. It drifted to `PPID 1` and every later app launch silently
 reconnected to it: an older build, with the environment it had been started with. The
 app's session list is a mirror of what that daemon reports, so it looked authoritative
 while being hours stale, and a `JUANCODE_SESSIONS_PER_PROJECT` set on the app's launch
@@ -519,7 +519,7 @@ window server and would fight the running instance for `:4280`.
 ```sh
 swift test                       # unit + integration (core + persistence + services + server)
 swift run juancode-smoke claude  # smoke the core against the real claude CLI
-swift run juancode-serve         # boot the embedded WS+HTTP server (headless) on :4280
+swift run juancode-serve         # boot the :4280 relay (headless) against the daemon
 ```
 
 With `juancode-serve` running, the oracle sidecar (`pnpm dev:oracle`) can connect

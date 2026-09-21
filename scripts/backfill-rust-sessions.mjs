@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Bring the Swift core's session history across to the Rust core's stores.
 //
-// Each core owns its own sqlite file — deliberately: the daemon is a separate
+// Each core owned its own sqlite file — deliberately: the daemon is a separate
 // process that outlives the app, and two writers on one file is a corruption risk,
-// not a cleanup. The cost of that is a sidebar that gets shorter when you switch
-// `JUANCODE_CORE`, because the history only ever existed in the other file. This
-// unions it across: every session the Swift store has and the Rust one does not.
+// not a cleanup. The cost of that was a sidebar that got shorter when you switched
+// cores, because the history only ever existed in the other file. The Swift core is
+// gone (juancode-nqpm) and its file is now history nothing reads; this unions it
+// across: every session the Swift store has and the Rust one does not.
 //
 // It is a UNION, never a copy. The Rust stores hold sessions the Swift one never
 // saw (they were created under the Rust core), and those must survive untouched.

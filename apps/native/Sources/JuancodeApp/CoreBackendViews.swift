@@ -1,10 +1,12 @@
-// Settings → Core, the core pill (shown in Settings and in the running-sessions
-// popover's footer since it gave up its toolbar slot), and the launch-time "the
-// rust core did not answer" offer.
+// Settings → Core and the core pill (shown in Settings and in the running-sessions
+// popover's footer since it gave up its toolbar slot).
 //
-// The picker is restart-scoped on purpose: a core owns the ptys, so switching one
-// mid-flight would mean migrating live sessions between processes. It records a
-// choice for the next launch and says so.
+// There used to be a backend picker here, and a sheet for the launch where the rust
+// core did not answer and the app fell back to the Swift one. juancode-nqpm deleted
+// the Swift core, so there is no choice to record and nothing to fall back to: a
+// launch that cannot reach the daemon does not get this far (see
+// `JuancodeApp.connectOrExplain`). What is left is what a bug report still needs —
+// which daemon answered, what is wrong with it, and what it can do.
 
 import SwiftUI
 import AppKit
@@ -13,7 +15,6 @@ import JuancodeCore
 
 struct CoreSettingsView: View {
     @Environment(AppModel.self) private var model
-    @State private var choice = CoreBackendPreference.persisted
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,56 +31,27 @@ struct CoreSettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Picker("Backend for the next launch", selection: $choice) {
-                        ForEach(CoreBackend.allCases, id: \.self) { backend in
-                            Text(backend.label).tag(backend)
-                        }
-                    }
-                    .disabled(model.coreSelection.isPinnedByEnvironment)
-                    .onChange(of: choice) { _, picked in
-                        CoreBackendPreference.setPersisted(picked)
-                    }
-
-                    if model.coreSelection.isPinnedByEnvironment {
-                        Text("JUANCODE_CORE is set in this process's environment, so it "
-                            + "wins over this picker for as long as it is set. This "
-                            + "launch is on the \(model.coreSelection.active.rawValue) core.")
-                            .font(.caption).foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else if choice != model.coreSelection.active {
-                        HStack(spacing: 8) {
-                            Text("Takes effect on the next launch. Live sessions are never "
-                                + "migrated between cores.")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("Quit juancode") { NSApp.terminate(nil) }
-                                .controlSize(.small)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Text("Each core keeps its own database, so **sessions started under one "
-                        + "core are not listed under the other**. Two writers on one SQLite "
-                        + "file, with two schemas drifting apart, is what that rule prevents.")
+                    Text("The core is the `juancoded` daemon: a separate process that "
+                        + "owns the ptys and outlives this app. The desktop keeps a "
+                        + "**mirror** of its session rows — one writer per file — and reads "
+                        + "the sidebar, the search index and the retention cap out of it.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Divider().padding(.vertical, 4)
 
-                    detail("Active core", model.coreSelection.active.label)
                     detail("Wire protocol", "v\(model.core.info.protocolVersion)")
-                    detail("Database", model.coreSelection.databasePath)
-                    if model.coreSelection.active == .rust {
-                        detail("Daemon", model.coreSelection.rustCoreURL)
-                        detail("Daemon's own store",
-                               "$JUANCODED_DATA_DIR/juancoded-rust.db (default ~/.juancode/rust-core)")
-                        detail("Connection", model.coreConnectionDown.map { "down: \($0)" } ?? "up")
-                        if let daemon = model.coreSelection.daemon {
-                            detail("Daemon identity", daemon.summary)
-                            if let exe = daemon.exePath { detail("Daemon binary", exe) }
-                        } else {
-                            detail("Daemon identity",
-                                   "not reported — this daemon predates serverInfo.daemon")
-                        }
+                    detail("Daemon", model.coreSelection.rustCoreURL)
+                    detail("Desktop mirror", model.coreSelection.databasePath)
+                    detail("Daemon's own store",
+                           "$JUANCODED_DATA_DIR/juancoded-rust.db (default ~/.juancode/rust-core)")
+                    detail("Connection", model.coreConnectionDown.map { "down: \($0)" } ?? "up")
+                    if let daemon = model.coreSelection.daemon {
+                        detail("Daemon identity", daemon.summary)
+                        if let exe = daemon.exePath { detail("Daemon binary", exe) }
+                    } else {
+                        detail("Daemon identity",
+                               "not reported — this daemon predates serverInfo.daemon")
                     }
                     if let persistence = model.coreSelection.sessionPersistence {
                         DaemonPersistenceRow(note: persistence)
@@ -87,10 +59,6 @@ struct CoreSettingsView: View {
                     ForEach(model.coreSelection.daemonWarnings) { warning in
                         BuildWarningRow(warning)
                     }
-                    if let reason = model.coreSelection.unreachableReason {
-                        detail("Fell back because", reason)
-                    }
-
                     Divider().padding(.vertical, 4)
 
                     Text("Capabilities").font(.subheadline)
@@ -140,8 +108,9 @@ struct CoreSettingsView: View {
     }
 }
 
-/// The active core, as a pill. Always shown, including for the default Swift core:
-/// a screenshot in a bug report should never leave which core produced it open to
+/// The core, as a pill. Always shown even though there is only one kind of core
+/// left: what it carries now is the daemon's STATE — down, stale, or outliving the
+/// app — and a screenshot in a bug report should never leave that open to
 /// interpretation.
 struct CoreBadgeLabel: View {
     let selection: CoreSelection
@@ -159,9 +128,9 @@ struct CoreBadgeLabel: View {
         // are true — the mode is never allowed to make an old core quieter — and the
         // tooltip carries both.
         let persists = selection.sessionPersistence
-        let tint: Color = down ? .red : (stale ? .yellow : (selection.active == .rust ? .orange : .secondary))
-        let label = stale ? "\(selection.active.rawValue) · stale"
-            : (persists != nil ? "\(selection.active.rawValue) · persists" : selection.active.rawValue)
+        let tint: Color = down ? .red : (stale ? .yellow : .orange)
+        let label = stale ? "juancoded · stale"
+            : (persists != nil ? "juancoded · persists" : "juancoded")
         return HStack(spacing: 4) {
             Image(systemName: down || stale ? "exclamationmark.triangle.fill"
                 : (persists != nil ? "pin.fill" : "cpu"))
@@ -235,51 +204,5 @@ struct BuildWarningRow: View {
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// Shown once, at launch, when the rust core was selected and did not answer. The
-/// app is already on the Swift core by then — this is where that is admitted, and
-/// where the user chooses whether to accept it or go start the daemon.
-struct CoreFallbackSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text("The rust core did not answer").font(.headline)
-            }
-            Text(model.coreSelection.unreachableReason ?? "The daemon was not reachable.")
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Looked for it at \(model.coreSelection.rustCoreURL). This launch is running "
-                + "on the Swift core instead, with its own database, so any session you "
-                + "started under the rust core is not listed here.")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("`scripts/dev-daemon.sh agent install` keeps a daemon running across app "
-                + "quits, logout and reboot, so this does not happen again. For one launch, "
-                + "`scripts/dev-app.sh` starts one that lives as long as its terminal. Either "
-                + "way, relaunch afterwards — the core is chosen once, at boot.")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Button("Switch the setting to Swift") {
-                    CoreBackendPreference.setPersisted(.swift)
-                    dismiss()
-                }
-                Spacer()
-                Button("Quit and start the daemon") { NSApp.terminate(nil) }
-                Button("Continue on Swift") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-            }
-            .padding(.top, 4)
-        }
-        .padding(20)
-        .frame(width: 480)
     }
 }

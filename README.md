@@ -13,11 +13,13 @@ servers).
 
 ## Layout
 
-- **`apps/native`** — the macOS app (Swift / SwiftUI), the primary surface. **The
-  app is the server**: an in-process registry owns the real ptys (`forkpty`, env
-  untouched) and fans output out to both the local SwiftUI view and remote clients
-  over an embedded WebSocket + HTTP server on `:4280`. See
-  [apps/native/README.md](./apps/native/README.md).
+- **`apps/native`** — the macOS app (Swift / SwiftUI), the primary surface: the shell
+  plus the relay that serves `:4280` over WebSocket + HTTP, so remote clients have one
+  address to talk to. See [apps/native/README.md](./apps/native/README.md).
+- **`apps/juancoded`** — the core (`juancoded`, Rust): a separate daemon that owns the
+  real ptys (`forkpty`, env untouched), the session store and the VT grid, and keeps
+  your sessions running after you quit the app. See
+  [apps/juancoded/README.md](./apps/juancoded/README.md).
 - **`apps/oracle-mcp`** — a Node sidecar (MCP server + Telegram bridge + a small
   phone web console) that talks to the native app's embedded server on `:4280`.
   Lets you observe/steer sessions and dispatch agents from Telegram or a phone.

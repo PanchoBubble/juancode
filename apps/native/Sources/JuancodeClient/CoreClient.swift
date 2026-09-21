@@ -7,17 +7,17 @@ import JuancodeServices
 ///
 /// The core is the non-UI half of juancode: it owns the ptys, the VT grid, the
 /// persisted session rows, the per-session message queue, the tracked-PR watch
-/// list, and the ephemeral editor/terminal ptys. Today that half runs in this
-/// process (`SwiftCoreClient` over the in-process registry + store); the point of
-/// this protocol is that the UI can no longer tell, so a second implementation
-/// can front a core running somewhere else.
+/// list, and the ephemeral editor/terminal ptys. That half runs in the `juancoded`
+/// daemon (`RustCoreClient`), which is the only implementation since
+/// juancode-nqpm; the protocol stays because the UI must not be able to tell where
+/// the core runs, and because this is the seam that makes reaching past it into a
+/// registry a compile error rather than a habit.
 ///
-/// The surface is modelled on the WebSocket message set the embedded server
-/// already speaks (`JuancodeServer/WireProtocol.swift`) plus the REST endpoints
-/// the same server exposes. That set is the contract, remote clients already
-/// depend on it, and re-deriving a second vocabulary here would be a second
-/// contract to keep in sync. Each section below names the wire messages it
-/// covers.
+/// The surface is modelled on the WebSocket message set the wire speaks
+/// (`JuancodeServer/WireProtocol.swift`) plus the REST endpoints the relay exposes.
+/// That set is the contract, remote clients already depend on it, and re-deriving a
+/// second vocabulary here would be a second contract to keep in sync. Each section
+/// below names the wire messages it covers.
 ///
 /// Nothing here hands back a core object. The live-session members return `any
 /// LiveSession`, the per-session protocol the terminal surfaces subscribe to for
@@ -46,12 +46,6 @@ public protocol CoreClient: AnyObject, Sendable {
 
     // MARK: - Session lifecycle (wire: create, reactivate, adoptExternal, setSkipPermissions, kill)
 
-    /// Whether this core cuts a `create`'s isolation worktree itself, given
-    /// `.requested`. A requirement rather than an extension-only member so the answer
-    /// is the core's and not the protocol's: see the extension below for the default
-    /// and `SessionWorktree` for why the two sides differ.
-    var makesWorktrees: Bool { get }
-
     /// Spawn a new agent session (wire `create`). Blocking: resolves the CLI
     /// through a login shell and forkpty()s, so callers keep it off the main actor.
     ///
@@ -71,7 +65,7 @@ public protocol CoreClient: AnyObject, Sendable {
     /// would exist on one core and be invented on the other.
     ///
     /// `worktree` asks for isolation, and says who cut the tree — see
-    /// `SessionWorktree` and `makesWorktrees`.
+    /// `SessionWorktree`.
     @discardableResult
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                 opts: SpawnOptions, worktree: SessionWorktree?,
@@ -423,23 +417,19 @@ public extension CoreClient {
 /// process owns the session row, because that row's `worktreePath` is the only thing
 /// the delete-reap reads. A desktop that cut its own tree and handed the daemon the
 /// path as a plain `cwd` left the daemon's row blank, so closing the session removed
-/// nothing and the tree stayed on disk forever (juancode-asnn). `makesWorktrees`
-/// answers which case the core in hand takes.
+/// nothing and the tree stayed on disk forever (juancode-asnn).
+///
+/// Only `.requested` is reachable now that the core is always another process. The
+/// `.made` case survives as the thing `RustCoreClient` REFUSES: a caller that cuts
+/// a tree itself and hands over the path gets an error rather than the silent leak
+/// asnn was.
 public enum SessionWorktree: Sendable, Equatable {
-    /// A tree the CALLER already cut, by absolute path. Only for a core in this
-    /// process, where the row and the tree are made by the same program.
+    /// A tree the CALLER already cut, by absolute path. No core accepts one: the row
+    /// and the tree have to be made by the same process.
     case made(path: String)
     /// A tree the CORE must cut, as `<repo>-worktrees/<name>` off the create's `cwd`,
     /// on branch `juancode/<name>`.
     case requested(name: String)
-}
-
-public extension CoreClient {
-    /// The in-process answer, and the default: the app IS that core, so the
-    /// app cuts the tree and hands over `.made` — the registry records it on the row
-    /// it writes in this same process. `RustCoreClient` overrides it to true, because
-    /// a daemon can only reap a tree its own row names.
-    var makesWorktrees: Bool { false }
 }
 
 /// A core's wire-protocol version and implemented capabilities: the `serverInfo`

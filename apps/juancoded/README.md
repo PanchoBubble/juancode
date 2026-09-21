@@ -26,10 +26,10 @@ risks and beat the Swift path on every number below; the composition core
 3. **The existing wire protocol is the whole boundary.** `juancoded-server` is a
    translation of `WireProtocol.swift`, not a redesign: `created`, `attached` with
    scrollback, `output`, `screen` (reset + row diffs), `inputAck`, `resizeAck`,
-   `activity`, `exit`, `error`, `unresumable`. `serverInfo` advertises a deliberately
-   narrower capability list than the Swift core, and clients feature-detect off it —
-   which is what makes a partial core a supported configuration rather than a broken
-   one.
+   `activity`, `exit`, `error`, `unresumable`. `serverInfo` advertises the capability
+   list this core actually implements and clients feature-detect off it — which is
+   what made a partial core a supported configuration rather than a broken one while
+   it was being written, and what still keeps an older daemon usable by a newer app.
 
 4. **The Swift UI needs no FFI.** `client-spike/` is a plain `TerminalView` fed from
    the socket (never `LocalProcessTerminalView` — the pty is not ours). Keystrokes go
@@ -38,7 +38,7 @@ risks and beat the Swift path on every number below; the composition core
 
 ## The three numbers (2026-08-21, M-series arm64, release build)
 
-| Measure | Rust core | Swift path | Note |
+| Measure | Rust core | Swift path (deleted 2026-09-21) | Note |
 | --- | --- | --- | --- |
 | VT parse | **0.0769 ms / 16KB** (213 MB/s) | 0.156 ms / 16KB | 2.0x faster. Same chunk unit as the recorded Swift figure. |
 | Grid projection | 0.0227 ms / 120x40 | — | Cost of one `snapshot()`. |
@@ -180,9 +180,11 @@ behind, which is why every reader confirms the pid is alive first.
 
 ### Bringing the Swift core's history across
 
-One DB per core means a session recorded under the Swift core is not visible here,
-which is fine until somebody wants the Swift core deleted (`juancode-nqpm`). The
-bridge is one subcommand:
+One DB per core meant a session recorded under the old in-process Swift core is not
+visible here. juancode-nqpm deleted that core; it did NOT delete its store, and
+nothing does — `~/.juancode/data/juancode.db` is still sitting there with the history
+in it, unread by anything. The bridge is one subcommand, and it can be run on any day
+(it needs this daemon stopped, so pick one where that is free):
 
 ```sh
 juancoded import-swift ~/.juancode/data/juancode.db --dry-run   # count it first
@@ -272,9 +274,9 @@ A mismatch shows in the core badge as `rust · stale` rather than being invisibl
 `JUANCODE_SESSIONS_PER_PROJECT` is the one that bites: it is read **once, at daemon
 start**, so setting it on an app launch line does nothing until the daemon restarts.
 That is why the effective value goes out on the handshake instead of being inferred.
-It defaults to `0` — no cap, keep everything — the same default the Swift core has.
-It used to default to 40 here, which made switching `JUANCODE_CORE=rust` a hard delete
-of history the Swift core had deliberately kept, so a cap is opt-in on both cores now.
+It defaults to `0` — no cap, keep everything — the same default the Swift core had.
+It used to default to 40 here, which made switching to this core a hard delete of
+history the Swift core had deliberately kept, so a cap is opt-in.
 
 `apps/native/scripts/juancoded.sh` (`ensure|reap|status|stop|restart`) owns the
 lifetime from the app side: a launch that starts a daemon owns it and reaps it when

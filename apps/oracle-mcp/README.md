@@ -58,8 +58,8 @@ ensure `claude` is on PATH and logged in.
 
 ## Architecture
 
-**This sidecar stays** — decided in juancode-52e8.14.7 and not to be re-opened. As the
-Swift core is retired in favour of `apps/juancoded` (Rust), the daemon absorbs nothing of
+**This sidecar stays** — decided in juancode-52e8.14.7 and not to be re-opened. The
+Swift core is retired in favour of `apps/juancoded` (Rust), and the daemon absorbs nothing of
 what is here: Telegram, the phone console, voice transcription, triggers, cron, the
 dispatch registry and the MCP server are not core work and gain nothing from Rust. The
 seam is the one long-lived WS in `src/native-events.ts`, and it already survived the core
@@ -81,31 +81,36 @@ oracle-mcp  (this sidecar, 127.0.0.1:4281)
   └─ GET 127.0.0.1:4280/api/sessions   (native app's embedded server)
 ```
 
-### What 4280 is, per core
+### What 4280 is
 
-The sidecar always talks to `127.0.0.1:4280` (`JUANCODE_PORT` / `JUANCODE_API`), but
-what answers there depends on which core the desktop launched with:
+The sidecar always talks to `127.0.0.1:4280` (`JUANCODE_PORT` / `JUANCODE_API`).
+What answers there is a **relay**: `/ws` is forwarded verbatim to the `juancoded`
+daemon, and the REST session reads are answered from the desktop's mirror of the
+daemon's rows. It is served by the SwiftUI app while that is up, and by
+`juancode-serve` (`swift run juancode-serve`) while it is not.
 
-| Core                  | 4280 is                       | `/ws`                | REST                    |
-| --------------------- | ----------------------------- | -------------------- | ----------------------- |
-| swift (default)       | the app's embedded server     | the in-process core  | the full set            |
-| rust (`JUANCODE_CORE`)| a relay inside the same app   | forwarded to the daemon | sessions + search + delete, everything else 501 |
+There used to be a second answer here — the app's own in-process Swift core, which
+served the full REST set out of its own registry. juancode-nqpm deleted it, so 4280
+means one thing now.
+
+| 4280 is                     | `/ws`                   | REST                                            |
+| --------------------------- | ----------------------- | ----------------------------------------------- |
+| a relay to the daemon       | forwarded to the daemon | sessions + search + delete, everything else 501 |
 
 The `juancoded` daemon on `JUANCODED_PORT` (4290) serves only `/health`,
 `/api/health` and `/ws`, so pointing `JUANCODE_API` straight at it would leave the
 session list, the delete and the PR webhook with nothing to answer them. The relay
-exists so one address behaves the same either way. Its `/api/health` says which
-core is behind it (`{"core":"rust","relayingTo":"http://127.0.0.1:4290"}`).
+exists so one address answers all of it. Its `/api/health` says what is behind it
+(`{"core":"rust","relayingTo":"http://127.0.0.1:4290"}`).
 
 Two consequences worth knowing:
 
-- **Desktop app down, daemon up.** Nothing answers 4280, so the sidecar is blind
-  even though the daemon is still running ptys: no notifications, no steering, no
-  dispatch. Filed as juancode-eko6.
-- **Capabilities differ.** The daemon has no message queue, so `oracle_session_queue`
-  refuses with the handshake's capability list rather than reporting a queued
-  message nobody will deliver. Reply instead (`oracle_session_reply`), which is a
-  plain `input` frame and works on both cores.
+- **Nothing serving 4280, daemon up.** The sidecar is blind even though the daemon
+  is still running ptys: no notifications, no steering, no dispatch. That is what
+  `juancode-serve` is for (juancode-eko6) — run it and the desktop can stay closed.
+- **Capabilities are read, never assumed.** Anything the handshake does not
+  advertise is refused with that list rather than reported as done. `/ws` frames the
+  relay cannot answer come back 501 rather than silently succeeding.
 
 ## 1. Run the sidecar
 

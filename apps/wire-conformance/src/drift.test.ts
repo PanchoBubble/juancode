@@ -72,6 +72,11 @@ function tokens(src: string): Set<string> {
   return new Set([...src.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0] as string));
 }
 
+/** The Swift side of the wire, which is no longer a core: juancode-nqpm deleted the
+ *  in-process Swift core, and `WireProtocol.swift` stayed because the desktop client
+ *  and the `:4280` relay both encode through it. Still probed for exactly the reason
+ *  it always was — a frame this file cannot spell is a frame the desktop cannot send
+ *  or read, whatever the daemon does. */
 const SWIFT: CoreProbe = {
   name: "swift",
   path: join(REPO_ROOT, "apps", "native", "Sources", "JuancodeServer", "WireProtocol.swift"),

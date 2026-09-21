@@ -41,7 +41,6 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/juancoded-lifecycle-XXXXXX")"
 export JUANCODED_DATA_DIR="$WORK/data"
 # Short name on purpose: a unix socket path caps out near 104 bytes.
 export JUANCODED_SOCKET="$WORK/jd.sock"
-export JUANCODE_CORE=rust
 # Pinned, not inherited. The profile is irrelevant to a lifetime contract, and this
 # script builds one of them; inheriting a JUANCODE_CONFIG=release from the shell would
 # have it launch a binary it never built.

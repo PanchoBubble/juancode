@@ -64,11 +64,11 @@ final class LoginEnvironmentTests: XCTestCase {
     /// The rule that protects a value this process was deliberately given.
     func testAnInheritedValueIsNeverOverwritten() {
         let plan = LoginEnvironment.plannedMerge(
-            current: ["TMPDIR": "/var/folders/launchd/T/", "JUANCODE_CORE": "swift"],
-            login: ["TMPDIR": "/tmp/", "JUANCODE_CORE": "rust", "FAKE_TOKEN": "x"]
+            current: ["TMPDIR": "/var/folders/launchd/T/", "JUANCODE_RUST_CORE_URL": "http://127.0.0.1:4290"],
+            login: ["TMPDIR": "/tmp/", "JUANCODE_RUST_CORE_URL": "http://127.0.0.1:4291", "FAKE_TOKEN": "x"]
         )
         XCTAssertNil(plan["TMPDIR"], "launchd's per-app TMPDIR must survive the import")
-        XCTAssertNil(plan["JUANCODE_CORE"], "an explicit override must beat the shell's")
+        XCTAssertNil(plan["JUANCODE_RUST_CORE_URL"], "an explicit override must beat the shell's")
         XCTAssertEqual(plan["FAKE_TOKEN"], "x", "a variable we did not have is what the import is for")
     }
 

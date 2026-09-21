@@ -12,13 +12,12 @@ let package = Package(
         .library(name: "JuancodeDesktop", targets: ["JuancodeDesktop"]),
         .library(name: "JuancodeClient", targets: ["JuancodeClient"]),
         .executable(name: "juancode-smoke", targets: ["Smoke"]),
-        // Headless server runner — answers port 4280 without the GUI. Boots the
-        // embedded WS+HTTP server on the swift core (u34.3 verification), or with
-        // `--core rust` relays to the `juancoded` daemon so the oracle sidecar is
-        // not blind while the desktop app is closed (juancode-eko6).
+        // Headless runner — answers port 4280 without the GUI, relaying to the
+        // `juancoded` daemon so the oracle sidecar is not blind while the desktop app
+        // is closed (juancode-eko6).
         .executable(name: "juancode-serve", targets: ["Serve"]),
-        // The native SwiftUI app (juancode-u34.4): the local shell AND the host
-        // of the embedded server. Run with `swift run juancode`.
+        // The native SwiftUI app (juancode-u34.4): the local shell AND the host of the
+        // relay. Run with `swift run juancode`.
         .executable(name: "juancode", targets: ["JuancodeApp"]),
     ],
     dependencies: [
@@ -92,10 +91,13 @@ let package = Package(
         // `JuancodeClient` and `JuancodeDesktop` can reach — `JuancodeDesktop` was the
         // obvious home for `ProcessRunner` until `JuancodeClient/AppBuildStamp.swift`
         // started calling it (e8b70ee), and `JuancodeClient` may not depend on
-        // `JuancodeDesktop`. `OracleMailbox.swift` and `ResumeGrid.swift` are the same
-        // kind of leftover and belong in `JuancodeDesktop`, but each still has a caller
-        // inside the Swift core (`WebSocketConnection`, `ReviveSession`), so they move
-        // in or after juancode-nqpm.
+        // `JuancodeDesktop`. juancode-nqpm then took the six files that existed to serve
+        // the Swift core (`Git`, `WorktreeDeps`, `GhPoll`, `PrTrackClassifier`,
+        // `LiveEnvironment`, `ReviveSession`) out with it.
+        //
+        // What is left is `OracleMailbox.swift` and `ResumeGrid.swift`: leftovers that
+        // belong in `JuancodeDesktop`, waiting on juancode-idza's follow-up to move
+        // them. Then this target is empty and goes.
         .target(
             name: "JuancodeServices",
             dependencies: ["JuancodeCore"]
@@ -120,23 +122,29 @@ let package = Package(
             name: "JuancodeDesktop",
             dependencies: ["JuancodeCore", "JuancodeServices"]
         ),
-        // Embedded WS+HTTP server (juancode-u34.3): Hummingbird app serving the
-        // protocol.ts wire format over /ws (mirrors ws.ts) + the REST endpoints
-        // (mirrors index.ts). Remote browser/phone clients subscribe to registry
-        // sessions here; the local SwiftUI view is an in-process subscriber.
+        // The `:4280` relay (juancode-u34.3, juancode-bse5): a Hummingbird app that
+        // forwards /ws verbatim to the `juancoded` daemon and answers the REST session
+        // reads the daemon does not serve, out of the desktop's mirror. Plus
+        // `WireProtocol`, the Swift side of the wire that `JuancodeClient` encodes with.
+        //
+        // It used to be a whole second server over an in-process registry; juancode-nqpm
+        // deleted that, and the `JuancodeServices` / `JuancodePersistence` dependencies
+        // went with it — the relay is handed its reads as closures by whoever boots it,
+        // so it needs neither the store nor the shell-outs.
         .target(
             name: "JuancodeServer",
             dependencies: [
-                "JuancodeCore", "JuancodeServices", "JuancodePersistence",
+                "JuancodeCore",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
-        // The seam the SwiftUI app talks to a core through: `CoreClient` (modelled
-        // on the wire message set) plus `SwiftCoreClient`, which fronts the
-        // in-process registry/store/services. Its own target so the boundary is
-        // compiler-enforced, so `JuancodeApp` cannot reach past it into `AppState`.
+        // The seam the SwiftUI app talks to the core through: `CoreClient` (modelled on
+        // the wire message set) plus `RustCoreClient`, which fronts the `juancoded`
+        // daemon over a socket and keeps the desktop-side mirror of its rows. Its own
+        // target so the boundary is compiler-enforced — `JuancodeApp` holds a
+        // `CoreClient` and cannot reach past it at anything concrete.
         .target(
             name: "JuancodeClient",
             dependencies: ["JuancodeCore", "JuancodeServices", "JuancodePersistence", "JuancodeServer"]
@@ -147,9 +155,8 @@ let package = Package(
             name: "Smoke",
             dependencies: ["JuancodeCore"]
         ),
-        // `JuancodeClient` as well as the server, for the rust serve mode
-        // (juancode-eko6): `--core rust` fronts the `juancoded` daemon with the same
-        // `CoreProxyServer` relay the shell boots, and that needs `RustCoreClient`.
+        // `JuancodeClient` as well as the server: the runner fronts the daemon with the
+        // same `CoreProxyServer` relay the shell boots, and that needs `RustCoreClient`.
         .executableTarget(
             name: "Serve",
             dependencies: ["JuancodeServer", "JuancodeClient"]

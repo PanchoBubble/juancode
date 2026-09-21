@@ -18,7 +18,7 @@ final class LiveSessionTests: XCTestCase {
 
     // MARK: - Conformance
 
-    /// The in-process core still satisfies the protocol, so `SwiftCoreClient` keeps
+    /// A core still satisfies the protocol, so a client keeps
     /// forwarding rather than adapting. The call is the assertion: it only
     /// type-checks while `Session: LiveSession`.
     func testSessionConformsToLiveSession() {
@@ -271,21 +271,6 @@ final class LiveSessionTests: XCTestCase {
 
         pool.prune { _ in nil }
         XCTAssertTrue(pool.entries.isEmpty, "a dead handle must not linger mounted")
-    }
-
-    /// `pooledSession` is the erasing form of `liveSession` the pool's resolve
-    /// closures call, and it must agree with it rather than being a second lookup.
-    func testPooledSessionAgreesWithLiveSession() throws {
-        let dbPath = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("juancode-pool-\(UUID().uuidString).db")
-        defer {
-            for suffix in ["", "-wal", "-shm"] {
-                try? FileManager.default.removeItem(atPath: dbPath + suffix)
-            }
-        }
-        let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
-        XCTAssertNil(core.liveSession("nope"))
-        XCTAssertNil(core.pooledSession("nope"))
     }
 }
 

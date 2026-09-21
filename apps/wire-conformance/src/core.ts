@@ -4,12 +4,13 @@
 //   * JUANCODE_CONFORMANCE_URL points at an already-running core (how you drive a
 //     core in a container, or one you have a debugger attached to).
 //   * otherwise the core named by JUANCODE_CONFORMANCE_CORE is built and booted
-//     here: `swift` (the default) builds `juancode-serve`, `rust` builds
-//     `juancoded`.
+//     here. There is one: `rust` builds `juancoded`. The `swift` entry went with
+//     the in-process Swift core (juancode-nqpm); the table stays a table because
+//     the suite's whole job is to be able to hold more than one.
 //
-// Booting is the mode CI uses for both cores. A core somebody started by hand is
-// a core whose environment nobody can see in the log, and every unrepeatable
-// conformance score this repo has reported came from one.
+// Booting is the mode CI uses. A core somebody started by hand is a core whose
+// environment nobody can see in the log, and every unrepeatable conformance score
+// this repo has reported came from one.
 //
 // Isolation is the hard requirement: a developer's live app owns :4280 and the
 // sidecar owns :4281, and driving THAT app would create, resize and kill their
@@ -35,13 +36,12 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(here, "..");
 const REPO_ROOT = join(PKG_ROOT, "..", "..");
-const NATIVE_ROOT = join(REPO_ROOT, "apps", "native");
 const JUANCODED_ROOT = join(REPO_ROOT, "apps", "juancoded");
 
 export const FIXTURES = join(PKG_ROOT, "fixtures");
 
 /** The cores this harness knows how to build and boot itself. */
-export const CORE_NAMES = ["swift", "rust"] as const;
+export const CORE_NAMES = ["rust"] as const;
 export type CoreName = (typeof CORE_NAMES)[number];
 
 /** How a core went away, and what it said on the way out.
@@ -102,7 +102,7 @@ interface ExitRecord {
 }
 
 export interface CoreUnderTest {
-  /** Label used in the parity report ("swift", "rust", or whatever was passed in). */
+  /** Label used in the parity report ("rust", or whatever was passed in). */
   label: string;
   /** WebSocket endpoint, e.g. ws://127.0.0.1:4295/ws */
   wsUrl: string;
@@ -316,9 +316,8 @@ function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promi
 
 /** One health probe: null when it answered, else why it did not.
  *
- *  The Swift core serves /api/health; the Rust core serves both /health and
- *  /api/health. Probing both keeps the harness core-agnostic (the divergence
- *  itself is a parity item). */
+ *  The core serves both /health and /api/health. Probing both keeps the harness
+ *  core-agnostic — a core that serves only one of them still boots here. */
 async function probeHealth(httpBase: string): Promise<string | null> {
   let lastError = "never probed";
   for (const path of ["/api/health", "/health"]) {
@@ -472,7 +471,7 @@ export function isolatedParentEnv(parent: NodeJS.ProcessEnv = process.env): Reco
 }
 
 /** The environment a booted core runs with. Every knob here exists so the golden
- *  transcripts are reproducible; see apps/native/Sources/JuancodeCore/Config.swift. */
+ *  transcripts are reproducible. */
 export function coreEnv(port: number, dataDir: string, oracleDir: string): Record<string, string> {
   const fakeAgent = join(FIXTURES, "fake-agent.sh");
   const fakeEditor = join(FIXTURES, "fake-editor.sh");
@@ -524,8 +523,8 @@ export function coreEnv(port: number, dataDir: string, oracleDir: string): Recor
   };
 }
 
-/** How to build and boot one core. Everything that differs between the Swift and
- *  the Rust core lives here; the boot itself is shared. */
+/** How to build and boot one core. Everything core-specific lives here; the boot
+ *  itself is shared. */
 interface CoreRecipe {
   /** Build the product, then hand back the executable to spawn. */
   resolve(skipBuild: boolean, buildTimeoutMs: number): Promise<string>;
@@ -534,30 +533,11 @@ interface CoreRecipe {
 }
 
 const RECIPES: Record<CoreName, CoreRecipe> = {
-  swift: {
-    resolve: async (skipBuild, buildTimeoutMs) => {
-      if (!skipBuild) {
-        // A sibling `swift build` holds the same package lock, so this can block
-        // for minutes before it even starts compiling. That is normal, not a hang.
-        await run("swift", ["build", "--product", "juancode-serve"], NATIVE_ROOT, buildTimeoutMs);
-      }
-      const binPath = (
-        await run(
-          "swift",
-          ["build", "--product", "juancode-serve", "--show-bin-path"],
-          NATIVE_ROOT,
-          120_000,
-        )
-      ).trim();
-      return join(binPath.split("\n").pop() ?? binPath, "juancode-serve");
-    },
-    // coreEnv already speaks the Swift core's own variables.
-    isolation: () => ({}),
-  },
   rust: {
     resolve: async (skipBuild, buildTimeoutMs) => {
       if (!skipBuild) {
-        // Same caveat as swift: a sibling cargo holds the target-dir lock.
+        // A sibling cargo holds the target-dir lock, so this can block for minutes
+        // before it even starts compiling. That is normal, not a hang.
         await run("cargo", ["build", "--bin", "juancoded"], JUANCODED_ROOT, buildTimeoutMs);
       }
       // Ask cargo where the target dir is rather than assuming ./target: a
@@ -591,7 +571,7 @@ const RECIPES: Record<CoreName, CoreRecipe> = {
 
 /** Which core a boot should build, from the environment. */
 export function coreName(raw = process.env.JUANCODE_CONFORMANCE_CORE): CoreName {
-  if (raw === undefined || raw === "") return "swift";
+  if (raw === undefined || raw === "") return "rust";
   const found = CORE_NAMES.find((n) => n === raw);
   if (!found) {
     throw new Error(
@@ -729,7 +709,7 @@ export async function startCore(opts: StartOptions = {}): Promise<CoreUnderTest>
 
   const exe = opts.exe ?? (await recipe.resolve(skipBuild, buildTimeoutMs));
 
-  // After the build on purpose: a cargo or swift build is minutes long, and a port
+  // After the build on purpose: a cargo build is minutes long, and a port
   // reserved before it is a port somebody else can take while we compile.
   const port = requested === 0 ? await freePort() : requested;
   const httpBase = `http://127.0.0.1:${port}`;

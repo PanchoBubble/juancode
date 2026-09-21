@@ -347,8 +347,7 @@ export function missingCapabilityMessage(capability: string, advertised: string[
   const list = advertised.length > 0 ? advertised.join(", ") : "none";
   return (
     `The core serving ${nativeApiBase()} doesn't implement "${capability}" ` +
-    `(its handshake advertises: ${list}). Reply to the session instead, or run the ` +
-    `app on the swift core.`
+    `(its handshake advertises: ${list}). Reply to the session instead.`
   );
 }
 

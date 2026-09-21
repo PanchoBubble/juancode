@@ -244,7 +244,7 @@ struct RunningSessionsBadge: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
     }
 
-    /// Where the core pill went: the active core, plus whatever is wrong with it.
+    /// Where the core pill went: the core, plus whatever is wrong with it.
     private var coreFooter: some View {
         VStack(alignment: .leading, spacing: 6) {
             CoreBadgeLabel(selection: model.coreSelection,
@@ -253,12 +253,6 @@ struct RunningSessionsBadge: View {
                 Text("Connection down: \(down). Sessions keep running in the daemon; "
                     + "the app is retrying.")
                     .font(.caption).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let reason = model.coreSelection.unreachableReason {
-                Text("Asked for the \(model.coreSelection.requested.rawValue) core and fell "
-                    + "back: \(reason)")
-                    .font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Beside the session list itself: whether these rows are still here after

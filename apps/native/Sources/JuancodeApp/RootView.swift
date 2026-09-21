@@ -140,10 +140,6 @@ private struct WindowContent: View {
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()
         }
-        // Asked for the rust core, got the swift one: say so before anything else.
-        .sheet(isPresented: $model.coreFallbackPending) {
-            CoreFallbackSheet()
-        }
         .onAppear { if model.degradedReason != nil { showDbRecovery = true } }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },

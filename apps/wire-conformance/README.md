@@ -3,11 +3,16 @@
 The wire protocol as an executable spec, plus the suite that measures a core
 against it.
 
-juancode is growing a second core: the Swift one in `apps/native` today, the Rust
-one in `apps/juancoded` next. Both speak the same WebSocket protocol to the same
-clients (the SwiftUI app, the Oracle sidecar, the phone console). Without one spec
-both cores are measured against, "the Rust core is at parity" is a feeling. With
-it, switching cores is a supported configuration.
+juancode had two cores while it was being ported: the Swift one in `apps/native`
+and the Rust one in `apps/juancoded`. Both spoke the same WebSocket protocol to the
+same clients (the SwiftUI app, the Oracle sidecar, the phone console). Without one
+spec both were measured against, "the Rust core is at parity" would have been a
+feeling — and it is that measurement, over months, that made deleting the Swift core
+(juancode-nqpm, 2026-09-21) a decision rather than a leap.
+
+One core boots here now. The spec did not shrink with it, and it should not: it is
+what a client depends on, what the daemon is checked against on every PR, and what a
+second implementation would be measured with if there is ever another one.
 
 ## Layout
 
@@ -34,18 +39,22 @@ conformant at v1 when it passes every scenario in `spec/v1`.
   cores advertise `protocolVersion: 2`. v1 stays in the tree and keeps being
   measured for as long as any core claims it.
 
-`src/drift.test.ts` compares the catalogue against both cores' wire sources
-directly - `apps/native/Sources/JuancodeServer/WireProtocol.swift` and
+`src/drift.test.ts` compares the catalogue against both wire sources directly -
+`apps/native/Sources/JuancodeServer/WireProtocol.swift`, which survives the Swift
+core's deletion because it is what the desktop client and the `:4280` relay encode
+with, and
 `apps/juancoded/crates/juancoded-server/src/wire.rs` - so adding a message or a
 capability to either one turns the suite red until the spec describes it. That is
 what keeps the spec from becoming documentation.
 
 ### The catalogue is the union, and the gate says which core
 
-The two cores do not implement the same set. Both have `restartFresh`, `spawnModel`,
+The two cores did not implement the same set; the catalogue is still written as a
+union, because the drift probes below still read both wire sources and because a
+capability gate is how a client feature-detects. Both had `restartFresh`, `spawnModel`,
 `spawnPreset`, `editor`, `terminal`, `trackedPrs`, `trackPrInSession`, `prWebhook`,
 `namedKeys` and
-`globalPause`; the Rust core has
+`globalPause`; the Rust core also has
 `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
 `sessionSleep`, `sessionEdit` and `heavyQueue` on top of that. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
@@ -109,9 +118,9 @@ Knobs:
 
 | Variable                          | Meaning                                                           |
 | --------------------------------- | ----------------------------------------------------------------- |
-| `JUANCODE_CONFORMANCE_CORE`       | Which core to build and boot: `swift` (default) or `rust`         |
+| `JUANCODE_CONFORMANCE_CORE`       | Which core to build and boot. One: `rust` (the default)           |
 | `JUANCODE_CONFORMANCE_URL`        | Drive a core that is already running instead of booting one       |
-| `JUANCODE_CONFORMANCE_LABEL`      | Name for that core in the report (`swift`, `rust`, …)             |
+| `JUANCODE_CONFORMANCE_LABEL`      | Name for that core in the report (`rust`, …)                      |
 | `JUANCODE_CONFORMANCE_PORT`       | Port for a core we boot: `0` picks a free one (default 4295)      |
 | `JUANCODE_CONFORMANCE_SKIP_BUILD` | `1` when the core binary is already built                         |
 | `JUANCODE_CONFORMANCE_REPORT`     | Write the run report here (`.md` for prose, `.json` for a status) |

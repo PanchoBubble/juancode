@@ -1,9 +1,10 @@
 name: wire-conformance
 
-# The wire protocol is the contract between the Swift core, the Rust core
-# (apps/juancoded) and every client. This workflow runs the executable spec:
-# the fast checks everywhere, and the live conformance suite against a real
-# core of each kind, booted in the runner.
+# The wire protocol is the contract between the core (apps/juancoded) and every
+# client. This workflow runs the executable spec: the fast checks everywhere, and
+# the live conformance suite against a real core booted in the runner. The Swift
+# package's own XCTest suite rides along in its own job, because nothing else in
+# .github/workflows runs it.
 on:
   push:
     branches: [main]
@@ -69,99 +70,35 @@ jobs:
           rustup target add x86_64-unknown-linux-gnu
           cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu
 
-  conformance-swift:
-    # Two things on one macOS runner: the live conformance suite against a real
-    # Swift core, and the package's own XCTest suite (see the step at the end).
-    # The name is load-bearing — it is a required status check on `main` — so it
-    # stays as it is until the branch-protection context moves with it.
-    name: conformance vs the Swift core
+  swift-tests:
+    # The Swift package's XCTest suite. Until it existed as a step, NOTHING in
+    # .github/workflows ran `swift test`: the suite was never a gate, and two
+    # suites had been red on main for as long as they had existed while main
+    # reported green (juancode-rzuw, juancode-h52n).
+    #
+    # It used to be the last step of `conformance vs the Swift core`, folded in so
+    # it could reuse that job's warm toolchain and module graph. juancode-nqpm
+    # deleted the Swift core, so the conformance steps it was riding on are gone
+    # and this is a job of its own — which is also the moment its
+    # branch-protection context moves, from "conformance vs the Swift core" to
+    # this job's name. A required check that can never run again blocks every PR.
+    name: swift tests
     runs-on: macos-15 # default Xcode 16.x -> Swift 6 tools
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
 
       - name: Toolchain
         run: swift --version
 
-      # Cold, this is the long step. The suite would build it itself, but doing it
-      # here keeps the build failure separate from a conformance failure.
-      - name: Build the headless Swift core
+      # Separate from the test step so a compile failure reads differently from a
+      # failing assertion.
+      - name: Build
         working-directory: apps/native
-        run: swift build --product juancode-serve
+        run: swift build
 
-      - name: Run the conformance suite
-        env:
-          # Already built above; and never 4280/4281, which are a developer's app.
-          JUANCODE_CONFORMANCE_CORE: swift
-          JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
-          # Three attempts at every scenario, all inside the one boot above. A
-          # single green run has twice been reported as the gate and turned out
-          # not to be repeatable (juancode-g2kl, juancode-p5vb: tracked-prs was
-          # 20 of 20 one day and 2 of 6 the next), so the suite measures instead
-          # of trusting. Not three whole jobs: the build plus boot dominates the
-          # wall clock, and repeating inside one boot also exercises the
-          # scenario-after-scenario ordering a fresh boot per run hides.
-          JUANCODE_CONFORMANCE_REPEAT: "3"
-          JUANCODE_CONFORMANCE_PORT: "4295"
-          JUANCODE_CONFORMANCE_LABEL: swift
-          # Anchored at the workspace: the suite resolves a relative path from
-          # apps/wire-conformance, which is not where the upload step looks.
-          JUANCODE_CONFORMANCE_REPORT: ${{ github.workspace }}/conformance-swift.md
-          JUANCODE_CONFORMANCE_STATUS: ${{ github.workspace }}/conformance-swift-status.json
-        run: pnpm --filter @juancode/wire-conformance test:conformance
-
-      # The checked-in parity file is a claim about this core. Comparing it to what
-      # the run just measured is the only thing that keeps it a measurement rather
-      # than a promise, and it is how the queue scenario stayed understated for a
-      # commit. Verdicts and capabilities only: the date and a failure note move
-      # on their own.
-      - name: Committed parity file still describes the core
-        working-directory: apps/wire-conformance
-        run: pnpm exec tsx src/parity-cli.ts --verify ${{ github.workspace }}/conformance-swift-status.json
-
-      # Until this step existed, NOTHING in .github/workflows ran `swift test`: the
-      # XCTest suite was never a gate, and two suites had been red on main for as
-      # long as they had existed while main reported green (juancode-rzuw,
-      # juancode-h52n, both fixed in the commits that added this).
-      #
-      # Folded into this job rather than given its own, because a second macos-15
-      # boot is the expensive part: the toolchain, the checkout, the resolve and
-      # most of the module graph are already warm here from the juancode-serve
-      # build above, so the suite costs a few minutes rather than a whole job at
-      # the 10x macOS minute multiplier. The cost of folding is that a failure
-      # here is reported under this job's name — main-red lists jobs, not steps —
-      # so a red XCTest reads as "conformance vs the Swift core" until you open
-      # the run.
-      #
-      # `!cancelled()` rather than the default, so a conformance failure above
-      # still leaves a test result behind instead of skipping the suite.
-      #
-      # When the Swift core is deleted (juancode-nqpm), the conformance steps in
-      # this job go and this one stays — that is the moment to split it out, give
-      # it its own name and move the branch-protection context, NOT before: this
-      # job is a required check today, and this step is why the XCTest suite is
-      # gated at all.
       - name: Run the XCTest suite
-        if: ${{ !cancelled() }}
         working-directory: apps/native
         run: swift test
-
-      - name: Upload the run report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wire-conformance-swift
-          path: |
-            conformance-swift.md
-            conformance-swift-status.json
-          if-no-files-found: warn
 
   conformance-rust:
     name: conformance vs the Rust core
@@ -184,27 +121,28 @@ jobs:
       - name: Toolchain
         run: cargo --version && rustc --version
 
-      # Same reason as the Swift job: a build failure has to read differently from
-      # a conformance failure.
+      # Cold, this is the long step. The suite would build it itself, but doing it
+      # here keeps the build failure separate from a conformance failure.
       - name: Build the Rust core
         working-directory: apps/juancoded
         run: cargo build --bin juancoded
 
       - name: Run the conformance suite
         env:
-          # Its own port, and not the Swift job's 4295 either, so the two jobs stay
-          # independent even on a self-hosted runner that shares a host.
+          # Its own port, never 4280/4281, which are a developer's app.
           JUANCODE_CONFORMANCE_CORE: rust
           JUANCODE_CONFORMANCE_SKIP_BUILD: "1"
-          # Three, like the Swift job, and for one more reason on top of its own:
-          # the only mid-run core death anyone has seen was this core, once in six
-          # passes of the spec (juancode-jyl9). Scoring it on a single pass sampled
-          # the flakiest core the least, while being a required check on main. Three
-          # is free here rather than a tradeoff: this job runs ~4m at three attempts
-          # against the Swift job's ~4m45, so it stays off the critical path and adds
-          # nothing to how long a PR waits. Six would catch a 1-in-6 death 67% of the
-          # time instead of 42%, but it makes this job the slowest one on every PR to
-          # chase a flake that a required check already samples three times per merge.
+          # Three attempts at every scenario, all inside the one boot above. A
+          # single green run has twice been reported as the gate and turned out not
+          # to be repeatable (juancode-g2kl, juancode-p5vb: tracked-prs was 20 of 20
+          # one day and 2 of 6 the next), so the suite measures instead of trusting.
+          # And one reason of this core's own: the only mid-run core death anyone
+          # has seen was here, once in six passes of the spec (juancode-jyl9).
+          # Scoring it on a single pass sampled the flakiest thing in the repo the
+          # least, while being a required check on main.
+          # Six would catch a 1-in-6 death 67% of the time instead of 42%, but it
+          # doubles the wall clock of a required check to chase a flake it already
+          # samples three times per merge.
           JUANCODE_CONFORMANCE_REPEAT: "3"
           JUANCODE_CONFORMANCE_PORT: "4300"
           JUANCODE_CONFORMANCE_LABEL: rust

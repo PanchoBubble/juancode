@@ -1,6 +1,5 @@
 import Foundation
 import JuancodeCore
-import JuancodeServices
 
 /// The WebSocket wire protocol: tagged unions whose discriminator is the `type`
 /// field; every other field sits flat alongside it. Originally a faithful mirror
@@ -285,6 +284,18 @@ extension ClientMessage: Decodable {
 /// via `serverInfo` rather than assuming parity.
 public enum WireProtocol {
     public static let version = 1
+
+    /// What THIS Swift wire mirror can encode and decode.
+    ///
+    /// It used to be the in-process Swift core's `serverInfo` list — what that core
+    /// promised a client. juancode-nqpm deleted the core, and nothing here answers a
+    /// handshake any more: `/ws` is relayed to the daemon, whose own list
+    /// (`CAPABILITIES` in `juancoded-server/src/wire.rs`) is the one every client
+    /// feature-detects off. This list stayed because `apps/wire-conformance`'s drift
+    /// probe reads it: it is how "the Swift side of the wire still speaks every frame
+    /// the catalogue describes" is checked on each PR, which matters exactly as much
+    /// as it did before — `RustCoreClient` and the relay both encode through this
+    /// file.
     public static let capabilities = ["queue", "trackedPrs", "editor", "terminal", "adoptExternal",
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",

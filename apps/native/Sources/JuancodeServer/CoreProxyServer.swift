@@ -4,17 +4,16 @@ import HummingbirdWebSocket
 import HTTPTypes
 import NIOCore
 import JuancodeCore
-import JuancodeServices
-import JuancodePersistence
 
 /// The address the oracle sidecar (and every other remote client) knows, served
-/// for a launch whose core is NOT the in-process Swift one.
+/// for a launch whose core is another process — which, since juancode-nqpm, is
+/// every launch.
 ///
-/// `JuancodeServer` needs an `AppState` — the in-process registry, store, queue
-/// and PR engine — so a rust launch had nothing to boot it with and port 4280
-/// went unserved: no Telegram notifications, no remote steering, no dispatch.
-/// This is the answer to that, and it is deliberately two different things at
-/// once, because the truth is split:
+/// The server this replaced needed an in-process registry, store, queue and PR
+/// engine to boot, so a launch against the daemon had nothing to serve 4280 with and
+/// the port went unanswered: no Telegram notifications, no remote steering, no
+/// dispatch. This is the answer to that, and it is deliberately two different things
+/// at once, because the truth is split:
 ///
 ///   - `/ws` is **relayed, verbatim, to the daemon**. The daemon owns the ptys, so
 ///     it is the only thing that can answer `input`, `create` or `subscribeScreen`,
@@ -28,8 +27,9 @@ import JuancodePersistence
 ///     until there is one, this process is the only place `/api/sessions` can come
 ///     from.
 ///
-/// Everything else the Swift core serves is answered with a 501 naming what is
-/// missing, so a caller gets a reason instead of a 404 that reads like a bug.
+/// Everything the old in-process server served and this does not is answered with a
+/// 501 naming what is missing, so a caller gets a reason instead of a 404 that reads
+/// like a bug.
 public enum CoreProxyServer {
     /// The session-shaped reads and writes the proxy answers, supplied by whoever
     /// owns the core. A closure bag rather than the `CoreClient` protocol on
@@ -354,7 +354,7 @@ public enum CoreProxyServer {
         return obj["type"] as? String
     }
 
-    // MARK: - REST (the subset a core with no AppState can honestly answer)
+    // MARK: - REST (the subset a relay over a remote core can honestly answer)
 
     static func buildRouter(source: Source, upstreamBaseURL: String) -> Router<BasicRequestContext> {
         let router = Router()
@@ -363,9 +363,9 @@ public enum CoreProxyServer {
             jsonResponse(ProxyHealth(ok: true, core: source.backendName, relayingTo: upstreamBaseURL))
         }
 
-        // The desktop presence gate is tracked by `AppState`, which a launch on this
-        // core does not have. Said out loud rather than answered with a made-up
-        // "nobody is at the desk", which would change how a caller notifies.
+        // The desktop presence gate was tracked by the in-process server, and nothing
+        // tracks it now. Said out loud rather than answered with a made-up "nobody is
+        // at the desk", which would change how a caller notifies.
         router.get("/presence") { _, _ -> Response in
             throw APIError(.notImplemented, unservedMessage("/presence", core: source.backendName))
         }

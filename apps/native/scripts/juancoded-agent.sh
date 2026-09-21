@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Install, inspect and remove the LaunchAgent that keeps `juancoded` — the Rust core —
-# running, so `JUANCODE_CORE=rust` lands on the Rust core after a relaunch, a logout, or
-# a reboot, with no terminal open anywhere.
+# Install, inspect and remove the LaunchAgent that keeps `juancoded` — the core —
+# running, so the app finds one after a relaunch, a logout, or a reboot, with no
+# terminal open anywhere.
 #
-# WHAT PROBLEM THIS SOLVES. Nothing in the repo used to start the daemon. You could set
-# the core to rust in Settings, relaunch, and come up on the SWIFT core with an
-# unreachable-daemon reason in the badge — unless you happened to have left `cargo run -p
-# juancoded` in a terminal, in which case closing that terminal killed every live agent
-# pty. `dev-app.sh` closed the terminal-launch half of that (it starts a daemon this
-# launch owns). This closes the rest: a Dock launch, a login, a reboot.
+# WHAT PROBLEM THIS SOLVES. Nothing in the repo used to start the daemon, and since
+# juancode-nqpm there is no in-process core to fall back to: an app that cannot reach
+# one refuses to launch. Before this, the only daemon was one you had left `cargo run
+# -p juancoded` running in a terminal, and closing that terminal killed every live
+# agent pty. `juancoded.sh` closes the terminal-launch half of that (it starts a
+# daemon this launch owns). This closes the rest: a Dock launch, a login, a reboot.
 #
 # WHAT IT DELIBERATELY DOES NOT DO: RESTART ON A REBUILD.
 #

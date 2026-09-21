@@ -1,83 +1,34 @@
 import Foundation
 import JuancodeCore
 
-/// The persisted "which core" preference, and the launch-time resolution of it.
+/// What this launch connected to, and everything the UI needs to explain it.
 ///
-/// Same shape as the terminal-backend precedent (`TerminalBackend`): a
-/// `UserDefaults` key the Settings pane writes, with a `JUANCODE_*` environment
-/// variable that wins over it. The difference is that a terminal surface can be
-/// swapped mid-flight and a core cannot, so this is read exactly once per launch
-/// and flipping it prompts for a relaunch instead of taking effect.
-public enum CoreBackendPreference {
-    /// Namespaced like the other juancode defaults keys.
-    public static let defaultsKey = "juancode.core.backend"
-
-    /// The core the next launch will use, absent an env override. Defaults to
-    /// `rust`, which is now the ahead core rather than the opt-in one: measured
-    /// 2026-09-18 against spec 1.15.0, rust passes 40 of 40 conformance scenarios
-    /// and swift 29 of 40, and swift no longer holds a reaper, a usage reader or a
-    /// structured transcript tail at all — those were deleted rather than
-    /// dual-maintained. Nobody should land on it by doing nothing.
-    ///
-    /// It is still the fallback when the daemon does not answer, and `boot` says so
-    /// loudly on the returned selection, because a launch with no core is worse than
-    /// a launch on the lesser one.
-    public static var persisted: CoreBackend {
-        guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
-              let backend = CoreBackend(rawValue: raw) else { return .rust }
-        return backend
-    }
-
-    /// Record the choice for the next launch. This is all the setter does: nothing
-    /// about the current launch changes, which is why the UI asks to relaunch.
-    public static func setPersisted(_ backend: CoreBackend) {
-        UserDefaults.standard.set(backend.rawValue, forKey: defaultsKey)
-    }
-}
-
-/// Which core a launch asked for, which one it got, and why they might differ.
-/// Carried by the app model so the badge, the Settings pane and any bug report all
-/// read the same answer.
+/// There used to be a choice here — a persisted `juancode.core.backend`, a
+/// `JUANCODE_CORE` override that won over it, a requested-vs-active pair and a
+/// fallback to the in-process Swift core when the daemon did not answer. The Swift
+/// core is gone (juancode-nqpm), so all of that collapses to one fact: which
+/// daemon answered, and what is wrong with it.
+///
+/// The fields that remain are the ones a screenshot in a bug report has to carry.
+/// A daemon is a separate process with its own build and its own lifetime, so
+/// "which one answered" is still a real question even when there is only one kind
+/// of core left.
 public struct CoreSelection: Sendable, Equatable {
-    /// Where the choice came from, so the Settings pane can say "pinned by
-    /// JUANCODE_CORE" instead of showing a picker that would not be obeyed.
-    public enum Source: String, Sendable {
-        case environment
-        case setting
-        case fallbackDefault
-    }
-
-    /// What this launch asked for.
-    public let requested: CoreBackend
-    /// What it is actually running on. Differs from `requested` only after a
-    /// fallback.
-    public let active: CoreBackend
-    public let source: Source
-    /// Why the requested core could not be used, nil when it was.
-    public let unreachableReason: String?
-    /// The sqlite file the active core's rows live in.
+    /// The desktop-side mirror of the daemon's session rows.
     public let databasePath: String
-    /// Where the Rust daemon was looked for, shown whether or not it answered.
+    /// Where the daemon was found.
     public let rustCoreURL: String
-    /// Who answered, when the answer came from a separate process. Nil on the Swift
-    /// core and on any daemon too old to identify itself.
+    /// Who answered. Nil on a daemon too old to identify itself.
     public let daemon: DaemonIdentity?
     /// Everything wrong with the daemon that answered, worst first. Empty is the
     /// normal case and the only one that needs no explaining.
     ///
     /// A stale daemon is NOT a boot failure: it owns live ptys, and refusing to
-    /// connect would end somebody's running sessions to fix a reporting problem. It
-    /// rides here beside `unreachableReason` so the badge and the Settings pane say
-    /// so instead.
+    /// connect would end somebody's running sessions to fix a reporting problem.
     public let daemonWarnings: [DaemonWarning]
 
-    public init(requested: CoreBackend, active: CoreBackend, source: Source,
-                unreachableReason: String?, databasePath: String, rustCoreURL: String,
+    public init(databasePath: String, rustCoreURL: String,
                 daemon: DaemonIdentity? = nil, daemonWarnings: [DaemonWarning] = []) {
-        self.requested = requested
-        self.active = active
-        self.source = source
-        self.unreachableReason = unreachableReason
         self.databasePath = databasePath
         self.rustCoreURL = rustCoreURL
         self.daemon = daemon
@@ -87,116 +38,57 @@ public struct CoreSelection: Sendable, Equatable {
     /// Whether the core that answered is not the one this checkout would have built.
     public var daemonIsStale: Bool { !daemonWarnings.isEmpty }
 
-    /// Whether live sessions are still there after this app quits, and what keeps them.
-    /// Nil when the answer is no — including for the Swift core, which is this process.
+    /// Whether live sessions are still there after this app quits, and what keeps
+    /// them. Nil when the daemon does not say.
     ///
     /// NOT a warning, and deliberately not carried in `daemonWarnings`: that array is
     /// what turns the core badge yellow, and a stated mode working as asked is not a
     /// fault. The two do stack, though, and that is the point — a persistent daemon
     /// that has gone stale is both persistent and loud.
     public var sessionPersistence: String? { daemon?.persistence }
-
-    public var didFallBack: Bool { requested != active }
-
-    /// Whether the user's picker can change anything, or an env var has pinned it.
-    public var isPinnedByEnvironment: Bool { source == .environment }
-
-    /// Resolve what a launch should try, without building anything.
-    public static func resolve(persisted: CoreBackend = CoreBackendPreference.persisted,
-                               override: CoreBackend? = Config.coreBackendOverride)
-        -> (requested: CoreBackend, source: Source) {
-        if let override { return (override, .environment) }
-        return (persisted, .setting)
-    }
 }
 
-/// A booted core plus everything the UI needs to explain it.
+/// A connected core plus everything the UI needs to explain it.
 public struct BootedCore: Sendable {
     public let client: any CoreClient
     public let selection: CoreSelection
-    /// Non-nil when the on-disk database would not open and an in-memory store was
-    /// substituted for this launch (the pre-existing `SwiftCoreClient` degradation).
-    public let degradedReason: String?
-    /// The database file the degraded launch was trying to open, for the recovery UI.
-    public let corruptDbPath: String
 
-    public init(client: any CoreClient, selection: CoreSelection,
-                degradedReason: String?, corruptDbPath: String) {
+    public init(client: any CoreClient, selection: CoreSelection) {
         self.client = client
         self.selection = selection
-        self.degradedReason = degradedReason
-        self.corruptDbPath = corruptDbPath
     }
 }
 
-/// Picks the core for a launch: the one place that turns a preference plus an
-/// environment override into a live `CoreClient`.
+/// Connects the launch to the `juancoded` daemon: the one place that names a
+/// concrete `CoreClient`.
 public enum CoreBoot {
-    /// Build the core this launch drives.
+    /// Connect, or throw with the daemon's own reason.
     ///
-    /// The rust path fails LOUDLY and falls back: when the daemon does not answer
-    /// the handshake, the reason is carried on the returned selection so the UI can
-    /// say what happened and offer the fallback it already took, rather than
-    /// leaving a window that looks fine and does nothing. Both builders are
-    /// injectable so the selection logic can be tested without a database or a
-    /// socket.
-    public static func boot(
-        persisted: CoreBackend = CoreBackendPreference.persisted,
-        override: CoreBackend? = Config.coreBackendOverride,
+    /// It throws rather than degrading because there is nothing left to degrade to.
+    /// A launch that cannot reach the daemon has no ptys, no session rows and no
+    /// history; the caller's job is to say so and offer to retry, not to open a
+    /// window that looks fine and does nothing. `makeRust` is injectable so the
+    /// selection logic can be tested without a socket.
+    public static func connect(
         rustCoreURL: String = Config.rustCoreBaseURL,
-        makeSwift: (String) -> (core: any CoreClient, degradedReason: String?) = { path in
-            let built = SwiftCoreClient.local(dbPath: path)
-            return (built.core, built.degradedReason)
-        },
         makeRust: (String) throws -> any CoreClient = { url in
             try RustCoreClient.connect(baseURL: url)
         },
         appIdentity: AppIdentity = .current
-    ) -> BootedCore {
-        let (requested, source) = CoreSelection.resolve(persisted: persisted, override: override)
-        if requested == .rust {
-            do {
-                let client = try makeRust(rustCoreURL)
-                // Asked and answered at boot, not on demand: the daemon's build stamp
-                // is what it was when IT started, and the whole comparison is against
-                // that. Deferring it would leave the first, most misleading session
-                // list on screen unlabelled.
-                let daemon = client.info.daemon
-                let warnings = daemon?.warnings(against: appIdentity) ?? []
-                for warning in warnings {
-                    NSLog("juancode: rust core at \(rustCoreURL) — \(warning.headline). \(warning.detail)")
-                }
-                return BootedCore(
-                    client: client,
-                    selection: CoreSelection(requested: .rust, active: .rust, source: source,
-                                             unreachableReason: nil,
-                                             databasePath: Config.databasePath(for: .rust),
-                                             rustCoreURL: rustCoreURL,
-                                             daemon: daemon, daemonWarnings: warnings),
-                    degradedReason: nil,
-                    corruptDbPath: Config.databasePath(for: .rust))
-            } catch {
-                let reason = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-                NSLog("juancode: JUANCODE_CORE=rust selected but the daemon is not usable: \(reason)")
-                let path = Config.databasePath(for: .swift)
-                let built = makeSwift(path)
-                return BootedCore(
-                    client: built.core,
-                    selection: CoreSelection(requested: .rust, active: .swift, source: source,
-                                             unreachableReason: reason,
-                                             databasePath: path, rustCoreURL: rustCoreURL),
-                    degradedReason: built.degradedReason,
-                    corruptDbPath: path)
-            }
+    ) throws -> BootedCore {
+        let client = try makeRust(rustCoreURL)
+        // Asked and answered at boot, not on demand: the daemon's build stamp is what
+        // it was when IT started, and the whole comparison is against that. Deferring
+        // it would leave the first, most misleading session list on screen unlabelled.
+        let daemon = client.info.daemon
+        let warnings = daemon?.warnings(against: appIdentity) ?? []
+        for warning in warnings {
+            NSLog("juancode: core at \(rustCoreURL) — \(warning.headline). \(warning.detail)")
         }
-        let path = Config.databasePath(for: .swift)
-        let built = makeSwift(path)
         return BootedCore(
-            client: built.core,
-            selection: CoreSelection(requested: .swift, active: .swift, source: source,
-                                     unreachableReason: nil,
-                                     databasePath: path, rustCoreURL: rustCoreURL),
-            degradedReason: built.degradedReason,
-            corruptDbPath: path)
+            client: client,
+            selection: CoreSelection(databasePath: Config.mirrorDatabasePath,
+                                     rustCoreURL: rustCoreURL,
+                                     daemon: daemon, daemonWarnings: warnings))
     }
 }

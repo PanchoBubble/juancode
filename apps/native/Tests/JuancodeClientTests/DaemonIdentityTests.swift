@@ -161,29 +161,23 @@ final class DaemonIdentityTests: XCTestCase {
 
     /// The badge and the Settings pane read `CoreSelection`, so that is where the
     /// verdict has to land — not in a log nobody opens.
-    func testBootPutsTheVerdictOnTheSelection() {
+    func testBootPutsTheVerdictOnTheSelection() throws {
         let daemon = identity(buildId: "old111")
         let app = AppIdentity(buildId: "new222", sessionsPerProject: 40)
-        let booted = CoreBoot.boot(
-            persisted: .rust, override: nil, rustCoreURL: "http://127.0.0.1:4290",
-            makeSwift: { _ in (FakeCore(capabilities: []), nil) },
+        let booted = try CoreBoot.connect(
+            rustCoreURL: "http://127.0.0.1:4290",
             makeRust: { _ in FakeCore(capabilities: ["inputAck"], daemon: daemon) },
             appIdentity: app)
-        XCTAssertEqual(booted.selection.active, .rust)
         XCTAssertTrue(booted.selection.daemonIsStale)
         XCTAssertEqual(booted.selection.daemon?.pid, 4242)
         XCTAssertEqual(booted.selection.daemonWarnings.map(\.kind), [.staleBuild])
-        // Staleness is never a fallback: the daemon owns live ptys, and refusing to
-        // connect would end them to fix a reporting problem.
-        XCTAssertNil(booted.selection.unreachableReason)
-        XCTAssertFalse(booted.selection.didFallBack)
     }
 
-    /// An in-process core has no daemon and can never be stale against itself.
-    func testTheSwiftCoreIsNeverStale() {
-        let booted = CoreBoot.boot(
-            persisted: .swift, override: nil, rustCoreURL: "http://127.0.0.1:1",
-            makeSwift: { _ in (FakeCore(capabilities: []), nil) },
+    /// A daemon too old to identify itself cannot be judged, and must not be
+    /// reported as stale for saying nothing.
+    func testADaemonThatDoesNotIdentifyItselfIsNotStale() throws {
+        let booted = try CoreBoot.connect(
+            rustCoreURL: "http://127.0.0.1:4290",
             makeRust: { _ in FakeCore(capabilities: []) })
         XCTAssertNil(booted.selection.daemon)
         XCTAssertFalse(booted.selection.daemonIsStale)

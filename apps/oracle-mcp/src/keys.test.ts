@@ -61,14 +61,16 @@ describe("the named-key vocabulary", () => {
 });
 
 // ── The mirror ───────────────────────────────────────────────────────────────
-// Three implementations of one table (this one, the Swift core's and the Rust
-// core's) is three chances to drift, and the symptom of drift is a phone button
-// that does something different depending on which core happens to be serving
-// 4280. So the cores' sources are read directly and compared, the way
+// Two implementations of one table (this one and the core's) is two chances to
+// drift, and the symptom of drift is a phone button that does nothing, or the wrong
+// thing. So the core's source is read directly and compared, the way
 // apps/wire-conformance/src/drift.test.ts compares the protocol catalogue.
+//
+// There were three until juancode-nqpm: the Swift core had its own `NamedKey.swift`,
+// and it went with the core. The list below is still a list because the check is
+// worth keeping table-shaped — a second core would be added back here.
 
-/** `"enter": [0x0D],` (Swift) and `("enter", &[0x0D]),` (Rust) both parse to the
- *  same pairs with one regex per core. */
+/** `("enter", &[0x0D]),` parses to name/bytes pairs with one regex per core. */
 function parseTable(src: string, pattern: RegExp): Record<string, number[]> {
   const out: Record<string, number[]> = {};
   for (const m of src.matchAll(pattern)) {
@@ -82,12 +84,6 @@ function parseTable(src: string, pattern: RegExp): Record<string, number[]> {
 }
 
 const CORES = [
-  {
-    name: "swift",
-    path: join(REPO_ROOT, "apps", "native", "Sources", "JuancodeServer", "NamedKey.swift"),
-    table: /"([a-z-]+)": \[([^\]]+)\]/g,
-    aliases: /"([a-z-]+)": "([a-z-]+)"/g,
-  },
   {
     name: "rust",
     path: join(

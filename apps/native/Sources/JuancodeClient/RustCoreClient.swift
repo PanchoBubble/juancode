@@ -179,7 +179,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// app does not implement — all three are the "fail loudly" path, and the caller
     /// turns them into the offer to fall back to the Swift core.
     public static func connect(baseURL: String = Config.rustCoreBaseURL,
-                               mirrorPath: String = Config.databasePath(for: .rust),
+                               mirrorPath: String = Config.mirrorDatabasePath,
                                timeout: TimeInterval = 3.0) throws -> RustCoreClient {
         let url = try WireConnection.websocketURL(base: baseURL)
         let store = try GRDBStore(path: mirrorPath)
@@ -228,7 +228,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             lock.withLock { backfillWaiter = nil }
         }
 
-        // Answer a remote pause without a desktop, the same way `AppState` does for
+        // Answer a remote pause without a desktop, the way the in-process server did for
         // the Swift core. Replaced by the model's own pause when the app comes up.
         globalPause.driver = RemoteGlobalPause(core: self, book: globalPause)
 
@@ -432,10 +432,6 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         if pinsModel, let model = opts.model, !model.isEmpty { frame["model"] = model }
         return frame
     }
-
-    /// The daemon cuts the isolation worktree, so its own row names the tree and its
-    /// delete-reap can remove it. See `SessionWorktree`.
-    public var makesWorktrees: Bool { true }
 
     @discardableResult
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,

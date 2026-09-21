@@ -116,10 +116,6 @@ final class AppModel {
     /// stop, and a frozen terminal that explains nothing is the worst outcome.
     var coreConnectionDown: String?
 
-    /// Set once when a launch that asked for the rust core fell back to swift, so
-    /// the offer is made exactly once per launch rather than on every render.
-    var coreFallbackPending = false
-
     var sessions: [SessionMeta] = []
     /// Every SessionMeta seen this run, keyed by id and NOT purged by the retention
     /// cap. Lets `reactivate` revive a session whose db row the cap deleted out from
@@ -620,8 +616,7 @@ final class AppModel {
 
     init(core: any CoreClient, degradedReason: String? = nil, corruptDbPath: String? = nil,
          coreSelection: CoreSelection = CoreSelection(
-            requested: .swift, active: .swift, source: .fallbackDefault, unreachableReason: nil,
-            databasePath: Config.databasePath(for: .swift), rustCoreURL: Config.rustCoreBaseURL)) {
+            databasePath: Config.mirrorDatabasePath, rustCoreURL: Config.rustCoreBaseURL)) {
         self.core = core
         // The GitHub panel reads the PR surface off the core over HTTP, so it needs the
         // route and — on a core that advertises no `github` — the sentence saying why
@@ -631,7 +626,6 @@ final class AppModel {
         self.degradedReason = degradedReason
         self.corruptDbPath = corruptDbPath
         self.coreSelection = coreSelection
-        self.coreFallbackPending = coreSelection.didFallBack
         // Snapshot the disk-restore candidates before anything revives: persisted
         // sessions not already live in the (post-restart, usually empty) registry.
         let persistedAtLaunch = core.sessions()
@@ -1755,39 +1749,30 @@ final class AppModel {
         unhideProject(cwd)
         unhideProject(projectCwd(for: cwd))
         do {
-            var workCwd = cwd
             var worktree: SessionWorktree? = nil
             if isolateWorktree {
-                let name = worktreeName ?? String(UUID().uuidString.prefix(8)).lowercased()
-                if core.makesWorktrees {
-                    // The core cuts it, from the repo root: a tree this app cut and
-                    // passed off as a plain `cwd` left the daemon's row with no
-                    // `worktreePath`, so closing the session reaped nothing and the
-                    // directory stayed on disk (juancode-asnn).
-                    worktree = .requested(name: name)
-                } else {
-                    let wt = try await createWorktree(cwd, name)
-                    workCwd = wt.path
-                    worktree = .made(path: wt.path)
-                }
+                // The core cuts it, from the repo root: a tree this app cut and
+                // passed off as a plain `cwd` left the daemon's row with no
+                // `worktreePath`, so closing the session reaped nothing and the
+                // directory stayed on disk (juancode-asnn).
+                worktree = .requested(name: worktreeName
+                    ?? String(UUID().uuidString.prefix(8)).lowercased())
             }
             // Spawn off the main actor: this resolves the CLI via a login shell and
             // forkpty()s — work that must never block the UI run loop.
             let core = core
-            let cwdToUse = workCwd
+            let cwdToUse = cwd
             let wt = worktree
             // Spawn at the given size, else the last on-screen terminal size, so the
             // CLI's alt-screen boots matching the view it'll render in (fixes "fresh
             // session opens short" / the Oracle dock garble). Oracle passes its dock
             // size explicitly since the dock is narrower than the main window.
             let grid: (cols: Int, rows: Int) = (cols != nil && rows != nil) ? (cols!, rows!) : TerminalGrid.spawn
-            // The opening prompt goes ON the create, so whichever core is running
-            // delivers it with its own verified paste-then-Enter: in-process that is
-            // `Session.autoSubmit`, on the daemon it is `deliver_seed`. Seeding the
-            // returned session from here instead reached the verified engine only on
-            // the Swift core — on the rust core `LiveSession.autoSubmit` is a blind
-            // paste plus a CR 120ms later, so a dispatched agent sat with its prompt
-            // typed into a still-booting TUI and never ran it.
+            // The opening prompt goes ON the create, so the core delivers it with its
+            // own verified paste-then-Enter (the daemon's `deliver_seed`). Seeding the
+            // returned session from here instead would reach a blind paste plus a CR
+            // 120ms later, so a dispatched agent sat with its prompt typed into a
+            // still-booting TUI and never ran it.
             let seed = (initialInput?.isEmpty ?? true) ? nil : initialInput
             let s = try await Task.detached(priority: .userInitiated) { [weak self] in
                 try core.create(
@@ -1882,7 +1867,7 @@ final class AppModel {
         // `group.cwd`), while `meta.cwd` is where the pty runs — the worktree dir for an
         // isolated session. Resolve the root before looking the flag up, else ⌘N off a
         // worktree session misses it and lands in that checkout. Cutting the new worktree
-        // also has to start from the main checkout: `createWorktree` takes git's
+        // also has to start from the main checkout: the core cuts it off git's
         // `--show-toplevel`, which from inside a worktree would nest a
         // `<repo>-worktrees/<name>-worktrees/…` sibling.
         let root = repoRoot(forSession: meta)
@@ -4827,7 +4812,6 @@ final class AppModel {
 
     /// First useful line of any git/gh/commit error, for a clean status note.
     private func gitErrorText(_ error: Error) -> String {
-        if let e = error as? GitError { return e.message }
         if let e = error as? GitHubError { return e.message }
         if let e = error as? ChangesError { return e.reason }
         return String(describing: error)
@@ -5035,14 +5019,10 @@ final class AppModel {
         clearUnread(id)
         navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
         refresh()
-        // The core that CUT the tree is the core that reaps it. On a core that makes
-        // its own worktrees, `deleteSession` removes the directory as part of
-        // forgetting the session — that is what the capability promises — so a second
-        // removal from here would be this process racing the daemon for the same
-        // path. Only a core the app cut the tree for needs reaping from the app.
-        if !core.makesWorktrees, let wt = meta?.worktreePath {
-            Task { try? await removeWorktree(wt) }
-        }
+        // Nothing to reap from here: the core that CUT the tree is the core that
+        // reaps it, and `deleteSession` removes the directory as part of forgetting
+        // the session — that is what the capability promises. A second removal from
+        // here would be this process racing the daemon for the same path.
     }
 
     /// Force-terminate a session's running agent (SIGTERM then SIGKILL via the
@@ -5100,8 +5080,8 @@ final class AppModel {
     }
 
     /// Close (kill + delete) every given session in one pass — the per-project
-    /// "close all" action. Same teardown as `delete(_:)` but refreshes once and
-    /// removes worktrees in a single batched task instead of one per session.
+    /// "close all" action. Same teardown as `delete(_:)`, refreshed once instead of
+    /// once per session.
     func closeSessions(_ ids: [String]) {
         guard !ids.isEmpty else { return }
         // Resolved before teardown (navOrder still holds the dying rows): where the
@@ -5110,11 +5090,9 @@ final class AppModel {
         let fallback = selection.flatMap { sel in
             idSet.contains(sel) ? neighborInNavOrder(of: sel, excluding: idSet) : nil
         }
-        var worktrees: [String] = []
         for id in ids {
             let editorParent = core.liveSession(id).flatMap { $0.meta.kind == .editor ? $0.meta.parentSessionId : nil }
             let meta = core.session(id)
-            if let wt = meta?.worktreePath { worktrees.append(wt) }
             core.logSessionEvent("close", sessionId: id, project: meta?.cwd ?? "")
             core.kill(id)
             core.deleteSession(id)
@@ -5132,10 +5110,6 @@ final class AppModel {
             clearUnread(id)
         }
         refresh()
-        // Reaped from here only on a core that does not reap its own — see `delete`.
-        if !worktrees.isEmpty, !core.makesWorktrees {
-            Task { for wt in worktrees { try? await removeWorktree(wt) } }
-        }
     }
 
     // MARK: - Work at risk (uncommitted/unpushed scanner) — juancode-rxu
@@ -5683,9 +5657,8 @@ private func loadDiffForSource(_ core: any CoreClient, _ cwd: String,
     }
 }
 
-/// The clean message from a GitError/GitHubError, else a generic description.
+/// The clean message from a GitHubError, else a generic description.
 private func diffErrorMessage(_ error: Error) -> String {
-    if let e = error as? GitError { return e.message }
     if let e = error as? GitHubError { return e.message }
     return String(describing: error)
 }

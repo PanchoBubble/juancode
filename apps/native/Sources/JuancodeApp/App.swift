@@ -292,35 +292,64 @@ struct JuancodeApp: App {
         // ptys), so a low inherited limit can't make forkpty fail with EMFILE.
         configureFileDescriptorLimit()
 
-        // Pick the core this launch talks to: the in-process Swift core, or the
-        // `juancoded` Rust daemon over the wire (`JUANCODE_CORE`, else the Settings
-        // choice). The only place that names a concrete implementation — everything
-        // above the seam holds a `CoreClient`. One core per launch and one database
-        // per core; a rust core that does not answer its handshake falls back to
-        // swift here and says so through `coreSelection`.
-        let booted = CoreBoot.boot()
-        let appModel = AppModel(core: booted.client, degradedReason: booted.degradedReason,
-                                corruptDbPath: booted.degradedReason != nil ? booted.corruptDbPath : nil,
-                                coreSelection: booted.selection)
+        // Connect to the `juancoded` daemon, the one core there is since
+        // juancode-nqpm. The only place that names a concrete implementation —
+        // everything above the seam holds a `CoreClient`.
+        //
+        // There is no fallback left to take, so a daemon that does not answer stops
+        // the launch here with the reason and a retry, rather than opening a window
+        // with no ptys, no session rows and no history in it.
+        let booted = Self.connectOrExplain()
+        let appModel = AppModel(core: booted.client, coreSelection: booted.selection)
         _model = State(wrappedValue: appModel)
         _oracle = State(wrappedValue: OracleModel(app: appModel))
         AppEnv.core = booted.client
         AppEnv.model = appModel
 
-        // Boot the embedded server so remote clients can attach to the same
-        // registry. Best-effort: if the port is taken (e.g. a dev server is
-        // running) the local shell still works fully.
+        // Serve 4280 so remote clients can reach the same core. Best-effort: if the
+        // port is taken (e.g. a headless `juancode-serve` is already up) the local
+        // shell still works fully.
         //
-        // Only the in-process core has a whole server to embed. A rust launch gets a
-        // relay on the same port instead: the daemon owns the ptys so `/ws` goes
-        // straight through to it, while the session REST reads, which it does not
-        // serve at all, are answered from this process's mirror. Either way 4280 is
-        // the one address the sidecar and any remote client know.
+        // It is a relay: the daemon owns the ptys so `/ws` goes straight through to
+        // it, while the session REST reads, which it does not serve at all, are
+        // answered from this process's mirror. 4280 is the one address the sidecar
+        // and any remote client know.
         let host = ProcessInfo.processInfo.environment["JUANCODE_HOST"] ?? "127.0.0.1"
-        if let swiftCore = booted.client as? SwiftCoreClient {
-            swiftCore.startEmbeddedServer(host: host, port: Config.port)
-        } else if let rustCore = booted.client as? RustCoreClient {
+        if let rustCore = booted.client as? RustCoreClient {
             rustCore.startProxyServer(host: host, port: Config.port)
+        }
+    }
+
+    /// Connect, or put the reason on screen and let the user retry or quit.
+    ///
+    /// A modal alert rather than a sheet inside the window, because there is no
+    /// usable window to put a sheet on: every pane, the sidebar and the session list
+    /// read the core. This is the one place in the app allowed to refuse to start.
+    @MainActor
+    private static func connectOrExplain() -> BootedCore {
+        while true {
+            do {
+                return try CoreBoot.connect()
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription
+                    ?? String(describing: error)
+                NSLog("juancode: the juancoded daemon is not usable: \(reason)")
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = "The juancoded core did not answer"
+                alert.informativeText = [
+                    reason,
+                    "Looked for it at \(Config.rustCoreBaseURL). juancode has no in-process "
+                        + "core any more, so there is nothing to run without one.",
+                    "`apps/native/scripts/juancoded-agent.sh install` keeps a daemon running "
+                        + "across app quits, logout and reboot. For one launch, "
+                        + "`apps/native/scripts/juancoded.sh` starts one that lives as long as "
+                        + "its terminal.",
+                ].joined(separator: "\n\n")
+                alert.addButton(withTitle: "Try again")
+                alert.addButton(withTitle: "Quit")
+                if alert.runModal() != .alertFirstButtonReturn { exit(1) }
+            }
         }
     }
 

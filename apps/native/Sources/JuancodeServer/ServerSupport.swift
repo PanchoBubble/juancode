@@ -3,7 +3,6 @@ import Hummingbird
 import HTTPTypes
 import NIOCore
 import JuancodeCore
-import JuancodeServices
 
 /// An API error that renders as `{ "error": "<message>" }` with a status code —
 /// matching the JSON error bodies the Express server returns in `index.ts`.
@@ -40,17 +39,16 @@ func rawJSONResponse(_ data: Data, status: HTTPResponse.Status = .ok) -> Respons
 let jsonNullResponse = rawJSONResponse(Data("null".utf8))
 
 /// `ProcessError` is a `JuancodeCore` type since juancode-idza, so it costs the relay
-/// nothing. `GitError` is the one thing this file still needs `JuancodeServices` for;
-/// that branch goes with `Git.swift` (juancode-lgaw), and the import with it.
+/// nothing. The `GitError` branch went with `Git.swift` and the Swift core
+/// (juancode-nqpm), and the `JuancodeServices` import with it.
 func errMsg(_ err: Error) -> String {
-    if let g = err as? GitError { return g.message }
     if let p = err as? ProcessError { return p.message }
     return (err as? LocalizedError)?.errorDescription ?? "\(err)"
 }
 
 // ── ResponseEncodable conformances ───────────────────────────────────────────
-// These DTOs live in JuancodeCore / JuancodeServices (which can't depend on
-// Hummingbird); conform them here so handlers can return them directly as JSON.
+// These DTOs live in JuancodeCore (which can't depend on Hummingbird); conform
+// them here so handlers can return them directly as JSON.
 
 extension SessionMeta: ResponseEncodable {}
 extension SearchHit: ResponseEncodable {}

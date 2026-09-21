@@ -2,155 +2,55 @@ import XCTest
 import JuancodeCore
 import JuancodePersistence
 import JuancodeServer
-import JuancodeServices
 @testable import JuancodeClient
 
-/// The backend switch: which core a launch resolves to, which database it writes,
-/// what happens when the core it asked for is not there, and how an affordance
-/// backed by a capability the connected core lacks is supposed to read.
+/// What a launch connects to, which database it mirrors into, what happens when
+/// the daemon is not there, and how an affordance backed by a capability the
+/// connected core lacks is supposed to read.
 ///
-/// Deliberately no real daemon and no real store in the selection tests: the
-/// builders are injected, so what is under test is the decision, not SQLite. The
-/// unreachable-core test does open a real socket, at a port nothing is listening
-/// on, because "the daemon is not there" is the path that has to fail loudly and a
-/// mock cannot prove that.
+/// There used to be a backend switch here — persisted setting, `JUANCODE_CORE`
+/// override, requested-vs-active, fallback to the in-process core. juancode-nqpm
+/// deleted the Swift core and all of it with them; what remains is one connection
+/// that either lands or is refused out loud.
+///
+/// Deliberately no real daemon in the boot tests: the builder is injected, so what
+/// is under test is the decision, not SQLite. The unreachable-core test does open a
+/// real socket, at a port nothing is listening on, because "the daemon is not
+/// there" is the path that has to fail loudly and a mock cannot prove that.
 final class CoreBackendTests: XCTestCase {
 
-    // MARK: - Resolution
+    // MARK: - One database, and it is a mirror
 
-    /// The env override wins over the persisted setting, matching every other
-    /// `JUANCODE_*` knob (and the terminal backend's `JUANCODE_GHOSTTY`).
-    func testEnvironmentOverrideBeatsThePersistedSetting() {
-        let resolved = CoreSelection.resolve(persisted: .swift, override: .rust)
-        XCTAssertEqual(resolved.requested, .rust)
-        XCTAssertEqual(resolved.source, .environment)
-
-        let other = CoreSelection.resolve(persisted: .rust, override: .swift)
-        XCTAssertEqual(other.requested, .swift)
-        XCTAssertEqual(other.source, .environment)
-    }
-
-    /// With no override the persisted choice is what a launch asks for, and the
-    /// selection says the picker is live.
-    func testPersistedSettingIsUsedWithNoOverride() {
-        let resolved = CoreSelection.resolve(persisted: .rust, override: nil)
-        XCTAssertEqual(resolved.requested, .rust)
-        XCTAssertEqual(resolved.source, .setting)
-        XCTAssertFalse(CoreSelection(requested: .rust, active: .rust, source: resolved.source,
-                                     unreachableReason: nil, databasePath: "/tmp/x",
-                                     rustCoreURL: "http://127.0.0.1:4290").isPinnedByEnvironment)
-    }
-
-    /// `JUANCODE_CORE` is read from the environment, and a typo is ignored rather
-    /// than fatal: a bad value must not be able to stop the app booting.
-    func testEnvironmentParsing() {
-        let key = "JUANCODE_CORE"
-        let previous = ProcessInfo.processInfo.environment[key]
-        defer {
-            if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
-        }
-
-        setenv(key, "rust", 1)
-        XCTAssertEqual(Config.coreBackendOverride, .rust)
-        setenv(key, "  SWIFT ", 1)
-        XCTAssertEqual(Config.coreBackendOverride, .swift)
-        setenv(key, "go", 1)
-        XCTAssertNil(Config.coreBackendOverride)
-        setenv(key, "", 1)
-        XCTAssertNil(Config.coreBackendOverride)
-        unsetenv(key)
-        XCTAssertNil(Config.coreBackendOverride)
-    }
-
-    // MARK: - One database per core
-
-    /// The two cores never share a file, and the swift core keeps the historical
-    /// name so switching cores cannot rename the store this app has been writing.
-    func testEachCoreHasItsOwnDatabase() {
-        let swiftPath = Config.databasePath(for: .swift)
-        let rustPath = Config.databasePath(for: .rust)
-        XCTAssertNotEqual(swiftPath, rustPath)
-        XCTAssertEqual(swiftPath, GRDBStore.defaultPath())
-        XCTAssertTrue(swiftPath.hasSuffix("/juancode.db"), swiftPath)
-        XCTAssertTrue(rustPath.hasSuffix("/juancode-rust.db"), rustPath)
-        // Both under the one data dir, so `JUANCODE_DATA_DIR` still relocates
-        // everything together.
-        XCTAssertEqual((swiftPath as NSString).deletingLastPathComponent,
-                       (rustPath as NSString).deletingLastPathComponent)
-    }
-
-    /// The rust mirror is NOT the daemon's own store: `juancoded` keeps that under
-    /// its own data dir and is its only writer (juancode-52e8.6 / commit 007b93f).
+    /// The mirror is NOT the daemon's own store: `juancoded` keeps that under its
+    /// own data dir and is its only writer (juancode-52e8.6 / commit 007b93f).
     func testTheMirrorIsNotTheDaemonsOwnStore() {
-        let mirror = Config.databasePath(for: .rust)
+        let mirror = Config.mirrorDatabasePath
+        XCTAssertTrue(mirror.hasSuffix("/juancode-rust.db"), mirror)
         XCTAssertFalse(mirror.contains("rust-core"), mirror)
         XCTAssertFalse(mirror.hasSuffix("juancoded-rust.db"), mirror)
     }
 
     // MARK: - Boot
 
-    func testBootUsesTheSwiftCoreByDefault() {
-        let booted = CoreBoot.boot(persisted: .swift, override: nil,
-                                   rustCoreURL: "http://127.0.0.1:1",
-                                   makeSwift: Self.fakeSwift,
-                                   makeRust: Self.refusingRust)
-        XCTAssertEqual(booted.selection.requested, .swift)
-        XCTAssertEqual(booted.selection.active, .swift)
-        XCTAssertFalse(booted.selection.didFallBack)
-        XCTAssertNil(booted.selection.unreachableReason)
-        XCTAssertEqual(booted.selection.databasePath, Config.databasePath(for: .swift))
-    }
-
-    func testBootUsesTheRustCoreWhenItAnswers() {
-        let booted = CoreBoot.boot(persisted: .rust, override: nil,
-                                   rustCoreURL: "http://127.0.0.1:4290",
-                                   makeSwift: Self.fakeSwift,
-                                   makeRust: { _ in FakeCore(capabilities: ["inputAck"]) })
-        XCTAssertEqual(booted.selection.active, .rust)
-        XCTAssertFalse(booted.selection.didFallBack)
-        XCTAssertEqual(booted.selection.databasePath, Config.databasePath(for: .rust))
+    func testBootConnectsToTheDaemonAndSaysWhereItIs() throws {
+        let booted = try CoreBoot.connect(rustCoreURL: "http://127.0.0.1:4290",
+                                          makeRust: { _ in FakeCore(capabilities: ["inputAck"]) })
         XCTAssertEqual(booted.selection.rustCoreURL, "http://127.0.0.1:4290")
+        XCTAssertEqual(booted.selection.databasePath, Config.mirrorDatabasePath)
+        XCTAssertFalse(booted.selection.daemonIsStale)
     }
 
-    /// The whole point of the "never silently" rule: an unreachable daemon leaves a
-    /// usable app, on the other core, carrying the reason and the fact that it fell
-    /// back — which is what the launch sheet and the badge render.
-    func testAnUnreachableRustCoreFallsBackAndSaysWhy() {
-        let booted = CoreBoot.boot(persisted: .rust, override: nil,
-                                   rustCoreURL: "http://127.0.0.1:1",
-                                   makeSwift: Self.fakeSwift,
-                                   makeRust: Self.refusingRust)
-        XCTAssertEqual(booted.selection.requested, .rust)
-        XCTAssertEqual(booted.selection.active, .swift)
-        XCTAssertTrue(booted.selection.didFallBack)
-        XCTAssertEqual(booted.selection.unreachableReason,
-                       "No serverInfo handshake from http://127.0.0.1:1 within 200ms")
-        // And it fell back onto the SWIFT database, not the rust mirror: the
-        // fallback runs the swift core, so it must read the swift core's rows.
-        XCTAssertEqual(booted.selection.databasePath, Config.databasePath(for: .swift))
-    }
-
-    /// A fallback still surfaces the in-memory-store degradation underneath it:
-    /// two independent failures, both reported.
-    func testFallbackCarriesTheSwiftCoresOwnDegradation() {
-        let booted = CoreBoot.boot(persisted: .rust, override: nil,
-                                   rustCoreURL: "http://127.0.0.1:1",
-                                   makeSwift: { _ in (FakeCore(capabilities: []), "disk is full") },
-                                   makeRust: Self.refusingRust)
-        XCTAssertEqual(booted.degradedReason, "disk is full")
-        XCTAssertNotNil(booted.selection.unreachableReason)
-    }
-
-    /// An override of `rust` on a machine with no daemon must not strand the app:
-    /// same fallback, and the selection still records that the environment asked.
-    func testEnvironmentPinnedRustStillFallsBack() {
-        let booted = CoreBoot.boot(persisted: .swift, override: .rust,
-                                   rustCoreURL: "http://127.0.0.1:1",
-                                   makeSwift: Self.fakeSwift,
-                                   makeRust: Self.refusingRust)
-        XCTAssertEqual(booted.selection.source, .environment)
-        XCTAssertTrue(booted.selection.isPinnedByEnvironment)
-        XCTAssertEqual(booted.selection.active, .swift)
+    /// The whole point of deleting the second core: there is nothing to fall back
+    /// to, so an unreachable daemon has to reach the caller as an error carrying the
+    /// daemon's own reason. A `BootedCore` that answered nothing would be a window
+    /// with no ptys, no rows and no history in it.
+    func testAnUnreachableDaemonThrowsRatherThanDegrading() {
+        XCTAssertThrowsError(
+            try CoreBoot.connect(rustCoreURL: "http://127.0.0.1:1",
+                                 makeRust: Self.refusingRust)) { error in
+            let described = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            XCTAssertEqual(described, "No serverInfo handshake from http://127.0.0.1:1 within 200ms")
+        }
     }
 
     // MARK: - Tracked PRs over the wire
@@ -261,35 +161,6 @@ final class CoreBackendTests: XCTestCase {
                         .heavyQueue, .changes, .github])
     }
 
-    /// The in-process core advertises everything the app knows how to ask for, bar
-    /// the surfaces that have moved out of it. This is also the drift guard: a new
-    /// capability string added to `WireProtocol` without a `CoreCapability` case (or
-    /// the reverse) shows up here.
-    ///
-    /// `heavyQueue` is the first name on the other side of that line
-    /// (juancode-52e8.14.3): the slot registry is read by the daemon now, and the
-    /// Swift core has no frame for it, so the panel greys out under this core rather
-    /// than drawing a queue nothing is watching. `changes` is the second
-    /// (juancode-52e8.14.5): the session's git working tree is the daemon's to read,
-    /// so the Changes panel says why it is empty rather than showing an empty diff,
-    /// which would read as "the agent changed nothing". `github` is the third
-    /// (juancode-52e8.14.6): the failing-CI log is parsed by the daemon and a review
-    /// pass is run by it, so this core serves the cached review and nothing else.
-    func testTheSwiftCoreGatesOnlyWhatHasMovedOutOfIt() throws {
-        let dbPath = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("juancode-caps-\(UUID().uuidString).db")
-        defer {
-            for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbPath + suffix) }
-        }
-        let core = SwiftCoreClient(state: try AppState(dbPath: dbPath))
-        XCTAssertEqual(core.missingCapabilities, [.heavyQueue, .changes, .github])
-        XCTAssertEqual(Set(WireProtocol.capabilities).subtracting(WireProtocol.remoteOnlyCapabilities),
-                       Set(CoreCapability.allCases.map(\.rawValue))
-                           .subtracting(["heavyQueue", "changes", "github"]),
-                       "every capability the Swift core advertises is one the app can ask for, "
-                       + "except the ones that only describe what the endpoint serves a remote client")
-    }
-
     /// The bug this closes, and the only reason the `changes` surface is spelled as
     /// protocol REQUIREMENTS rather than left in the extension beside its defaults.
     ///
@@ -335,7 +206,7 @@ final class CoreBackendTests: XCTestCase {
 
     /// No mock: a socket to a port nothing is listening on. The handshake wait has
     /// to end in a thrown error rather than a hang or a half-built client, because
-    /// that is what `CoreBoot` turns into the fallback offer.
+    /// that is what `CoreBoot` turns into the refusal the launch shows.
     func testConnectingToANonListeningPortThrows() {
         // Port 1 needs no privileges to CONNECT to and nothing listens there.
         let mirrorPath = (NSTemporaryDirectory() as NSString)
@@ -364,10 +235,6 @@ final class CoreBackendTests: XCTestCase {
     }
 
     // MARK: - Doubles
-
-    private static func fakeSwift(_ path: String) -> (core: any CoreClient, degradedReason: String?) {
-        (FakeCore(capabilities: WireProtocol.capabilities), nil)
-    }
 
     /// Stands in for a daemon that is not there, with the same error the real
     /// handshake wait throws.

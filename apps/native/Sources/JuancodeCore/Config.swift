@@ -208,69 +208,28 @@ public enum Config {
     }
 }
 
-/// Which harness core a launch drives: the in-process Swift core, or the
-/// `juancoded` Rust daemon over the wire protocol.
-///
-/// One core per launch, and one database per core. The two stores have separate
-/// schemas and separate writers, so pointing both at one file would buy nothing
-/// but drift; the visible consequence is that sessions started under one core are
-/// not listed under the other.
-public enum CoreBackend: String, Sendable, CaseIterable, Codable {
-    case swift
-    case rust
-
-    /// The user-facing name, for the Settings picker and the active-core badge.
-    public var label: String {
-        switch self {
-        case .swift: return "Swift (in-process)"
-        case .rust: return "Rust daemon (juancoded)"
-        }
-    }
-}
-
 public extension Config {
-    /// Explicit `JUANCODE_CORE=swift|rust` override, nil when unset or unparseable.
+    /// The desktop-side MIRROR of the daemon's session rows, under `dataDir` so a
+    /// relocated install keeps everything under one root.
     ///
-    /// The usual `JUANCODE_*` precedence: when set it wins over the persisted
-    /// Settings choice, so a launch can be pinned to a core without touching the
-    /// preference the next launch reads. An unrecognised value is ignored rather
-    /// than fatal — a typo should not make the app refuse to boot.
-    static var coreBackendOverride: CoreBackend? {
-        let raw = (ProcessInfo.processInfo.environment["JUANCODE_CORE"] ?? "")
-            .trimmingCharacters(in: .whitespaces).lowercased()
-        guard !raw.isEmpty else { return nil }
-        guard let backend = CoreBackend(rawValue: raw) else {
-            NSLog("juancode: ignoring unknown JUANCODE_CORE=\(raw), expected swift or rust")
-            return nil
-        }
-        return backend
+    /// Not the core's own store: `juancoded` keeps that at
+    /// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`) and
+    /// is its only writer. This file is what the sidebar, the search index and the
+    /// retention cap read, and the desktop is its only writer — one writer per file,
+    /// which is the rule that survives from when there were two cores.
+    ///
+    /// The name keeps the `-rust` suffix it was given when it was one of two. The
+    /// other file, `juancode.db`, is the deleted Swift core's store: nothing reads or
+    /// writes it any more, and `juancoded import-swift` is how its history reaches
+    /// the daemon (juancode-hebs).
+    static var mirrorDatabasePath: String {
+        (dataDir as NSString).appendingPathComponent("juancode-rust.db")
     }
 
-    /// The sqlite file a given core's rows live in, both under `dataDir` so a
-    /// relocated install keeps everything under one root. `swift` keeps the
-    /// historical name (`GRDBStore.defaultPath()`), so switching cores never
-    /// renames the store the current app has been writing for months.
-    ///
-    /// The rust file is the DESKTOP's mirror of what the daemon told it, not the
-    /// daemon's own store: `juancoded` keeps that at
-    /// `$JUANCODED_DATA_DIR/juancoded-rust.db` (default `~/.juancode/rust-core`)
-    /// and is its only writer.
-    ///
-    /// One file per core means switching cores shows a different, shorter history —
-    /// each core only ever wrote its own. `scripts/backfill-rust-sessions.mjs` unions
-    /// the Swift history across (dry run by default, and it refuses to write while
-    /// anything holds the stores open). Merging the files is NOT the fix: the daemon
-    /// is a separate process that outlives the app, and two writers on one sqlite
-    /// file is a corruption risk.
-    static func databasePath(for backend: CoreBackend) -> String {
-        let name = backend == .swift ? "juancode.db" : "juancode-rust.db"
-        return (dataDir as NSString).appendingPathComponent(name)
-    }
-
-    /// Base URL of the Rust daemon (`JUANCODE_RUST_CORE_URL`, else
+    /// Base URL of the `juancoded` daemon (`JUANCODE_RUST_CORE_URL`, else
     /// `JUANCODED_PORT` on loopback, else the daemon's own default port 4290).
-    /// Deliberately not 4280: that port belongs to whichever core is embedded in
-    /// this app, and the daemon is a separate process.
+    /// Deliberately not 4280: that port belongs to the relay this app serves, and
+    /// the daemon is a separate process.
     static var rustCoreBaseURL: String {
         let explicit = (ProcessInfo.processInfo.environment["JUANCODE_RUST_CORE_URL"] ?? "")
             .trimmingCharacters(in: .whitespaces)

@@ -19,7 +19,7 @@ import type { Scenario } from "./spec.ts";
 export type Status = "passed" | "failed" | "skipped" | "unknown" | "unmeasured";
 
 export interface RunReport {
-  /** Short core name, e.g. "swift" or "rust". */
+  /** Short core name, e.g. "rust". */
   core: string;
   url: string;
   specRevision: string;
@@ -59,7 +59,6 @@ export interface StatusFile {
  *  file wholesale, so the readable name has to live here or every measurement
  *  quietly replaces it with the short one. */
 const CORE_LABELS: Record<string, string> = {
-  swift: "apps/native (JuancodeServer), the Swift core",
   rust: "apps/juancoded, the Rust core",
 };
 

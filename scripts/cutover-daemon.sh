@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT="$ROOT/apps/native/scripts/juancoded-agent.sh"
 BIN="$ROOT/apps/juancoded/target/release/juancoded"
 MIRROR="$HOME/.juancode/data/juancode-rust.db"
-CORE_URL="${JUANCODE_CORE_URL:-http://127.0.0.1:4280}"
+RELAY_URL="${JUANCODE_RELAY_URL:-http://127.0.0.1:4280}"
 
 ASSUME_YES=0
 [[ ${1:-} == --yes || ${1:-} == -y ]] && ASSUME_YES=1
@@ -45,7 +45,7 @@ echo "main at $(git -C "$ROOT" log --oneline -1)"
 
 # --- 1. Say what dies ----------------------------------------------------------
 say "Live sessions (all of these end)"
-curl -s -m 5 "$CORE_URL/api/sessions" 2>/dev/null | python3 -c '
+curl -s -m 5 "$RELAY_URL/api/sessions" 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -137,7 +137,7 @@ say "Installing the launchd job from $ROOT"
 # --- 7. Show what is actually serving now ----------------------------------------
 say "Result"
 for _ in $(seq 1 40); do
-  curl -s -m 2 "$CORE_URL/api/health" >/dev/null 2>&1 && break
+  curl -s -m 2 "$RELAY_URL/api/health" >/dev/null 2>&1 && break
   sleep 0.5
 done
 "$AGENT" status || true

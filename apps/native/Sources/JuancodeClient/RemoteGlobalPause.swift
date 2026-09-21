@@ -1,11 +1,12 @@
 import Foundation
 import JuancodeCore
 
-/// The global pause a launch on the Rust core performs when no desktop is attached.
+/// The global pause a launch performs over the wire when no desktop is attached.
 ///
-/// The twin of `RegistryGlobalPause`, and it exists for the same reason: a headless
-/// `juancode-serve --core rust` is exactly the launch a phone talks to when nobody
-/// is at the Mac, which is the moment you want to pause everything. Sleeping goes
+/// It exists because a headless `juancode-serve` is exactly the launch a phone talks
+/// to when nobody is at the Mac, which is the moment you want to pause everything.
+/// Its in-process twin, `RegistryGlobalPause`, went with the Swift core
+/// (juancode-nqpm); this is the only one now. Sleeping goes
 /// through `markDormant`, so it is the `sleepSession` frame the first half of
 /// juancode-nizo added and not a plain kill; waking is `resume`, which is
 /// `reactivate` on the wire.

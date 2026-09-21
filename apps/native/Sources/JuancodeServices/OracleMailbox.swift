@@ -6,21 +6,19 @@ import Foundation
 ///
 /// Split out of `Oracle.swift` (juancode-a2s7). The rest of Oracle — the dispatch
 /// and state-snapshot types, the control-dir bootstrap and the agent instructions —
-/// is desktop-local and lives in `JuancodeDesktop/Oracle.swift`. This half stays
-/// here because the in-process WS server claims dispatch ids and records their
-/// outcomes (`JuancodeServer/WebSocketConnection.swift`), and `JuancodeServer`
-/// must not depend on `JuancodeDesktop`.
+/// is desktop-local and lives in `JuancodeDesktop/Oracle.swift`. This half stayed
+/// here because the in-process WS server claimed dispatch ids and recorded their
+/// outcomes, and `JuancodeServer` must not depend on `JuancodeDesktop`.
 ///
-/// Disposition (re-measured at this tree, juancode-880y): it MOVES, it does not die.
-/// The earlier line here — that it shares `ReviveSession.swift`'s fate and goes when
-/// the in-process server does — was wrong. Only 2 of its 39 references are that server
-/// (`JuancodeServer/WebSocketConnection.swift:359` and `:365`). The other 37 read the
-/// Oracle control dir on either core: `JuancodeDesktop/Oracle.swift` 14,
-/// `OracleDispatchRegistry.swift` 1, and in `JuancodeApp` OracleModel 11, AppModel 6,
-/// RootView 3, JumpPalette 1 — plus `ResumeGrid.swift:48` in this target, which is
-/// moving to the same place. `claim_dispatch` in juancoded-persistence is not the
-/// counterpart it looks like: it dedups the daemon's own dispatch ids, not these
-/// mailbox lines.
+/// Disposition (juancode-880y, re-read after juancode-nqpm): it MOVES, it does not
+/// die — and the reason it could not move is gone. The 2 of its 39 references that
+/// were the in-process server (`WebSocketConnection.swift:359` and `:365`) went with
+/// that server. The other 37 read the Oracle control dir and are all desktop:
+/// `JuancodeDesktop/Oracle.swift` 14, `OracleDispatchRegistry.swift` 1, and in
+/// `JuancodeApp` OracleModel 11, AppModel 6, RootView 3, JumpPalette 1 — plus
+/// `ResumeGrid.swift:48` in this target, which is moving to the same place.
+/// `claim_dispatch` in juancoded-persistence is not the counterpart it looks like:
+/// it dedups the daemon's own dispatch ids, not these mailbox lines.
 ///
 /// Its home is `JuancodeDesktop`, rejoining the half of `Oracle.swift` that
 /// juancode-a2s7 already put there, and the move is juancode-kf8n. It cannot go before

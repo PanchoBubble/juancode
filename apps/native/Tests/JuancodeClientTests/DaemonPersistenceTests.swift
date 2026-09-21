@@ -103,7 +103,6 @@ final class DaemonPersistenceTests: XCTestCase {
             "buildId": "same-1",
         ]))
         let selection = CoreSelection(
-            requested: .rust, active: .rust, source: .setting, unreachableReason: nil,
             databasePath: "/tmp/x.db", rustCoreURL: "http://127.0.0.1:4290",
             daemon: daemon,
             daemonWarnings: daemon.warnings(against: AppIdentity(buildId: "same-1",
@@ -115,11 +114,11 @@ final class DaemonPersistenceTests: XCTestCase {
                            + "the badge yellow")
     }
 
-    /// The Swift core is this process. It cannot outlive the app and must not claim to.
-    func testTheInProcessCoreNeverClaimsToSurviveAQuit() {
-        let selection = CoreSelection(
-            requested: .swift, active: .swift, source: .setting, unreachableReason: nil,
-            databasePath: "/tmp/x.db", rustCoreURL: "http://127.0.0.1:4290")
+    /// A daemon that says nothing about its own lifetime must not be reported as
+    /// outliving the app: silence is not a promise.
+    func testADaemonThatSaysNothingClaimsNoPersistence() {
+        let selection = CoreSelection(databasePath: "/tmp/x.db",
+                                      rustCoreURL: "http://127.0.0.1:4290")
         XCTAssertNil(selection.sessionPersistence)
     }
 }
