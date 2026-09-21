@@ -1904,8 +1904,12 @@ private struct FolderHeader: View {
                     VStack(alignment: .leading, spacing: 2) {
                         // Per-project worktree default: when on, picking an agent below
                         // starts the session on a fresh git worktree. Persisted per
-                        // project, so it sticks for future "+" clicks. Git folders only.
-                        if model.folderGitState(group.cwd)?.git == true {
+                        // project (falling back to the app-wide default in Settings →
+                        // Sessions), so it sticks for future "+" clicks. Hidden only for
+                        // a folder git has answered for — while the state is still
+                        // loading the switch shows, or the popover would look like it
+                        // has no worktree choice at all.
+                        if model.folderGitState(group.cwd)?.git != false {
                             Toggle(isOn: Binding(
                                 get: { model.worktreeDefault(forProject: group.cwd) },
                                 set: { model.setWorktreeDefault($0, forProject: group.cwd) }
@@ -3601,7 +3605,11 @@ struct NewSessionView: View {
     @State private var cwd: String = Config.defaultCwd
     // New sessions default to accept-all (skip permission prompts); toggle off per session.
     @State private var skipPermissions = true
+    // Seeded from the folder's resolved worktree default (its own "+" switch, else
+    // the app-wide one in Settings → Sessions) and re-seeded as the folder changes,
+    // until the user answers here — after which this sheet's answer stands.
     @State private var isolateWorktree = false
+    @State private var worktreeEdited = false
     // Opening prompt, auto-submitted once the CLI is ready (Session.autoSubmit).
     @State private var prompt = ""
     // Fan-out: how many parallel agents (each its own worktree) to spawn with the
@@ -3635,10 +3643,16 @@ struct NewSessionView: View {
                         .clickCursor()
                 }
                 Toggle("Accept all (skip permission prompts)", isOn: $skipPermissions)
-                Toggle("Isolate in a fresh git worktree", isOn: $isolateWorktree)
+                // Disabled for a folder git has answered "not a repo" for: there is
+                // nothing to cut a worktree from, and a seeded-on default would fail
+                // the spawn rather than start a session.
+                Toggle("Isolate in a fresh git worktree", isOn: Binding(
+                    get: { isolateWorktree && folderIsGit },
+                    set: { isolateWorktree = $0; worktreeEdited = true }))
+                    .disabled(!folderIsGit)
                 // Fan-out only appears once worktree isolation is on — >1 agent on a
                 // shared checkout would collide. Toggling worktree off resets to 1.
-                if isolateWorktree {
+                if isolateWorktree, folderIsGit {
                     Stepper(value: $agentCount, in: 1...FanOut.maxAgents) {
                         Text(agentCount == 1
                              ? "Run 1 agent"
@@ -3670,8 +3684,16 @@ struct NewSessionView: View {
         }
         // Surface resumable CLI conversations for whichever folder is selected,
         // refreshed as the directory changes (juancode-g4c).
-        .onAppear { model.loadResumableSessions(for: cwd) }
-        .onChange(of: cwd) { _, new in model.loadResumableSessions(for: new) }
+        .onAppear {
+            model.loadResumableSessions(for: cwd)
+            model.loadFolderGitState(cwd)
+            if !worktreeEdited { isolateWorktree = model.worktreeDefault(forProject: cwd) }
+        }
+        .onChange(of: cwd) { _, new in
+            model.loadResumableSessions(for: new)
+            model.loadFolderGitState(new)
+            if !worktreeEdited { isolateWorktree = model.worktreeDefault(forProject: new) }
+        }
     }
 
     /// A `claude --resume`-style list of CLI conversations already started in the
@@ -3730,9 +3752,13 @@ struct NewSessionView: View {
         if model.adoptResumable(s, cwd: cwd) != nil { dismiss() }
     }
 
+    /// Whether the selected folder can be worktree-isolated: true until git has
+    /// said otherwise, so the control doesn't flicker in while the state loads.
+    private var folderIsGit: Bool { model.folderGitState(cwd)?.git != false }
+
     private var startLabel: String {
         if creating { return "Starting…" }
-        return (isolateWorktree && agentCount > 1) ? "Start \(agentCount) agents" : "Start"
+        return (isolateWorktree && folderIsGit && agentCount > 1) ? "Start \(agentCount) agents" : "Start"
     }
 
     private func start() {
@@ -3741,7 +3767,8 @@ struct NewSessionView: View {
         let initialInput = seed.isEmpty ? nil : seed
         Task {
             let started: Bool
-            if isolateWorktree, agentCount > 1 {
+            let isolate = isolateWorktree && folderIsGit
+            if isolate, agentCount > 1 {
                 let sessions = await model.createFanOut(
                     provider: provider, cwd: cwd, skipPermissions: skipPermissions,
                     count: agentCount, initialInput: initialInput)
@@ -3749,7 +3776,7 @@ struct NewSessionView: View {
             } else {
                 let session = await model.create(
                     provider: provider, cwd: cwd, skipPermissions: skipPermissions,
-                    isolateWorktree: isolateWorktree, initialInput: initialInput, select: true)
+                    isolateWorktree: isolate, initialInput: initialInput, select: true)
                 started = session != nil
             }
             creating = false

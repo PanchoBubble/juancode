@@ -49,6 +49,11 @@ private let dismissedSessionsKey = "juancode.dismissedSessions"
 /// toggle: project cwd → Bool (a plist-safe [String: Bool]).
 private let worktreeByProjectKey = "juancode.worktreeByProject"
 
+/// UserDefaults key for the app-wide "new sessions land on a fresh worktree"
+/// default, which every project follows unless it holds its own entry in
+/// `worktreeByProject`.
+private let worktreeDefaultAllKey = "juancode.worktreeDefaultAll"
+
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
@@ -1632,16 +1637,25 @@ final class AppModel {
         didSet { UserDefaults.standard.set(worktreeByProject, forKey: worktreeByProjectKey) }
     }
 
-    /// Whether the folder "+" should isolate new sessions onto a worktree for `cwd`.
-    func worktreeDefault(forProject cwd: String) -> Bool {
-        worktreeByProject[cwd] ?? false
+    /// App-wide default behind `worktreeByProject`: what a project that has never
+    /// been switched either way does. Settings → Sessions edits this one, so a user
+    /// who always wants isolation sets it once instead of per project. Persisted.
+    var worktreeDefaultAll: Bool = UserDefaults.standard.bool(forKey: worktreeDefaultAllKey) {
+        didSet { UserDefaults.standard.set(worktreeDefaultAll, forKey: worktreeDefaultAllKey) }
     }
 
-    /// Flip the per-project worktree default, dropping the entry when back to the
-    /// `false` default so the blob doesn't accumulate stale project keys.
+    /// Whether the folder "+" should isolate new sessions onto a worktree for `cwd`:
+    /// the project's own setting when it has one, else the app-wide default.
+    func worktreeDefault(forProject cwd: String) -> Bool {
+        worktreeByProject[cwd] ?? worktreeDefaultAll
+    }
+
+    /// Flip the per-project worktree default, dropping the entry when it agrees with
+    /// the app-wide default so the blob doesn't accumulate stale project keys — and
+    /// so a project left alone keeps following that default when it later changes.
     func setWorktreeDefault(_ on: Bool, forProject cwd: String) {
         var next = worktreeByProject
-        if on { next[cwd] = true } else { next[cwd] = nil }
+        if on == worktreeDefaultAll { next[cwd] = nil } else { next[cwd] = on }
         worktreeByProject = next
     }
 

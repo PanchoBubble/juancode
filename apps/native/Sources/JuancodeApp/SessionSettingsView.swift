@@ -1,5 +1,7 @@
-// Settings → Sessions pane: sleep idle sessions. Once a session has been verifiably
-// idle for the chosen duration, the core's reaper kills its CLI process tree to
+// Settings → Sessions pane: sleep idle sessions, cost budget, the app-wide
+// fresh-worktree default for new sessions, and notification routing.
+//
+// Sleeping: once a session has been verifiably idle for the chosen duration, the core's reaper kills its CLI process tree to
 // free RAM, leaving a dormant tile that resumes on demand. Only the Rust core holds
 // one, so on the Swift core this pane edits a window nothing acts on. The duration is editable;
 // the toggle off (0 min) disables it entirely. Backed by
@@ -75,6 +77,21 @@ struct SessionSettingsView: View {
                 }
                 .disabled(!budgetEnabled)
                 .foregroundStyle(budgetEnabled ? .primary : .secondary)
+
+                Divider().padding(.vertical, 4)
+
+                // App-wide worktree default. A project whose "+" popover switch was
+                // flipped keeps its own answer; every other project follows this one.
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Start new sessions in a fresh git worktree", isOn: Binding(
+                        get: { model.worktreeDefaultAll },
+                        set: { model.worktreeDefaultAll = $0 }))
+                    Text("Applies to the folder + button, ⌘N and the New Session sheet. "
+                        + "A project you switched individually in its + popover keeps "
+                        + "that choice; non-git folders ignore it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 Divider().padding(.vertical, 4)
 
