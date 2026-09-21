@@ -554,4 +554,19 @@ import Testing
             }
         }
     }
+
+    @Test func dedupeKeepsTheFirstRowCarryingAnId() {
+        // The sidebar's two sources name the same session whenever a core keys it by
+        // its CLI session id: the owned row and the discovered row for the
+        // conversation behind it share an id. Owned is passed first and is what must
+        // survive — the discovered ghost carries no usage and draws no controls.
+        struct Row: Equatable { var id: String; var owned: Bool }
+        let owned = [Row(id: "a", owned: true), Row(id: "b", owned: true)]
+        let discovered = [Row(id: "b", owned: false), Row(id: "c", owned: false)]
+        let merged = dedupedSessionIds(owned + discovered, id: \.id)
+        #expect(merged == [Row(id: "a", owned: true), Row(id: "b", owned: true),
+                           Row(id: "c", owned: false)])
+        // Order is the input's, and a list with nothing to drop comes back whole.
+        #expect(dedupedSessionIds(owned, id: \.id) == owned)
+    }
 }

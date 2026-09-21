@@ -135,6 +135,22 @@ public func sidebarOrderAttention(
     return (resting == .working || resting == .doneUnseen) ? .idle : resting
 }
 
+/// The sessions a list may draw, with the first row carrying an id winning.
+///
+/// The sidebar and the ⌘K palette both build their population as "the sessions we
+/// own, plus the terminal conversations discovered on disk", and the two lists can
+/// name the same session: a core keys a session by its CLI session id, so an
+/// owned session and the discovered row for the conversation behind it carry the
+/// SAME id. Two rows with one id is not a cosmetic problem — SwiftUI keys a `List`
+/// row by it, so the session is drawn twice, both copies answer to one selection
+/// and share the hover state, and `Dictionary(uniqueKeysWithValues:)` over the
+/// result traps. Owned rows are passed first, so the real session wins and the
+/// discovered ghost drops.
+public func dedupedSessionIds<T>(_ metas: [T], id: (T) -> String) -> [T] {
+    var seen = Set<String>()
+    return metas.filter { seen.insert(id($0)).inserted }
+}
+
 /// Whether a folded folder keeps showing the row at `index` instead of hiding it
 /// behind "Load more".
 ///

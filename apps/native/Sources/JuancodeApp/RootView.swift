@@ -641,7 +641,7 @@ struct SidebarView: View {
     /// Sessions that would show with no filter applied (same visibility rules as
     /// `groups`, minus the query) — the denominator for the "showing N of M" hint.
     private var unfilteredVisibleCount: Int {
-        let nonOracle = (model.sessions + model.externalSessions).filter { $0.cwd != OraclePaths.controlDir }
+        let nonOracle = model.sidebarUniverse.filter { $0.cwd != OraclePaths.controlDir }
         let inWorkspace = nonOracle.filter { Config.isUnderWorkspaceRoot($0.cwd) }
         return (showArchived ? inWorkspace : inWorkspace.filter { !$0.archived }).count
     }
@@ -794,7 +794,7 @@ struct SidebarView: View {
         // Own sessions + discovered terminal sessions, grouped by project together.
         // Hide the pinned Oracle agent session — it's reachable from the Oracle dock,
         // not the per-project sidebar (juancode-wjg).
-        let nonOracle = (model.sessions + model.externalSessions).filter { $0.cwd != OraclePaths.controlDir }
+        let nonOracle = model.sidebarUniverse.filter { $0.cwd != OraclePaths.controlDir }
         // Only show folders that live under the workspace root (~/workdir); sessions
         // discovered elsewhere on disk are noise. Worktrees of in-workspace repos sit
         // in sibling `<repo>-worktrees/…` dirs, still under the root, so they survive.
@@ -1887,7 +1887,14 @@ private struct FolderHeader: View {
                 // A popover (not a native Menu) so each agent option is a real SwiftUI
                 // button: it gets the pointing-hand cursor + hover highlight, and clicks
                 // register reliably (native menu rows did neither).
-                Button { showingAgentPicker = true } label: {
+                Button {
+                    // Re-ask for the folder's git state as the popover opens: the
+                    // "New worktree" switch below is drawn from it, and the answer
+                    // this header got on appear may be missing (the core was busy,
+                    // or still starting). Coalesced and rate-limited in the model.
+                    model.loadFolderGitState(group.cwd)
+                    showingAgentPicker = true
+                } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .medium))
                         .frame(width: 22, height: 22)

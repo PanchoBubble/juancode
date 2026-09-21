@@ -810,6 +810,10 @@ final class AppModel {
         merged.append(contentsOf: liveSessions.map(\.meta).filter { !persistedIds.contains($0.id) })
         sessions = merged
         for m in sessions { metaCache[m.id] = m }
+        // A conversation we now own must stop being a discovered row: the core keys
+        // a session by its CLI session id, so the two lists would carry the same id
+        // and the sidebar would draw the session twice.
+        dropOwnedExternals()
         rebuildWorkAtRiskSessionIndex()
         // A relaunch is the usual way a day passes with the app closed: the rows that
         // slept yesterday have to come back grey, not wearing a moon until the first
@@ -1947,6 +1951,14 @@ final class AppModel {
     /// True if `id` is a not-yet-imported terminal session (vs. one of ours).
     func isExternal(_ id: String) -> Bool { externalIds.contains(id) }
 
+    /// Every session a list may draw: the ones we own, then the discovered terminal
+    /// conversations, with one row per id. `dropOwnedExternals` keeps the overlap
+    /// empty as sessions are adopted; this is the last word on it, because a list
+    /// that draws one id twice draws one session twice (see `dedupedSessionIds`).
+    var sidebarUniverse: [SessionMeta] {
+        dedupedSessionIds(sessions + externalSessions, id: \.id)
+    }
+
     // MARK: - "Continue existing" picker (new-session flow, juancode-g4c)
 
     /// Resumable CLI conversations for the cwd currently shown in the new-session
@@ -2032,12 +2044,22 @@ final class AppModel {
             let result = await Task.detached(priority: .utility) {
                 await discoverExternalSessions(limit: limit, excluding: used)
             }.value
-            let discovered = result.sessions.map { ext in
-                SessionMeta(id: ext.id, provider: ext.provider, cwd: ext.cwd, title: ext.title,
-                            status: .exited, exitCode: nil, createdAt: ext.lastActiveMs,
-                            updatedAt: ext.lastActiveMs, cliSessionId: ext.id,
-                            skipPermissions: true, worktreePath: nil, usage: nil)
-            }
+            // Ask again for what we own, now that the scan is back. The set read
+            // before it is a snapshot from before an await that reads every
+            // transcript on disk: a session adopted or created while it ran — or,
+            // at launch, one whose mirror row had not landed yet — is not in it, and
+            // a discovered row for a conversation we already own is a second row
+            // with the SAME id (the core keys a session by its CLI session id), which
+            // the sidebar renders twice.
+            let ownedIds = Set(sessions.map(\.id)).union(core.usedCliSessionIds())
+            let discovered = result.sessions
+                .filter { !ownedIds.contains($0.id) }
+                .map { ext in
+                    SessionMeta(id: ext.id, provider: ext.provider, cwd: ext.cwd, title: ext.title,
+                                status: .exited, exitCode: nil, createdAt: ext.lastActiveMs,
+                                updatedAt: ext.lastActiveMs, cliSessionId: ext.id,
+                                skipPermissions: true, worktreePath: nil, usage: nil)
+                }
             // Re-discovery usually returns the same transcripts. Assigning regardless
             // notified observers and re-ran the sidebar for nothing (`@Observable` fires
             // on equal writes), so only publish a real change.
@@ -2049,6 +2071,20 @@ final class AppModel {
             if externalHasMore != result.hasMore { externalHasMore = result.hasMore }
             externalLoading = false
         }
+    }
+
+    /// Drop discovered rows for conversations this app already owns. Called from
+    /// `refresh()`, so every create / adopt / exit reconciles the two lists rather
+    /// than waiting for the next discovery pass — which may never come, since
+    /// discovery runs on the sidebar's `onAppear` and on "Load more".
+    private func dropOwnedExternals() {
+        guard !externalSessions.isEmpty else { return }
+        let ownedIds = Set(sessions.map(\.id))
+        let ownedCli = Set(sessions.compactMap(\.cliSessionId))
+        let kept = externalSessions.filter { !ownedIds.contains($0.id) && !ownedCli.contains($0.id) }
+        guard kept.count != externalSessions.count else { return }
+        externalSessions = kept
+        externalIds = Set(kept.map(\.id))
     }
 
     /// Import a discovered terminal session: register it as a real juancode session
@@ -2592,6 +2628,14 @@ final class AppModel {
     var gitStateByCwd: [String: GitState] = [:]
     /// cwds with a folder git-state fetch in flight, so appears don't stampede.
     private var gitStateCwdLoading: Set<String> = []
+    /// When a folder's git-state ask last failed to answer, so the next appear can
+    /// try again without every appear re-asking a core that is busy or down.
+    @ObservationIgnored private var gitStateFailedAt: [String: Date] = [:]
+    /// How long a failed folder git-state ask is left alone before a retry. Short:
+    /// the cost of asking again is one HTTP round trip, and the cost of never asking
+    /// again is a project stuck without its branch label, its GitHub button and its
+    /// "New worktree" switch until the app is relaunched.
+    private static let gitStateRetryAfter: TimeInterval = 20
 
     /// The cached branch/state for `cwd`, if loaded yet.
     func folderGitState(_ cwd: String) -> GitState? { gitStateByCwd[cwd] }
@@ -2599,12 +2643,29 @@ final class AppModel {
     /// Load (or refresh) the git state for `cwd` from the core. Coalesces concurrent
     /// calls. A non-git folder — and a core with no `changes` capability — resolve to
     /// `git: false`, so the label just stays hidden. Mirrors `loadPrs`/`loadBeads`.
+    ///
+    /// A core that *failed* to answer is not an answer, and caching `.unknown` for it
+    /// was: `git: false` is the shape of "not a repo", so one timed-out ask (the
+    /// daemon's `git status` on a big dirty repo is seconds, and a launch asks for
+    /// every visible folder at once) left the project with no branch label, no GitHub
+    /// button and no "New worktree" switch for the rest of the run. A failure now
+    /// keeps whatever was known and lets the next appear re-ask.
     func loadFolderGitState(_ cwd: String) {
         guard !gitStateCwdLoading.contains(cwd) else { return }
+        if let failedAt = gitStateFailedAt[cwd],
+           Date().timeIntervalSince(failedAt) < Self.gitStateRetryAfter { return }
         gitStateCwdLoading.insert(cwd)
         Task {
-            let state = (try? await core.gitState(cwd: cwd)) ?? GitState.unknown
-            gitStateByCwd[cwd] = state
+            do {
+                gitStateByCwd[cwd] = try await core.gitState(cwd: cwd)
+                gitStateFailedAt[cwd] = nil
+            } catch is CoreCapabilityError {
+                // The one durable "no": this core cannot answer for any folder, and
+                // asking again next appear would only repeat the same refusal.
+                gitStateByCwd[cwd] = .unknown
+            } catch {
+                gitStateFailedAt[cwd] = Date()
+            }
             gitStateCwdLoading.remove(cwd)
         }
     }
