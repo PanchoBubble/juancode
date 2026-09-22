@@ -395,6 +395,7 @@ final class AppModel {
     var needsYouByCwd: [String: [NeedsYouRow]] = [:]
     /// cwds with a PR fetch in flight, so a refresh doesn't stampede.
     private var prsLoading: Set<String> = []
+    func isLoadingPrs(_ cwd: String) -> Bool { prsLoading.contains(cwd) }
     /// Per-cwd debounce tasks for the PR popover's background scoped re-query.
     private var prsBackfillTasks: [String: Task<Void, Never>] = [:]
     /// The resolved `gh` search qualifiers for each cwd's currently-active scoped
@@ -2278,10 +2279,12 @@ final class AppModel {
         github.refresh(model: self)
     }
 
-    /// The global GitHub button/shortcut: always the all-folders view.
+    /// The global GitHub button/shortcut: the viewer queue. It is one GitHub search
+    /// for every repo, where the all-folders list is three `gh` calls per project and
+    /// ran into GitHub's rate limit and 504s.
     func toggleGitHubView() {
         if showingGitHub && githubScope == nil { showingGitHub = false }
-        else { openGitHub(scope: nil) }
+        else { openViewerPrQueue() }
     }
 
     /// The GitHub badge's "open the full view": the view on the viewer queue (your

@@ -152,9 +152,9 @@ final class GitHubModel {
         if filterActive { applyFilters(model: model) }
     }
 
-    /// Fetch a folder's PRs the first time its section comes into view. Already
-    /// loaded (or loading) folders are left alone — `loadPrs` coalesces, and a
-    /// re-appear shouldn't re-shell.
+    /// Fetch a folder's PRs when its section header is clicked (or when the view is
+    /// scoped to it). Already loaded (or loading) folders are left alone — `loadPrs`
+    /// coalesces, and a second click shouldn't re-shell.
     func loadFolderIfNeeded(_ cwd: String, model: AppModel) {
         guard model.prs(cwd) == nil else { return }
         model.loadPrs(cwd)
@@ -1008,10 +1008,13 @@ struct GitHubView: View {
         }
     }
 
-    /// A folder's pinned header. Fetches that folder's PRs the first time it comes
-    /// into view (`.task`) — scrolling is what pays for `gh`, not opening the view.
+    /// A folder's pinned header. An unloaded folder fetches only when its header is
+    /// clicked: fetching on scroll-into-view spent three `gh` calls per project just
+    /// for opening the view, which is what hit GitHub's rate limit. The scoped folder
+    /// is the exception — opening a project's GitHub view is already the click.
     private func folderHeader(_ cwd: String, result: PrListResult?, shownCount: Int) -> some View {
         let active = cwd == model.activeProjectFolder
+        let scoped = cwd == model.githubScope
         return HStack(spacing: 6) {
             Image(systemName: active ? "folder.fill" : "folder")
                 .font(.system(size: 10))
@@ -1035,8 +1038,12 @@ struct GitHubView: View {
                 Text("\(shownCount)")
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
-            } else if result == nil {
+            } else if result == nil, scoped || model.isLoadingPrs(cwd) {
                 ProgressView().controlSize(.mini)
+            } else if result == nil {
+                Label("Load PRs", systemImage: "arrow.down.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
             }
         }
         .padding(.horizontal, 10)
@@ -1049,7 +1056,10 @@ struct GitHubView: View {
         .overlay(alignment: .leading) {
             if active { Rectangle().fill(Color.accentColor).frame(width: 2) }
         }
-        .task(id: cwd) { model.github.loadFolderIfNeeded(cwd, model: model) }
+        .contentShape(Rectangle())
+        .onTapGesture { model.github.loadFolderIfNeeded(cwd, model: model) }
+        .help(result == nil ? "Load this project's open PRs" : cwd)
+        .task(id: cwd) { if scoped { model.github.loadFolderIfNeeded(cwd, model: model) } }
     }
 
     private func folderNote(_ text: String, tone: Color) -> some View {
