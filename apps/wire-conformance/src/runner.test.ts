@@ -1,3 +1,8 @@
+import { execFile as execFileCb } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
 import { describe, expect, it } from "vitest";
 
 import type { Frame } from "./client.ts";
@@ -8,9 +13,12 @@ import {
   httpBaseOf,
   interpolate,
   makeSessionScope,
+  makeWorkspace,
   repeatCount,
   seedVars,
 } from "./runner.ts";
+
+const execFile = promisify(execFileCb);
 
 const workspace = {
   cwd: "/w/plain",
@@ -158,4 +166,45 @@ describe("addressing a core's HTTP reads", () => {
     // path the scenario actually asked for.
     expect(interpolate("/api/sessions/$nope/screen", {})).toBe("/api/sessions/$nope/screen");
   });
+});
+
+describe("the git identity the changes fixture carries", () => {
+  it("lets the CORE commit in a linked worktree of it, on a machine with no global one", async () => {
+    const ws = makeWorkspace();
+    try {
+      // The core is a separate process with no fixture environment, and on a CI
+      // runner it has no global `user.email` either. Scrubbing both is what makes
+      // this test the CI machine rather than this one.
+      const bare: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+      ]) {
+        delete bare[key];
+      }
+      bare.GIT_CONFIG_GLOBAL = "/dev/null";
+      bare.GIT_CONFIG_SYSTEM = "/dev/null";
+      // `execFile` and not `execFileSync`: this file runs in a vitest worker whose
+      // reporter RPC shares the event loop, and a fork costs 257ms on the machine
+      // this was written on. A second of blocking per git call is how a worker
+      // times out calling `onTaskUpdate` and fails a run that passed.
+      const git = (cwd: string, ...args: string[]) =>
+        execFile("git", args, { cwd, env: bare }).then((r) => r.stdout);
+
+      const wt = join(ws.gitRemoteCwd, "..", "identity-probe");
+      await git(ws.gitRemoteCwd, "worktree", "add", "--quiet", "-b", "probe", wt);
+      writeFileSync(join(wt, "wide.txt"), "line 1 EDITED\n");
+      await git(wt, "add", "-A");
+      await git(wt, "commit", "--quiet", "-m", "fix: the thirty-seventh line");
+      expect((await git(wt, "log", "-1", "--pretty=%s")).trim()).toBe(
+        "fix: the thirty-seventh line",
+      );
+    } finally {
+      ws.dispose();
+    }
+    // Generous on purpose: `makeWorkspace` is a dozen `git` invocations, and a
+    // fork+exec costs 257ms on the machine this was written on.
+  }, 120_000);
 });

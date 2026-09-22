@@ -46,6 +46,21 @@ export interface Workspace {
   dispose(): void;
 }
 
+/** Write the fixture's git identity into the repo's own config.
+ *
+ *  In the repo's config and not this process's environment, because the commits that
+ *  matter are not made by this process: `changes` asks the CORE to commit, in a linked
+ *  worktree, out of a process this file never touches. A repo whose identity lived only
+ *  in the fixture's env commits fine here and answers `Author identity unknown` on any
+ *  machine without an ambient global `user.email` — which is every CI runner, and is why
+ *  main was red from 2026-09-18. Local config is kept in the common dir, so every linked
+ *  worktree of this repo resolves it too.
+ */
+function seedIdentity(git: (...args: string[]) => unknown): void {
+  git("config", "user.name", "conformance");
+  git("config", "user.email", "conformance@localhost");
+}
+
 export function makeWorkspace(): Workspace {
   const root = mkdtempSync(join(tmpdir(), "juancode-conformance-work-"));
   const cwd = join(root, "plain");
@@ -55,19 +70,9 @@ export function makeWorkspace(): Workspace {
   const file = join(cwd, "note.txt");
   writeFileSync(file, "conformance fixture\n");
 
-  const git = (...args: string[]) =>
-    execFileSync("git", args, {
-      cwd: gitCwd,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: "conformance",
-        GIT_AUTHOR_EMAIL: "conformance@localhost",
-        GIT_COMMITTER_NAME: "conformance",
-        GIT_COMMITTER_EMAIL: "conformance@localhost",
-      },
-    });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: gitCwd, stdio: "ignore" });
   git("init", "--quiet", "--initial-branch=main");
+  seedIdentity(git);
   writeFileSync(join(gitCwd, "committed.txt"), "base\n");
   git("add", "committed.txt");
   git("commit", "--quiet", "-m", "base");
@@ -82,19 +87,10 @@ export function makeWorkspace(): Workspace {
   const bare = join(root, "origin.git");
   mkdirSync(gitRemoteCwd);
   const gitRemote = (...args: string[]) =>
-    execFileSync("git", args, {
-      cwd: gitRemoteCwd,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: "conformance",
-        GIT_AUTHOR_EMAIL: "conformance@localhost",
-        GIT_COMMITTER_NAME: "conformance",
-        GIT_COMMITTER_EMAIL: "conformance@localhost",
-      },
-    });
+    execFileSync("git", args, { cwd: gitRemoteCwd, stdio: "ignore" });
   execFileSync("git", ["init", "--quiet", "--bare", bare], { stdio: "ignore" });
   gitRemote("init", "--quiet", "--initial-branch=main");
+  seedIdentity(gitRemote);
   writeFileSync(
     join(gitRemoteCwd, "wide.txt"),
     Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n",
