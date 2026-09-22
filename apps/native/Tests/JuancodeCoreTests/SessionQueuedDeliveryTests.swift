@@ -28,18 +28,45 @@ import Testing
     /// taller than this, which is the whole point.
     private let inputRows = 16
 
-    /// A message whose literal rendering is taller than the input-box footer: 20
+    /// The tty's canonical-mode input queue, `TTYHOG` in xnu's `bsd/sys/tty.h`. Once
+    /// `t_rawq + t_canq` reaches it, `ttyinput` DISCARDS the rest of what is being
+    /// written (with `IMAXBEL` it rings the bell and drops the character) instead of
+    /// pushing back on the writer, and a write to the pty master reports a clean
+    /// success for bytes the line discipline then threw away.
+    ///
+    /// That is what juancode-xfbr was: at 1228 bytes this suite's payload was over the
+    /// cap, so under a loaded runner — where the fake CLI, a bash `read` loop taking
+    /// one byte at a time, could not drain fast enough — the driver kept the first
+    /// ~1007 bytes and dropped the tail line and the closing `ESC[201~` with them. The
+    /// paste's head reached the child (so it logged one paste) while its tail never
+    /// existed, and no amount of waiting or retrying could make a land check see a
+    /// signature that had been discarded a layer below us. Measured on macos-15 in CI,
+    /// where the echoed screen stopped mid-"Note 16" in 6 of 10 full runs.
+    ///
+    /// Real agent CLIs never hit this: they put the tty in raw mode, where `ptcwrite`
+    /// blocks at `TTYHOG - 2` unconditionally and our non-blocking write gets EAGAIN
+    /// and retries. It is the canonical mode this suite deliberately leaves the fake
+    /// CLI in — the thing that makes the paste echo back as literal text — that makes
+    /// an over-size paste lossy. So the payload has to stay under the cap.
+    private let ttyInputQueueBytes = 1024
+
+    /// A message whose literal rendering is taller than the input-box footer: 18
     /// lines, each short enough not to wrap at 80 columns, so its first line (the
     /// head signature) sits well above the bottom `inputRows` rows and only its
     /// last line (the tail signature) is still down there. Deliberately free of the
     /// activity detector's working/prompt tokens so the echoed text can't classify
     /// the fake session busy or waiting by itself.
+    ///
+    /// Tall means ROWS, not bytes, and the two pull in opposite directions here: the
+    /// rendering has to be taller than `inputRows` while the payload stays under
+    /// `ttyInputQueueBytes`. Hence short lines. `payloadFitsTheTtyInputQueue` holds
+    /// the line, so lengthening this by hand fails loudly instead of flaking in CI.
     private var tallMessage: String {
-        var lines = ["Follow up on the batch import and report what moved"]
-        for i in 1...18 {
-            lines.append("Note \(i): list the changed files, then say what each one does.")
+        var lines = ["Follow up on the batch import"]
+        for i in 1...16 {
+            lines.append("Note \(i): list the changed files.")
         }
-        lines.append("Wrap up with a one paragraph summary of the batch import.")
+        lines.append("Wrap up with a short summary.")
         return lines.joined(separator: "\n")
     }
 
@@ -109,27 +136,65 @@ import Testing
         return cond()
     }
 
-    private func env(script: String, queue: MessageQueue) -> SessionEnvironment {
+    private func env(script: String, queue: MessageQueue, log: SessionActivityLogging) -> SessionEnvironment {
         SessionEnvironment(
             resolver: FakeResolver(path: script),
             store: InMemorySessionStore(),
             messageQueue: queue,
-            discoverCliSessionId: { _, _, _ in nil }
+            discoverCliSessionId: { _, _, _ in nil },
+            log: log
         )
+    }
+
+    /// A real activity log in a throwaway directory. The delivery machine records
+    /// `queuedPaste` / `queuedEnter` / `queuedResult` there, which is the only
+    /// timestamped account of what a delivery did — and this suite's failure mode
+    /// (juancode-xfbr) is only reproducible inside a full run, where re-running the
+    /// test by hand tells you nothing. Cheap enough to leave on always.
+    private func makeActivityLog() -> SessionActivityLog {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("juancode-queued-log-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return SessionActivityLog(directory: dir.path)
+    }
+
+    /// Everything the land check reads, sampled at failure time. A red run should
+    /// say by itself whether the child never rendered the paste or the check
+    /// refused to see what it rendered, instead of leaving the next reader to guess.
+    private func deliveryDiagnostic(
+        _ s: Session, activity: SessionActivityLog, log: String, head: String, tail: String
+    ) -> String {
+        let footer = InitialPromptDelivery.normalize(s.terminalModel.bottomText(inputRows))
+        let screen = InitialPromptDelivery.normalize(s.terminalModel.visibleText())
+        let trail = (try? String(contentsOfFile: activity.logPath, encoding: .utf8)) ?? "<none>"
+        return """
+
+        grid=\(s.terminalModel.cols)x\(s.terminalModel.rows) activity=\(s.activity) \
+        running=\(s.isRunning)
+        footer holds head=\(InitialPromptDelivery.region(footer, contains: head)) \
+        tail=\(InitialPromptDelivery.region(footer, contains: tail))
+        screen holds head=\(InitialPromptDelivery.region(screen, contains: head)) \
+        tail=\(InitialPromptDelivery.region(screen, contains: tail))
+        child log: paste=\(count("paste", in: log)) enter=\(count("enter", in: log))
+        footer: \(footer)
+        activity trail:
+        \(trail)
+        """
     }
 
     /// Spawn a live session whose screen already shows `transcript`, and wait until
     /// it is settled and idle — the state the queue flush fires in.
     private func liveIdleSession(
         log: String, transcript: String, onPaste: String = "", onEnter: String = "",
-        extraSetup: String = "", queue: MessageQueue
+        extraSetup: String = "", queue: MessageQueue,
+        activityLog: SessionActivityLogging = NoopSessionActivityLog()
     ) async throws -> Session {
         let script = makeFakeCli(
             log: log, transcript: makeTranscript(transcript),
             onPaste: onPaste, onEnter: onEnter, extraSetup: extraSetup)
         let s = try Session.create(
             provider: .claude, cwd: FileManager.default.temporaryDirectory.path,
-            cols: 80, rows: 24, env: env(script: script, queue: queue))
+            cols: 80, rows: 24, env: env(script: script, queue: queue, log: activityLog))
         let ready = await poll {
             s.activity == .idle
                 && s.terminalModel.visibleText().contains("fake-claude ready")
@@ -141,11 +206,13 @@ import Testing
     @Test func tallMessageOverAnEchoingTranscriptLandsOnceAndIsActuallySubmitted() async throws {
         let log = makeLogPath()
         let queue = MessageQueue()
+        let activity = makeActivityLog()
         // The message is already in the transcript before delivery starts, and its
         // *tail* is sitting in the very footer rows the land check reads.
         let s = try await liveIdleSession(
             log: log, transcript: tallMessage,
-            onEnter: #"printf 'crunching... esc to interrupt\r\n'"#, queue: queue)
+            onEnter: #"printf 'crunching... esc to interrupt\r\n'"#, queue: queue,
+            activityLog: activity)
         defer { s.kill() }
 
         let head = InitialPromptDelivery.signature(for: tallMessage)
@@ -159,7 +226,8 @@ import Testing
         // The queue drops a message only once delivery is confirmed, so an empty
         // queue is the observable "it went through".
         let delivered = await poll { queue.list(s.id).isEmpty }
-        #expect(delivered, "the message was never confirmed delivered")
+        let diagnose = { self.deliveryDiagnostic(s, activity: activity, log: log, head: head, tail: tail) }
+        #expect(delivered, "the message was never confirmed delivered\(diagnose())")
 
         // Read the log only once the child has *recorded* the Enter. Delivery can be
         // confirmed off the screen while the CR is still sitting in the tty buffer, so
@@ -172,7 +240,7 @@ import Testing
         #expect(count("paste", in: log) == 1)
         // And the Enter really went out — a delivered message with no Enter is the
         // false success this test exists for.
-        #expect(count("enter", in: log) == 1)
+        #expect(count("enter", in: log) == 1, "no Enter reached the child\(diagnose())")
         // Rendered literally, with no collapsed-paste chip to fall back on.
         #expect(!InitialPromptDelivery.regionShowsCollapsedPaste(s.terminalModel.visibleText()))
     }
@@ -218,6 +286,20 @@ import Testing
         #expect(count("enter", in: log) == 0)
         // Undelivered means still queued, to be retried on the next idle edge.
         #expect(!queue.list(s.id).isEmpty)
+    }
+
+    @Test func payloadFitsTheTtyInputQueue() {
+        // The guard juancode-xfbr cost four days of red main to learn. Everything this
+        // suite asserts about a queued delivery is downstream of the whole paste
+        // actually reaching the child, and in canonical mode the tty stops being a
+        // pipe and starts being a 1KB bucket that throws away the overflow. Keep the
+        // margin: the bracketed-paste markers ride along, and the queue may be asked
+        // to deliver while the child still holds part of an earlier line.
+        let bytes = tallMessage.utf8.count + PasteEngine.startMarker.count + PasteEngine.endMarker.count
+        #expect(bytes < ttyInputQueueBytes, "a paste this size is lossy in canonical mode: \(bytes) bytes")
+        // And it is still taller than the footer, which is the other half of the point
+        // — a payload trimmed until it fits in the input box tests nothing.
+        #expect(tallMessage.split(separator: "\n").count > inputRows)
     }
 
     @Test func tailSignatureIsTakenFromTheLastNonEmptyLine() {

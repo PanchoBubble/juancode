@@ -1151,8 +1151,13 @@ public final class Session: @unchecked Sendable {
             guard let item = env.messageQueue.peek(id) else { break }
             // Drop the message only once it verifiably submitted; otherwise leave it
             // queued and stop, so a stalled delivery is retried on the next idle / kick.
+            let startedMs = nowMs()
             let delivered = await deliverQueued(item)
-            logEvent("queuedResult", ["delivered": "\(delivered)", "chars": "\(item.text.count)"])
+            let attempt = lock.withLock { queuedRetryId == item.id ? queuedRetries + 1 : 1 }
+            logEvent("queuedResult", [
+                "delivered": "\(delivered)", "chars": "\(item.text.count)",
+                "attempt": "\(attempt)", "ms": "\(nowMs() - startedMs)",
+            ])
             if delivered {
                 env.messageQueue.remove(id, item.id)
             } else if armQueueRetry(for: item.id) {
@@ -1228,7 +1233,17 @@ public final class Session: @unchecked Sendable {
         } else {
             before = footerSnapshot()
             logEvent("queuedPaste", ["chars": "\(item.text.count)"])
-            paste(item.text)
+            // Report what the write did rather than firing and forgetting: a stalled
+            // delivery otherwise leaves no record of whether we even got the bytes out.
+            // Note this says the pty ACCEPTED them — a tty whose input queue is full
+            // drops the rest below this layer and still reports a clean write, which is
+            // exactly what juancode-xfbr turned out to be.
+            let pastedAtMs = nowMs()
+            deliverPaste(item.text, submit: false) { [weak self] outcome in
+                self?.logEvent("queuedPasteWrote", [
+                    "outcome": "\(outcome)", "ms": "\(nowMs() - pastedAtMs)",
+                ])
+            }
             // Recorded here rather than after the land check below, because the write
             // has already happened: a CLI whose echo is slower than `acceptMs` fails
             // this pass with the payload sitting in the child's box, and a retry that
