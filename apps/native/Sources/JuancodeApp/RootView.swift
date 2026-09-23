@@ -391,7 +391,7 @@ private struct NotificationsBell: View {
                         .font(.system(size: 12, weight: .semibold))
                     Spacer(minLength: 12)
                     if hasAny {
-                        Button("Mark all read") {
+                        Button("Clear all") {
                             model.markAllRead()
                             showing = false
                         }
@@ -403,87 +403,99 @@ private struct NotificationsBell: View {
                     }
                 }
                 .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
-                if unread.isEmpty {
-                    Text("Nothing unread.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10).padding(.bottom, 8)
-                } else {
-                    ForEach(unread, id: \.id) { meta in
+                Divider()
+                // A day of background sessions can list more rows than the screen is
+                // tall; unscrolled, the popover grew past the screen and clipped this
+                // header, taking "Clear all" with it.
+                ViewThatFits(in: .vertical) {
+                    rows
+                    ScrollView { rows }
+                }
+                .frame(maxHeight: 440)
+            }
+            .frame(width: 280)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private var rows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if unread.isEmpty {
+                Text("Nothing unread.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10).padding(.bottom, 8)
+            } else {
+                ForEach(unread, id: \.id) { meta in
+                    Button {
+                        model.selection = meta.id
+                        showing = false
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: model.activity(meta.id) == .waitingInput
+                                  ? "questionmark.circle.fill" : "checkmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(model.activity(meta.id) == .waitingInput ? .yellow : .green)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(meta.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                Text((meta.cwd as NSString).lastPathComponent)
+                                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer(minLength: 12)
+                        }
+                        .contentShape(Rectangle())
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .clickCursor()
+                }
+            }
+            // Work-at-risk: folders with uncommitted/unpushed work whose session
+            // went idle or exited (juancode-rxu). Clicking opens the Worktrees
+            // panel where the full list + actions live.
+            if !atRiskNotices.isEmpty {
+                Divider().padding(.vertical, 4)
+                Text("Work at risk")
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 10).padding(.bottom, 4)
+                ForEach(atRiskNotices) { notice in
+                    HStack(spacing: 8) {
                         Button {
-                            model.selection = meta.id
+                            model.showingWorktrees = true
+                            model.loadWorktrees()
                             showing = false
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: model.activity(meta.id) == .waitingInput
-                                      ? "questionmark.circle.fill" : "checkmark.circle.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(model.activity(meta.id) == .waitingInput ? .yellow : .green)
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11)).foregroundStyle(.orange)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(meta.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                    Text((meta.cwd as NSString).lastPathComponent)
+                                    Text(notice.title.isEmpty ? "A session" : notice.title)
+                                        .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                    Text((notice.path as NSString).lastPathComponent)
                                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                                 }
-                                Spacer(minLength: 12)
+                                Spacer(minLength: 8)
                             }
                             .contentShape(Rectangle())
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.plain)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .clickCursor()
+                        Button {
+                            model.dismissWorkAtRiskNotice(notice.id)
+                        } label: {
+                            Image(systemName: "xmark").font(.system(size: 9))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Dismiss")
                         .clickCursor()
                     }
-                }
-                // Work-at-risk: folders with uncommitted/unpushed work whose session
-                // went idle or exited (juancode-rxu). Clicking opens the Worktrees
-                // panel where the full list + actions live.
-                if !atRiskNotices.isEmpty {
-                    Divider().padding(.vertical, 4)
-                    Text("Work at risk")
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 10).padding(.bottom, 4)
-                    ForEach(atRiskNotices) { notice in
-                        HStack(spacing: 8) {
-                            Button {
-                                model.showingWorktrees = true
-                                model.loadWorktrees()
-                                showing = false
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .font(.system(size: 11)).foregroundStyle(.orange)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(notice.title.isEmpty ? "A session" : notice.title)
-                                            .font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                        Text((notice.path as NSString).lastPathComponent)
-                                            .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer(minLength: 8)
-                                }
-                                .contentShape(Rectangle())
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.plain)
-                            .clickCursor()
-                            Button {
-                                model.dismissWorkAtRiskNotice(notice.id)
-                            } label: {
-                                Image(systemName: "xmark").font(.system(size: 9))
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Dismiss")
-                            .clickCursor()
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                    }
-                } else if unread.isEmpty {
-                    // (the "Nothing unread" text above already covers the empty case)
-                    EmptyView()
+                    .padding(.horizontal, 10).padding(.vertical, 6)
                 }
             }
-            .frame(width: 280)
-            .padding(.bottom, 4)
         }
+        .padding(.top, 4)
     }
 }
 
