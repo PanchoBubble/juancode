@@ -473,6 +473,10 @@ struct JuancodeApp: App {
                     performShortcut(.openEditor, model: model, oracle: oracle)
                 }
                 .appShortcut(.openEditor, shortcuts)
+                Button("Split Editor Beside Agent") {
+                    performShortcut(.splitEditor, model: model, oracle: oracle)
+                }
+                .appShortcut(.splitEditor, shortcuts)
                 // ⇧⌃P pins the row you're looking at to the top of its list — the
                 // active Oracle when the dock is open, else the sidebar selection.
                 Button(pinCommandTitle(model: model, oracle: oracle)) {

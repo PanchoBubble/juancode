@@ -3221,6 +3221,7 @@ struct SessionContainer: View {
                           ? "Show this session's editor (⌘2)"
                           : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
                     .clickCursor()
+                    splitButton
                 }
                 Button {
                     model.deepRefreshSelectedTerminal()
@@ -3249,9 +3250,14 @@ struct SessionContainer: View {
             }
             .padding(8)
             Divider()
-            ZStack(alignment: .top) {
+            GeometryReader { geo in
+            let frames = splitFrames(geo.size)
+            ZStack(alignment: .topLeading) {
+                // The agent always sits at the pane's top-left; a split only narrows
+                // (or shortens) it, so its view identity, and with it the live surface,
+                // never changes when a split opens or closes: one reflow, not a remount.
                 terminal
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(width: frames.agent.width, height: frames.agent.height)
                     // Focus rim flash on teleport landings (juancode-vz1): belongs to
                     // the visible pane container, not the pooled panes inside `terminal`.
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
@@ -3277,14 +3283,22 @@ struct SessionContainer: View {
                     // no pty reflow; the newest rows (the prompt) end up right above the
                     // panel and the oldest scroll off the top, exactly like scrolling.
                     // Closing slides it back into place (juancode).
-                    .offset(y: model.bottomTerminalShown ? -CGFloat(bottomHeight) : 0)
+                    // Stacked, the agent already sits above the panel (translating the
+                    // top pane would push it out of sight), so only the other layouts move.
+                    .offset(y: model.bottomTerminalShown && splitAxis != .stacked ? -CGFloat(bottomHeight) : 0)
 
-                // In-place editor tabs, above the agent pane and its overlays. Unlike
-                // the agent this one is resized (not translated) by the bottom panel:
-                // the editor redraws on SIGWINCH, and translating it would hide its top
-                // rows with no scrollback to reach them.
+                // In-place editor tabs, above the agent pane and its overlays, or beside
+                // it in a split. Unlike the agent this one is resized (not translated) by
+                // the bottom panel: the editor redraws on SIGWINCH, and translating it
+                // would hide its top rows with no scrollback to reach them.
                 editorPanes
-                    .padding(.bottom, model.bottomTerminalShown ? CGFloat(bottomHeight) : 0)
+                    .frame(width: frames.editor.width, height: frames.editor.height)
+                    .padding(.leading, frames.editor.minX)
+                    .padding(.top, frames.editor.minY)
+
+                if let axis = splitAxis {
+                    splitDivider(axis: axis, frames: frames, size: geo.size)
+                }
 
                 // Keep-alive bottom panel, pinned to the bottom edge and slid in from
                 // below via a transform. Once this folder has shells the panel stays
@@ -3307,6 +3321,7 @@ struct SessionContainer: View {
                     .offset(y: model.bottomTerminalShown ? 0 : CGFloat(bottomHeight))
                     .allowsHitTesting(model.bottomTerminalShown)
                 }
+            }
             }
             .clipped()
             // Breathing room so the terminal isn't glued to the window edges. Constant
@@ -3465,7 +3480,7 @@ struct SessionContainer: View {
             let current = model.liveSession(meta.id)
             ZStack {
                 ForEach(model.livePanes.entries) { entry in
-                    let visible = entry.session === current && !editorInFront
+                    let visible = entry.session === current && agentShown
                     // `entry.live` re-types the pooled handle (see `LivePanePool.Entry.live`).
                     if let session = entry.live {
                         GhosttyLive(session: session,
@@ -3492,26 +3507,93 @@ struct SessionContainer: View {
                           topHitInset: terminalTopHitInset,
                           onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
-                .opacity(editorInFront ? 0 : 1)
-                .allowsHitTesting(!editorInFront)
+                .opacity(agentShown ? 1 : 0)
+                .allowsHitTesting(agentShown)
         } else {
             nonLivePane
         }
     }
 
-    private var editorInFront: Bool { model.editorTabs.activeTab(for: meta.id) == .editor }
+    private var agentShown: Bool { model.editorTabs.isShown(.agent, for: meta.id) }
+    private var editorShown: Bool { model.editorTabs.isShown(.editor, for: meta.id) }
+    private var splitAxis: SessionSplitAxis? { model.editorTabs.splitAxis(for: meta.id) }
+
+    private func splitFrames(_ size: CGSize) -> SessionSplitFrames {
+        SessionSplitFrames.layout(size: size, axis: splitAxis,
+                                  fraction: model.paneLayout(for: meta.id).fraction,
+                                  bottomInset: model.bottomTerminalShown ? CGFloat(bottomHeight) : 0)
+    }
+
+    /// The bar between a split's panes. previewOnly: a drag moves only a guide line,
+    /// and the release commits once, so each pane gets one settled resize through
+    /// its grid authority rather than a SIGWINCH per drag tick while the agent streams.
+    private func splitDivider(axis: SessionSplitAxis, frames: SessionSplitFrames, size: CGSize) -> some View {
+        let inset = model.bottomTerminalShown ? CGFloat(bottomHeight) : 0
+        let span = axis == .sideBySide ? size.width : size.height - inset
+        let usable = Double(max(0, span - SessionSplitFrames.gap))
+        let extent = Binding<Double>(
+            get: { Double(axis == .sideBySide ? frames.agent.width : frames.agent.height) },
+            set: { value in
+                model.setSplitFraction(SessionSplitFrames.fraction(forAgentExtent: value, axis: axis,
+                                                                   size: size, bottomInset: inset),
+                                       for: meta.id)
+            })
+        let range = SessionPaneLayout.fractionRange
+        let handle = DragResizeHandle(axis: axis == .sideBySide ? .vertical : .horizontal,
+                                      value: extent,
+                                      min: usable * range.lowerBound, max: usable * range.upperBound,
+                                      invert: false, previewOnly: true)
+        let hit: CGFloat = 14
+        return Group {
+            if axis == .sideBySide {
+                handle
+                    .frame(height: frames.divider.height)
+                    .padding(.leading, frames.divider.midX - hit / 2)
+            } else {
+                handle
+                    .frame(width: frames.divider.width)
+                    .padding(.top, frames.divider.midY - hit / 2)
+            }
+        }
+    }
+
+    /// Show the agent and its editor at once, or back to tabs. Right-click picks
+    /// the axis, or which pane to keep.
+    private var splitButton: some View {
+        let axis = splitAxis
+        let remembered = model.paneLayout(for: meta.id).axis
+        return Button {
+            model.toggleSplitEditor(meta.id)
+        } label: {
+            Image(systemName: (axis ?? remembered) == .stacked ? "rectangle.split.1x2" : "rectangle.split.2x1")
+                .foregroundStyle(axis != nil ? Color.accentColor : Color.primary)
+        }
+        .help(axis != nil
+              ? "Back to tabs, keeping the focused pane (⌘\\). Right-click for more."
+              : "Show the editor beside the agent (⌘\\). Right-click to stack them instead.")
+        .clickCursor()
+        .contextMenu {
+            Button("Side by Side") { model.splitEditor(meta.id, axis: .sideBySide) }
+            Button("Stacked") { model.splitEditor(meta.id, axis: .stacked) }
+            if axis != nil {
+                Divider()
+                Button("Keep Only the Agent") { model.closeSplit(for: meta.id, keeping: .agent) }
+                Button("Keep Only the Editor") { model.closeSplit(for: meta.id, keeping: .editor) }
+            }
+        }
+    }
 
     /// Every open in-place editor, mounted for as long as it lives — a hidden one
     /// keeps its surface (rendering suspended, sizing frozen) so switching sessions
-    /// or tabs never remounts it blank. Only this session's, with its tab in front,
-    /// is visible.
+    /// or tabs never remounts it blank. Only this session's, with its tab in front
+    /// or split beside the agent, is visible.
     @ViewBuilder
     private var editorPanes: some View {
         let panes = model.sessionEditorPanes
         if !panes.isEmpty {
             ZStack {
                 ForEach(panes, id: \.entry.id) { pane in
-                    let visible = pane.entry.sessionId == meta.id && editorInFront
+                    let visible = pane.entry.sessionId == meta.id && editorShown
                     Group {
                         if TerminalBackend.shared.useGhostty {
                             GhosttyEphemeral(pty: pane.pty, hidden: !visible,

@@ -390,6 +390,11 @@ final class AppModel {
     @ObservationIgnored private var editorPtys: [String: EphemeralPty] = [:]
     /// Bumped to pull the keyboard into the visible in-place editor.
     var editorFocusToken = 0
+    /// Each project's remembered agent | editor split, persisted as JSON.
+    var paneLayouts = ProjectPaneLayouts.decode(UserDefaults.standard.data(forKey: AppModel.paneLayoutsKey)) {
+        didSet { UserDefaults.standard.set(paneLayouts.encoded(), forKey: AppModel.paneLayoutsKey) }
+    }
+    nonisolated static let paneLayoutsKey = "session.paneLayouts"
 
     /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
     /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
@@ -1936,7 +1941,9 @@ final class AppModel {
             return
         }
         editorPtys[pty.id] = pty
-        if let replaced = editorTabs.opened(pty.id, for: sessionId) {
+        let layout = paneLayouts.layout(for: parent.cwd)
+        if layout.split { LayoutTransitionGate.shared.begin() }
+        if let replaced = editorTabs.opened(pty.id, for: sessionId, split: layout.split ? layout.axis : nil) {
             editorPtys.removeValue(forKey: replaced)?.kill()
         }
         let editorId = pty.id
@@ -1981,10 +1988,74 @@ final class AppModel {
         sessionEditorPty(sessionId)?.kill()
     }
 
+    /// The project whose remembered split `sessionId` follows.
+    private func paneLayoutProject(_ sessionId: String) -> String? {
+        (core.liveSession(sessionId)?.meta ?? sessions.first(where: { $0.id == sessionId }))?.cwd
+    }
+
+    /// The split layout `sessionId`'s project remembers (axis and divider position
+    /// apply even while it shows tabs, so the next split lands where the last was).
+    func paneLayout(for sessionId: String) -> SessionPaneLayout {
+        paneLayoutProject(sessionId).map { paneLayouts.layout(for: $0) } ?? .standard
+    }
+
+    /// ⌘\ and the header's split button: show `sessionId`'s agent and editor side
+    /// by side (or stacked, if that is what its project last used), opening the
+    /// editor first when there is none; in a split, go back to tabs with the
+    /// focused pane in front. The project remembers the choice.
+    func toggleSplitEditor(_ sessionId: String) {
+        if editorTabs.splitAxis(for: sessionId) != nil {
+            closeSplit(for: sessionId, keeping: editorTabs.activeTab(for: sessionId))
+        } else {
+            splitEditor(sessionId, axis: paneLayout(for: sessionId).axis)
+        }
+    }
+
+    /// Split `sessionId` along `axis` (re-laying out an existing split), opening its
+    /// editor straight into the split when it has none.
+    func splitEditor(_ sessionId: String, axis: SessionSplitAxis) {
+        guard let meta = core.liveSession(sessionId)?.meta ?? sessions.first(where: { $0.id == sessionId }),
+              meta.kind != .editor else { return }
+        paneLayouts.update(meta.cwd) { $0.split = true; $0.axis = axis }
+        guard editorTabs.hasEditor(sessionId) else {
+            openEditorSession(sessionId)
+            return
+        }
+        // The divider move is one reflow for each pane; the gate makes each coordinator
+        // push one settled grid instead of the relayout's intermediate ones.
+        LayoutTransitionGate.shared.begin()
+        editorTabs.split(axis, for: sessionId)
+    }
+
+    /// Leave the split with `keeping` alone on screen. Closing the agent's side
+    /// only hides it (it keeps streaming, like a background tab); the editor's side
+    /// is closed with the editor itself (`closeSessionEditor`).
+    func closeSplit(for sessionId: String, keeping: SessionPaneTab) {
+        guard editorTabs.splitAxis(for: sessionId) != nil else { return }
+        if let project = paneLayoutProject(sessionId) {
+            paneLayouts.update(project) { $0.split = false }
+        }
+        LayoutTransitionGate.shared.begin()
+        editorTabs.unsplit(for: sessionId, keeping: keeping)
+        showSessionTab(keeping, for: sessionId)
+    }
+
+    /// A divider drag settled: persist where it landed. Called once on release,
+    /// never per drag tick, so each pane reflows exactly once.
+    func setSplitFraction(_ fraction: Double, for sessionId: String) {
+        guard let project = paneLayoutProject(sessionId) else { return }
+        paneLayouts.update(project) { $0.fraction = fraction }
+    }
+
     /// The editor exited (`:q`, or the force close): drop its tab, return to the
-    /// agent, and refresh the diff the editor may have changed.
+    /// agent, and refresh the diff the editor may have changed. A split ends with
+    /// it, and the agent reflows back to the full pane.
     private func sessionEditorExited(_ editorId: String) {
         editorPtys[editorId] = nil
+        if let owner = editorTabs.entries.first(where: { $0.editorId == editorId })?.sessionId,
+           editorTabs.splitAxis(for: owner) != nil {
+            LayoutTransitionGate.shared.begin()
+        }
         guard let sessionId = editorTabs.exited(editorId) else { return }
         loadChanges(sessionId)
         if selection == sessionId { focusTerminal() }

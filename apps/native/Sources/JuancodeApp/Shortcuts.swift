@@ -25,6 +25,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case recalcGeometry
     case toggleTerminal
     case openEditor
+    case splitEditor
     case togglePin
     case oracle
     case globalIssues
@@ -58,6 +59,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .recalcGeometry: return "Recalculate Terminal Geometry"
         case .toggleTerminal: return "Toggle Terminal"
         case .openEditor: return "Open Editor for Session"
+        case .splitEditor: return "Split Editor Beside Agent"
         case .togglePin: return "Pin Session to Top"
         case .oracle: return "Oracle (chat)"
         case .globalIssues: return "Global Issues"
@@ -94,6 +96,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
         // ⌘E opens the selected session's worktree in $EDITOR (nvim) in a tab beside it.
         case .openEditor: return KeyBinding(key: "e", command: true)
+        // ⌘\ shows the agent and its editor at once (opening the editor if needed),
+        // and back to tabs — the split-pane key in most editors.
+        case .splitEditor: return KeyBinding(key: "\\", command: true)
         // ⇧⌃P pins/unpins whatever list you're looking at (the Oracle rail when the
         // dock is open, else the sidebar selection). Shift+control so it never eats
         // a TUI's own ⌃P (nvim completion, readline history).
@@ -288,6 +293,8 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .recalcGeometry: model.resyncTerminalGeometry()
     case .toggleTerminal: model.toggleBottomTerminal()
     case .openEditor: model.openEditorForSelection()
+    case .splitEditor:
+        if let sel = model.selection { model.toggleSplitEditor(sel) }
     case .togglePin:
         if let id = pinShortcutTarget(model: model, oracle: oracle) { model.togglePinned(id) }
     case .oracle: oracle.toggleChatFocused()
