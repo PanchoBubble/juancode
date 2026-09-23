@@ -916,6 +916,9 @@ struct GhosttyEphemeral: NSViewRepresentable {
     /// shrinking grids never reach the shell, and occludes the surface so a hidden
     /// pane stops Metal-drawing on output.
     var hidden: Bool = false
+    /// Bumped by the host to pull the keyboard into this pane once it's already
+    /// on-screen (see `SwiftTermEphemeral.focusToken`). Default 0 never re-focuses.
+    var focusToken: Int = 0
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -923,6 +926,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
     func makeNSView(context: Context) -> GhosttyHostView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         context.coordinator.attach(to: tv)
+        context.coordinator.lastFocusToken = focusToken
         let host = GhosttyHostView(terminal: tv)
         host.focusOnAppear = true
         host.onDrop = { [pty] text in pty.write(Array(text.utf8)) }
@@ -933,6 +937,10 @@ struct GhosttyEphemeral: NSViewRepresentable {
     // intermediate animation frame resizes the NSView — so the freeze lands first.
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
         context.coordinator.setHidden(hidden, host: nsView)
+        if focusToken != context.coordinator.lastFocusToken {
+            context.coordinator.lastFocusToken = focusToken
+            if !hidden { nsView.focusTerminal() }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: GhosttyHostView, context: Context) -> CGSize? {
@@ -961,6 +969,8 @@ struct GhosttyEphemeral: NSViewRepresentable {
         private var lastSurfaceGrid: (cols: Int, rows: Int)?
         private var lastResizeAt: DispatchTime?
         private let resizeThrottle = DispatchTimeInterval.milliseconds(33)
+        /// Last `focusToken` acted on, so a bump focuses exactly once.
+        var lastFocusToken = 0
         /// Output that arrived before the surface existed; flushed on attach.
         private var preSurfaceBuffer: [UInt8] = []
         private var surfaceReady = false

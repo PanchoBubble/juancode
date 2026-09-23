@@ -337,6 +337,19 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             performShortcut(action, model: model, oracle: oracle)
             return true
         }
+        // The selected session's in-place tabs: ⌘1 agent, ⌘2 editor, ⌃Tab flips.
+        // Only once it has an editor, so without one the keys stay the pty's, and
+        // never under the GitHub overlay, which owns ⌘1-3 for its own tabs.
+        if !model.showingGitHub, let sel = model.selection, model.editorTabs.hasEditor(sel) {
+            let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
+            if mods == .command, let tab = ["1": SessionPaneTab.agent, "2": .editor][event.charactersIgnoringModifiers ?? ""] {
+                model.showSessionTab(tab, for: sel)
+                return true
+            }
+            if mods == .control, event.keyCode == 48 { // ⌃Tab
+                return model.toggleSessionTabForSelection()
+            }
+        }
         // ⌘+ (physically ⌘⇧=) also zooms the terminal in — cmd-plus is the macOS
         // convention, while the rebindable primary is ⌘= (juancode-fry). Handled
         // as a fixed alias here because a shifted "=" can't match a shift-less

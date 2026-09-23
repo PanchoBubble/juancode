@@ -92,7 +92,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
         case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
-        // ⌘E opens the selected session's worktree in $EDITOR (nvim) as a session.
+        // ⌘E opens the selected session's worktree in $EDITOR (nvim) in a tab beside it.
         case .openEditor: return KeyBinding(key: "e", command: true)
         // ⇧⌃P pins/unpins whatever list you're looking at (the Oracle rail when the
         // dock is open, else the sidebar selection). Shift+control so it never eats

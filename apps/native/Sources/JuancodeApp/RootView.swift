@@ -3180,7 +3180,15 @@ struct SessionContainer: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 // Title lives in the window titlebar (.navigationTitle); no need to
-                // repeat it here — this row is just the session's action buttons.
+                // repeat it here — this row is the session's tabs (once it has an
+                // editor) and its action buttons. The tabs sit in this row rather
+                // than above the pane so opening one never reflows the agent's grid.
+                if model.editorTabs.hasEditor(meta.id) {
+                    SessionTabStrip(agent: meta.provider.rawValue.capitalized,
+                                    active: model.editorTabs.activeTab(for: meta.id),
+                                    onSelect: { model.showSessionTab($0, for: meta.id) },
+                                    onCloseEditor: { model.closeSessionEditor(meta.id) })
+                }
                 Spacer()
                 Text(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
                     .font(.caption.monospacedDigit())
@@ -3201,6 +3209,17 @@ struct SessionContainer: View {
                         Label("PR #\(pr.number)", systemImage: "arrow.triangle.pull")
                     }
                     .help("Open PR #\(pr.number) \"\(pr.title)\" for this branch in juancode")
+                    .clickCursor()
+                }
+                if meta.kind != .editor {
+                    Button {
+                        model.openEditorSession(meta.id)
+                    } label: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    }
+                    .help(model.editorTabs.hasEditor(meta.id)
+                          ? "Show this session's editor (⌘2)"
+                          : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
                     .clickCursor()
                 }
                 Button {
@@ -3259,6 +3278,13 @@ struct SessionContainer: View {
                     // panel and the oldest scroll off the top, exactly like scrolling.
                     // Closing slides it back into place (juancode).
                     .offset(y: model.bottomTerminalShown ? -CGFloat(bottomHeight) : 0)
+
+                // In-place editor tabs, above the agent pane and its overlays. Unlike
+                // the agent this one is resized (not translated) by the bottom panel:
+                // the editor redraws on SIGWINCH, and translating it would hide its top
+                // rows with no scrollback to reach them.
+                editorPanes
+                    .padding(.bottom, model.bottomTerminalShown ? CGFloat(bottomHeight) : 0)
 
                 // Keep-alive bottom panel, pinned to the bottom edge and slid in from
                 // below via a transform. Once this folder has shells the panel stays
@@ -3439,7 +3465,7 @@ struct SessionContainer: View {
             let current = model.liveSession(meta.id)
             ZStack {
                 ForEach(model.livePanes.entries) { entry in
-                    let visible = entry.session === current
+                    let visible = entry.session === current && !editorInFront
                     // `entry.live` re-types the pooled handle (see `LivePanePool.Entry.live`).
                     if let session = entry.live {
                         GhosttyLive(session: session,
@@ -3466,8 +3492,41 @@ struct SessionContainer: View {
                           topHitInset: terminalTopHitInset,
                           onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
+                .opacity(editorInFront ? 0 : 1)
+                .allowsHitTesting(!editorInFront)
         } else {
             nonLivePane
+        }
+    }
+
+    private var editorInFront: Bool { model.editorTabs.activeTab(for: meta.id) == .editor }
+
+    /// Every open in-place editor, mounted for as long as it lives — a hidden one
+    /// keeps its surface (rendering suspended, sizing frozen) so switching sessions
+    /// or tabs never remounts it blank. Only this session's, with its tab in front,
+    /// is visible.
+    @ViewBuilder
+    private var editorPanes: some View {
+        let panes = model.sessionEditorPanes
+        if !panes.isEmpty {
+            ZStack {
+                ForEach(panes, id: \.entry.id) { pane in
+                    let visible = pane.entry.sessionId == meta.id && editorInFront
+                    Group {
+                        if TerminalBackend.shared.useGhostty {
+                            GhosttyEphemeral(pty: pane.pty, hidden: !visible,
+                                             focusToken: model.editorFocusToken, onExit: {})
+                        } else {
+                            SwiftTermEphemeral(pty: pane.pty, hidden: !visible,
+                                               focusToken: model.editorFocusToken, onExit: {})
+                        }
+                    }
+                    .background(Color.black)
+                    .opacity(visible ? 1 : 0)
+                    .allowsHitTesting(visible)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -3500,6 +3559,51 @@ struct SessionContainer: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: phase)
+    }
+}
+
+/// A session's in-place tabs, shown in its header once it has an editor: the agent
+/// and the editor, the editor closable (which kills it, like `:q` would end it).
+private struct SessionTabStrip: View {
+    let agent: String
+    let active: SessionPaneTab
+    let onSelect: (SessionPaneTab) -> Void
+    let onCloseEditor: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            tab(.agent, title: agent, systemImage: "sparkles", shortcut: "⌘1")
+            tab(.editor, title: "nvim", systemImage: "chevron.left.forwardslash.chevron.right",
+                shortcut: "⌘2", closable: true)
+        }
+        .padding(2)
+        .background(Color.appHairline(0.06), in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func tab(_ which: SessionPaneTab, title: String, systemImage: String,
+                     shortcut: String, closable: Bool = false) -> some View {
+        let selected = active == which
+        return HStack(spacing: 6) {
+            Button { onSelect(which) } label: {
+                Label(title, systemImage: systemImage)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+            }
+            .buttonStyle(.plain)
+            .help("Show the \(title) tab (\(shortcut), ⌃Tab to flip)")
+            .clickCursor()
+            if closable {
+                Button(action: onCloseEditor) {
+                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close the editor (discards an unsaved buffer)")
+                .clickCursor()
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(selected ? Color.appHairline(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .foregroundStyle(selected ? .primary : .secondary)
     }
 }
 

@@ -384,6 +384,12 @@ final class AppModel {
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
     var editing: EditorTarget?
+    /// Which sessions have an in-place editor tab, and which tab is in front. The
+    /// ptys themselves are in `editorPtys`, keyed by the pty id this records.
+    var editorTabs = SessionEditorTabs()
+    @ObservationIgnored private var editorPtys: [String: EphemeralPty] = [:]
+    /// Bumped to pull the keyboard into the visible in-place editor.
+    var editorFocusToken = 0
 
     /// Open-PR lists per folder cwd, loaded lazily by `FolderHeader` and refreshed
     /// in the background. Mirrors the web's per-folder `useQuery(["prs", cwd])`.
@@ -1894,39 +1900,97 @@ final class AppModel {
         createInFolder(provider: meta.provider, cwd: worktree ? root : meta.cwd, isolateWorktree: worktree)
     }
 
-    /// Open the user's editor (`JUANCODE_EDITOR`, default nvim) as a session rooted
-    /// in `sessionId`'s effective working directory — its worktree when isolated,
-    /// else its cwd — so the editor lands in the same checkout the agent edits.
-    /// `file`, when given and inside that directory, opens directly. Spawns off the
-    /// main actor (forkpty + login-shell binary resolution) like `create`, then
-    /// selects the new pane. No-op if the source session is unknown or is itself an
-    /// editor.
+    /// Open the user's editor (`JUANCODE_EDITOR`, default nvim) IN PLACE for
+    /// `sessionId`: a second tab beside its agent, rooted in the session's effective
+    /// working directory (its worktree when isolated, else its cwd), so the editor
+    /// lands in the same checkout the agent edits. The pty goes through
+    /// `core.openEditorPty`, so on the rust core the daemon owns it. Reopening
+    /// focuses the existing tab instead of spawning a second editor; `file` (inside
+    /// that directory) only picks what a FRESH editor opens on, and `line` is not
+    /// forwarded because the wire `openEditor` takes a file alone. Selects the
+    /// session so a row's menu lands on its pane. No-op for an unknown session or
+    /// one that is itself a legacy editor session.
     func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
         if let reason = unavailable(.editor) {
-            errorMessage = "Can't open an editor session. \(reason)"
+            errorMessage = "Can't open an editor. \(reason)"
             return
         }
         guard let parent = core.liveSession(sessionId)?.meta
                 ?? sessions.first(where: { $0.id == sessionId }),
               parent.kind != .editor else { return }
+        if selection != sessionId { selection = sessionId }
+        if editorTabs.hasEditor(sessionId) {
+            showSessionTab(.editor, for: sessionId)
+            return
+        }
         let grid = TerminalGrid.spawn
-        let core = core
-        Task {
-            do {
-                let s = try await Task.detached(priority: .userInitiated) {
-                    try core.createEditorSession(parent: parent, file: file, line: line,
-                                                 cols: grid.cols, rows: grid.rows)
-                }.value
-                refresh()
-                selection = s.id
-                focusTerminal()
-            } catch {
-                errorMessage = "Couldn't open the editor: \(error)"
-            }
+        let pty: EphemeralPty
+        do {
+            pty = try core.openEditorPty(cwd: parent.effectiveCwd, file: file ?? ".",
+                                         cols: grid.cols, rows: grid.rows)
+        } catch EphemeralPtyError.outsideWorkingDir {
+            errorMessage = "Couldn't open the editor: the file is outside the session's working directory."
+            return
+        } catch {
+            errorMessage = "Couldn't open the editor: \(error)"
+            return
+        }
+        editorPtys[pty.id] = pty
+        if let replaced = editorTabs.opened(pty.id, for: sessionId) {
+            editorPtys.removeValue(forKey: replaced)?.kill()
+        }
+        let editorId = pty.id
+        pty.onExit { [weak self] _ in
+            Task { @MainActor in self?.sessionEditorExited(editorId) }
+        }
+        editorFocusToken &+= 1
+    }
+
+    /// The in-place editor pty for `sessionId`, if one is open.
+    func sessionEditorPty(_ sessionId: String) -> EphemeralPty? {
+        editorTabs.editorId(for: sessionId).flatMap { editorPtys[$0] }
+    }
+
+    /// Every open in-place editor with its pty, so the pane keeps each one mounted
+    /// across session switches (a remount would come up blank until nvim redraws).
+    var sessionEditorPanes: [(entry: SessionEditorTabs.Entry, pty: EphemeralPty)] {
+        editorTabs.entries.compactMap { e in editorPtys[e.editorId].map { (e, $0) } }
+    }
+
+    /// Bring `tab` to the front of `sessionId`'s pane and give it the keyboard.
+    func showSessionTab(_ tab: SessionPaneTab, for sessionId: String) {
+        guard editorTabs.select(tab, for: sessionId) else { return }
+        switch tab {
+        case .agent: focusTerminal()
+        case .editor: editorFocusToken &+= 1
         }
     }
 
-    /// Open an editor session for the current selection (toolbar / shortcut). No-op
+    /// ⌃Tab: flip the selected session between its agent and its editor. False
+    /// when there is nothing to flip, so the key stays the pty's.
+    @discardableResult
+    func toggleSessionTabForSelection() -> Bool {
+        guard let sel = selection, editorTabs.hasEditor(sel) else { return false }
+        let next: SessionPaneTab = editorTabs.activeTab(for: sel) == .editor ? .agent : .editor
+        showSessionTab(next, for: sel)
+        return true
+    }
+
+    /// Close `sessionId`'s editor tab by killing its pty; the exit drops the tab.
+    func closeSessionEditor(_ sessionId: String) {
+        sessionEditorPty(sessionId)?.kill()
+    }
+
+    /// The editor exited (`:q`, or the force close): drop its tab, return to the
+    /// agent, and refresh the diff the editor may have changed.
+    private func sessionEditorExited(_ editorId: String) {
+        editorPtys[editorId] = nil
+        guard let sessionId = editorTabs.exited(editorId) else { return }
+        loadChanges(sessionId)
+        if selection == sessionId { focusTerminal() }
+    }
+
+    /// Open the in-place editor for the current selection (⌘E). No-op
     /// when nothing suitable is selected.
     func openEditorForSelection() {
         guard let sel = selection else { return }
@@ -5093,6 +5157,7 @@ final class AppModel {
         agentWorktreeBySession.removeValue(forKey: id)
         remoteGridOwners.removeValue(forKey: id)
         stoppedPanes.remove(id)
+        if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
         navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
@@ -5180,6 +5245,7 @@ final class AppModel {
             agentWorktreeBySession.removeValue(forKey: id)
             remoteGridOwners.removeValue(forKey: id)
             stoppedPanes.remove(id)
+            if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
             pinnedSessions.remove(id)
             dismissedSessions.remove(id)
             if selection == id {
