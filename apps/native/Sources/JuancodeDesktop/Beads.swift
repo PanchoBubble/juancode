@@ -101,7 +101,7 @@ private func numberToString(_ n: NSNumber) -> String {
 public func getBeads(_ cwd: String) async -> BeadsResult {
     let raw: [[String: Any]]
     do {
-        let value = try await bdJson(cwd, ["list"])
+        let value = try await bdJson(cwd, ["list", "--limit", "0"])
         // `(await bdJson(...)) ?? []` — null stdout becomes an empty listing.
         raw = (value as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
     } catch {

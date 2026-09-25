@@ -102,7 +102,7 @@ function asRecord(v: unknown): Record<string, unknown> {
 /** List the Oracle's global tracker items, flagging which are ready (unblocked).
  *  Read-only (`--sandbox`), so it never cold-starts the dolt daemon. */
 export async function listIssues(): Promise<OracleIssue[]> {
-  const listed = await runBdRaw(["--sandbox", "list", "--json"]);
+  const listed = await runBdRaw(["--sandbox", "list", "--limit", "0", "--json"]);
   if (listed.code !== 0) {
     throw new Error(listed.stderr.trim() || `bd list exited ${listed.code}`);
   }
