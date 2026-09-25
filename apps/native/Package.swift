@@ -44,7 +44,7 @@ let package = Package(
         // PR #29 moved those writes onto a per-session serial queue.
         //
         // VENDORED, not fetched (juancode-o9h2): `vendor/libghostty-spm` is upstream
-        // 1.3.2 verbatim plus one fix. PR #29 moved the wedging write off the main
+        // 1.3.2 verbatim plus two fixes. PR #29 moved the wedging write off the main
         // thread but left `InMemoryTerminalSurfaceAccess` draining it with an
         // unbounded `NSCondition.wait()` — and that drain runs on the MAIN thread from
         // a view's deinit, so a write wedged inside libghostty froze the whole app
@@ -52,6 +52,11 @@ let package = Package(
         // the surface instead of freeing it under a live C call. Every patched site is
         // marked `juancode patch`. Drop the vendoring and go back to the remote
         // package once this is fixed upstream.
+        //
+        // A second patch (juancode-m3bp) lets one controller serve many surfaces:
+        // upstream kept a single wakeup handler per controller and skipped the app
+        // tick while that one surface was occluded. The app shares one controller
+        // across every pane, so no pane close frees a ghostty app.
         .package(path: "vendor/libghostty-spm"),
         // GitHub-flavored markdown rendering for PR-panel comment bodies
         // (juancode-lqw). Handles headings, task lists, code fences, links; HTML

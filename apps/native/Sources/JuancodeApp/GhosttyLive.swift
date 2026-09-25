@@ -74,6 +74,16 @@ private let juancodeGhosttyTheme = TerminalTheme(
     dark: .afterglow.background("000000")
 )
 
+/// The one ghostty app every pane's surface lives in. A controller per pane meant
+/// every pane close ran `ghostty_app_free`, the site of the 10 Aug SIGSEGV.
+///
+/// Sharing is exact, not approximate: every pane used the same theme and default
+/// config, the color scheme follows `NSApp.appearance` for the whole process, and
+/// font zoom and focus are per-surface. The shared app's tick is never gated on one
+/// pane being visible (see the vendored `TerminalController.handleWakeup`), so a
+/// hidden pane cannot starve the others.
+@MainActor private let juancodeGhosttyController = TerminalController(theme: juancodeGhosttyTheme)
+
 struct GhosttyLive: View {
     let session: any LiveSession
     var remembersSize: Bool = true
@@ -397,7 +407,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
             // The surface is built lazily by `rebuildIfReady()`, which bails unless a
             // controller is set — without this nothing ever renders and every
             // `receive()` is dropped. Mirrors the example app's `terminalView.controller`.
-            tv.controller = TerminalController(theme: juancodeGhosttyTheme)
+            tv.controller = juancodeGhosttyController
             tv.configuration = TerminalSurfaceOptions(backend: .inMemory(gs))
             tv.delegate = self
             shiftEnterMonitor = installShiftEnterNewline(view: tv, session: session)
@@ -1010,7 +1020,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
                 resize: { _ in }
             )
             gsession = gs
-            tv.controller = TerminalController(theme: juancodeGhosttyTheme)
+            tv.controller = juancodeGhosttyController
             tv.configuration = TerminalSurfaceOptions(backend: .inMemory(gs))
             tv.delegate = self
 

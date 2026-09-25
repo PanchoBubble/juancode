@@ -56,18 +56,49 @@ struct TerminalLifecycleTests {
     }
 
     @Test
-    func `suspended wakeup does not schedule render`() {
+    func `wakeup ticks and reaches every surface on a shared controller`() {
         let controller = TerminalController()
-        var wakeups = 0
+        let first = TerminalSurfaceCoordinator()
+        let second = TerminalSurfaceCoordinator()
+        var reached: [String] = []
 
-        controller.shouldProcessWakeup = { false }
-        controller.onWakeup = {
-            wakeups += 1
-        }
-
+        controller.addWakeupObserver(first) { reached.append("first") }
+        controller.addWakeupObserver(second) { reached.append("second") }
         controller.handleWakeup()
 
-        #expect(wakeups == 0)
+        #expect(reached.sorted() == ["first", "second"])
+    }
+
+    @Test
+    func `tearing down one surface keeps the others' wakeups`() {
+        let controller = TerminalController()
+        let closing = TerminalSurfaceCoordinator()
+        let staying = TerminalSurfaceCoordinator()
+        var stayingWakeups = 0
+
+        closing.isAttached = { false }
+        closing.controller = controller
+        controller.addWakeupObserver(closing) {}
+        controller.addWakeupObserver(staying) { stayingWakeups += 1 }
+
+        closing.freeSurface()
+        controller.handleWakeup()
+
+        #expect(controller.wakeupObserverCount == 1)
+        #expect(stayingWakeups == 1)
+    }
+
+    @Test
+    func `a coordinator that deinits leaves no wakeup behind`() {
+        let controller = TerminalController()
+        var coordinator: TerminalSurfaceCoordinator? = TerminalSurfaceCoordinator()
+
+        coordinator?.isAttached = { false }
+        coordinator?.controller = controller
+        controller.addWakeupObserver(coordinator!) {}
+        coordinator = nil
+
+        #expect(controller.wakeupObserverCount == 0)
     }
 
     @Test

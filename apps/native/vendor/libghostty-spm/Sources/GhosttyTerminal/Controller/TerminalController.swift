@@ -56,8 +56,11 @@ public final class TerminalController {
     var renderedConfigContents: String = TerminalController.defaultRenderedConfig
 
     public internal(set) var lastConfigurationIssue: String?
-    var onWakeup: (() -> Void)?
-    var shouldProcessWakeup: (() -> Bool)?
+    /// juancode patch: one handler per surface coordinator, not one per controller.
+    /// Upstream kept a single `onWakeup` / `shouldProcessWakeup` pair, so on a
+    /// controller shared by several panes the last surface built won, and tearing
+    /// any one down silenced wakeups for all of them.
+    private var wakeupObservers: [ObjectIdentifier: () -> Void] = [:]
 
     // MARK: - Config Resolution State
 
@@ -287,14 +290,31 @@ public final class TerminalController {
         ghostty_app_tick(app)
     }
 
+    /// juancode patch: the app tick is never gated on a surface being renderable.
+    /// `ghostty_app_tick` is the only thing that drains the app mailbox, and every
+    /// surface's io thread pushes into that mailbox and blocks while it is full.
+    /// Upstream skipped the tick while its surface was occluded, which on a hidden
+    /// pane that kept streaming starved the mailbox and wedged the io thread
+    /// (juancode-o9h2). On a shared app the same gate would let one hidden pane wedge
+    /// every pane. Whether to render stays per-surface: each observer's own
+    /// `requestImmediateTick` already refuses while its surface cannot draw.
     func handleWakeup() {
-        guard shouldProcessWakeup?() ?? true else {
-            TerminalDebugLog.log(.lifecycle, "wakeup suspended")
-            return
-        }
-
         tick()
-        onWakeup?()
+        for handler in Array(wakeupObservers.values) {
+            handler()
+        }
+    }
+
+    func addWakeupObserver(_ owner: AnyObject, _ handler: @escaping () -> Void) {
+        wakeupObservers[ObjectIdentifier(owner)] = handler
+    }
+
+    func removeWakeupObserver(_ owner: AnyObject) {
+        wakeupObservers.removeValue(forKey: ObjectIdentifier(owner))
+    }
+
+    var wakeupObserverCount: Int {
+        wakeupObservers.count
     }
 
     private static func initializeRuntimeIfNeeded() {
