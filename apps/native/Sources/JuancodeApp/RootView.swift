@@ -1007,6 +1007,22 @@ struct SidebarView: View {
         Task { @MainActor in
             seenFolders.formUnion(new)
             collapsedFolders.formUnion(new)
+            revealSelection()
+        }
+    }
+
+    /// Expand the project holding the selected session (and open its clipped preview
+    /// if the row is past the cap), so the session you are in is always on screen —
+    /// at launch, and when the selection jumps from the palette or a notification.
+    /// Deferred by the callers for the same NSTableView reentrancy reason as above.
+    private func revealSelection() {
+        guard let sel = model.selection else { return }
+        let groups = makeGroups(tallyFacets: false).groups
+        guard let group = groups.first(where: { $0.sessions.contains { $0.id == sel } })
+        else { return }
+        collapsedFolders.remove(group.cwd)
+        if !previewSessions(group).contains(where: { $0.id == sel }) {
+            expandedFolders.insert(group.cwd)
         }
     }
 
@@ -1286,6 +1302,7 @@ struct SidebarView: View {
                 // selection-did-change delegate, and scrolling the same table
                 // while that callback is on the stack is a reentrant operation.
                 Task { @MainActor in
+                    revealSelection()
                     withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(sel, anchor: .center) }
                 }
             }
