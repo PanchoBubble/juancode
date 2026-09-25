@@ -32,8 +32,9 @@ import {
   deliverReply,
   queueMessages,
   listIssues,
-  listProjectIssues,
   listProjects,
+  projectIssue,
+  projectOverview,
   listSessions,
   oracleChat,
   oracleChatStream,
@@ -585,14 +586,31 @@ app.get("/api/projects", async (_req: Request, res: Response) => {
   }
 });
 
-app.get("/api/projects/issues", async (req: Request, res: Response) => {
-  const path = req.query.path;
-  if (typeof path !== "string" || !path) {
-    res.status(400).send("path is required");
-    return;
+/** The `?path=` (and `?id=`) a project route needs, or a 400 when one is missing. */
+function projectQuery(req: Request, res: Response, ...keys: string[]): string[] | null {
+  const vals = keys.map((k) => req.query[k]);
+  if (vals.some((v) => typeof v !== "string" || !v)) {
+    res.status(400).send(`${keys.join(" and ")} required`);
+    return null;
   }
+  return vals as string[];
+}
+
+app.get("/api/projects/overview", async (req: Request, res: Response) => {
+  const q = projectQuery(req, res, "path");
+  if (!q) return;
   try {
-    res.json(await listProjectIssues(path));
+    res.json(await projectOverview(q[0]!));
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.get("/api/projects/issue", async (req: Request, res: Response) => {
+  const q = projectQuery(req, res, "path", "id");
+  if (!q) return;
+  try {
+    res.json(await projectIssue(q[0]!, q[1]!));
   } catch (e) {
     sendErr(res, e);
   }

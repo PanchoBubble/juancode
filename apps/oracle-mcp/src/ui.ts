@@ -221,13 +221,53 @@ export const consoleHtml = /* html */ `<!doctype html>
   details > summary .chev { margin-left: auto; color: var(--faint); transition: transform .2s; font-size: 13px; }
   details[open] > summary .chev { transform: rotate(90deg); }
   details .body { padding: 0 14px 14px; }
-  details.proj > summary { color: var(--txt); }
-  details.proj > summary .path { color: var(--faint); font-weight: 400; font-size: 12px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-  details.proj > summary .count { color: var(--dim); font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: var(--panel-2); padding: 3px 7px; border-radius: 999px; }
-  details.proj > summary .chev { margin-left: 0; }
-  details.proj .body .item:last-child { margin-bottom: 0; }
+  /* ── Projects list + project / ticket views ───────────── */
+  .proj { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; color: var(--txt);
+    font: inherit; }
+  .proj .pname { font-weight: 640; font-size: 15px; }
+  .proj .path { color: var(--faint); font-size: 12px; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj .chev, .vhead .esc { color: var(--faint); }
+  .vhead { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 10px;
+    margin: 0 -12px 8px; padding: 6px 12px 8px; background: var(--bg); }
+  .back { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px;
+    background: var(--panel); color: var(--tint); font-weight: 640; font-size: 14px;
+    box-shadow: inset 0 0 0 1px var(--line-soft); }
+  .vtitle { min-width: 0; flex: 1; }
+  .vtitle .name { font-weight: 680; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vtitle .sub { color: var(--faint); font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vhead .esc { font: 600 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 4px 6px;
+    border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line-soft); }
+  @media (hover: none) { .vhead .esc { display: none; } }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; }
+  .tile { border: 0; text-align: left; padding: 10px 11px; border-radius: 12px; background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--line-soft); color: var(--dim); font-size: 12px; font-weight: 600; }
+  .tile b { display: block; color: var(--txt); font-size: 20px; font-weight: 700; margin-bottom: 2px; }
+  .tile.hot b { color: var(--tint); } .tile.warn b { color: var(--warn); } .tile.good b { color: var(--good); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 10px; }
+  .chip { border: 0; min-height: 30px; padding: 0 11px; border-radius: 999px; background: var(--panel);
+    color: var(--dim); font-size: 12.5px; font-weight: 640; box-shadow: inset 0 0 0 1px var(--line-soft); }
+  .chip.on { background: rgba(138,180,255,.16); color: var(--tint); box-shadow: inset 0 0 0 1px rgba(138,180,255,.35); }
+  .board { display: flex; gap: 10px; overflow-x: auto; margin: 0 -12px; padding: 0 12px 12px;
+    scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
+  .col { flex: 0 0 min(84vw, 290px); scroll-snap-align: start; background: var(--bg-2);
+    border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 8px; min-height: 120px; }
+  .col-h { display: flex; align-items: center; gap: 8px; padding: 4px 4px 10px;
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--dim); }
+  .col-h .n { margin-left: auto; color: var(--faint); }
+  .col .card { padding: 10px 11px; margin-bottom: 7px; cursor: pointer; }
+  .col .title { font-size: 14px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .col .empty { color: var(--faint); font-size: 12.5px; padding: 6px 4px; }
+  .psess { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 10px 12px; }
+  .psess .title { font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .none { color: var(--faint); font-size: 13px; padding: 2px 4px 6px; }
+  .desc { white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.5; color: var(--txt); }
+  .rel { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; }
+  .rel .title { font-size: 13.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rel .kind { color: var(--faint); font-size: 11.5px; }
+  .cmt .meta { margin: 0 0 6px; }
   /* Pin the new-issue / dispatch ("compose") control to the top of the scroll
      area so it stays reachable while the list scrolls under it. Sticky is
      relative to <main> (the overflow-y:auto container); the safe-area notch is
@@ -593,6 +633,20 @@ export const consoleHtml = /* html */ `<!doctype html>
       <div id="projects-list"></div>
     </section>
 
+    <!-- ── Project / ticket views (routed by #project=…&ticket=…) ── -->
+    <section id="pview" class="tab">
+      <div class="vhead"><button class="back" data-back>‹ Projects</button>
+        <div class="vtitle"><div class="name" id="pv-name"></div><div class="sub" id="pv-path"></div></div>
+        <span class="esc">esc</span></div>
+      <div id="pv-body"></div>
+    </section>
+    <section id="tview" class="tab">
+      <div class="vhead"><button class="back" data-back id="tv-back">‹ Board</button>
+        <div class="vtitle"><div class="name" id="tv-id"></div><div class="sub" id="tv-proj"></div></div>
+        <span class="esc">esc</span></div>
+      <div id="tv-body"></div>
+    </section>
+
     <!-- ── Sessions ───────────────────────────────────── -->
     <section id="sessions" class="tab">
       <details class="create">
@@ -742,6 +796,7 @@ function setCount(sel, n){ const el = $(sel); el.hidden = false; el.textContent 
 
 // ── Tabs ──────────────────────────────────────────────────
 document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x === b));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === b.dataset.tab));
   if (b.dataset.tab === "issues") loadIssues();
@@ -755,6 +810,7 @@ document.addEventListener("click", (e) => {
   if (!r) return;
   if (r.dataset.retry === "issues") loadIssues();
   if (r.dataset.retry === "projects") loadProjects();
+  if (r.dataset.retry === "pview" || r.dataset.retry === "tview") renderRoute();
   if (r.dataset.retry === "sessions") { loadSessions(); loadHeavy(); }
 });
 
@@ -781,9 +837,9 @@ async function loadIssues(){
     el.innerHTML = items.map(issueCard).join("");
   } catch(e){ setConn(false); el.innerHTML = errState(e.message, "issues"); }
 }
-// Projects: one collapsed row per repo a session has run in; a project's tickets are
-// fetched only when it is opened, and re-fetched for the ones still open on refresh.
-const openProjects = new Set();
+// Projects: one row per repo a session has run in. Tapping one routes to its
+// project view (#project=<path>), and a ticket there to #project=<path>&ticket=<id>,
+// so the phone's back gesture, the ‹ button and Esc all walk back the same way.
 let projectsLoaded = false;
 async function loadProjects(){
   const el = $("#projects-list");
@@ -793,27 +849,169 @@ async function loadProjects(){
     setCount("#p-count", items.length);
     if (!items.length) { el.innerHTML = emptyState("◌", "No projects with a tracker", "Repos with a .beads dir show up once a session runs in them."); return; }
     el.innerHTML = items.map((p) =>
-      '<details class="proj" data-path="'+esc(p.path)+'"'+(openProjects.has(p.path)?' open':'')+'>'
-      + '<summary>'+esc(p.name)+'<span class="path">'+esc(p.path)+'</span>'
-      + '<span class="count" hidden></span><span class="chev">›</span></summary>'
-      + '<div class="body"></div></details>').join("");
-    el.querySelectorAll("details.proj").forEach((d) => {
-      d.addEventListener("toggle", () => {
-        if (d.open) { openProjects.add(d.dataset.path); loadProjectIssues(d); }
-        else openProjects.delete(d.dataset.path);
-      });
-      if (d.open) loadProjectIssues(d);
-    });
+      '<button class="card item proj" data-project="'+esc(p.path)+'"><span class="pname">'+esc(p.name)+'</span>'
+      + '<span class="path">'+esc(p.path)+'</span><span class="chev">›</span></button>').join("");
   } catch(e){ el.innerHTML = errState(e.message, "projects"); }
 }
-async function loadProjectIssues(d){
-  const body = d.querySelector(".body"), count = d.querySelector("summary .count");
-  if (!body.innerHTML) body.innerHTML = skeletons(2);
+
+function route(){
+  const h = new URLSearchParams(location.hash.slice(1));
+  return { project: h.get("project"), ticket: h.get("ticket") };
+}
+function routeUrl(r){
+  if (!r.project) return location.pathname + location.search;
+  const h = new URLSearchParams({ project: r.project });
+  if (r.ticket) h.set("ticket", r.ticket);
+  return "#" + h.toString();
+}
+function go(r){
+  const depth = ((history.state && history.state.oracleDepth) || 0) + 1;
+  history.pushState({ oracleDepth: depth }, "", routeUrl(r));
+  renderRoute();
+}
+// Back pops our own history entry when there is one; a deep link opened cold has
+// none, so it steps to the parent route in place instead of leaving the page.
+function goBack(){
+  const r = route();
+  if (!r.project) return;
+  if (history.state && history.state.oracleDepth > 0) { history.back(); return; }
+  history.replaceState(null, "", routeUrl(r.ticket ? { project: r.project } : {}));
+  renderRoute();
+}
+window.addEventListener("popstate", renderRoute);
+function showSection(id){
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x.dataset.tab === "issues"));
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === id));
+  $("main").scrollTop = 0;
+}
+function renderRoute(){
+  const r = route();
+  if (r.project && r.ticket) { showSection("tview"); loadTicketView(r.project, r.ticket); }
+  else if (r.project) { showSection("pview"); loadProjectView(r.project); }
+  else if ($("#pview").classList.contains("active") || $("#tview").classList.contains("active")) {
+    showSection("issues"); loadIssues();
+  }
+}
+document.addEventListener("click", (e) => {
+  const t = e.target.closest && e.target.closest("[data-project],[data-ticket],[data-back],[data-col-jump],[data-psess],[data-chip]");
+  if (!t) return;
+  if (t.dataset.back !== undefined) goBack();
+  else if (t.dataset.project) go({ project: t.dataset.project });
+  else if (t.dataset.ticket) go({ project: route().project, ticket: t.dataset.ticket });
+  else if (t.dataset.colJump) { const c = document.querySelector('.col[data-col="'+t.dataset.colJump+'"]'); if (c) c.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" }); }
+  else if (t.dataset.psess) openLiveView(t.dataset.psess, t.dataset.title);
+  else if (t.dataset.chip) toggleChip(t.dataset.chip);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !route().project) return;
+  if (!$("#settings-modal").hidden || !$("#live-view").hidden) return;
+  e.preventDefault(); goBack();
+});
+
+// Board columns, Jira-style. bd has no "blocked" status: an open ticket that is not
+// ready is waiting on a dependency, so it gets its own column.
+const COLS = [
+  { key: "todo", name: "To do", tone: "hot", test: (i) => i.status === "open" && i.ready },
+  { key: "blocked", name: "Blocked", tone: "warn", test: (i) => i.status === "open" && !i.ready },
+  { key: "in_progress", name: "In progress", tone: "hot", test: (i) => i.status === "in_progress" },
+  { key: "in_review", name: "In review", tone: "", test: (i) => i.status === "in_review" },
+];
+let pv = null; // { path, data, prio:Set, type:Set }
+async function loadProjectView(path){
+  const fresh = !pv || pv.path !== path;
+  if (fresh) {
+    pv = { path, data: null, prio: new Set(), type: new Set() };
+    $("#pv-name").textContent = path.split("/").pop(); $("#pv-path").textContent = path;
+    $("#pv-body").innerHTML = skeletons(4);
+  }
   try {
-    const items = await api("/api/projects/issues?path="+encodeURIComponent(d.dataset.path));
-    count.hidden = false; count.textContent = items.length;
-    body.innerHTML = items.length ? items.map(issueCard).join("") : emptyState("✓", "No open tickets", "");
-  } catch(e){ body.innerHTML = '<div class="state err"><div class="small">'+esc(e.message)+'</div></div>'; }
+    const data = await api("/api/projects/overview?path="+encodeURIComponent(path)); setConn(true);
+    if (!pv || pv.path !== path) return;
+    pv.data = data; renderProjectView();
+  } catch(e){ if (fresh) $("#pv-body").innerHTML = errState(e.message, "pview"); }
+}
+function columnsOf(data){
+  const other = [...new Set(data.issues.map((i) => i.status))].filter((s) => !["open","in_progress","in_review"].includes(s));
+  return COLS.concat(other.map((s) => ({ key: s, name: s.replace(/_/g, " "), tone: "", test: (i) => i.status === s })));
+}
+function renderProjectView(){
+  const d = pv.data, cols = columnsOf(d);
+  const tiles = cols.map((c) => { const n = d.issues.filter(c.test).length;
+      return '<button class="tile '+(n?c.tone:"")+'" data-col-jump="'+esc(c.key)+'"><b>'+n+'</b>'+esc(c.name)+'</button>'; })
+    .concat(['<button class="tile good" data-col-jump="done"><b>'+d.closed.length+'</b>Recently done</button>',
+      '<button class="tile '+(d.sessions.length?"good":"")+'" data-col-jump="sessions"><b>'+d.sessions.length+'</b>Live sessions</button>']);
+  const sessions = d.sessions.length ? d.sessions.map((s) =>
+      '<div class="card item psess" data-psess="'+esc(s.id)+'" data-title="'+esc(s.title)+'">'
+      + '<span class="title">'+esc(s.title)+'</span><span class="badge b-open">'+esc(s.provider)+'</span>'
+      + '<span class="badge b-ready">'+esc(s.status)+'</span></div>').join("")
+    : '<div class="none">Nothing running here right now.</div>';
+  $("#pv-body").innerHTML =
+    '<div class="tiles">'+tiles.join("")+'</div>'
+    + '<div class="sec-head" id="pv-sessions">Live sessions</div>'+sessions
+    + '<div class="sec-head">Board <span class="count">'+d.issues.length+' open</span></div>'
+    + '<div class="chips" id="pv-chips"></div><div class="board" id="pv-board"></div>';
+  renderBoard();
+}
+function toggleChip(key){
+  const [kind, val] = key.split(":"), set = kind === "p" ? pv.prio : pv.type;
+  set.has(val) ? set.delete(val) : set.add(val);
+  renderBoard();
+}
+function renderBoard(){
+  const d = pv.data, cols = columnsOf(d);
+  const prios = [...new Set(d.issues.map((i) => String(i.priority)))].sort();
+  const types = [...new Set(d.issues.map((i) => i.issueType))].sort();
+  $("#pv-chips").innerHTML =
+    prios.map((p) => '<button class="chip'+(pv.prio.has(p)?" on":"")+'" data-chip="p:'+p+'">P'+p+'</button>').join("")
+    + types.map((t) => '<button class="chip'+(pv.type.has(t)?" on":"")+'" data-chip="t:'+esc(t)+'">'+esc(t)+'</button>').join("");
+  const keep = (i) => (!pv.prio.size || pv.prio.has(String(i.priority))) && (!pv.type.size || pv.type.has(i.issueType));
+  const byPrio = (a, b) => a.priority - b.priority || String(b.updatedAt).localeCompare(String(a.updatedAt));
+  const column = (key, name, items) => '<div class="col" data-col="'+esc(key)+'"><div class="col-h">'+esc(name)
+    + '<span class="n">'+items.length+'</span></div>'
+    + (items.length ? items.map(boardCard).join("") : '<div class="empty">Nothing here.</div>') + '</div>';
+  $("#pv-board").innerHTML = cols.map((c) => column(c.key, c.name, d.issues.filter((i) => c.test(i) && keep(i)).sort(byPrio))).join("")
+    + column("done", "Done", d.closed.filter(keep));
+}
+function boardCard(i){
+  const blocks = i.deps.filter((x) => x.type === "blocks").length;
+  return '<div class="card item" data-ticket="'+esc(i.id)+'"><div class="row"><span class="id">'+esc(i.id)+'</span>'
+    + prioBadge(i.priority) + '</div><div class="title">'+esc(i.title)+'</div>'
+    + '<div class="meta"><span>'+esc(i.issueType)+'</span>'
+    + (i.parent ? '<span>↑ '+esc(i.parent)+'</span>' : '')
+    + (blocks ? '<span>⛓ '+blocks+'</span>' : '')
+    + (i.closedAt ? '<span>'+ago(Date.parse(i.closedAt))+'</span>' : '') + '</div></div>';
+}
+
+async function loadTicketView(path, id){
+  $("#tv-id").textContent = id; $("#tv-proj").textContent = path.split("/").pop();
+  $("#tv-back").textContent = "‹ " + path.split("/").pop();
+  const body = $("#tv-body"); body.innerHTML = skeletons(3);
+  try {
+    const [t] = await Promise.all([
+      api("/api/projects/issue?path="+encodeURIComponent(path)+"&id="+encodeURIComponent(id)),
+      pv && pv.path === path && pv.data ? null : loadProjectView(path).catch(() => {}),
+    ]);
+    setConn(true);
+    if (route().ticket !== id) return;
+    const all = pv && pv.path === path && pv.data ? pv.data.issues.concat(pv.data.closed) : [];
+    const dependents = all.filter((i) => i.deps.some((x) => x.id === id));
+    const rel = (x, kind) => '<div class="card item rel" data-ticket="'+esc(x.id)+'"><span class="id">'+esc(x.id)+'</span>'
+      + '<span class="title">'+esc(x.title||"")+'</span>'
+      + (x.status ? statusBadge(x.status) : '') + '<span class="kind">'+esc(kind)+'</span></div>';
+    const section = (name, html) => html ? '<div class="sec-head">'+name+'</div>'+html : '';
+    body.innerHTML =
+      '<div class="card"><div class="row">'+prioBadge(t.priority)+statusBadge(t.status)
+      + '<span class="badge b-closed">'+esc(t.issueType)+'</span></div>'
+      + '<div class="title" style="margin-top:8px">'+esc(t.title)+'</div>'
+      + '<div class="meta">'+(t.owner?'<span>'+esc(t.owner)+'</span>':'')
+      + (t.updatedAt?'<span>updated '+ago(Date.parse(t.updatedAt))+'</span>':'')
+      + (t.closeReason?'<span>closed: '+esc(t.closeReason)+'</span>':'')+'</div></div>'
+      + section("Description", t.description ? '<div class="card desc">'+esc(t.description)+'</div>' : '')
+      + section("Depends on", t.deps.map((x) => rel(x, x.type)).join(""))
+      + section("Needed by", dependents.map((x) => rel(x, (x.deps.find((y) => y.id === id) || {}).type || "")).join(""))
+      + section("Comments", t.comments.map((c) => '<div class="card cmt"><div class="meta"><span>'+esc(c.author)+'</span>'
+          + (c.createdAt?'<span>'+ago(Date.parse(c.createdAt))+'</span>':'')+'</div><div class="desc">'+esc(c.text)+'</div></div>').join(""));
+  } catch(e){ body.innerHTML = errState(e.message, "tview"); }
 }
 $("#i-create").onclick = async () => {
   const title = $("#i-title").value.trim();
@@ -1566,7 +1764,8 @@ renderInstallHint();
 function reloadActiveTab(){
   const active = document.querySelector("nav button.active");
   const tab = active && active.dataset.tab;
-  if (tab === "issues") loadIssues();
+  if (route().project) renderRoute();
+  else if (tab === "issues") loadIssues();
   else if (tab === "sessions") { loadSessions(); loadHeavy(); }
   // Chat has no list to refresh; its SSE turn is one-shot per send.
 }
@@ -1593,6 +1792,7 @@ window.addEventListener("offline", () => setConn(false));
     const tabBtn = document.querySelector('nav button[data-tab="sessions"]');
     if (tabBtn) { tabBtn.click(); return; } // click() loads the session list
   }
+  if (route().project) { renderRoute(); return; }
   loadIssues();
 })();
 </script>

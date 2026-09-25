@@ -93,10 +93,43 @@ export interface OracleIssue {
   issueType: string;
   parent: string | null;
   ready: boolean;
+  /** What this issue depends on, with bd's edge type (`blocks`, `parent-child`, …). */
+  deps: { id: string; type: string }[];
+  updatedAt: string | null;
+  closedAt: string | null;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+}
+
+const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+
+/** Map `bd list --json` rows onto the console's issue shape. */
+export function toIssues(rows: unknown, readyIds: ReadonlySet<string>): OracleIssue[] {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map(asRecord)
+    .filter((r) => typeof r.id === "string" && r.id.length > 0)
+    .map((r) => {
+      const id = String(r.id);
+      const deps = (Array.isArray(r.dependencies) ? r.dependencies : [])
+        .map(asRecord)
+        .map((d) => ({ id: str(d.depends_on_id) ?? "", type: str(d.type) ?? "blocks" }))
+        .filter((d) => d.id && d.id !== id);
+      return {
+        id,
+        title: str(r.title) ?? "",
+        status: str(r.status) ?? "open",
+        priority: typeof r.priority === "number" ? r.priority : 2,
+        issueType: str(r.issue_type) ?? "task",
+        parent: str(r.parent) ?? deps.find((d) => d.type === "parent-child")?.id ?? null,
+        ready: readyIds.has(id),
+        deps,
+        updatedAt: str(r.updated_at),
+        closedAt: str(r.closed_at),
+      };
+    });
 }
 
 /** List the Oracle's global tracker items, flagging which are ready (unblocked).
@@ -105,36 +138,21 @@ export function listIssues(): Promise<OracleIssue[]> {
   return listIssuesIn(oracleDir());
 }
 
+async function bdJson(args: string[], cwd: string): Promise<unknown> {
+  const res = await runBdRaw(["--sandbox", ...args, "--json"], cwd);
+  if (res.code !== 0) throw new Error(res.stderr.trim() || `bd ${args[0]} exited ${res.code}`);
+  return parseBdJson(res.stdout);
+}
+
+async function readyIn(cwd: string): Promise<Set<string>> {
+  // best-effort; a failure just leaves every flag false.
+  const raw = await bdJson(["ready", "--limit", "1000"], cwd).catch(() => null);
+  return new Set(Array.isArray(raw) ? raw.map((r) => String(asRecord(r).id ?? "")) : []);
+}
+
 async function listIssuesIn(cwd: string): Promise<OracleIssue[]> {
-  const listed = await runBdRaw(["--sandbox", "list", "--limit", "0", "--json"], cwd);
-  if (listed.code !== 0) {
-    throw new Error(listed.stderr.trim() || `bd list exited ${listed.code}`);
-  }
-  const rows = parseBdJson(listed.stdout);
-  if (!Array.isArray(rows)) return [];
-
-  // ready overlay — best-effort; a failure just leaves every flag false.
-  const readyRes = await runBdRaw(["--sandbox", "ready", "--limit", "1000", "--json"], cwd);
-  const readyRaw = readyRes.code === 0 ? parseBdJson(readyRes.stdout) : null;
-  const readyIds = new Set<string>(
-    Array.isArray(readyRaw) ? readyRaw.map((r) => String(asRecord(r).id ?? "")) : [],
-  );
-
-  return rows
-    .map(asRecord)
-    .filter((r) => typeof r.id === "string" && r.id.length > 0)
-    .map((r) => {
-      const id = String(r.id);
-      return {
-        id,
-        title: typeof r.title === "string" ? r.title : "",
-        status: typeof r.status === "string" ? r.status : "open",
-        priority: typeof r.priority === "number" ? r.priority : 2,
-        issueType: typeof r.issue_type === "string" ? r.issue_type : "task",
-        parent: typeof r.parent === "string" ? r.parent : null,
-        ready: readyIds.has(id),
-      };
-    });
+  const [rows, ready] = await Promise.all([bdJson(["list", "--limit", "0"], cwd), readyIn(cwd)]);
+  return toIssues(rows, ready);
 }
 
 export interface OracleProject {
@@ -159,22 +177,31 @@ async function hasBeads(dir: string): Promise<boolean> {
   );
 }
 
+interface SessionRow {
+  row: Record<string, unknown>;
+  root: string;
+}
+
+async function sessionsByRoot(): Promise<SessionRow[]> {
+  const rows = await listSessions();
+  const list = (Array.isArray(rows) ? rows : []).map(asRecord);
+  const roots = new Map<string, Promise<string>>();
+  return Promise.all(
+    list
+      .filter((r) => str(r.cwd))
+      .map(async (row) => {
+        const cwd = row.cwd as string;
+        if (!roots.has(cwd)) roots.set(cwd, repoRoot(cwd));
+        return { row, root: await roots.get(cwd)! };
+      }),
+  );
+}
+
 /** Every project a session has run in that keeps a bd tracker, busiest first. The
  *  Oracle's own dir is left out: its board is the global one. */
 export async function listProjects(): Promise<OracleProject[]> {
-  const rows = await listSessions();
-  const byCwd = new Map<string, number>();
-  for (const r of Array.isArray(rows) ? rows : []) {
-    const cwd = asRecord(r).cwd;
-    if (typeof cwd === "string" && cwd) byCwd.set(cwd, (byCwd.get(cwd) ?? 0) + 1);
-  }
   const byRoot = new Map<string, number>();
-  await Promise.all(
-    [...byCwd].map(async ([cwd, n]) => {
-      const root = await repoRoot(cwd);
-      byRoot.set(root, (byRoot.get(root) ?? 0) + n);
-    }),
-  );
+  for (const { root } of await sessionsByRoot()) byRoot.set(root, (byRoot.get(root) ?? 0) + 1);
   const own = oracleDir();
   const kept = await Promise.all(
     [...byRoot].map(async ([path, sessions]) =>
@@ -186,12 +213,110 @@ export async function listProjects(): Promise<OracleProject[]> {
     .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
 }
 
-/** A project's open tickets. Only paths `listProjects` returns are accepted, so the
- *  endpoint can't be pointed at an arbitrary directory. */
-export async function listProjectIssues(path: string): Promise<OracleIssue[]> {
-  const known = await listProjects();
-  if (!known.some((p) => p.path === path)) throw new Error(`not a known project: ${path}`);
-  return listIssuesIn(path);
+/** Only paths `listProjects` returns are accepted, so no project endpoint can be
+ *  pointed at an arbitrary directory. */
+async function knownProject(path: string): Promise<OracleProject> {
+  const found = (await listProjects()).find((p) => p.path === path);
+  if (!found) throw new Error(`not a known project: ${path}`);
+  return found;
+}
+
+export interface ProjectSession {
+  id: string;
+  title: string;
+  provider: string;
+  status: string;
+  cwd: string;
+  updatedAt: string | null;
+}
+
+/** A session is live while its pty is: anything the core has not marked exited. */
+export function isLiveSession(r: Record<string, unknown>): boolean {
+  const st = (str(r.status) ?? "").toLowerCase();
+  return r.archived !== true && st !== "" && st !== "exited" && st !== "closed" && st !== "done";
+}
+
+export interface ProjectOverview {
+  project: OracleProject;
+  issues: OracleIssue[];
+  /** The most recently closed tickets, newest first: the board's Done column. */
+  closed: OracleIssue[];
+  sessions: ProjectSession[];
+}
+
+export async function projectOverview(path: string): Promise<ProjectOverview> {
+  const project = await knownProject(path);
+  const [issues, closedRows, rows] = await Promise.all([
+    listIssuesIn(path),
+    bdJson(["list", "--status", "closed", "--sort", "closed", "--limit", "20"], path).catch(
+      () => [],
+    ),
+    sessionsByRoot(),
+  ]);
+  const sessions = rows
+    .filter(({ root, row }) => root === path && isLiveSession(row))
+    .map(({ row }) => ({
+      id: str(row.id) ?? str(row.cliSessionId) ?? "",
+      title: str(row.title) ?? "untitled",
+      provider: str(row.provider) ?? "agent",
+      status: str(row.status) ?? "",
+      cwd: str(row.cwd) ?? "",
+      updatedAt: typeof row.updatedAt === "number" ? new Date(row.updatedAt).toISOString() : str(row.updatedAt),
+    }));
+  return { project, issues, closed: toIssues(closedRows, new Set()), sessions };
+}
+
+export interface IssueDetail {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  priority: number;
+  issueType: string;
+  owner: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  closeReason: string | null;
+  deps: { id: string; title: string; status: string; type: string }[];
+  comments: { author: string; text: string; createdAt: string | null }[];
+}
+
+const ISSUE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+
+/** One ticket in full, via `bd show`. */
+export async function projectIssue(path: string, id: string): Promise<IssueDetail> {
+  if (!ISSUE_ID.test(id)) throw new Error(`not an issue id: ${id}`);
+  await knownProject(path);
+  const raw = await bdJson(["show", id], path);
+  return toIssueDetail(Array.isArray(raw) ? raw[0] : raw);
+}
+
+export function toIssueDetail(v: unknown): IssueDetail {
+  const r = asRecord(v);
+  if (!str(r.id)) throw new Error("issue not found");
+  return {
+    id: String(r.id),
+    title: str(r.title) ?? "",
+    description: str(r.description) ?? "",
+    status: str(r.status) ?? "open",
+    priority: typeof r.priority === "number" ? r.priority : 2,
+    issueType: str(r.issue_type) ?? "task",
+    owner: str(r.owner),
+    createdAt: str(r.created_at),
+    updatedAt: str(r.updated_at),
+    closeReason: str(r.close_reason),
+    deps: (Array.isArray(r.dependencies) ? r.dependencies : []).map(asRecord).map((d) => ({
+      id: str(d.id) ?? str(d.depends_on_id) ?? "",
+      title: str(d.title) ?? "",
+      status: str(d.status) ?? "",
+      type: str(d.dependency_type) ?? str(d.type) ?? "blocks",
+    })),
+    comments: (Array.isArray(r.comments) ? r.comments : []).map(asRecord).map((c) => ({
+      author: str(c.author) ?? "",
+      text: str(c.text) ?? "",
+      createdAt: str(c.created_at),
+    })),
+  };
 }
 
 /** Create a global tracker item. A write, so no `--sandbox` (it would block the
