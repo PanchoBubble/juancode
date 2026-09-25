@@ -324,8 +324,8 @@ final class AnsweringCore: CoreClient, @unchecked Sendable {
                         _ listener: @escaping MessageQueue.Listener) -> @Sendable () -> Void {
         inner.subscribeQueue(sessionId, listener)
     }
-    func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty {
-        try inner.openEditorPty(cwd: cwd, file: file, cols: cols, rows: rows)
+    func openEditorPty(cwd: String, file: String, line: Int?, cols: Int, rows: Int) throws -> EphemeralPty {
+        try inner.openEditorPty(cwd: cwd, file: file, line: line, cols: cols, rows: rows)
     }
     func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty {
         try inner.openTerminalPty(cwd: cwd, cols: cols, rows: rows)
@@ -406,7 +406,7 @@ final class FakeCore: CoreClient, @unchecked Sendable {
     func dequeueMessage(_ sessionId: String, messageId: String) -> Bool { false }
     func subscribeQueue(_ sessionId: String,
                         _ listener: @escaping MessageQueue.Listener) -> @Sendable () -> Void { {} }
-    func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty { unreached() }
+    func openEditorPty(cwd: String, file: String, line: Int?, cols: Int, rows: Int) throws -> EphemeralPty { unreached() }
     func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty { unreached() }
     func trackedPrs() async -> [TrackedPr] { [] }
     func trackPr(_ pr: PullRequest, cwd: String, cols: Int, rows: Int,

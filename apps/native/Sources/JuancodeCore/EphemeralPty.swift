@@ -161,16 +161,17 @@ public final class EphemeralPtyRegistry: @unchecked Sendable {
 
     public init() {}
 
-    /// Spawn an editor on `file`, confined to `cwd` so a client can't escape it.
-    public func openEditor(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty {
-        let root = URL(fileURLWithPath: cwd).standardizedFileURL
-        let full = URL(fileURLWithPath: file, relativeTo: root).standardizedFileURL
-        guard full.path == root.path || full.path.hasPrefix(root.path + "/") else {
+    /// Spawn an editor on `file`, confined to `cwd` so a client can't escape it, with
+    /// its cursor on `line` when the editor reads `+N`.
+    public func openEditor(cwd: String, file: String, line: Int? = nil, cols: Int, rows: Int) throws -> EphemeralPty {
+        guard let full = EditorRouting.confined(file, to: cwd) else {
             throw EphemeralPtyError.outsideWorkingDir
         }
         let (cmd, args) = editorCommand()
-        guard let pty = EphemeralPty(executable: cmd, args: args + [full.path],
-                                     cwd: root.path, cols: cols, rows: rows) else {
+        let lineArg = EditorRouting.lineArg(command: cmd, line: line).map { [$0] } ?? []
+        guard let pty = EphemeralPty(executable: cmd, args: args + lineArg + [full],
+                                     cwd: URL(fileURLWithPath: cwd).standardizedFileURL.path,
+                                     cols: cols, rows: rows) else {
             throw EphemeralPtyError.spawnFailed
         }
         track(pty)

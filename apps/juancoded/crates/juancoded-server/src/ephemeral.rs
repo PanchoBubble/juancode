@@ -115,16 +115,19 @@ impl EphemeralPtys {
         }
     }
 
-    /// Spawn the user's editor on `file`, confined to `cwd`.
+    /// Spawn the user's editor on `file`, confined to `cwd`, with its cursor on
+    /// `line` when the editor takes a `+N`.
     pub fn open_editor(
         &mut self,
         cwd: &str,
         file: &str,
+        line: Option<u32>,
         cols: u16,
         rows: u16,
     ) -> Result<String, EphemeralError> {
         let path = confine(cwd, file).ok_or(EphemeralError::OutsideWorkingDir)?;
         let (program, mut args) = (self.commands.editor)().ok_or(EphemeralError::NoEditor)?;
+        args.extend(line_arg(&program, line));
         args.push(path.to_string_lossy().into_owned());
         self.spawn(program, args, cwd, cols, rows)
     }
@@ -286,6 +289,19 @@ fn end(handle: PtyHandle) {
     });
 }
 
+/// Editors known to read `+N` as "start on line N". Anything else gets no line
+/// rather than a `+N` it would open as a file of that name. Mirrors the Swift
+/// `editorLineArg`.
+const LINE_ARG_EDITORS: &[&str] = &[
+    "vi", "vim", "nvim", "view", "gvim", "mvim", "nano", "emacs", "micro", "kak",
+];
+
+fn line_arg(program: &str, line: Option<u32>) -> Option<String> {
+    let line = line.filter(|&n| n > 0)?;
+    let name = Path::new(program).file_name()?.to_str()?;
+    LINE_ARG_EDITORS.contains(&name).then(|| format!("+{line}"))
+}
+
 /// `file` resolved against `root`, or `None` when it lands outside it.
 ///
 /// Lexical, like the Swift core's `standardizedFileURL`: `..` is popped without
@@ -356,6 +372,19 @@ mod tests {
         assert_eq!(confine("/work/repo", "/etc/passwd"), None);
         // A sibling whose name merely starts with the root's is not inside it.
         assert_eq!(confine("/work/repo", "/work/repo-other/x"), None);
+    }
+
+    #[test]
+    fn a_line_goes_to_editors_that_read_plus_n() {
+        assert_eq!(
+            line_arg("/opt/homebrew/bin/nvim", Some(42)),
+            Some("+42".into())
+        );
+        assert_eq!(line_arg("vim", Some(1)), Some("+1".into()));
+        assert_eq!(line_arg("/usr/bin/nvim", None), None);
+        assert_eq!(line_arg("/usr/bin/nvim", Some(0)), None);
+        // `code +42 file` would open a file named `+42`.
+        assert_eq!(line_arg("/usr/local/bin/code", Some(42)), None);
     }
 
     #[test]

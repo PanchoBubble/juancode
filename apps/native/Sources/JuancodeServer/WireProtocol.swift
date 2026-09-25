@@ -113,7 +113,8 @@ public enum ClientMessage: Sendable {
     /// is never woken: a play that resurrected a crashed session would be the same
     /// mistake as reading a kill for a sleep.
     case resumeAll
-    case openEditor(cwd: String, file: String, cols: Int, rows: Int)
+    /// `line` (1-based) puts a fresh editor's cursor there, as `+N`.
+    case openEditor(cwd: String, file: String, line: Int?, cols: Int, rows: Int)
     case openTerminal(cwd: String, cols: Int, rows: Int, requestId: String)
     // ── Tracked-PR registry (juancode-bt2) — keep beside the PR server messages ──
     /// Subscribe to the tracked-PR registry; the server replies with the current
@@ -153,7 +154,7 @@ extension ClientMessage: Decodable {
     private enum K: String, CodingKey {
         case type, provider, cwd, cols, rows, initialInput, skipPermissions, isolateWorktree
         case worktreeName
-        case sessionId, data, file, requestId, cliSessionId, startMs, seq, model, preset
+        case sessionId, data, file, line, requestId, cliSessionId, startMs, seq, model, preset
         // Oracle dispatch over WS (juancode-2kz.1).
         case dispatchId
         // Tracked-PR registry (juancode-bt2).
@@ -242,6 +243,7 @@ extension ClientMessage: Decodable {
         case "openEditor":
             self = .openEditor(cwd: try c.decode(String.self, forKey: .cwd),
                                file: try c.decode(String.self, forKey: .file),
+                               line: try c.decodeIfPresent(Int.self, forKey: .line),
                                cols: try c.decode(Int.self, forKey: .cols),
                                rows: try c.decode(Int.self, forKey: .rows))
         case "openTerminal":

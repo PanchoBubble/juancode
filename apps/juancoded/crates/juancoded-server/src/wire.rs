@@ -394,6 +394,8 @@ pub enum ClientMessage {
     OpenEditor {
         cwd: String,
         file: String,
+        /// 1-based; the editor opens with its cursor there (`+N`) when it takes one.
+        line: Option<u32>,
         cols: u16,
         rows: u16,
     },
@@ -1016,6 +1018,12 @@ impl ClientMessage {
             "openEditor" => Ok(Self::OpenEditor {
                 cwd: raw.cwd.ok_or("missing cwd")?,
                 file: raw.file.ok_or("missing file")?,
+                // A line that is not a positive u32 is a hint the editor cannot use,
+                // not a reason to refuse the pane.
+                line: raw
+                    .line
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|&n| n > 0),
                 cols: raw.cols.ok_or("missing cols")?,
                 rows: raw.rows.ok_or("missing rows")?,
             }),
@@ -1877,6 +1885,21 @@ mod tests {
                 r#type: "steerMessage".into()
             }
         );
+    }
+
+    /// `line` is optional and advisory: absent, zero or negative, the editor still
+    /// opens, just without a cursor position.
+    #[test]
+    fn an_open_editor_carries_its_line_when_it_has_a_usable_one() {
+        let line = |frame: &str| match ClientMessage::decode(frame).unwrap() {
+            ClientMessage::OpenEditor { line, .. } => line,
+            other => panic!("expected openEditor, got {other:?}"),
+        };
+        let base = r#""type":"openEditor","cwd":"/tmp","file":"a.txt","cols":80,"rows":24"#;
+        assert_eq!(line(&format!("{{{base},\"line\":42}}")), Some(42));
+        assert_eq!(line(&format!("{{{base}}}")), None);
+        assert_eq!(line(&format!("{{{base},\"line\":0}}")), None);
+        assert_eq!(line(&format!("{{{base},\"line\":-3}}")), None);
     }
 
     #[test]

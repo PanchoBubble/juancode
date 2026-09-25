@@ -1191,9 +1191,10 @@ fn handle_client_message(
         ClientMessage::OpenEditor {
             cwd,
             file,
+            line,
             cols,
             rows,
-        } => match ephemeral.open_editor(&cwd, &file, cols, rows) {
+        } => match ephemeral.open_editor(&cwd, &file, line, cols, rows) {
             Ok(editor_id) => outbound.push(ServerMessage::EditorReady { editor_id }),
             Err(e) => outbound.push(ServerMessage::Error {
                 session_id: None,
@@ -3223,6 +3224,7 @@ mod tests {
             ClientMessage::OpenEditor {
                 cwd: "/tmp".into(),
                 file: "../etc/passwd".into(),
+                line: None,
                 cols: 80,
                 rows: 24,
             },

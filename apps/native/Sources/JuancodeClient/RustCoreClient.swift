@@ -947,9 +947,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     /// The pane is handed back before the daemon has forked anything: see
     /// `RemoteEphemeralPty` for why an open cannot be waited on here.
-    public func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty {
+    public func openEditorPty(cwd: String, file: String, line: Int?, cols: Int, rows: Int) throws -> EphemeralPty {
         guard supports(.editor) else { throw CoreCapabilityError(.editor, backend: backendName) }
-        return ephemeral.openEditor(cwd: cwd, file: file, cols: cols, rows: rows)
+        return ephemeral.openEditor(cwd: cwd, file: file, line: line, cols: cols, rows: rows)
     }
 
     public func openTerminalPty(cwd: String, cols: Int, rows: Int) throws -> EphemeralPty {

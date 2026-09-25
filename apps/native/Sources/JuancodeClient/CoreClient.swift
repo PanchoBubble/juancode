@@ -193,8 +193,9 @@ public protocol CoreClient: AnyObject, Sendable {
     // MARK: - Ephemeral ptys (wire: openEditor, openTerminal)
 
     /// Open a file in the configured editor as an ephemeral pty, which the overlay
-    /// renders directly (wire `openEditor` / `editorReady`).
-    func openEditorPty(cwd: String, file: String, cols: Int, rows: Int) throws -> EphemeralPty
+    /// renders directly (wire `openEditor` / `editorReady`). `line` (1-based) puts
+    /// the cursor there when the editor reads `+N`.
+    func openEditorPty(cwd: String, file: String, line: Int?, cols: Int, rows: Int) throws -> EphemeralPty
 
     /// Open a login shell as an ephemeral pty for the bottom terminal panel
     /// (wire `openTerminal` / `terminalReady`).

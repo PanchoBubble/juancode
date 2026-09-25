@@ -61,7 +61,7 @@ final class RustCoreLiveTests: XCTestCase {
     /// the error says which capability and what it costs.
     func testMissingCapabilitiesThrowRatherThanPretend() {
         if !core.supports(.editor) {
-            XCTAssertThrowsError(try core.openEditorPty(cwd: "/tmp", file: "/tmp/x", cols: 80, rows: 24)) {
+            XCTAssertThrowsError(try core.openEditorPty(cwd: "/tmp", file: "/tmp/x", line: nil, cols: 80, rows: 24)) {
                 XCTAssertEqual(($0 as? CoreCapabilityError)?.capability, .editor)
             }
         }

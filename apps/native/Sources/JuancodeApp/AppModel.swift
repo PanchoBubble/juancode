@@ -1909,12 +1909,12 @@ final class AppModel {
     /// `sessionId`: a second tab beside its agent, rooted in the session's effective
     /// working directory (its worktree when isolated, else its cwd), so the editor
     /// lands in the same checkout the agent edits. The pty goes through
-    /// `core.openEditorPty`, so on the rust core the daemon owns it. Reopening
-    /// focuses the existing tab instead of spawning a second editor; `file` (inside
-    /// that directory) only picks what a FRESH editor opens on, and `line` is not
-    /// forwarded because the wire `openEditor` takes a file alone. Selects the
-    /// session so a row's menu lands on its pane. No-op for an unknown session or
-    /// one that is itself a legacy editor session.
+    /// `core.openEditorPty`, so on the rust core the daemon owns it. `file` (inside
+    /// that directory) and `line` go to a fresh editor as its argv; reopening focuses
+    /// the existing tab instead of spawning a second editor, and sends it to `file`
+    /// when one is given (`retargetSessionEditor`). Selects the session so a row's
+    /// menu lands on its pane. No-op for an unknown session or one that is itself a
+    /// legacy editor session.
     func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
         if let reason = unavailable(.editor) {
             errorMessage = "Can't open an editor. \(reason)"
@@ -1925,13 +1925,14 @@ final class AppModel {
               parent.kind != .editor else { return }
         if selection != sessionId { selection = sessionId }
         if editorTabs.hasEditor(sessionId) {
+            if let file { retargetSessionEditor(sessionId, root: parent.effectiveCwd, file: file, line: line) }
             showSessionTab(.editor, for: sessionId)
             return
         }
         let grid = TerminalGrid.spawn
         let pty: EphemeralPty
         do {
-            pty = try core.openEditorPty(cwd: parent.effectiveCwd, file: file ?? ".",
+            pty = try core.openEditorPty(cwd: parent.effectiveCwd, file: file ?? ".", line: line,
                                          cols: grid.cols, rows: grid.rows)
         } catch EphemeralPtyError.outsideWorkingDir {
             errorMessage = "Couldn't open the editor: the file is outside the session's working directory."
@@ -1951,6 +1952,22 @@ final class AppModel {
             Task { @MainActor in self?.sessionEditorExited(editorId) }
         }
         editorFocusToken &+= 1
+    }
+
+    /// Send `sessionId`'s running editor to `file` (confined to `root`, like a fresh
+    /// open) at `line`, by typing a `:drop` into it. Only a vim-family editor can be
+    /// driven that way; any other is left on its file and the caller just focuses it.
+    /// The editor is judged by the configured command's name, which is the one the
+    /// core spawned unless the daemon was started with a different environment.
+    private func retargetSessionEditor(_ sessionId: String, root: String, file: String, line: Int?) {
+        guard let pty = sessionEditorPty(sessionId) else { return }
+        guard let path = EditorRouting.confined(file, to: root) else {
+            errorMessage = "Couldn't open the file: it is outside the session's working directory."
+            return
+        }
+        guard EditorRouting.canRetarget(command: editorCommandString()),
+              let keys = EditorRouting.retargetKeys(path: path, line: line) else { return }
+        pty.write(keys)
     }
 
     /// The in-place editor pty for `sessionId`, if one is open.
@@ -4583,7 +4600,7 @@ final class AppModel {
             return nil
         }
         do {
-            return try core.openEditorPty(cwd: cwd, file: file, cols: cols, rows: rows)
+            return try core.openEditorPty(cwd: cwd, file: file, line: nil, cols: cols, rows: rows)
         } catch {
             let text: String
             switch error {

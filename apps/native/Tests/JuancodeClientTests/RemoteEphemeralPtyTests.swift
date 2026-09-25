@@ -52,6 +52,15 @@ final class RemoteEphemeralPtyTests: XCTestCase {
         XCTAssertEqual(frame?["cwd"] as? String, "/tmp")
         XCTAssertEqual(frame?["file"] as? String, "a.txt")
         XCTAssertEqual(frame?["cols"] as? Int, 100)
+        XCTAssertNil(frame?["line"], "no line is sent when none was asked for")
+    }
+
+    func testOpeningAnEditorAtALineSendsTheLine() {
+        let wire = Wire()
+        let ptys = RemoteEphemeralPtys(send: wire.sent)
+        _ = ptys.openEditor(cwd: "/tmp", file: "a.txt", line: 42, cols: 100, rows: 30)
+
+        XCTAssertEqual(wire.first("openEditor")?["line"] as? Int, 42)
     }
 
     // MARK: - The gap before the ack

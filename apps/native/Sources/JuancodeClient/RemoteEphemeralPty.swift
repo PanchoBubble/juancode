@@ -174,10 +174,12 @@ final class RemoteEphemeralPtys: @unchecked Sendable {
         return pane.pty
     }
 
-    func openEditor(cwd: String, file: String, cols: Int, rows: Int) -> EphemeralPty {
+    func openEditor(cwd: String, file: String, line: Int? = nil, cols: Int, rows: Int) -> EphemeralPty {
         let pane = makePane(id: UUID().uuidString.lowercased())
         lock.withLock { pendingEditors.append(pane) }
-        send(["type": "openEditor", "cwd": cwd, "file": file, "cols": cols, "rows": rows])
+        var frame: [String: Any] = ["type": "openEditor", "cwd": cwd, "file": file, "cols": cols, "rows": rows]
+        if let line, line > 0 { frame["line"] = line }
+        send(frame)
         expireEditor(pane)
         return pane.pty
     }

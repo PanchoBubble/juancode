@@ -408,7 +408,9 @@
         "cols",
         "rows"
       ],
-      "optional": [],
+      "optional": [
+        "line"
+      ],
       "capability": "editor"
     },
     "openTerminal": {
