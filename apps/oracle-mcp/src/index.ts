@@ -32,6 +32,8 @@ import {
   deliverReply,
   queueMessages,
   listIssues,
+  listProjectIssues,
+  listProjects,
   listSessions,
   oracleChat,
   oracleChatStream,
@@ -570,6 +572,27 @@ app.post("/api/issues", async (req: Request, res: Response) => {
       return;
     }
     res.json(await createIssue({ title, description, type, priority }));
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.get("/api/projects", async (_req: Request, res: Response) => {
+  try {
+    res.json(await listProjects());
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+app.get("/api/projects/issues", async (req: Request, res: Response) => {
+  const path = req.query.path;
+  if (typeof path !== "string" || !path) {
+    res.status(400).send("path is required");
+    return;
+  }
+  try {
+    res.json(await listProjectIssues(path));
   } catch (e) {
     sendErr(res, e);
   }

@@ -7,9 +7,9 @@
 // apps/native — the native app tails the file and decodes it.
 
 import { spawn } from "node:child_process";
-import { appendFile, readFile, rm } from "node:fs/promises";
+import { appendFile, readFile, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { touchChatSession, upsertChatSession } from "./chat-store.ts";
@@ -56,7 +56,7 @@ export interface BdResult {
  * files once `bd` exits. This mirrors the `sh -c '… >/dev/null </dev/null'` guard
  * the Swift side uses for `bd init`.
  */
-function runBdRaw(args: string[]): Promise<BdResult> {
+function runBdRaw(args: string[], cwd: string = oracleDir()): Promise<BdResult> {
   const bd = process.env.JUANCODE_BD_BIN || "bd";
   const out = join(tmpdir(), `oracle-bd-${randomUUID()}.out`);
   const err = join(tmpdir(), `oracle-bd-${randomUUID()}.err`);
@@ -65,7 +65,7 @@ function runBdRaw(args: string[]): Promise<BdResult> {
     ` >${shellQuote(out)} 2>${shellQuote(err)} </dev/null`;
 
   return new Promise<BdResult>((resolve) => {
-    const child = spawn("sh", ["-c", cmd], { cwd: oracleDir() });
+    const child = spawn("sh", ["-c", cmd], { cwd });
     child.on("error", () => resolve({ code: -1, stdout: "", stderr: "failed to launch bd" }));
     child.on("close", async (code) => {
       const [stdout, stderr] = await Promise.all([
@@ -101,8 +101,12 @@ function asRecord(v: unknown): Record<string, unknown> {
 
 /** List the Oracle's global tracker items, flagging which are ready (unblocked).
  *  Read-only (`--sandbox`), so it never cold-starts the dolt daemon. */
-export async function listIssues(): Promise<OracleIssue[]> {
-  const listed = await runBdRaw(["--sandbox", "list", "--limit", "0", "--json"]);
+export function listIssues(): Promise<OracleIssue[]> {
+  return listIssuesIn(oracleDir());
+}
+
+async function listIssuesIn(cwd: string): Promise<OracleIssue[]> {
+  const listed = await runBdRaw(["--sandbox", "list", "--limit", "0", "--json"], cwd);
   if (listed.code !== 0) {
     throw new Error(listed.stderr.trim() || `bd list exited ${listed.code}`);
   }
@@ -110,7 +114,7 @@ export async function listIssues(): Promise<OracleIssue[]> {
   if (!Array.isArray(rows)) return [];
 
   // ready overlay — best-effort; a failure just leaves every flag false.
-  const readyRes = await runBdRaw(["--sandbox", "ready", "--limit", "1000", "--json"]);
+  const readyRes = await runBdRaw(["--sandbox", "ready", "--limit", "1000", "--json"], cwd);
   const readyRaw = readyRes.code === 0 ? parseBdJson(readyRes.stdout) : null;
   const readyIds = new Set<string>(
     Array.isArray(readyRaw) ? readyRaw.map((r) => String(asRecord(r).id ?? "")) : [],
@@ -131,6 +135,63 @@ export async function listIssues(): Promise<OracleIssue[]> {
         ready: readyIds.has(id),
       };
     });
+}
+
+export interface OracleProject {
+  name: string;
+  path: string;
+  sessions: number;
+}
+
+/** A worktree's `.git` is a file pointing into the main checkout's `.git/worktrees/`;
+ *  folding worktrees onto their main repo keeps one row per project, and reading the
+ *  file avoids a git spawn per cwd. */
+async function repoRoot(cwd: string): Promise<string> {
+  const pointer = await readFile(join(cwd, ".git"), "utf8").catch(() => "");
+  const m = /^gitdir:\s*(.+?)\/\.git\/worktrees\//m.exec(pointer);
+  return m ? m[1]! : cwd;
+}
+
+async function hasBeads(dir: string): Promise<boolean> {
+  return stat(join(dir, ".beads")).then(
+    (st) => st.isDirectory(),
+    () => false,
+  );
+}
+
+/** Every project a session has run in that keeps a bd tracker, busiest first. The
+ *  Oracle's own dir is left out: its board is the global one. */
+export async function listProjects(): Promise<OracleProject[]> {
+  const rows = await listSessions();
+  const byCwd = new Map<string, number>();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const cwd = asRecord(r).cwd;
+    if (typeof cwd === "string" && cwd) byCwd.set(cwd, (byCwd.get(cwd) ?? 0) + 1);
+  }
+  const byRoot = new Map<string, number>();
+  await Promise.all(
+    [...byCwd].map(async ([cwd, n]) => {
+      const root = await repoRoot(cwd);
+      byRoot.set(root, (byRoot.get(root) ?? 0) + n);
+    }),
+  );
+  const own = oracleDir();
+  const kept = await Promise.all(
+    [...byRoot].map(async ([path, sessions]) =>
+      path !== own && (await hasBeads(path)) ? { name: basename(path), path, sessions } : null,
+    ),
+  );
+  return kept
+    .filter((p): p is OracleProject => p !== null)
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+}
+
+/** A project's open tickets. Only paths `listProjects` returns are accepted, so the
+ *  endpoint can't be pointed at an arbitrary directory. */
+export async function listProjectIssues(path: string): Promise<OracleIssue[]> {
+  const known = await listProjects();
+  if (!known.some((p) => p.path === path)) throw new Error(`not a known project: ${path}`);
+  return listIssuesIn(path);
 }
 
 /** Create a global tracker item. A write, so no `--sandbox` (it would block the

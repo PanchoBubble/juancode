@@ -221,6 +221,13 @@ export const consoleHtml = /* html */ `<!doctype html>
   details > summary .chev { margin-left: auto; color: var(--faint); transition: transform .2s; font-size: 13px; }
   details[open] > summary .chev { transform: rotate(90deg); }
   details .body { padding: 0 14px 14px; }
+  details.proj > summary { color: var(--txt); }
+  details.proj > summary .path { color: var(--faint); font-weight: 400; font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+  details.proj > summary .count { color: var(--dim); font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel-2); padding: 3px 7px; border-radius: 999px; }
+  details.proj > summary .chev { margin-left: 0; }
+  details.proj .body .item:last-child { margin-bottom: 0; }
   /* Pin the new-issue / dispatch ("compose") control to the top of the scroll
      area so it stays reachable while the list scrolls under it. Sticky is
      relative to <main> (the overflow-y:auto container); the safe-area notch is
@@ -581,6 +588,9 @@ export const consoleHtml = /* html */ `<!doctype html>
 
       <div class="sec-head">Global board <span id="i-count" class="count" hidden></span></div>
       <div id="issues-list"></div>
+
+      <div class="sec-head">Projects <span id="p-count" class="count" hidden></span></div>
+      <div id="projects-list"></div>
     </section>
 
     <!-- ── Sessions ───────────────────────────────────── -->
@@ -744,28 +754,66 @@ document.addEventListener("click", (e) => {
   const r = e.target.closest && e.target.closest("[data-retry]");
   if (!r) return;
   if (r.dataset.retry === "issues") loadIssues();
+  if (r.dataset.retry === "projects") loadProjects();
   if (r.dataset.retry === "sessions") { loadSessions(); loadHeavy(); }
 });
 
 // ── Issues ────────────────────────────────────────────────
 function prioBadge(p){ return '<span class="badge b-p'+p+'">P'+p+'</span>'; }
 function statusBadge(s){ const c = s==="closed"?"b-closed":"b-open"; return '<span class="badge '+c+'">'+esc(s)+'</span>'; }
+function issueCard(i){
+  return '<div class="card item"><div class="row"><span class="id">'+esc(i.id)+'</span>'
+    + prioBadge(i.priority) + statusBadge(i.status)
+    + (i.ready?'<span class="badge b-ready">ready</span>':'')
+    + '</div><div class="title">'+esc(i.title)+'</div>'
+    + '<div class="meta"><span>'+esc(i.issueType||"")+'</span>'
+    + (i.parent?'<span>↑ '+esc(i.parent)+'</span>':'')+'</div></div>';
+}
 let issuesLoaded = false;
 async function loadIssues(){
+  loadProjects();
   const el = $("#issues-list");
   if (!issuesLoaded) el.innerHTML = skeletons(4);
   try {
     const items = await api("/api/issues"); setConn(true); issuesLoaded = true;
     setCount("#i-count", items.length);
     if (!items.length) { el.innerHTML = emptyState("◌", "No global issues", "Cross-project work shows up here. Add one above."); return; }
-    el.innerHTML = items.map((i) =>
-      '<div class="card item"><div class="row"><span class="id">'+esc(i.id)+'</span>'
-      + prioBadge(i.priority) + statusBadge(i.status)
-      + (i.ready?'<span class="badge b-ready">ready</span>':'')
-      + '</div><div class="title">'+esc(i.title)+'</div>'
-      + '<div class="meta"><span>'+esc(i.issueType||"")+'</span>'
-      + (i.parent?'<span>↑ '+esc(i.parent)+'</span>':'')+'</div></div>').join("");
+    el.innerHTML = items.map(issueCard).join("");
   } catch(e){ setConn(false); el.innerHTML = errState(e.message, "issues"); }
+}
+// Projects: one collapsed row per repo a session has run in; a project's tickets are
+// fetched only when it is opened, and re-fetched for the ones still open on refresh.
+const openProjects = new Set();
+let projectsLoaded = false;
+async function loadProjects(){
+  const el = $("#projects-list");
+  if (!projectsLoaded) el.innerHTML = skeletons(3);
+  try {
+    const items = await api("/api/projects"); projectsLoaded = true;
+    setCount("#p-count", items.length);
+    if (!items.length) { el.innerHTML = emptyState("◌", "No projects with a tracker", "Repos with a .beads dir show up once a session runs in them."); return; }
+    el.innerHTML = items.map((p) =>
+      '<details class="proj" data-path="'+esc(p.path)+'"'+(openProjects.has(p.path)?' open':'')+'>'
+      + '<summary>'+esc(p.name)+'<span class="path">'+esc(p.path)+'</span>'
+      + '<span class="count" hidden></span><span class="chev">›</span></summary>'
+      + '<div class="body"></div></details>').join("");
+    el.querySelectorAll("details.proj").forEach((d) => {
+      d.addEventListener("toggle", () => {
+        if (d.open) { openProjects.add(d.dataset.path); loadProjectIssues(d); }
+        else openProjects.delete(d.dataset.path);
+      });
+      if (d.open) loadProjectIssues(d);
+    });
+  } catch(e){ el.innerHTML = errState(e.message, "projects"); }
+}
+async function loadProjectIssues(d){
+  const body = d.querySelector(".body"), count = d.querySelector("summary .count");
+  if (!body.innerHTML) body.innerHTML = skeletons(2);
+  try {
+    const items = await api("/api/projects/issues?path="+encodeURIComponent(d.dataset.path));
+    count.hidden = false; count.textContent = items.length;
+    body.innerHTML = items.length ? items.map(issueCard).join("") : emptyState("✓", "No open tickets", "");
+  } catch(e){ body.innerHTML = '<div class="state err"><div class="small">'+esc(e.message)+'</div></div>'; }
 }
 $("#i-create").onclick = async () => {
   const title = $("#i-title").value.trim();
