@@ -197,10 +197,12 @@ public final class Session: @unchecked Sendable {
     /// Guarded by `lock`.
     private var pastedQueuedFooter: FooterSnapshot?
     /// Consecutive failed delivery passes, and the message they belong to, so the
-    /// self-armed retry can't loop forever on a message the child never shows.
-    /// Guarded by `lock`.
+    /// self-armed retry backs off instead of polling at a fixed rate. Guarded by `lock`.
     private var queuedRetryId: String?
     private var queuedRetries = 0
+    /// True while a retry beat is scheduled, so every non-delivery path can arm one
+    /// without the chains multiplying. Guarded by `lock`.
+    private var queueBeatArmed = false
 
     private let persistDebounceMs = 2000
     private var persistGeneration = 0
@@ -1101,11 +1103,17 @@ public final class Session: @unchecked Sendable {
         /// How long to confirm a delivered message took (the agent went busy).
         static let acceptMs = 4_000
         static let pollMs = 120
-        /// Backoff before a failed pass re-kicks itself.
-        static let retryMs = 3_000
-        /// How many self-armed retries one message gets before it falls back to
-        /// waiting for a real idle edge.
-        static let maxRetries = 5
+        /// Backoff before a failed pass re-kicks itself, holding at the last step.
+        /// Never capped: a session that is already idle and stays idle produces no
+        /// edge, so a chain that gave up would strand the message. A retry never
+        /// re-pastes (`pastedQueuedId`), so holding at 10s costs one footer read.
+        static let retryBackoffMs = [3_000, 6_000, 10_000]
+    }
+
+    /// The wait before retry number `attempt` (1-based) of the same message.
+    static func queueRetryDelayMs(attempt: Int) -> Int {
+        let steps = Queue.retryBackoffMs
+        return steps[min(max(attempt, 1), steps.count) - 1]
     }
 
     /// Nudge the queue when a message is added while the session is already idle —
@@ -1136,8 +1144,8 @@ public final class Session: @unchecked Sendable {
     /// sent with the seed path's verified bracketed-paste-then-Enter (`deliverQueued`).
     /// We pop a message only once we've confirmed it submitted; that also ends this
     /// pass — the agent finishing the turn fires the next idle edge, which delivers
-    /// the next message in order. A stalled delivery is left queued and retried on
-    /// the next idle / kick rather than spun on.
+    /// the next message in order. A stalled delivery is left queued and retried on a
+    /// backed-off beat (`armQueueRetry`) rather than spun on or abandoned.
     private func flushQueue() async {
         let claimed = lock.withLock { () -> Bool in
             if flushingQueue { return false }
@@ -1147,46 +1155,61 @@ public final class Session: @unchecked Sendable {
         guard claimed else { return }
         defer { lock.withLock { flushingQueue = false } }
 
-        while isRunning && activity == .idle {
-            guard let item = env.messageQueue.peek(id) else { break }
-            // Drop the message only once it verifiably submitted; otherwise leave it
-            // queued and stop, so a stalled delivery is retried on the next idle / kick.
-            let startedMs = nowMs()
-            let delivered = await deliverQueued(item)
-            let attempt = lock.withLock { queuedRetryId == item.id ? queuedRetries + 1 : 1 }
-            logEvent("queuedResult", [
-                "delivered": "\(delivered)", "chars": "\(item.text.count)",
-                "attempt": "\(attempt)", "ms": "\(nowMs() - startedMs)",
-            ])
-            if delivered {
-                env.messageQueue.remove(id, item.id)
-            } else if armQueueRetry(for: item.id) {
-                scheduleQueueRetry()
-            }
-            break
+        guard isRunning, let item = env.messageQueue.peek(id) else { return }
+        // The beat or edge that started this checked idle a scheduling hop ago. A
+        // session that has since gone busy will usually hand us an idle edge, but
+        // "usually" is how a message got stranded, so the beat is armed either way.
+        guard activity == .idle else {
+            armQueueRetry(for: item.id)
+            return
+        }
+        // Drop the message only once it verifiably submitted; otherwise leave it
+        // queued and arm the next beat.
+        let startedMs = nowMs()
+        let delivered = await deliverQueued(item)
+        let attempt = lock.withLock { queuedRetryId == item.id ? queuedRetries + 1 : 1 }
+        logEvent("queuedResult", [
+            "delivered": "\(delivered)", "chars": "\(item.text.count)",
+            "attempt": "\(attempt)", "ms": "\(nowMs() - startedMs)",
+        ])
+        if delivered {
+            env.messageQueue.remove(id, item.id)
+        } else {
+            armQueueRetry(for: item.id)
         }
     }
 
-    /// Whether a failed pass may re-kick itself. "Retried on the next idle edge" is
-    /// only true while edges keep arriving: a session that is already idle and stays
-    /// idle produces none, so a stalled delivery would wait forever. Capped per
-    /// message so an undeliverable one settles back to waiting for a real edge.
-    private func armQueueRetry(for messageId: String) -> Bool {
-        lock.withLock {
+    /// Schedule the next delivery beat for `messageId`, backing off per message.
+    /// "Retried on the next idle edge" is only true while edges keep arriving: a
+    /// session that is already idle and stays idle produces none. At most one beat
+    /// is outstanding, so arming from every non-delivery path cannot fan out.
+    private func armQueueRetry(for messageId: String) {
+        let delayMs: Int? = lock.withLock {
             if queuedRetryId != messageId {
                 queuedRetryId = messageId
                 queuedRetries = 0
             }
-            guard queuedRetries < Queue.maxRetries else { return false }
+            guard !queueBeatArmed else { return nil }
+            queueBeatArmed = true
             queuedRetries += 1
-            return true
+            return Self.queueRetryDelayMs(attempt: queuedRetries)
+        }
+        guard let delayMs else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            await Nap.duration(.milliseconds(delayMs))
+            self?.queueBeat()
         }
     }
 
-    private func scheduleQueueRetry() {
-        Task.detached(priority: .utility) { [weak self] in
-            await Nap.duration(.milliseconds(Queue.retryMs))
-            self?.kickQueue()
+    /// One retry beat. Unlike `kickQueue` it never ends the chain while there is
+    /// still a message to deliver: a session that is not idle yet gets the next beat.
+    private func queueBeat() {
+        lock.withLock { queueBeatArmed = false }
+        guard isRunning, let item = env.messageQueue.peek(id) else { return }
+        if activity == .idle {
+            startFlushQueue()
+        } else {
+            armQueueRetry(for: item.id)
         }
     }
 
@@ -1266,7 +1289,7 @@ public final class Session: @unchecked Sendable {
             write("\r")
             let submitted = await waitUntil(maxMs: Seed.submitMs, pollMs: Seed.pollMs) {
                 self.activity == .busy
-                    || !self.footerHoldsQueued(self.footerSnapshot().text, head: head, tail: tail)
+                    || !Self.footerHoldsQueued(self.footerSnapshot().text, head: head, tail: tail)
             }
             if submitted {
                 lock.withLock { clearQueuedPasteLocked() }
@@ -1280,7 +1303,7 @@ public final class Session: @unchecked Sendable {
     /// plus the grid it was rendered at. `bottomText` is a window on the bottom rows,
     /// so a resize re-frames that window and every row in it appears to change — the
     /// boot-time grid nudge on its own would otherwise read as "the paste landed".
-    private struct FooterSnapshot {
+    struct FooterSnapshot {
         let text: String
         let cols: Int
         let rows: Int
@@ -1294,7 +1317,7 @@ public final class Session: @unchecked Sendable {
     /// Whether `footer` shows the queued payload at all: its head or tail signature,
     /// or the collapsed-paste chip Claude renders instead of the literal text. Used
     /// bare to confirm submission ("the message left the box").
-    private func footerHoldsQueued(_ footer: String, head: String, tail: String) -> Bool {
+    static func footerHoldsQueued(_ footer: String, head: String, tail: String) -> Bool {
         InitialPromptDelivery.region(footer, contains: head)
             || InitialPromptDelivery.region(footer, contains: tail)
             || InitialPromptDelivery.regionShowsCollapsedPaste(footer)
@@ -1305,13 +1328,22 @@ public final class Session: @unchecked Sendable {
     /// Text that was already on those rows — an earlier copy of the message in the
     /// transcript, the user's own typing, a previous failed delivery — otherwise
     /// passes for this delivery, and the Enter then goes into a box the paste never
-    /// reached. A grid change makes the two snapshots incomparable, so we wait for
-    /// the grid to come back rather than call the re-framing a landing.
+    /// reached.
+    ///
+    /// A grid change makes the two texts incomparable (the window re-frames and every
+    /// row differs), and it may never change back, so waiting for it pinned the
+    /// message forever. What does survive the reflow is whether `before` held the
+    /// payload at all: if it did not, the payload now on screen can only be the paste.
+    /// If it did, a changed grid leaves nothing that separates the paste from the old
+    /// copy, and the message waits for the grid to come back.
     private func queuedLanded(head: String, tail: String, before: FooterSnapshot) -> Bool {
-        let now = footerSnapshot()
-        guard now.cols == before.cols, now.rows == before.rows, now.text != before.text
-        else { return false }
-        return footerHoldsQueued(now.text, head: head, tail: tail)
+        Self.queuedLanded(now: footerSnapshot(), before: before, head: head, tail: tail)
+    }
+
+    static func queuedLanded(now: FooterSnapshot, before: FooterSnapshot, head: String, tail: String) -> Bool {
+        guard footerHoldsQueued(now.text, head: head, tail: tail) else { return false }
+        if now.cols == before.cols, now.rows == before.rows { return now.text != before.text }
+        return !footerHoldsQueued(before.text, head: head, tail: tail)
     }
 
     /// `InitialPromptDelivery.signature(for:)` taken from the *end* of the payload.

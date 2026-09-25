@@ -288,6 +288,68 @@ import Testing
         #expect(!queue.list(s.id).isEmpty)
     }
 
+    @Test func aResizeBetweenThePasteAndItsEchoStillSubmits() async throws {
+        // Echo off, and the child paints the payload's tail itself a beat after the
+        // paste arrives, so the resize below lands between our write and the land
+        // check seeing it. The transcript fills the screen so the footer rows are
+        // live, and does not hold the message, which is what lets the check trust the
+        // payload across the changed grid.
+        let log = makeLogPath()
+        let queue = MessageQueue()
+        let activity = makeActivityLog()
+        let s = try await liveIdleSession(
+            log: log, transcript: (1...30).map { "earlier turn line \($0)" }.joined(separator: "\n"),
+            onPaste: #"sleep 1; printf 'Wrap up with a short summary.\r\n'"#,
+            onEnter: #"printf 'crunching... esc to interrupt\r\n'"#,
+            extraSetup: "stty -echo", queue: queue, activityLog: activity)
+        defer { s.kill() }
+        // The boot re-apply would otherwise put the grid back mid-test.
+        #expect(await poll { s.bootGridSettled })
+
+        queue.add(s.id, text: tallMessage)
+        s.kickQueue()
+
+        #expect(await poll { count("paste", in: log) >= 1 }, "the paste never reached the fake CLI")
+        s.resizeLocal(cols: 100, rows: 30)
+
+        let delivered = await poll { queue.list(s.id).isEmpty }
+        let head = InitialPromptDelivery.signature(for: tallMessage)
+        let tail = Session.tailSignature(for: tallMessage)
+        #expect(delivered, """
+            a grid change mid-delivery pinned the message to the old grid\
+            \(deliveryDiagnostic(s, activity: activity, log: log, head: head, tail: tail))
+            """)
+        await poll { self.count("enter", in: log) > 0 }
+        #expect(count("paste", in: log) == 1)
+        #expect(count("enter", in: log) == 1)
+    }
+
+    @Test func theLandCheckAcrossAGridChangeTrustsOnlyAPayloadThatWasNotThereBefore() {
+        let head = "follow up on the batch i"
+        let tail = "wrap up with a short sum"
+        let empty = Session.FooterSnapshot(text: "> ", cols: 80, rows: 24)
+        let stale = Session.FooterSnapshot(text: "wrap up with a short summary. > ", cols: 80, rows: 24)
+        let landedWider = Session.FooterSnapshot(text: "wrap up with a short summary. >", cols: 100, rows: 30)
+        let landedSame = Session.FooterSnapshot(text: "wrap up with a short summary. >", cols: 80, rows: 24)
+
+        #expect(Session.queuedLanded(now: landedSame, before: empty, head: head, tail: tail))
+        #expect(Session.queuedLanded(now: landedWider, before: empty, head: head, tail: tail))
+        // The old footer already held a copy, so after a reflow nothing tells the two apart.
+        #expect(!Session.queuedLanded(now: landedWider, before: stale, head: head, tail: tail))
+        // A re-framed window that does not show the payload is never a landing.
+        let reframed = Session.FooterSnapshot(text: "something else", cols: 100, rows: 30)
+        #expect(!Session.queuedLanded(now: reframed, before: empty, head: head, tail: tail))
+        #expect(!Session.queuedLanded(now: stale, before: stale, head: head, tail: tail))
+    }
+
+    @Test func theRetryBacksOffAndNeverRunsOut() {
+        #expect(Session.queueRetryDelayMs(attempt: 1) == 3_000)
+        #expect(Session.queueRetryDelayMs(attempt: 2) == 6_000)
+        #expect(Session.queueRetryDelayMs(attempt: 3) == 10_000)
+        #expect(Session.queueRetryDelayMs(attempt: 6) == 10_000)
+        #expect(Session.queueRetryDelayMs(attempt: 1_000) == 10_000)
+    }
+
     @Test func payloadFitsTheTtyInputQueue() {
         // The guard juancode-xfbr cost four days of red main to learn. Everything this
         // suite asserts about a queued delivery is downstream of the whole paste
