@@ -122,7 +122,13 @@ public func getBeads(_ cwd: String) async -> BeadsResult {
     let ready = await readyTask
     let blocked = await blockedTask
 
-    let issues: [BeadsIssue] = raw
+    let issues = beadsIssues(raw, ready: ready, blocked: blocked)
+    return BeadsResult(available: true, issues: issues)
+}
+
+/// Map `bd list --json` rows onto `BeadsIssue`, flagging ready/blocked.
+private func beadsIssues(_ raw: [[String: Any]], ready: Set<String>, blocked: Set<String>) -> [BeadsIssue] {
+    raw
         // Mirror `.filter((r) => r.id)`: drop entries with a falsy id. bd ids
         // are strings, so a missing/null/empty id is the faithful falsy guard.
         .filter { r in
@@ -146,8 +152,52 @@ public func getBeads(_ cwd: String) async -> BeadsResult {
                 blocked: blocked.contains(id)
             )
         }
+}
 
-    return BeadsResult(available: true, issues: issues)
+/// The most recently closed issues, newest first: the Beads board's Done column.
+/// `bd list` leaves closed issues out by default, so this is its own query.
+/// Degrades to an empty list, like the overlays in `getBeads`.
+public func getBeadsRecentlyClosed(_ cwd: String, limit: Int = 20) async -> [BeadsIssue] {
+    let value = try? await bdJson(cwd, ["list", "--status", "closed", "--sort", "closed",
+                                        "--limit", String(limit)])
+    let raw = (value as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+    return beadsIssues(raw, ready: [], blocked: [])
+}
+
+/// One issue in full (`bd show <id> --json`): description, both directions of
+/// its dependency edges, and comments. `nil` when bd is missing or the id is
+/// unknown.
+public func getBeadsDetail(_ cwd: String, id: String) async -> BeadsIssueDetail? {
+    guard !id.isEmpty, let value = try? await bdJson(cwd, ["show", id]) else { return nil }
+    return parseBeadsDetail(value)
+}
+
+/// Pure half of `getBeadsDetail`, split out for tests.
+public func parseBeadsDetail(_ value: Any?) -> BeadsIssueDetail? {
+    guard let r = ((value as? [Any])?.first ?? value) as? [String: Any],
+          let id = stringify(r["id"]), !id.isEmpty else { return nil }
+    let iso = ISO8601DateFormatter()
+    func date(_ v: Any?) -> Date? { (v as? String).flatMap { iso.date(from: $0) } }
+    func relations(_ v: Any?) -> [BeadsRelation] {
+        ((v as? [Any]) ?? []).compactMap { $0 as? [String: Any] }.compactMap { d in
+            guard let rid = stringify(d["id"]) ?? stringify(d["depends_on_id"]), !rid.isEmpty else { return nil }
+            return BeadsRelation(id: rid, title: (d["title"] as? String) ?? "",
+                                 status: (d["status"] as? String) ?? "",
+                                 type: (d["dependency_type"] as? String) ?? (d["type"] as? String) ?? "blocks")
+        }
+    }
+    let comments = ((r["comments"] as? [Any]) ?? []).compactMap { $0 as? [String: Any] }.map { c in
+        BeadsComment(author: (c["author"] as? String) ?? "", text: (c["text"] as? String) ?? "",
+                     createdAt: date(c["created_at"]))
+    }
+    return BeadsIssueDetail(
+        id: id, title: (r["title"] as? String) ?? "",
+        description: ((r["description"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+        status: (r["status"] as? String) ?? "open", priority: intIfNumber(r["priority"]) ?? 2,
+        issueType: (r["issue_type"] as? String) ?? "task", owner: r["owner"] as? String,
+        updatedAt: date(r["updated_at"]), closeReason: r["close_reason"] as? String,
+        dependencies: relations(r["dependencies"]), dependents: relations(r["dependents"]),
+        comments: comments)
 }
 
 /// Return an `Int` only when the JSON value is genuinely a number (not a numeric

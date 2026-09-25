@@ -152,6 +152,7 @@ final class AppModel {
             // "Go to session", search hits) dismisses the GitHub overlay — every
             // landing path routes through this setter (juancode-2t6).
             showingGitHub = false
+            showingBeads = false
             // Remember the pane for the next launch to land on. A click-rate plist
             // write, and only when it actually changed.
             if let sel = selection, sel != oldValue {
@@ -331,7 +332,15 @@ final class AppModel {
     /// open PRs per project. NOT a sheet — the session content stays mounted
     /// underneath (juancode-073); `selection.didSet` auto-dismisses it so every
     /// navigation path lands back on the session.
-    var showingGitHub = false
+    var showingGitHub = false {
+        didSet { if showingGitHub { showingBeads = false } }
+    }
+    /// The app-wide Beads view (BeadsView.swift): the same kind of overlay as the
+    /// GitHub view, and never both at once.
+    var showingBeads = false {
+        didSet { if showingBeads { showingGitHub = false } }
+    }
+    let beadsBoard = BeadsBoardModel()
     /// Selection + per-PR detail caches for the GitHub view (see GitHubPanel.swift).
     let github = GitHubModel()
     /// Session-health panel (juancode-0me pillar 3 / juancode-02k).

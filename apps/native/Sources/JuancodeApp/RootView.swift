@@ -548,6 +548,9 @@ private struct ToolsMenu: View {
                     model.showingWorktrees = true
                     model.loadWorktrees()
                 }
+                toolButton("checklist", "Beads") {
+                    model.openBeads()
+                }
                 toolButton("square.stack.3d.up", "Heavy Queue",
                            trailing: model.heavyQueue.isEmpty ? nil : "\(model.heavyQueue.total)") {
                     model.showingHeavyQueue = true
@@ -1207,7 +1210,7 @@ struct SidebarView: View {
             // click and breaks selection entirely on macOS. We never write nil back, so
             // the real selection (and its keep-alive pane) survives.
             List(selection: Binding(
-                get: { model.showingGitHub ? nil : model.selection },
+                get: { model.showingGitHub || model.showingBeads ? nil : model.selection },
                 set: { newValue in
                     if model.showingGitHub { model.showingGitHub = false }
                     if let newValue { model.selection = newValue }
@@ -3143,6 +3146,10 @@ struct DetailView: View {
             }
             if model.showingGitHub {
                 GitHubView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if model.showingBeads {
+                BeadsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

@@ -390,7 +390,7 @@ struct JuancodeApp: App {
                     performShortcut(.navigateBack, model: model, oracle: oracle)
                 }
                 .appShortcut(.navigateBack, shortcuts)
-                .disabled(!model.canGoBack && !model.showingGitHub && !model.showingFindBar
+                .disabled(!model.canGoBack && !model.showingGitHub && !model.showingBeads && !model.showingFindBar
                           && model.editing == nil && !oracle.expanded)
                 Button("Forward") {
                     performShortcut(.navigateForward, model: model, oracle: oracle)
@@ -499,6 +499,11 @@ struct JuancodeApp: App {
                     performShortcut(.githubView, model: model, oracle: oracle)
                 }
                 .appShortcut(.githubView, shortcuts)
+                // ⌘⇧B: every project's bd tracker, as boards.
+                Button("Beads") {
+                    performShortcut(.beadsView, model: model, oracle: oracle)
+                }
+                .appShortcut(.beadsView, shortcuts)
                 // ⌃F drops focus into the sidebar's "Filter sessions…" field from
                 // anywhere so you can start a find without reaching for the mouse.
                 Button("Find Sessions") {

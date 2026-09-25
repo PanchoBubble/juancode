@@ -249,43 +249,98 @@ private struct OracleIssuesView: View {
         }
     }
 
-    @ViewBuilder private var content: some View {
-        if result == nil {
-            centered("Loading…")
-        } else if let r = result, !r.available {
-            centered(r.error ?? "No global tracker yet")
-        } else if groups.isEmpty {
-            centered(query.isEmpty ? "No global items yet.\nAsk Oracle to capture one." : "No matching items")
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(groups, id: \.section) { group in
-                        HStack {
-                            Text(group.section.title.uppercased())
-                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                            Text("\(group.issues.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-                        ForEach(group.issues, id: \.id) { issue in
-                            OracleIssueRow(issue: issue)
-                            Divider()
-                        }
+    /// Every project's tracker sits above the global board as one row each; a row
+    /// opens that project's board in the app-wide Beads view.
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                OracleProjectsSection()
+                sectionHeader("Global", count: groups.reduce(0) { $0 + $1.issues.count })
+                if result == nil {
+                    note("Loading…")
+                } else if let r = result, !r.available {
+                    note(r.error ?? "No global tracker yet")
+                } else if groups.isEmpty {
+                    note(query.isEmpty ? "No global items yet. Ask Oracle to capture one." : "No matching items")
+                }
+                ForEach(groups, id: \.section) { group in
+                    sectionHeader(group.section.title, count: group.issues.count)
+                    ForEach(group.issues, id: \.id) { issue in
+                        OracleIssueRow(issue: issue)
+                        Divider()
                     }
                 }
-                .padding(.bottom, 8)
             }
+            .padding(.bottom, 8)
         }
     }
 
-    private func centered(_ text: String) -> some View {
-        VStack {
-            Spacer()
-            Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).padding(.horizontal, 16)
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        HStack {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            Text("\(count)").font(.system(size: 10)).foregroundStyle(.tertiary)
             Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+    }
+}
+
+/// The Projects rows at the top of the Oracle's Issues tab: name, open and blocked
+/// counts, live sessions. Clicking one opens its board.
+private struct OracleProjectsSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let projects = model.beadsProjects
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("PROJECTS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Text("\(projects.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                Spacer()
+                Button("All boards") { model.openBeads() }
+                    .buttonStyle(.borderless).font(.system(size: 10.5))
+                    .help("Open the Beads view (⇧⌘B)").clickCursor()
+            }
+            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
+            ForEach(projects, id: \.self) { cwd in
+                row(cwd)
+                Divider()
+            }
+        }
+        .onAppear { model.loadAllBeads() }
+    }
+
+    private func row(_ cwd: String) -> some View {
+        let issues = model.beads(cwd)?.issues ?? []
+        let counts = BeadsBoard.counts(issues)
+        let open = counts.values.reduce(0, +)
+        let blocked = counts[.blocked] ?? 0
+        let live = model.liveSessions(inProject: cwd).count
+        return Button { model.openBeads(project: cwd) } label: {
+            HStack(spacing: 6) {
+                Text((cwd as NSString).lastPathComponent).font(.system(size: 12)).lineLimit(1)
+                Spacer(minLength: 4)
+                if live > 0 {
+                    Circle().fill(.green).frame(width: 6, height: 6).help("\(live) live")
+                }
+                if blocked > 0 {
+                    Text("\(blocked) blocked").font(.system(size: 10)).foregroundStyle(.orange)
+                }
+                Text("\(open)").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(cwd)
+        .clickCursor()
     }
 }
 

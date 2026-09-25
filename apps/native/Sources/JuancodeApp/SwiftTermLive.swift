@@ -380,6 +380,11 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         // while a terminal holds first responder, where `.onExitCommand` on the
         // overlay never fires (juancode-2t6). One level at a time: the PR detail
         // returns to the list, and the list closes the overlay.
+        if model.showingBeads, keyCode == 53,
+           mods.intersection([.command, .shift, .control, .option]).isEmpty {
+            model.beadsBack()
+            return true
+        }
         if model.showingGitHub, keyCode == 53,
            mods.intersection([.command, .shift, .control, .option]).isEmpty {
             if model.github.tab == .detail { model.github.backToList() }

@@ -279,4 +279,22 @@ final class BeadsTests: XCTestCase {
         """
         return try writeFakeBdScript(script)
     }
+
+    func testParseBeadsDetailReadsBothEdgeDirectionsAndComments() throws {
+        let json = """
+        [{"id":"p-2","title":"t","description":"  body  ","status":"in_progress","priority":1,
+          "issue_type":"bug","owner":"me","updated_at":"2026-09-25T10:00:00Z",
+          "dependencies":[{"id":"p-1","title":"dep","status":"open","dependency_type":"blocks"}],
+          "dependents":[{"id":"p-3","title":"kid","status":"closed","dependency_type":"parent-child"}],
+          "comments":[{"author":"me","text":"hi","created_at":"2026-09-25T11:00:00Z"}]}]
+        """
+        let value = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        let d = try XCTUnwrap(parseBeadsDetail(value))
+        XCTAssertEqual(d.description, "body")
+        XCTAssertEqual(d.dependencies, [BeadsRelation(id: "p-1", title: "dep", status: "open", type: "blocks")])
+        XCTAssertEqual(d.dependents.map(\.type), ["parent-child"])
+        XCTAssertEqual(d.comments.map(\.text), ["hi"])
+        XCTAssertNotNil(d.updatedAt)
+        XCTAssertNil(parseBeadsDetail([Any]()))
+    }
 }

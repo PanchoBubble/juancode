@@ -35,6 +35,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case openChangesForCurrentSession
     case toggleFileTree
     case githubView
+    case beadsView
     case toggleProjects
     case findInTerminal
     case terminalZoomIn
@@ -69,6 +70,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .openChangesForCurrentSession: return "Open Changes for Current Session"
         case .toggleFileTree: return "Toggle File Tree"
         case .githubView: return "GitHub"
+        case .beadsView: return "Beads"
         case .toggleProjects: return "Toggle Projects Panel"
         case .findInTerminal: return "Find in Terminal"
         case .terminalZoomIn: return "Increase Terminal Font"
@@ -116,6 +118,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
         // ⌘⇧G toggles the GitHub view — all open PRs per project (juancode-2t6).
         case .githubView: return KeyBinding(key: "g", command: true, shift: true)
+        case .beadsView: return KeyBinding(key: "b", command: true, shift: true)
         case .toggleProjects: return KeyBinding(key: "s", control: true)
         // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
         // ⌃F (focusSessionSearch) stays the sidebar session filter.
@@ -309,6 +312,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         if let id = model.selection { model.openChanges(for: id) }
     case .toggleFileTree: model.toggleFileTreePanel()
     case .githubView: model.toggleGitHubView()
+    case .beadsView: model.toggleBeadsView()
     case .toggleProjects: model.toggleProjectsSidebar()
     case .findInTerminal: model.showFindBar()
     case .terminalZoomIn: TerminalZoom.shared.zoomIn()
@@ -355,6 +359,7 @@ func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
         else { model.showingGitHub = false }
         return true
     }
+    if model.showingBeads { model.beadsBack(); return true }
     if oracle.expanded { oracle.collapse(); return true }
     return false
 }
