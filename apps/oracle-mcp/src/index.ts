@@ -76,7 +76,7 @@ import {
   supportsHeavyQueue,
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
-import { startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
+import { notifyOracleText, startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -423,6 +423,36 @@ function buildServer(): McpServer {
     async (args) => {
       try {
         return ok(unobserveMessage(await unobserveSessionForOracle(args.sessionId)));
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_notify_session",
+    {
+      title: "Send a Telegram notification about a session",
+      description:
+        "Push a one-off text message to Telegram about a specific session — a decision needed, a status update, anything worth a ping right now. Fans out to every known Telegram chat, same set oracle_observe_session targets. Reply to it on Telegram to send text straight into that session's pty (no separate observe needed). Use this instead of oracle_ask when the message is FOR the human about a session, not a question routed to the Oracle's own chat.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe("The session id this notification is about (from oracle_list_sessions)"),
+        text: z.string().min(1).describe("The notification text"),
+      },
+    },
+    async (args) => {
+      try {
+        const { chatIds } = await notifyOracleText(args.sessionId, args.text);
+        if (chatIds.length === 0) {
+          return fail(
+            "No Telegram chat to notify — message the Oracle bot once (or set ALLOWED_USER_IDS), or set TELEGRAM_BOT_TOKEN.",
+          );
+        }
+        const n = chatIds.length;
+        return ok(`Sent to ${n} Telegram chat${n === 1 ? "" : "s"}.`);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -801,6 +831,27 @@ app.post("/api/observe", async (req: Request, res: Response) => {
     }
     const outcome = await observeSessionForOracle(sessionId);
     res.json({ ok: true, message: observeMessage(outcome), ...outcome });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Push a one-off Telegram notification about a session and set up reply-routing
+// for it, without waiting for a native state transition (juancode-nez follow-up:
+// Oracle deciding, mid-turn, that this is worth a ping now).
+app.post("/api/notify", async (req: Request, res: Response) => {
+  try {
+    const { sessionId, text } = req.body ?? {};
+    if (typeof sessionId !== "string" || !sessionId) {
+      res.status(400).send("sessionId is required");
+      return;
+    }
+    if (typeof text !== "string" || !text.trim()) {
+      res.status(400).send("text is required");
+      return;
+    }
+    const { chatIds, title } = await notifyOracleText(sessionId, text);
+    res.json({ ok: true, chatIds, title });
   } catch (e) {
     sendErr(res, e);
   }

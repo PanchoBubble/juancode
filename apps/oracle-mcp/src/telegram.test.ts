@@ -5,6 +5,7 @@ import {
   keyPadRow,
   isAllowed,
   newBridgeState,
+  notifyOracleText,
   notifySessionEvent,
   notifyStuckEvent,
   notifyUsageSample,
@@ -887,6 +888,69 @@ describe("startDispatchResultRelay", () => {
       if (prevIds === undefined) delete process.env.ALLOWED_USER_IDS;
       else process.env.ALLOWED_USER_IDS = prevIds;
     }
+  });
+});
+
+describe("notifyOracleText", () => {
+  it("is a no-op without a bot token", async () => {
+    const result = await notifyOracleText("sess-1", "hello", null);
+    expect(result).toEqual({ chatIds: [], title: "sess-1" });
+  });
+
+  it("sends to every resolved chat and records outbound for each", async () => {
+    const send = vi.fn(async (_chatId: number, _text: string) => 42);
+    const record = vi.fn(
+      async (_ref: { chatId: number; messageId: number; sessionId: string; title: string; at: number }) => {},
+    );
+    const resolveChats = vi.fn(async () => [100, 200]);
+    const fetchSessions = async () => [
+      { id: "sess-1", title: "Build the thing", cwd: "/x/juancode", provider: "claude", status: "running" },
+    ];
+
+    const result = await notifyOracleText(
+      "sess-1",
+      "needs a decision",
+      { token: "t", allowedUserIds: new Set([100]) },
+      send,
+      fetchSessions,
+      resolveChats,
+      record,
+    );
+
+    expect(result).toEqual({ chatIds: [100, 200], title: "Build the thing" });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[0]![0]).toBe(100);
+    expect(send.mock.calls[0]![1]).toContain("Build the thing — juancode");
+    expect(send.mock.calls[0]![1]).toContain("needs a decision");
+    expect(send.mock.calls[0]![1]).toMatch(/reply to this message/i);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(record.mock.calls[0]![0]).toMatchObject({
+      chatId: 100,
+      messageId: 42,
+      sessionId: "sess-1",
+      title: "Build the thing",
+    });
+  });
+
+  it("falls back to the id slice when the native app is unreachable, and skips recording an unsent message", async () => {
+    const send = vi.fn(async () => null);
+    const record = vi.fn(async () => {});
+
+    const result = await notifyOracleText(
+      "sess-unknown-1234",
+      "ping",
+      { token: "t", allowedUserIds: new Set() },
+      send,
+      async () => {
+        throw new Error("native app unreachable");
+      },
+      async () => [7],
+      record,
+    );
+
+    expect(result).toEqual({ chatIds: [7], title: "sess-unk" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(record).not.toHaveBeenCalled();
   });
 });
 

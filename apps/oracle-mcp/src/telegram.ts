@@ -1410,3 +1410,67 @@ export function startDispatchResultRelay(
     })();
   });
 }
+
+export interface NotifyOracleResult {
+  /** Chats the notification was fanned out to (resolveObserverChatIds — same set
+   *  an Oracle/MCP-initiated observe targets). Empty when no bot token is set. */
+  chatIds: number[];
+  /** Session title used in the header, best-effort. */
+  title: string;
+}
+
+/**
+ * Push a one-off, Oracle-authored text notification about a session (juancode
+ * pasted-content ask: "Oracle needs to ping Juan's phone about session X and get
+ * the reply back into that session"). Unlike notifySessionEvent, this isn't a
+ * reaction to a native state transition — it's Oracle choosing, right now, to say
+ * something. It reuses the exact same fan-out (resolveObserverChatIds) and outbound
+ * correlation (recordOutbound) as an observed session, so a Telegram reply to it
+ * routes straight into the session's pty via the existing handleSessionReply path —
+ * no new reply-matching logic needed. No-op (empty chatIds) without a bot token.
+ */
+export async function notifyOracleText(
+  sessionId: string,
+  text: string,
+  config: TelegramConfig | null = readTelegramConfig(),
+  send: (chatId: number, text: string) => Promise<number | null> = (chatId, t) =>
+    sendMessage(config!.token, chatId, t),
+  fetchSessions: () => Promise<unknown> = listSessions,
+  resolveChats: () => Promise<number[]> = resolveObserverChatIds,
+  record: (ref: {
+    chatId: number;
+    messageId: number;
+    sessionId: string;
+    title: string;
+    at: number;
+  }) => Promise<void> = recordOutbound,
+): Promise<NotifyOracleResult> {
+  if (!config) return { chatIds: [], title: sessionId.slice(0, 8) };
+
+  let title = sessionId.slice(0, 8);
+  let project = "";
+  try {
+    const s = parseSessionList(await fetchSessions()).find((x) => x.id === sessionId);
+    if (s) {
+      title = s.title;
+      project = projectName(s.cwd);
+    }
+  } catch {
+    // Native app unreachable — notify with the id slice rather than staying silent.
+  }
+  const header = project ? `${title} — ${project}` : title;
+  const body = `${header}\n${text}\n↩️ Reply to this message to send a follow-up to this session.`;
+
+  const chatIds = await resolveChats();
+  for (const chatId of chatIds) {
+    try {
+      const mid = await send(chatId, body);
+      if (mid !== null) {
+        await record({ chatId, messageId: mid, sessionId, title, at: Date.now() });
+      }
+    } catch (e) {
+      console.error("telegram oracle notify failed:", e instanceof Error ? e.message : e);
+    }
+  }
+  return { chatIds, title };
+}
