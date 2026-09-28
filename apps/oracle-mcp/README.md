@@ -163,6 +163,27 @@ Transport is long-poll `getUpdates` (no webhook), so it works behind the existin
 `/start`) resets it. Replies are chunked to Telegram's 4096-char limit. Only users in
 `ALLOWED_USER_IDS` are answered; everyone else is silently ignored.
 
+#### Replies and pings
+
+Every session-scoped bot message (a needs-input or finish ping, a stuck advisory, a
+`✅ Sent to` confirmation, an `/api/notify` ping) is logged with its Telegram message id
+in `~/.juancode/oracle/oracle-telegram-outbound.json`. A Telegram **reply** to one of
+them is resolved through that log and typed into that session's pty. A plain message
+with no reply-to, or a reply to anything not in the log, goes to the Oracle chat
+(`oracle-telegram-sessions.json`, one Oracle session per chat).
+
+A message sent straight to the Bot API (curl with the token) is not in the log, so a
+reply to it can only reach the Oracle. To ping about a session so replies route back to
+it, use `POST /api/notify` or the `oracle_notify_session` MCP tool:
+
+```sh
+curl -s -X POST 127.0.0.1:4281/api/notify -H 'Content-Type: application/json' \
+  -d '{"sessionId":"<full session id>","text":"Need a decision on X"}'
+```
+
+A finish ping goes out once per turn: a replayed settle is deduped, but once the session
+goes busy again, or a Telegram reply is delivered to it, its next finish pings again.
+
 #### Control keys (juancode-uigs)
 
 A reply — typed or tapped — is **bracketed-pasted**, which is what makes it literal: the

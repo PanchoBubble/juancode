@@ -952,6 +952,9 @@ async function handleSessionReply(
     const busy = state.activity.get(ref.sessionId) === "busy";
     if (busy) await deps.queue(ref.sessionId, [text]);
     else await deps.deliver(ref.sessionId, text);
+    // The chat is now waiting on this session's answer; its finish ping must not
+    // be deduped against the ping being replied to, even if the busy edge is missed.
+    state.lastNotified.delete(`${chatId}:${ref.sessionId}`);
     if (messageId !== null) await deps.react(chatId, messageId, "👍");
     const confirmation = busy
       ? `📥 Queued for “${ref.title}” — delivers when it next goes idle. Reply here to send more.`
@@ -978,6 +981,13 @@ async function handleSessionReply(
 
 // ── Observer notifications ───────────────────────────────────────────────────
 
+function forgetNotified(state: BridgeState, sessionId: string): void {
+  const suffix = `:${sessionId}`;
+  for (const key of state.lastNotified.keys()) {
+    if (key.endsWith(suffix)) state.lastNotified.delete(key);
+  }
+}
+
 /**
  * Fan one native activity event out to the chats observing that session — plus,
  * when the event carries a `dispatchId`, the Telegram chat the dispatch
@@ -995,6 +1005,9 @@ export async function notifySessionEvent(
   state: BridgeState,
 ): Promise<void> {
   state.activity.set(ev.sessionId, ev.state);
+  // A new turn makes the next settle a fresh transition. Without this, every
+  // finish after the first was swallowed, including the answer to a reply.
+  if (ev.state === "busy") forgetNotified(state, ev.sessionId);
   const kind = classifyActivity(ev.state, ev.notify);
   if (!kind) return;
   const chats = [...(await deps.observers.chatsFor(ev.sessionId))];

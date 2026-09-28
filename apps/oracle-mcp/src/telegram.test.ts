@@ -547,6 +547,60 @@ describe("notifySessionEvent", () => {
     expect(state.activity.get("aaaa-1111")).toBe("waiting_input");
   });
 
+  it("still de-dups a replayed settle with no turn in between", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    const idle = { sessionId: "aaaa-1111", state: "idle" as const, notify: true };
+    await notifySessionEvent(idle, deps, state);
+    await notifySessionEvent(idle, deps, state);
+    expect(deps.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("pings every finish once a new turn starts in between", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    const idle = { sessionId: "aaaa-1111", state: "idle" as const, notify: true };
+    const busy = { sessionId: "aaaa-1111", state: "busy" as const, notify: false };
+    await notifySessionEvent(idle, deps, state);
+    await notifySessionEvent(busy, deps, state);
+    await notifySessionEvent(idle, deps, state);
+    expect(deps.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("pings the answer to a Telegram reply even when the busy edge is missed", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      outbound: {
+        record: vi.fn(async () => {}),
+        lookup: vi.fn(async () => ({ sessionId: "aaaa-1111", title: "fix tests" })),
+      },
+    });
+    const state = newBridgeState();
+    const idle = { sessionId: "aaaa-1111", state: "idle" as const, notify: true };
+    await notifySessionEvent(idle, deps, state);
+    await handleUpdate(
+      {
+        update_id: 1,
+        message: {
+          message_id: 8,
+          chat: { id: 100 },
+          from: { id: 5 },
+          text: "Status?",
+          reply_to_message: { message_id: 900 },
+        },
+      },
+      new Set([5]),
+      deps,
+      state,
+    );
+    expect(deps.deliver).toHaveBeenCalledWith("aaaa-1111", "Status?");
+    await notifySessionEvent(idle, deps, state);
+    const pings = (deps.send as ReturnType<typeof vi.fn>).mock.calls.filter(([, text]) =>
+      String(text).includes("finished"),
+    );
+    expect(pings).toHaveLength(2);
+  });
+
   it("stays silent on non-notify transitions but still tracks activity", async () => {
     const deps = makeDeps({ observers: observers([100]) });
     const state = newBridgeState();
