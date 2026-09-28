@@ -139,9 +139,9 @@ struct BottomTerminalPanel: View {
         if let pty = model.shellPty(pane) {
             Group {
                 if TerminalBackend.shared.useGhostty {
-                    GhosttyEphemeral(pty: pty, hidden: hidden, onExit: {})
+                    GhosttyEphemeral(pty: pty, hidden: hidden, isEditor: false, onExit: {})
                 } else {
-                    SwiftTermEphemeral(pty: pty, hidden: hidden, focusToken: focusToken, onExit: {})
+                    SwiftTermEphemeral(pty: pty, hidden: hidden, focusToken: focusToken, isEditor: false, onExit: {})
                 }
             }
             .background(Color.black)

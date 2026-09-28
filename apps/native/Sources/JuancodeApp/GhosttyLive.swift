@@ -65,6 +65,22 @@ final class TerminalBackend {
 protocol JuancodeTerminalResponder {}
 extension AppTerminalView: JuancodeTerminalResponder {}
 
+/// The terminal views that host the user's editor (nvim) rather than an agent or a
+/// shell. While one has the keyboard, the window key monitor hands every ⌃-key to
+/// the pty: ⌃F/⌃E/⌃H/⌃T/⌃Z are editor motions there, not app shortcuts. Weak, so a
+/// dismantled view drops out on its own.
+@MainActor
+enum EditorKeyRouting {
+    private static let views = NSHashTable<NSView>.weakObjects()
+
+    static func mark(_ view: NSView) { views.add(view) }
+
+    static func isEditor(_ responder: NSResponder?) -> Bool {
+        guard let view = responder as? NSView else { return false }
+        return views.contains(view)
+    }
+}
+
 /// Ghostty theme for our live panes. The app runs in forced dark mode (see
 /// `RootView`), so only the dark variant is ever used — start from libghostty's
 /// `afterglow` and override the background to pure black (afterglow ships #212121).
@@ -929,12 +945,15 @@ struct GhosttyEphemeral: NSViewRepresentable {
     /// Bumped by the host to pull the keyboard into this pane once it's already
     /// on-screen (see `SwiftTermEphemeral.focusToken`). Default 0 never re-focuses.
     var focusToken: Int = 0
+    /// See `SwiftTermEphemeral.isEditor`.
+    var isEditor: Bool = true
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
 
     func makeNSView(context: Context) -> GhosttyHostView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        if isEditor { EditorKeyRouting.mark(tv) }
         context.coordinator.attach(to: tv)
         context.coordinator.lastFocusToken = focusToken
         let host = GhosttyHostView(terminal: tv)

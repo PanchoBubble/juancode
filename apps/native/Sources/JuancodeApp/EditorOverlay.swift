@@ -137,12 +137,16 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     /// on-screen (a keep-alive re-show has no fresh view for `makeNSView` to focus).
     /// Default 0 → callers that don't drive focus (e.g. the editor) never re-focus.
     var focusToken: Int = 0
+    /// Every ephemeral pty runs the user's editor except the bottom shell panel,
+    /// which opts out: an editor's ⌃-keys go to it, not to app shortcuts.
+    var isEditor: Bool = true
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
 
     func makeNSView(context: Context) -> TerminalHostView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        if isEditor { EditorKeyRouting.mark(tv) }
         tv.terminalDelegate = context.coordinator
         applySteadyCursor(to: tv)
         context.coordinator.attach(to: tv)

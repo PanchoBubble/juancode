@@ -321,6 +321,15 @@ func installBackForwardMouse(model: AppModel, oracle: OracleModel, host: NSView)
 ///
 /// Scoped to our own key window (and only when no sheet is attached / no text field is
 /// editing) so it never hijacks dialogs or the filter field.
+/// Whether the keyboard is in an editor: an in-place editor tab or overlay, or a
+/// terminal while an editor session (kind `.editor`) is the selection.
+@MainActor
+private func editorHasFocus(_ responder: NSResponder?, model: AppModel) -> Bool {
+    if EditorKeyRouting.isEditor(responder) { return true }
+    guard responder is JuancodeTerminalResponder, let sel = model.selection else { return false }
+    return model.isEditorSession(sel)
+}
+
 @MainActor
 func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shortcuts, host: NSView) -> Any? {
     // App-level shortcuts (⌘N, ⌃Space, …) while a terminal holds focus: the terminal
@@ -330,9 +339,24 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
     // the action directly, consuming the event so it doesn't also leak into the pty.
     // Only when a terminal is first responder; elsewhere the menu key equivalents work.
     let routeAppShortcut: @MainActor (NSEvent) -> Bool = { [weak host] event in
-        guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil,
-              window.firstResponder is JuancodeTerminalResponder
+        guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
         else { return false }
+        let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        let inEditor = editorHasFocus(window.firstResponder, model: model)
+        // ⌃E opens the editor from anywhere but the editor itself (where it scrolls)
+        // and a text field (where it is end-of-line). It shadows readline's ⌃E in
+        // the agent panes on purpose.
+        if mods == .control, event.keyCode == 14, !inEditor,
+           !(window.firstResponder is NSTextView) {
+            performShortcut(.openEditor, model: model, oracle: oracle)
+            return true
+        }
+        guard window.firstResponder is JuancodeTerminalResponder else { return false }
+        // In the editor every ⌃-key is a vim motion; only ⌃Tab (back to the agent)
+        // stays the app's. ⌘-shortcuts still work.
+        if inEditor, mods.contains(.control), !mods.contains(.command), event.keyCode != 48 {
+            return false
+        }
         if let action = shortcuts.action(matching: event) {
             performShortcut(action, model: model, oracle: oracle)
             return true
@@ -341,7 +365,6 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         // Only once it has an editor, so without one the keys stay the pty's, and
         // never under the GitHub overlay, which owns ⌘1-3 for its own tabs.
         if !model.showingGitHub, let sel = model.selection, model.editorTabs.hasEditor(sel) {
-            let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
             if mods == .command, let tab = ["1": SessionPaneTab.agent, "2": .editor][event.charactersIgnoringModifiers ?? ""] {
                 model.showSessionTab(tab, for: sel)
                 return true
@@ -423,7 +446,7 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             guard ctrl, keyCode == 4 else { return false } // ⌃H
             // Inside an editor pane (nvim), ⌃H/J/K/L are vim window moves — let ⌃H reach
             // the pty instead of stealing it for sidebar focus (⌃J/K/L already pass through).
-            if let sel = model.selection, model.isEditorSession(sel) { return false }
+            if editorHasFocus(fr, model: model) { return false }
             window.makeFirstResponder(nil)
             model.focusSidebar()
             return true
