@@ -36,7 +36,7 @@
         "type": "created",
         "session": {
           "cwd": {
-            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
+            "$regex": "-worktrees/(conformance-[0-9a-z-]+|slot-[0-9]+)$"
           }
         }
       },

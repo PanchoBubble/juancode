@@ -448,7 +448,7 @@ async fn a_create_that_cannot_be_isolated_is_refused_rather_than_run_in_the_shar
 }
 
 /// The desktop's fan-out names its trees `<stem>-a`, `<stem>-b`, … so one question's
-/// parallel answers read as a family on disk and in `git branch`. That name reaches
+/// parallel answers read as a family in `git branch` and in the session list. That name reaches
 /// the daemon now, because the daemon is the side that cuts the tree: a desktop that
 /// cut its own left a row with no `worktree_path` and a tree nothing ever reaped
 /// (juancode-asnn).
@@ -461,8 +461,36 @@ async fn an_isolated_create_takes_the_name_the_client_asked_for() {
     req.worktree_name = Some("a1b2c3-a".into());
     let meta = harness.sessions.create(req).expect("create");
     let worktree = meta.worktree_path.clone().expect("a worktree path");
-    assert!(worktree.ends_with("repo-worktrees/a1b2c3-a"), "{worktree}");
+    // A pooled tree is a slot; the name rides on the branch and the title.
+    assert!(worktree.ends_with("repo-worktrees/slot-01"), "{worktree}");
     assert_eq!(meta.cwd, worktree);
+    assert_eq!(meta.title, "a1b2c3-a");
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&worktree)
+        .output()
+        .expect("git");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "juancode/a1b2c3-a"
+    );
+}
+
+#[tokio::test]
+async fn with_pooling_off_the_tree_is_named_after_the_client_name() {
+    let harness = Harness::new("isolate-named-unpooled");
+    std::fs::write(
+        harness.dir.join("worktree-pool.json"),
+        r#"{"maxIdlePerRepo":0}"#,
+    )
+    .unwrap();
+    let repo = seed_repo(&harness, "repo");
+    let mut req = request(repo.to_str().unwrap());
+    req.isolate_worktree = true;
+    req.worktree_name = Some("a1b2c3-a".into());
+    let meta = harness.sessions.create(req).expect("create");
+    let worktree = meta.worktree_path.clone().expect("a worktree path");
+    assert!(worktree.ends_with("repo-worktrees/a1b2c3-a"), "{worktree}");
 }
 
 /// A name off the wire spells a directory and a branch, so one carrying a separator

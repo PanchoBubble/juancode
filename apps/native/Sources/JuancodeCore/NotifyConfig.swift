@@ -28,9 +28,7 @@ public enum NotifyConfig {
     /// `~/.juancode/data`.
     public static var path: String {
         if let explicit = envValue("JUANCODE_NOTIFY_CONFIG") { return explicit }
-        let dir = envValue("JUANCODED_DATA_DIR") ?? envValue("JUANCODE_DATA_DIR")
-            ?? (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/rust-core")
-        return (dir as NSString).appendingPathComponent("notify.json")
+        return (DaemonDataDir.path as NSString).appendingPathComponent("notify.json")
     }
 
     /// The URL the daemon would POST to right now, or `nil` when none is configured.

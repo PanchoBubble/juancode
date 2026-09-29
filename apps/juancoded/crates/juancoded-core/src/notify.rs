@@ -121,14 +121,18 @@ pub fn config_path() -> PathBuf {
     if let Some(path) = env_value("JUANCODE_NOTIFY_CONFIG") {
         return PathBuf::from(path);
     }
-    let dir = env_value("JUANCODED_DATA_DIR")
+    daemon_data_dir().join("notify.json")
+}
+
+/// The daemon's own data dir, where its store and its small JSON configs live.
+pub fn daemon_data_dir() -> PathBuf {
+    env_value("JUANCODED_DATA_DIR")
         .or_else(|| env_value("JUANCODE_DATA_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
             PathBuf::from(home).join(".juancode").join("rust-core")
-        });
-    dir.join("notify.json")
+        })
 }
 
 /// The configured webhook URL, or `None` for "notify nobody".

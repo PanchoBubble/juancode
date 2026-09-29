@@ -99,7 +99,7 @@
         "type": "created",
         "session": {
           "worktreePath": {
-            "$regex": "-worktrees/[0-9a-f]{8}$"
+            "$regex": "-worktrees/([0-9a-f]{8}|slot-[0-9]+)$"
           }
         }
       },
@@ -176,7 +176,7 @@
         "worktreeRemoved": true
       },
       "timeoutMs": 20000,
-      "note": "the tree is named and reported removed. A core that dropped the row and left the directory would answer worktreeRemoved: false and be caught here rather than by a `pnpm loose` sweep weeks later"
+      "note": "the tree is named and reported removed (or recycled into the pool, which takes it from this session just the same). A core that dropped the row and left the directory would answer worktreeRemoved: false and be caught here rather than by a `pnpm loose` sweep weeks later"
     },
     {
       "send": {

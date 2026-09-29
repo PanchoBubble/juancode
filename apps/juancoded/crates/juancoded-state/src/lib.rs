@@ -74,7 +74,19 @@ pub fn test_entries_at(store: &str, program: &str, args: &[&str]) -> EntryList {
             "program": program,
             "args": args,
             "retention": 0,
+            // Never the real one in `~/.juancode`: a cap set in Settings must not
+            // change what the tests see. Missing, so the default cap applies.
+            "worktreePoolConfig": worktree_pool_config_beside(store),
         }),
     );
     entries
+}
+
+fn worktree_pool_config_beside(store: &str) -> String {
+    let dir = std::path::Path::new(store)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir().join("juancoded-no-pool-config"));
+    dir.join("worktree-pool.json").to_string_lossy().to_string()
 }

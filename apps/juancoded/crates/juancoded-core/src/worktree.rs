@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use crate::pr::BranchWorktree;
 
+pub mod pool;
+
 /// A worktree this core made, and the branch checked out in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedWorktree {
@@ -89,6 +91,8 @@ pub struct CreateStages {
     pub worktree_add_ms: f64,
     /// Symlinking the source checkout's `node_modules` into the new tree.
     pub link_modules_ms: f64,
+    /// Whether a pooled tree was taken instead of a new one cut ([`pool`]).
+    pub reused_slot: bool,
 }
 
 /// [`create`], with the cost of each step alongside the result.
@@ -817,7 +821,7 @@ fn node_modules_paths(root: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn run(cwd: &Path, args: &[&str]) {
+    pub(super) fn run(cwd: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -840,7 +844,7 @@ mod tests {
     }
 
     /// A repo at `<scratch>/repo` with one commit, so `worktree add` has a HEAD.
-    fn repo(tag: &str) -> (PathBuf, PathBuf) {
+    pub(super) fn repo(tag: &str) -> (PathBuf, PathBuf) {
         let parent = scratch(tag);
         let root = parent.join("repo");
         std::fs::create_dir_all(&root).unwrap();

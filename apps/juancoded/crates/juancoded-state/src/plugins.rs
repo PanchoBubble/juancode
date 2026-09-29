@@ -69,6 +69,13 @@ impl Plugin for SessionRegistryPlugin {
         if let Some(keep) = ctx.config().get("retention").and_then(|v| v.as_u64()) {
             config.retention = keep as usize;
         }
+        if let Some(path) = ctx
+            .config()
+            .get("worktreePoolConfig")
+            .and_then(|v| v.as_str())
+        {
+            config.worktree_pool_config = path.into();
+        }
         if let (Some(cols), Some(rows)) = (
             ctx.config().get("cols").and_then(|v| v.as_u64()),
             ctx.config().get("rows").and_then(|v| v.as_u64()),

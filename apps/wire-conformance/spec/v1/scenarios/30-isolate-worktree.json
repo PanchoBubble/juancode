@@ -33,10 +33,10 @@
         "session": {
           "provider": "claude",
           "cwd": {
-            "$regex": "-worktrees/[0-9a-f]{8}$"
+            "$regex": "-worktrees/([0-9a-f]{8}|slot-[0-9]+)$"
           },
           "worktreePath": {
-            "$regex": "-worktrees/[0-9a-f]{8}$"
+            "$regex": "-worktrees/([0-9a-f]{8}|slot-[0-9]+)$"
           }
         }
       },
@@ -45,7 +45,7 @@
         "isolatedCwd": "session.cwd"
       },
       "timeoutMs": 20000,
-      "note": "a sibling <repo>-worktrees/<name> tree, and worktreePath records what has to be removed later"
+      "note": "a sibling <repo>-worktrees/<name> tree (or a recycled <repo>-worktrees/slot-NN), and worktreePath records what has to be removed later"
     },
     {
       "expect": {
@@ -88,18 +88,19 @@
         "type": "created",
         "session": {
           "cwd": {
-            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
+            "$regex": "-worktrees/(conformance-[0-9a-z-]+|slot-[0-9]+)$"
           },
           "worktreePath": {
-            "$regex": "-worktrees/conformance-[0-9a-z-]+$"
-          }
+            "$regex": "-worktrees/(conformance-[0-9a-z-]+|slot-[0-9]+)$"
+          },
+          "title": "$worktreeName"
         }
       },
       "bind": {
         "named": "session.id"
       },
       "timeoutMs": 20000,
-      "note": "the name the client sent, not one the core invented"
+      "note": "the name the client sent, not one the core invented: on the tree, or on the title when the tree is a recycled slot"
     },
     {
       "expect": {

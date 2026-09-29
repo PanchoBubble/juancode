@@ -146,11 +146,11 @@ async fn a_forgotten_conversation_is_not_adopted_back() {
     assert!(harness.sessions.ids().is_empty());
 }
 
-/// juancode-oe30: the tree an isolated create made, reaped by the delete and by
+/// juancode-oe30: the tree an isolated create made, released by the delete and by
 /// nothing else. An exit must not take it — the work in a worktree routinely outlives
 /// the agent that did it.
 #[tokio::test]
-async fn deleting_an_isolated_session_reaps_its_worktree() {
+async fn deleting_an_isolated_session_releases_its_worktree() {
     let harness = Harness::new("forget-worktree");
     let root = repo(&harness.dir);
     let mut req = request(&root);
@@ -175,6 +175,61 @@ async fn deleting_an_isolated_session_reaps_its_worktree() {
             &event,
             SessionEvent::Deleted { worktree_path: Some(p), worktree_removed: Some(true), .. }
                 if p == &tree
+        ),
+        "{event:?}"
+    );
+    // Clean, so it is parked for the next session rather than removed: still on
+    // disk, but no longer on the session's branch.
+    assert!(Path::new(&tree).is_dir(), "{tree}");
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&tree)
+        .output()
+        .expect("git");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "HEAD",
+        "detached"
+    );
+
+    // And the next isolated session gets that same tree.
+    let mut req = request(&root);
+    req.isolate_worktree = true;
+    let next = harness
+        .sessions
+        .create(req)
+        .expect("a second isolated create");
+    assert_eq!(next.worktree_path.as_deref(), Some(tree.as_str()));
+}
+
+/// Uncommitted work is never carried into another agent's checkout: a dirty tree is
+/// removed on delete, exactly as it was before there was a pool.
+#[tokio::test]
+async fn deleting_a_session_with_a_dirty_worktree_removes_it() {
+    let harness = Harness::new("forget-dirty-worktree");
+    let root = repo(&harness.dir);
+    let mut req = request(&root);
+    req.isolate_worktree = true;
+    let meta = harness.sessions.create(req).expect("an isolated create");
+    let tree = meta.worktree_path.clone().expect("a worktree path");
+    std::fs::write(Path::new(&tree).join("half-done.txt"), "wip\n").unwrap();
+
+    harness.sessions.kill(&meta.id).expect("kill");
+    let mut events = harness.sessions.subscribe();
+    harness.sessions.delete(&meta.id).expect("delete");
+    let event = wait_for(
+        &mut events,
+        10,
+        |e| matches!(e, SessionEvent::Deleted { session_id, .. } if session_id == &meta.id),
+    )
+    .await;
+    assert!(
+        matches!(
+            &event,
+            SessionEvent::Deleted {
+                worktree_removed: Some(true),
+                ..
+            }
         ),
         "{event:?}"
     );

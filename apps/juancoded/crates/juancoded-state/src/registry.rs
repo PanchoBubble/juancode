@@ -272,6 +272,9 @@ pub struct RegistryConfig {
     pub discover_id: Option<IdScanner>,
     /// How long to keep asking, and how often, per source.
     pub discovery_window: fn(IdSource) -> (Duration, Duration),
+    /// `worktree-pool.json`, read on every create and delete so Settings can change
+    /// the cap without a restart.
+    pub worktree_pool_config: std::path::PathBuf,
 }
 
 impl Default for RegistryConfig {
@@ -286,6 +289,7 @@ impl Default for RegistryConfig {
             program_override: None,
             discover_id: Some(Arc::new(discovery::scan_once)),
             discovery_window: discovery::window,
+            worktree_pool_config: worktree::pool::config_path(),
         }
     }
 }
@@ -431,6 +435,10 @@ impl SessionRegistry {
     /// was started with and never told anyone about.
     pub fn retention(&self) -> usize {
         self.inner.config.retention
+    }
+
+    fn max_idle_worktrees(&self) -> usize {
+        worktree::pool::max_idle_per_repo_at(&self.inner.config.worktree_pool_config)
     }
 
     /// Build the registry over the services it composes with, rehydrate whatever the
@@ -764,7 +772,25 @@ impl SessionRegistry {
                 .worktree_name
                 .clone()
                 .unwrap_or_else(|| id.chars().take(8).collect::<String>());
-            Some(worktree::create(&req.cwd, &name).map_err(|e| StateError::Worktree(e.0))?)
+            let max_idle = self.max_idle_worktrees();
+            let recorded: std::collections::HashSet<String> = if max_idle == 0 {
+                Default::default()
+            } else {
+                self.inner
+                    .store
+                    .all()
+                    .map_err(|e| StateError::Store(e.to_string()))?
+                    .into_iter()
+                    .filter_map(|m| m.worktree_path)
+                    .collect()
+            };
+            let pool = worktree::pool::Pool {
+                max_idle,
+                in_use: &|path| recorded.contains(path),
+            };
+            let (made, _) = worktree::pool::create_timed(&req.cwd, &name, &pool)
+                .map_err(|e| StateError::Worktree(e.0))?;
+            Some((made, name))
         } else {
             None
         };
@@ -773,7 +799,7 @@ impl SessionRegistry {
         // of what has to be removed when the session is deleted.
         let cwd = worktree
             .as_ref()
-            .map(|w| w.path.clone())
+            .map(|(w, _)| w.path.clone())
             .unwrap_or_else(|| req.cwd.clone());
         let spec = Providers::spec(req.provider);
         let opts = SpawnOptions {
@@ -783,10 +809,14 @@ impl SessionRegistry {
         };
         let (program, args) = self.program_for(req.provider, &id, &opts, None)?;
 
-        let title = std::path::Path::new(&cwd)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| cwd.clone());
+        // The tree's name, not its directory: a pooled tree is `slot-NN`.
+        let title = match &worktree {
+            Some((_, name)) => name.clone(),
+            None => std::path::Path::new(&cwd)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| cwd.clone()),
+        };
         let mut meta = SessionMeta::new(
             id.clone(),
             req.provider,
@@ -795,7 +825,7 @@ impl SessionRegistry {
             now_ms(),
             req.skip_permissions,
         );
-        meta.worktree_path = worktree.as_ref().map(|w| w.path.clone());
+        meta.worktree_path = worktree.as_ref().map(|(w, _)| w.path.clone());
         // Claude pins its conversation id to ours, so the session is resumable at
         // once; the others have to be discovered from their own state later.
         if spec.pins_session_id() {
@@ -1413,15 +1443,18 @@ impl SessionRegistry {
             }
         }
 
-        let worktree_removed = meta.worktree_path.as_ref().map(|path| {
-            match worktree::remove(path) {
-                Ok(()) => true,
+        let worktree_removed = meta.worktree_path.as_ref().map(
+            |path| match worktree::pool::release(path, self.max_idle_worktrees()) {
+                Ok(released) => {
+                    info!(session = id, tree = %path, ?released, "released the worktree");
+                    true
+                }
                 Err(e) => {
                     warn!(session = id, tree = %path, error = %e.0, "could not reap the worktree");
                     false
                 }
-            }
-        });
+            },
+        );
         let deleted = Deleted {
             session_id: id.to_string(),
             worktree_path: meta.worktree_path.clone(),

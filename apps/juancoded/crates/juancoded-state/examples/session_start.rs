@@ -9,6 +9,10 @@
 //! It spawns the REAL provider CLI, because a stand-in that echoes instantly
 //! measures the harness and hides the thing that actually costs the user seconds.
 //!
+//! Isolated sessions go through the worktree pool as the daemon would (the real
+//! `worktree-pool.json` cap): each run is deleted, so later runs reuse the first run's
+//! tree. Every tree and branch the run made is removed at the end.
+//!
 //! Run: cargo run --release -p juancoded-state --example session_start -- <repo> [runs]
 
 use std::time::{Duration, Instant};
@@ -40,6 +44,7 @@ async fn main() {
         juancoded_state::boot_with(&juancoded_state::plugins::entries_over_store(":memory:"))
             .expect("mount the tree");
 
+    let mut made: Vec<(String, String)> = Vec::new();
     for isolate in [false, true] {
         let mut samples = Vec::new();
         for _ in 0..runs {
@@ -80,15 +85,18 @@ async fn main() {
                 create_ms,
                 first_frame_ms,
             });
-            let _ = reg.kill(&meta.id);
             if let Some(path) = &meta.worktree_path {
-                let _ = worktree::remove(path);
-                drop_branch(&repo, path);
+                made.push((path.clone(), format!("juancode/{}", meta.title)));
             }
+            let _ = reg.delete(&meta.id);
             // The CLI's own teardown, and the pty's, before the next run starts.
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         report(isolate, &samples);
+    }
+    for (path, branch) in &made {
+        let _ = worktree::remove(path);
+        drop_branch(&repo, branch);
     }
 
     // The steps inside worktree setup, timed on their own: the end-to-end pair above
@@ -103,10 +111,36 @@ async fn main() {
                     s.repo_root_ms, s.base_ref_ms, s.worktree_add_ms, s.link_modules_ms
                 );
                 let _ = worktree::remove(&created.path);
-                drop_branch(&repo, &created.path);
+                drop_branch(&repo, &created.branch);
             }
             Err(e) => println!("  failed: {e}"),
         }
+    }
+
+    println!("\npooled worktree setup stages (ms, {runs} runs, each released for the next)");
+    let nobody = |_: &str| false;
+    let pool = worktree::pool::Pool {
+        max_idle: worktree::pool::DEFAULT_MAX_IDLE_PER_REPO,
+        in_use: &nobody,
+    };
+    let mut pooled = Vec::new();
+    for _ in 0..runs {
+        let name = format!("bench{}", uuid_ish());
+        match worktree::pool::create_timed(&repo, &name, &pool) {
+            Ok((created, s)) => {
+                println!(
+                    "  reused {:5}  root {:7.1}  base_ref(fetch) {:7.1}  take/add {:7.1}  link node_modules {:7.1}",
+                    s.reused_slot, s.repo_root_ms, s.base_ref_ms, s.worktree_add_ms, s.link_modules_ms
+                );
+                let _ = worktree::pool::release(&created.path, pool.max_idle);
+                pooled.push(created);
+            }
+            Err(e) => println!("  failed: {e}"),
+        }
+    }
+    for created in &pooled {
+        let _ = worktree::remove(&created.path);
+        drop_branch(&repo, &created.branch);
     }
 }
 
@@ -136,13 +170,9 @@ fn report(isolate: bool, samples: &[Run]) {
 /// `worktree::remove` leaves the branch behind on purpose. A benchmark's branches
 /// are empty by construction, so it cleans up after itself rather than leaving a
 /// `juancode/bench*` for every run in the repo it measured.
-fn drop_branch(repo: &str, worktree_path: &str) {
-    let name = std::path::Path::new(worktree_path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
+fn drop_branch(repo: &str, branch: &str) {
     let _ = std::process::Command::new("git")
-        .args(["branch", "-D", &format!("juancode/{name}")])
+        .args(["branch", "-D", branch])
         .current_dir(repo)
         .output();
 }

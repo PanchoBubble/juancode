@@ -31,6 +31,7 @@ struct WorktreeSweeperSettingsView: View {
     @AppStorage("worktreeSweepDays") private var days = 2
 
     @State private var confirmArm = false
+    @State private var poolMaxIdle = WorktreePoolConfig.maxIdle()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -57,6 +58,8 @@ struct WorktreeSweeperSettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    reuseSection
+                    Divider().padding(.vertical, 4)
                     ageFloor
                     Divider().padding(.vertical, 4)
                     previewSection
@@ -89,6 +92,27 @@ struct WorktreeSweeperSettingsView: View {
         }
         .frame(width: 560, height: 620)
         .task { await sweeper.load(hints: Array(Set(model.worktreeRepoRoots.values))) }
+    }
+
+    // MARK: - reuse pool
+
+    private var reuseSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("Keep for reuse, per repo")
+                Stepper(value: $poolMaxIdle, in: 0...100) {
+                    Text(poolMaxIdle == 0 ? "off" : "\(poolMaxIdle) worktree\(poolMaxIdle == 1 ? "" : "s")")
+                        .monospacedDigit()
+                }
+                .fixedSize()
+                .onChange(of: poolMaxIdle) { _, n in WorktreePoolConfig.setMaxIdle(n) }
+            }
+            Text("A deleted session's clean worktree is kept, build caches and all, and "
+                + "handed to the next new session in that repo. Trees with uncommitted "
+                + "files are removed as before. Takes effect on the next create.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - age floor
