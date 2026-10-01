@@ -23,9 +23,10 @@ struct RootView: View {
             // and Worktrees live in the window toolbar — reachable from any session.
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    // Four items, and each one owns a whole family: how much is
+                    // Five items, and each one owns a whole family: how much is
                     // running (with the list, a kill for each, the global pause and
-                    // the core's health behind a click), what wants your attention,
+                    // the core's health behind a click), which agents are waiting on
+                    // your answer, what wants your attention,
                     // your GitHub queue, and the utilities. Everything else moved —
                     // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP
                     // status / AI settings into Tools; Open in Editor into the
@@ -33,6 +34,7 @@ struct RootView: View {
                     // Appearance into the ⌘, Settings window. The Oracle has the
                     // right-edge rail and ⌃Space, so it does not need a slot here too.
                     RunningSessionsBadge()
+                    WaitingInputBadge()
                     NotificationsBell()
                     GitHubQueueBadge()
                     ToolsMenu()

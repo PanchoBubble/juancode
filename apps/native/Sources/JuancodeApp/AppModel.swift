@@ -969,7 +969,11 @@ final class AppModel {
     /// palettes, the Oracle bridge) and the per-session box (the sidebar row), each
     /// only on a real change — `@Observable` notifies on equal writes too.
     private func setActivity(_ id: String, _ state: SessionActivity?) {
-        if activities[id] != state { activities[id] = state }
+        if activities[id] != state {
+            if state == .waitingInput { waitingSince[id] = Date() }
+            else if activities[id] == .waitingInput { waitingSince[id] = nil }
+            activities[id] = state
+        }
         if let box = activityBoxes[id] {
             if box.activity != state { box.activity = state }
         } else {
@@ -995,6 +999,15 @@ final class AppModel {
     /// (juancode-2n0). It lands in the same sweep the sidebar order does, since the
     /// paths that move either are the same ones.
     private(set) var runningTally: GlobalPause.RunningTally = .empty
+
+    /// Live agents waiting on you, longest first — what the waiting-input badge shows.
+    /// Stored for the same reason as `runningTally`, and changes only when a session
+    /// enters or leaves `.waitingInput`, so a busy↔idle edge never touches it.
+    private(set) var waitingSessions: [WaitingSessions.Entry] = []
+
+    /// When each session entered `.waitingInput`. Ignored by observation: only
+    /// `waitingSessions` is read by views, and it already carries the timestamp.
+    @ObservationIgnored private var waitingSince: [String: Date] = [:]
 
     /// `id`'s order bucket, defaulting to a resting live session for anything not yet
     /// projected. Every create/exit routes through `refresh`, which re-sweeps.
@@ -1023,9 +1036,13 @@ final class AppModel {
         for meta in sessions { project(meta.id) }
         for meta in externalSessions where next[meta.id] == nil { project(meta.id) }
         if next != sidebarOrder { sidebarOrder = next }
-        let tally = GlobalPause.tally(pauseCandidates(),
+        let candidates = pauseCandidates()
+        let tally = GlobalPause.tally(candidates,
                                       busy: Set(activities.filter { $0.value == .busy }.keys))
         if tally != runningTally { runningTally = tally }
+        let waiting = WaitingSessions.project(candidates, activities: activities,
+                                              since: waitingSince)
+        if waiting != waitingSessions { waitingSessions = waiting }
     }
 
     /// Whether the active core implements `capability`. The one question every
