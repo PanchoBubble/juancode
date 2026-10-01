@@ -2908,6 +2908,16 @@ final class AppModel {
     /// list, poll loop, and persistence (juancode-b4m) — kept fresh via
     /// `subscribeTrackedMirror()` so badges/panels observe it like local state.
     private(set) var tracked: [String: TrackedPr] = [:]
+    /// The engine's last list, before the optimistic layer below is laid over it.
+    @ObservationIgnored private var trackedFromEngine: [TrackedPr] = []
+    /// Tracks clicked but not yet in an engine list: a track spawns a worktree and a
+    /// CLI, so the list takes seconds, and the eye must not wait for it. A
+    /// placeholder has an empty `sessionId` until the real entry replaces it.
+    @ObservationIgnored private var pendingTracks: [String: TrackedPr] = [:]
+    /// Untracks sent but not yet reflected in an engine list.
+    @ObservationIgnored private var pendingUntracks: Set<String> = []
+    /// Untracked while still pending: undone once the engine reports the track.
+    @ObservationIgnored private var cancelledTracks: Set<String> = []
     /// Linear issues under continuous watch, keyed by `TrackedIssue.key(cwd:identifier:)`
     /// (juancode-z4v). The same poll loop diffs each one's Linear activity and feeds
     /// next-step prompts into its agent session — the Linear twin of `tracked`.
@@ -2959,20 +2969,46 @@ final class AppModel {
     }
 
     /// Start tracking a PR — forwarded to `PrTrackingEngine`, the single owner
-    /// (juancode-b4m). The engine spawns the dedicated seeded agent session and
-    /// runs the poll loop; the GUI just selects the spawned session so "Track" is
-    /// still an explicit "take me there". The mirror updates via the subscription.
+    /// (juancode-b4m). The eye shows at once and the agent spawns in the
+    /// background, the way a dispatch does: the selection stays where you are, so
+    /// you can keep tracking down the list. The mirror updates via the subscription.
     func trackPr(_ pr: PullRequest, cwd: String) {
         if let reason = unavailable(.trackedPrs) {
             errorMessage = "Can't track PR #\(pr.number). \(reason)"
             return
         }
+        trackInBackground([pr], cwd: cwd)
+    }
+
+    /// Whether `t` is still waiting for the engine to spawn its agent.
+    func isTrackPending(_ t: TrackedPr) -> Bool { t.sessionId.isEmpty }
+
+    private func trackInBackground(_ prs: [PullRequest], cwd: String) {
+        let prs = prs.filter { trackedPr(cwd: cwd, number: $0.number) == nil }
+        guard !prs.isEmpty else { return }
+        for pr in prs {
+            let placeholder = TrackedPr(number: pr.number, title: pr.title, branch: pr.branch,
+                                        url: pr.url, cwd: cwd, sessionId: "")
+            pendingTracks[placeholder.id] = placeholder
+            pendingUntracks.remove(placeholder.id)
+            cancelledTracks.remove(placeholder.id)
+        }
+        rebuildTracked()
         let grid = TerminalGrid.spawn
         Task {
-            guard let entry = await core.trackPr(
-                pr, cwd: cwd, cols: grid.cols, rows: grid.rows) else { return }
-            selection = entry.sessionId
-            focusTerminal()
+            for pr in prs {
+                let key = TrackedPr.key(cwd: cwd, number: pr.number)
+                if cancelledTracks.remove(key) != nil { continue }
+                let entry = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows)
+                pendingTracks[key] = nil
+                // Untracked while it was still spawning: let the track land, then undo it.
+                if cancelledTracks.remove(key) != nil, entry != nil {
+                    await core.untrackPr(key)
+                }
+                // nil can also mean the list just has not landed yet; the mirror
+                // shows it whenever it does.
+                rebuildTracked()
+            }
         }
     }
 
@@ -2980,6 +3016,7 @@ final class AppModel {
     /// selection would point at a row nobody can see; a session the store no longer
     /// has (reaped, or deleted by hand) says so instead of selecting nothing.
     func openTrackingSession(_ t: TrackedPr) {
+        if isTrackPending(t) { return }
         guard let meta = sessions.first(where: { $0.id == t.sessionId }) else {
             errorMessage = "PR #\(t.number)'s tracking session is gone. Untrack and track it again to start a new one."
             return
@@ -2991,19 +3028,12 @@ final class AppModel {
     }
 
     /// Track several PRs of one checkout at once — the queue's per-repo Track all.
-    /// Unlike `trackPr` it leaves the selection alone: jumping to each spawned agent
-    /// in turn would just flicker through them.
     func trackPrs(_ prs: [PullRequest], cwd: String) {
         if let reason = unavailable(.trackedPrs) {
             errorMessage = "Can't track PRs. \(reason)"
             return
         }
-        let grid = TerminalGrid.spawn
-        Task {
-            for pr in prs where trackedPr(cwd: cwd, number: pr.number) == nil {
-                _ = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows)
-            }
-        }
+        trackInBackground(prs, cwd: cwd)
     }
 
     /// Track a PR **in a session that already exists** — the session-row context
@@ -3035,7 +3065,21 @@ final class AppModel {
     /// Stop tracking a PR (forwarded to the engine). Leaves its agent session
     /// alone (the user may still want it); just drops it from the watch list.
     func untrackPr(_ id: String) {
-        Task { await core.untrackPr(id) }
+        if pendingTracks.removeValue(forKey: id) != nil {
+            // Not tracked yet: `trackInBackground` undoes it once the track lands.
+            cancelledTracks.insert(id)
+            rebuildTracked()
+            return
+        }
+        pendingUntracks.insert(id)
+        rebuildTracked()
+        Task {
+            await core.untrackPr(id)
+            // The engine never confirms an untrack except by a new list; if none
+            // comes, stop pretending and show what it last said.
+            await Nap.duration(.seconds(15))
+            if pendingUntracks.remove(id) != nil { rebuildTracked() }
+        }
     }
 
     /// Queue a prompt into a session's message queue and kick it — the same
@@ -3140,7 +3184,19 @@ final class AppModel {
         for entry in list where entry.snapshot != tracked[entry.id]?.snapshot {
             github.notePollerActivity(entry.id)
         }
-        tracked = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+        trackedFromEngine = list
+        let ids = Set(list.map(\.id))
+        for id in pendingTracks.keys where ids.contains(id) { pendingTracks[id] = nil }
+        pendingUntracks.formIntersection(ids)
+        rebuildTracked()
+    }
+
+    /// The engine's list with the clicks it has not caught up with laid over it.
+    private func rebuildTracked() {
+        var next = Dictionary(trackedFromEngine.map { ($0.id, $0) }, uniquingKeysWith: { _, b in b })
+        for id in pendingUntracks { next[id] = nil }
+        for (id, placeholder) in pendingTracks where next[id] == nil { next[id] = placeholder }
+        if next != tracked { tracked = next }
         updateTrackKeepAwake()
     }
 

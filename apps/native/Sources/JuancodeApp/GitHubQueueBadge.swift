@@ -429,8 +429,9 @@ struct GitHubQueueBadge: View {
         @Environment(AppModel.self) private var model
         let row: ViewerPr
         let reason: PrAttentionReason?
-        /// Close the popover: an action that spawns a session takes you somewhere
-        /// else, so leaving the queue floating over it would be in the way.
+        /// Close the popover: jumping to a tracking agent takes you somewhere else,
+        /// so leaving the queue floating over it would be in the way. Track and
+        /// Agent spawn in the background and leave it open.
         let dismiss: () -> Void
         let onOpen: () -> Void
         /// Whether the pointer is over the row — the two actions ride on it.
@@ -475,9 +476,13 @@ struct GitHubQueueBadge: View {
                         Button {
                             dismiss()
                             model.openTrackingSession(t)
-                        } label: { TrackBadge(state: t.state, compact: true) }
+                        } label: {
+                            TrackBadge(state: t.state, compact: true)
+                                .opacity(model.isTrackPending(t) ? 0.45 : 1)
+                        }
                         .buttonStyle(.borderless)
                         .clickCursor()
+                        .disabled(model.isTrackPending(t))
                     }
                     HStack(spacing: 3) {
                         Image(systemName: pr.checks.icon).font(.system(size: 9))
@@ -541,14 +546,12 @@ struct GitHubQueueBadge: View {
             } else {
                 iconButton("eye", help: model.unavailable(.trackedPrs)
                     ?? "Track: an agent watches this PR, fixes the obvious and escalates the rest") {
-                    dismiss()
                     model.trackPr(pr, cwd: cwd)
                 }
                 .disabled(!model.supports(.trackedPrs))
             }
             iconButton("terminal",
                        help: "Agent: a fresh session on this PR, seeded with its details") {
-                dismiss()
                 model.workOnPr(pr, cwd: cwd)
             }
         }
@@ -590,10 +593,10 @@ struct GitHubQueueBadge: View {
                     Button("Untrack") { model.untrackPr(t.id) }
                         .disabled(!model.supports(.trackedPrs))
                 } else {
-                    Button("Track") { dismiss(); model.trackPr(pr, cwd: cwd) }
+                    Button("Track") { model.trackPr(pr, cwd: cwd) }
                         .disabled(!model.supports(.trackedPrs))
                 }
-                Button("Work on PR") { dismiss(); model.workOnPr(pr, cwd: cwd) }
+                Button("Work on PR") { model.workOnPr(pr, cwd: cwd) }
             }
             ClosePrMenuItem(confirming: $confirmingClose)
         }
@@ -676,8 +679,10 @@ struct GitHubQueueBadge: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("\(t.title)\nOpen the session tracking it")
+                .help(model.isTrackPending(t) ? "\(t.title)\nStarting its agent…"
+                      : "\(t.title)\nOpen the session tracking it")
                 .clickCursor()
+                .disabled(model.isTrackPending(t))
                 Button { model.untrackPr(t.id) } label: {
                     Image(systemName: "eye.slash").font(.system(size: 11))
                 }
