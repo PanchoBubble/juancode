@@ -55,8 +55,9 @@ pub use model::{ProviderId, SessionActivity, SessionKind, SessionMeta, SessionSt
 pub use notify::{notification_text, webhook_body, NotificationEvent};
 pub use pr::{
     auto_fix_prompt, classify_pr_activity, derive_track_state, stalled_ci_fix_reason,
-    track_seed_prompt, BranchWorktree, PrActivity, PrBaseline, PrChecks, PrClassification,
-    PrComment, PrReview, TrackEvent, TrackNotification, TrackState, TrackedPr,
+    stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree, PrActivity, PrBaseline,
+    PrChecks, PrClassification, PrComment, PrReview, TrackEvent, TrackNotification, TrackState,
+    TrackedPr,
 };
 pub use pr_timeline::{
     check_outcome, pr_visible_timeline, PrCheckOutcome, PrThreadGroup, PrTimelineItem,

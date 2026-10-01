@@ -65,7 +65,7 @@ pub async fn pr_activity(cwd: &str, number: i64) -> Option<PrActivity> {
             "view",
             &number,
             "--json",
-            "state,statusCheckRollup,comments,reviews,author",
+            "state,statusCheckRollup,comments,reviews,author,mergeable,baseRefName",
         ],
     )
     .await?;
@@ -164,6 +164,8 @@ fn parse_activity(raw: RawActivity) -> PrActivity {
         author: raw.author.and_then(|a| a.login).unwrap_or_default(),
         state: raw.state.unwrap_or_default().to_uppercase(),
         checks: rollup_checks(&raw.status_check_rollup.unwrap_or_default()),
+        conflicting: parse_mergeable(raw.mergeable.as_deref()),
+        base_branch: raw.base_ref_name.unwrap_or_default(),
         comments: raw
             .comments
             .unwrap_or_default()
@@ -192,6 +194,16 @@ fn parse_activity(raw: RawActivity) -> PrActivity {
     }
 }
 
+/// GitHub computes `mergeable` lazily after the base moves and answers `UNKNOWN` until
+/// it has, so that is `None`: not yet known is not the same as clean.
+fn parse_mergeable(mergeable: Option<&str>) -> Option<bool> {
+    match mergeable?.to_uppercase().as_str() {
+        "CONFLICTING" => Some(true),
+        "MERGEABLE" => Some(false),
+        _ => None,
+    }
+}
+
 /// One entry of gh's `statusCheckRollup`. Both shapes are in there: a CheckRun carries
 /// `status`/`conclusion`, a commit status carries `state`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -210,6 +222,8 @@ struct RawActivity {
     status_check_rollup: Option<Vec<RawCheck>>,
     comments: Option<Vec<RawComment>>,
     reviews: Option<Vec<RawReview>>,
+    mergeable: Option<String>,
+    base_ref_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1823,6 +1837,15 @@ mod tests {
             act.reviews[0].author, "",
             "an absent author is empty, not a failure"
         );
+        assert_eq!(act.conflicting, None, "no mergeable field is not known");
+    }
+
+    #[test]
+    fn mergeable_unknown_is_not_read_as_clean() {
+        assert_eq!(parse_mergeable(Some("CONFLICTING")), Some(true));
+        assert_eq!(parse_mergeable(Some("mergeable")), Some(false));
+        assert_eq!(parse_mergeable(Some("UNKNOWN")), None);
+        assert_eq!(parse_mergeable(None), None);
     }
 
     /// Every probe answers `None`/empty for a `gh` that failed, which is the contract

@@ -104,6 +104,11 @@ pub struct PrBaseline {
     pub checks: PrChecks,
     #[serde(default)]
     pub baselined: bool,
+    /// The last mergeability GitHub settled on. Held across an `UNKNOWN` poll, so a
+    /// recompute after the base moves cannot read as the conflict going away and
+    /// coming back.
+    #[serde(default)]
+    pub conflicting: bool,
 }
 
 /// One PR under continuous watch: its identity, the agent session driving fixes, the
@@ -158,7 +163,11 @@ impl TrackedPr {
     }
 
     pub fn state(&self) -> TrackState {
-        derive_track_state(self.baseline.checks, !self.notifications.is_empty())
+        let state = derive_track_state(self.baseline.checks, !self.notifications.is_empty());
+        if state == TrackState::Watching && self.baseline.conflicting {
+            return TrackState::Fixing;
+        }
+        state
     }
 }
 
@@ -200,6 +209,11 @@ pub struct PrActivity {
     pub checks: PrChecks,
     pub comments: Vec<PrComment>,
     pub reviews: Vec<PrReview>,
+    /// `Some(true)` when the PR conflicts with its base, `None` while GitHub is still
+    /// computing it.
+    pub conflicting: Option<bool>,
+    /// The branch the PR merges into, empty when gh did not say.
+    pub base_branch: String,
     /// The PR author's login, empty when GitHub reported none. Read in the same call as
     /// everything else here, and carried because "is this PR mine" is the first of
     /// GitHub Desktop's notification rules (juancode-2vlz) and a poll has nowhere else
@@ -246,6 +260,7 @@ pub fn classify_pr_activity(
         seen_review_ids: activity.reviews.iter().map(|r| r.id.clone()).collect(),
         checks: activity.checks,
         baselined: true,
+        conflicting: activity.conflicting.unwrap_or(prev.conflicting),
     };
 
     // A merged/closed PR is terminal. Emitted even before the first baseline, so
@@ -322,6 +337,12 @@ pub fn classify_pr_activity(
         events.push(TrackEvent::AutoFix("CI checks are failing".into()));
     }
 
+    // GitHub does not run `pull_request` CI on a PR it cannot merge, so a conflict
+    // usually arrives with green or empty checks and has to be its own signal.
+    if !prev.conflicting && next.conflicting {
+        events.push(TrackEvent::AutoFix(conflict_reason(&activity.base_branch)));
+    }
+
     // Codex normally reviews a PR before it is queued for merge. When it posts that it
     // is out of review capacity, Claude has to step in and review the PR itself (see
     // `track_seed_prompt`), so that is its own auto-fix signal.
@@ -364,6 +385,31 @@ pub fn stalled_ci_fix_reason(
         return None;
     }
     Some("CI is still failing and the session that was working this PR is gone".into())
+}
+
+/// The conflict counterpart of [`stalled_ci_fix_reason`]: a PR that conflicts with its
+/// base must always have a live agent on it, for the same edge-triggered reason.
+pub fn stalled_conflict_fix_reason(
+    conflicting: bool,
+    session_live: bool,
+    has_pending_fixes: bool,
+) -> Option<String> {
+    if !conflicting || session_live || has_pending_fixes {
+        return None;
+    }
+    Some("The PR still conflicts with its base and the session that was working it is gone".into())
+}
+
+fn conflict_reason(base_branch: &str) -> String {
+    let base = if base_branch.is_empty() {
+        "its base branch".to_string()
+    } else {
+        format!("`{base_branch}`")
+    };
+    format!(
+        "Merge conflicts with {base}: fetch it, merge it into this branch, resolve the \
+         conflicts, run the tests and push"
+    )
 }
 
 /// True when a comment or review body is Codex reporting it could not review the PR
@@ -426,10 +472,13 @@ pub fn track_seed_prompt(
     format!(
         "[juancode PR-tracker] You are now tracking pull request #{number} \"{title}\" \
          (branch `{branch}`): {url}{place}\n\n\
-         I'll periodically tell you when there's new activity on this PR — new review comments \
-         or a change in CI status. When I do:\n\
+         I'll periodically tell you when there's new activity on this PR — new review comments, \
+         a change in CI status, or merge conflicts with its base. When I do:\n\
          - If it's an obvious fix (a lint/format/type error, a clearly-correct test fix, or \
          addressing a concrete review comment), make the change, commit, and push to `{branch}`.\n\
+         - If the PR conflicts with its base, merge the base in (do not rebase or force-push), \
+         resolve the conflicts and push. If both sides changed the same logic in ways that do \
+         not obviously combine, STOP and show me the conflict instead of picking a side.\n\
          - If it needs a real decision (ambiguous feedback, conflicting requirements, a risky \
          refactor, or a non-obvious failure), STOP and explain what you need from me instead of \
          guessing.\n\n\
@@ -477,6 +526,8 @@ mod tests {
             checks,
             comments: Vec::new(),
             reviews: Vec::new(),
+            conflicting: Some(false),
+            base_branch: "main".into(),
             author: "octocat".into(),
         }
     }
@@ -570,6 +621,82 @@ mod tests {
         assert!(stalled_ci_fix_reason(PrChecks::Failing, false, true).is_none());
         assert!(stalled_ci_fix_reason(PrChecks::Passing, false, false).is_none());
         assert!(stalled_ci_fix_reason(PrChecks::Failing, false, false).is_some());
+    }
+
+    /// A conflict arrives with green checks, because GitHub will not run CI on a PR
+    /// it cannot merge, so it is its own auto-fix, once per transition.
+    #[test]
+    fn a_new_conflict_is_an_auto_fix_and_a_standing_one_is_not() {
+        let clean = PrBaseline {
+            baselined: true,
+            checks: PrChecks::Passing,
+            ..Default::default()
+        };
+        let mut act = activity("OPEN", PrChecks::Passing);
+        act.conflicting = Some(true);
+        let out = classify_pr_activity(&clean, &act, "");
+        assert!(out.baseline.conflicting);
+        assert!(
+            matches!(&out.events[..], [TrackEvent::AutoFix(r)] if r.contains("`main`")),
+            "{:?}",
+            out.events
+        );
+
+        let again = classify_pr_activity(&out.baseline, &act, "");
+        assert!(again.events.is_empty(), "{:?}", again.events);
+    }
+
+    /// GitHub answers UNKNOWN while it recomputes after a push to the base. Reading
+    /// that as clean would re-fire the conflict on the next poll.
+    #[test]
+    fn an_unknown_mergeable_keeps_the_last_settled_answer() {
+        let conflicted = PrBaseline {
+            baselined: true,
+            conflicting: true,
+            ..Default::default()
+        };
+        let mut act = activity("OPEN", PrChecks::Passing);
+        act.conflicting = None;
+        let out = classify_pr_activity(&conflicted, &act, "");
+        assert!(out.baseline.conflicting);
+        assert!(out.events.is_empty(), "{:?}", out.events);
+
+        act.conflicting = Some(false);
+        let resolved = classify_pr_activity(&out.baseline, &act, "");
+        assert!(!resolved.baseline.conflicting);
+        assert!(resolved.events.is_empty(), "{:?}", resolved.events);
+    }
+
+    #[test]
+    fn a_standing_conflict_with_nobody_on_it_revives_the_session() {
+        assert!(stalled_conflict_fix_reason(true, true, false).is_none());
+        assert!(stalled_conflict_fix_reason(true, false, true).is_none());
+        assert!(stalled_conflict_fix_reason(false, false, false).is_none());
+        assert!(stalled_conflict_fix_reason(true, false, false).is_some());
+    }
+
+    #[test]
+    fn a_conflicting_pr_with_green_ci_badges_as_fixing() {
+        let pr = TrackedPr {
+            id: "x".into(),
+            number: 1,
+            title: String::new(),
+            url: String::new(),
+            branch: "b".into(),
+            cwd: "/r".into(),
+            session_id: None,
+            repo_nwo: None,
+            baseline: PrBaseline {
+                baselined: true,
+                checks: PrChecks::Passing,
+                conflicting: true,
+                ..Default::default()
+            },
+            notifications: Vec::new(),
+            last_polled_at: None,
+            created_at: 0,
+        };
+        assert_eq!(pr.state(), TrackState::Fixing);
     }
 
     /// Terminal, and terminal before the baseline: tracking a PR that merged while you

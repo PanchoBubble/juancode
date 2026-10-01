@@ -55,7 +55,8 @@ use juancoded_core::gh;
 use juancoded_core::model::{now_ms, ProviderId};
 use juancoded_core::pr::{
     auto_fix_prompt, classify_pr_activity, repo_slug_from_pr_url, stalled_ci_fix_reason,
-    track_seed_prompt, BranchWorktree, PrActivity, TrackEvent, TrackNotification, TrackedPr,
+    stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree, PrActivity, TrackEvent,
+    TrackNotification, TrackedPr,
 };
 use juancoded_core::worktree;
 use juancoded_persistence::SessionStore;
@@ -670,6 +671,13 @@ impl TrackedPrs {
         if let Some(stalled) =
             stalled_ci_fix_reason(entry.baseline.checks, session_live, !fix_reasons.is_empty())
         {
+            fix_reasons.push(stalled);
+        }
+        if let Some(stalled) = stalled_conflict_fix_reason(
+            entry.baseline.conflicting,
+            session_live,
+            !fix_reasons.is_empty(),
+        ) {
             fix_reasons.push(stalled);
         }
 
