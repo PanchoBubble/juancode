@@ -1222,6 +1222,46 @@ pub async fn rerun_checks(cwd: &str, number: i64, failed_only: bool) -> Result<(
     Ok(())
 }
 
+/// The `gh` arguments that close the PR at `url` and delete its head branch on GitHub,
+/// or None when `url` is not a PR url.
+///
+/// `--repo` is the point: without it gh also deletes the *local* branch, and when that
+/// branch is the one checked out it first switches the checkout to the default branch —
+/// a closed PR would yank an agent's worktree out from under it. With it, only the
+/// remote branch goes.
+pub fn close_pr_args(url: &str) -> Option<Vec<String>> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+    let [host, owner, repo, "pull", number, ..] = parts.as_slice() else {
+        return None;
+    };
+    if host.is_empty() || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    number.parse::<u64>().ok().filter(|n| *n > 0)?;
+    Some(vec![
+        "pr".into(),
+        "close".into(),
+        (*number).into(),
+        "--repo".into(),
+        format!("{host}/{owner}/{repo}"),
+        "--delete-branch".into(),
+    ])
+}
+
+/// Close a PR and delete its branch on GitHub. Always user-initiated, behind a
+/// confirmation.
+pub async fn close_pr(url: &str) -> Result<(), GhError> {
+    let args = close_pr_args(url).ok_or_else(|| GhError(format!("Not a PR url: {url}")))?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `--repo` names the repo, so where gh runs does not matter; a scratch dir keeps it
+    // from reading any checkout's git state at all.
+    let cwd = std::env::temp_dir();
+    gh_write(&cwd.to_string_lossy(), &args).await.map(|_| ())
+}
+
 // ── the writes and the reads the desktop kept for itself ─────────────────────
 //
 // `create_pr`, `pr_diff` and the viewer queue below are the last three `gh` calls the
@@ -1765,6 +1805,29 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_a_pr_names_its_repo_so_the_local_checkout_is_left_alone() {
+        assert_eq!(
+            close_pr_args("https://github.com/acme/widgets/pull/42").unwrap(),
+            [
+                "pr",
+                "close",
+                "42",
+                "--repo",
+                "github.com/acme/widgets",
+                "--delete-branch"
+            ]
+        );
+        assert_eq!(
+            close_pr_args("https://ghe.corp/acme/widgets/pull/7/files").unwrap()[4],
+            "ghe.corp/acme/widgets"
+        );
+        assert_eq!(close_pr_args("https://github.com/acme/widgets/issues/42"), None);
+        assert_eq!(close_pr_args("https://github.com/acme/widgets/pull/x"), None);
+        assert_eq!(close_pr_args("https://github.com/acme/widgets/pull/0"), None);
+        assert_eq!(close_pr_args("42"), None);
+    }
 
     pub(super) fn check(
         status: Option<&str>,

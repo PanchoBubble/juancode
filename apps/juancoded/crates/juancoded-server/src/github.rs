@@ -46,6 +46,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/pr/create", post(create_pr))
         .route("/api/pr/comment", post(comment))
         .route("/api/pr/rerun", post(rerun))
+        .route("/api/pr/close", post(close_pr))
         .route("/api/repo", get(repo))
         .route("/api/pr/conversation", get(conversation))
         .route("/api/pr/timeline", get(timeline))
@@ -469,6 +470,26 @@ async fn rerun(State(_): State<CoreHandles>, Json(body): Json<RerunBody>) -> Res
         return bad_request("a positive PR number required");
     };
     match gh::rerun_checks(&cwd, number, body.failed_only).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClosePrBody {
+    /// The PR's url and not cwd + number: a PR in the viewer queue may live in a repo
+    /// with no checkout here, and the url already names the repo.
+    pub url: Option<String>,
+}
+
+async fn close_pr(State(_): State<CoreHandles>, Json(body): Json<ClosePrBody>) -> Response {
+    let Some(url) = non_empty(body.url) else {
+        return bad_request("url (the PR's GitHub url) required");
+    };
+    if gh::close_pr_args(&url).is_none() {
+        return bad_request("url must be a GitHub pull request url");
+    }
+    match gh::close_pr(&url).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => gh_write_failed(e),
     }

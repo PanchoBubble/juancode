@@ -1119,6 +1119,7 @@ private struct GitHubPrRow: View {
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
     private var selected: Bool { model.github.selectedKey == key }
+    @State private var confirmingClose = false
 
     var body: some View {
         Button {
@@ -1192,7 +1193,11 @@ private struct GitHubPrRow: View {
         .buttonStyle(.plain)
         .background(selected ? Color.accentColor.opacity(0.18) : Color.clear)
         .clickCursor()
-        .contextMenu { GitHubPrActions(pr: pr, cwd: cwd) }
+        .contextMenu {
+            GitHubPrActions(pr: pr, cwd: cwd)
+            ClosePrMenuItem(confirming: $confirmingClose)
+        }
+        .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
     }
 
     /// Review verdict chip. "Review required" is left out: on a repo that requires
@@ -1233,8 +1238,10 @@ private struct GitHubPrRow: View {
 /// needs a working tree: no selection, no detail pane, no tracking (an agent has
 /// nowhere to run). Clicking opens the PR on github.com.
 private struct ViewerPrRow: View {
+    @Environment(AppModel.self) private var model
     let row: ViewerPr
     var reason: PrAttentionReason? = nil
+    @State private var confirmingClose = false
 
     private var pr: PullRequest { row.pr }
 
@@ -1306,7 +1313,9 @@ private struct ViewerPrRow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(pr.url, forType: .string)
             }
+            ClosePrMenuItem(confirming: $confirmingClose)
         }
+        .closePrConfirmation($confirmingClose, pr: pr, cwd: nil, model: model)
     }
 
     private func open() {

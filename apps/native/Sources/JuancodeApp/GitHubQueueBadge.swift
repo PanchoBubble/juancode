@@ -236,6 +236,7 @@ struct GitHubQueueBadge: View {
         let row: ViewerPr
         let reason: PrAttentionReason?
         let onOpen: () -> Void
+        @State private var confirmingClose = false
 
         private var pr: PullRequest { row.pr }
 
@@ -303,7 +304,10 @@ struct GitHubQueueBadge: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(pr.url, forType: .string)
                 }
+                ClosePrMenuItem(confirming: $confirmingClose)
             }
+            .closePrConfirmation($confirmingClose, pr: pr,
+                                 cwd: model.folder(forRepo: row.repo), model: model)
         }
 
         private var helpText: String {

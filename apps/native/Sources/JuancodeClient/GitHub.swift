@@ -291,6 +291,13 @@ public struct GitHubReads: Sendable {
                                        "Could not re-run the checks")
     }
 
+    /// Close a PR and delete its branch on GitHub. By url, because a queue row may be
+    /// in a repo with no checkout here; the core leaves local branches alone.
+    public func closePr(url: String) async throws {
+        let _: OkBody = try await tell("/api/pr/close", ["url": url],
+                                       "Could not close the pull request")
+    }
+
     private struct OkBody: Decodable { let ok: Bool }
 
     /// A read whose failure the caller shows rather than swallows. The thrown message
