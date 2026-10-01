@@ -1823,40 +1823,6 @@ private struct FolderHeader: View {
         model.unreadOrNoticed(sessionIds: group.sessions.map(\.id))
     }
 
-    /// At-risk work rolled up per CHECKOUT, not per session — dozens of sessions
-    /// share one checkout, so counting sessions showed absurd numbers ("97" for
-    /// one dirty branch, juancode-64z). `main` is the repo root's own risk entry
-    /// (uncommitted/unpushed on the folder itself); `worktrees` counts distinct
-    /// at-risk linked worktrees under this repo, including orphaned ones.
-    private var atRiskRoots: (main: WorkAtRisk?, worktrees: Int) {
-        // Memoized normalize: this runs per folder header per render, and
-        // `standardizingPath` is not cheap.
-        let root = model.normalizedPath(group.cwd)
-        // The list scan lives in the model, rebuilt only when the at-risk map
-        // changes; per render this is one dictionary lookup (juancode-6bmw).
-        var rollup = model.workAtRiskRollupByRoot[root] ?? AppModel.AtRiskRollup()
-        // Sessions whose at-risk root isn't tied to this repo root (e.g. a cwd in
-        // a subdirectory the worktree listing doesn't know) still count once.
-        for s in group.sessions {
-            guard let r = model.workAtRisk(forSession: s),
-                  rollup.counted.insert(r.path).inserted else { continue }
-            if r.path == root { rollup.main = r } else { rollup.worktrees += 1 }
-        }
-        return (rollup.main, rollup.worktrees)
-    }
-
-    /// Tooltip for the main-checkout uncommitted badge.
-    private func mainDirtyHelp(_ r: WorkAtRisk) -> String {
-        let branch = r.branch.map { " on \($0)" } ?? ""
-        return "Main checkout: \(r.dirtyFiles) uncommitted file(s)\(branch)"
-    }
-
-    /// Tooltip for the main-checkout unpushed badge.
-    private func mainAheadHelp(_ r: WorkAtRisk) -> String {
-        let branch = r.branch.map { " on \($0)" } ?? ""
-        return "Main checkout: \(r.ahead) unpushed commit(s)\(r.noUpstream ? " (no upstream)" : "")\(branch)"
-    }
-
     /// Own sessions we can close in bulk. Discovered/external sessions aren't ours
     /// to delete (their row only offers "Resume"), so they're excluded.
     private var closableSessions: [SessionMeta] {
@@ -1887,15 +1853,13 @@ private struct FolderHeader: View {
     }
 
     /// Whether the metadata line has any signal. Keeps an idle folder a single line.
-    private func showsMeta(_ risk: (main: WorkAtRisk?, worktrees: Int)) -> Bool {
-        group.running > 0 || unreadCount > 0 || risk.main != nil || risk.worktrees > 0
-            || openIssueCount > 0 || openPrCount > 0
+    private var showsMeta: Bool {
+        group.running > 0 || unreadCount > 0 || openIssueCount > 0 || openPrCount > 0
     }
 
     var body: some View {
         // Two-line layout (juancode-…): name gets its own line so it no longer
         // truncates behind the badge cluster; all counts drop to a second line.
-        let risk = atRiskRoots
         VStack(alignment: .leading, spacing: 5) {
             // Line 1: collapse toggle (chevron + name, full-width clickable) + the
             // per-folder "+" agent menu.
@@ -2062,7 +2026,7 @@ private struct FolderHeader: View {
             }
             // Line 2: quiet metadata cluster — a single 10pt style, semantic color only
             // where it's a signal. Only rendered when something is present.
-            if showsMeta(risk) {
+            if showsMeta {
                 HStack(spacing: 8) {
                     // Current branch on the main checkout — the project-level "where am
                     // I" signal. Leads the line; hidden on a detached HEAD / non-git dir.
@@ -2098,44 +2062,6 @@ private struct FolderHeader: View {
                                 .foregroundStyle(.red)
                         }
                         .help("\(unreadCount) session(s) here with unread activity")
-                    }
-                    // Work-at-risk roll-up per checkout, not per session (juancode-64z):
-                    // the main checkout's uncommitted and unpushed work get separate
-                    // badges (yellow pencil = dirty files, blue arrow.up = unpushed
-                    // commits) so the two states read distinctly instead of summing into
-                    // one ambiguous number; orange warning = how many distinct WORKTREES
-                    // hold at-risk work.
-                    if let main = risk.main {
-                        if main.dirtyFiles > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "pencil.circle.fill")
-                                    .font(.system(size: 9))
-                                Text("\(main.dirtyFiles)")
-                                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                            }
-                            .foregroundStyle(.yellow)
-                            .help(mainDirtyHelp(main))
-                        }
-                        if main.ahead > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.up.circle.fill")
-                                    .font(.system(size: 9))
-                                Text("\(main.ahead)")
-                                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                            }
-                            .foregroundStyle(.blue)
-                            .help(mainAheadHelp(main))
-                        }
-                    }
-                    if risk.worktrees > 0 {
-                        HStack(spacing: 3) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 8))
-                            Text("\(risk.worktrees)")
-                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        }
-                        .foregroundStyle(.orange)
-                        .help("\(risk.worktrees) worktree(s) here with uncommitted or unpushed work")
                     }
                     Spacer(minLength: 0)
                     FolderIssues(cwd: group.cwd)
