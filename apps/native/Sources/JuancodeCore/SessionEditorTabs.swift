@@ -210,12 +210,14 @@ public struct SessionSplitFrames: Equatable, Sendable {
                                       editor: CGRect(x: 0, y: 0, width: w, height: h - inset),
                                       divider: .zero)
         case .sideBySide:
+            // The editor on the left, as in an IDE: code first, the agent beside it.
             let usable = max(0, w - gap)
             let agentW = (usable * f).rounded()
+            let editorW = usable - agentW
             return SessionSplitFrames(
-                agent: CGRect(x: 0, y: 0, width: agentW, height: h),
-                editor: CGRect(x: agentW + gap, y: 0, width: usable - agentW, height: h - inset),
-                divider: CGRect(x: agentW, y: 0, width: gap, height: h - inset))
+                agent: CGRect(x: editorW + gap, y: 0, width: agentW, height: h),
+                editor: CGRect(x: 0, y: 0, width: editorW, height: h - inset),
+                divider: CGRect(x: editorW, y: 0, width: gap, height: h - inset))
         case .stacked:
             let avail = h - inset
             let usable = max(0, avail - gap)

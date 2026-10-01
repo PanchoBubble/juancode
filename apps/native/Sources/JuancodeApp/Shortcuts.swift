@@ -63,7 +63,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .splitEditor: return "Split Editor Beside Agent"
         case .togglePin: return "Pin Session to Top"
         case .oracle: return "Oracle (chat)"
-        case .globalIssues: return "Global Issues"
+        case .globalIssues: return "Oracle Tickets"
         case .focusSessionSearch: return "Find Sessions"
         case .refreshTerminal: return "Refresh Terminal"
         case .toggleChanges: return "Toggle Code Changes"
@@ -301,7 +301,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .togglePin:
         if let id = pinShortcutTarget(model: model, oracle: oracle) { model.togglePinned(id) }
     case .oracle: oracle.toggleChatFocused()
-    case .globalIssues: oracle.open(tab: .issues)
+    case .globalIssues: model.openOracleBeads()
     case .focusSessionSearch: model.focusSessionSearch()
     case .refreshTerminal:
         // Refresh whichever terminal you're looking at: the Oracle chat when the

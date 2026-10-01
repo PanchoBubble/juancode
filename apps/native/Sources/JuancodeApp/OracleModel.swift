@@ -66,7 +66,7 @@ final class OracleModel {
     ///
     /// Everything that disturbs the chat terminal goes through here — the bootstrap's
     /// disk IO (on main), an agent spawn/revive (which repoints the pane, rebuilding
-    /// the surface and replaying scrollback), a rail selection, the issues fetch — so
+    /// the surface and replaying scrollback), a rail selection — so
     /// the drawer animates in over an idle main thread instead of repainting the TUI
     /// under a moving panel. The panel itself is never gated: `expanded` is set by the
     /// caller first, so the dock opens on the keystroke even when the agent is still
@@ -105,12 +105,6 @@ final class OracleModel {
         return Int((now &- started.uptimeNanoseconds) / 1_000_000)
     }
 
-    /// Which dock tab is showing. Defaults to `.chat` so the Oracle conversation is
-    /// the surface the app leads with (juancode-8n0) — chat is the primary window,
-    /// not a transient afterthought.
-    var tab: OracleTab = .chat
-    /// The global bd tracker listing (control-dir cwd), loaded lazily + refreshable.
-    var globalBeads: BeadsResult?
     /// The Oracle agent session currently shown in the chat. You can run several
     /// Oracles in parallel (all live in the control dir); this points at the active
     /// one and the session rail lists them all (see `oracleSessions`).
@@ -138,12 +132,9 @@ final class OracleModel {
     /// Oracles with a resume in flight, so re-tapping a row during the (up to ~5s)
     /// confirmation can't stack a second revive on the same session.
     @ObservationIgnored private var reviving: Set<String> = []
-    @ObservationIgnored private var beadsLoading = false
     /// Last snapshot written to `state.json`, to skip rewriting an unchanged file
     /// every tick (the timestamp is excluded from the comparison).
     private var lastState: OracleState?
-
-    enum OracleTab: String, CaseIterable { case issues = "Issues", chat = "Chat" }
 
     /// The Oracle agent's working directory (its control dir). Sessions in this cwd
     /// are Oracle's own and are hidden from the per-project sidebar.
@@ -169,39 +160,6 @@ final class OracleModel {
         currentOracleProvider(active: oracleSessionId, oracles: oracleSessions)
     }
 
-    /// Count of open global tracker items, for the top-bar Issues badge.
-    var openCount: Int {
-        guard let r = globalBeads, r.available else { return 0 }
-        return r.issues.filter { $0.status != "closed" }.count
-    }
-
-    /// Open the Oracle panel on a specific tab (from the top command bar / shortcuts).
-    /// The agent CLI is spawned here — on open, when the drawer's size is known — not
-    /// at launch, so it boots into the panel's grid rather than the main window's.
-    func open(tab: OracleTab) {
-        // Act as a toggle: invoking the command for the tab that's already showing
-        // collapses the dock, so the top-bar Issues / Oracle buttons (and ⌘⇧I) close
-        // it as well as open it — otherwise the panel only ever opens and feels stuck.
-        if expanded, self.tab == tab {
-            collapse()
-            return
-        }
-        self.tab = tab
-        expanded = true
-        // Opening straight onto the chat should land the cursor in the agent's input
-        // (same as ⌃Space), so the focus handoff into Oracle is deterministic.
-        focusChat()
-        // The panel is already opening; everything that would repaint the terminal
-        // under it waits for the slide (juancode: jumpy Oracle open).
-        afterDockSettles { [weak self] in
-            guard let self else { return }
-            self.bootstrap()
-            self.ensureAgentSession()
-            if tab == .issues { self.loadGlobalBeads() }
-            self.focusChat()
-        }
-    }
-
     /// Toggle the panel (⌃Space). Bootstraps + brings the agent up on open; on close
     /// hands focus back to the open session's terminal.
     func toggle() {
@@ -219,12 +177,11 @@ final class OracleModel {
     /// start typing to Oracle immediately. Toggles closed when the chat is already
     /// showing. Brings the agent up if it isn't running.
     func toggleChatFocused() {
-        if expanded && tab == .chat {
+        if expanded {
             collapse()
             return
         }
         expanded = true
-        tab = .chat
         focusChat()
         afterDockSettles { [weak self] in
             self?.bootstrap()
@@ -250,9 +207,9 @@ final class OracleModel {
     /// path that opens, reveals or re-surfaces the chat routes through here, so an
     /// open dock always types into the agent rather than leaving focus stranded on
     /// whatever control opened it. A no-op unless the chat is actually on screen
-    /// (the issues tab and the rail own their own text fields).
+    /// (the rail owns its own text fields).
     func focusChat() {
-        guard expanded, tab == .chat else { return }
+        guard expanded else { return }
         chatFocusToken += 1
     }
 
@@ -292,12 +249,12 @@ final class OracleModel {
             MainActor.assumeIsolated { self?.focusChat() }
         }
         Task {
-            // Stand up the bd tracker and load the global issue listing. The agent
+            // Stand up the bd tracker and load the global tickets. The agent
             // itself is NOT spawned here — it comes up lazily when the panel is first
             // opened (open()/toggle()), so it boots sized to the drawer rather than at
             // launch when the drawer's size isn't known yet.
             await ensureOracleTracker()
-            loadGlobalBeads()
+            app.loadBeads(controlDir)
         }
     }
 
@@ -307,12 +264,11 @@ final class OracleModel {
     /// session pane you have to toggle Oracle open over. A one-shot (`didAutoPresentChat`)
     /// so it only fires for the first appearance, never re-opening the dock after the
     /// user has deliberately closed it. To revert "chat as main window", drop this call
-    /// from the dock's `.onAppear` (and reset the default `tab` to `.issues`).
+    /// from the dock's `.onAppear`.
     func presentChatAtLaunch() {
         bootstrap()
         guard !didAutoPresentChat else { return }
         didAutoPresentChat = true
-        tab = .chat
         expanded = true
         focusChat()
         afterDockSettles { [weak self] in
@@ -384,7 +340,6 @@ final class OracleModel {
     /// and still land on the CLI you're already working with.
     func newOracle(provider: ProviderId? = nil) {
         guard ready else { bootstrap(); return }
-        tab = .chat
         afterDockSettles { [weak self] in
             guard let self else { return }
             self.spawnAgent(provider: provider ?? self.oracleProvider)
@@ -392,12 +347,11 @@ final class OracleModel {
         }
     }
 
-    /// Expand the dock on the chat tab without `open(tab:)`'s toggle behavior — the
+    /// Expand the dock on the chat without a toggle — the
     /// always-visible session rail's way in (row tap / "+"): opening from the rail
     /// must never collapse an already-open dock. Skips `ensureAgentSession` — rail
     /// entry points always follow up with an explicit select or spawn.
     func reveal() {
-        tab = .chat
         defer { focusChat() }
         guard !expanded else { return }
         expanded = true
@@ -435,11 +389,9 @@ final class OracleModel {
             return
         case let .focus(id), let .adopt(id):
             oracleSessionId = id
-            tab = .chat
             focusChat()
         case let .revive(id):
             oracleSessionId = id
-            tab = .chat
             focusChat()
             reviveOracle(id)
         case .spawnFresh:
@@ -536,7 +488,6 @@ final class OracleModel {
     /// the chat so the exchange is visible on the Mac.
     func receiveAsk(_ text: String) {
         expanded = true
-        tab = .chat
         focusChat()
         afterDockSettles { [weak self] in self?.deliverAsk(text) }
     }
@@ -579,18 +530,6 @@ final class OracleModel {
         return (cols, rows)
     }
 
-    /// Refresh the global bd tracker listing (control-dir cwd). Coalesces calls.
-    func loadGlobalBeads() {
-        guard !beadsLoading else { return }
-        beadsLoading = true
-        let cwd = controlDir
-        Task {
-            let result = await Task.detached(priority: .utility) { await getBeads(cwd) }.value
-            globalBeads = result
-            beadsLoading = false
-        }
-    }
-
     /// Dispatch an agent into a project. Routed through the same mailbox the agent
     /// uses, so UI- and agent-initiated dispatch share one code path; the tail loop
     /// turns it into a real session.
@@ -608,7 +547,6 @@ final class OracleModel {
     /// rather than dispatching it directly. Starts the agent if needed.
     func ask(_ text: String) {
         expanded = true
-        tab = .chat
         focusChat()
         if let s = session {
             s.submit(text) // bracketed paste + separate Enter (see `receiveAsk`)

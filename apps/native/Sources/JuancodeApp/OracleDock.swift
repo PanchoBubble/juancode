@@ -5,8 +5,8 @@ import JuancodeServices
 
 /// The global "Oracle" helper (juancode-wjg / juancode-6sw): a right-docked,
 /// full-height side panel. Chat is the whole surface — the Oracle agent's live
-/// terminal plus the session rail; the global bd issue view (dispatch into a
-/// project / ask Oracle) is reached via a header button rather than a tab bar.
+/// terminal plus the session rail; its tickets open as the "Oracle" project on the
+/// Beads board from a header button.
 /// Opened from the top command bar or ⌃Space; it slides in over the right edge
 /// with a minimum width so the agent CLI always boots into a usable, stable grid
 /// (a fixed drawer avoids the live-reflow fragility of a free-floating panel).
@@ -86,9 +86,8 @@ struct OracleDock: View {
         // An open dock is always focused on its terminal, whatever surfaced it —
         // a keyboard toggle, a rail tap, a remote ask from the sidecar, or the agent
         // session finally coming up after an async spawn. `focusChat` no-ops when the
-        // panel is shut or showing issues, so these are safe blanket hooks.
+        // panel is shut, so these are safe blanket hooks.
         .onChange(of: oracle.expanded) { _, open in if open { oracle.focusChat() } }
-        .onChange(of: oracle.tab) { _, _ in oracle.focusChat() }
         .onChange(of: oracle.oracleSessionId) { _, _ in oracle.focusChat() }
     }
 
@@ -135,43 +134,28 @@ struct OracleDock: View {
         }
     }
 
-    /// One header toolbar: title on the left, then the tab's contextual action(s) and
-    /// the close button on the right — all the same borderless icon-button styling at a
-    /// single level (juancode-cwa). Previously the issues Refresh sat buried in the
-    /// content row while restart/close lived up here, so the controls read as
-    /// misaligned; routing every action through `headerButton` keeps them consistent.
+    /// One header toolbar: title on the left, then the actions and the close button on
+    /// the right, all the same borderless icon-button styling.
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.tint).padding(.leading, 12)
             Text("Oracle").font(.system(size: 13, weight: .semibold))
             Spacer()
-            switch oracle.tab {
-            case .issues:
-                headerButton("arrow.clockwise", help: "Refresh issues") { oracle.loadGlobalBeads() }
-                headerButton("sparkles", help: "Back to chat") {
-                    oracle.tab = .chat
+            headerButton("checklist", help: "Oracle tickets on the Beads board") {
+                model.openOracleBeads()
+            }
+            headerButton(sessionRailShown ? "sidebar.right" : "sidebar.squares.right",
+                         help: sessionRailShown ? "Hide the Oracle session rail" : "Show the Oracle session rail") {
+                sessionRailShown.toggle()
+            }
+            if oracle.session != nil {
+                headerButton("arrow.clockwise", help: "Refresh terminal — rebuild and replay scrollback to fix a corrupted render") {
+                    oracle.refreshChat()
                     oracle.focusChat()
                 }
-            case .chat:
-                // Issues is a header action, not a tab (juancode dock cleanup): chat
-                // owns the panel; this flips the content to the global bd view.
-                headerButton("tray.full", help: "Global issues") {
-                    oracle.tab = .issues
-                    oracle.loadGlobalBeads()
-                }
-                headerButton(sessionRailShown ? "sidebar.right" : "sidebar.squares.right",
-                             help: sessionRailShown ? "Hide the Oracle session rail" : "Show the Oracle session rail") {
-                    sessionRailShown.toggle()
-                }
-                if oracle.session != nil {
-                    headerButton("arrow.clockwise", help: "Refresh terminal — rebuild and replay scrollback to fix a corrupted render") {
-                        oracle.refreshChat()
-                        oracle.focusChat()
-                    }
-                    headerButton("arrow.triangle.2.circlepath", help: "Restart the Oracle agent") {
-                        oracle.restartAgent()
-                        oracle.focusChat()
-                    }
+                headerButton("arrow.triangle.2.circlepath", help: "Restart the Oracle agent") {
+                    oracle.restartAgent()
+                    oracle.focusChat()
                 }
             }
             headerButton("chevron.right", help: "Close (⌃Space)") { oracle.collapse() }
@@ -202,10 +186,7 @@ struct OracleDock: View {
             // one hands off to the other reads as a flicker.
             centered("Starting Oracle…")
         } else {
-            switch oracle.tab {
-            case .issues: OracleIssuesView()
-            case .chat: OracleChatView()
-            }
+            OracleChatView()
         }
     }
 
@@ -217,239 +198,6 @@ struct OracleDock: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-/// The global bd tracker, grouped by actionability via `BeadsGrouping`. Each open
-/// item offers Dispatch… (spawn an agent in a project) and Ask Oracle (hand the
-/// item to the agent to reason about).
-private struct OracleIssuesView: View {
-    @Environment(OracleModel.self) private var oracle
-    @State private var query = ""
-
-    private var result: BeadsResult? { oracle.globalBeads }
-
-    private var groups: [BeadsGroup] {
-        guard let r = result, r.available else { return [] }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let filtered = q.isEmpty ? r.issues
-            : r.issues.filter { "\($0.id) \($0.title)".lowercased().contains(q) }
-        return BeadsGrouping.grouped(filtered, includeClosed: false)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Refresh now lives in the dock header alongside the other controls
-            // (juancode-cwa); this row is just the filter field.
-            TextField("Filter global items…", text: $query)
-                .textFieldStyle(.roundedBorder).font(.system(size: 11))
-                .padding(.horizontal, 12).padding(.vertical, 8)
-            Divider()
-            content
-        }
-    }
-
-    /// Every project's tracker sits above the global board as one row each; a row
-    /// opens that project's board in the app-wide Beads view.
-    private var content: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                OracleProjectsSection()
-                sectionHeader("Global", count: groups.reduce(0) { $0 + $1.issues.count })
-                if result == nil {
-                    note("Loading…")
-                } else if let r = result, !r.available {
-                    note(r.error ?? "No global tracker yet")
-                } else if groups.isEmpty {
-                    note(query.isEmpty ? "No global items yet. Ask Oracle to capture one." : "No matching items")
-                }
-                ForEach(groups, id: \.section) { group in
-                    sectionHeader(group.section.title, count: group.issues.count)
-                    ForEach(group.issues, id: \.id) { issue in
-                        OracleIssueRow(issue: issue)
-                        Divider()
-                    }
-                }
-            }
-            .padding(.bottom, 8)
-        }
-    }
-
-    private func sectionHeader(_ title: String, count: Int) -> some View {
-        HStack {
-            Text(title.uppercased())
-                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-            Text("\(count)").font(.system(size: 10)).foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-    }
-
-    private func note(_ text: String) -> some View {
-        Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-    }
-}
-
-/// The Projects rows at the top of the Oracle's Issues tab: name, open and blocked
-/// counts, live sessions. Clicking one opens its board.
-private struct OracleProjectsSection: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let projects = model.beadsProjects
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("PROJECTS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text("\(projects.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
-                Spacer()
-                Button("All boards") { model.openBeads() }
-                    .buttonStyle(.borderless).font(.system(size: 10.5))
-                    .help("Open the Beads view (⇧⌘B)").clickCursor()
-            }
-            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-            ForEach(projects, id: \.self) { cwd in
-                row(cwd)
-                Divider()
-            }
-        }
-        .onAppear { model.loadAllBeads() }
-    }
-
-    private func row(_ cwd: String) -> some View {
-        let issues = model.beads(cwd)?.issues ?? []
-        let counts = BeadsBoard.counts(issues)
-        let open = counts.values.reduce(0, +)
-        let blocked = counts[.blocked] ?? 0
-        let live = model.liveSessions(inProject: cwd).count
-        return Button { model.openBeads(project: cwd) } label: {
-            HStack(spacing: 6) {
-                Text((cwd as NSString).lastPathComponent).font(.system(size: 12)).lineLimit(1)
-                Spacer(minLength: 4)
-                if live > 0 {
-                    Circle().fill(.green).frame(width: 6, height: 6).help("\(live) live")
-                }
-                if blocked > 0 {
-                    Text("\(blocked) blocked").font(.system(size: 10)).foregroundStyle(.orange)
-                }
-                Text("\(open)").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(cwd)
-        .clickCursor()
-    }
-}
-
-/// One global item: status dot, id/priority, title, and the dispatch / ask actions.
-private struct OracleIssueRow: View {
-    @Environment(OracleModel.self) private var oracle
-    let issue: BeadsIssue
-    @State private var showingDispatch = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 7, height: 7).help(statusLabel)
-                Text("p\(issue.priority)").font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-                Text(issue.id).font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                if issue.blocked {
-                    Text("blocked").font(.system(size: 9)).foregroundStyle(.orange)
-                }
-            }
-            Text(issue.title).font(.system(size: 12)).lineLimit(2).help(issue.title)
-            if !issue.isClosed {
-                HStack(spacing: 12) {
-                    Button("Dispatch…") { showingDispatch = true }
-                        .buttonStyle(.borderless).font(.system(size: 11))
-                        .help("Spawn an agent in a project, seeded with this item")
-                        .popover(isPresented: $showingDispatch, arrowEdge: .bottom) {
-                            OracleDispatchPicker(issue: issue) { showingDispatch = false }
-                        }
-                        .clickCursor()
-                    Button("Ask Oracle") {
-                        oracle.ask(issuePrompt(id: issue.id, title: issue.title))
-                    }
-                    .buttonStyle(.borderless).font(.system(size: 11))
-                    .help("Hand this item to the Oracle agent to reason about / orchestrate")
-                    .clickCursor()
-                    Spacer()
-                }
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-    }
-
-    private var statusColor: Color {
-        if issue.isClosed { return .secondary }
-        if issue.blocked { return .orange }
-        if issue.ready { return .green }
-        return .blue
-    }
-    private var statusLabel: String {
-        if issue.isClosed { return "Closed" }
-        if issue.blocked { return "Blocked" }
-        if issue.ready { return "Ready" }
-        return issue.status
-    }
-}
-
-/// Pick the target project + provider + worktree for dispatching a global item.
-/// Project choices are the work dirs already in play, plus a free-text path.
-private struct OracleDispatchPicker: View {
-    @Environment(OracleModel.self) private var oracle
-    let issue: BeadsIssue
-    let dismiss: () -> Void
-
-    @State private var project = ""
-    /// Seeded from the Oracle in play on appear, matching what a provider-less
-    /// dispatch line from that Oracle would resolve to.
-    @State private var provider: ProviderId = .claude
-    @State private var worktree = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Dispatch \(issue.id)").font(.system(size: 12, weight: .semibold))
-            if !oracle.knownProjects.isEmpty {
-                Picker("Project", selection: $project) {
-                    Text("Choose a project…").tag("")
-                    ForEach(oracle.knownProjects, id: \.self) { p in
-                        Text((p as NSString).lastPathComponent).tag(p)
-                    }
-                }
-                .font(.system(size: 11))
-            }
-            TextField("Project path", text: $project)
-                .textFieldStyle(.roundedBorder).font(.system(size: 11))
-            Picker("Agent", selection: $provider) {
-                ForEach(ProviderId.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-            Toggle("Isolate in a fresh git worktree", isOn: $worktree)
-                .toggleStyle(.checkbox).font(.system(size: 11))
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.controlSize(.small).clickCursor()
-                Button("Dispatch") {
-                    oracle.dispatch(
-                        project: project.trimmingCharacters(in: .whitespaces),
-                        prompt: issuePrompt(id: issue.id, title: issue.title),
-                        provider: provider, worktree: worktree)
-                    dismiss()
-                }
-                .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
-                .disabled(project.trimmingCharacters(in: .whitespaces).isEmpty)
-                .clickCursor()
-            }
-        }
-        .padding(12)
-        .frame(width: 300)
-        .onAppear { provider = oracle.oracleProvider }
     }
 }
 
@@ -794,7 +542,7 @@ struct OracleGlobalRail: View {
             activity: entry.activity,
             unread: model.unreadSessions.contains(meta.id),
             unseenDone: model.unseenCompletions.contains(meta.id),
-            asleep: model.isResting(meta.id),
+            asleep: model.isResting(meta),
             pinned: entry.pinned,
             onTogglePin: { model.togglePinned(meta.id) },
             // Reveal first: tapping a row with the drawer closed slides the chat in

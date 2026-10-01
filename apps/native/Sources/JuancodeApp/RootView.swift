@@ -23,20 +23,18 @@ struct RootView: View {
             // and Worktrees live in the window toolbar — reachable from any session.
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    // Five items, and each one owns a whole family: how much is
+                    // Three items, and each one owns a whole family: how much is
                     // running (with the list, a kill for each, the global pause and
-                    // the core's health behind a click), which agents are waiting on
-                    // your answer, what wants your attention,
-                    // your GitHub queue, and the utilities. Everything else moved —
+                    // the core's health behind a click), what wants your attention,
+                    // and the utilities. The GitHub queue lives under the Oracles in
+                    // the right rail. Everything else moved —
                     // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP
                     // status / AI settings into Tools; Open in Editor into the
                     // session-row hover menu; Tracked Issues into the sidebar;
                     // Appearance into the ⌘, Settings window. The Oracle has the
                     // right-edge rail and ⌃Space, so it does not need a slot here too.
                     RunningSessionsBadge()
-                    WaitingInputBadge()
                     NotificationsBell()
-                    GitHubQueueBadge()
                     ToolsMenu()
                 }
             }
@@ -58,6 +56,8 @@ private struct WindowContent: View {
     @AppStorage("oracle.sessionRail.shown") private var oracleRailShown = true
     /// The rail's width — drag its left edge to adjust; persisted.
     @AppStorage("oracle.sessionRail.width") private var oracleRailWidth: Double = 220
+    /// Height of the PR queue under the Oracles in the rail — drag the divider; persisted.
+    @AppStorage("github.rail.height") private var prRailHeight: Double = 320
 
     var body: some View {
         @Bindable var model = model
@@ -157,9 +157,16 @@ private struct WindowContent: View {
             // garbles the CLIs' TUIs — commit once on release for a single clean reflow.
             DragResizeHandle(axis: .vertical, value: $oracleRailWidth,
                              min: 170, max: 480, invert: true, previewOnly: true)
-            OracleGlobalRail().frame(width: oracleRailWidth)
+            VStack(spacing: 0) {
+                OracleGlobalRail().frame(maxHeight: .infinity)
+                DragResizeHandle(axis: .horizontal, value: $prRailHeight,
+                                 min: 120, max: 900, invert: true)
+                GitHubQueueRail().frame(height: prRailHeight)
+            }
+            .frame(width: oracleRailWidth)
         }
         }
+        .overlay { EditorSpawnOverlay(center: model.editorSpawn) }
         .background(Color.appSurface.ignoresSafeArea())
     }
 }
@@ -1109,7 +1116,7 @@ struct SidebarView: View {
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
                                    live: model.isLive($0.element.id),
-                                   sleepingUndismissed: model.isResting($0.element.id))
+                                   sleepingUndismissed: model.isResting($0.element))
             }
             .map(\.element)
     }
@@ -1771,9 +1778,9 @@ private struct SessionRowHost: View {
                    onTogglePin: external ? nil : { model.togglePinned(meta.id) },
                    selected: selected,
                    activating: model.isActivating(meta.id),
-                   asleep: model.isResting(meta.id),
+                   asleep: model.isResting(meta),
                    dismissed: !external && model.isDismissed(meta.id),
-                   onToggleDismissed: external || !model.isAsleep(meta.id)
+                   onToggleDismissed: external || !model.isAsleep(meta)
                        ? nil : { model.toggleDismissed(meta.id) })
             // Wheel button, browser-tab style — what it closes depends on the row:
             // a live one has its agent stopped (deliberately the menu's "Kill Agent"
@@ -1781,7 +1788,7 @@ private struct SessionRowHost: View {
             // session, its scrollback or its worktree); a sleeping one, which we
             // closed rather than the user, is dismissed into the fold. Inert on an
             // external row, and on a dead one — nothing left to close.
-            .onMiddleClick(enabled: !external && (model.isLive(meta.id) || model.isAsleep(meta.id))) {
+            .onMiddleClick(enabled: !external && (model.isLive(meta.id) || model.isAsleep(meta))) {
                 if model.isLive(meta.id) {
                     model.killSession(meta.id)
                 } else {
@@ -1802,7 +1809,7 @@ private struct FolderHeader: View {
     @State private var showingAgentPicker = false
     @State private var showingProjectMenu = false
     @State private var plusHovering = false
-    @State private var ghHovering = false
+    @State private var beadsHovering = false
     @State private var menuHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
@@ -1839,22 +1846,12 @@ private struct FolderHeader: View {
         SessionUsageFormat.cost(group.sessions.aggregateUsage()?.costUsd)
     }
 
-    /// Open bd issues in this folder — mirrors `FolderIssues`' own filter so we can
-    /// decide whether the second (metadata) line has anything to show.
-    private var openIssueCount: Int {
-        guard let r = model.beads(group.cwd), r.available else { return 0 }
-        return r.issues.filter { $0.status != "closed" }.count
-    }
-
-    /// Open PRs in this folder — mirrors `FolderPrs`, same purpose as above.
-    private var openPrCount: Int {
-        guard let r = model.prs(group.cwd), r.available else { return 0 }
-        return r.prs.count
-    }
+    /// Whether this folder has a bd tracker, so the header offers its board.
+    private var hasBeads: Bool { model.beads(group.cwd)?.available == true }
 
     /// Whether the metadata line has any signal. Keeps an idle folder a single line.
     private var showsMeta: Bool {
-        group.running > 0 || unreadCount > 0 || openIssueCount > 0 || openPrCount > 0
+        group.running > 0 || unreadCount > 0
     }
 
     var body: some View {
@@ -1952,23 +1949,21 @@ private struct FolderHeader: View {
                     .padding(4)
                     .fixesPopoverFirstClick()
                 }
-                // Per-project GitHub view (juancode-4r4): opens the PR view scoped
-                // to this folder, deep-linking to the current branch's PR when
-                // there is one. Only for folders with a git remote.
-                if model.folderGitState(group.cwd)?.remote == true {
-                    Button { model.openGitHubForFolder(group.cwd) } label: {
-                        Image(systemName: "arrow.triangle.pull")
+                // The project's Beads board; PRs live in the global GitHub view.
+                if hasBeads {
+                    Button { model.openBeads(project: group.cwd) } label: {
+                        Image(systemName: "checklist")
                             .font(.system(size: 12, weight: .medium))
                             .frame(width: 22, height: 22)
                             .contentShape(Rectangle())
                             .background(
                                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(Color.appHairline(ghHovering ? 0.14 : 0)))
+                                    .fill(Color.appHairline(beadsHovering ? 0.14 : 0)))
                     }
                     .buttonStyle(.plain)
-                    .help("GitHub PRs for \(group.name) — opens this branch's PR if it has one")
+                    .help("Beads board for \(group.name)")
                     .clickCursor()
-                    .onHover { ghHovering = $0 }
+                    .onHover { beadsHovering = $0 }
                 }
                 // Per-project overflow menu. A popover of plain buttons for the same
                 // reason the agent picker is one: native Menu rows get neither the
@@ -2064,8 +2059,6 @@ private struct FolderHeader: View {
                         .help("\(unreadCount) session(s) here with unread activity")
                     }
                     Spacer(minLength: 0)
-                    FolderIssues(cwd: group.cwd)
-                    FolderPrs(cwd: group.cwd)
                 }
                 .padding(.leading, 15) // align under the name, past the chevron
             }
@@ -2105,10 +2098,6 @@ private struct FolderHeader: View {
             }
             Button("Remove project") { model.hideProject(group.cwd) }
         }
-        // No `loadPrs` here: PRs are fetched when you ask for them (the PRs button,
-        // or a folder section scrolling into view in the GitHub tab). Every project
-        // row firing three `gh` round trips on appear was the sidebar's biggest
-        // startup cost, and it bought only a count in a button label.
         .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 }
@@ -2119,292 +2108,22 @@ func prPrompt(_ pr: PullRequest) -> String {
     "Please help me work on pull request #\(pr.number) \"\(pr.title)\" (branch \(pr.branch)): \(pr.url) — start by reviewing the PR and its diff."
 }
 
-/// Per-folder open-PR badge + popover. Renders nothing unless the folder is a
-/// GitHub repo with at least one open PR, so it stays invisible unless useful.
-/// Mirrors the web `FolderPrs`: list with rolled-up CI status, free-text search,
-/// "Mine" (author) and "Assigned to me" (assignee) filters, and per-PR
-/// Open / Work on / Track actions.
-private struct FolderPrs: View {
-    @Environment(AppModel.self) private var model
-    let cwd: String
-    @State private var showing = false
-    @State private var query = ""
-    @State private var mineOnly = false
-    @State private var assignedOnly = false
-
-    private var result: PrListResult? { model.prs(cwd) }
-    private var all: [PullRequest] {
-        guard let r = result, r.available else { return [] }
-        return r.prs
-    }
-    private var viewer: String { result?.viewer ?? "" }
-    private var mineCount: Int {
-        viewer.isEmpty ? 0 : all.filter { $0.author == viewer }.count
-    }
-    private var assignedCount: Int {
-        viewer.isEmpty ? 0 : all.filter { $0.assignees.contains(viewer) }.count
-    }
-    /// Offer the viewer-scoped filters only when we know who the viewer is.
-    private var canFilterViewer: Bool { !viewer.isEmpty && all.count > 1 }
-
-    private var list: [PullRequest] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return all.filter { pr in
-            if mineOnly && canFilterViewer && pr.author != viewer { return false }
-            if assignedOnly && canFilterViewer && !pr.assignees.contains(viewer) { return false }
-            if !q.isEmpty {
-                let hay = "#\(pr.number) \(pr.title) \(pr.branch)".lowercased()
-                if !hay.contains(q) { return false }
-            }
-            return true
-        }
-    }
-
-    /// Whether this folder's PRs have been fetched at least once. Until then the
-    /// button carries no count — showing one would mean shelling out to `gh` for
-    /// every project in the sidebar just to render a number nobody asked for.
-    private var loaded: Bool { result != nil }
-    /// The folder isn't a GitHub repo / `gh` can't reach it — established only after
-    /// a real attempt, and then the button retires itself rather than staying as a
-    /// button that always errors.
-    private var unavailable: Bool { result?.available == false }
-
-    var body: some View {
-        if unavailable || (loaded && all.isEmpty) {
-            EmptyView()
-        } else {
-            Button {
-                if !showing {
-                    model.loadPrs(cwd)
-                    // Reopening with a filter still active: re-run the scoped query
-                    // since loadPrs resets the cache to the firehose top-50.
-                    model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: query)
-                }
-                showing.toggle()
-            } label: {
-                Text(loaded ? "\(all.count) PR\(all.count == 1 ? "" : "s")" : "PRs")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .buttonStyle(.borderless)
-            .help(loaded ? "\(all.count) open pull request\(all.count == 1 ? "" : "s")"
-                         : "Open pull requests (loads on click)")
-            .popover(isPresented: $showing, arrowEdge: .bottom) {
-                popover
-            }
-            .clickCursor()
-        }
-    }
-
-    /// Fixed popover height: the header plus room for ~8 rows of list.
-    private static let popoverHeight: CGFloat = 360
-
-    private var popover: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Search + viewer filters.
-            HStack(spacing: 6) {
-                TextField("Filter PRs…", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11))
-                if canFilterViewer {
-                    Toggle("Mine (\(mineCount))", isOn: $mineOnly)
-                        .toggleStyle(.button)
-                        .controlSize(.small)
-                        .font(.system(size: 10))
-                        .clickCursor()
-                    Toggle("Assigned (\(assignedCount))", isOn: $assignedOnly)
-                        .toggleStyle(.button)
-                        .controlSize(.small)
-                        .font(.system(size: 10))
-                        .clickCursor()
-                }
-            }
-            .padding(8)
-            Divider()
-            // Every state fills the same fixed-height body. An intrinsically sized
-            // popover can only ever shrink: NSPopover sizes itself once, and a
-            // ScrollView accepts whatever height it is left with, so a filter that
-            // empties the list shrinks the window and the list coming back never
-            // grows it again (only a close/reopen did).
-            Group {
-                if !loaded {
-                    // First open of this folder's PRs: the `gh` call starts on the
-                    // click that opened this popover.
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Loading pull requests…")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                } else if unavailable {
-                    Text(result?.error ?? "PRs unavailable")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
-                } else if list.isEmpty {
-                    Text(query.isEmpty && !mineOnly && !assignedOnly ? "No open PRs" : "No matching PRs")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(list, id: \.number) { pr in
-                                PrRow(pr: pr, cwd: cwd) { showing = false }
-                                Divider()
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(width: 320, height: Self.popoverHeight)
-        // Instant filtering happens over the cached set above; these fire a
-        // debounced, repo-scoped `gh` re-query in the background so matches beyond
-        // the newest-50 firehose (e.g. your own older PRs) fold into the view.
-        .onChange(of: query) { _, q in
-            model.backfillPrs(cwd, mine: mineOnly, assigned: assignedOnly, query: q)
-        }
-        .onChange(of: mineOnly) { _, m in
-            model.backfillPrs(cwd, mine: m, assigned: assignedOnly, query: query)
-        }
-        .onChange(of: assignedOnly) { _, a in
-            model.backfillPrs(cwd, mine: mineOnly, assigned: a, query: query)
-        }
-    }
-}
-
-/// One PR in the popover: CI-status dot, title, draft badge, and the
-/// Open / Work on / Track actions.
-private struct PrRow: View {
-    @Environment(AppModel.self) private var model
-    let pr: PullRequest
-    let cwd: String
-    /// Called to dismiss the popover after an action that navigates away.
-    let dismiss: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(checkColor).frame(width: 7, height: 7).help(checkLabel)
-                Text("#\(pr.number)").font(.system(size: 11)).foregroundStyle(.secondary)
-                Text(pr.title).font(.system(size: 12)).lineLimit(1).help(pr.title)
-                if pr.draft {
-                    Text("draft")
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.2))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                }
-                Spacer(minLength: 4)
-                // Checks as an icon + passed/total fraction (coloured by rollup
-                // status), and, when any, the number of unresolved review threads.
-                // Hover for the full passing/failing wording.
-                HStack(spacing: 3) {
-                    Image(systemName: checkIcon).font(.system(size: 9))
-                    Text(checksText).font(.system(size: 10).monospacedDigit())
-                }
-                .foregroundStyle(checkColor)
-                .help(checkLabel)
-                if pr.unresolvedComments > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "bubble.left.fill").font(.system(size: 8))
-                        Text("\(pr.unresolvedComments)").font(.system(size: 10))
-                    }
-                    .foregroundStyle(.orange)
-                    .help("\(pr.unresolvedComments) unresolved comment\(pr.unresolvedComments == 1 ? "" : "s")")
-                }
-            }
-            HStack(spacing: 12) {
-                Button("Open ↗") {
-                    if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .clickCursor()
-                Button("Work on") {
-                    dismiss()
-                    model.workOnPr(pr, cwd: cwd)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .clickCursor()
-                // Track (juancode-it5): hand the PR to a dedicated agent session that
-                // watches for new review comments / CI status and auto-fixes the
-                // obvious ones, escalating real decisions back here.
-                if let t = tracked {
-                    TrackBadge(state: t.state)
-                    Button("Untrack") { model.untrackPr(t.id) }
-                        .disabled(!model.supports(.trackedPrs))
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 11))
-                        .help("Stop watching this PR (keeps the session)")
-                        .clickCursor()
-                } else {
-                    Button("Track") { model.trackPr(pr, cwd: cwd) }
-                        .disabled(!model.supports(.trackedPrs))
-                        .help(model.unavailable(.trackedPrs) ?? "Track this PR: an agent watches it and answers review comments")
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 11))
-                        .help("Watch this PR — auto-fix review comments & CI, escalate decisions")
-                        .clickCursor()
-                }
-                Spacer()
-            }
-            .padding(.leading, 13)
-            // Decisions the tracker won't make on its own — surfaced for the user.
-            if let t = tracked, !t.notifications.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(t.notifications) { note in
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9)).foregroundStyle(.orange)
-                            Text(note.message).font(.system(size: 10)).foregroundStyle(.primary)
-                            Spacer(minLength: 4)
-                            Button("Open") {
-                                dismiss()
-                                model.selection = t.sessionId
-                            }
-                            .buttonStyle(.borderless).font(.system(size: 9))
-                            .clickCursor()
-                            Button("Dismiss") {
-                                model.resolveNotification(prId: t.id, notificationId: note.id)
-                            }
-                            .buttonStyle(.borderless).font(.system(size: 9))
-                            .clickCursor()
-                        }
-                    }
-                }
-                .padding(.leading, 13)
-                .padding(.top, 2)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-    }
-
-    private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
-
-    private var checkColor: Color { pr.checks.color }
-
-    private var checkIcon: String { pr.checks.icon }
-
-    private var checksText: String { pr.checksText }
-
-    private var checkLabel: String {
-        guard pr.checkCount > 0 else { return "No checks" }
-        let base: String
-        switch pr.checks {
-        case .passing: base = "All checks passing"
-        case .failing: base = "Checks failing"
-        case .pending: base = "Checks running"
-        case .none: base = "No checks"
-        }
-        return "\(base) — \(pr.passedCount)/\(pr.checkCount) passed"
-    }
-}
-
 /// A small pill showing what a tracked PR is currently doing.
 struct TrackBadge: View {
     let state: TrackState
+    /// Just a tinted eye, for rows with no room for the word.
+    var compact = false
     var body: some View {
+        if compact {
+            Image(systemName: "eye.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(state == .watching ? Color.teal : color)
+                .help(help)
+        } else {
+            pill
+        }
+    }
+    private var pill: some View {
         Text(label)
             .font(.system(size: 9, weight: .medium))
             .padding(.horizontal, 5).padding(.vertical, 1)
@@ -2428,157 +2147,13 @@ struct TrackBadge: View {
         }
     }
     private var help: String {
+        let base: String
         switch state {
-        case .watching: return "Tracking — CI green, watching for new activity"
-        case .fixing: return "Tracking — CI is running/failing; the agent is on it"
-        case .needsDecision: return "Tracking — a change needs your decision"
+        case .watching: base = "Tracking — CI green, watching for new activity"
+        case .fixing: base = "Tracking — CI is running/failing; the agent is on it"
+        case .needsDecision: base = "Tracking — a change needs your decision"
         }
-    }
-}
-
-/// Per-folder bd-issue badge + popover (juancode-sfh). Renders nothing unless the
-/// folder has a beads tracker with at least one issue, so it stays invisible
-/// otherwise. Mirrors `FolderPrs`: a count badge opening a searchable list with a
-/// "Ready" filter and a per-issue "Work on" action that injects the issue's
-/// context into the folder's focused session.
-private struct FolderIssues: View {
-    @Environment(AppModel.self) private var model
-    let cwd: String
-    @State private var showing = false
-    @State private var query = ""
-    @State private var readyOnly = false
-
-    private var result: BeadsResult? { model.beads(cwd) }
-    private var all: [BeadsIssue] {
-        guard let r = result, r.available else { return [] }
-        // Open work only — closed issues aren't actionable to "work on".
-        return r.issues.filter { $0.status != "closed" }
-    }
-    private var readyCount: Int { all.filter { $0.ready }.count }
-    /// Offer the Ready filter only when it would change the list.
-    private var canFilterReady: Bool { readyCount > 0 && readyCount < all.count }
-
-    private var list: [BeadsIssue] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return all.filter { issue in
-            if readyOnly && canFilterReady && !issue.ready { return false }
-            if !q.isEmpty {
-                let hay = "\(issue.id) \(issue.title)".lowercased()
-                if !hay.contains(q) { return false }
-            }
-            return true
-        }
-    }
-
-    var body: some View {
-        if all.isEmpty {
-            EmptyView()
-        } else {
-            Button {
-                showing.toggle()
-            } label: {
-                Text("\(all.count) issue\(all.count == 1 ? "" : "s")")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .buttonStyle(.borderless)
-            .help("\(all.count) open bd issue\(all.count == 1 ? "" : "s")")
-            .popover(isPresented: $showing, arrowEdge: .bottom) {
-                popover
-            }
-            .clickCursor()
-        }
-    }
-
-    private var popover: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                TextField("Filter issues…", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11))
-                if canFilterReady {
-                    Toggle("Ready (\(readyCount))", isOn: $readyOnly)
-                        .toggleStyle(.button)
-                        .controlSize(.small)
-                        .font(.system(size: 10))
-                        .clickCursor()
-                }
-            }
-            .padding(8)
-            Divider()
-            if list.isEmpty {
-                Text(query.isEmpty && !readyOnly ? "No open issues" : "No matching issues")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(list, id: \.id) { issue in
-                            IssueRow(issue: issue, cwd: cwd) { showing = false }
-                            Divider()
-                        }
-                    }
-                }
-                .frame(maxHeight: 320)
-            }
-        }
-        .frame(width: 320)
-    }
-}
-
-/// One bd issue in the popover: status dot, id, title, and a "Work on" action
-/// that injects the issue's context into the folder's focused agent session.
-private struct IssueRow: View {
-    @Environment(AppModel.self) private var model
-    let issue: BeadsIssue
-    let cwd: String
-    /// Called to dismiss the popover after an action that navigates away.
-    let dismiss: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 7, height: 7).help(statusLabel)
-                Text(issue.id).font(.system(size: 11)).foregroundStyle(.secondary)
-                Text(issue.title).font(.system(size: 12)).lineLimit(1).help(issue.title)
-                if issue.blocked {
-                    Text("blocked")
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(Color.orange.opacity(0.2))
-                        .foregroundStyle(.orange)
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                }
-                Spacer(minLength: 4)
-                Text("p\(issue.priority)").font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 12) {
-                Button("Work on") {
-                    dismiss()
-                    model.workOnIssue(issue, cwd: cwd)
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .help("Inject this issue's context into the focused session (starts one if none)")
-                .clickCursor()
-                Spacer()
-            }
-            .padding(.leading, 13)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-    }
-
-    private var statusColor: Color {
-        if issue.blocked { return .orange }
-        if issue.ready { return .green }
-        return .secondary
-    }
-    private var statusLabel: String {
-        if issue.blocked { return "Blocked" }
-        if issue.ready { return "Ready" }
-        return issue.status
+        return compact ? base + ". Click to open its session." : base
     }
 }
 
@@ -3128,6 +2703,23 @@ struct SessionContainer: View {
         nonmutating set { tabRaw = newValue.rawValue }
     }
 
+    /// Which project a prompt typed here lands in: the repo's name over the
+    /// session's actual cwd (the worktree path, for a worktree session).
+    private var projectHeader: some View {
+        let name = (model.repoRoot(forSession: meta) as NSString).lastPathComponent
+        let path = (meta.cwd as NSString).abbreviatingWithTildeInPath
+        return VStack(spacing: 1) {
+            Text(name)
+                .font(.callout.weight(.semibold))
+            Text(path)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .truncationMode(.middle)
+        }
+        .lineLimit(1)
+        .frame(maxWidth: max(model.windowWidth * 0.3, 200))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -3201,13 +2793,17 @@ struct SessionContainer: View {
                 .clickCursor()
             }
             .padding(8)
+            // An overlay, not an HStack member, so it stays centred on the pane no
+            // matter how wide the tab strip or the button cluster get.
+            .overlay { projectHeader.allowsHitTesting(false) }
             Divider()
             GeometryReader { geo in
             let frames = splitFrames(geo.size)
             ZStack(alignment: .topLeading) {
-                // The agent always sits at the pane's top-left; a split only narrows
-                // (or shortens) it, so its view identity, and with it the live surface,
-                // never changes when a split opens or closes: one reflow, not a remount.
+                // A split only narrows (or shortens) the agent and, side by side, slides
+                // it right of the editor, so its view identity, and with it the live
+                // surface, never changes when a split opens or closes: one reflow, not a
+                // remount.
                 terminal
                     .frame(width: frames.agent.width, height: frames.agent.height)
                     // Focus rim flash on teleport landings (juancode-vz1): belongs to
@@ -3238,6 +2834,7 @@ struct SessionContainer: View {
                     // Stacked, the agent already sits above the panel (translating the
                     // top pane would push it out of sight), so only the other layouts move.
                     .offset(y: model.bottomTerminalShown && splitAxis != .stacked ? -CGFloat(bottomHeight) : 0)
+                    .padding(.leading, frames.agent.minX)
 
                 // In-place editor tabs, above the agent pane and its overlays, or beside
                 // it in a split. Unlike the agent this one is resized (not translated) by
@@ -3247,6 +2844,17 @@ struct SessionContainer: View {
                     .frame(width: frames.editor.width, height: frames.editor.height)
                     .padding(.leading, frames.editor.minX)
                     .padding(.top, frames.editor.minY)
+
+                // Where a file opened from the Diff rail flies to. A stand-in rather than
+                // the panes themselves, which are empty until the first editor opens.
+                Color.clear
+                    .frame(width: frames.editor.width, height: frames.editor.height)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rect in
+                        if model.selection == meta.id { model.editorSpawn.target = rect }
+                    }
+                    .padding(.leading, frames.editor.minX)
+                    .padding(.top, frames.editor.minY)
+                    .allowsHitTesting(false)
 
                 if let axis = splitAxis {
                     splitDivider(axis: axis, frames: frames, size: geo.size)
@@ -3494,7 +3102,9 @@ struct SessionContainer: View {
         let handle = DragResizeHandle(axis: axis == .sideBySide ? .vertical : .horizontal,
                                       value: extent,
                                       min: usable * range.lowerBound, max: usable * range.upperBound,
-                                      invert: false, previewOnly: true)
+                                      // Side by side the agent is right of the bar, so
+                                      // dragging right shrinks it.
+                                      invert: axis == .sideBySide, previewOnly: true)
         let hit: CGFloat = 14
         return Group {
             if axis == .sideBySide {

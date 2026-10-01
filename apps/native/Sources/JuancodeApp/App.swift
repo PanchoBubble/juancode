@@ -489,7 +489,7 @@ struct JuancodeApp: App {
                     performShortcut(.oracle, model: model, oracle: oracle)
                 }
                 .appShortcut(.oracle, shortcuts)
-                Button("Global Issues") {
+                Button("Oracle Tickets") {
                     performShortcut(.globalIssues, model: model, oracle: oracle)
                 }
                 .appShortcut(.globalIssues, shortcuts)

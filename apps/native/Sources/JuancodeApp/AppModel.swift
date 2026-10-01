@@ -399,6 +399,8 @@ final class AppModel {
     @ObservationIgnored private var editorPtys: [String: EphemeralPty] = [:]
     /// Bumped to pull the keyboard into the visible in-place editor.
     var editorFocusToken = 0
+    /// The Diff rail's open-from-the-row flourish (`EditorSpawnOverlay`).
+    let editorSpawn = EditorSpawnCenter()
     /// Each project's remembered agent | editor split, persisted as JSON.
     var paneLayouts = ProjectPaneLayouts.decode(UserDefaults.standard.data(forKey: AppModel.paneLayoutsKey)) {
         didSet { UserDefaults.standard.set(paneLayouts.encoded(), forKey: AppModel.paneLayoutsKey) }
@@ -588,9 +590,13 @@ final class AppModel {
     /// spinner → live within seconds, and a moon there would just be a flicker that
     /// says the wrong thing. Excluding the boot orphans leaves the moon meaning
     /// exactly one thing: auto-slept to free memory, open it to carry on.
-    func isAsleep(_ id: String) -> Bool {
-        guard !isLive(id), !isCrashOrphan(id), !lapsedSleeps.contains(id) else { return false }
-        return sessions.first(where: { $0.id == id })?.dormant ?? false
+    ///
+    /// Takes the meta, not an id: the sidebar asks this of every row on every
+    /// render, and an id lookup scanning `sessions` made that quadratic.
+    func isAsleep(_ meta: SessionMeta) -> Bool {
+        guard meta.dormant, !isLive(meta.id), !isCrashOrphan(meta.id),
+              !lapsedSleeps.contains(meta.id) else { return false }
+        return true
     }
 
     /// Whether `id` is asleep *and* still resting in place: the moon glyph, the
@@ -604,7 +610,7 @@ final class AppModel {
     ///   `isAsleep` fact (what gates that affordance) is a separate question;
     /// - a day has passed since it was slept (`SleepLapse`): a moon still burning on
     ///   yesterday's session crowds out the ones that really are open.
-    func isResting(_ id: String) -> Bool { isAsleep(id) && !isDismissed(id) }
+    func isResting(_ meta: SessionMeta) -> Bool { isAsleep(meta) && !isDismissed(meta.id) }
 
     /// Auto-slept sessions whose day has run out (`SleepLapse`) — they render and sort
     /// as plain exited rows from here on. Recomputed on the coarse health tick rather
@@ -1941,7 +1947,12 @@ final class AppModel {
     /// when one is given (`retargetSessionEditor`). Selects the session so a row's
     /// menu lands on its pane. No-op for an unknown session or one that is itself a
     /// legacy editor session.
-    func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil) {
+    ///
+    /// `root` overrides the directory the editor is rooted in (and `file` is
+    /// confined to) — the rail's Diff tab opens the main checkout's files beside a
+    /// session that may be standing in a worktree.
+    func openEditorSession(_ sessionId: String, file: String? = nil, line: Int? = nil,
+                           root: String? = nil) {
         if let reason = unavailable(.editor) {
             errorMessage = "Can't open an editor. \(reason)"
             return
@@ -1949,16 +1960,17 @@ final class AppModel {
         guard let parent = core.liveSession(sessionId)?.meta
                 ?? sessions.first(where: { $0.id == sessionId }),
               parent.kind != .editor else { return }
+        let base = root ?? parent.effectiveCwd
         if selection != sessionId { selection = sessionId }
         if editorTabs.hasEditor(sessionId) {
-            if let file { retargetSessionEditor(sessionId, root: parent.effectiveCwd, file: file, line: line) }
+            if let file { retargetSessionEditor(sessionId, root: base, file: file, line: line) }
             showSessionTab(.editor, for: sessionId)
             return
         }
         let grid = TerminalGrid.spawn
         let pty: EphemeralPty
         do {
-            pty = try core.openEditorPty(cwd: parent.effectiveCwd, file: file ?? ".", line: line,
+            pty = try core.openEditorPty(cwd: base, file: file ?? ".", line: line,
                                          cols: grid.cols, rows: grid.rows)
         } catch EphemeralPtyError.outsideWorkingDir {
             errorMessage = "Couldn't open the editor: the file is outside the session's working directory."
@@ -2961,6 +2973,36 @@ final class AppModel {
                 pr, cwd: cwd, cols: grid.cols, rows: grid.rows) else { return }
             selection = entry.sessionId
             focusTerminal()
+        }
+    }
+
+    /// Land on the agent session watching `t`. Its folder is unhidden first, or the
+    /// selection would point at a row nobody can see; a session the store no longer
+    /// has (reaped, or deleted by hand) says so instead of selecting nothing.
+    func openTrackingSession(_ t: TrackedPr) {
+        guard let meta = sessions.first(where: { $0.id == t.sessionId }) else {
+            errorMessage = "PR #\(t.number)'s tracking session is gone. Untrack and track it again to start a new one."
+            return
+        }
+        unhideProject(meta.cwd)
+        unhideProject(projectCwd(for: meta.cwd))
+        revealSession(meta.id)
+        focusTerminal()
+    }
+
+    /// Track several PRs of one checkout at once — the queue's per-repo Track all.
+    /// Unlike `trackPr` it leaves the selection alone: jumping to each spawned agent
+    /// in turn would just flicker through them.
+    func trackPrs(_ prs: [PullRequest], cwd: String) {
+        if let reason = unavailable(.trackedPrs) {
+            errorMessage = "Can't track PRs. \(reason)"
+            return
+        }
+        let grid = TerminalGrid.spawn
+        Task {
+            for pr in prs where trackedPr(cwd: cwd, number: pr.number) == nil {
+                _ = await core.trackPr(pr, cwd: cwd, cols: grid.cols, rows: grid.rows)
+            }
         }
     }
 

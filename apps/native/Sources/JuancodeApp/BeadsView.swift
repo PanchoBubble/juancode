@@ -1,6 +1,7 @@
 import SwiftUI
 import JuancodeCore
 import JuancodeDesktop
+import JuancodeServices
 
 /// The app-wide Beads view: every project's bd tracker as a grid, one project as a
 /// Jira-style board (status tiles, live sessions, filters, a column per status),
@@ -62,13 +63,23 @@ extension AppModel {
         if !beadsBoard.back() { showingBeads = false }
     }
 
+    /// Every tracker the board can show: the Oracle's global one first, then each
+    /// project's.
+    var beadsTrackers: [String] { [OraclePaths.controlDir] + trackableFolders }
+
     /// Projects whose tracker has loaded; the rest appear as their load lands.
     var beadsProjects: [String] {
-        trackableFolders.filter { beads($0)?.available == true }
+        beadsTrackers.filter { beads($0)?.available == true }
     }
 
     func loadAllBeads() {
-        for cwd in trackableFolders where beads(cwd) == nil { loadBeads(cwd) }
+        for cwd in beadsTrackers where beads(cwd) == nil { loadBeads(cwd) }
+    }
+
+    /// The Oracle's global tracker on its board, loading it if it isn't yet.
+    func openOracleBeads() {
+        loadBeads(OraclePaths.controlDir)
+        openBeads(project: OraclePaths.controlDir)
     }
 
     /// Sessions with a live pty in `cwd` or any of its worktrees.
@@ -138,7 +149,7 @@ struct BeadsView: View {
 
     private func refresh(_ board: BeadsBoardModel) {
         guard let cwd = board.project else {
-            for cwd in model.trackableFolders { model.loadBeads(cwd) }
+            for cwd in model.beadsTrackers { model.loadBeads(cwd) }
             return
         }
         model.loadBeads(cwd)
@@ -147,7 +158,9 @@ struct BeadsView: View {
     }
 }
 
-private func projectName(_ cwd: String) -> String { (cwd as NSString).lastPathComponent }
+private func projectName(_ cwd: String) -> String {
+    cwd == OraclePaths.controlDir ? "Oracle" : (cwd as NSString).lastPathComponent
+}
 
 private extension BeadsColumn {
     var tint: Color {
@@ -208,7 +221,7 @@ private struct BeadsProjectsGrid: View {
         Group {
             if projects.isEmpty {
                 ContentUnavailableView(
-                    model.trackableFolders.contains { model.beads($0) == nil } ? "Loading trackers…" : "No trackers",
+                    model.beadsTrackers.contains { model.beads($0) == nil } ? "Loading trackers…" : "No trackers",
                     systemImage: "checklist",
                     description: Text("Projects with a .beads tracker show up here once a session runs in them."))
             } else {

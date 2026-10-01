@@ -174,11 +174,11 @@ import Testing
         #expect(f.editor == CGRect(x: 0, y: 0, width: 1008, height: 400))
     }
 
-    @Test func sideBySideSharesTheWidthAroundTheGap() {
+    @Test func sideBySidePutsTheEditorLeftOfTheAgent() {
         let f = SessionSplitFrames.layout(size: size, axis: .sideBySide, fraction: 0.25, bottomInset: 0)
-        #expect(f.agent == CGRect(x: 0, y: 0, width: 250, height: 600))
-        #expect(f.divider == CGRect(x: 250, y: 0, width: 8, height: 600))
-        #expect(f.editor == CGRect(x: 258, y: 0, width: 750, height: 600))
+        #expect(f.editor == CGRect(x: 0, y: 0, width: 750, height: 600))
+        #expect(f.divider == CGRect(x: 750, y: 0, width: 8, height: 600))
+        #expect(f.agent == CGRect(x: 758, y: 0, width: 250, height: 600))
     }
 
     @Test func stackedSharesOnlyTheHeightAboveTheShellPanel() {
