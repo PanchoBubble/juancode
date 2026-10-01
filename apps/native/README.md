@@ -337,6 +337,32 @@ JUANCODE_ORACLE_DIR=…    scripts/dev-app.sh   # relocate the Oracle control di
 scripts/dev-app.sh --print-bin               # build + assemble, print the inner binary path, don't exec
 ```
 
+### Rebuild and relaunch on save (`pnpm dev:app`)
+
+```sh
+pnpm dev:app                          # from the repo root, in a normal terminal
+JUANCODE_CONFIG=release pnpm dev:app  # same, optimized (incremental, no WMO)
+```
+
+Watches `Sources/**` and `Package.swift` (FSEvents via node's recursive `fs.watch`,
+no fswatch needed), debounces saves by 1s, and rebuilds with `dev-app.sh --print-bin`.
+A successful build quits the app this loop launched (SIGTERM by pid, SIGKILL after
+10s) and starts the new bundle as a child of your terminal, so it keeps your env just
+like `dev-app.sh`. A failed build prints the `error:` lines and leaves the running app
+alone. Saves that land mid-build fold into one follow-up build.
+
+- **It never touches the daemon.** The build runs with `JUANCODE_DAEMON=off`, so
+  `juancoded.sh ensure` is skipped: nothing is built, started, claimed or reaped. The
+  app adopts whatever daemon is running (normally launchd's), so sessions survive
+  every relaunch. If nothing answers on `:4290` it warns and carries on.
+- **Quit the running juancode first.** It refuses to start while another instance is
+  up, since it only stops apps it launched and two would fight over `:4280`. Run it
+  outside juancode: quitting the app ends any terminal hosted inside it.
+- **Ctrl-C leaves nothing behind.** `scripts/watch-app.sh` holds a
+  `kill 0` trap over the watcher, the build and the app.
+- Test seams: `JUANCODE_APP_BIN` (a stand-in app, as for `dev-app.sh`) and
+  `JUANCODE_WATCH_BUILD` (a stand-in build command whose last stdout line is the binary).
+
 ### Starting the Rust daemon
 
 Everything about the daemon is reachable from the repo root, and nothing needs `cargo
