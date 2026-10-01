@@ -86,13 +86,35 @@
 #     WARNED about, on every launch, and left running. Restarting it is a human
 #     command (`juancoded-agent.sh restart`) that counts the ptys first.
 #
+# THE LIVE UPGRADE: A NEW BUILD WITHOUT ENDING A SESSION
+#
+# `upgrade` builds, then asks the running daemon to exec the new binary IN PLACE
+# (`juancoded upgrade` -> SIGUSR2; crates/juancoded-server/src/reexec.rs). Same pid, so
+# the ownership record, launchd's supervision and every child pty stay exactly as they
+# were; the new image adopts the ptys and writes a fresh run file stamped with the new
+# JUANCODE_BUILD_ID, so the app's core badge stops saying stale. The daemon probes the
+# new binary before handing anything over, and an upgrade it refuses leaves it serving
+# on the old code with every session intact.
+#
+# Two limits, both stated rather than discovered:
+#   * it changes the CODE, not the environment. The new image inherits the old one's
+#     env verbatim (that is env fidelity); a changed JUANCODE_* still needs a restart.
+#   * a daemon that predates the listener does not advertise `upgrade=sigusr2` in its
+#     run file, and to it SIGUSR2 is a kill. That one is refused, never signalled: it
+#     takes one ordinary restart, after which every upgrade keeps the sessions.
+#
+# `restart` takes this path on its own when the daemon has live sessions and can be
+# upgraded. JUANCODE_RESTART_HARD=1 forces the old stop-then-start.
+#
 # Usage:
 #   juancoded.sh ensure [token]  # build, then start (owned by `token`) or report foreign
 #   juancoded.sh persist         # build, then start one that OUTLIVES the app, on purpose
 #   juancoded.sh reap <token>    # end the daemon `token` owns: TERM, grace, then KILL
 #   juancoded.sh status          # what is running, who owns it, does it match the checkout
 #   juancoded.sh stop            # end whatever is running, after confirming
-#   juancoded.sh restart         # stop, then start an unowned one
+#   juancoded.sh restart         # stop, then start an unowned one (upgrades instead
+#                                #   when it has live sessions and can be upgraded)
+#   juancoded.sh upgrade         # build, then exec it IN PLACE: no session is ended
 #   juancoded.sh serve           # run the daemon in the FOREGROUND, owned by launchd
 #   juancoded.sh build-id        # print the checkout's build identity
 #
@@ -108,6 +130,7 @@
 #   JUANCODE_SKIP_DAEMON_BUILD=1    skip cargo (test harnesses only — reintroduces the bug)
 #   JUANCODE_OWNER_GRACE_SECONDS=N  how long an ORPHANED daemon keeps serving before it
 #                                   ends itself (default 120; 0 disables the watchdog)
+#   JUANCODE_RESTART_HARD=1         `restart` stops and starts even when it could upgrade
 #   JUANCODE_LOGIN_ENV=0            `serve` only: do NOT re-exec through `$SHELL -lic`
 #                                   first. Only safe when the caller's environment is
 #                                   already a login shell's.
@@ -506,6 +529,11 @@ cmd_status() {
   else
     warn "  build: $theirs — this checkout builds $want. THE DAEMON IS STALE."
   fi
+  if can_upgrade; then
+    say "  upgrade: live — \`$SELF upgrade\` swaps the build without ending a session"
+  else
+    warn "  upgrade: NOT supported by this build — a new build costs its sessions one last time"
+  fi
   healthy || warn "  it is NOT answering :$PORT/health"
 }
 
@@ -775,7 +803,64 @@ cmd_stop() {
   fi
 }
 
+# Whether the running daemon says it answers SIGUSR2 with an upgrade. The ONLY gate
+# in front of that signal: to a daemon without the listener it is a kill.
+can_upgrade() { [ "$(run_get upgrade)" = "sigusr2" ]; }
+
+cmd_upgrade() {
+  local pid; pid="$(run_get pid)"
+  if [ -z "$pid" ] || ! alive "$pid"; then
+    warn "no daemon running to upgrade (no live pid in $RUN_FILE)"
+    warn "\`$SELF ensure\` or \`$SELF persist\` starts one on the current build"
+    return 1
+  fi
+  if ! can_upgrade; then
+    warn "daemon pid $pid predates live upgrades: SIGUSR2 would KILL it and its $(child_count "$pid") session(s)."
+    warn "Nothing was sent. It takes one ordinary restart onto a build that has them:"
+    warn "  JUANCODE_RESTART_HARD=1 $SELF restart   (asks first; ends its sessions this one time)"
+    return 1
+  fi
+  # Every ownership state may be upgraded, `foreign` included: from here, without the
+  # launch's token, an app-owned daemon reads as foreign, and an upgrade ends nothing and
+  # changes no record. The pid, and so the claim on it, is the same afterwards.
+  local state; state="$(ownership "$pid" "")"
+  build_daemon
+  local want theirs; want="$(build_id)"; theirs="$(run_get build_id)"
+  if [ "$theirs" = "$want" ] && [ "$(run_get exe)" = "$BIN" ]; then
+    say "daemon pid $pid already runs build $want from $BIN; nothing to upgrade"
+    return 0
+  fi
+  local before; before="$(child_count "$pid")"
+  say "upgrading daemon pid $pid IN PLACE: build ${theirs:-unstamped} -> $want"
+  say "  $before child process(es) come with it; nothing is signalled but the daemon"
+  list_children "$pid"
+  case "$state" in
+    launchd)    say "  still launchd's ($AGENT_LABEL): same pid, so its supervision does not notice" ;;
+    persistent) say "  still persistent: the ownership record names the same pid and is left alone" ;;
+    foreign)    say "  still owned by launch $(own_get token): same pid, so that launch still reaps it" ;;
+  esac
+  if ! JUANCODED_DATA_DIR="$DATA_DIR" "$BIN" upgrade --build-id "$want" >&2; then
+    if alive "$pid"; then
+      warn "the upgrade did not happen; pid $pid is still serving on build ${theirs:-unstamped}"
+    else
+      warn "pid $pid is GONE. Its sessions went with it; check $LOG_FILE"
+    fi
+    return 1
+  fi
+  say "pid $pid now runs build $(run_get build_id), $(child_count "$pid") child process(es) (was $before)"
+}
+
 cmd_restart() {
+  # A restart ends every pty; an upgrade ends none. When there is something to lose and
+  # the daemon can take the cheaper path, take it.
+  local live_pid; live_pid="$(run_get pid)"
+  if [ "${JUANCODE_RESTART_HARD:-0}" != "1" ] && [ -n "$live_pid" ] && alive "$live_pid" \
+     && can_upgrade && [ "$(child_count "$live_pid")" != "0" ]; then
+    say "pid $live_pid has $(child_count "$live_pid") live child process(es) and can be upgraded in place;"
+    say "  upgrading instead of restarting. JUANCODE_RESTART_HARD=1 forces a real restart."
+    cmd_upgrade
+    return
+  fi
   build_daemon
   local want; want="$(build_id)"
   local pid; pid="$(run_get pid)"
@@ -809,7 +894,8 @@ case "${1:-ensure}" in
   status)   cmd_status ;;
   stop)     cmd_stop ;;
   restart)  cmd_restart ;;
+  upgrade)  cmd_upgrade ;;
   serve)    cmd_serve ;;
   build-id) build_id; printf '\n' ;;
-  *) warn "unknown command: $1 (want: ensure|persist|reap|status|stop|restart|serve|build-id)"; exit 2 ;;
+  *) warn "unknown command: $1 (want: ensure|persist|reap|status|stop|restart|upgrade|serve|build-id)"; exit 2 ;;
 esac

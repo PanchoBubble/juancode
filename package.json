@@ -20,6 +20,7 @@
     "daemon:status": "scripts/dev-daemon.sh status",
     "daemon:stop": "scripts/dev-daemon.sh stop",
     "daemon:restart": "scripts/dev-daemon.sh restart",
+    "daemon:upgrade": "scripts/dev-daemon.sh upgrade",
     "daemon:agent": "scripts/dev-daemon.sh agent",
     "build": "pnpm --filter \"./apps/*\" build",
     "typecheck": "pnpm --recursive typecheck",

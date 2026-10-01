@@ -560,12 +560,16 @@ name = "juancoded"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "juancoded-cordis",
+ "juancoded-core",
  "juancoded-persistence",
  "juancoded-server",
  "juancoded-state",
  "libc",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]

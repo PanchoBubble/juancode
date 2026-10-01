@@ -10,7 +10,9 @@
 # was "read CoreBackendViews.swift and run cargo by hand".
 #
 #   scripts/dev-daemon.sh status         # what is running, who owns it, is it stale
-#   scripts/dev-daemon.sh restart        # onto the current build (ends its ptys, asks)
+#   scripts/dev-daemon.sh upgrade        # onto the current build IN PLACE, keeping its ptys
+#   scripts/dev-daemon.sh restart        # onto the current build (upgrades when it can,
+#                                        #   otherwise ends its ptys, asks)
 #   scripts/dev-daemon.sh stop           # end it (asks)
 #   scripts/dev-daemon.sh agent install  # keep it running across logins
 #   scripts/dev-daemon.sh agent status   # …and everything else in juancoded-agent.sh

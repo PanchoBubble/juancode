@@ -313,6 +313,41 @@ ctrl-c. Default SIGTERM disposition is immediate death with no unwinding, which 
 have made the launcher's grace period a wait over an already-dead process — the exact
 torn-write-mid-flush the grace period exists to avoid.
 
+### A new build without ending a session
+
+A restart ends every pty. An **upgrade** ends none: the daemon execs the new binary in
+place, so the pid, the fd table and every child survive, and the new image adopts the
+ptys from a handoff file (`juancoded-core/src/reexec.rs`) and replays their stored
+scrollback into fresh grids.
+
+```sh
+pnpm daemon upgrade                     # build, then upgrade the running daemon
+juancoded upgrade --build-id <id>       # the trigger by hand: run it from the NEW binary
+```
+
+- **Trigger:** SIGUSR2, in every build. The binary to become is named in
+  `juancoded.upgrade` beside the store, which must be a private file of this user's;
+  `juancoded upgrade` writes it, signals, and waits for the same pid to come back
+  listening. The debug-only `POST /api/reexec` (behind `JUANCODED_REEXEC=1`) stays as
+  it was, because an HTTP route is reachable from the relay.
+- **Asked before anything is handed over:** the new binary is run with
+  `--handoff-probe` and must answer with a handoff range that includes this image's
+  version. A crash, a timeout, or a different format is refused while refusing costs
+  nothing, and the reason is written to `juancoded.upgrade.failed` for the trigger.
+- **A failed exec is undone:** readers are parked rather than ended, so they resume and
+  every fd gets `FD_CLOEXEC` back; the daemon keeps serving on the old code.
+- **A handoff this image cannot read** keeps its fds open (closing one hangs its CLI
+  up), seals them against inheritance, and keeps the file as `*.rejected`.
+- **The run file says whether it is safe to ask:** `upgrade=sigusr2` and
+  `handoff_version=N`. A daemon without them predates the listener, and to it SIGUSR2
+  is a kill, so both the script and the subcommand refuse to send it.
+- **Code, not environment:** the new image inherits the old one's env verbatim, with
+  `JUANCODE_BUILD_ID` replaced so the core badge sees the new build. A changed
+  `JUANCODE_*` setting still needs a restart.
+
+`scripts/reexec-live-test.sh` swaps underneath a CLI mid-answer and checks every line
+survives; `crates/juancoded/tests/live_upgrade.rs` drives the real trigger.
+
 Then point the Swift client at it:
 
 ```sh

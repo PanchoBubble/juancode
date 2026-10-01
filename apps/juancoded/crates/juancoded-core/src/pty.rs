@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -321,6 +321,12 @@ struct Inner {
     /// and leaves everything after it in the kernel's pty buffer, for the next image
     /// to read once it has adopted the master. See [`PtyHandle::quiesce`].
     quiesced: AtomicBool,
+    /// Where a quiesced reader waits. It parks rather than returning, so an exec that
+    /// fails after the handoff can [`PtyHandle::resume`] it: a reader that had exited
+    /// could not be restarted without racing a second thread against any read the
+    /// first is still blocked in.
+    park: Mutex<()>,
+    resumed: Condvar,
     /// Read once at spawn. Asking the child for it later would mean taking the lock
     /// the reader thread holds while it waits, and the signal path must not be able
     /// to block on the thread whose exit it is waiting for.
@@ -390,7 +396,12 @@ fn start_reader(inner: Arc<Inner>, mut reader: Box<dyn Read + Send>) -> Result<(
                     // Not an exit, and deliberately silent: the child is alive and is
                     // about to belong to another image of this process. Publishing an
                     // `Exit` here would tell every client a live session had ended.
-                    return;
+                    // Parked, not returned: the exec ends this thread for us, and an
+                    // exec that fails hands it back with `resume`.
+                    let mut guard = inner.park.lock().unwrap_or_else(|e| e.into_inner());
+                    while inner.quiesced.load(Ordering::SeqCst) {
+                        guard = inner.resumed.wait(guard).unwrap_or_else(|e| e.into_inner());
+                    }
                 }
             }
             let code = inner.child.lock().ok().and_then(|mut c| c.wait_code());
@@ -525,6 +536,8 @@ impl PtyHandle {
             size: Mutex::new((spec.cols, spec.rows)),
             exited: AtomicBool::new(false),
             quiesced: AtomicBool::new(false),
+            park: Mutex::new(()),
+            resumed: Condvar::new(),
             pid,
         });
 
@@ -575,6 +588,8 @@ impl PtyHandle {
             size: Mutex::new((spec.cols, spec.rows)),
             exited: AtomicBool::new(false),
             quiesced: AtomicBool::new(false),
+            park: Mutex::new(()),
+            resumed: Condvar::new(),
             pid: Some(spec.pid),
         });
         start_reader(Arc::clone(&inner), Box::new(reader))?;
@@ -644,6 +659,15 @@ impl PtyHandle {
     /// which is why the caller flushes once more after a settle.
     pub fn quiesce(&self) {
         self.inner.quiesced.store(true, Ordering::SeqCst);
+    }
+
+    /// Undo [`quiesce`](Self::quiesce), for an exec that was prepared for and did not
+    /// happen. The reader picks up where it stopped; what the CLI printed meanwhile
+    /// waited in the kernel's pty buffer, so nothing is lost.
+    pub fn resume(&self) {
+        let _guard = self.inner.park.lock().unwrap_or_else(|e| e.into_inner());
+        self.inner.quiesced.store(false, Ordering::SeqCst);
+        self.inner.resumed.notify_all();
     }
 
     /// Describe this pty well enough for the next image of this process to adopt it,
@@ -1187,6 +1211,40 @@ mod tests {
             Some(Some(0)),
             "an exit of its own, not a signal that took it"
         );
+    }
+
+    /// The undo half of the exec path. A swap that fails after the readers were
+    /// quiesced must leave a daemon that still hears its ptys, and what the CLI said
+    /// while it was parked has to arrive, not vanish.
+    #[test]
+    fn a_quiesced_reader_resumes_without_losing_what_was_said_meanwhile() {
+        let pty = PtyHandle::spawn(spec("/bin/cat", &[]), 256).expect("spawn");
+        let mut rx = pty.subscribe();
+        pty.write(b"first\n").expect("write");
+        wait_for(&mut rx, "first", Duration::from_secs(5));
+        // Let the echo and cat's copy both drain, so the reader is blocked in a read
+        // with nothing pending when the quiesce lands.
+        std::thread::sleep(Duration::from_millis(300));
+        while rx.try_recv().is_ok() {}
+
+        pty.quiesce();
+        // The reader is blocked in a read; this wakes it, it publishes, then parks.
+        pty.write(b"wakes\n").expect("write");
+        wait_for(&mut rx, "wakes", Duration::from_secs(5));
+        // Said while parked: it waits in the kernel's buffer.
+        pty.write(b"parked\n").expect("write");
+        std::thread::sleep(Duration::from_millis(200));
+        let mut early = String::new();
+        while let Ok(PtyEvent::Output(bytes)) = rx.try_recv() {
+            early.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(!early.contains("parked"), "a parked reader read: {early:?}");
+
+        pty.resume();
+        wait_for(&mut rx, "parked", Duration::from_secs(5));
+        pty.write(b"after\n").expect("write");
+        wait_for(&mut rx, "after", Duration::from_secs(5));
+        pty.stop_within(Duration::from_secs(2)).expect("stop");
     }
 
     #[test]

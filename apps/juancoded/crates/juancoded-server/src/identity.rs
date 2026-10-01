@@ -192,6 +192,13 @@ pub fn write_run_file(identity: &DaemonIdentity, port: u16, path: &Path) -> Resu
             .map(|n| n.to_string())
             .unwrap_or_default(),
     );
+    // What a launcher must check before it sends SIGUSR2: to a daemon older than the
+    // listener, that signal's default disposition is death, and every pty with it.
+    line("upgrade", "sigusr2".to_string());
+    line(
+        "handoff_version",
+        juancoded_core::reexec::HANDOFF_VERSION.to_string(),
+    );
 
     // Write-then-rename: a reader that catches a half-written file would decide the
     // daemon is unidentifiable and offer to kill it, which is the one outcome this
@@ -346,8 +353,14 @@ mod tests {
                 "sessions_per_project",
                 "owner_pid",
                 "owner_grace_ms",
+                "upgrade",
+                "handoff_version",
             ]
         );
+        assert!(body.contains(&format!(
+            "handoff_version={}\n",
+            juancoded_core::reexec::HANDOFF_VERSION
+        )));
         assert!(body.contains(&format!("pid={}\n", std::process::id())));
         assert!(body.contains("port=4290\n"));
         assert!(body.contains("sessions_per_project=0\n"));

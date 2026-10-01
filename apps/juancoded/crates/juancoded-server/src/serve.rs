@@ -324,6 +324,7 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
         Arc::clone(&handles.sessions),
         juancoded_core::notify::config_path(),
     );
+    let upgrade_handles = handles.clone();
     let app = router(handles);
 
     if let Some(dir) = config.socket.parent() {
@@ -347,6 +348,10 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     let _ = std::fs::remove_file(&config.socket);
     let uds = tokio::net::UnixListener::bind(&config.socket)
         .with_context(|| format!("bind {}", config.socket.display()))?;
+
+    // The upgrade trigger, armed before the run file advertises it. Only the process
+    // that won the bind may answer it: see `reexec::listen_for_upgrades`.
+    let _upgrades = crate::reexec::listen_for_upgrades(upgrade_handles);
 
     // Only now, with both listeners up, is this process the daemon. Written here and
     // not in `main` so a start that lost the race for the socket cannot overwrite the

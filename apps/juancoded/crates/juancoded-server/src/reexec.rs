@@ -31,15 +31,32 @@
 //! image reclaims it exactly as any boot over a stale path does — `is_live` fails to
 //! connect, so it unlinks and binds.
 //!
-//! ## Why it is not shipped on
+//! ## Two triggers, two trust boundaries
 //!
-//! A daemon that can replace its own code on request is a daemon that can be asked to
-//! run a binary somebody else chose. This is debug builds only and behind an env flag
-//! on top, so a release build has no route at all. The watch loop that would rebuild
-//! and trigger this automatically is a separate ticket; this is the mechanism, driven
-//! by an explicit command.
+//! **SIGUSR2** is the shipped one, in every build. Only a process running as this
+//! user (or root) can signal it, and the binary it execs comes from a request file
+//! beside the store that has to be owned by this user and writable by nobody else —
+//! the same user who could already replace the binary on disk. `juancoded upgrade`
+//! writes that file, signals, and waits for the new image to say it is listening;
+//! `juancoded.sh upgrade` builds first and then runs it. A signal with no request file
+//! re-execs onto our own path, which is what a `cargo build` in place has replaced.
+//!
+//! **`POST /api/reexec`** is the original debug mechanism and stays debug-only and
+//! behind [`ENABLE_ENV`]: an HTTP route is reachable from anything that can reach the
+//! port, including the phone path through the relay, and must never be able to name a
+//! binary in a release build.
+//!
+//! ## Before anything is handed over, the new binary is asked
+//!
+//! It is run once with [`reexec::PROBE_ARG`] and has to answer, within a timeout, with
+//! a handoff range that includes the version this image writes. A binary that crashes
+//! on start, is not a juancoded, or reads a different format is refused while refusing
+//! costs nothing. A failure AFTER the handoff (the exec itself failing) is undone:
+//! every reader resumes and every fd gets `FD_CLOEXEC` back, so the daemon keeps
+//! serving on its old code with its sessions intact.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -61,6 +78,24 @@ pub const ENABLE_ENV: &str = "JUANCODED_REEXEC";
 /// How long the pumps get to fold the last chunk each reader published before the
 /// final flush. Generous next to a broadcast hop, and paid once per swap.
 const SETTLE: Duration = Duration::from_millis(150);
+
+/// How long the incoming binary gets to answer its probe. One fork+exec costs a
+/// quarter of a second on this machine and several under load, so this is generous;
+/// a binary that has not answered by then is not one to hand ptys to.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Beside the store: what `juancoded upgrade` asks for. `key=value` lines, the same
+/// shape as the run file, read and removed by the SIGUSR2 listener.
+pub const REQUEST_FILE: &str = "juancoded.upgrade";
+
+/// Beside the store: why the last signalled upgrade did not happen. Written by the
+/// image that is still running, so the trigger that is waiting can say why instead of
+/// timing out.
+pub const FAILURE_FILE: &str = "juancoded.upgrade.failed";
+
+/// One swap at a time. A second request while the first is mid-handoff would describe
+/// fds that are already promised to an exec.
+static SWAPPING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -107,7 +142,7 @@ async fn reexec_now(
         }
     };
 
-    match swap_onto(&handles, &binary).await {
+    match swap_onto(&handles, &binary, None).await {
         // Unreachable on success: `execv` does not return.
         Ok(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(e) => {
@@ -179,12 +214,36 @@ fn executable(_path: &Path) -> bool {
     true
 }
 
-/// Quiesce, hand the ptys over and become `binary`. Returns only on failure.
+/// Probe `binary`, quiesce, hand the ptys over and become it. Returns only on failure,
+/// and a failure leaves this image serving every session it had.
+///
+/// `build_id` replaces `JUANCODE_BUILD_ID` for the new image, which is how the app's
+/// core badge sees the new build rather than calling an upgraded daemon stale.
 #[cfg(unix)]
-async fn swap_onto(handles: &CoreHandles, binary: &Path) -> anyhow::Result<()> {
+pub async fn swap_onto(
+    handles: &CoreHandles,
+    binary: &Path,
+    build_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if SWAPPING.swap(true, Ordering::SeqCst) {
+        anyhow::bail!("an upgrade is already under way");
+    }
+    let result = swap_inner(handles, binary, build_id).await;
+    SWAPPING.store(false, Ordering::SeqCst);
+    result
+}
+
+#[cfg(unix)]
+async fn swap_inner(
+    handles: &CoreHandles,
+    binary: &Path,
+    build_id: Option<&str>,
+) -> anyhow::Result<()> {
     let Some(pty) = handles.pty.clone() else {
         anyhow::bail!("this tree mounted no `pty` service, so there is nothing to carry");
     };
+    // Before anything is touched: the one check that runs the new code.
+    probe(binary).await?;
 
     // The same flush the shutdown path makes, and the bulk of the work: everything a
     // live session has printed since its last throttled write.
@@ -196,16 +255,13 @@ async fn swap_onto(handles: &CoreHandles, binary: &Path) -> anyhow::Result<()> {
     tokio::time::sleep(SETTLE).await;
     handles.sessions.flush_all();
 
-    let dir = juancoded_persistence::db_path()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(std::env::temp_dir);
+    let dir = data_dir();
     let fds: Vec<i32> = carried.iter().map(|c| c.spec.master_fd).collect();
     let sessions = carried.len();
     let handoff = match reexec::write(&dir, carried) {
         Ok(path) => path,
         Err(e) => {
-            undo(&fds, None);
+            undo(pty.as_ref(), &fds, None, None);
             return Err(e);
         }
     };
@@ -213,23 +269,174 @@ async fn swap_onto(handles: &CoreHandles, binary: &Path) -> anyhow::Result<()> {
         binary = %binary.display(),
         sessions,
         flushed,
+        build_id,
         handoff = %handoff.display(),
         "re-execing onto a new binary; the live ptys come with us"
     );
 
-    // The ONE entry added to the environment, and the adopting side removes it from
-    // its own the moment it has read the file — so no CLI this daemon spawns after the
-    // swap ever sees it. Everything else `execv` carries across untouched, which is
-    // the whole reason this daemon is worth having.
+    // The handoff var is the one entry added to the environment, and the adopting side
+    // removes it from its own the moment it has read the file — so no CLI this daemon
+    // spawns after the swap ever sees it. `JUANCODE_BUILD_ID` is replaced rather than
+    // added: it is already the launcher's stamp, and the new image is a new build.
+    // Everything else `execv` carries across untouched, which is the whole reason this
+    // daemon is worth having.
+    let previous_build = std::env::var_os(BUILD_ID_ENV);
+    if let Some(id) = build_id {
+        std::env::set_var(BUILD_ID_ENV, id);
+    }
     std::env::set_var(reexec::HANDOFF_ENV, &handoff);
     let err = exec_self(binary);
-    undo(&fds, Some(&handoff));
+    undo(
+        pty.as_ref(),
+        &fds,
+        Some(&handoff),
+        build_id.map(|_| previous_build),
+    );
     Err(err)
 }
 
 #[cfg(not(unix))]
-async fn swap_onto(_handles: &CoreHandles, _binary: &Path) -> anyhow::Result<()> {
+pub async fn swap_onto(
+    _handles: &CoreHandles,
+    _binary: &Path,
+    _build_id: Option<&str>,
+) -> anyhow::Result<()> {
     anyhow::bail!("re-execing onto a new binary is unix-only")
+}
+
+const BUILD_ID_ENV: &str = "JUANCODE_BUILD_ID";
+
+/// Where the handoff, the request and the failure note live: beside the store, which
+/// is the directory the run file already names.
+fn data_dir() -> PathBuf {
+    juancoded_persistence::db_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Run `binary` with the probe argument and insist on an answer that includes the
+/// handoff version this image writes.
+#[cfg(unix)]
+async fn probe(binary: &Path) -> anyhow::Result<()> {
+    let child = tokio::process::Command::new(binary)
+        .arg(reexec::PROBE_ARG)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("{} would not start: {e}", binary.display()))?;
+    let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} did not answer its handoff probe within {}s",
+                binary.display(),
+                PROBE_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("probing {}: {e}", binary.display()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || !reexec::probe_accepts(&stdout, reexec::HANDOFF_VERSION) {
+        anyhow::bail!(
+            "{} cannot adopt this daemon's sessions (probe {}: {:?}{}); nothing was handed over",
+            binary.display(),
+            out.status,
+            stdout.trim(),
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .map(|l| format!(", stderr: {l}"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// What a request file asks for.
+#[derive(Debug, Default, PartialEq)]
+pub struct UpgradeRequest {
+    pub binary: Option<PathBuf>,
+    pub build_id: Option<String>,
+}
+
+/// Read and consume the request file, if there is one.
+///
+/// Refused unless it is a regular file owned by this user and writable by nobody
+/// else: it names a binary this process is about to become, so whoever can write it
+/// has to be somebody who could already replace that binary.
+#[cfg(unix)]
+pub fn take_request(dir: &Path) -> anyhow::Result<UpgradeRequest> {
+    use std::os::unix::fs::MetadataExt;
+    let path = dir.join(REQUEST_FILE);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(UpgradeRequest::default()),
+        Err(e) => anyhow::bail!("{}: {e}", path.display()),
+    };
+    let body = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if !meta.file_type().is_file() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+        anyhow::bail!(
+            "{} is not a private file of this user's (uid {}, mode {:o}); refusing it",
+            path.display(),
+            meta.uid(),
+            meta.mode() & 0o7777
+        );
+    }
+    let body = body.map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let mut req = UpgradeRequest::default();
+    for line in body.lines() {
+        match line.split_once('=') {
+            Some(("binary", v)) if !v.is_empty() => req.binary = Some(PathBuf::from(v)),
+            Some(("build_id", v)) if !v.is_empty() => req.build_id = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    Ok(req)
+}
+
+/// Answer SIGUSR2 with an upgrade, for as long as this daemon serves.
+///
+/// Called by `serve` once both listeners are bound: a start that lost the bind race is
+/// not the daemon, and must not be the one that execs. The stream is created here,
+/// synchronously, so the handler is installed before the run file advertises it.
+#[cfg(unix)]
+pub fn listen_for_upgrades(handles: CoreHandles) -> Option<tokio::task::JoinHandle<()>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut usr2 = match signal(SignalKind::user_defined2()) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("could not listen for SIGUSR2 ({e}); live upgrades are unavailable");
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        while usr2.recv().await.is_some() {
+            let dir = data_dir();
+            let _ = std::fs::remove_file(dir.join(FAILURE_FILE));
+            let outcome = async {
+                let req = take_request(&dir)?;
+                let binary = resolve_binary(req.binary.as_ref().and_then(|p| p.to_str()))?;
+                info!(binary = %binary.display(), build_id = req.build_id, "SIGUSR2: upgrading in place");
+                swap_onto(&handles, &binary, req.build_id.as_deref()).await
+            }
+            .await;
+            // Only a failure gets here; a success is a different program by now.
+            if let Err(e) = outcome {
+                error!(error = %format!("{e:#}"), "the upgrade did not happen; still serving on the old binary");
+                let _ = std::fs::write(dir.join(FAILURE_FILE), format!("error={e:#}\n"));
+            }
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+pub fn listen_for_upgrades(_handles: CoreHandles) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 /// Replace this process's image, keeping argv exactly as it was.
@@ -257,24 +464,33 @@ fn exec_self(binary: &Path) -> anyhow::Error {
 /// Put back what the handoff changed, for an exec that did not happen.
 ///
 /// The fds must not stay inheritable: the next CLI this daemon spawns would be handed
-/// another session's master. The reader threads cannot be restarted, so this daemon is
-/// deaf on its ptys from here — it is still the better half of a bad outcome, and it is
-/// why `resolve_binary` is as fussy as it is.
+/// another session's master. The readers were parked rather than ended, so they
+/// resume where they stopped and what the CLIs printed meanwhile is still in the
+/// kernel's buffer. `build` is the previous `JUANCODE_BUILD_ID`, when the swap changed
+/// it: the badge must keep describing the binary that is actually running.
 #[cfg(unix)]
-fn undo(fds: &[i32], handoff: Option<&Path>) {
+fn undo(
+    pty: &dyn juancoded_cordis::services::pty::PtySpawnApi,
+    fds: &[i32],
+    handoff: Option<&Path>,
+    build: Option<Option<std::ffi::OsString>>,
+) {
     for fd in fds {
         if let Err(e) = make_cloexec(*fd) {
             warn!(fd, error = %e, "could not put FD_CLOEXEC back on a carried master");
         }
     }
+    pty.take_back();
     std::env::remove_var(reexec::HANDOFF_ENV);
+    match build {
+        Some(Some(previous)) => std::env::set_var(BUILD_ID_ENV, previous),
+        Some(None) => std::env::remove_var(BUILD_ID_ENV),
+        None => {}
+    }
     if let Some(path) = handoff {
         let _ = std::fs::remove_file(path);
     }
-    error!(
-        "the exec failed after the ptys were handed over: this daemon is still serving \
-         but has stopped reading them. Restart it to recover."
-    );
+    error!("the exec failed after the ptys were handed over; took them back and kept serving");
 }
 
 #[cfg(test)]

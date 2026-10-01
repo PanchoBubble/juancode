@@ -39,6 +39,12 @@ pub trait PtySpawnApi: Send + Sync {
     /// The index is left intact, so a failed exec leaves a daemon that still works.
     fn hand_off(&self) -> Vec<SessionHandoff>;
 
+    /// Undo [`hand_off`](Self::hand_off) for an exec that did not happen: every reader
+    /// resumes, and the host ends its children on the way out again. The caller puts
+    /// `FD_CLOEXEC` back on the carried fds; the leaked refcounts stay leaked, which
+    /// costs a handle each and keeps the writer-drop EOF from ever firing.
+    fn take_back(&self);
+
     /// Take over a pty a previous image of this process opened. The handle is a
     /// `PtyHandle` in every respect; see `PtyHandle::adopt`.
     fn adopt(&self, session: &str, spec: AdoptSpec) -> Result<PtyHandle>;
@@ -149,6 +155,13 @@ impl PtySpawnApi for PtyHost {
     #[cfg(not(unix))]
     fn hand_off(&self) -> Vec<SessionHandoff> {
         Vec::new()
+    }
+
+    fn take_back(&self) {
+        for handle in self.live_map().values() {
+            handle.resume();
+        }
+        self.disarmed.store(false, Ordering::SeqCst);
     }
 
     #[cfg(unix)]
