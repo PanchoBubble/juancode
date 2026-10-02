@@ -12,20 +12,26 @@ extension AppModel {
             errorMessage = "Can't close the PR. \(core.unavailableReason(.github) ?? "")"
             return
         }
+        // Optimistic: the row goes on confirm, and comes back if GitHub refuses.
+        let removed = forgetViewerPr(url: pr.url)
+        let localIndex = cwd.flatMap { prsByCwd[$0]?.prs.firstIndex { $0.url == pr.url } }
+        if let cwd { prsByCwd[cwd]?.prs.removeAll { $0.url == pr.url } }
         Task {
             do {
                 try await reads.closePr(url: pr.url)
-            } catch let e as GitHubError {
-                errorMessage = "Couldn't close #\(pr.number): \(e.message)"
-                return
             } catch {
-                errorMessage = "Couldn't close #\(pr.number): \(error.localizedDescription)"
+                let reason = (error as? GitHubError)?.message ?? error.localizedDescription
+                errorMessage = "Couldn't close #\(pr.number): \(reason)"
+                restoreViewerPr(url: pr.url, removed)
+                if let cwd, let localIndex, var list = prsByCwd[cwd],
+                   !list.prs.contains(where: { $0.url == pr.url }) {
+                    list.prs.insert(pr, at: min(localIndex, list.prs.count))
+                    prsByCwd[cwd] = list
+                }
                 return
             }
-            forgetViewerPr(url: pr.url)
             if let cwd {
                 if let t = trackedPr(cwd: cwd, number: pr.number) { untrackPr(t.id) }
-                prsByCwd[cwd]?.prs.removeAll { $0.url == pr.url }
                 loadPrs(cwd)
             }
             refreshViewerPrs(force: true)

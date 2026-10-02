@@ -2511,10 +2511,24 @@ final class AppModel {
     /// fetch stops returning it.
     @ObservationIgnored private var viewerPrsClosedUrls: Set<String> = []
 
-    /// Drop a PR closed from here off the queue now, without waiting on a refetch.
-    func forgetViewerPr(url: String) {
+    /// Drop a PR being closed from here off the queue now, without waiting on the
+    /// close or a refetch. Returns what was removed so a failed close can put it back.
+    @discardableResult
+    func forgetViewerPr(url: String) -> [(index: Int, row: ViewerPr)] {
         viewerPrsClosedUrls.insert(url)
+        let removed = viewerPrs.rows.enumerated()
+            .filter { $0.element.pr.url == url }
+            .map { (index: $0.offset, row: $0.element) }
         viewerPrs.rows.removeAll { $0.pr.url == url }
+        return removed
+    }
+
+    /// Undo `forgetViewerPr` after a close that failed, at the rows' old positions.
+    func restoreViewerPr(url: String, _ removed: [(index: Int, row: ViewerPr)]) {
+        viewerPrsClosedUrls.remove(url)
+        for (index, row) in removed where !viewerPrs.rows.contains(where: { $0.id == row.id }) {
+            viewerPrs.rows.insert(row, at: min(index, viewerPrs.rows.count))
+        }
     }
 
     /// Rows in the queue — the toolbar badge's count.
