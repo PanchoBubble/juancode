@@ -160,7 +160,7 @@ final class AppModel {
             showingBeads = false
             // Remember the pane for the next launch to land on. A click-rate plist
             // write, and only when it actually changed.
-            if let sel = selection, sel != oldValue {
+            if let sel = selection, sel != oldValue, pendingCreate(sel) == nil {
                 UserDefaults.standard.set(sel, forKey: lastFocusedSessionKey)
             }
             // The open pane is never a reap candidate — and the pane you just left
@@ -169,6 +169,23 @@ final class AppModel {
         }
     }
     var showingNewSession = false
+
+    /// A session the user asked for whose `core.create` hasn't returned yet. Worktree
+    /// cutting plus the spawn takes seconds here, and with nothing on screen in the
+    /// meantime the click looked ignored, so a selected create shows a placeholder
+    /// row and pane under this id until the real session replaces it.
+    struct PendingCreate: Identifiable, Equatable {
+        let id: String
+        let provider: ProviderId
+        let cwd: String
+        let isolateWorktree: Bool
+    }
+    private(set) var pendingCreates: [PendingCreate] = []
+    func pendingCreate(_ id: String) -> PendingCreate? {
+        guard id.hasPrefix(Self.pendingCreatePrefix) else { return nil }
+        return pendingCreates.first { $0.id == id }
+    }
+    private static let pendingCreatePrefix = "pending-create:"
 
     /// Sessions whose exited pane is currently being resumed (async `reactivate` in
     /// flight), so the sidebar row can show a spinner instead of the idle dot until
@@ -1817,6 +1834,25 @@ final class AppModel {
         // would land in a section nobody can see.
         unhideProject(cwd)
         unhideProject(projectCwd(for: cwd))
+        var pending: PendingCreate? = nil
+        let selectionBefore = selection
+        if select {
+            let p = PendingCreate(id: Self.pendingCreatePrefix + UUID().uuidString,
+                                  provider: provider, cwd: cwd, isolateWorktree: isolateWorktree)
+            pendingCreates.append(p)
+            selection = p.id
+            pending = p
+        }
+        // The placeholder only owns the selection while it's still selected: if the
+        // user moved on during the spawn, the finished session must not yank them back.
+        func settlePending(landingOn id: String?) {
+            guard let p = pending else { return }
+            pendingCreates.removeAll { $0.id == p.id }
+            guard selection == p.id else { return }
+            navigatingHistory = true
+            selection = id
+            navigatingHistory = false
+        }
         do {
             var worktree: SessionWorktree? = nil
             if isolateWorktree {
@@ -1860,8 +1896,9 @@ final class AppModel {
                     })
             }.value
             refresh()
-            if select {
-                selection = s.id
+            let stillWanted = pending.map { selection == $0.id } ?? false
+            settlePending(landingOn: s.id)
+            if stillWanted {
                 // Creating a session is an explicit "take me there": clear any j/k
                 // nav focus suppression and request focus, so the fresh terminal is
                 // typeable whether it appeared behind the New Session sheet, from
@@ -1870,6 +1907,7 @@ final class AppModel {
             }
             return s
         } catch {
+            settlePending(landingOn: selectionBefore)
             errorMessage = "Failed to start \(provider.rawValue): \(error)"
             return nil
         }

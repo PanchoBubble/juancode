@@ -907,9 +907,15 @@ struct SidebarView: View {
         // instead of floating as their own folder. Prefer git's authoritative
         // worktree→repo map (`worktreeRepoRoots`); fall back to the path heuristic
         // (`<repo>-worktrees/…`) until that async scan lands.
-        let byCwd = Dictionary(grouping: filtered, by: {
+        var byCwd = Dictionary(grouping: filtered, by: {
             model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)
         })
+        // A first session in a folder the sidebar has no section for yet still needs
+        // somewhere for its placeholder row to sit.
+        for p in model.pendingCreates {
+            let key = model.worktreeRepoRoots[p.cwd] ?? projectCwd(for: p.cwd)
+            if byCwd[key] == nil { byCwd[key] = [] }
+        }
         // Projects the user removed from the sidebar drop out here — the folder and
         // its rows, not the sessions themselves (restorable from the footer below).
         let groups = byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions -> FolderGroup in
@@ -1280,6 +1286,12 @@ struct SidebarView: View {
             )) {
                 ForEach(groups) { group in
                     Section {
+                        ForEach(pendingCreates(in: group)) { p in
+                            PendingSessionRow(pending: p)
+                                .tag(p.id)
+                                .listRowSeparator(.visible)
+                                .listRowSeparatorTint(Color.appHairline(0.12))
+                        }
                         if !collapsedFolders.contains(group.cwd) {
                             sessionList(group)
                         }
@@ -1464,6 +1476,12 @@ struct SidebarView: View {
             Text(closeWarning(meta))
         }
         .perfTrackBody()
+    }
+
+    private func pendingCreates(in group: FolderGroup) -> [AppModel.PendingCreate] {
+        model.pendingCreates.filter {
+            (model.worktreeRepoRoots[$0.cwd] ?? projectCwd(for: $0.cwd)) == group.cwd
+        }
     }
 
     /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
@@ -2671,7 +2689,9 @@ struct DetailView: View {
         // replacing it: the container underneath must stay MOUNTED so the
         // keep-alive terminal panes survive (juancode-073, juancode-2t6).
         ZStack {
-            if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
+            if let id = model.selection, let pending = model.pendingCreate(id) {
+                PendingSessionCard(pending: pending)
+            } else if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
                 // Deliberately NOT keyed by id: the container must survive session
                 // switches so the keep-alive terminal panes inside it stay mounted
                 // (juancode-073). Per-session subviews that assume a fresh identity
@@ -3318,6 +3338,49 @@ private struct SessionLoadingCard: View {
 
     private var folderName: String {
         URL(fileURLWithPath: meta.effectiveCwd).lastPathComponent
+    }
+}
+
+/// Sidebar placeholder for a session whose create is still in flight.
+private struct PendingSessionRow: View {
+    let pending: AppModel.PendingCreate
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini)
+            Text("New \(Providers.spec(for: pending.provider).label) session")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// The pane for a session whose create hasn't returned: says what is being started
+/// so the click visibly landed, until the real session's pane replaces it.
+private struct PendingSessionCard: View {
+    let pending: AppModel.PendingCreate
+
+    var body: some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 12) {
+                ProgressView().controlSize(.small)
+                Text("Starting \(Providers.spec(for: pending.provider).label)…")
+                    .font(.title3)
+                Text(URL(fileURLWithPath: pending.cwd).lastPathComponent)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                Text(pending.isolateWorktree
+                     ? "Cutting a worktree and launching the CLI."
+                     : "Launching the CLI.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+        }
     }
 }
 
