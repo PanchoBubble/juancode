@@ -1710,7 +1710,7 @@ impl SessionRegistry {
         let Some(raw) = self.inner.terminal.take_title(id) else {
             return;
         };
-        let title = raw.trim().to_string();
+        let title = strip_status_glyph(raw.trim()).to_string();
         if title.is_empty() {
             return;
         }
@@ -2338,6 +2338,44 @@ impl SessionRegistry {
                 bottom: snapshot.bottom_text(PROMPT_REGION_ROWS),
             },
             None => ScreenText::default(),
+        }
+    }
+}
+
+/// Drop the status glyph a CLI animates at the front of its window title (`✳ name`
+/// idle, `◐ name` / `◑ name` or a braille spinner while working). Adopted as is, the
+/// row's title changes twice a second for as long as the agent works, and every
+/// change is a broadcast, a store write and a window-title change in each client —
+/// the last one closes any toolbar popover open in the app.
+fn strip_status_glyph(title: &str) -> &str {
+    let is_glyph = |c: char| matches!(c, '\u{00B7}' | '*' | '\u{2190}'..='\u{2BFF}');
+    match title.split_once(char::is_whitespace) {
+        Some((head, rest)) if !head.is_empty() && head.chars().all(is_glyph) => rest.trim_start(),
+        _ => title,
+    }
+}
+
+#[cfg(test)]
+mod status_glyph_tests {
+    use super::strip_status_glyph;
+
+    #[test]
+    fn an_animated_title_settles_on_one_name() {
+        for raw in [
+            "✳ Fanvue PRs",
+            "◐ Fanvue PRs",
+            "◑ Fanvue PRs",
+            "⠂ Fanvue PRs",
+            "· Fanvue PRs",
+        ] {
+            assert_eq!(strip_status_glyph(raw), "Fanvue PRs", "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_title_without_a_glyph_is_left_alone() {
+        for raw in ["claude in tmp", "PR #12 review", "→", "a → b"] {
+            assert_eq!(strip_status_glyph(raw), raw);
         }
     }
 }
