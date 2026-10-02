@@ -148,6 +148,11 @@ final class AppModel {
             // scrollback replay of a dead CLI's TUI — the garble this flag suppresses
             // (juancode-p6tw).
             if let sel = selection { markPaneOpening(sel) }
+            // Leaving a row before its pane's `.task` ran means no revive will ever
+            // clear its flag, so the row would spin forever.
+            if let old = oldValue, old != selection, !panesReviving.contains(old) {
+                activatingSessions.remove(old)
+            }
             // Navigating to a session (jump palette, notification click-through,
             // "Go to session", search hits) dismisses the GitHub overlay — every
             // landing path routes through this setter (juancode-2t6).
@@ -170,6 +175,8 @@ final class AppModel {
     /// the pty is back. Set/cleared by `openPersistedPane`.
     private(set) var activatingSessions: Set<String> = []
     func isActivating(_ id: String) -> Bool { activatingSessions.contains(id) }
+    /// Ids with an `openPersistedPane` actually in flight, as opposed to merely marked.
+    @ObservationIgnored private var panesReviving: Set<String> = []
 
     /// Mark a pane as opening the moment its row is selected, ahead of the async
     /// `openPersistedPane` that clears it. Only for our own not-yet-live sessions:
@@ -3617,7 +3624,12 @@ final class AppModel {
     /// couldn't be resumed (`.unresumable`, dismissible with its X). Non-restore opens
     /// (already live, or revived earlier this run) just fall through to `reactivate`.
     func openPersistedPane(_ id: String) async {
-        guard !isLive(id) else { return }
+        // The launch sweep can revive the restored selection before its pane mounts;
+        // the selection setter's mark must still be cleared.
+        guard !isLive(id) else {
+            if !panesReviving.contains(id) { activatingSessions.remove(id) }
+            return
+        }
         // Reopening a killed pane resumes it, so its stopped card has served its
         // purpose — drop the flag now so the revived pty renders, not the card.
         stoppedPanes.remove(id)
@@ -3627,7 +3639,11 @@ final class AppModel {
         // Drive a per-row spinner while the (async, up to ~5s) resume is in flight, so
         // clicking an exited session gives immediate "working on it" feedback.
         activatingSessions.insert(id)
-        defer { activatingSessions.remove(id) }
+        panesReviving.insert(id)
+        defer {
+            activatingSessions.remove(id)
+            panesReviving.remove(id)
+        }
         let announce = launchRestoredIds.contains(id) && !revivedRestoresThisRun.contains(id)
         if announce {
             revivedRestoresThisRun.insert(id)
