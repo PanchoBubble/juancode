@@ -48,20 +48,24 @@ public let viewerPrBackgroundRefreshInterval: TimeInterval = 1200
 /// the GitHub view, the tick). The search costs seconds, so a burst of triggers
 /// must collapse into one call.
 public let viewerPrRefreshFloor: TimeInterval = 60
+/// Floor for a manual refresh. Someone pressed the button and is watching for a
+/// change, so the minute floor would read as a dead button; the in-flight guard
+/// already keeps a held-down button to one search at a time.
+public let viewerPrManualRefreshFloor: TimeInterval = 5
 
 /// Whether the viewer PR queue should be refetched now.
 ///
 /// - `lastFetched`: when the queue last landed, nil if never.
 /// - `focused`: whether the app is frontmost.
-/// - `force`: a manual refresh — still floored, so a held-down refresh button can't
-///   stampede `gh`.
+/// - `force`: a manual refresh — floored by `viewerPrManualRefreshFloor` instead, so a
+///   click always lands but a burst of clicks can't stampede `gh`.
 public func viewerPrRefreshDue(lastFetched: Date?, now: Date, focused: Bool,
                                force: Bool = false) -> Bool {
     guard let lastFetched else { return true }
     let age = now.timeIntervalSince(lastFetched)
     // Clock moved backwards (sleep/wake, NTP step): the age says nothing, so refetch.
     if age < 0 { return true }
+    if force { return age >= viewerPrManualRefreshFloor }
     if age < viewerPrRefreshFloor { return false }
-    if force { return true }
     return age >= (focused ? viewerPrRefreshInterval : viewerPrBackgroundRefreshInterval)
 }

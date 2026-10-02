@@ -67,14 +67,14 @@ import Testing
         #expect(due(nil, focused: false))
     }
 
-    @Test func theFloorHoldsEvenForAManualRefresh() {
+    @Test func aManualRefreshInsideTheMinuteFloorStillFetches() {
         #expect(!due(viewerPrRefreshFloor - 1))
-        #expect(!due(viewerPrRefreshFloor - 1, force: true))
+        #expect(due(viewerPrRefreshFloor - 1, force: true))
+        #expect(due(viewerPrManualRefreshFloor, force: true))
     }
 
-    @Test func forceFetchesOncePastTheFloor() {
-        #expect(!due(viewerPrRefreshFloor + 1))
-        #expect(due(viewerPrRefreshFloor + 1, force: true))
+    @Test func aBurstOfManualRefreshesCollapses() {
+        #expect(!due(viewerPrManualRefreshFloor - 1, force: true))
     }
 
     @Test func focusedRefreshesOnTheFiveMinuteCadence() {

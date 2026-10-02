@@ -22,6 +22,7 @@ extension AppModel {
                 errorMessage = "Couldn't close #\(pr.number): \(error.localizedDescription)"
                 return
             }
+            forgetViewerPr(url: pr.url)
             if let cwd {
                 if let t = trackedPr(cwd: cwd, number: pr.number) { untrackPr(t.id) }
                 prsByCwd[cwd]?.prs.removeAll { $0.url == pr.url }

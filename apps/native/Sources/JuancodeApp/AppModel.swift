@@ -2506,6 +2506,16 @@ final class AppModel {
     /// view's refresh button can't stampede one `gh` search into three.
     private(set) var viewerPrsLoading = false
     @ObservationIgnored private var viewerPrLoop: Task<Void, Never>?
+    /// PRs closed from here. GitHub's search index lags a close by seconds to
+    /// minutes, so a refetch can still list one; it stays filtered out until a
+    /// fetch stops returning it.
+    @ObservationIgnored private var viewerPrsClosedUrls: Set<String> = []
+
+    /// Drop a PR closed from here off the queue now, without waiting on a refetch.
+    func forgetViewerPr(url: String) {
+        viewerPrsClosedUrls.insert(url)
+        viewerPrs.rows.removeAll { $0.pr.url == url }
+    }
 
     /// Rows in the queue — the toolbar badge's count.
     var viewerPrCount: Int { viewerPrs.rows.count }
@@ -2527,8 +2537,13 @@ final class AppModel {
         }
         viewerPrsLoading = true
         Task {
-            let result = await reads.viewerPrs()
+            var result = await reads.viewerPrs()
                 ?? ViewerPrResult(available: false, error: "The core did not answer")
+            if result.available {
+                let listed = Set(result.rows.map(\.pr.url))
+                viewerPrsClosedUrls.formIntersection(listed)
+                result.rows.removeAll { viewerPrsClosedUrls.contains($0.pr.url) }
+            }
             // A failed search keeps the last good queue on screen rather than
             // blanking the count on one flaky round trip; the error still lands so
             // the view can say what went wrong.

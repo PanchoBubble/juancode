@@ -211,7 +211,7 @@ struct GitHubQueueBadge: View {
                     Image(systemName: "arrow.clockwise").font(.system(size: 10))
                 }
                 .buttonStyle(.borderless)
-                .help("Refresh your queue now (at most once a minute)")
+                .help("Refresh your queue now")
                 .clickCursor()
             }
             .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 6)
