@@ -76,7 +76,7 @@ private struct WindowContent: View {
             get: { model.projectsSidebarVisible ? .all : .detailOnly },
             set: { model.projectsSidebarVisible = $0 != .detailOnly }
         )) {
-            SidebarView()
+            SidebarColumn()
                 .navigationSplitViewColumnWidth(min: 220, ideal: sidebarIdeal)
         } detail: {
             DetailView()
@@ -611,8 +611,61 @@ private struct ToolsMenu: View {
     }
 }
 
+/// What the sidebar's toolbar buttons need from the sidebar, without the toolbar's
+/// owner reading it: the owner of a `.toolbar` must not re-render (see `RootView`),
+/// and `SidebarView` re-renders on every session update.
+@Observable final class SidebarToolbarBridge {
+    var anyExpanded = false
+    var toggleAllRequests = 0
+}
+
+/// Owns the sidebar's `.toolbar` and reads no observable state, for the same reason
+/// `RootView` reads none: while `SidebarView` itself owned it, every session update
+/// re-rendered the owner and closed whatever toolbar popover was open.
+private struct SidebarColumn: View {
+    @State private var bridge = SidebarToolbarBridge()
+
+    var body: some View {
+        SidebarView()
+            .environment(bridge)
+            .toolbar {
+                ToolbarItem { CollapseAllProjectsButton() }
+                // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP
+                // status (shield) moved off the sidebar: the filter field above covers
+                // in-list finding, and Kill Port + MCP status now live in the top-bar
+                // Tools popover (juancode-tciz / juancode-v4ep).
+                ToolbarItem { NewSessionToolbarButton() }
+            }
+            .navigationTitle("juancode")
+    }
+}
+
+private struct CollapseAllProjectsButton: View {
+    @Environment(SidebarToolbarBridge.self) private var bridge
+
+    var body: some View {
+        Button { bridge.toggleAllRequests += 1 } label: {
+            Image(systemName: bridge.anyExpanded
+                  ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+        }
+        .help(bridge.anyExpanded ? "Collapse all projects" : "Expand all projects")
+        .clickCursor()
+    }
+}
+
+private struct NewSessionToolbarButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
+            .help("New session")
+            .clickCursor()
+    }
+}
+
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(SidebarToolbarBridge.self) private var toolbarBridge
 
     /// Free-text filter over folder names/paths + session titles.
     @State private var query = ""
@@ -1378,31 +1431,15 @@ struct SidebarView: View {
         }
         .background(Color.appSurface)
         .onAppear { model.loadExternalSessions(); model.navOrder = visibleIDs }
-        .toolbar {
-            ToolbarItem {
-                let anyExpanded = groups.contains { !collapsedFolders.contains($0.cwd) }
-                Button {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
-                    }
-                } label: {
-                    Image(systemName: anyExpanded
-                          ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
-                }
-                .help(anyExpanded ? "Collapse all projects" : "Expand all projects")
-                .clickCursor()
-            }
-            // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP
-            // status (shield) moved off the sidebar: the filter field above covers
-            // in-list finding, and Kill Port + MCP status now live in the top-bar
-            // Tools popover (juancode-tciz / juancode-v4ep).
-            ToolbarItem {
-                Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
-                    .help("New session")
-                    .clickCursor()
+        .onChange(of: groups.contains { !collapsedFolders.contains($0.cwd) }, initial: true) { _, any in
+            toolbarBridge.anyExpanded = any
+        }
+        .onChange(of: toolbarBridge.toggleAllRequests) { _, _ in
+            let anyExpanded = groups.contains { !collapsedFolders.contains($0.cwd) }
+            withAnimation(.easeOut(duration: 0.18)) {
+                collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
             }
         }
-        .navigationTitle("juancode")
         .alert("Rename session", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
