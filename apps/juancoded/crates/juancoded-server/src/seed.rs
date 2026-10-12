@@ -40,6 +40,10 @@ use tracing::{debug, warn};
 /// and re-queueing a payload that may already be sitting in the agent's box is how
 /// this area has shipped duplicate pastes before. So the split is by evidence, not by
 /// severity: [`Self::Refused`] is exactly the case where no write ever succeeded.
+/// Why a [`Precondition::LiveIdle`] delivery is refused when the agent is working. A
+/// caller that can wait for the turn to end tells this refusal apart from the rest.
+pub const MID_TURN: &str = "the session is in the middle of a turn";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
     Submitted {
@@ -68,6 +72,12 @@ impl SeedOutcome {
             Self::Submitted { .. } => None,
             Self::Refused { reason } | Self::Failed { reason } => Some(reason),
         }
+    }
+
+    /// Refused only because the agent was mid-turn: nothing was typed, and the same
+    /// text will go in cleanly once the turn ends.
+    pub fn is_mid_turn(&self) -> bool {
+        matches!(self, Self::Refused { reason } if reason == MID_TURN)
     }
 
     /// Classify a stop by the one thing that decides it: whether a write has already
@@ -208,9 +218,7 @@ pub async fn deliver_text(
             // A session that has been up and is now busy is mid-turn. Refusing hands
             // the text back to whoever queued it, which is the only answer that does
             // not either interleave it or lose it.
-            Precondition::LiveIdle => {
-                return SeedOutcome::stopped(wrote, "the session is in the middle of a turn")
-            }
+            Precondition::LiveIdle => return SeedOutcome::stopped(wrote, MID_TURN),
         }
     }
 

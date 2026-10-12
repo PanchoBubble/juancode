@@ -63,7 +63,7 @@ use juancoded_persistence::SessionStore;
 use juancoded_state::registry::CreateRequest;
 use juancoded_state::{ClientId, SessionsApi};
 
-use crate::seed::{deliver_text, log_outcome, Precondition, SeedTiming};
+use crate::seed::{deliver_text, log_outcome, Precondition, SeedOutcome, SeedTiming, MID_TURN};
 
 /// Cadence of the poll loop, matching the Swift core's `Config.prPollInterval` without
 /// its webhook branch: that branch demotes the poll to a slow reconciler *because*
@@ -83,6 +83,20 @@ pub const WEBHOOK_DEBOUNCE: Duration = Duration::from_secs(2);
 /// spawn width forever, so this matches the wire layer's `DEFAULT_GRID` rather than a
 /// nominal 80x24 that would leave a permanently narrow transcript.
 const SPAWN_GRID: (u16, u16) = (120, 40);
+
+/// How every hand-over failure notification starts. A later delivery that does reach
+/// the agent makes all of them moot, so this prefix is how they are found and cleared.
+const HANDOVER_FAILED: &str = "Auto-fix needed, but";
+
+/// What became of a fix prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum HandOver {
+    Delivered,
+    /// The agent is mid-turn. Nothing was typed; the prompt waits for the next pass.
+    Busy,
+    /// Nothing reached the agent, for a reason the user has to look at.
+    Failed(String),
+}
 
 /// What a client asked to be watched.
 #[derive(Debug, Clone)]
@@ -140,6 +154,12 @@ pub struct TrackedPrs {
     pending_refresh: Mutex<BTreeMap<String, JoinHandle<()>>>,
     webhook_debounce: Duration,
     seed_timing: SeedTiming,
+    /// Fix reasons whose prompt found the agent mid-turn, keyed by [`TrackedPr::key`].
+    /// The classifier is edge-triggered, so a reason dropped here is never seen again;
+    /// each pass retries them until a delivery lands. Memory only: a restart takes the
+    /// session's turn down with it, and the stalled-CI/conflict checks re-derive the
+    /// level-triggered cases.
+    deferred: Mutex<BTreeMap<String, Vec<String>>>,
     /// The bus the notification rules hang off (juancode-2vlz). Every candidate a pass
     /// produces goes through `pr.notify` before anybody is told, and with no listener
     /// mounted the terminal returns all of them — which is exactly the behaviour this
@@ -166,7 +186,21 @@ impl TrackedPrs {
                 Vec::new()
             }
         };
-        let tracked = restored.into_iter().map(|pr| (pr.id.clone(), pr)).collect();
+        let tracked = restored
+            .into_iter()
+            .map(|mut pr| {
+                // A busy agent used to be raised as a decision that nothing ever cleared.
+                let before = pr.notifications.len();
+                pr.notifications
+                    .retain(|n| !is_mid_turn_failure(&n.message));
+                if pr.notifications.len() != before {
+                    if let Err(e) = store.upsert_tracked_pr(&pr) {
+                        warn!(tracked = %pr.id, "could not persist the tracked PR: {e:#}");
+                    }
+                }
+                (pr.id.clone(), pr)
+            })
+            .collect();
         Arc::new(Self {
             sessions,
             store,
@@ -177,6 +211,7 @@ impl TrackedPrs {
             pending_refresh: Mutex::new(BTreeMap::new()),
             webhook_debounce: WEBHOOK_DEBOUNCE,
             seed_timing: SeedTiming::default(),
+            deferred: Mutex::new(BTreeMap::new()),
             bus,
         })
     }
@@ -371,7 +406,7 @@ impl TrackedPrs {
         // learn the PR is being watched.
         let me = Arc::clone(self);
         tokio::spawn(async move {
-            if let Some(why) = me.deliver(&session, &seed, live).await {
+            if let Some(why) = me.deliver(&session, &seed, live).await.reason() {
                 warn!(session = %session, "the watch contract did not reach the agent: {why}");
             }
         });
@@ -402,6 +437,7 @@ impl TrackedPrs {
         if let Some(pending) = self.pending().remove(tracked_id) {
             pending.abort();
         }
+        self.deferred().remove(tracked_id);
         if let Err(e) = self.store.untrack_pr(tracked_id) {
             warn!(tracked = tracked_id, "could not persist the untrack: {e:#}");
         }
@@ -638,11 +674,15 @@ impl TrackedPrs {
             return;
         }
 
-        let mut fix_reasons = Vec::new();
+        let mut fix_reasons = self.deferred().remove(key).unwrap_or_default();
         let mut candidates = Vec::new();
         for event in result.events {
             match event {
-                TrackEvent::AutoFix(reason) => fix_reasons.push(reason),
+                TrackEvent::AutoFix(reason) => {
+                    if !fix_reasons.contains(&reason) {
+                        fix_reasons.push(reason);
+                    }
+                }
                 // Only a decision is a notification. An auto-fix is work handed to the
                 // agent, and the rules are about what reaches a person.
                 TrackEvent::NeedsDecision(reason) => candidates.push(PrNotifyCandidate {
@@ -693,8 +733,13 @@ impl TrackedPrs {
             return;
         }
         let prompt = auto_fix_prompt(number, &entry.branch, &fix_reasons);
-        if let Some(offline) = self.hand_over(&entry, &prompt, session_live).await {
-            self.raise(key, number, offline);
+        match self.hand_over(&entry, &prompt, session_live).await {
+            HandOver::Delivered => self.clear_handover_failures(key),
+            HandOver::Busy => {
+                debug!(tracked = %key, "agent mid-turn, fix prompt deferred to the next pass");
+                self.deferred().insert(key.to_string(), fix_reasons);
+            }
+            HandOver::Failed(offline) => self.raise(key, number, offline),
         }
     }
 
@@ -741,24 +786,32 @@ impl TrackedPrs {
     }
 
     /// Type the fix prompt into the PR's agent, reviving it first when its pty is gone.
-    /// `Some(reason)` when the work could not be handed over at all.
-    async fn hand_over(&self, entry: &TrackedPr, prompt: &str, live: bool) -> Option<String> {
+    async fn hand_over(&self, entry: &TrackedPr, prompt: &str, live: bool) -> HandOver {
         let Some(session) = entry.session_id.clone() else {
-            return Some("Auto-fix needed, but this PR has no session driving it.".into());
+            return HandOver::Failed(format!(
+                "{HANDOVER_FAILED} this PR has no session driving it."
+            ));
         };
         // A live session is mid-conversation and takes the delivery straight in. One
         // that has to come up first has a boot to sit through, exactly like a spawn's
         // seed, which is what the two preconditions are.
         if !live {
             if let Err(e) = self.revive(&session) {
-                return Some(format!(
-                    "Auto-fix needed, but the session working this PR could not be resumed: {e}"
+                return HandOver::Failed(format!(
+                    "{HANDOVER_FAILED} the session working this PR could not be resumed: {e}"
                 ));
             }
         }
-        self.deliver(&session, prompt, live)
-            .await
-            .map(|why| format!("Auto-fix needed, but the prompt did not reach the agent: {why}"))
+        let outcome = self.deliver(&session, prompt, live).await;
+        if outcome.is_mid_turn() {
+            return HandOver::Busy;
+        }
+        match outcome.reason() {
+            None => HandOver::Delivered,
+            Some(why) => HandOver::Failed(format!(
+                "{HANDOVER_FAILED} the prompt did not reach the agent: {why}"
+            )),
+        }
     }
 
     /// Bring a session's pty back on the conversation its row remembers.
@@ -774,13 +827,12 @@ impl TrackedPrs {
         revived.map(|_| ()).map_err(|e| e.to_string())
     }
 
-    /// Paste `text` into a session and submit it. `Some(reason)` when nothing reached
-    /// the agent.
+    /// Paste `text` into a session and submit it.
     ///
     /// `live` is about the session's state BEFORE any revive: a session that was up all
     /// along is between turns and takes the paste straight in, and one that had to be
     /// brought back has a CLI boot to sit through, exactly like a spawn's seed.
-    async fn deliver(&self, session: &str, text: &str, live: bool) -> Option<String> {
+    async fn deliver(&self, session: &str, text: &str, live: bool) -> SeedOutcome {
         let precondition = if live {
             Precondition::LiveIdle
         } else {
@@ -795,7 +847,28 @@ impl TrackedPrs {
         )
         .await;
         log_outcome(session, &outcome);
-        outcome.reason().map(str::to_string)
+        outcome
+    }
+
+    /// A prompt just reached the agent, so every earlier "it could not be handed over"
+    /// is answered.
+    fn clear_handover_failures(&self, key: &str) {
+        let entry = {
+            let mut held = self.held();
+            let Some(entry) = held.get_mut(key) else {
+                return;
+            };
+            let before = entry.notifications.len();
+            entry
+                .notifications
+                .retain(|n| !n.message.starts_with(HANDOVER_FAILED));
+            if entry.notifications.len() == before {
+                return;
+            }
+            entry.clone()
+        };
+        self.persist(&entry);
+        self.publish_list();
     }
 
     /// Raise a decision on a tracked PR, deduplicated by message.
@@ -862,6 +935,10 @@ impl TrackedPrs {
         // client would be sent has not moved.
     }
 
+    fn deferred(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<String>>> {
+        self.deferred.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, JoinHandle<()>>> {
         self.pending_refresh
             .lock()
@@ -890,6 +967,10 @@ impl TrackedPrs {
     fn held(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, TrackedPr>> {
         self.tracked.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+fn is_mid_turn_failure(message: &str) -> bool {
+    message.starts_with(HANDOVER_FAILED) && message.ends_with(MID_TURN)
 }
 
 /// The handle a classifier sentence names, lower-cased, or empty when it names nobody.
@@ -1341,6 +1422,75 @@ mod tests {
         );
 
         std::fs::remove_file(&file).ok();
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// A busy agent is not a decision. Rows persisted by the engine that raised one
+    /// lose it on the next start; every other decision survives.
+    #[tokio::test]
+    async fn a_stuck_mid_turn_notification_is_dropped_on_restart() {
+        let sessions = crate::testing::sessions();
+        let file = std::env::temp_dir().join(format!(
+            "juancoded-trackedpr-midturn-{}.db",
+            std::process::id()
+        ));
+        std::fs::remove_file(&file).ok();
+        let store: Arc<dyn SessionStore> =
+            Arc::new(SqliteStore::open(&file).expect("a store on disk"));
+
+        let root = repo("midturn");
+        let cwd = root.to_string_lossy().to_string();
+        let first = TrackedPrs::new(
+            Arc::clone(&sessions),
+            Arc::clone(&store),
+            POLL_INTERVAL,
+            Bus::new(),
+        );
+        let entry = first.track(request(&cwd, 4242)).await.expect("a watch");
+        first.raise(
+            &entry.id,
+            4242,
+            format!("{HANDOVER_FAILED} the prompt did not reach the agent: {MID_TURN}"),
+        );
+        first.raise(&entry.id, 4242, "@somebody requested changes".into());
+        drop(first);
+
+        let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::open(&file).expect("reopened"));
+        let second = TrackedPrs::new(sessions, store, POLL_INTERVAL, Bus::new());
+        let kept: Vec<String> = second.list()[0]
+            .notifications
+            .iter()
+            .map(|n| n.message.clone())
+            .collect();
+        assert_eq!(kept, vec!["@somebody requested changes".to_string()]);
+
+        std::fs::remove_file(&file).ok();
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    /// A prompt that lands answers every earlier failure to hand one over, and nothing
+    /// else.
+    #[tokio::test]
+    async fn a_delivery_clears_earlier_handover_failures_only() {
+        let (engine, _sessions) = engine();
+        let root = repo("handover-clear");
+        let cwd = root.to_string_lossy().to_string();
+        let entry = engine.track(request(&cwd, 4242)).await.expect("a watch");
+
+        engine.raise(
+            &entry.id,
+            4242,
+            format!("{HANDOVER_FAILED} the session working this PR could not be resumed: gone"),
+        );
+        engine.raise(&entry.id, 4242, "@somebody requested changes".into());
+        engine.clear_handover_failures(&entry.id);
+        let left: Vec<String> = engine.list()[0]
+            .notifications
+            .iter()
+            .map(|n| n.message.clone())
+            .collect();
+        assert_eq!(left, vec!["@somebody requested changes".to_string()]);
+
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 

@@ -2182,13 +2182,16 @@ func prPrompt(_ pr: PullRequest) -> String {
 /// A small pill showing what a tracked PR is currently doing.
 struct TrackBadge: View {
     let state: TrackState
+    /// The tracking session sits at a prompt. CI can be green with the agent stuck on a
+    /// question only the user can answer, so this outranks watching/fixing.
+    var waiting = false
     /// Just a tinted eye, for rows with no room for the word.
     var compact = false
     var body: some View {
         if compact {
             Image(systemName: "eye.fill")
                 .font(.system(size: 9))
-                .foregroundStyle(state == .watching ? Color.teal : color)
+                .foregroundStyle(state == .watching && !waiting ? Color.teal : color)
                 .help(help)
         } else {
             pill
@@ -2204,6 +2207,7 @@ struct TrackBadge: View {
             .help(help)
     }
     private var label: String {
+        if waiting && state != .needsDecision { return "needs you" }
         switch state {
         case .watching: return "watching"
         case .fixing: return "fixing"
@@ -2211,6 +2215,7 @@ struct TrackBadge: View {
         }
     }
     private var color: Color {
+        if waiting { return .orange }
         switch state {
         case .watching: return .secondary
         case .fixing: return .blue
@@ -2220,6 +2225,8 @@ struct TrackBadge: View {
     private var help: String {
         let base: String
         switch state {
+        case _ where waiting && state != .needsDecision:
+            base = "Tracking — the agent is waiting for your reply"
         case .watching: base = "Tracking — CI green, watching for new activity"
         case .fixing: base = "Tracking — CI is running/failing; the agent is on it"
         case .needsDecision: base = "Tracking — a change needs your decision"

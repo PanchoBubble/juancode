@@ -477,7 +477,9 @@ struct GitHubQueueBadge: View {
                             dismiss()
                             model.openTrackingSession(t)
                         } label: {
-                            TrackBadge(state: t.state, compact: true)
+                            TrackBadge(state: t.state,
+                                       waiting: model.activity(t.sessionId) == .waitingInput,
+                                       compact: true)
                                 .opacity(model.isTrackPending(t) ? 0.45 : 1)
                         }
                         .buttonStyle(.borderless)
@@ -668,7 +670,8 @@ struct GitHubQueueBadge: View {
                             Text(verbatim: "#\(t.number)")
                                 .font(.system(size: 11, weight: .medium).monospacedDigit())
                                 .foregroundStyle(.secondary)
-                            TrackBadge(state: t.state)
+                            TrackBadge(state: t.state,
+                                       waiting: model.activity(t.sessionId) == .waitingInput)
                             Text(t.repoNwo ?? (t.cwd as NSString).lastPathComponent)
                                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                                 .lineLimit(1).truncationMode(.middle)
