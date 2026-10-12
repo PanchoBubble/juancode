@@ -71,6 +71,8 @@ pub struct GitParams {
     pub commit: Option<String>,
     pub path: Option<String>,
     pub limit: Option<usize>,
+    /// Commits at or before this date only (`git log --until`).
+    pub until: Option<String>,
     pub pid: Option<i32>,
 }
 
@@ -217,7 +219,9 @@ async fn path_commits(Query(p): Query<GitParams>) -> Response {
         return missing_cwd();
     };
     let limit = p.limit.unwrap_or(DEFAULT_COMMIT_LIMIT);
-    blocking(move || Json(git::recent_commits(&cwd, limit)).into_response()).await
+    let until = p.until.clone();
+    blocking(move || Json(git::recent_commits_until(&cwd, limit, until.as_deref())).into_response())
+        .await
 }
 
 async fn path_status(Query(p): Query<GitParams>) -> Response {

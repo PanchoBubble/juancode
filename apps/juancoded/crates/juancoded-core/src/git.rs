@@ -527,16 +527,29 @@ pub fn state(cwd: &str) -> GitState {
 /// Never fails: an empty repo, a non-repo, or a git that will not answer all come back
 /// as an empty picker, because there is nothing for a person to do about any of them.
 pub fn recent_commits(cwd: &str, limit: usize) -> Vec<RecentCommit> {
+    recent_commits_until(cwd, limit, None)
+}
+
+/// `recent_commits`, starting from the newest commit at or before `until` (anything
+/// `git log --until` reads, e.g. `2026-10-12 23:59:59`).
+pub fn recent_commits_until(cwd: &str, limit: usize, until: Option<&str>) -> Vec<RecentCommit> {
     if repo_root(cwd).is_none() {
         return Vec::new();
     }
     let limit_s = limit.to_string();
     // Unit separator, because a commit subject may contain anything a person typed,
     // tabs included.
-    let Some(log) = git(
-        cwd,
-        &["log", "-n", &limit_s, "--format=%H%x1f%h%x1f%s%x1f%cr"],
-    ) else {
+    let mut args = vec![
+        "log".to_string(),
+        "-n".to_string(),
+        limit_s,
+        "--format=%H%x1f%h%x1f%s%x1f%cr".to_string(),
+    ];
+    if let Some(until) = until.filter(|u| !u.trim().is_empty()) {
+        args.push(format!("--until={until}"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Some(log) = git(cwd, &args) else {
         return Vec::new();
     };
 
@@ -1159,6 +1172,23 @@ pub(crate) mod tests {
             "gitignore is honoured: {files:?}"
         );
         assert_eq!(tracked_files(cwd, 1).len(), 1, "the cap is a cap");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn commits_until_a_date_skip_the_newer_ones() {
+        let dir = repo("commitsuntil");
+        let cwd = dir.to_str().unwrap();
+        std::fs::write(dir.join("a.txt"), "later\n").unwrap();
+        commit_all(cwd, "later").unwrap();
+
+        assert_eq!(
+            recent_commits_until(cwd, 10, Some("")).len(),
+            2,
+            "blank is no filter"
+        );
+        assert!(recent_commits_until(cwd, 10, Some("2000-01-01 23:59:59")).is_empty());
+        assert_eq!(recent_commits_until(cwd, 10, Some("2099-01-01")).len(), 2);
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 

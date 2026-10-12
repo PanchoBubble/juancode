@@ -122,11 +122,62 @@ final class RepoDiffStore {
     var error: String?
     var busy = false
     var note: Note?
+    /// The commit picker: `selectedCommit` nil means the working tree.
+    var commits: [RecentCommit] = []
+    var commitsUntil: Date?
+    var commitsLoading = false
+    var hasMoreCommits = false
+    var selectedCommit: RecentCommit?
+    var commitDiff: DiffResult?
+    @ObservationIgnored private var commitLimit = RepoDiffStore.commitPage
+    static let commitPage = 5
     @ObservationIgnored private var watch: WorktreeWatchToken?
     @ObservationIgnored private let watcher = WorktreeWatcherRegistry()
     @ObservationIgnored private var root: String?
 
     func stopWatching() { watch = nil }
+
+    /// What the tree shows: the picked commit's diff, else the working tree's.
+    var shown: DiffResult? { selectedCommit == nil ? diff : commitDiff }
+
+    func loadCommits(model: AppModel, more: Bool = false) async {
+        guard let root else { return }
+        commitLimit = more ? commitLimit + Self.commitPage : Self.commitPage
+        commitsLoading = true
+        defer { commitsLoading = false }
+        let until = commitsUntil.map(Self.untilArg)
+        do {
+            let got = try await model.core.recentCommits(cwd: root, limit: commitLimit, until: until)
+            guard root == self.root else { return }
+            commits = got
+            hasMoreCommits = got.count >= commitLimit
+        } catch {
+            note = Note(ok: false, text: Self.message(error))
+        }
+    }
+
+    func select(_ commit: RecentCommit?, model: AppModel) async {
+        selectedCommit = commit
+        commitDiff = nil
+        guard let commit, let root else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let d = try await model.core.commitDiff(cwd: root, sha: commit.sha)
+            guard root == self.root, selectedCommit == commit else { return }
+            commitDiff = d
+        } catch {
+            note = Note(ok: false, text: Self.message(error))
+        }
+    }
+
+    /// The end of the picked day, so that day's commits are included.
+    private static func untilArg(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date) + " 23:59:59"
+    }
 
     func load(root: String?, model: AppModel, rewatch: Bool) async {
         self.root = root
@@ -135,6 +186,11 @@ final class RepoDiffStore {
             diff = nil
             gitState = nil
             note = nil
+            commits = []
+            commitsUntil = nil
+            hasMoreCommits = false
+            selectedCommit = nil
+            commitDiff = nil
             watch = watcher.watch(path: root) { [weak self] in
                 Task { @MainActor in await self?.load(root: root, model: model, rewatch: false) }
             }
@@ -187,6 +243,7 @@ final class RepoDiffStore {
         do {
             let r = try await model.core.commitAll(sessionId: sid, cwd: root, message: message)
             note = Note(ok: true, text: "Committed \(r.sha) · \(r.subject)")
+            commits = []
             await load(root: root, model: model, rewatch: false)
             return true
         } catch {
@@ -260,7 +317,8 @@ private struct RepoDiffRail: View {
     @State private var collapsed: Set<String> = []
     @State private var pendingDiscard: DiscardRequest?
 
-    private var diff: DiffResult? { store.diff }
+    private var diff: DiffResult? { store.shown }
+    private var viewingCommit: Bool { store.selectedCommit != nil }
     private var loading: Bool { store.loading }
     private var error: String? { store.error }
 
@@ -277,7 +335,10 @@ private struct RepoDiffRail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            if let files = diff?.files, !files.isEmpty, root != nil {
+            if root != nil {
+                RepoCommitPicker(store: store)
+            }
+            if !viewingCommit, let files = diff?.files, !files.isEmpty, root != nil {
                 RepoDiffActions(store: store)
             }
             Divider().padding(.vertical, 2)
@@ -350,11 +411,13 @@ private struct RepoDiffRail: View {
             note("Select a session to see its repo's changes.")
         } else if let error {
             note(error)
+        } else if viewingCommit && diff == nil {
+            note(loading ? "Loading commit…" : "Couldn't load this commit.")
         } else if let diff, !diff.git {
             note("Not a git repository.")
         } else if let files = diff?.files {
             if files.isEmpty {
-                note("Working tree clean.")
+                note(viewingCommit ? "No file changes in this commit." : "Working tree clean.")
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -362,7 +425,7 @@ private struct RepoDiffRail: View {
                             RepoDiffRow(node: item.node, depth: item.depth,
                                         collapsed: collapsed.contains(item.node.id),
                                         onTap: { frame in tap(item.node, from: frame) },
-                                        onDiscard: { requestDiscard(item.node) },
+                                        onDiscard: viewingCommit ? nil : { requestDiscard(item.node) },
                                         onOpen: { if let f = item.node.file { open(f, from: .zero) } })
                         }
                         if diff?.truncatedFiles == true {
@@ -446,7 +509,8 @@ private struct RepoDiffRow: View {
     let depth: Int
     let collapsed: Bool
     let onTap: (CGRect) -> Void
-    let onDiscard: () -> Void
+    /// Nil for a commit's diff: there is nothing uncommitted to discard.
+    let onDiscard: (() -> Void)?
     let onOpen: () -> Void
 
     @State private var hovering = false
@@ -521,19 +585,23 @@ private struct RepoDiffRow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(f.path, forType: .string)
             }
-            Divider()
-            if f.status == .untracked {
-                Button("Delete File…", role: .destructive) { onDiscard() }
-            } else {
-                Button("Discard Changes…", role: .destructive) { onDiscard() }
+            if let onDiscard {
+                Divider()
+                if f.status == .untracked {
+                    Button("Delete File…", role: .destructive) { onDiscard() }
+                } else {
+                    Button("Discard Changes…", role: .destructive) { onDiscard() }
+                }
             }
         } else {
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(node.id, forType: .string)
             }
-            Divider()
-            Button("Discard Changes in Folder…", role: .destructive) { onDiscard() }
+            if let onDiscard {
+                Divider()
+                Button("Discard Changes in Folder…", role: .destructive) { onDiscard() }
+            }
         }
     }
 
@@ -565,6 +633,123 @@ private struct RepoDiffRow: View {
         case .added, .untracked: return .green
         case .deleted: return .red
         }
+    }
+}
+
+/// Which diff the tab shows: the working tree, or one past commit. The list starts at
+/// the last five, grows a page at a time, and can start from a picked day instead.
+private struct RepoCommitPicker: View {
+    @Environment(AppModel.self) private var model
+    let store: RepoDiffStore
+    @State private var open = false
+    @State private var byDate = false
+    @State private var day = Date()
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: store.selectedCommit == nil ? "square.and.pencil" : "clock.arrow.circlepath")
+                    .font(.system(size: 10))
+                if let c = store.selectedCommit {
+                    Text(c.shortSha).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    Text(c.subject).lineLimit(1).truncationMode(.tail)
+                } else {
+                    Text("Working tree")
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 11))
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.primary.opacity(0.06)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help("Show the diff of a past commit")
+        .padding(.horizontal, 10).padding(.top, 4)
+        .popover(isPresented: $open, arrowEdge: .bottom) { list }
+        .onChange(of: open) { _, isOpen in
+            if isOpen { Task { await store.loadCommits(model: model) } }
+        }
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row(nil)
+            Divider()
+            HStack(spacing: 6) {
+                Toggle("On or before", isOn: $byDate)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                DatePicker("", selection: $day, in: ...Date(), displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.field)
+                    .controlSize(.small)
+                    .disabled(!byDate)
+                Spacer()
+                if store.commitsLoading { ProgressView().controlSize(.mini) }
+            }
+            .onChange(of: byDate) { _, _ in reloadByDate() }
+            .onChange(of: day) { _, _ in if byDate { reloadByDate() } }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(store.commits) { row($0) }
+                    if store.commits.isEmpty && !store.commitsLoading {
+                        Text(byDate ? "No commits on or before that day." : "No commits.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .padding(.vertical, 8)
+                    }
+                    if store.hasMoreCommits {
+                        Button("Load more") { Task { await store.loadCommits(model: model, more: true) } }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                            .disabled(store.commitsLoading)
+                            .padding(.horizontal, 6).padding(.vertical, 6)
+                            .clickCursor()
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+        }
+        .padding(10)
+        .frame(width: 380)
+    }
+
+    private func reloadByDate() {
+        store.commitsUntil = byDate ? day : nil
+        Task { await store.loadCommits(model: model) }
+    }
+
+    private func row(_ commit: RecentCommit?) -> some View {
+        let picked = store.selectedCommit?.sha == commit?.sha
+        return Button {
+            open = false
+            Task { await store.select(commit, model: model) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
+                    .opacity(picked ? 1 : 0)
+                if let commit {
+                    Text(commit.shortSha)
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    Text(commit.subject).font(.system(size: 11)).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(commit.relativeAge).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("Working tree").font(.system(size: 11, weight: .medium))
+                    Text("uncommitted changes").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .clickCursor()
     }
 }
 

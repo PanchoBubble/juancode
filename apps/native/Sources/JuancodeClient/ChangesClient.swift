@@ -41,6 +41,12 @@ public extension CoreClient {
         throw changesUnsupported
     }
 
+    /// `recentCommits`, starting from the newest commit at or before `until`
+    /// (anything `git log --until` reads).
+    func recentCommits(cwd: String, limit: Int, until: String?) async throws -> [RecentCommit] {
+        throw changesUnsupported
+    }
+
     /// Every linked worktree of the repo `cwd` belongs to, main one first.
     func worktrees(cwd: String) async throws -> [Worktree] { throw changesUnsupported }
 

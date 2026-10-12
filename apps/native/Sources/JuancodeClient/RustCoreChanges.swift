@@ -46,8 +46,13 @@ public extension RustCoreClient {
     }
 
     func recentCommits(cwd: String, limit: Int) async throws -> [RecentCommit] {
-        try await gitGet("/api/git/commits", [("cwd", cwd), ("limit", String(limit))],
-                         as: [RecentCommit].self)
+        try await recentCommits(cwd: cwd, limit: limit, until: nil)
+    }
+
+    func recentCommits(cwd: String, limit: Int, until: String?) async throws -> [RecentCommit] {
+        var query = [("cwd", cwd), ("limit", String(limit))]
+        if let until, !until.isEmpty { query.append(("until", until)) }
+        return try await gitGet("/api/git/commits", query, as: [RecentCommit].self)
     }
 
     func worktrees(cwd: String) async throws -> [Worktree] {
