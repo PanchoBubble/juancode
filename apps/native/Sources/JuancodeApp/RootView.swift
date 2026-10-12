@@ -151,6 +151,22 @@ private struct WindowContent: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .alert("All worktree slots are taken", isPresented: Binding(
+            get: { model.pendingReclaim != nil },
+            set: { if !$0 { model.pendingReclaim = nil } }
+        ), presenting: model.pendingReclaim) { pending in
+            Button("Cancel", role: .cancel) { model.pendingReclaim = nil }
+            Button("Delete and Reuse", role: .destructive) {
+                model.pendingReclaim = nil
+                Task { await pending.retry() }
+            }
+        } message: { pending in
+            Text("The oldest slot, \((pending.confirm.slot as NSString).lastPathComponent), belongs to "
+                + "\"\(pending.confirm.title)\", updated today at "
+                + "\(pending.confirm.updatedAt.formatted(date: .omitted, time: .shortened)). "
+                + "Reusing it deletes that session; its branch stays in git. "
+                + "Turn this question off in Settings → Worktrees.")
+        }
         if oracleRailShown {
             // Preview-only drag (like the Oracle drawer's edge): the split view to the
             // left hosts live terminals, and reflowing them at every intermediate width

@@ -430,8 +430,9 @@ public enum SessionWorktree: Sendable, Equatable {
     /// and the tree have to be made by the same process.
     case made(path: String)
     /// A tree the CORE must cut, as `<repo>-worktrees/<name>` off the create's `cwd`,
-    /// on branch `juancode/<name>`.
-    case requested(name: String)
+    /// on branch `juancode/<name>`. `reclaimSlot` is the user's yes to deleting the
+    /// session that holds a full repo's oldest slot (`WorktreeReclaimConfirm`).
+    case requested(name: String, reclaimSlot: Bool = false)
 }
 
 /// A core's wire-protocol version and implemented capabilities: the `serverInfo`

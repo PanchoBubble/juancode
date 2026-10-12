@@ -24,6 +24,7 @@ fn request(cwd: &str) -> CreateRequest {
         model: None,
         preset: None,
         isolate_worktree: false,
+        reclaim_slot: false,
         worktree_name: None,
         dispatch_id: None,
         owner: 1,
@@ -265,5 +266,67 @@ async fn deleting_a_session_this_core_never_had_is_not_found() {
     assert_eq!(
         harness.sessions.delete("no-such-session").unwrap_err(),
         StateError::NotFound
+    );
+}
+
+/// Sessions usually exit without being deleted, so a full repo frees a slot by
+/// deleting the least recently updated session in one. One updated today is asked
+/// about first, and turning reclaiming off grows the pool instead.
+#[tokio::test]
+async fn a_full_repo_reclaims_the_oldest_slot_after_asking() {
+    let harness = Harness::new("reclaim-slot");
+    let root = repo(&harness.dir);
+    let config = harness.dir.join("worktree-pool.json");
+    std::fs::write(&config, r#"{"maxIdlePerRepo":1}"#).unwrap();
+    let isolated = || {
+        let mut req = request(&root);
+        req.isolate_worktree = true;
+        req
+    };
+    let first = harness
+        .sessions
+        .create(isolated())
+        .expect("an isolated create");
+    let slot = first.worktree_path.clone().expect("a slot");
+    let mut events = harness.sessions.subscribe();
+    harness.sessions.kill(&first.id).expect("kill");
+    harness::wait_for_exit(&mut events, &first.id).await;
+
+    match harness.sessions.create(isolated()) {
+        Err(StateError::ReclaimConfirm {
+            slot: asked,
+            session_id,
+            ..
+        }) => {
+            assert_eq!(asked, slot);
+            assert_eq!(session_id, first.id);
+        }
+        other => panic!("expected a question, got {other:?}"),
+    }
+    assert!(
+        harness.sessions.meta(&first.id).is_some(),
+        "nothing deleted before a yes"
+    );
+
+    let mut yes = isolated();
+    yes.reclaim_slot = true;
+    let second = harness.sessions.create(yes).expect("a reclaiming create");
+    assert_eq!(second.worktree_path.as_deref(), Some(slot.as_str()));
+    assert!(
+        harness.sessions.meta(&first.id).is_none(),
+        "the old session is gone"
+    );
+
+    std::fs::write(&config, r#"{"maxIdlePerRepo":1,"reclaimOldest":false}"#).unwrap();
+    harness.sessions.kill(&second.id).expect("kill");
+    harness::wait_for_exit(&mut events, &second.id).await;
+    let third = harness
+        .sessions
+        .create(isolated())
+        .expect("a create past the cap");
+    assert_ne!(third.worktree_path.as_deref(), Some(slot.as_str()));
+    assert!(
+        harness.sessions.meta(&second.id).is_some(),
+        "reclaiming off deletes nothing"
     );
 }

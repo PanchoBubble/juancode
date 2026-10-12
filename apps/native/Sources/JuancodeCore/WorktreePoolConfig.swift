@@ -14,12 +14,13 @@ public enum DaemonDataDir {
     }
 }
 
-/// How many deleted sessions' worktrees the daemon keeps per repo for reuse
-/// (`juancoded-core/src/worktree/pool.rs`). Written here, read by the daemon on every
-/// create and delete, so a change needs no restart.
+/// How many worktree slots the daemon keeps per repo, and what it does when they are
+/// full (`juancoded-core/src/worktree/pool.rs`). Written here, read by the daemon on
+/// every create and delete, so a change needs no restart.
 ///
-/// `worktree-pool.json` beside the daemon's store: `{"maxIdlePerRepo": 20}`. `0`
-/// turns reuse off.
+/// `worktree-pool.json` beside the daemon's store:
+/// `{"maxIdlePerRepo": 20, "reclaimOldest": true, "confirmRecentReclaim": true}`.
+/// `0` slots turns reuse off.
 public enum WorktreePoolConfig {
     public static let defaultMaxIdle = 20
 
@@ -31,22 +32,47 @@ public enum WorktreePoolConfig {
     }
 
     public static func maxIdle(at path: String = WorktreePoolConfig.path) -> Int {
-        guard let data = FileManager.default.contents(atPath: path),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let n = obj["maxIdlePerRepo"] as? Int, n >= 0
-        else { return defaultMaxIdle }
+        guard let n = read(at: path)["maxIdlePerRepo"] as? Int, n >= 0 else { return defaultMaxIdle }
         return n
     }
 
-    /// Other keys in the file are preserved. Returns whether the file was written.
+    /// Off: a full repo cuts a new slot past the cap instead of deleting a session.
+    public static func reclaimOldest(at path: String = WorktreePoolConfig.path) -> Bool {
+        read(at: path)["reclaimOldest"] as? Bool ?? true
+    }
+
+    /// Off: the oldest slot is reclaimed without asking, even if its session was
+    /// updated today.
+    public static func confirmRecentReclaim(at path: String = WorktreePoolConfig.path) -> Bool {
+        read(at: path)["confirmRecentReclaim"] as? Bool ?? true
+    }
+
     @discardableResult
     public static func setMaxIdle(_ n: Int, at path: String = WorktreePoolConfig.path) -> Bool {
-        var obj: [String: Any] = [:]
-        if let data = FileManager.default.contents(atPath: path),
-           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            obj = existing
-        }
-        obj["maxIdlePerRepo"] = max(0, n)
+        write(["maxIdlePerRepo": max(0, n)], at: path)
+    }
+
+    @discardableResult
+    public static func setReclaimOldest(_ on: Bool, at path: String = WorktreePoolConfig.path) -> Bool {
+        write(["reclaimOldest": on], at: path)
+    }
+
+    @discardableResult
+    public static func setConfirmRecentReclaim(_ on: Bool, at path: String = WorktreePoolConfig.path) -> Bool {
+        write(["confirmRecentReclaim": on], at: path)
+    }
+
+    private static func read(at path: String) -> [String: Any] {
+        guard let data = FileManager.default.contents(atPath: path),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return obj
+    }
+
+    /// Other keys in the file are preserved. Returns whether the file was written.
+    private static func write(_ changes: [String: Any], at path: String) -> Bool {
+        var obj = read(at: path)
+        obj.merge(changes) { _, new in new }
         let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])

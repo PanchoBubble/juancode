@@ -417,8 +417,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         ]
         switch worktree {
         case .none: break
-        case let .requested(name):
+        case let .requested(name, reclaimSlot):
             frame["isolateWorktree"] = true
+            if reclaimSlot { frame["reclaimSlot"] = true }
             // The name carries meaning for the caller — the fan-out's `<stem>-a`,
             // `<stem>-b` family — and the daemon names the tree after the session when
             // it is absent.
@@ -1489,6 +1490,19 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
         case "error":
             let message = body["message"] as? String ?? "unknown core error"
+            if body["code"] as? String == WorktreeReclaimConfirm.code,
+               let reclaim = body["reclaim"] as? [String: Any] {
+                let updated = (reclaim["updatedAt"] as? NSNumber)?.doubleValue ?? 0
+                pendingResult {
+                    $0.failure = WorktreeReclaimConfirm(
+                        message: message,
+                        slot: reclaim["slot"] as? String ?? "",
+                        sessionId: reclaim["sessionId"] as? String ?? "",
+                        title: reclaim["title"] as? String ?? "",
+                        updatedAt: Date(timeIntervalSince1970: updated / 1000))
+                }
+                return
+            }
             // A refused open is the one error frame that names nothing at all: no
             // session, and no requestId either, because the daemon answers a failed
             // open before it has anything to call the pty. The message is what says
@@ -2003,6 +2017,20 @@ public struct CoreRemoteError: LocalizedError {
         self.message = message
         self.sessionId = sessionId
     }
+
+    public var errorDescription: String? { message }
+}
+
+/// A create refused because every worktree slot in the repo is taken and the oldest
+/// belongs to a session updated today. Resending with `.requested(reclaimSlot: true)`
+/// deletes that session and reuses its slot.
+public struct WorktreeReclaimConfirm: LocalizedError, Equatable {
+    public static let code = "worktreeReclaimConfirm"
+    public let message: String
+    public let slot: String
+    public let sessionId: String
+    public let title: String
+    public let updatedAt: Date
 
     public var errorDescription: String? { message }
 }

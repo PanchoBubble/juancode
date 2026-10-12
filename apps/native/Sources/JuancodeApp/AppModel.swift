@@ -414,6 +414,13 @@ final class AppModel {
     /// runs a headless `claude -p` turn and previews a settings patch to confirm.
     var showingSettingsAI = false
     var errorMessage: String?
+    /// A create waiting on "delete this session to free its worktree slot?".
+    var pendingReclaim: PendingReclaim?
+    struct PendingReclaim: Identifiable {
+        var id: String { confirm.sessionId }
+        let confirm: WorktreeReclaimConfirm
+        let retry: @MainActor () async -> Void
+    }
     /// The file currently open in the floating editor overlay, if any. A single
     /// overlay at a time; hosted at the window root by `EditorHost`.
     var editing: EditorTarget?
@@ -1829,7 +1836,8 @@ final class AppModel {
     func create(provider: ProviderId, cwd: String, skipPermissions: Bool,
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
-                worktreeName: String? = nil, dispatchId: String? = nil) async -> (any LiveSession)? {
+                worktreeName: String? = nil, dispatchId: String? = nil,
+                reclaimSlot: Bool = false) async -> (any LiveSession)? {
         // A folder you're starting work in must not stay hidden — the new session
         // would land in a section nobody can see.
         unhideProject(cwd)
@@ -1861,7 +1869,7 @@ final class AppModel {
                 // `worktreePath`, so closing the session reaped nothing and the
                 // directory stayed on disk (juancode-asnn).
                 worktree = .requested(name: worktreeName
-                    ?? String(UUID().uuidString.prefix(8)).lowercased())
+                    ?? String(UUID().uuidString.prefix(8)).lowercased(), reclaimSlot: reclaimSlot)
             }
             // Spawn off the main actor: this resolves the CLI via a login shell and
             // forkpty()s — work that must never block the UI run loop.
@@ -1906,6 +1914,16 @@ final class AppModel {
                 focusTerminal()
             }
             return s
+        } catch let confirm as WorktreeReclaimConfirm {
+            settlePending(landingOn: selectionBefore)
+            pendingReclaim = PendingReclaim(confirm: confirm) { [weak self] in
+                await self?.create(provider: provider, cwd: cwd, skipPermissions: skipPermissions,
+                                   isolateWorktree: isolateWorktree, initialInput: initialInput,
+                                   select: select, cols: cols, rows: rows, model: model,
+                                   worktreeName: worktreeName, dispatchId: dispatchId,
+                                   reclaimSlot: true)
+            }
+            return nil
         } catch {
             settlePending(landingOn: selectionBefore)
             errorMessage = "Failed to start \(provider.rawValue): \(error)"

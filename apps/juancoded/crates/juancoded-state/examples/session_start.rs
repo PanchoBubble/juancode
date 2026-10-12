@@ -59,6 +59,7 @@ async fn main() {
                 model: None,
                 preset: None,
                 isolate_worktree: isolate,
+                reclaim_slot: true,
                 worktree_name: None,
                 dispatch_id: None,
                 owner: 1,
@@ -122,6 +123,7 @@ async fn main() {
     let pool = worktree::pool::Pool {
         max_idle: worktree::pool::DEFAULT_MAX_IDLE_PER_REPO,
         in_use: &nobody,
+        reclaim: None,
     };
     let mut pooled = Vec::new();
     for _ in 0..runs {

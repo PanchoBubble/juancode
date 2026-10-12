@@ -157,6 +157,8 @@ pub struct CreateRequest {
     /// numbers a family of trees off one question — and an unusable one is refused
     /// rather than silently replaced, same as any other part of the isolation promise.
     pub worktree_name: Option<String>,
+    /// The user already said yes to reclaiming a slot whose session was updated today.
+    pub reclaim_slot: bool,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -206,6 +208,14 @@ pub enum StateError {
     NotADirectory(String),
     /// Isolation was asked for and could not be given. Carries git's own reason.
     Worktree(String),
+    /// The repo's slots are full and the oldest belongs to a session updated today.
+    /// Nothing was deleted; the create can be resent with `reclaim_slot`.
+    ReclaimConfirm {
+        slot: String,
+        session_id: String,
+        title: String,
+        updated_at_ms: i64,
+    },
     /// A `create.preset` name the core could not turn into an instruction set.
     /// Carries the store's own reason.
     Preset(String),
@@ -227,6 +237,10 @@ impl std::fmt::Display for StateError {
             Self::NotRunning => write!(f, "Session is not running"),
             Self::NotADirectory(cwd) => write!(f, "\"{cwd}\" is not an existing directory"),
             Self::Worktree(why) => write!(f, "{why}"),
+            Self::ReclaimConfirm { slot, title, .. } => write!(
+                f,
+                "Every worktree slot is taken; the oldest, {slot}, belongs to \"{title}\", updated today"
+            ),
             Self::Preset(why) => write!(f, "Preset rejected: {why}"),
             Self::DispatchAlreadyProcessed(id) => {
                 write!(f, "Dispatch {id} was already processed")
@@ -438,7 +452,38 @@ impl SessionRegistry {
     }
 
     fn max_idle_worktrees(&self) -> usize {
-        worktree::pool::max_idle_per_repo_at(&self.inner.config.worktree_pool_config)
+        self.pool_settings().max_slots
+    }
+
+    fn pool_settings(&self) -> worktree::pool::PoolSettings {
+        worktree::pool::settings_at(&self.inner.config.worktree_pool_config)
+    }
+
+    /// Who holds each pooled slot, for choosing which one a full repo gives up.
+    fn slot_owners(&self) -> Result<HashMap<String, worktree::pool::SlotOwner>, StateError> {
+        let rows = self
+            .inner
+            .store
+            .all()
+            .map_err(|e| StateError::Store(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| {
+                let path = m.worktree_path.clone()?;
+                let running = self.get(&m.id).is_some_and(|live| {
+                    live.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+                });
+                Some((
+                    path,
+                    worktree::pool::SlotOwner {
+                        session_id: m.id,
+                        title: m.title,
+                        updated_at_ms: m.updated_at,
+                        running,
+                    },
+                ))
+            })
+            .collect())
     }
 
     /// Build the registry over the services it composes with, rehydrate whatever the
@@ -772,24 +817,56 @@ impl SessionRegistry {
                 .worktree_name
                 .clone()
                 .unwrap_or_else(|| id.chars().take(8).collect::<String>());
-            let max_idle = self.max_idle_worktrees();
-            let recorded: std::collections::HashSet<String> = if max_idle == 0 {
+            let settings = self.pool_settings();
+            let owners = if settings.max_slots == 0 {
                 Default::default()
             } else {
-                self.inner
-                    .store
-                    .all()
-                    .map_err(|e| StateError::Store(e.to_string()))?
-                    .into_iter()
-                    .filter_map(|m| m.worktree_path)
-                    .collect()
+                self.slot_owners()?
+            };
+            let owner_of = |path: &str| owners.get(path).cloned();
+            let evict = |owner: &worktree::pool::SlotOwner| match self
+                .forget(&owner.session_id, false)
+            {
+                Ok(_) => {
+                    info!(session = %owner.session_id, "deleted to reclaim its worktree slot");
+                    true
+                }
+                Err(e) => {
+                    warn!(session = %owner.session_id, error = %e, "could not delete to reclaim its slot");
+                    false
+                }
             };
             let pool = worktree::pool::Pool {
-                max_idle,
-                in_use: &|path| recorded.contains(path),
+                max_idle: settings.max_slots,
+                in_use: &|path| owners.contains_key(path),
+                reclaim: settings.reclaim_oldest.then(|| worktree::pool::Reclaim {
+                    owner: &owner_of,
+                    recent_since_ms: worktree::pool::start_of_local_day_ms(now_ms()),
+                    // A dispatch has nobody to ask, so it is a yes.
+                    confirmed: req.reclaim_slot
+                        || !settings.confirm_recent
+                        || req.dispatch_id.is_some(),
+                    evict: &evict,
+                }),
             };
-            let (made, _) = worktree::pool::create_timed(&req.cwd, &name, &pool)
-                .map_err(|e| StateError::Worktree(e.0))?;
+            let (made, _) =
+                worktree::pool::create_timed(&req.cwd, &name, &pool).map_err(|e| match e {
+                    worktree::pool::CreateError::Worktree(e) => StateError::Worktree(e.0),
+                    worktree::pool::CreateError::NeedsConfirm(c) => {
+                        let owner = c.owner.unwrap_or(worktree::pool::SlotOwner {
+                            session_id: String::new(),
+                            title: String::new(),
+                            updated_at_ms: 0,
+                            running: false,
+                        });
+                        StateError::ReclaimConfirm {
+                            slot: c.slot,
+                            session_id: owner.session_id,
+                            title: owner.title,
+                            updated_at_ms: owner.updated_at_ms,
+                        }
+                    }
+                })?;
             Some((made, name))
         } else {
             None
@@ -1408,6 +1485,12 @@ impl SessionRegistry {
     /// thrown: a tree that could not be removed is a directory to clean up by hand,
     /// not a reason to keep a session the client has already dropped.
     pub fn delete(&self, id: &str) -> Result<Deleted, StateError> {
+        self.forget(id, true)
+    }
+
+    /// [`Self::delete`]; `release_tree: false` leaves the worktree exactly where it
+    /// is, for a slot that is being handed straight to a new session.
+    fn forget(&self, id: &str, release_tree: bool) -> Result<Deleted, StateError> {
         // The store, not the map, is the authority on existence: a row hydration
         // could not build is still a row a client is entitled to delete.
         let meta = match self.meta(id) {
@@ -1443,7 +1526,7 @@ impl SessionRegistry {
             }
         }
 
-        let worktree_removed = meta.worktree_path.as_ref().map(
+        let worktree_removed = meta.worktree_path.as_ref().filter(|_| release_tree).map(
             |path| match worktree::pool::release(path, self.max_idle_worktrees()) {
                 Ok(released) => {
                     info!(session = id, tree = %path, ?released, "released the worktree");

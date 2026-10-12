@@ -304,6 +304,19 @@ final class RustCoreClientTests: XCTestCase {
         XCTAssertEqual(frame["worktreeName"] as? String, "a1b2c3-a")
     }
 
+    /// `reclaimSlot` rides only on the resend the user said yes to.
+    func testReclaimSlotIsSentOnlyWhenConfirmed() throws {
+        let opts = SpawnOptions(skipPermissions: true, model: nil)
+        let plain = try RustCoreClient.createFrame(
+            provider: .claude, cwd: "/repo", cols: 80, rows: 24, opts: opts,
+            worktree: .requested(name: "abc"), pinsModel: false)
+        XCTAssertNil(plain["reclaimSlot"])
+        let yes = try RustCoreClient.createFrame(
+            provider: .claude, cwd: "/repo", cols: 80, rows: 24, opts: opts,
+            worktree: .requested(name: "abc", reclaimSlot: true), pinsModel: false)
+        XCTAssertEqual(yes["reclaimSlot"] as? Bool, true)
+    }
+
     /// No isolation asked for, nothing promised: the flag is false and no name rides
     /// along to make a tree out of.
     func testAPlainCreateAsksForNoTree() throws {

@@ -309,6 +309,9 @@ pub enum ClientMessage {
         /// `<stem>-b`, … so one question's parallel answers are one family on disk and
         /// in `git branch`. Ignored without `isolate_worktree`.
         worktree_name: Option<String>,
+        /// Yes to `worktreeReclaimConfirm`: take the repo's oldest slot even though
+        /// its session was updated today, deleting that session.
+        reclaim_slot: Option<bool>,
         dispatch_id: Option<String>,
     },
     Attach {
@@ -827,6 +830,8 @@ struct RawClient {
     isolate_worktree: Option<bool>,
     #[serde(rename = "worktreeName", default)]
     worktree_name: Option<String>,
+    #[serde(rename = "reclaimSlot", default)]
+    reclaim_slot: Option<bool>,
     #[serde(rename = "cliSessionId", default)]
     cli_session_id: Option<String>,
     #[serde(rename = "startMs", default)]
@@ -960,6 +965,7 @@ impl ClientMessage {
                 preset: raw.preset,
                 isolate_worktree: raw.isolate_worktree,
                 worktree_name: raw.worktree_name,
+                reclaim_slot: raw.reclaim_slot,
                 dispatch_id: raw.dispatch_id,
             }),
             "attach" => Ok(Self::Attach {
@@ -1493,6 +1499,16 @@ pub enum ServerMessage {
         session_id: Option<String>,
         message: String,
     },
+    /// A `create` refused because the repo's slots are full and the oldest belongs
+    /// to a session updated today. An `error` frame with a `code`, so a client that
+    /// does not know the code still sees the create fail; one that does asks the user
+    /// and resends the create with `reclaimSlot`.
+    ReclaimConfirm {
+        slot: String,
+        session_id: String,
+        title: String,
+        updated_at_ms: i64,
+    },
 }
 
 /// One tracked PR on the wire: a hand-built mirror of [`TrackedPr`] reduced to what a
@@ -1852,6 +1868,24 @@ impl ServerMessage {
                 }
                 v
             }
+            Self::ReclaimConfirm {
+                slot,
+                session_id,
+                title,
+                updated_at_ms,
+            } => json!({
+                "type": "error",
+                "code": "worktreeReclaimConfirm",
+                "message": format!(
+                    "Every worktree slot in this repo is taken. The oldest, {slot}, belongs to \"{title}\", updated today; reclaiming it deletes that session."
+                ),
+                "reclaim": {
+                    "slot": slot,
+                    "sessionId": session_id,
+                    "title": title,
+                    "updatedAt": updated_at_ms,
+                },
+            }),
         }
     }
 
@@ -1924,6 +1958,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: None,
                 worktree_name: None,
+                reclaim_slot: None,
                 dispatch_id: None,
             }
         );
@@ -2662,6 +2697,36 @@ mod tests {
         }
         .to_value();
         assert_eq!(v["sessionId"], "s");
+    }
+
+    #[test]
+    fn a_reclaim_question_is_an_error_a_client_can_recognise() {
+        let v = ServerMessage::ReclaimConfirm {
+            slot: "/r-worktrees/slot-03".into(),
+            session_id: "abc".into(),
+            title: "fix login".into(),
+            updated_at_ms: 42,
+        }
+        .to_value();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "worktreeReclaimConfirm");
+        assert!(
+            v.get("sessionId").is_none(),
+            "it answers the create, not a session"
+        );
+        assert_eq!(v["reclaim"]["sessionId"], "abc");
+        assert_eq!(v["reclaim"]["updatedAt"], 42);
+        let create = ClientMessage::decode(
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","isolateWorktree":true,"reclaimSlot":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            create,
+            ClientMessage::Create {
+                reclaim_slot: Some(true),
+                ..
+            }
+        ));
     }
 
     #[test]

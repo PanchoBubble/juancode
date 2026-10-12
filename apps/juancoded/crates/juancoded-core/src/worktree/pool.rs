@@ -15,10 +15,19 @@
 //! session, live or exited, and is never handed out. The stamp lives outside the work
 //! tree so it can never be committed, and it goes with the admin dir when anything
 //! (the sweeper, a person) removes the tree.
+//!
+//! The cap bounds every slot in a repo, not only idle ones. Sessions usually exit
+//! without being deleted, so their slots were never parked and the pool grew past its
+//! cap one new slot per session. Once a repo is at the cap, a create with no idle slot
+//! reclaims the slot whose session was updated longest ago: that session is deleted
+//! (its branch stays in git) and its tree is switched onto the new branch. A running
+//! session's slot and a slot with uncommitted files are never reclaimed; when every
+//! slot is one of those, a new slot is cut past the cap rather than refusing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
     base_ref, git, link_node_modules, remove, repo_root, safe_name, siblings_dir, CreateStages,
@@ -35,11 +44,46 @@ const SLOT_PREFIX: &str = "slot-";
 /// handed the same slot, and an eviction must not remove the tree a take just claimed.
 static POOL_LOCK: Mutex<()> = Mutex::new(());
 
+/// Slots handed out by this process and when. A slot is handed out before the session
+/// row that records it is written, so for a moment it has no owner and would look
+/// like the best slot to reclaim.
+static HANDED_OUT: Mutex<Option<HashMap<PathBuf, Instant>>> = Mutex::new(None);
+const HANDOUT_GRACE: Duration = Duration::from_secs(600);
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PoolConfig {
     #[serde(default)]
     max_idle_per_repo: Option<usize>,
+    #[serde(default)]
+    reclaim_oldest: Option<bool>,
+    #[serde(default)]
+    confirm_recent_reclaim: Option<bool>,
+}
+
+/// Everything `worktree-pool.json` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSettings {
+    /// Slots per repo; `0` turns pooling off.
+    pub max_slots: usize,
+    /// Off: no session is ever deleted to free a slot, and slots grow past the cap.
+    pub reclaim_oldest: bool,
+    /// Ask before reclaiming the slot of a session updated today.
+    pub confirm_recent: bool,
+}
+
+pub fn settings_at(path: &Path) -> PoolSettings {
+    let config = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PoolConfig>(&raw).ok())
+        .unwrap_or_default();
+    PoolSettings {
+        max_slots: config
+            .max_idle_per_repo
+            .unwrap_or(DEFAULT_MAX_IDLE_PER_REPO),
+        reclaim_oldest: config.reclaim_oldest.unwrap_or(true),
+        confirm_recent: config.confirm_recent_reclaim.unwrap_or(true),
+    }
 }
 
 /// `worktree-pool.json` beside the daemon's store, or `JUANCODE_WORKTREE_POOL_CONFIG`.
@@ -63,11 +107,7 @@ pub fn max_idle_per_repo() -> usize {
 }
 
 pub fn max_idle_per_repo_at(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<PoolConfig>(&raw).ok())
-        .and_then(|c| c.max_idle_per_repo)
-        .unwrap_or(DEFAULT_MAX_IDLE_PER_REPO)
+    settings_at(path).max_slots
 }
 
 /// What a pooled create needs to know about the rest of the daemon.
@@ -76,6 +116,125 @@ pub struct Pool<'a> {
     /// Whether some session row still records this path as its tree. A stamp says a
     /// slot is idle; this is the second opinion, for a daemon that died mid-take.
     pub in_use: &'a dyn Fn(&str) -> bool,
+    /// `None`: a full repo gets a new slot past the cap.
+    pub reclaim: Option<Reclaim<'a>>,
+}
+
+/// How a full repo frees a slot.
+pub struct Reclaim<'a> {
+    /// The session that records this slot as its tree, if any.
+    pub owner: &'a dyn Fn(&str) -> Option<SlotOwner>,
+    /// A session updated at or after this is recent enough to ask about first.
+    pub recent_since_ms: i64,
+    /// Skip the question: the user said yes, turned it off, or nobody is there to ask.
+    pub confirmed: bool,
+    /// Delete the owning session and leave its tree alone. `false` keeps the slot.
+    pub evict: &'a dyn Fn(&SlotOwner) -> bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotOwner {
+    pub session_id: String,
+    pub title: String,
+    pub updated_at_ms: i64,
+    pub running: bool,
+}
+
+/// The slot a full repo would take, and the session that taking it deletes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimCandidate {
+    pub slot: String,
+    pub owner: Option<SlotOwner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateError {
+    Worktree(WorktreeError),
+    /// The repo is full and the oldest slot's session was updated recently.
+    NeedsConfirm(ReclaimCandidate),
+}
+
+impl std::fmt::Display for CreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Worktree(e) => write!(f, "{}", e.0),
+            Self::NeedsConfirm(c) => write!(f, "every slot is taken; the oldest is {}", c.slot),
+        }
+    }
+}
+
+impl From<WorktreeError> for CreateError {
+    fn from(e: WorktreeError) -> Self {
+        Self::Worktree(e)
+    }
+}
+
+/// Local midnight before `now_ms`, for "updated today".
+pub fn start_of_local_day_ms(now_ms: i64) -> i64 {
+    let secs = (now_ms / 1000) as libc::time_t;
+    // SAFETY: localtime_r and mktime only touch the structs passed to them.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&secs, &mut tm).is_null() {
+            return now_ms - 86_400_000;
+        }
+        tm.tm_hour = 0;
+        tm.tm_min = 0;
+        tm.tm_sec = 0;
+        tm.tm_isdst = -1;
+        libc::mktime(&mut tm) as i64 * 1000
+    }
+}
+
+fn mark_handed_out(slot: &Path) {
+    let mut map = HANDED_OUT.lock().unwrap_or_else(|e| e.into_inner());
+    let map = map.get_or_insert_with(HashMap::new);
+    map.retain(|_, at| at.elapsed() < HANDOUT_GRACE);
+    map.insert(slot.to_path_buf(), Instant::now());
+}
+
+fn recently_handed_out(slot: &Path) -> bool {
+    HANDED_OUT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(slot))
+        .is_some_and(|at| at.elapsed() < HANDOUT_GRACE)
+}
+
+fn is_clean(tree: &Path) -> bool {
+    git(&tree.to_string_lossy(), &["status", "--porcelain"]).is_some_and(|s| s.trim().is_empty())
+}
+
+/// The slot a full repo gives up: least recently updated owner first, an ownerless
+/// slot before any of them. Running and dirty slots are skipped; `git status` runs
+/// only until one passes, because each one is an exec.
+fn reclaim_candidate(worktrees_dir: &Path, reclaim: &Reclaim<'_>) -> Option<ReclaimCandidate> {
+    let mut ranked: Vec<(PathBuf, Option<SlotOwner>)> = slots(worktrees_dir)
+        .into_iter()
+        .filter(|p| parked_at(p).is_none())
+        .map(|p| {
+            let owner = (reclaim.owner)(&p.to_string_lossy());
+            (p, owner)
+        })
+        .filter(|(p, owner)| match owner {
+            Some(o) => !o.running,
+            None => !recently_handed_out(p),
+        })
+        .collect();
+    ranked.sort_by_key(|(p, owner)| {
+        (
+            owner.as_ref().map_or(i64::MIN, |o| o.updated_at_ms),
+            p.clone(),
+        )
+    });
+    ranked
+        .into_iter()
+        .find(|(p, _)| is_clean(p))
+        .map(|(p, owner)| ReclaimCandidate {
+            slot: p.to_string_lossy().to_string(),
+            owner,
+        })
 }
 
 /// Whether `path` is a pool slot rather than a tree named after its session.
@@ -161,14 +320,15 @@ pub fn create_timed(
     repo_cwd: &str,
     name: &str,
     pool: &Pool<'_>,
-) -> Result<(CreatedWorktree, CreateStages), WorktreeError> {
+) -> Result<(CreatedWorktree, CreateStages), CreateError> {
     if pool.max_idle == 0 {
-        return super::create_timed(repo_cwd, name);
+        return Ok(super::create_timed(repo_cwd, name)?);
     }
     if !safe_name(name) {
         return Err(WorktreeError(format!(
             "\"{name}\" is not a usable worktree name: letters, digits, -, _ and . only."
-        )));
+        ))
+        .into());
     }
     let mut stages = CreateStages::default();
     let step = std::time::Instant::now();
@@ -202,38 +362,92 @@ pub fn create_timed(
             if let Err(why) = run_git(&path, &args) {
                 // Nothing about the slot changed, so it goes back to the pool.
                 stamp(&slot);
-                return Err(WorktreeError(format!("Failed to create worktree: {why}")));
+                return Err(WorktreeError(format!("Failed to create worktree: {why}")).into());
             }
             stages.reused_slot = true;
             slot
         }
-        None => {
-            let dir = {
-                let _guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-                let dir = next_free_slot(&worktrees_dir);
-                // Held until `worktree add` creates it, so a concurrent create picks
-                // the next number.
-                let _ = std::fs::create_dir(&dir);
-                dir
-            };
-            let path = dir.to_string_lossy().to_string();
-            let mut args = vec!["worktree", "add", "--no-track", "-b", &branch, &path];
-            if let Some(base) = base.as_deref() {
-                args.push(base);
+        None => match take_oldest(&worktrees_dir, pool, &branch, base.as_deref())? {
+            Some(slot) => {
+                stages.reused_slot = true;
+                slot
             }
-            if let Err(why) = run_git(repo_cwd, &args) {
-                let _ = std::fs::remove_dir(&dir);
-                return Err(WorktreeError(format!("Failed to create worktree: {why}")));
-            }
-            dir
-        }
+            None => cut_slot(repo_cwd, &worktrees_dir, &branch, base.as_deref())?,
+        },
     };
+    mark_handed_out(&dir);
     stages.worktree_add_ms = step.elapsed().as_secs_f64() * 1000.0;
     let path = dir.to_string_lossy().to_string();
     let step = std::time::Instant::now();
     link_node_modules(&root, &path);
     stages.link_modules_ms = step.elapsed().as_secs_f64() * 1000.0;
     Ok((CreatedWorktree { path, branch }, stages))
+}
+
+/// A full repo's oldest slot, switched onto `branch`, or `None` when the repo is not
+/// full, reclaiming is off, or nothing is reclaimable.
+fn take_oldest(
+    worktrees_dir: &Path,
+    pool: &Pool<'_>,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<Option<PathBuf>, CreateError> {
+    let Some(reclaim) = pool.reclaim.as_ref() else {
+        return Ok(None);
+    };
+    // Held from choosing to switching, so two creates cannot reclaim one slot.
+    let _guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if slots(worktrees_dir).len() < pool.max_idle {
+        return Ok(None);
+    }
+    let Some(candidate) = reclaim_candidate(worktrees_dir, reclaim) else {
+        return Ok(None);
+    };
+    if let Some(owner) = &candidate.owner {
+        if !reclaim.confirmed && owner.updated_at_ms >= reclaim.recent_since_ms {
+            return Err(CreateError::NeedsConfirm(candidate));
+        }
+        if !(reclaim.evict)(owner) {
+            return Ok(None);
+        }
+    }
+    let slot = PathBuf::from(&candidate.slot);
+    let mut args = vec!["switch", "--no-track", "--quiet", "-c", branch];
+    if let Some(base) = base {
+        args.push(base);
+    }
+    if let Err(why) = run_git(&candidate.slot, &args) {
+        // Its session is gone either way, so the slot is idle now.
+        stamp(&slot);
+        return Err(WorktreeError(format!("Failed to create worktree: {why}")).into());
+    }
+    Ok(Some(slot))
+}
+
+fn cut_slot(
+    repo_cwd: &str,
+    worktrees_dir: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<PathBuf, WorktreeError> {
+    let dir = {
+        let _guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = next_free_slot(worktrees_dir);
+        // Held until `worktree add` creates it, so a concurrent create picks the
+        // next number.
+        let _ = std::fs::create_dir(&dir);
+        dir
+    };
+    let path = dir.to_string_lossy().to_string();
+    let mut args = vec!["worktree", "add", "--no-track", "-b", branch, &path];
+    if let Some(base) = base {
+        args.push(base);
+    }
+    if let Err(why) = run_git(repo_cwd, &args) {
+        let _ = std::fs::remove_dir(&dir);
+        return Err(WorktreeError(format!("Failed to create worktree: {why}")));
+    }
+    Ok(dir)
 }
 
 /// What deleting a session did with its tree.
@@ -311,6 +525,7 @@ mod tests {
         Pool {
             max_idle,
             in_use: &nobody,
+            reclaim: None,
         }
     }
 
@@ -386,6 +601,7 @@ mod tests {
         let pool = Pool {
             max_idle: 20,
             in_use: &in_use,
+            reclaim: None,
         };
         let (next, stages) = make(&root, "next0001", &pool);
         assert_ne!(next.path, made.path);
@@ -432,6 +648,161 @@ mod tests {
         );
         assert_eq!(release(&made.path, 20).unwrap(), Released::Removed);
         std::fs::remove_dir_all(&parent).ok();
+    }
+
+    fn owner(id: &str, updated_at_ms: i64, running: bool) -> SlotOwner {
+        SlotOwner {
+            session_id: id.into(),
+            title: id.into(),
+            updated_at_ms,
+            running,
+        }
+    }
+
+    /// Two owned slots at a cap of 2, the older one first.
+    fn full_repo(
+        tag: &str,
+        owners: [SlotOwner; 2],
+    ) -> (PathBuf, PathBuf, Vec<(String, SlotOwner)>) {
+        let (parent, root) = repo(tag);
+        let (a, _) = make(&root, "own-a", &pooled(2));
+        let (b, _) = make(&root, "own-b", &pooled(2));
+        let [oa, ob] = owners;
+        (parent, root, vec![(a.path, oa), (b.path, ob)])
+    }
+
+    fn reclaiming<'a>(
+        confirmed: bool,
+        lookup: &'a dyn Fn(&str) -> Option<SlotOwner>,
+        evict: &'a dyn Fn(&SlotOwner) -> bool,
+    ) -> Pool<'a> {
+        Pool {
+            max_idle: 2,
+            in_use: &nobody,
+            reclaim: Some(Reclaim {
+                owner: lookup,
+                recent_since_ms: 1_000,
+                confirmed,
+                evict,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_full_repo_reclaims_the_least_recently_updated_slot() {
+        let (parent, root, owned) = full_repo(
+            "pool-reclaim",
+            [owner("old", 10, false), owner("new", 500, false)],
+        );
+        let evicted = Mutex::new(Vec::new());
+        let lookup = |p: &str| owned.iter().find(|(s, _)| s == p).map(|(_, o)| o.clone());
+        let evict = |o: &SlotOwner| {
+            evicted.lock().unwrap().push(o.session_id.clone());
+            true
+        };
+        let pool = reclaiming(false, &lookup, &evict);
+        let (made, stages) = make(&root, "fresh01", &pool);
+        assert_eq!(made.path, owned[0].0);
+        assert!(stages.reused_slot);
+        assert_eq!(*evicted.lock().unwrap(), vec!["old".to_string()]);
+        let head = git(&made.path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), "juancode/fresh01");
+        assert!(git(
+            root.to_str().unwrap(),
+            &["rev-parse", "--verify", "juancode/own-a"]
+        )
+        .is_some());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn a_slot_updated_recently_asks_first_unless_confirmed() {
+        let (parent, root, owned) = full_repo(
+            "pool-confirm",
+            [owner("today", 5_000, false), owner("later", 6_000, false)],
+        );
+        let evicted = Mutex::new(Vec::new());
+        let lookup = |p: &str| owned.iter().find(|(s, _)| s == p).map(|(_, o)| o.clone());
+        let evict = |o: &SlotOwner| {
+            evicted.lock().unwrap().push(o.session_id.clone());
+            true
+        };
+        let err = create_timed(
+            root.to_str().unwrap(),
+            "fresh02",
+            &reclaiming(false, &lookup, &evict),
+        )
+        .expect_err("a same-day slot is not taken silently");
+        match err {
+            CreateError::NeedsConfirm(c) => {
+                assert_eq!(c.slot, owned[0].0);
+                assert_eq!(c.owner.unwrap().session_id, "today");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            evicted.lock().unwrap().is_empty(),
+            "nothing deleted before a yes"
+        );
+        let (made, _) = make(&root, "fresh02", &reclaiming(true, &lookup, &evict));
+        assert_eq!(made.path, owned[0].0);
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn running_and_dirty_slots_are_never_reclaimed() {
+        let (parent, root, owned) = full_repo(
+            "pool-skip",
+            [owner("live", 10, true), owner("dirty", 20, false)],
+        );
+        std::fs::write(Path::new(&owned[1].0).join("wip.txt"), "x").unwrap();
+        let evicted = Mutex::new(Vec::new());
+        let lookup = |p: &str| owned.iter().find(|(s, _)| s == p).map(|(_, o)| o.clone());
+        let evict = |o: &SlotOwner| {
+            evicted.lock().unwrap().push(o.session_id.clone());
+            true
+        };
+        let (made, stages) = make(&root, "fresh03", &reclaiming(true, &lookup, &evict));
+        assert!(
+            made.path.ends_with("/repo-worktrees/slot-03"),
+            "{}",
+            made.path
+        );
+        assert!(!stages.reused_slot);
+        assert!(evicted.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn reclaim_off_grows_past_the_cap() {
+        let (parent, root) = repo("pool-grow");
+        make(&root, "grow-a", &pooled(1));
+        let (b, _) = make(&root, "grow-b", &pooled(1));
+        assert!(b.path.ends_with("/repo-worktrees/slot-02"), "{}", b.path);
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn settings_default_to_reclaiming_with_a_question() {
+        let dir = std::env::temp_dir().join(format!("juancoded-pool-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("worktree-pool.json");
+        let defaults = settings_at(&file);
+        assert!(defaults.reclaim_oldest && defaults.confirm_recent);
+        std::fs::write(
+            &file,
+            r#"{"maxIdlePerRepo":5,"reclaimOldest":false,"confirmRecentReclaim":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings_at(&file),
+            PoolSettings {
+                max_slots: 5,
+                reclaim_oldest: false,
+                confirm_recent: false
+            }
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

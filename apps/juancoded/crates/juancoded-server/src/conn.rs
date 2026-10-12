@@ -929,6 +929,7 @@ fn handle_client_message(
             preset,
             isolate_worktree,
             worktree_name,
+            reclaim_slot,
             dispatch_id,
         } => {
             let Some(provider_id) = ProviderId::parse(&provider) else {
@@ -952,6 +953,7 @@ fn handle_client_message(
                 preset: preset.filter(|p| !p.is_empty()),
                 isolate_worktree: isolate_worktree.unwrap_or(false),
                 worktree_name: worktree_name.filter(|n| !n.is_empty()),
+                reclaim_slot: reclaim_slot.unwrap_or(false),
                 dispatch_id,
                 owner: client,
             };
@@ -973,6 +975,17 @@ fn handle_client_message(
                         session: meta,
                     });
                 }
+                Err(StateError::ReclaimConfirm {
+                    slot,
+                    session_id,
+                    title,
+                    updated_at_ms,
+                }) => outbound.push(ServerMessage::ReclaimConfirm {
+                    slot,
+                    session_id,
+                    title,
+                    updated_at_ms,
+                }),
                 Err(e) => outbound.push(ServerMessage::Error {
                     session_id: None,
                     message: e.to_string(),
@@ -2291,6 +2304,7 @@ mod tests {
                 model: None,
                 preset: None,
                 isolate_worktree: false,
+                reclaim_slot: false,
                 worktree_name: None,
                 dispatch_id: None,
                 owner: 1,
@@ -2481,6 +2495,7 @@ mod tests {
                     model: None,
                     preset: None,
                     isolate_worktree: false,
+                    reclaim_slot: false,
                     worktree_name: None,
                     dispatch_id: None,
                     owner: 1,

@@ -32,6 +32,8 @@ struct WorktreeSweeperSettingsView: View {
 
     @State private var confirmArm = false
     @State private var poolMaxIdle = WorktreePoolConfig.maxIdle()
+    @State private var reclaimOldest = WorktreePoolConfig.reclaimOldest()
+    @State private var confirmRecentReclaim = WorktreePoolConfig.confirmRecentReclaim()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -99,7 +101,7 @@ struct WorktreeSweeperSettingsView: View {
     private var reuseSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text("Keep for reuse, per repo")
+                Text("Worktree slots per repo")
                 Stepper(value: $poolMaxIdle, in: 0...100) {
                     Text(poolMaxIdle == 0 ? "off" : "\(poolMaxIdle) worktree\(poolMaxIdle == 1 ? "" : "s")")
                         .monospacedDigit()
@@ -112,6 +114,22 @@ struct WorktreeSweeperSettingsView: View {
                 + "files are removed as before. Takes effect on the next create.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Toggle("When full, reclaim the oldest slot", isOn: $reclaimOldest)
+                .onChange(of: reclaimOldest) { _, on in WorktreePoolConfig.setReclaimOldest(on) }
+                .disabled(poolMaxIdle == 0)
+                .padding(.top, 6)
+            Text(reclaimOldest
+                ? "A new session in a full repo takes the slot of the least recently "
+                    + "updated session and deletes that session. Its branch stays in git. "
+                    + "Running sessions and slots with uncommitted files are never taken."
+                : "Nothing is deleted to make room: a full repo gets another slot past the limit.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Ask first if that session was updated today", isOn: $confirmRecentReclaim)
+                .onChange(of: confirmRecentReclaim) { _, on in WorktreePoolConfig.setConfirmRecentReclaim(on) }
+                .disabled(poolMaxIdle == 0 || !reclaimOldest)
+            Text("Dispatched sessions never ask: there is nobody to answer.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
