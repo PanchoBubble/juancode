@@ -712,7 +712,9 @@ private struct RepoCommitPicker: View {
                     }
                 }
             }
-            .frame(maxHeight: 320)
+            // A popover sizes a ScrollView to its minimum, which is one row; this fits
+            // the first page of five plus "Load more".
+            .frame(minHeight: 170, maxHeight: 320)
         }
         .padding(10)
         .frame(width: 380)
