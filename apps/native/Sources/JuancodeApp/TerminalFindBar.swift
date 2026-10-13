@@ -5,7 +5,7 @@ import JuancodeCore
 // MARK: - In-pane find bar (juancode-972)
 //
 // ⌘F over the visible terminal pane. Cross-session transcript FTS lives in
-// SearchPanel.swift; THIS searches *inside* one pane's scrollback.
+// the sidebar filter's body search; THIS searches *inside* one pane's scrollback.
 //
 // Achievable level: neither terminal surface exposes a usable search/scroll API
 // (libghostty has none; SwiftTerm keeps its SearchService internal), so we search

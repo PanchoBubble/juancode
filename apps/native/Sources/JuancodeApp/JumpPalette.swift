@@ -9,7 +9,7 @@ import JuancodeDesktop
 // filter across title / folder / branch, rows show the live agent-state glyph the
 // sidebar rows use, needs-attention sessions sort first (see JumpPalette.swift in
 // JuancodeCore for the pure ranking), Return switches to the highlighted session.
-// Distinct from the transcript FTS in SearchPanel.swift — this jumps between
+// Distinct from the sidebar filter's body search — this jumps between
 // sessions, it doesn't search inside them.
 
 /// Presented as a sheet from `RootView`, toggled by `model.showingJumpPalette` (⌘K).

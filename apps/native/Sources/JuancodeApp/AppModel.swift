@@ -2840,43 +2840,16 @@ final class AppModel {
 
     // MARK: - Full-text transcript search (juancode-wx9)
 
-    /// The current search query (bound to the SearchPanel text field).
-    var searchQuery = ""
-    /// Hits for the most recently completed search, in rank order.
-    var searchResults: [SearchHit] = []
-    /// True while a search is in flight (for a "Searching…" affordance).
-    var searching = false
-    /// Monotonic token so a slow earlier search can't clobber a newer one.
-    private var searchToken = 0
-
-    /// Run full-text search over persisted session titles + scrollback for `query`,
-    /// mirroring the web `/api/search` path: queries under 2 chars clear results;
-    /// otherwise we hit the in-process FTS store off the main actor (it shells into
-    /// SQLite) and publish the ranked hits. Stale responses are dropped via a token.
-    func search(_ query: String) {
+    /// Full-text search over session bodies (the core's transcript store), for the
+    /// sidebar filter's body toggle. Queries under 2 chars answer nothing. Runs off
+    /// the main actor because `CoreClient.searchSessions` blocks on the daemon.
+    func searchSessionBodies(_ query: String) async -> [SearchHit] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard q.count >= 2 else {
-            searching = false
-            searchResults = []
-            return
-        }
-        searchToken += 1
-        let token = searchToken
-        searching = true
+        guard q.count >= 2 else { return [] }
         let core = core
-        Task {
-            let hits = await Task.detached(priority: .userInitiated) {
-                core.searchSessions(q, limit: 50)
-            }.value
-            guard token == self.searchToken else { return }
-            self.searchResults = hits
-            self.searching = false
-        }
-    }
-
-    /// Open the session a search hit points at and dismiss the search affordance.
-    func openSearchHit(_ hit: SearchHit) {
-        selection = hit.meta.id
+        return await Task.detached(priority: .userInitiated) {
+            core.searchSessions(q, limit: 50)
+        }.value
     }
 
     // MARK: - Beads issues (per-folder issue picker — juancode-sfh)

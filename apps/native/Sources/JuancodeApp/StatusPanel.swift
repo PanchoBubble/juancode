@@ -8,7 +8,7 @@ import JuancodeServices
 /// dot, version + command, and its MCP servers with a normalized health dot,
 /// transport badge, detail, and auth scheme. Reads the in-process status cache
 /// on `AppModel` (populated by `getAllStatus`, which shells into the real CLIs).
-/// Presented as a sheet from the sidebar toolbar, like `SearchPanel`.
+/// Presented as a sheet from the sidebar toolbar.
 struct StatusPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss

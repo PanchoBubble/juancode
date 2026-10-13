@@ -328,6 +328,12 @@ private struct SidebarContent {
     var facetCounts: [SessionFacet: Int]
 }
 
+/// What the sidebar's body search re-runs on: the query, and whether it's on at all.
+private struct BodySearchKey: Equatable {
+    var query: String
+    var on: Bool
+}
+
 /// A folder's sessions, mirroring the web `FolderGroup` (groupByFolder).
 private struct FolderGroup: Identifiable {
     let cwd: String
@@ -352,8 +358,11 @@ enum SessionFacet: String, CaseIterable, Identifiable {
     case prOpen
     /// Still on watch duty: a tracked PR or a tracked Linear issue is bound to it.
     case tracking
-    /// Its checkout holds uncommitted or unpushed work.
-    case atRisk
+    /// Its own worktree holds uncommitted changes. Main-checkout sessions are left
+    /// out: they share one tree, so one dirty file would flag every one of them.
+    case uncommitted
+    /// Its checkout has commits that aren't on the remote yet.
+    case unpushed
 
     var id: String { rawValue }
 
@@ -363,7 +372,8 @@ enum SessionFacet: String, CaseIterable, Identifiable {
         case .waiting: return "Waiting on me"
         case .prOpen: return "Has open PR"
         case .tracking: return "Tracking"
-        case .atRisk: return "Work at risk"
+        case .uncommitted: return "Uncommitted changes"
+        case .unpushed: return "Unpushed commits"
         }
     }
 
@@ -373,7 +383,8 @@ enum SessionFacet: String, CaseIterable, Identifiable {
         case .waiting: return "questionmark.circle.fill"
         case .prOpen: return "arrow.triangle.pull"
         case .tracking: return "eye.fill"
-        case .atRisk: return "exclamationmark.triangle.fill"
+        case .uncommitted: return "pencil.circle.fill"
+        case .unpushed: return "arrow.up.circle.fill"
         }
     }
 
@@ -381,9 +392,10 @@ enum SessionFacet: String, CaseIterable, Identifiable {
         switch self {
         case .unread: return "Finished a turn or asked a question since you last looked"
         case .waiting: return "Sitting at a prompt, waiting for your reply"
-        case .prOpen: return "The session's branch has an open pull request"
+        case .prOpen: return "The session's branch has an open pull request, or it tracks one"
         case .tracking: return "Still watching a tracked PR or Linear issue"
-        case .atRisk: return "Uncommitted or unpushed work in this session's checkout"
+        case .uncommitted: return "Uncommitted changes in this session's own worktree"
+        case .unpushed: return "Commits in this session's checkout that aren't pushed"
         }
     }
 }
@@ -685,6 +697,11 @@ struct SidebarView: View {
 
     /// Free-text filter over folder names/paths + session titles.
     @State private var query = ""
+    /// Also match the query against session bodies (the core's transcript FTS).
+    @AppStorage("sidebar.filter.searchBodies") private var searchBodies = false
+    /// Body-search hits for the current query: session id → snippet. Empty while the
+    /// toggle is off or the query is under 2 chars.
+    @State private var bodyHits: [String: String] = [:]
     /// When off (default) archived sessions are hidden from the list.
     @State private var showArchived = false
     /// Whether the funnel dropdown is open. Also gates the facet tally: with it shut
@@ -771,7 +788,11 @@ struct SidebarView: View {
     /// count beside each one and a dot when any are on.
     @ViewBuilder
     private func facetMenu(counts: [SessionFacet: Int], active: Bool) -> some View {
-        Button { showingFilters = true } label: {
+        Button {
+            showingFilters = true
+            // Opening the list is the ask for the PR count, not just ticking it.
+            loadPrContextForFacet()
+        } label: {
             Image(systemName: active ? "line.3.horizontal.decrease.circle.fill"
                                      : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 12))
@@ -779,7 +800,7 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .clickCursor()
-        .help(facets.isEmpty ? "Filter by state — unread, waiting, PR, tracking, at risk"
+        .help(facets.isEmpty ? "Filter by state — unread, waiting, PR, tracking, uncommitted, unpushed"
                              : "Filtering: \(activeFacetLabel)")
         .popover(isPresented: $showingFilters, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
@@ -806,13 +827,6 @@ struct SidebarView: View {
                     .help(facet.help)
                     .padding(.horizontal, 12).padding(.vertical, 3)
                 }
-                // The PR list is fetched on demand, so this count is only as complete
-                // as what has been loaded until the facet is switched on.
-                Text("Turning on \"Has open PR\" fetches each project's pull requests.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12).padding(.top, 4)
                 Divider().padding(.vertical, 6)
                 HStack {
                     Toggle(isOn: $showArchived) {
@@ -834,15 +848,13 @@ struct SidebarView: View {
         }
     }
 
-    /// Toggling a facet on/off, with the PR fetch hung off the `prOpen` switch so it
-    /// only ever runs when that filter is actually asked for.
+    /// Toggling a facet on/off.
     private func facetBinding(_ facet: SessionFacet) -> Binding<Bool> {
         Binding(
             get: { facets.contains(facet) },
             set: { on in
                 if on {
                     facets.insert(facet)
-                    if facet == .prOpen { loadPrContextForFacet() }
                 } else {
                     facets.remove(facet)
                 }
@@ -858,7 +870,8 @@ struct SidebarView: View {
         case .waiting: return .yellow
         case .prOpen: return .purple
         case .tracking: return .blue
-        case .atRisk: return .orange
+        case .uncommitted: return .orange
+        case .unpushed: return .teal
         }
     }
 
@@ -897,6 +910,7 @@ struct SidebarView: View {
             ? visible
             : visible.filter {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q)
+                    || bodyHits[$0.id] != nil
             }
         // Facet tallies come off the same pass that applies them, so the dropdown's
         // counts cost one walk of the list rather than one per facet per body eval.
@@ -983,20 +997,26 @@ struct SidebarView: View {
         case .waiting:
             return model.activity(meta.id) == .waitingInput
         case .prOpen:
-            return model.openPr(forSession: meta) != nil
+            // A tracked PR stops being tracked once it merges or closes, so tracking
+            // one is itself an open PR, even when it isn't on the session's branch.
+            return model.trackedPr(forSession: meta.id) != nil
+                || model.openPr(forSession: meta) != nil
         case .tracking:
             return model.trackedPr(forSession: meta.id) != nil
                 || model.trackedIssue(forSession: meta.id) != nil
-        case .atRisk:
-            guard let risk = model.workAtRisk(forSession: meta) else { return false }
-            return risk.dirtyFiles > 0 || risk.ahead > 0
+        case .uncommitted:
+            guard meta.worktreePath != nil,
+                  let risk = model.workAtRisk(forSession: meta) else { return false }
+            return risk.dirtyFiles > 0
+        case .unpushed:
+            return (model.workAtRisk(forSession: meta)?.ahead ?? 0) > 0
         }
     }
 
     /// PR state is deliberately not loaded for every row on startup (three `gh` round
-    /// trips per project was the sidebar's biggest boot cost). Turning the "Has open
-    /// PR" facet on is an explicit ask for it, so that's when we go get it — once per
-    /// project root, coalesced downstream.
+    /// trips per project was the sidebar's biggest boot cost). Opening the filter
+    /// dropdown is an explicit ask for the "Has open PR" count, so that's when we go
+    /// get it — once per project root, coalesced downstream.
     private func loadPrContextForFacet() {
         // Every session the sidebar could show, not just the ones the other facets
         // leave standing — the facets are OR'd, so switching this one on widens the
@@ -1248,6 +1268,15 @@ struct SidebarView: View {
                         clearFilters()
                         return .handled
                     }
+                Button { searchBodies.toggle() } label: {
+                    Image(systemName: "text.magnifyingglass")
+                        .font(.system(size: 12))
+                        .foregroundStyle(searchBodies ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .clickCursor()
+                .help(searchBodies ? "Searching session bodies too (click to search names only)"
+                                   : "Also search inside session bodies")
                 if filtering {
                     Button { clearFilters() } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -1261,6 +1290,16 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
+            .task(id: BodySearchKey(query: query, on: searchBodies)) {
+                let q = query.trimmingCharacters(in: .whitespaces)
+                guard searchBodies, q.count >= 2 else { bodyHits = [:]; return }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
+                let hits = await model.searchSessionBodies(q)
+                guard !Task.isCancelled else { return }
+                bodyHits = Dictionary(hits.map { ($0.meta.id, $0.snippet) },
+                                      uniquingKeysWith: { first, _ in first })
+            }
             .background(RoundedRectangle(cornerRadius: 6)
                 .fill(filtering ? Color.accentColor.opacity(0.12) : Color.clear))
             .overlay(RoundedRectangle(cornerRadius: 6)
@@ -1707,8 +1746,19 @@ struct SidebarView: View {
     private func sessionRow(_ meta: SessionMeta, external: Bool) -> SessionRowHost {
         SessionRowHost(meta: meta, external: external,
                        selected: model.selection == meta.id,
+                       bodySnippet: bodySnippet(for: meta),
                        confirmClose: { confirmingClose = meta },
                        menu: { AnyView(rowContextMenu(meta)) })
+    }
+
+    /// The body-search snippet to show under a row, only when the body is the reason
+    /// the row is listed — a title or path match explains itself.
+    private func bodySnippet(for meta: SessionMeta) -> String? {
+        guard let snippet = bodyHits[meta.id], !snippet.isEmpty else { return nil }
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !meta.title.lowercased().contains(q), !meta.cwd.lowercased().contains(q)
+        else { return nil }
+        return snippet
     }
 
     /// What closing this session actually discards, spelled out in the confirm alert.
@@ -1818,12 +1868,36 @@ private struct SessionRowHost: View {
     /// Whether this row is the current selection — also the caller's, for the same
     /// reason (it drives the row's own background chrome).
     let selected: Bool
+    /// Why a body search listed this row, when its title and path don't say.
+    let bodySnippet: String?
     /// Ask to close this session; the caller owns the confirmation alert.
     let confirmClose: () -> Void
     /// The hover ellipsis menu's content (the context menu's items).
     let menu: () -> AnyView
 
     var body: some View {
+        if let bodySnippet {
+            VStack(alignment: .leading, spacing: 1) {
+                row
+                snippetText(bodySnippet)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .padding(.leading, 22)
+            }
+        } else {
+            row
+        }
+    }
+
+    /// The snippet with its `[term]`-marked matches emphasised.
+    private func snippetText(_ snippet: String) -> Text {
+        parseSearchSnippet(snippet).reduce(Text("")) { acc, run in
+            acc + (run.highlighted ? Text(run.text).bold().foregroundColor(.orange) : Text(run.text))
+        }
+    }
+
+    private var row: some View {
         SessionRow(meta: meta,
                    activity: model.activityBox(meta.id)?.activity,
                    live: model.isLive(meta.id), external: external,
