@@ -92,6 +92,20 @@ extension Color {
         light: NSColor(calibratedWhite: 0.93, alpha: 1),
         dark: NSColor(calibratedWhite: 0.10, alpha: 1)))
 
+    /// A solid hairline for dividers and separators. Solid rather than a translucent
+    /// white, which went muddy over the raised fills.
+    static let appDivider = Color(nsColor: .appAdaptive(
+        light: NSColor(calibratedWhite: 0.90, alpha: 1),
+        dark: NSColor(calibratedWhite: 0.10, alpha: 1)))
+
+    /// A band a step off the surface, for section/project headers.
+    static let appBand = Color(nsColor: .appAdaptive(
+        light: NSColor(calibratedWhite: 0.95, alpha: 1),
+        dark: NSColor(calibratedWhite: 0.05, alpha: 1)))
+
+    /// Fill behind a selected row; pairs with an `accentColor` leading bar.
+    static let appSelection = Color.accentColor.opacity(0.16)
+
     /// A faint contrast tint that was `Color.white.opacity(x)` on dark — flips to black
     /// on light so hairlines and subtle fills stay visible in both appearances.
     static func appHairline(_ opacity: Double) -> Color {

@@ -291,7 +291,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         context.coordinator.attach(to: tv)
         let host = GhosttyHostView(terminal: tv)
-        host.focusOnAppear = autoFocusOnAppear
+        // A pane mounted hidden (pool rebuild) must not race the visible one for focus.
+        host.focusOnAppear = autoFocusOnAppear && !hidden
         host.onDrop = { [session] text in session.write(text) }
         return host
     }

@@ -37,31 +37,57 @@ extension View {
     func pointerCursor() -> some View {
         onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
     }
+
+    /// `pointerCursor()` when `enabled`, without changing the view's type.
+    func pointerCursor(enabled: Bool) -> some View {
+        onHover { hovering in
+            guard enabled else { return }
+            hovering ? NSCursor.pointingHand.push() : NSCursor.pop()
+        }
+    }
 }
 
-/// Selection + hover background for a session row. When selected, draws the accent
-/// highlight (unless `drawSelection` is false, i.e. the native `List` already draws
-/// its own selection); otherwise draws a faint fill on hover so the row visibly
-/// reacts to the pointer. Matches `ClickCursorModifier`'s hover feel.
+/// Selection + hover background for a row: a full-width, square fill with an accent
+/// bar on the leading edge when selected, a faint fill on hover otherwise.
 struct SelectableRowBackground: ViewModifier {
     let selected: Bool
-    /// Set false on the native `List` path, where the List owns the selection
-    /// highlight and we only want to add the missing hover feedback.
-    var drawSelection: Bool = true
     @State private var hovering = false
 
     func body(content: Content) -> some View {
         content
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(fill)
+                Rectangle()
+                    .fill(selected ? Color.appSelection : Color.primary.opacity(hovering ? 0.06 : 0))
+                    .overlay(alignment: .leading) {
+                        if selected { Rectangle().fill(Color.accentColor).frame(width: 2) }
+                    }
+                    .allowsHitTesting(false)
             )
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.10), value: hovering)
     }
+}
 
-    private var fill: Color {
-        if selected { return drawSelection ? Color.accentColor.opacity(0.25) : .clear }
-        return Color.primary.opacity(hovering ? 0.10 : 0)
+/// Turns off the native selection drawing of the `NSTableView` behind a SwiftUI
+/// `List`, so rows can paint their own (full-width) selection. Place it in any
+/// row's background; it finds the table by walking up from there.
+struct NativeListSelectionSuppressor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Finder() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Finder: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            // Deferred: this can run while the table is mid-update.
+            DispatchQueue.main.async { [weak self] in
+                var v = self?.superview
+                while let cur = v, !(cur is NSTableView) { v = cur.superview }
+                if let table = v as? NSTableView, table.selectionHighlightStyle != .none {
+                    table.selectionHighlightStyle = .none
+                }
+            }
+        }
     }
 }
 

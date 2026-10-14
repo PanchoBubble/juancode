@@ -13,7 +13,7 @@ import Foundation
 /// `OracleModel` is the executor.
 public enum PanelSettle {
     /// The drawer's slide. Must match the dock's open/close animation duration.
-    public static let slideMs = 160
+    public static let slideMs = 240
     /// Quiet beat after the slide lands before deferred work runs.
     public static let debounceMs = 100
 

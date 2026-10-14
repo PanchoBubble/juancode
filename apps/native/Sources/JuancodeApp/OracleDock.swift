@@ -39,11 +39,13 @@ struct OracleDock: View {
 
     var body: some View {
         ZStack(alignment: .trailing) {
+            // The scrim only dims: clicks and scrolls go straight through to the app
+            // behind it, and `OutsideClickCollapser` closes the dock on that same click,
+            // so hitting "+" outside the panel is one action, not dismiss-then-click.
             if oracle.expanded {
                 Color.black.opacity(0.28)
                     .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture { oracle.collapse() }
+                    .allowsHitTesting(false)
                     .transition(.opacity)
             }
             // The panel stays mounted across toggles and slides off the right edge when
@@ -78,7 +80,7 @@ struct OracleDock: View {
         // Duration lives in `PanelSettle`: the model holds the terminal-disturbing
         // work (spawns, bootstrap IO, chat repointing) for exactly this slide plus a
         // quiet beat, so the two must not drift apart.
-        .animation(.easeOut(duration: Double(PanelSettle.slideMs) / 1000), value: oracle.expanded)
+        .animation(.timingCurve(0.22, 1, 0.36, 1, duration: Double(PanelSettle.slideMs) / 1000), value: oracle.expanded)
         // Open the app into the Oracle chat (juancode-8n0): chat is the main surface,
         // so the dock auto-presents on the chat tab at first launch. A one-shot inside
         // `presentChatAtLaunch`, so it won't re-open after the user closes it.
@@ -118,14 +120,16 @@ struct OracleDock: View {
             .frame(width: w)
         }
         .frame(maxHeight: .infinity)
-        .background(Color.appPanel)
+        // The shadow hangs off a plain shape, not the panel: shadowing the panel made
+        // every slide frame re-render the live terminal into the shadow pass.
+        .background(Rectangle().fill(Color.appPanel).shadow(radius: 24, x: -6))
         .overlay(alignment: .leading) {
-            Rectangle().fill(Color.appHairline(0.12)).frame(width: 1)
+            Rectangle().fill(Color.appDivider).frame(width: 1)
         }
-        .shadow(radius: 24, x: -6)
         // Esc closes it (the close button mirrors this). Only while expanded — the
         // panel is always mounted now, and an always-live cancelAction would swallow
         // Esc app-wide even when the dock is closed.
+        .background(OutsideClickCollapser(oracle: oracle))
         .background {
             if oracle.expanded {
                 Button("") { oracle.collapse() }
@@ -706,4 +710,37 @@ private struct OracleRailRow: View {
         // Routed through the confirm alert (same one as the hover ✕).
         Button("Delete", role: .destructive, action: onDeleteRequested)
     }
+}
+
+/// Collapses the dock on a left click anywhere left of the panel, without consuming
+/// the click. Only an NSEvent monitor sees the press before its target does, which is
+/// what lets the click both close the dock and land on what was under it. Clicks to
+/// the panel's right (the Oracle rail) are left alone: the rail drives the dock.
+private struct OutsideClickCollapser: NSViewRepresentable {
+    let oracle: OracleModel
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak v] event in
+            MainActor.assumeIsolated {
+                guard oracle.expanded, let v, let window = v.window,
+                      event.window === window, window.attachedSheet == nil else { return }
+                let panel = v.convert(v.bounds, to: nil)
+                if event.locationInWindow.x < panel.minX { oracle.collapse() }
+            }
+            return event
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let m = coordinator.monitor { NSEvent.removeMonitor(m) }
+        coordinator.monitor = nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator { var monitor: Any? }
 }

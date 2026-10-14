@@ -19,3 +19,27 @@ public func projectCwd(for cwd: String) -> String {
     guard !repoBase.isEmpty else { return cwd }
     return parent.deletingLastPathComponent().appendingPathComponent(repoBase).path
 }
+
+/// Which persisted sessions to archive at launch so each project keeps at most
+/// `keep` of them. Newest by `updatedAt` stay; archived and `protected` sessions
+/// (live, pinned, about to be revived) are neither archived nor counted.
+public func launchArchiveOverflow(
+    _ metas: [SessionMeta],
+    keep: Int,
+    projectKey: (String) -> String,
+    protected: Set<String>
+) -> [String] {
+    guard keep > 0 else { return [] }
+    var seen: [String: Int] = [:]
+    var overflow: [String] = []
+    let candidates = metas
+        .filter { !$0.archived && !protected.contains($0.id) }
+        .sorted { $0.updatedAt > $1.updatedAt }
+    for meta in candidates {
+        let key = projectKey(meta.cwd)
+        let count = (seen[key] ?? 0) + 1
+        seen[key] = count
+        if count > keep { overflow.append(meta.id) }
+    }
+    return overflow
+}

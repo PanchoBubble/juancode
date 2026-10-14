@@ -95,7 +95,10 @@ struct GitHubQueueBadge: View {
         private func toggle(_ repo: String) {
             var set = collapsed
             if set.contains(repo) { set.remove(repo) } else { set.insert(repo) }
-            collapsedRaw = set.sorted().joined(separator: "\n")
+            // Animated so the rows fade in/out and the headers below slide, instead of snapping.
+            withAnimation(.easeOut(duration: 0.18)) {
+                collapsedRaw = set.sorted().joined(separator: "\n")
+            }
         }
 
         /// The selected session's repo, as the queue names it (owner/name).
@@ -164,9 +167,6 @@ struct GitHubQueueBadge: View {
                             LazyVStack(alignment: .leading, spacing: 0) {
                                 ForEach(Array(groups.enumerated()), id: \.element.repo) { index, group in
                                     let folded = collapsed.contains(group.repo)
-                                    if index > 0 {
-                                        Divider().padding(.top, 6)
-                                    }
                                     RepoHeader(repo: group.repo, rows: group.rows,
                                                collapsed: folded,
                                                current: group.repo == currentRepo,
@@ -174,9 +174,16 @@ struct GitHubQueueBadge: View {
                                                dismiss: { showing = false })
                                         .id(group.repo)
                                     if !folded {
-                                        ForEach(group.rows) { row in
+                                        ForEach(Array(group.rows.enumerated()), id: \.element.id) { i, row in
                                             QueueRow(row: row, reason: reason(row),
                                                      dismiss: { showing = false }) { open(row) }
+                                                .overlay(alignment: .top) {
+                                                    if i > 0 {
+                                                        Rectangle().fill(Color.appDivider).frame(height: 1)
+                                                            .padding(.horizontal, 10)
+                                                    }
+                                                }
+                                                .transition(.opacity)
                                         }
                                     }
                                 }
@@ -436,6 +443,7 @@ struct GitHubQueueBadge: View {
         let onOpen: () -> Void
         /// Whether the pointer is over the row — the two actions ride on it.
         @State private var hovering = false
+        @State private var eyeHovering = false
         @State private var confirmingClose = false
 
         private var pr: PullRequest { row.pr }
@@ -450,7 +458,9 @@ struct GitHubQueueBadge: View {
         var body: some View {
             Button(action: onOpen) { rowContent }
                 .buttonStyle(.plain)
-                .clickCursor()
+                .focusEffectDisabled()
+                .modifier(SelectableRowBackground(selected: false))
+                .pointerCursor()
                 .help(helpText)
                 // Floated, not inline: inline buttons take their width from the title,
                 // so every title re-truncates the instant the pointer enters the row
@@ -461,99 +471,120 @@ struct GitHubQueueBadge: View {
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
         }
 
-        /// Facts on the first line, title on the second. The attention reason is
+        /// Facts on the first line, title on the second, with a leading column for
+        /// the checks dot and, under it, the watching eye. The attention reason is
         /// not drawn — the orange comment count and red checks already say it — but
         /// stays in the hover text.
         private var rowContent: some View {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+            HStack(alignment: .top, spacing: 6) {
+                VStack(spacing: 4) {
                     Circle().fill(pr.checks.color).frame(width: 7, height: 7)
-                    // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
-                    Text(verbatim: "#\(pr.number)")
-                        .font(.system(size: 11, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    if let t = tracked {
-                        Button {
-                            dismiss()
-                            model.openTrackingSession(t)
-                        } label: {
-                            TrackBadge(state: t.state,
-                                       waiting: model.activity(t.sessionId) == .waitingInput,
-                                       compact: true)
-                                .opacity(model.isTrackPending(t) ? 0.45 : 1)
-                        }
-                        .buttonStyle(.borderless)
-                        .clickCursor()
-                        .disabled(model.isTrackPending(t))
-                    }
-                    HStack(spacing: 3) {
-                        Image(systemName: pr.checks.icon).font(.system(size: 9))
-                        Text(pr.checksText).font(.system(size: 10).monospacedDigit())
-                    }
-                    .foregroundStyle(pr.checks.color)
-                    if pr.unresolvedComments > 0 {
-                        HStack(spacing: 3) {
-                            Image(systemName: "bubble.left.fill").font(.system(size: 8))
-                            Text(verbatim: "\(pr.unresolvedComments)").font(.system(size: 10))
-                        }
-                        .foregroundStyle(.orange)
-                    }
-                    if pr.draft {
-                        Text("draft")
-                            .font(.system(size: 9))
-                            .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.2))
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                    }
-                    Spacer(minLength: 4)
-                    if let age = prAgeLabel(pr.createdAt) {
-                        Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .frame(height: 14)
+                    if let t = tracked { trackEye(t) }
+                }
+                .frame(width: Self.leadColumn)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
+                        Text(verbatim: "#\(pr.number)")
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.secondary)
+                        HStack(spacing: 3) {
+                            Image(systemName: pr.checks.icon).font(.system(size: 9))
+                            Text(pr.checksText).font(.system(size: 10).monospacedDigit())
+                        }
+                        .foregroundStyle(pr.checks.color)
+                        if pr.unresolvedComments > 0 {
+                            HStack(spacing: 3) {
+                                Image(systemName: "bubble.left.fill").font(.system(size: 8))
+                                Text(verbatim: "\(pr.unresolvedComments)").font(.system(size: 10))
+                            }
+                            .foregroundStyle(.orange)
+                        }
+                        if pr.draft {
+                            Text("draft")
+                                .font(.system(size: 9))
+                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.2))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                        }
+                        Spacer(minLength: 4)
+                        if let age = prAgeLabel(pr.createdAt) {
+                            Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(height: 14)
+                    Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
                 }
                 .padding(.trailing, 10)
-                Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                    .padding(.leading, 13).padding(.trailing, 10)
             }
-            .padding(.leading, 10).padding(.vertical, 4)
-            .contentShape(Rectangle())
+            .padding(.leading, 6).padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+
+        private static let leadColumn: CGFloat = 22
+
+        /// The watching agent's eye: a chip filling the lead column, so it's a real
+        /// target rather than a 9pt glyph. Jumps to the tracking session.
+        private func trackEye(_ t: TrackedPr) -> some View {
+            let badge = TrackBadge(state: t.state,
+                                   waiting: model.activity(t.sessionId) == .waitingInput,
+                                   compact: true, compactSize: 11)
+            return Button {
+                dismiss()
+                model.openTrackingSession(t)
+            } label: {
+                badge
+                    .frame(width: Self.leadColumn, height: 18)
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(badge.compactColor.opacity(eyeHovering ? 0.28 : 0.14)))
+                    .contentShape(Rectangle())
+                    .opacity(model.isTrackPending(t) ? 0.45 : 1)
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            .onHover { eyeHovering = $0 }
+            .disabled(model.isTrackPending(t))
         }
 
         /// Track, Agent and GitHub, on hover. Track hands the PR to an agent that keeps
         /// watching it, Agent opens one session on it right now; both need a checkout,
         /// so a repo juancode has never opened gets only the GitHub button. That one is
         /// always there because a click on a mapped row opens the GitHub view instead.
+        /// Nearly row-height, with each button's whole cell clickable.
         @ViewBuilder private var actions: some View {
             if hovering {
-                HStack(spacing: 1) {
+                HStack(spacing: 2) {
                     if let cwd { checkoutActions(cwd) }
-                    iconButton("arrow.up.right.square", help: "Open on GitHub") {
+                    HoverCellButton(symbol: "arrow.up.right.square", help: "Open on GitHub") {
                         if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
                     }
                 }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 5).padding(.vertical, 3)
+                .padding(3)
+                .frame(maxHeight: .infinity)
                 .background(pill)
+                .padding(.vertical, 3)
                 .padding(.trailing, 6)
             }
         }
 
         @ViewBuilder private func checkoutActions(_ cwd: String) -> some View {
             if let t = tracked {
-                iconButton("eye.slash", help: "Stop tracking this PR") {
+                HoverCellButton(symbol: "eye.slash", help: "Stop tracking this PR") {
                     model.untrackPr(t.id)
                 }
                 .disabled(!model.supports(.trackedPrs))
             } else {
-                iconButton("eye", help: model.unavailable(.trackedPrs)
+                HoverCellButton(symbol: "eye", help: model.unavailable(.trackedPrs)
                     ?? "Track: an agent watches this PR, fixes the obvious and escalates the rest") {
                     model.trackPr(pr, cwd: cwd)
                 }
                 .disabled(!model.supports(.trackedPrs))
             }
-            iconButton("terminal",
-                       help: "Agent: a fresh session on this PR, seeded with its details") {
+            HoverCellButton(symbol: "terminal",
+                            help: "Agent: a fresh session on this PR, seeded with its details") {
                 model.workOnPr(pr, cwd: cwd)
             }
         }
@@ -567,16 +598,6 @@ struct GitHubQueueBadge: View {
                 .overlay(shape.fill(Color.appHairline(0.10)))
                 .overlay(shape.strokeBorder(Color.appHairline(0.22), lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.45), radius: 5, y: 1)
-        }
-
-        private func iconButton(_ symbol: String, help: String,
-                                action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: symbol).font(.system(size: 11, weight: .semibold))
-            }
-            .buttonStyle(.borderless)
-            .help(help)
-            .clickCursor()
         }
 
         /// The same actions without the hover, for a pointer that never rests: the
@@ -710,6 +731,7 @@ struct GitHubQueueBadge: View {
         let toggle: () -> Void
         let dismiss: () -> Void
         @State private var confirming = false
+        @State private var hovering = false
 
         private var cwd: String? { model.folder(forRepo: repo) }
         private var untracked: [PullRequest] {
@@ -720,11 +742,12 @@ struct GitHubQueueBadge: View {
         var body: some View {
             HStack(spacing: 6) {
                 Button(action: toggle) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 8) {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.tertiary)
                             .rotationEffect(.degrees(collapsed ? 0 : 90))
+                            .frame(width: 10)
                         Text(repo).font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(current ? Color.accentColor : .primary)
                             .lineLimit(1).truncationMode(.middle)
@@ -742,16 +765,20 @@ struct GitHubQueueBadge: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
                 .help(collapsed ? "Show \(repo)'s PRs" : "Minimise \(repo)")
-                .clickCursor()
+                // Hover lights the whole bar (below), not a rounded chip on the name.
+                .pointerCursor()
                 trackAll
             }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(current ? Color.accentColor.opacity(0.10) : Color.appHairline(0.06))
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(current ? Color.appSelection
+                        : hovering ? Color.appHairline(0.08) : Color.appBand)
             .overlay(alignment: .leading) {
                 if current { Rectangle().fill(Color.accentColor).frame(width: 2) }
             }
-            .padding(.bottom, 2)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.10), value: hovering)
         }
 
         @ViewBuilder private var trackAll: some View {
@@ -786,5 +813,31 @@ struct GitHubQueueBadge: View {
                 }
             }
         }
+    }
+}
+
+/// A hover-pill action whose whole cell, not just its glyph, takes the click.
+private struct HoverCellButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.appHairline(hovering && isEnabled ? 0.18 : 0)))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .clickCursor()
+        .onHover { hovering = $0 }
     }
 }

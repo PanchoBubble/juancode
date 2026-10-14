@@ -179,6 +179,9 @@ final class AppModel {
         let provider: ProviderId
         let cwd: String
         let isolateWorktree: Bool
+        /// The session that was open when the create started. Its container stays
+        /// mounted under the placeholder so the keep-alive panes aren't torn down.
+        let backdrop: String?
     }
     private(set) var pendingCreates: [PendingCreate] = []
     func pendingCreate(_ id: String) -> PendingCreate? {
@@ -960,6 +963,34 @@ final class AppModel {
         )
     }
 
+    /// Persisted sessions a project keeps in the sidebar across a relaunch.
+    private static let launchKeepPerProject = 10
+    private var launchOverflowArchived = false
+
+    /// Once per launch, archive each project's persisted sessions past the newest
+    /// `launchKeepPerProject`. Archive, not delete: they stay one toggle away. Runs
+    /// after the first worktree scan so worktree sessions count toward their repo.
+    private func archiveOverflowAtLaunch() {
+        guard !launchOverflowArchived else { return }
+        launchOverflowArchived = true
+        var protected = Set(core.liveSessions().map(\.id))
+            .union(pinnedSessions)
+            .union(activatingSessions)
+            .union(restorePlan.reopen)
+            .union(pendingCrashOrphans)
+        if let focus = restorePlan.focus { protected.insert(focus) }
+        if let sel = selection { protected.insert(sel) }
+        let repoRoots = worktreeRepoRoots
+        let metas = core.sessions().filter { $0.cwd != OraclePaths.controlDir }
+        let overflow = launchArchiveOverflow(
+            metas, keep: Self.launchKeepPerProject,
+            projectKey: { repoRoots[$0] ?? projectCwd(for: $0) },
+            protected: protected)
+        guard !overflow.isEmpty else { return }
+        for id in overflow { core.setArchived(id, archived: true) }
+        refresh()
+    }
+
     // MARK: - Worktree → repo grouping
 
     /// Authoritative map from any git worktree path to its repo's main worktree
@@ -990,6 +1021,7 @@ final class AppModel {
             for (k, v) in additions { worktreeRepoRoots[k] = v }
             scannedWorktreeCwds.formUnion(cwds)
             worktreeScanInFlight = false
+            archiveOverflowAtLaunch()
             // New sessions may have arrived mid-scan; pick them up (no-op if none).
             refreshWorktreeMap()
         }
@@ -1846,10 +1878,14 @@ final class AppModel {
         let selectionBefore = selection
         if select {
             let p = PendingCreate(id: Self.pendingCreatePrefix + UUID().uuidString,
-                                  provider: provider, cwd: cwd, isolateWorktree: isolateWorktree)
+                                  provider: provider, cwd: cwd, isolateWorktree: isolateWorktree,
+                                  backdrop: selectionBefore.flatMap { pendingCreate($0)?.backdrop ?? $0 })
             pendingCreates.append(p)
             selection = p.id
             pending = p
+            // The backdrop's terminal is still mounted under the placeholder; typing
+            // during the spawn must not land in it.
+            NSApp.keyWindow?.makeFirstResponder(nil)
         }
         // The placeholder only owns the selection while it's still selected: if the
         // user moved on during the spawn, the finished session must not yank them back.

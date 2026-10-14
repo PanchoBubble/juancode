@@ -173,11 +173,20 @@ private struct WindowContent: View {
             // garbles the CLIs' TUIs — commit once on release for a single clean reflow.
             DragResizeHandle(axis: .vertical, value: $oracleRailWidth,
                              min: 170, max: 480, invert: true, previewOnly: true)
-            VStack(spacing: 0) {
-                OracleGlobalRail().frame(maxHeight: .infinity)
-                DragResizeHandle(axis: .horizontal, value: $prRailHeight,
-                                 min: 120, max: 900, invert: true)
-                GitHubQueueRail().frame(height: prRailHeight)
+            GeometryReader { geo in
+                // The PR/Diff half may take the rail down to a sliver of Oracles; the
+                // cap follows the rail's real height so it isn't stuck near the middle.
+                let maxPr = Swift.max(120, Double(geo.size.height) - 100)
+                VStack(spacing: 0) {
+                    OracleGlobalRail()
+                        .frame(minHeight: 0, maxHeight: .infinity)
+                        .clipped()
+                    DragResizeHandle(axis: .horizontal, value: $prRailHeight,
+                                     min: 120, max: maxPr, invert: true)
+                    GitHubQueueRail()
+                        .frame(height: Swift.min(prRailHeight, maxPr))
+                        .layoutPriority(1)
+                }
             }
             .frame(width: oracleRailWidth)
         }
@@ -654,8 +663,9 @@ private struct SidebarColumn: View {
     @State private var bridge = SidebarToolbarBridge()
 
     var body: some View {
+        // `.environment` goes after `.toolbar`: toolbar items are hosted outside the
+        // view they hang off, so an environment applied below `.toolbar` never reaches them.
         SidebarView()
-            .environment(bridge)
             .toolbar {
                 ToolbarItem { CollapseAllProjectsButton() }
                 // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP
@@ -665,6 +675,7 @@ private struct SidebarColumn: View {
                 ToolbarItem { NewSessionToolbarButton() }
             }
             .navigationTitle("juancode")
+            .environment(bridge)
     }
 }
 
@@ -729,9 +740,16 @@ struct SidebarView: View {
 
     /// How many session rows a folder shows before offering "Load more".
     private let folderPreviewCount = 5
-    /// Max height of an expanded folder's scrollable session box (~5 rows at the
-    /// 220 default). User-resizable via the drag handle under the box; persisted.
-    @AppStorage("session.folderScroll.maxHeight") private var folderScrollMaxHeight: Double = 220
+    /// Height the user dragged an expanded folder's session box to; nil until they do.
+    @AppStorage("session.folderScroll.userHeight") private var folderScrollUserHeight: Double?
+    /// The sidebar's measured height, for the box's window-relative cap.
+    @State private var sidebarHeight: Double = 0
+    /// Tallest an expanded folder's session box may get: 80% of the sidebar, never
+    /// below 500. The box shrinks to fit fewer rows.
+    private var folderScrollCap: Double { Swift.max(500, sidebarHeight * 0.8) }
+    private var folderScrollMaxHeight: Double {
+        Swift.min(folderScrollUserHeight ?? folderScrollCap, folderScrollCap)
+    }
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
@@ -1339,18 +1357,9 @@ struct SidebarView: View {
                     if let newValue { model.selection = newValue }
                 }
             )) {
+                // Flat rows, not a Section per project: the sidebar style puts a gap
+                // above every section header.
                 ForEach(groups) { group in
-                    Section {
-                        ForEach(pendingCreates(in: group)) { p in
-                            PendingSessionRow(pending: p)
-                                .tag(p.id)
-                                .listRowSeparator(.visible)
-                                .listRowSeparatorTint(Color.appHairline(0.12))
-                        }
-                        if !collapsedFolders.contains(group.cwd) {
-                            sessionList(group)
-                        }
-                    } header: {
                         FolderHeader(group: group, collapsed: collapsedFolders.contains(group.cwd)) {
                             // Animated so the section's rows slide in/out instead of snapping.
                             withAnimation(.easeOut(duration: 0.18)) {
@@ -1359,6 +1368,12 @@ struct SidebarView: View {
                                 } else {
                                     collapsedFolders.insert(group.cwd)
                                 }
+                            }
+                        }
+                        // Hairline between projects, so adjacent headers don't run together.
+                        .overlay(alignment: .top) {
+                            if group.cwd != groups.first?.cwd {
+                                Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
                             }
                         }
                         // Drag a header onto another to reorder projects (persisted).
@@ -1385,9 +1400,20 @@ struct SidebarView: View {
                             }
                         }
                         // Let the project bar span the full sidebar width (no default
-                        // section-header inset), so its fill/divider reach both edges.
+                        // row inset), so its fill reaches both edges.
                         .listRowInsets(EdgeInsets())
-                    }
+                        .listRowSeparator(.hidden)
+                        .selectionDisabled()
+                        .background(NativeListSelectionSuppressor())
+                        ForEach(Array(pendingCreates(in: group).enumerated()), id: \.element.id) { index, p in
+                            PendingSessionRow(pending: p)
+                                .modifier(SidebarRowChrome(divider: index > 0, selected: nil))
+                                .modifier(SidebarListRow())
+                                .tag(p.id)
+                        }
+                        if !collapsedFolders.contains(group.cwd) {
+                            sessionList(group, dividerFirst: !pendingCreates(in: group).isEmpty)
+                        }
                 }
                 if groups.isEmpty {
                     Text(query.isEmpty ? "No sessions yet." : "No matching sessions.")
@@ -1406,6 +1432,7 @@ struct SidebarView: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
+            .modifier(FloatingScrollIndicator())
             // Slide rows to their new slot when a session dies and sinks, instead
             // of snapping (juancode-05u).
             //
@@ -1530,6 +1557,7 @@ struct SidebarView: View {
         } message: { meta in
             Text(closeWarning(meta))
         }
+        .onGeometryChange(for: Double.self) { $0.size.height.rounded() } action: { sidebarHeight = $0 }
         .perfTrackBody()
     }
 
@@ -1544,29 +1572,47 @@ struct SidebarView: View {
     /// internally so the sidebar doesn't grow. The preview always carries every active
     /// (live) session, wherever it sorts — see `previewSessions`.
     @ViewBuilder
-    private func sessionList(_ group: FolderGroup) -> some View {
+    private func sessionList(_ group: FolderGroup, dividerFirst: Bool) -> some View {
         let sessions = group.sessions
         let shown = previewSessions(group)
         if shown.count == sessions.count {
-            ForEach(sessions, id: \.id) { meta in nativeRow(meta) }
-                .onMove { from, to in
-                    moveSessions(in: group, shown: sessions, from: from, to: to)
-                }
-        } else if expandedFolders.contains(group.cwd) {
-            scrollBox(group)
-        } else {
-            ForEach(shown, id: \.id) { meta in nativeRow(meta) }
-                .onMove { from, to in
-                    moveSessions(in: group, shown: shown, from: from, to: to)
-                }
-            Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.insert(group.cwd) } } label: {
-                Label("Load more (\(sessions.count - shown.count))",
-                      systemImage: "chevron.down.circle")
-                    .font(.system(size: 11))
+            ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
+                nativeRow(meta, divider: dividerFirst || index > 0)
             }
-            .buttonStyle(.borderless)
-            .clickCursor()
+            .onMove { from, to in
+                moveSessions(in: group, shown: sessions, from: from, to: to)
+            }
+        } else if expandedFolders.contains(group.cwd) {
+            scrollBox(group, dividerFirst: dividerFirst)
+        } else {
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, meta in
+                nativeRow(meta, divider: dividerFirst || index > 0)
+            }
+            .onMove { from, to in
+                moveSessions(in: group, shown: shown, from: from, to: to)
+            }
+            foldButton("Load more (\(sessions.count - shown.count))", systemImage: "chevron.down.circle") {
+                _ = expandedFolders.insert(group.cwd)
+            }
+            .modifier(SidebarListRow())
+            .selectionDisabled()
         }
+    }
+
+    /// "Load more" / "Show less": centered, and the same height in both places so
+    /// swapping one for the other doesn't move what's around it.
+    private func foldButton(_ title: String, systemImage: String,
+                            action: @escaping () -> Void) -> some View {
+        Button { withAnimation(.easeOut(duration: 0.18)) { action() } } label: {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, SidebarRowChrome.vertical)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .pointerCursor()
     }
 
     /// All of a folder's sessions inside a height-capped, internally scrolling box.
@@ -1574,18 +1620,14 @@ struct SidebarView: View {
     /// selection by hand and reordering is drag-a-row-onto-another, like the
     /// project headers.
     @ViewBuilder
-    private func scrollBox(_ group: FolderGroup) -> some View {
+    private func scrollBox(_ group: FolderGroup, dividerFirst: Bool) -> some View {
         let sessions = group.sessions
         let cwd = group.cwd
         VStack(spacing: 0) {
             ContainedScroll(maxHeight: CGFloat(folderScrollMaxHeight)) {
                 VStack(spacing: 0) {
                     ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
-                        // Match the List path's minimal inter-row hairline.
-                        if index > 0 {
-                            Divider().overlay(Color.appHairline(0.12)).padding(.horizontal, 8)
-                        }
-                        scrollRow(meta)
+                        scrollRow(meta, divider: dividerFirst || index > 0)
                             .overlay(alignment: .top) {
                                 Rectangle()
                                     .fill(Color.accentColor)
@@ -1613,29 +1655,29 @@ struct SidebarView: View {
                 }
             }
             // Drag the divider down to grow the box / up to shrink it (persisted).
-            DragResizeHandle(axis: .horizontal, value: $folderScrollMaxHeight,
-                             min: 120, max: 800, invert: false)
-            Button { withAnimation(.easeOut(duration: 0.18)) { _ = expandedFolders.remove(cwd) } } label: {
-                Label("Show less", systemImage: "chevron.up.circle").font(.system(size: 11))
+            DragResizeHandle(axis: .horizontal,
+                             value: Binding(get: { folderScrollMaxHeight },
+                                            set: { folderScrollUserHeight = $0 }),
+                             min: 120, max: folderScrollCap, invert: false)
+            foldButton("Show less", systemImage: "chevron.up.circle") {
+                _ = expandedFolders.remove(cwd)
             }
-            .buttonStyle(.borderless)
-            .clickCursor()
-            .padding(.top, 2)
         }
-        .listRowInsets(EdgeInsets())
-        .listRowSeparator(.hidden)
+        .modifier(SidebarListRow())
+        .selectionDisabled()
     }
 
     /// A row rendered as a native List cell (selection + keyboard nav via `.tag`).
     @ViewBuilder
-    private func nativeRow(_ meta: SessionMeta) -> some View {
+    private func nativeRow(_ meta: SessionMeta, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
-        let row = sessionRow(meta, external: external)
+        sessionRow(meta, external: external)
+            .modifier(SidebarRowChrome(divider: divider,
+                                       selected: external ? nil : model.selection == meta.id))
+            .modifier(SidebarListRow())
+            .pointerCursor(enabled: !external)
             .tag(meta.id)
             .selectionDisabled(external)
-            // A minimal hairline between session rows for visual separation.
-            .listRowSeparator(.visible)
-            .listRowSeparatorTint(Color.appHairline(0.12))
             // Also for a tracked-PR row in the main checkout: its capsule now carries
             // the PR's diff size, which lives on the cached PR list.
             .onAppear {
@@ -1644,29 +1686,17 @@ struct SidebarView: View {
                 }
             }
             .contextMenu { rowContextMenu(meta) }
-        // Pointing-hand + hover fill for the clickable (selectable) rows; external
-        // rows aren't selectable, so they keep the default cursor and no hover fill.
-        // The List owns the selection highlight, so we add hover feedback only.
-        if external {
-            row
-        } else {
-            row
-                .modifier(SelectableRowBackground(selected: model.selection == meta.id,
-                                                  drawSelection: false))
-                .pointerCursor()
-        }
     }
 
     /// A row inside the scroll box: manual tap-to-select + highlight (the List's own
     /// selection machinery doesn't reach views nested in a ScrollView).
     @ViewBuilder
-    private func scrollRow(_ meta: SessionMeta) -> some View {
+    private func scrollRow(_ meta: SessionMeta, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
-        let row = sessionRow(meta, external: external)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+        sessionRow(meta, external: external)
+            .modifier(SidebarRowChrome(divider: divider,
+                                       selected: external ? nil : model.selection == meta.id))
+            .pointerCursor(enabled: !external)
             .onTapGesture {
                 if !external {
                     model.selection = meta.id
@@ -1681,16 +1711,6 @@ struct SidebarView: View {
                 }
             }
             .contextMenu { rowContextMenu(meta) }
-        // Selection accent + pointing-hand + hover fill for the clickable rows;
-        // external rows can't be selected by tap, so they keep the default cursor
-        // and no hover feedback.
-        if external {
-            row
-        } else {
-            row
-                .modifier(SelectableRowBackground(selected: model.selection == meta.id))
-                .pointerCursor()
-        }
     }
 
     /// Tracked Linear issues, surfaced in the sidebar (juancode-yluq) — moved off the
@@ -1858,6 +1878,51 @@ struct SidebarView: View {
 /// waited to paint. Now an activity tick invalidates only the rows, and the activity
 /// arrives through a per-session box (`AppModel.activityBox`) so it's only the row whose
 /// agent actually moved. The grouping pass upstream never sees it (juancode-2n0).
+/// Padding, divider and selection shared by every sidebar session row, in the List
+/// and in a folder's scroll box alike, so expanding a folder moves nothing.
+private struct SidebarRowChrome: ViewModifier {
+    static let leading: CGFloat = 14
+    static let trailing: CGFloat = 16
+    static let vertical: CGFloat = 6
+
+    let divider: Bool
+    /// Nil for a row that can't be selected: no hover or selection fill.
+    let selected: Bool?
+
+    func body(content: Content) -> some View {
+        let row = content
+            .padding(.leading, Self.leading)
+            .padding(.trailing, Self.trailing)
+            .padding(.vertical, Self.vertical)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        Group {
+            if let selected { row.modifier(SelectableRowBackground(selected: selected)) } else { row }
+        }
+        .overlay(alignment: .top) {
+            if divider {
+                Rectangle().fill(Color.appDivider).frame(height: 1)
+                    .padding(.leading, Self.leading)
+                    .padding(.trailing, Self.trailing)
+            }
+        }
+    }
+}
+
+/// Puts a row edge to edge in the sidebar List, which pads every row by
+/// `listInset` per side even with zero row insets (measured), and hides the native
+/// separator: `SidebarRowChrome` draws its own.
+private struct SidebarListRow: ViewModifier {
+    static let listInset: CGFloat = 16
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, -Self.listInset)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+    }
+}
+
 private struct SessionRowHost: View {
     @Environment(AppModel.self) private var model
     let meta: SessionMeta
@@ -1956,6 +2021,7 @@ private struct FolderHeader: View {
     @State private var plusHovering = false
     @State private var beadsHovering = false
     @State private var menuHovering = false
+    @State private var headerHovering = false
 
     /// Folder tooltip: full path, plus the per-project spend rollup when known so
     /// the cost stays discoverable without crowding the header (juancode-341).
@@ -2007,10 +2073,11 @@ private struct FolderHeader: View {
             // per-folder "+" agent menu.
             HStack(spacing: 6) {
                 Button(action: toggle) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 10) {
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.secondary)
+                            .frame(width: 10, alignment: .leading)
                         Text(group.name)
                             .font(.system(size: 15, weight: .semibold))
                             // Explicit primary: section-header text otherwise renders
@@ -2023,7 +2090,9 @@ private struct FolderHeader: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .clickCursor()
+                .focusEffectDisabled()
+                // Hover lights the whole bar (below), not a rounded chip on the name.
+                .pointerCursor()
                 // A popover (not a native Menu) so each agent option is a real SwiftUI
                 // button: it gets the pointing-hand cursor + hover highlight, and clicks
                 // register reliably (native menu rows did neither).
@@ -2049,67 +2118,51 @@ private struct FolderHeader: View {
                 .onHover { plusHovering = $0 }
                 .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 2) {
-                        // Per-project worktree default: when on, picking an agent below
-                        // starts the session on a fresh git worktree. Persisted per
-                        // project (falling back to the app-wide default in Settings →
-                        // Sessions), so it sticks for future "+" clicks. Hidden only for
-                        // a folder git has answered for — while the state is still
-                        // loading the switch shows, or the popover would look like it
-                        // has no worktree choice at all.
+                        // Shown unless git has answered "not a repo": while the state is
+                        // still loading, hiding the worktree half would look like the
+                        // folder has no worktree choice at all.
                         if model.folderGitState(group.cwd)?.git != false {
+                            // Per-project worktree default. The rows below each say where
+                            // they start, so this only decides what ⌘N does. Persisted per
+                            // project, falling back to Settings → Sessions.
                             Toggle(isOn: Binding(
                                 get: { model.worktreeDefault(forProject: group.cwd) },
                                 set: { model.setWorktreeDefault($0, forProject: group.cwd) }
                             )) {
-                                Text("New worktree")
+                                Text("⌘N on new worktree")
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .toggleStyle(.switch)
                             .controlSize(.mini)
-                            .help("Start new sessions here on a fresh git worktree")
+                            .help("⌘N from a session here starts on a fresh git worktree")
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             Divider().padding(.vertical, 2)
-                        }
-                        ForEach(ProviderId.allCases, id: \.self) { p in
-                            Button {
-                                model.createInFolder(provider: p, cwd: group.cwd)
-                                showingAgentPicker = false
-                            } label: {
-                                Text(Providers.spec(for: p).label)
-                                    // Explicit primary: a plain button's label paints in
-                                    // the inactive-control gray whenever the popover panel
-                                    // isn't key, which read as "these options are disabled".
-                                    .foregroundStyle(.primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .clickCursor()
+                            splitAgentRows
+                        } else {
+                            agentRows(worktree: false)
                         }
                     }
-                    .frame(minWidth: 180)
+                    .frame(width: Self.pickerWidth)
                     .padding(4)
                     .fixesPopoverFirstClick()
                 }
                 // The project's Beads board; PRs live in the global GitHub view.
-                if hasBeads {
-                    Button { model.openBeads(project: group.cwd) } label: {
-                        Image(systemName: "checklist")
-                            .font(.system(size: 12, weight: .medium))
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                            .background(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(Color.appHairline(beadsHovering ? 0.14 : 0)))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Beads board for \(group.name)")
-                    .clickCursor()
-                    .onHover { beadsHovering = $0 }
+                // Always shown so every header has the same buttons in the same place.
+                Button { model.openBeads(project: group.cwd) } label: {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.appHairline(beadsHovering ? 0.14 : 0)))
                 }
+                .buttonStyle(.plain)
+                .help(hasBeads ? "Beads board for \(group.name)"
+                               : "Beads board (no tracker in \(group.name) yet)")
+                .clickCursor()
+                .onHover { beadsHovering = $0 }
                 // Per-project overflow menu. A popover of plain buttons for the same
                 // reason the agent picker is one: native Menu rows get neither the
                 // pointing-hand cursor nor a reliable first click here.
@@ -2205,28 +2258,22 @@ private struct FolderHeader: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.leading, 15) // align under the name, past the chevron
             }
         }
-        // Full-width project bar: a subtle raised fill that spans the whole sidebar
-        // (edge to edge, no rounded inset) for clear contrast against the session
-        // rows, with a hairline underline separating it from the sessions below.
-        // Trailing is wider than leading: the outer -10 stretch below eats 10pt of
-        // it, leaving ~8pt of visible inset so the badge cluster doesn't sit under
-        // the splitter/scrollbar.
-        .padding(.leading, 8)
-        .padding(.trailing, 18)
+        // Full-width project bar: a band a step off the surface, edge to edge.
+        // Trailing is wider so the badge cluster clears the overlay scrollbar.
+        .padding(.leading, SidebarRowChrome.leading)
+        .padding(.trailing, SidebarRowChrome.trailing + 8)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.appHairline(0.06))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
-        }
+        .background(headerHovering ? Color.appHairline(0.08) : Color.appBand)
+        .onHover { headerHovering = $0 }
+        .animation(.easeOut(duration: 0.10), value: headerHovering)
         // `.listRowInsets(EdgeInsets())` (at the call site) removes the row's own
-        // insets, but the sidebar list style still pads row content ~10pt per side
-        // for its rounded-selection look — the gap left of the bar. Negative
-        // padding outside the fill stretches it to the true sidebar edges.
-        .padding(.horizontal, -10)
+        // insets, but the sidebar list style still pads row content 16pt per side
+        // for its rounded-selection look. Negative padding outside the fill
+        // stretches it to the true sidebar edges.
+        .padding(.horizontal, -SidebarListRow.listInset)
         .contextMenu {
             // A day of background sessions leaves this project painted in unread
             // dots, done checks and at-risk notices — one click puts it back to
@@ -2245,6 +2292,116 @@ private struct FolderHeader: View {
         }
         .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
+
+    private static let pickerWidth: CGFloat = 240
+    /// The current-branch end of a split row: a fifth of the popover.
+    private static let currentBranchWidth: CGFloat = pickerWidth * 0.2
+
+    /// One row per agent: the row starts it on a new worktree, its right fifth on
+    /// the folder's current branch.
+    @ViewBuilder
+    private var splitAgentRows: some View {
+        let branch = model.folderGitState(group.cwd)?.branch
+        HStack(spacing: 0) {
+            Label("New worktree", systemImage: "arrow.triangle.branch")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 10)
+            Image(systemName: "folder")
+                .frame(width: Self.currentBranchWidth)
+                .help(branch.map { "Current branch: \($0)" } ?? "Current branch")
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(.top, 2)
+        .padding(.bottom, 2)
+        ForEach(ProviderId.allCases, id: \.self) { p in
+            SplitAgentRow(
+                label: Providers.spec(for: p).label,
+                currentHelp: "\(Providers.spec(for: p).label) on "
+                    + (branch.map { "the current branch (\($0))" } ?? "the current branch"),
+                currentWidth: Self.currentBranchWidth,
+                onWorktree: { startAgent(p, worktree: true) },
+                onCurrent: { startAgent(p, worktree: false) })
+        }
+    }
+
+    private func startAgent(_ p: ProviderId, worktree: Bool) {
+        model.createInFolder(provider: p, cwd: group.cwd, isolateWorktree: worktree)
+        showingAgentPicker = false
+    }
+
+    private func agentRows(worktree: Bool) -> some View {
+        ForEach(ProviderId.allCases, id: \.self) { p in
+            Button {
+                startAgent(p, worktree: worktree)
+            } label: {
+                Text(Providers.spec(for: p).label)
+                    // Explicit primary: a plain button's label paints in the
+                    // inactive-control gray whenever the popover panel isn't key,
+                    // which read as "these options are disabled".
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .clickCursor()
+        }
+    }
+}
+
+/// An agent row in the "+" picker split in two: most of it starts the agent on a
+/// new worktree, the trailing segment on the folder's current branch. Each half
+/// highlights on its own hover so it's clear which one a click lands on.
+private struct SplitAgentRow: View {
+    let label: String
+    let currentHelp: String
+    let currentWidth: CGFloat
+    let onWorktree: () -> Void
+    let onCurrent: () -> Void
+    @State private var hoveringWorktree = false
+    @State private var hoveringCurrent = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onWorktree) {
+                Text(label)
+                    // Explicit primary: a plain button's label paints in the
+                    // inactive-control gray whenever the popover panel isn't key.
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                    .background(hoverFill(hoveringWorktree))
+            }
+            .buttonStyle(.plain)
+            .help("\(label) on a new worktree")
+            .clickCursor()
+            .onHover { hoveringWorktree = $0 }
+            Rectangle().fill(Color.appHairline(0.14)).frame(width: 1).padding(.vertical, 4)
+            Button(action: onCurrent) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .background(hoverFill(hoveringCurrent))
+            }
+            .buttonStyle(.plain)
+            .frame(width: currentWidth - 1)
+            .help(currentHelp)
+            .clickCursor()
+            .onHover { hoveringCurrent = $0 }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func hoverFill(_ on: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(Color.appHairline(on ? 0.14 : 0))
+    }
 }
 
 /// Build the single-line seed prompt auto-submitted to a PR-context session.
@@ -2261,16 +2418,20 @@ struct TrackBadge: View {
     var waiting = false
     /// Just a tinted eye, for rows with no room for the word.
     var compact = false
+    /// Glyph size of the compact eye.
+    var compactSize: CGFloat = 9
     var body: some View {
         if compact {
             Image(systemName: "eye.fill")
-                .font(.system(size: 9))
-                .foregroundStyle(state == .watching && !waiting ? Color.teal : color)
+                .font(.system(size: compactSize))
+                .foregroundStyle(compactColor)
                 .help(help)
         } else {
             pill
         }
     }
+
+    var compactColor: Color { state == .watching && !waiting ? .teal : color }
     private var pill: some View {
         Text(label)
             .font(.system(size: 9, weight: .medium))
@@ -2786,20 +2947,28 @@ struct DetailView: View {
         // replacing it: the container underneath must stay MOUNTED so the
         // keep-alive terminal panes survive (juancode-073, juancode-2t6).
         ZStack {
-            if let id = model.selection, let pending = model.pendingCreate(id) {
-                PendingSessionCard(pending: pending)
-            } else if let id = model.selection, let meta = model.sessions.first(where: { $0.id == id }) {
+            let pending = model.selection.flatMap { model.pendingCreate($0) }
+            let shownId = pending.map { $0.backdrop } ?? model.selection
+            if let id = shownId, let meta = model.sessions.first(where: { $0.id == id }) {
                 // Deliberately NOT keyed by id: the container must survive session
                 // switches so the keep-alive terminal panes inside it stay mounted
                 // (juancode-073). Per-session subviews that assume a fresh identity
-                // (Changes/Issues panels) are keyed individually inside.
+                // (Changes/Issues panels) are keyed individually inside. A pending
+                // create keeps it mounted under the placeholder for the same reason:
+                // remounting rebuilt every pooled pane, and their focus-on-appear
+                // raced the new session's.
                 SessionContainer(meta: meta)
-            } else {
+                    .opacity(pending == nil ? 1 : 0)
+                    .allowsHitTesting(pending == nil)
+            } else if pending == nil {
                 ContentUnavailableView(
                     "No session selected",
                     systemImage: "terminal",
                     description: Text("Pick a session, or create one with +.")
                 )
+            }
+            if let pending {
+                PendingSessionCard(pending: pending)
             }
             if model.showingGitHub {
                 GitHubView()
