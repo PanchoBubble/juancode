@@ -19,7 +19,7 @@ public enum DaemonDataDir {
 /// every create and delete, so a change needs no restart.
 ///
 /// `worktree-pool.json` beside the daemon's store:
-/// `{"maxIdlePerRepo": 20, "reclaimOldest": true, "confirmRecentReclaim": true}`.
+/// `{"maxIdlePerRepo": 20, "reclaimOldest": true}`.
 /// `0` slots turns reuse off.
 public enum WorktreePoolConfig {
     public static let defaultMaxIdle = 20
@@ -36,15 +36,9 @@ public enum WorktreePoolConfig {
         return n
     }
 
-    /// Off: a full repo cuts a new slot past the cap instead of deleting a session.
+    /// Off: a full repo cuts a new slot past the cap instead of parking a session.
     public static func reclaimOldest(at path: String = WorktreePoolConfig.path) -> Bool {
         read(at: path)["reclaimOldest"] as? Bool ?? true
-    }
-
-    /// Off: the oldest slot is reclaimed without asking, even if its session was
-    /// updated today.
-    public static func confirmRecentReclaim(at path: String = WorktreePoolConfig.path) -> Bool {
-        read(at: path)["confirmRecentReclaim"] as? Bool ?? true
     }
 
     @discardableResult
@@ -55,11 +49,6 @@ public enum WorktreePoolConfig {
     @discardableResult
     public static func setReclaimOldest(_ on: Bool, at path: String = WorktreePoolConfig.path) -> Bool {
         write(["reclaimOldest": on], at: path)
-    }
-
-    @discardableResult
-    public static func setConfirmRecentReclaim(_ on: Bool, at path: String = WorktreePoolConfig.path) -> Bool {
-        write(["confirmRecentReclaim": on], at: path)
     }
 
     private static func read(at path: String) -> [String: Any] {

@@ -22,7 +22,6 @@ fn request(cwd: &str) -> CreateRequest {
         model: None,
         preset: None,
         isolate_worktree: false,
-        reclaim_slot: false,
         worktree_name: None,
         dispatch_id: None,
         owner: 1,

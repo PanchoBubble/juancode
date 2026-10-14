@@ -157,8 +157,6 @@ pub struct CreateRequest {
     /// numbers a family of trees off one question — and an unusable one is refused
     /// rather than silently replaced, same as any other part of the isolation promise.
     pub worktree_name: Option<String>,
-    /// The user already said yes to reclaiming a slot whose session was updated today.
-    pub reclaim_slot: bool,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -208,14 +206,6 @@ pub enum StateError {
     NotADirectory(String),
     /// Isolation was asked for and could not be given. Carries git's own reason.
     Worktree(String),
-    /// The repo's slots are full and the oldest belongs to a session updated today.
-    /// Nothing was deleted; the create can be resent with `reclaim_slot`.
-    ReclaimConfirm {
-        slot: String,
-        session_id: String,
-        title: String,
-        updated_at_ms: i64,
-    },
     /// A `create.preset` name the core could not turn into an instruction set.
     /// Carries the store's own reason.
     Preset(String),
@@ -237,10 +227,6 @@ impl std::fmt::Display for StateError {
             Self::NotRunning => write!(f, "Session is not running"),
             Self::NotADirectory(cwd) => write!(f, "\"{cwd}\" is not an existing directory"),
             Self::Worktree(why) => write!(f, "{why}"),
-            Self::ReclaimConfirm { slot, title, .. } => write!(
-                f,
-                "Every worktree slot is taken; the oldest, {slot}, belongs to \"{title}\", updated today"
-            ),
             Self::Preset(why) => write!(f, "Preset rejected: {why}"),
             Self::DispatchAlreadyProcessed(id) => {
                 write!(f, "Dispatch {id} was already processed")
@@ -457,6 +443,87 @@ impl SessionRegistry {
 
     fn pool_settings(&self) -> worktree::pool::PoolSettings {
         worktree::pool::settings_at(&self.inner.config.worktree_pool_config)
+    }
+
+    /// Run a pooled worktree take with this daemon's settings: who owns which slot,
+    /// and parking the owner of the one a full repo reclaims.
+    fn with_pool(
+        &self,
+        take: impl FnOnce(
+            &worktree::pool::Pool<'_>,
+        ) -> Result<
+            (worktree::CreatedWorktree, worktree::CreateStages),
+            worktree::WorktreeError,
+        >,
+    ) -> Result<worktree::CreatedWorktree, StateError> {
+        let settings = self.pool_settings();
+        let owners = if settings.max_slots == 0 {
+            Default::default()
+        } else {
+            self.slot_owners()?
+        };
+        let owner_of = |path: &str| owners.get(path).cloned();
+        let evict = |owner: &worktree::pool::SlotOwner| {
+            let slot = owners
+                .iter()
+                .find(|(_, o)| o.session_id == owner.session_id)
+                .map(|(path, _)| path.as_str());
+            slot.is_some_and(|slot| self.park_off_slot(&owner.session_id, slot))
+        };
+        let pool = worktree::pool::Pool {
+            max_idle: settings.max_slots,
+            in_use: &|path| owners.contains_key(path),
+            reclaim: settings.reclaim_oldest.then_some(worktree::pool::Reclaim {
+                owner: &owner_of,
+                evict: &evict,
+            }),
+        };
+        take(&pool)
+            .map(|(made, _)| made)
+            .map_err(|e| StateError::Worktree(e.0))
+    }
+
+    /// Take a session off the slot a full pool is reclaiming, keeping everything else
+    /// about it: the row, the conversation, and the branch, which a reactivate checks
+    /// out into a slot again. `updated_at` is left alone, so a reclaim does not float
+    /// an old session to the top of anybody's list.
+    fn park_off_slot(&self, id: &str, slot: &str) -> bool {
+        let Some((main, branch)) = worktree::pool::parked_spot(slot) else {
+            warn!(
+                session = id,
+                slot, "could not read the slot's branch, so it was not reclaimed"
+            );
+            return false;
+        };
+        let park = |meta: &mut SessionMeta| {
+            meta.cwd = main.clone();
+            meta.worktree_path = None;
+            meta.parked_branch = Some(branch.clone());
+        };
+        let meta = match self.get(id) {
+            Some(live) => {
+                let mut meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+                park(&mut meta);
+                meta.clone()
+            }
+            None => match self.inner.store.get(id) {
+                Ok(Some(mut meta)) => {
+                    park(&mut meta);
+                    meta
+                }
+                _ => return false,
+            },
+        };
+        if let Err(e) = self.inner.store.upsert(&meta) {
+            warn!(session = id, error = %e, "could not persist a parked session");
+            return false;
+        }
+        info!(session = id, slot, branch = %branch, "parked to reclaim its worktree slot");
+        let _ = self.inner.events.send(SessionEvent::Meta {
+            session_id: id.to_string(),
+            meta,
+        });
+        true
     }
 
     /// Who holds each pooled slot, for choosing which one a full repo gives up.
@@ -817,56 +884,8 @@ impl SessionRegistry {
                 .worktree_name
                 .clone()
                 .unwrap_or_else(|| id.chars().take(8).collect::<String>());
-            let settings = self.pool_settings();
-            let owners = if settings.max_slots == 0 {
-                Default::default()
-            } else {
-                self.slot_owners()?
-            };
-            let owner_of = |path: &str| owners.get(path).cloned();
-            let evict = |owner: &worktree::pool::SlotOwner| match self
-                .forget(&owner.session_id, false)
-            {
-                Ok(_) => {
-                    info!(session = %owner.session_id, "deleted to reclaim its worktree slot");
-                    true
-                }
-                Err(e) => {
-                    warn!(session = %owner.session_id, error = %e, "could not delete to reclaim its slot");
-                    false
-                }
-            };
-            let pool = worktree::pool::Pool {
-                max_idle: settings.max_slots,
-                in_use: &|path| owners.contains_key(path),
-                reclaim: settings.reclaim_oldest.then(|| worktree::pool::Reclaim {
-                    owner: &owner_of,
-                    recent_since_ms: worktree::pool::start_of_local_day_ms(now_ms()),
-                    // A dispatch has nobody to ask, so it is a yes.
-                    confirmed: req.reclaim_slot
-                        || !settings.confirm_recent
-                        || req.dispatch_id.is_some(),
-                    evict: &evict,
-                }),
-            };
-            let (made, _) =
-                worktree::pool::create_timed(&req.cwd, &name, &pool).map_err(|e| match e {
-                    worktree::pool::CreateError::Worktree(e) => StateError::Worktree(e.0),
-                    worktree::pool::CreateError::NeedsConfirm(c) => {
-                        let owner = c.owner.unwrap_or(worktree::pool::SlotOwner {
-                            session_id: String::new(),
-                            title: String::new(),
-                            updated_at_ms: 0,
-                            running: false,
-                        });
-                        StateError::ReclaimConfirm {
-                            slot: c.slot,
-                            session_id: owner.session_id,
-                            title: owner.title,
-                            updated_at_ms: owner.updated_at_ms,
-                        }
-                    }
-                })?;
+            let made =
+                self.with_pool(|pool| worktree::pool::create_timed(&req.cwd, &name, pool))?;
             Some((made, name))
         } else {
             None
@@ -1103,13 +1122,19 @@ impl SessionRegistry {
         if live.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Ok(None);
         }
-        let (provider, cwd, cli_session_id) = {
+        let (provider, cwd, cli_session_id, parked_branch) = {
             let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
-            (meta.provider, meta.cwd.clone(), meta.cli_session_id.clone())
+            (
+                meta.provider,
+                meta.cwd.clone(),
+                meta.cli_session_id.clone(),
+                meta.parked_branch.clone(),
+            )
         };
         let Some(cli_session_id) = cli_session_id else {
             return Err(StateError::Unresumable(UNRESUMABLE_REASON.to_string()));
         };
+        let cwd = self.unpark(id, &live, cwd, parked_branch)?;
         self.respawn(
             id,
             &live,
@@ -1123,6 +1148,29 @@ impl SessionRegistry {
             },
         )?;
         self.attach(id, owner, cols, rows).map(Some)
+    }
+
+    /// The cwd a dead session respawns in. A full pool took its slot while it slept:
+    /// its branch goes into a fresh one, and the CLI resumes there (claude finds a
+    /// conversation by id from any cwd).
+    fn unpark(
+        &self,
+        id: &str,
+        live: &Arc<LiveSession>,
+        cwd: String,
+        parked_branch: Option<String>,
+    ) -> Result<String, StateError> {
+        let Some(branch) = parked_branch else {
+            return Ok(cwd);
+        };
+        let made = self.with_pool(|pool| worktree::pool::checkout_timed(&cwd, &branch, pool))?;
+        self.edit_meta(id, live, |meta| {
+            meta.cwd = made.path.clone();
+            meta.worktree_path = Some(made.path.clone());
+            meta.parked_branch = None;
+            true
+        });
+        Ok(made.path)
     }
 
     /// Restart an exited session as a brand-new CLI conversation in place: same
@@ -1151,10 +1199,11 @@ impl SessionRegistry {
         if live.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Err(StateError::StillRunning);
         }
-        let (provider, cwd) = {
+        let (provider, cwd, parked_branch) = {
             let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
-            (meta.provider, meta.cwd.clone())
+            (meta.provider, meta.cwd.clone(), meta.parked_branch.clone())
         };
+        let cwd = self.unpark(id, &live, cwd, parked_branch)?;
         let pins = Providers::spec(provider).pins_session_id();
         let fresh_pin = uuid::Uuid::new_v4().to_string();
         // Written before the spawn, not after it: `respawn` runs id discovery for a

@@ -32,16 +32,12 @@ final class WorktreePoolConfigTests: XCTestCase {
 
     func testReclaimSwitchesDefaultOnAndKeepTheCap() throws {
         XCTAssertTrue(WorktreePoolConfig.reclaimOldest(at: path))
-        XCTAssertTrue(WorktreePoolConfig.confirmRecentReclaim(at: path))
         XCTAssertTrue(WorktreePoolConfig.setMaxIdle(7, at: path))
         XCTAssertTrue(WorktreePoolConfig.setReclaimOldest(false, at: path))
-        XCTAssertTrue(WorktreePoolConfig.setConfirmRecentReclaim(false, at: path))
         XCTAssertFalse(WorktreePoolConfig.reclaimOldest(at: path))
-        XCTAssertFalse(WorktreePoolConfig.confirmRecentReclaim(at: path))
         XCTAssertEqual(WorktreePoolConfig.maxIdle(at: path), 7)
         let data = try XCTUnwrap(FileManager.default.contents(atPath: path))
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(obj["reclaimOldest"] as? Bool, false)
-        XCTAssertEqual(obj["confirmRecentReclaim"] as? Bool, false)
     }
 }

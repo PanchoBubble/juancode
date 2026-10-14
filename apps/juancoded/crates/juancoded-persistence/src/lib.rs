@@ -335,12 +335,13 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         },
         parent_session_id: row.get("parent_session_id")?,
         dispatch_id: row.get("dispatch_id")?,
+        parked_branch: row.get("parked_branch")?,
     })
 }
 
 const SESSION_COLUMNS: &str = "id, provider, cwd, title, status, exit_code, created_at, \
      updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, \
-     title_is_manual, kind, parent_session_id, dispatch_id";
+     title_is_manual, kind, parent_session_id, dispatch_id, parked_branch";
 
 impl SessionStore for SqliteStore {
     fn upsert(&self, meta: &SessionMeta) -> Result<()> {
@@ -359,15 +360,16 @@ impl SessionStore for SqliteStore {
         self.conn().execute(
             "INSERT INTO sessions (id, provider, cwd, title, status, exit_code, created_at, \
              updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, \
-             dormant, title_is_manual, kind, parent_session_id, dispatch_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) \
+             dormant, title_is_manual, kind, parent_session_id, dispatch_id, parked_branch) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) \
              ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, cwd=excluded.cwd, \
              title=excluded.title, status=excluded.status, exit_code=excluded.exit_code, \
              updated_at=excluded.updated_at, cli_session_id=excluded.cli_session_id, \
              skip_permissions=excluded.skip_permissions, worktree_path=excluded.worktree_path, \
              usage=excluded.usage, archived=excluded.archived, dormant=excluded.dormant, \
              title_is_manual=excluded.title_is_manual, kind=excluded.kind, \
-             parent_session_id=excluded.parent_session_id, dispatch_id=excluded.dispatch_id",
+             parent_session_id=excluded.parent_session_id, dispatch_id=excluded.dispatch_id, \
+             parked_branch=excluded.parked_branch",
             params![
                 meta.id,
                 meta.provider.as_str(),
@@ -387,6 +389,7 @@ impl SessionStore for SqliteStore {
                 kind,
                 meta.parent_session_id,
                 meta.dispatch_id,
+                meta.parked_branch,
             ],
         )?;
         Ok(())
@@ -761,6 +764,16 @@ mod tests {
         assert_eq!(back.status, SessionStatus::Exited);
         assert_eq!(back.exit_code, Some(7));
         assert_eq!(store.all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_parked_branch_survives_a_restart() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut m = meta("s1", "/tmp/proj", 10);
+        m.parked_branch = Some("juancode/s1".into());
+        store.upsert(&m).unwrap();
+        let back = store.get("s1").unwrap().unwrap();
+        assert_eq!(back.parked_branch.as_deref(), Some("juancode/s1"));
     }
 
     #[test]

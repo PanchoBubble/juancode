@@ -267,6 +267,11 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL
     );
     "#,
+    // 11: the branch a reclaimed slot's session was on, so reopening it can check
+    // that branch out into a fresh slot instead of losing the session with the slot.
+    r#"
+    ALTER TABLE sessions ADD COLUMN parked_branch TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

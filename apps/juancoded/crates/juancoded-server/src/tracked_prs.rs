@@ -282,7 +282,6 @@ impl TrackedPrs {
             // Already standing in the worktree above, which is the PR's branch rather
             // than a fresh `juancode/<name>` one this flag would cut.
             isolate_worktree: false,
-            reclaim_slot: false,
             worktree_name: None,
             dispatch_id: None,
             owner: req.owner,
@@ -1134,7 +1133,6 @@ mod tests {
                 model: None,
                 preset: None,
                 isolate_worktree: false,
-                reclaim_slot: false,
                 worktree_name: None,
                 dispatch_id: None,
                 owner: 1,
@@ -1185,7 +1183,6 @@ mod tests {
                 model: None,
                 preset: None,
                 isolate_worktree: false,
-                reclaim_slot: false,
                 worktree_name: None,
                 dispatch_id: None,
                 owner: 1,

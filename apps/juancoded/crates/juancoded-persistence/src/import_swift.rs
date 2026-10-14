@@ -215,6 +215,7 @@ fn translate(row: &SwiftRow) -> SessionMeta {
         kind: SessionKind::Agent,
         parent_session_id: None,
         dispatch_id: row.dispatch_id.clone(),
+        parked_branch: None,
     }
 }
 

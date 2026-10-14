@@ -133,6 +133,12 @@ pub struct SessionMeta {
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatch_id: Option<String>,
+    /// The branch this session was on when a full pool reclaimed its tree. Its
+    /// conversation and commits outlived the slot, so a reactivate checks this branch
+    /// out into a fresh slot and resumes there. Daemon-only, like `title_is_manual`:
+    /// a client sees `cwd` at the repo root and no `worktree_path`, which is true.
+    #[serde(skip)]
+    pub parked_branch: Option<String>,
 }
 
 impl SessionMeta {
@@ -163,6 +169,7 @@ impl SessionMeta {
             kind: SessionKind::Agent,
             parent_session_id: None,
             dispatch_id: None,
+            parked_branch: None,
         }
     }
 
