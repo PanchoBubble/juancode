@@ -57,7 +57,6 @@ private struct WindowContent: View {
     /// The rail's width — drag its left edge to adjust; persisted.
     @AppStorage("oracle.sessionRail.width") private var oracleRailWidth: Double = 220
     /// Height of the PR queue under the Oracles in the rail — drag the divider; persisted.
-    @AppStorage("github.rail.height") private var prRailHeight: Double = 320
 
     var body: some View {
         @Bindable var model = model
@@ -173,21 +172,7 @@ private struct WindowContent: View {
             // garbles the CLIs' TUIs — commit once on release for a single clean reflow.
             DragResizeHandle(axis: .vertical, value: $oracleRailWidth,
                              min: 170, max: 480, invert: true, previewOnly: true)
-            GeometryReader { geo in
-                // The PR/Diff half may take the rail down to a sliver of Oracles; the
-                // cap follows the rail's real height so it isn't stuck near the middle.
-                let maxPr = Swift.max(120, Double(geo.size.height) - 100)
-                VStack(spacing: 0) {
-                    OracleGlobalRail()
-                        .frame(minHeight: 0, maxHeight: .infinity)
-                        .clipped()
-                    DragResizeHandle(axis: .horizontal, value: $prRailHeight,
-                                     min: 120, max: maxPr, invert: true)
-                    GitHubQueueRail()
-                        .frame(height: Swift.min(prRailHeight, maxPr))
-                        .layoutPriority(1)
-                }
-            }
+            RightRailPanels()
             .frame(width: oracleRailWidth)
         }
         }
@@ -2302,18 +2287,6 @@ private struct FolderHeader: View {
     @ViewBuilder
     private var splitAgentRows: some View {
         let branch = model.folderGitState(group.cwd)?.branch
-        HStack(spacing: 0) {
-            Label("New worktree", systemImage: "arrow.triangle.branch")
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 10)
-            Image(systemName: "folder")
-                .frame(width: Self.currentBranchWidth)
-                .help(branch.map { "Current branch: \($0)" } ?? "Current branch")
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(.secondary)
-        .padding(.top, 2)
-        .padding(.bottom, 2)
         ForEach(ProviderId.allCases, id: \.self) { p in
             SplitAgentRow(
                 label: Providers.spec(for: p).label,
@@ -2382,7 +2355,7 @@ private struct SplitAgentRow: View {
             .onHover { hoveringWorktree = $0 }
             Rectangle().fill(Color.appHairline(0.14)).frame(width: 1).padding(.vertical, 4)
             Button(action: onCurrent) {
-                Image(systemName: "folder")
+                Image(systemName: "smallcircle.filled.circle")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

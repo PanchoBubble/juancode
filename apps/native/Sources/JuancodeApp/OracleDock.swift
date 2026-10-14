@@ -263,6 +263,46 @@ private struct OracleChatView: View {
     }
 }
 
+/// The Oracle rail's title-bar extras: the live count and the "+" that starts
+/// another Oracle. Shared by the rail's own header and the right rail's panel bar.
+struct OracleRailAccessory: View {
+    @Environment(AppModel.self) private var model
+    @Environment(OracleModel.self) private var oracle
+
+    var body: some View {
+        let sessions = oracle.oracleSessions
+        let live = sessions.filter { model.isLive($0.id) }.count
+        if live == 0 {
+            Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+        } else {
+            // A live count reads at a glance; the total is in the tooltip.
+            Text("\(live) live")
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Color.accentColor.opacity(0.2))
+                .foregroundStyle(Color.accentColor)
+                .clipShape(Capsule())
+                .help("\(live) of \(sessions.count) Oracles running")
+        }
+        Spacer()
+        Menu {
+            ForEach(ProviderId.allCases, id: \.self) { p in
+                Button(Providers.spec(for: p).label) {
+                    oracle.reveal()
+                    oracle.newOracle(provider: p)
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Start another Oracle on claude, codex or opencode")
+        .clickCursor()
+    }
+}
+
 /// A compact rail listing the running Oracle agents (you can spin up several in
 /// parallel; they all live in the control dir), docked ALWAYS-VISIBLE on the
 /// window's right edge (mounted by RootView, toggled from the dock header). Each
@@ -290,6 +330,8 @@ struct OracleGlobalRail: View {
     /// Measured height of the row area. The row budget derives from it, so the rail
     /// only builds the rows that can actually be on screen instead of all of them.
     @State private var listHeight: Double = 0
+    /// Off when a host (the right rail's collapsible panel) draws the title bar.
+    var showsHeader = true
 
     /// Approximate rendered height of one row (glyph line + subtitle + padding) —
     /// what the fitted budget divides the measured height by.
@@ -364,7 +406,6 @@ struct OracleGlobalRail: View {
 
     var body: some View {
         let all = entries()
-        let active = all.filter(\.live)
         // Rows that are never folded away: the live ones, plus anything pinned — a
         // pin is a promise the row stays put, so an idle pinned Oracle must not
         // disappear behind "Show N more".
@@ -380,37 +421,19 @@ struct OracleGlobalRail: View {
         let shown = searching ? pool : Array(pool.prefix(budget))
         let hidden = all.count - shown.count
         return VStack(spacing: 0) {
-            HStack(spacing: 5) {
-                Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
-                Text("Oracles")
-                    .font(.system(size: 10, weight: .semibold))
-                    .textCase(.uppercase).tracking(0.5)
-                    .foregroundStyle(.secondary)
-                if active.isEmpty {
-                    Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
-                } else {
-                    // A live count reads at a glance; the total is in the tooltip.
-                    Text("\(active.count) live")
-                        .font(.system(size: 9, weight: .semibold))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Color.accentColor.opacity(0.2))
-                        .foregroundStyle(Color.accentColor)
-                        .clipShape(Capsule())
-                        .help("\(active.count) of \(sessions.count) Oracles running")
+            if showsHeader {
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
+                    Text("Oracles")
+                        .font(.system(size: 10, weight: .semibold))
+                        .textCase(.uppercase).tracking(0.5)
+                        .foregroundStyle(.secondary)
+                    OracleRailAccessory()
                 }
-                Spacer()
-                Menu {
-                    newOracleItems
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Start another Oracle on claude, codex or opencode")
-                .clickCursor()
+                .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
+            } else {
+                Spacer().frame(height: 6)
             }
-            .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
             if !sessions.isEmpty {
                 HStack(spacing: 5) {
                     Image(systemName: "line.3.horizontal.decrease.circle")

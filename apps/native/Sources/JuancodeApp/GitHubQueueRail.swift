@@ -1,5 +1,5 @@
-// The bottom half of the right rail, under the Oracles: the GitHub PR queue, and
-// beside it a Diff tab summarising the main checkout's uncommitted changes.
+// The right rail: Oracles, the GitHub PR queue and the main checkout's Diff, each a
+// collapsible panel the user can drag into any order.
 //
 // The queue was a toolbar badge with the list behind a popover. The rail is always
 // on screen, so the queue can be too: the same list, chips and row actions, with no
@@ -9,23 +9,47 @@ import SwiftUI
 import JuancodeCore
 import JuancodeClient
 
-struct GitHubQueueRail: View {
+enum RightRailPanel: String, CaseIterable, Identifiable {
+    case oracle, prs, diff
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .oracle: "Oracles"
+        case .prs: "PRs"
+        case .diff: "Diff"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .oracle: "sparkles"
+        case .prs: "arrow.triangle.pull"
+        case .diff: "plusminus"
+        }
+    }
+
+    /// Stored order, healed: unknown names dropped, missing panels appended.
+    static func order(from raw: String) -> [RightRailPanel] {
+        var seen = raw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) }
+        seen = seen.enumerated().filter { i, p in !seen[..<i].contains(p) }.map(\.1)
+        return seen + allCases.filter { !seen.contains($0) }
+    }
+}
+
+struct RightRailPanels: View {
     @Environment(AppModel.self) private var model
     /// Shared with the old popover's key, so the chip you lived on carries over.
     @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
-    @AppStorage("github.rail.tab") private var tabRaw = Tab.prs.rawValue
-    /// Owned here rather than by the Diff tab, so the tab label can show +/− while
-    /// the PR list is the one on screen.
+    @AppStorage("rightRail.order") private var orderRaw = ""
+    @AppStorage("rightRail.collapsed") private var collapsedRaw = ""
+    /// Owned here rather than by the Diff panel, so its title bar can show +/−
+    /// while the panel is collapsed.
     @State private var diffStore = RepoDiffStore()
-    @Namespace private var tabIndicator
+    @State private var dropTarget: RightRailPanel?
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case prs, diff
-        var id: String { rawValue }
-        var label: String { self == .prs ? "PRs" : "Diff" }
+    private var order: [RightRailPanel] { RightRailPanel.order(from: orderRaw) }
+    private var collapsed: Set<RightRailPanel> {
+        Set(collapsedRaw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) })
     }
-
-    private var tab: Tab { Tab(rawValue: tabRaw) ?? .prs }
     private var root: String? {
         guard let id = model.selection,
               let meta = model.sessions.first(where: { $0.id == id }) else { return nil }
@@ -33,26 +57,39 @@ struct GitHubQueueRail: View {
     }
 
     var body: some View {
+        let collapsed = collapsed
+        let anyExpanded = collapsed.count < RightRailPanel.allCases.count
         VStack(spacing: 0) {
-            tabBar
-            ZStack(alignment: .top) {
-                if tab == .diff {
-                    RepoDiffRail(store: diffStore, root: root)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                } else {
-                    GitHubQueueBadge.GitHubQueuePopover(
-                        slice: Binding(get: { ViewerPrSlice(rawValue: filterRaw) ?? .all },
-                                       set: { filterRaw = $0.rawValue }),
-                        showing: .constant(true),
-                        listMaxHeight: nil)
-                        // Floored to one search a minute inside `refreshViewerPrs`; the
-                        // model's own timer keeps it fresh after that.
-                        .onAppear { model.refreshViewerPrs() }
-                        .transition(.move(edge: .leading).combined(with: .opacity))
+            HStack {
+                Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        setCollapsed(anyExpanded ? Set(RightRailPanel.allCases) : [])
+                    }
+                } label: {
+                    Image(systemName: anyExpanded
+                          ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                        .font(.system(size: 12))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help(anyExpanded ? "Collapse all panels" : "Expand all panels")
+                .clickCursor()
+            }
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            Divider()
+            ForEach(order) { panel in
+                let isCollapsed = collapsed.contains(panel)
+                header(panel, collapsed: isCollapsed)
+                if !isCollapsed {
+                    content(panel)
+                        .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+                        .clipped()
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .clipped()
+            if !anyExpanded { Spacer(minLength: 0) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.appSurface)
@@ -60,38 +97,88 @@ struct GitHubQueueRail: View {
         .onDisappear { diffStore.stopWatching() }
     }
 
-    private var tabBar: some View {
-        HStack(spacing: 0) {
-            ForEach(Tab.allCases) { t in
-                Button {
-                    withAnimation(.snappy(duration: 0.25)) { tabRaw = t.rawValue }
-                } label: {
-                    VStack(spacing: 0) {
-                        HStack(spacing: 6) {
-                            Text(t.label)
-                                .font(.system(size: 12, weight: tab == t ? .semibold : .regular))
-                                .foregroundStyle(tab == t ? .primary : .secondary)
-                            if t == .diff { diffPreview }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        ZStack {
-                            Rectangle().fill(.clear).frame(height: 2)
-                            if tab == t {
-                                Rectangle()
-                                    .fill(Color.accentColor)
-                                    .frame(height: 2)
-                                    .matchedGeometryEffect(id: "indicator", in: tabIndicator)
-                            }
-                        }
-                    }
-                    .contentShape(Rectangle())
+    private func header(_ panel: RightRailPanel, collapsed isCollapsed: Bool) -> some View {
+        HStack(spacing: 5) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    var c = collapsed
+                    if isCollapsed { c.remove(panel) } else { c.insert(panel) }
+                    setCollapsed(c)
                 }
-                .buttonStyle(.plain)
-                .clickCursor()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Image(systemName: panel.icon).font(.system(size: 10)).foregroundStyle(.tint)
+                    Text(panel.title)
+                        .font(.system(size: 10, weight: .semibold))
+                        .textCase(.uppercase).tracking(0.5)
+                        .foregroundStyle(.secondary)
+                    if panel != .oracle { Spacer(minLength: 0) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .clickCursor()
+            switch panel {
+            case .oracle: OracleRailAccessory()
+            case .diff: diffPreview
+            case .prs: EmptyView()
             }
         }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Color.appBand)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.accentColor).frame(height: 2)
+                .opacity(dropTarget == panel ? 1 : 0)
+        }
         .overlay(alignment: .bottom) { Divider() }
+        .draggable(panel.rawValue) {
+            Text(panel.title)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.appSurface.opacity(0.8))
+        }
+        .dropDestination(for: String.self) { items, _ in
+            dropTarget = nil
+            guard let dragged = items.first.flatMap(RightRailPanel.init(rawValue:)),
+                  dragged != panel else { return false }
+            var o = order
+            o.removeAll { $0 == dragged }
+            o.insert(dragged, at: o.firstIndex(of: panel) ?? o.endIndex)
+            withAnimation(.snappy(duration: 0.2)) {
+                orderRaw = o.map(\.rawValue).joined(separator: ",")
+            }
+            return true
+        } isTargeted: { hovering in
+            dropTarget = hovering ? panel : (dropTarget == panel ? nil : dropTarget)
+        }
+        .help("Drag to reorder")
+    }
+
+    @ViewBuilder private func content(_ panel: RightRailPanel) -> some View {
+        switch panel {
+        case .oracle:
+            OracleGlobalRail(showsHeader: false)
+        case .prs:
+            GitHubQueueBadge.GitHubQueuePopover(
+                slice: Binding(get: { ViewerPrSlice(rawValue: filterRaw) ?? .all },
+                               set: { filterRaw = $0.rawValue }),
+                showing: .constant(true),
+                listMaxHeight: nil)
+                // Floored to one search a minute inside `refreshViewerPrs`; the
+                // model's own timer keeps it fresh after that.
+                .onAppear { model.refreshViewerPrs() }
+        case .diff:
+            RepoDiffRail(store: diffStore, root: root)
+        }
+    }
+
+    private func setCollapsed(_ c: Set<RightRailPanel>) {
+        collapsedRaw = RightRailPanel.allCases.filter(c.contains).map(\.rawValue).joined(separator: ",")
     }
 
     @ViewBuilder private var diffPreview: some View {
@@ -103,7 +190,6 @@ struct GitHubQueueRail: View {
                 Text("−\(compactCount(del))").foregroundStyle(.red)
             }
             .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .opacity(tab == .diff ? 1 : 0.75)
         }
     }
 }
