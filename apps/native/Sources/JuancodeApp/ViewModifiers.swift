@@ -34,15 +34,22 @@ extension View {
     /// `NavigationSplitView` toolbar (AppKit `NSToolbar`), so the pointer went missing on
     /// the sidebar toolbar icons even though their hover highlight (also `onHover`-driven)
     /// showed. The push/pop approach works in every context, toolbar included.
+    ///
+    /// Set on every move, not pushed once on enter: inside a scroll view AppKit resets
+    /// the cursor to the arrow on the next mouse move, so a one-shot push only lasted
+    /// until the pointer moved again.
     func pointerCursor() -> some View {
-        onHover { $0 ? NSCursor.pointingHand.push() : NSCursor.pop() }
+        pointerCursor(enabled: true)
     }
 
     /// `pointerCursor()` when `enabled`, without changing the view's type.
     func pointerCursor(enabled: Bool) -> some View {
-        onHover { hovering in
+        onContinuousHover { phase in
             guard enabled else { return }
-            hovering ? NSCursor.pointingHand.push() : NSCursor.pop()
+            switch phase {
+            case .active: NSCursor.pointingHand.set()
+            case .ended: NSCursor.arrow.set()
+            }
         }
     }
 }
