@@ -698,6 +698,8 @@ struct SidebarView: View {
     /// Body-search hits for the current query: session id → snippet. Empty while the
     /// toggle is off or the query is under 2 chars.
     @State private var bodyHits: [String: String] = [:]
+    /// A body search is in flight, for the spinner in the toggle.
+    @State private var searchingBodies = false
     /// When off (default) archived sessions are hidden from the list.
     @State private var showArchived = false
     /// Whether the funnel dropdown is open. Also gates the facet tally: with it shut
@@ -882,6 +884,42 @@ struct SidebarView: View {
     private var activeFacetLabel: String {
         SessionFacet.allCases.filter { facets.contains($0) }
             .map(\.label).joined(separator: " / ")
+    }
+
+    /// The "Body" switch in the filter field: also match text inside sessions.
+    private var bodyToggle: some View {
+        Button { searchBodies.toggle() } label: {
+            HStack(spacing: 3) {
+                if searchingBodies {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "text.magnifyingglass")
+                }
+                Text("Body")
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(searchBodies ? Color.white : Color.secondary)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(searchBodies ? Color.accentColor : Color.clear))
+            .overlay(Capsule().strokeBorder(searchBodies ? Color.clear : Color.secondary.opacity(0.4)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help(searchBodies
+              ? "On: also matching text inside sessions (2+ characters, top 50 hits). Click to match titles and paths only."
+              : "Off: matching titles and paths only. Click to also search text inside sessions.")
+    }
+
+    /// A text or facet filter is narrowing the list.
+    private var filterActive: Bool {
+        !query.trimmingCharacters(in: .whitespaces).isEmpty || !facets.isEmpty
+    }
+
+    /// While filtering, every folder shows all its matches: a hit hidden in a
+    /// collapsed folder or past the preview cap reads as no hit at all.
+    private func isCollapsed(_ cwd: String) -> Bool {
+        !filterActive && collapsedFolders.contains(cwd)
     }
 
     /// Back to an unfiltered sidebar: text and facets both.
@@ -1209,7 +1247,7 @@ struct SidebarView: View {
     /// they've been asleep a full day (`AppModel.isResting`, `foldedPreviewKeeps`).
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
         let s = group.sessions
-        guard s.count > folderPreviewCount else { return s }
+        guard !filterActive, s.count > folderPreviewCount else { return s }
         return s.enumerated()
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
@@ -1239,7 +1277,7 @@ struct SidebarView: View {
     /// Published into `model.navOrder` so the keyboard monitor can move the selection.
     private func visibleOrderedIDs(from groups: [FolderGroup]) -> [String] {
         var ids: [String] = []
-        for group in groups where !collapsedFolders.contains(group.cwd) {
+        for group in groups where !isCollapsed(group.cwd) {
             let shown = expandedFolders.contains(group.cwd)
                 ? group.sessions : previewSessions(group)
             for meta in shown where !model.isExternal(meta.id) { ids.append(meta.id) }
@@ -1259,7 +1297,7 @@ struct SidebarView: View {
             let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty || !facets.isEmpty
             HStack(spacing: 6) {
                 facetMenu(counts: content.facetCounts, active: filtering)
-                TextField("Filter sessions…", text: $query)
+                TextField(searchBodies ? "Filter sessions + bodies…" : "Filter sessions…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .focused($searchFocused)
@@ -1271,15 +1309,7 @@ struct SidebarView: View {
                         clearFilters()
                         return .handled
                     }
-                Button { searchBodies.toggle() } label: {
-                    Image(systemName: "text.magnifyingglass")
-                        .font(.system(size: 12))
-                        .foregroundStyle(searchBodies ? Color.accentColor : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .clickCursor()
-                .help(searchBodies ? "Searching session bodies too (click to search names only)"
-                                   : "Also search inside session bodies")
+                bodyToggle
                 if filtering {
                     Button { clearFilters() } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -1295,11 +1325,15 @@ struct SidebarView: View {
             .padding(.vertical, 5)
             .task(id: BodySearchKey(query: query, on: searchBodies)) {
                 let q = query.trimmingCharacters(in: .whitespaces)
-                guard searchBodies, q.count >= 2 else { bodyHits = [:]; return }
+                guard searchBodies, q.count >= 2 else {
+                    bodyHits = [:]; searchingBodies = false; return
+                }
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
+                searchingBodies = true
                 let hits = await model.searchSessionBodies(q)
                 guard !Task.isCancelled else { return }
+                searchingBodies = false
                 bodyHits = Dictionary(hits.map { ($0.meta.id, $0.snippet) },
                                       uniquingKeysWith: { first, _ in first })
             }
@@ -1345,7 +1379,7 @@ struct SidebarView: View {
                 // Flat rows, not a Section per project: the sidebar style puts a gap
                 // above every section header.
                 ForEach(groups) { group in
-                        FolderHeader(group: group, collapsed: collapsedFolders.contains(group.cwd)) {
+                        FolderHeader(group: group, collapsed: isCollapsed(group.cwd)) {
                             // Animated so the section's rows slide in/out instead of snapping.
                             withAnimation(.easeOut(duration: 0.18)) {
                                 if collapsedFolders.contains(group.cwd) {
@@ -1396,7 +1430,7 @@ struct SidebarView: View {
                                 .modifier(SidebarListRow())
                                 .tag(p.id)
                         }
-                        if !collapsedFolders.contains(group.cwd) {
+                        if !isCollapsed(group.cwd) {
                             sessionList(group, dividerFirst: !pendingCreates(in: group).isEmpty)
                         }
                 }
@@ -1751,19 +1785,16 @@ struct SidebarView: View {
     private func sessionRow(_ meta: SessionMeta, external: Bool) -> SessionRowHost {
         SessionRowHost(meta: meta, external: external,
                        selected: model.selection == meta.id,
-                       bodySnippet: bodySnippet(for: meta),
+                       titleHighlight: titleHighlight,
+                       bodySnippet: bodyHits[meta.id].flatMap { $0.isEmpty ? nil : $0 },
                        confirmClose: { confirmingClose = meta },
                        menu: { AnyView(rowContextMenu(meta)) })
     }
 
-    /// The body-search snippet to show under a row, only when the body is the reason
-    /// the row is listed — a title or path match explains itself.
-    private func bodySnippet(for meta: SessionMeta) -> String? {
-        guard let snippet = bodyHits[meta.id], !snippet.isEmpty else { return nil }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !meta.title.lowercased().contains(q), !meta.cwd.lowercased().contains(q)
-        else { return nil }
-        return snippet
+    /// The query to mark in row titles, nil when there isn't one.
+    private var titleHighlight: String? {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty ? nil : q
     }
 
     /// What closing this session actually discards, spelled out in the confirm alert.
@@ -1918,7 +1949,9 @@ private struct SessionRowHost: View {
     /// Whether this row is the current selection — also the caller's, for the same
     /// reason (it drives the row's own background chrome).
     let selected: Bool
-    /// Why a body search listed this row, when its title and path don't say.
+    /// The filter text, marked wherever it appears in the title.
+    let titleHighlight: String?
+    /// Where a body search matched this session, `[term]`-marked.
     let bodySnippet: String?
     /// Ask to close this session; the caller owns the confirmation alert.
     let confirmClose: () -> Void
@@ -1929,11 +1962,19 @@ private struct SessionRowHost: View {
         if let bodySnippet {
             VStack(alignment: .leading, spacing: 1) {
                 row
-                snippetText(bodySnippet)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .padding(.leading, 22)
+                HStack(spacing: 4) {
+                    Text("body")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.15)))
+                    snippetText(bodySnippet)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 22)
+                .help("Matched inside the session: \(bodySnippet)")
             }
         } else {
             row
@@ -1949,6 +1990,7 @@ private struct SessionRowHost: View {
 
     private var row: some View {
         SessionRow(meta: meta,
+                   titleHighlight: titleHighlight,
                    activity: model.activityBox(meta.id)?.activity,
                    live: model.isLive(meta.id), external: external,
                    tracked: external ? nil : model.trackedPr(forSession: meta.id),
@@ -2445,6 +2487,8 @@ struct TrackBadge: View {
 
 struct SessionRow: View {
     let meta: SessionMeta
+    /// Filter text to mark in the title (case-insensitive), nil for none.
+    var titleHighlight: String? = nil
     let activity: SessionActivity?
     let live: Bool
     /// A discovered terminal session not yet imported — shown with a marker and an
@@ -2528,6 +2572,20 @@ struct SessionRow: View {
     /// re-centers it on the title line.
     private nonisolated static let titleCenterShift = NSFont.systemFont(ofSize: 13).capHeight / 2
 
+    /// The title with every case-insensitive occurrence of `titleHighlight` marked.
+    private var highlightedTitle: Text {
+        guard let needle = titleHighlight, !needle.isEmpty else { return Text(meta.title) }
+        let title = meta.title
+        var out = Text("")
+        var rest = title.startIndex
+        while let hit = title.range(of: needle, options: .caseInsensitive, range: rest..<title.endIndex) {
+            out = out + Text(title[rest..<hit.lowerBound])
+                + Text(title[hit]).bold().foregroundColor(.orange)
+            rest = hit.upperBound
+        }
+        return out + Text(title[rest...])
+    }
+
     var body: some View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
@@ -2535,7 +2593,7 @@ struct SessionRow: View {
             statusIndicator
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             VStack(alignment: .leading, spacing: 2) {
-                Text(meta.title).lineLimit(1)
+                highlightedTitle.lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
                 if isWorktree || !subtitle.isEmpty {
                     HStack(spacing: 3) {
