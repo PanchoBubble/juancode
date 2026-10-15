@@ -35,6 +35,37 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
     }
 }
 
+/// Grows a panel body down from its header: the body lays out at full size and the
+/// rail only gives it `progress` of that height, so siblings move with the animation.
+private struct RailReveal: ViewModifier {
+    var progress: Double
+    func body(content: Content) -> some View {
+        RevealLayout(progress: progress) { content }
+            .clipped()
+            .opacity(progress)
+    }
+}
+
+private struct RevealLayout: Layout {
+    var progress: Double
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let size = subviews.first?.sizeThatFits(proposal) ?? .zero
+        return CGSize(width: size.width, height: size.height * progress)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let child = subviews.first else { return }
+        let full = child.sizeThatFits(proposal)
+        child.place(at: bounds.origin, anchor: .topLeading,
+                    proposal: ProposedViewSize(width: bounds.width, height: full.height))
+    }
+}
+
 struct RightRailPanels: View {
     @Environment(AppModel.self) private var model
     /// Shared with the old popover's key, so the chip you lived on carries over.
@@ -51,10 +82,13 @@ struct RightRailPanels: View {
     /// while the panel is collapsed.
     @State private var diffStore = RepoDiffStore()
     @State private var dropTarget: RightRailPanel?
+    /// Mirrors `collapsedRaw`: an `@AppStorage` write does not reliably carry the
+    /// `withAnimation` transaction, so layout reads this instead.
+    @State private var collapsedState: Set<RightRailPanel>?
 
     private var order: [RightRailPanel] { RightRailPanel.order(from: orderRaw) }
     private var collapsed: Set<RightRailPanel> {
-        Set(collapsedRaw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) })
+        collapsedState ?? Set(collapsedRaw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) })
     }
     private var root: String? {
         guard let id = model.selection,
@@ -115,7 +149,8 @@ struct RightRailPanels: View {
                                     .offset(y: 7)
                             }
                         }
-                        .transition(.opacity)
+                        .transition(.modifier(active: RailReveal(progress: 0),
+                                              identity: RailReveal(progress: 1)))
                         .zIndex(h == nil ? 0 : 1)
                 }
             }
@@ -281,6 +316,7 @@ struct RightRailPanels: View {
     }
 
     private func setCollapsed(_ c: Set<RightRailPanel>) {
+        collapsedState = c
         collapsedRaw = RightRailPanel.allCases.filter(c.contains).map(\.rawValue).joined(separator: ",")
     }
 
