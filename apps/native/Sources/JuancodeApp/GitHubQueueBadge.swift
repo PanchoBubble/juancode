@@ -189,6 +189,7 @@ struct GitHubQueueBadge: View {
                                 }
                             }
                         }
+                        .reportsRailOverflow()
                         .task(id: currentRepo) { reveal(currentRepo, proxy) }
                     }
                     // Tall enough for ~6 rows, then it scrolls: a popover that grows

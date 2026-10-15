@@ -517,6 +517,7 @@ struct OracleGlobalRail: View {
                     }
                     .padding(.vertical, 4)
                 }
+                .reportsRailOverflow()
                 // The row budget follows the rail's real height, so resizing the
                 // window (or dragging the rail's edge) refits it.
                 .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }

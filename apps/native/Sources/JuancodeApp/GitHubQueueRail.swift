@@ -41,9 +41,12 @@ struct RightRailPanels: View {
     @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
     @AppStorage("rightRail.order") private var orderRaw = ""
     @AppStorage("rightRail.collapsed") private var collapsedRaw = ""
-    /// "panel:points" for each panel the user has resized; the last expanded one fills.
+    /// "panel:points" for each panel the user has resized. The rest fit their content,
+    /// and the last expanded one fills whatever that leaves when it needs more.
     @AppStorage("rightRail.heights") private var heightsRaw = ""
     @State private var railHeight: CGFloat = 0
+    @State private var shownHeight: [RightRailPanel: Double] = [:]
+    @State private var overflow: [RightRailPanel: Double] = [:]
     /// Owned here rather than by the Diff panel, so its title bar can show +/−
     /// while the panel is collapsed.
     @State private var diffStore = RepoDiffStore()
@@ -98,6 +101,10 @@ struct RightRailPanels: View {
                         .frame(maxWidth: .infinity, minHeight: h ?? 0, maxHeight: h ?? .infinity,
                                alignment: .top)
                         .clipped()
+                        .onGeometryChange(for: Double.self) { $0.size.height.rounded() } action: {
+                            shownHeight[panel] = $0
+                        }
+                        .onPreferenceChange(RailOverflowKey.self) { overflow[panel] = $0.map(Double.init) }
                         .overlay(alignment: .bottom) {
                             if let h {
                                 DragResizeHandle(axis: .horizontal,
@@ -221,16 +228,29 @@ struct RightRailPanels: View {
         return Double(max(0, railHeight - Self.topBarHeight - headers))
     }
 
-    /// Fixed heights for every expanded panel but the last, which fills. Stored
-    /// heights that no longer fit (a shorter window, a panel just expanded) are
-    /// scaled down together so the filler keeps at least `minPanel`.
+    /// The height that shows a panel's whole list, once its scroll view has said how
+    /// far short of (or past) that it is.
+    private func natural(_ panel: RightRailPanel) -> Double? {
+        guard let shown = shownHeight[panel], let over = overflow[panel] else { return nil }
+        return max(Self.minPanel, shown + over)
+    }
+
+    /// Fixed heights for the expanded panels: the user's size, else the content's.
+    /// The last one fills instead when its content wants more than is left. Heights
+    /// that no longer fit (a shorter window, a panel just expanded) are scaled down
+    /// together so the filler keeps at least `minPanel`.
     private func sizedHeights(_ expanded: [RightRailPanel]) -> [RightRailPanel: Double] {
+        guard let last = expanded.last, railHeight > 0 else { return [:] }
         let fixed = expanded.dropLast()
-        guard !fixed.isEmpty, railHeight > 0 else { return [:] }
         let stored = Self.heights(from: heightsRaw)
         let space = contentSpace
         let even = space / Double(expanded.count)
-        var want = Dictionary(uniqueKeysWithValues: fixed.map { ($0, stored[$0] ?? even) })
+        var want = Dictionary(uniqueKeysWithValues: fixed.map { ($0, stored[$0] ?? natural($0) ?? even) })
+        if let own = stored[last] ?? natural(last), want.values.reduce(0, +) + own <= space {
+            want[last] = own
+            return want
+        }
+        guard !fixed.isEmpty else { return [:] }
         let budget = max(0, space - Self.minPanel)
         let total = want.values.reduce(0, +)
         if total > budget, total > 0 {
@@ -603,6 +623,7 @@ private struct RepoDiffRail: View {
                     }
                     .padding(.horizontal, 4)
                 }
+                .reportsRailOverflow()
             }
         }
         Spacer(minLength: 0)
@@ -1076,4 +1097,35 @@ private struct DiffStatBar: View {
             }
         }
     }
+}
+
+/// How much taller a rail panel's list wants to be than it is, negative when it has
+/// room to spare. Summed when a panel has more than one list.
+struct RailOverflowKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() { value = (value ?? 0) + next }
+    }
+}
+
+/// Put on a rail panel's ScrollView so the rail can size the panel to its content.
+private struct RailOverflowReporter: ViewModifier {
+    @State private var overflow: CGFloat?
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { g in
+                    (g.contentSize.height + g.contentInsets.top + g.contentInsets.bottom
+                        - g.containerSize.height).rounded()
+                } action: { _, v in overflow = v }
+                .preference(key: RailOverflowKey.self, value: overflow)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func reportsRailOverflow() -> some View { modifier(RailOverflowReporter()) }
 }
