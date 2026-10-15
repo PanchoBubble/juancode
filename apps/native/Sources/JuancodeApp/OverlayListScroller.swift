@@ -38,8 +38,9 @@ struct FloatingScrollIndicator: ViewModifier {
             let progress = min(1, max(0, offset / (contentHeight - containerHeight)))
             Capsule()
                 .fill(Color.primary.opacity(0.35))
-                .frame(width: 5, height: height)
-                .offset(x: 2, y: 2 + (track - height) * progress)
+                .frame(width: 4, height: height)
+                // Clear of the 2pt selection bar at x 0, inside the rows' 14pt gutter.
+                .offset(x: 6, y: 2 + (track - height) * progress)
                 .opacity(hovering || scrolling ? 1 : 0)
                 .animation(.easeOut(duration: 0.2), value: hovering || scrolling)
                 .allowsHitTesting(false)
