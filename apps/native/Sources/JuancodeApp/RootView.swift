@@ -3013,11 +3013,11 @@ struct DetailView: View {
     }
 }
 
-/// The views the session's right-side panel can show: the working-tree changes
-/// panel (diff + inline comments + git actions), the file-tree sidebar over the
-/// session's worktree, or the folder's bd issues.
+/// The views the session's right-side panel can show: the file-tree sidebar over
+/// the session's worktree, or the folder's bd issues. The diff lives in the right
+/// rail's Diff panel.
 private enum SidePanelTab: String, CaseIterable {
-    case changes = "Changes", files = "Files", issues = "Issues"
+    case files = "Files", issues = "Issues"
 }
 
 /// Colour for a usage badge by how full the session's context window is
@@ -3035,7 +3035,7 @@ struct SessionContainer: View {
     @Environment(AppModel.self) private var model
     let meta: SessionMeta
     /// Active right-panel tab, remembered app-wide.
-    @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.changes.rawValue
+    @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.files.rawValue
     /// Whether the right-side panel is shown. Toggled from the header CTA.
     @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
     /// Width of the right-side panel, persisted once the user drags its edge. Nil =
@@ -3053,7 +3053,7 @@ struct SessionContainer: View {
     }
 
     private var tab: SidePanelTab {
-        get { SidePanelTab(rawValue: tabRaw) ?? .changes }
+        get { SidePanelTab(rawValue: tabRaw) ?? .files }
         nonmutating set { tabRaw = newValue.rawValue }
     }
 
@@ -3143,7 +3143,7 @@ struct SessionContainer: View {
                 } label: {
                     Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
                 }
-                .help(panelShown ? "Hide the Changes / Files / Issues panel" : "Show the Changes / Files / Issues panel")
+                .help(panelShown ? "Hide the Files / Issues panel" : "Show the Files / Issues panel")
                 .clickCursor()
             }
             .padding(8)
@@ -3244,7 +3244,7 @@ struct SessionContainer: View {
             .padding(.horizontal, 10)
             .padding(.top, 6)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // The Changes/Issues panel floats OVER the terminal instead of splitting
+            // The Files/Issues panel floats OVER the terminal instead of splitting
             // the space with it. Squeezing the terminal ~400pt narrower rewraps the
             // whole scrollback and forces the CLI's TUI to redraw across a huge width
             // jump — no SIGWINCH choreography made that clean (juancode-1th.2,
@@ -3294,9 +3294,8 @@ struct SessionContainer: View {
         }
     }
 
-    /// The right-side panel: a Changes | Files | Issues tab switcher hosting the
-    /// self-contained `ChangesPanel` (session diff), `FileTreePanel` (worktree
-    /// explorer), and `IssuesPanel` (folder bd issues). The active tab is
+    /// The right-side panel: a Files | Issues tab switcher hosting `FileTreePanel`
+    /// (worktree explorer) and `IssuesPanel` (folder bd issues). The active tab is
     /// remembered app-wide via @AppStorage.
     private var sidePanel: some View {
         VStack(spacing: 0) {
@@ -3312,7 +3311,6 @@ struct SessionContainer: View {
             // (keep-alive terminal pool, juancode-073), but these panels hold
             // per-session/per-folder @State seeded in onAppear.
             switch tab {
-            case .changes: ChangesPanel(sessionId: meta.id).id(meta.id)
             case .files: FileTreePanel(sessionId: meta.id, root: meta.effectiveCwd).id(meta.id)
             case .issues: IssuesPanel(cwd: meta.cwd).id(meta.cwd)
             }

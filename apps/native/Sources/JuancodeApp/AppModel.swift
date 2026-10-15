@@ -1352,20 +1352,33 @@ final class AppModel {
         projectsSidebarVisible.toggle()
     }
 
-    /// Toggle the session's right-side panel onto the Changes tab (⌘C). The panel's
-    /// visibility + tab live in @AppStorage inside SessionContainer; writing the same
-    /// UserDefaults keys keeps that view the single owner of the state. Hides only
-    /// when Changes is already the visible tab — from Issues it switches tabs instead.
+    /// Toggle the right rail's Diff panel (⌘C). Its visibility lives in @AppStorage
+    /// inside `RightRailPanels`; writing the same UserDefaults keys keeps that view the
+    /// single owner of the state. Collapses only when the rail is up and Diff is open.
     func toggleChangesPanel() {
+        setRailDiffShown(!isRailDiffShown)
+    }
+
+    var isRailDiffShown: Bool {
         let d = UserDefaults.standard
-        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
-        let onChanges = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Changes"
-        if shown && onChanges {
-            d.set(false, forKey: "session.sidePanel.shown")
-        } else {
-            d.set("Changes", forKey: "session.sidePanel.tab")
-            d.set(true, forKey: "session.sidePanel.shown")
+        let rail = d.object(forKey: "oracle.sessionRail.shown") as? Bool ?? true
+        return rail && !railCollapsed.contains(RightRailPanel.diff.rawValue)
+    }
+
+    func setRailDiffShown(_ shown: Bool) {
+        var collapsed = railCollapsed
+        if shown {
+            collapsed.removeAll { $0 == RightRailPanel.diff.rawValue }
+            UserDefaults.standard.set(true, forKey: "oracle.sessionRail.shown")
+        } else if !collapsed.contains(RightRailPanel.diff.rawValue) {
+            collapsed.append(RightRailPanel.diff.rawValue)
         }
+        UserDefaults.standard.set(collapsed.joined(separator: ","), forKey: "rightRail.collapsed")
+    }
+
+    private var railCollapsed: [String] {
+        (UserDefaults.standard.string(forKey: "rightRail.collapsed") ?? "")
+            .split(separator: ",").map(String.init)
     }
 
     func scrollback(_ id: String) -> [UInt8] {
@@ -2855,26 +2868,12 @@ final class AppModel {
         githubPendingBranchSelect = nil
     }
 
-    /// "Open diff" from the GitHub view: land on the best session for the PR with
-    /// its Changes panel showing the PR diff — the tracked PR's live session,
-    /// else the folder's focused/most-recent live session, else spawn a fresh
-    /// work-on session (decision D: no new diff renderer). Setting `selection`
-    /// dismisses the view via its didSet.
+    /// "Open diff" from the GitHub view: select the PR and show its detail on the
+    /// Diff tab.
     func openPrDiff(_ pr: PullRequest, cwd: String) {
-        let target = trackedPr(cwd: cwd, number: pr.number).flatMap { liveSession($0.sessionId) }
-            ?? focusedLiveSession(in: cwd)
-        guard let target else {
-            workOnPr(pr, cwd: cwd)
-            return
-        }
-        selection = target.id
-        setChangesSource(target.id, .pr(pr))
-        // Reveal the Changes panel (same UserDefaults contract as `openChanges`,
-        // which would reset the source to the working tree).
-        let d = UserDefaults.standard
-        d.set("Changes", forKey: "session.sidePanel.tab")
-        d.set(true, forKey: "session.sidePanel.shown")
-        requestChangesFocus(target.id)
+        github.select(cwd: cwd, pr: pr)
+        github.detailWantsDiff = true
+        showingGitHub = true
     }
 
     // MARK: - Full-text transcript search (juancode-wx9)
@@ -4581,12 +4580,7 @@ final class AppModel {
     /// i.e. the user is already looking at this session's diff.
     private func isChangesPanelOpen(for id: String) -> Bool {
         guard selection == id else { return false }
-        let d = UserDefaults.standard
-        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
-        let onChanges = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Changes"
-        guard shown, onChanges else { return false }
-        if case .workingTree = changesSource(id) { return true }
-        return false
+        return isRailDiffShown
     }
 
     /// Record that a session's changes have been viewed — clears its badge by taking
@@ -4606,14 +4600,8 @@ final class AppModel {
     /// (the ⌘⇧C shortcut, the in-pane banner) just get the panel toggled open.
     func openChanges(for id: String) {
         if selection != id, sessions.contains(where: { $0.id == id }) { selection = id }
-        setChangesSource(id, .workingTree)
-        let d = UserDefaults.standard
-        d.set("Changes", forKey: "session.sidePanel.tab")
-        d.set(true, forKey: "session.sidePanel.shown")
+        setRailDiffShown(true)
         markChangesViewed(id)
-        // Explicit open → let the diff pane grab the keyboard so j/k/n/p/r/c work
-        // immediately. A plain session-switch appear does not request this.
-        requestChangesFocus(id)
     }
 
     /// Load (or refresh) the diff + git state for a session, off the main actor
@@ -4817,7 +4805,7 @@ final class AppModel {
     func toggleFileTreePanel() {
         let d = UserDefaults.standard
         let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
-        let onFiles = (d.string(forKey: "session.sidePanel.tab") ?? "Changes") == "Files"
+        let onFiles = (d.string(forKey: "session.sidePanel.tab") ?? "Files") == "Files"
         if shown && onFiles {
             d.set(false, forKey: "session.sidePanel.shown")
         } else {

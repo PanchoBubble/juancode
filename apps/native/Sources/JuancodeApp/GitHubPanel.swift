@@ -31,6 +31,8 @@ final class GitHubModel {
     /// Which tab is showing. Lives here (not in the view) so it survives the view
     /// being dismissed and re-opened, like the selection and filters do.
     var tab: Tab = .list
+    /// Set by "Open Diff"; the PR detail flips to its Diff tab and clears it.
+    var detailWantsDiff = false
     /// The selected PR's key, or nil when nothing is selected.
     var selectedKey: String?
     /// Fetched conversations per PR — merged into the chronology they are read in by
@@ -1746,6 +1748,11 @@ private struct GitHubPrDetail: View {
         // as the tracked-PR poller reports the PR moved. Restarts on PR/tab change so
         // the loop's view of both stays current.
         .task(id: "\(key)|\(tab.rawValue)") { await freshnessTick() }
+        .onChange(of: model.github.detailWantsDiff, initial: true) { _, wants in
+            guard wants else { return }
+            tab = .diff
+            model.github.detailWantsDiff = false
+        }
     }
 
     /// The freshness loop. Short tick, cheap body: the policy decides whether a fetch
