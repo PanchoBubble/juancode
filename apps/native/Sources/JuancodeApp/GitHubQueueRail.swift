@@ -41,6 +41,9 @@ struct RightRailPanels: View {
     @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
     @AppStorage("rightRail.order") private var orderRaw = ""
     @AppStorage("rightRail.collapsed") private var collapsedRaw = ""
+    /// "panel:points" for each panel the user has resized; the last expanded one fills.
+    @AppStorage("rightRail.heights") private var heightsRaw = ""
+    @State private var railHeight: CGFloat = 0
     /// Owned here rather than by the Diff panel, so its title bar can show +/−
     /// while the panel is collapsed.
     @State private var diffStore = RepoDiffStore()
@@ -80,18 +83,38 @@ struct RightRailPanels: View {
             }
             .padding(.horizontal, 6).padding(.vertical, 2)
             Divider()
+            let expanded = order.filter { !collapsed.contains($0) }
+            let sized = sizedHeights(expanded)
             ForEach(order) { panel in
                 let isCollapsed = collapsed.contains(panel)
                 header(panel, collapsed: isCollapsed)
                 if !isCollapsed {
-                    content(panel)
-                        .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
-                        .clipped()
+                    if let h = sized[panel] {
+                        content(panel)
+                            .frame(maxWidth: .infinity, alignment: .top)
+                            .frame(height: h, alignment: .top)
+                            .clipped()
+                            .overlay(alignment: .bottom) {
+                                DragResizeHandle(axis: .horizontal,
+                                                 value: heightBinding(panel, shown: h),
+                                                 min: Self.minPanel,
+                                                 max: max(Self.minPanel, contentSpace - Self.minPanel),
+                                                 invert: false)
+                                    .offset(y: 7)
+                            }
+                            .zIndex(1)
+                    } else {
+                        // The last expanded panel takes whatever the sized ones leave.
+                        content(panel)
+                            .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+                            .clipped()
+                    }
                 }
             }
             if !anyExpanded { Spacer(minLength: 0) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { railHeight = $0 }
         .background(Color.appSurface)
         .task(id: root) { await diffStore.load(root: root, model: model, rewatch: true) }
         .onDisappear { diffStore.stopWatching() }
@@ -129,11 +152,15 @@ struct RightRailPanels: View {
             case .prs: EmptyView()
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(height: Self.headerHeight)
         .background(Color.appBand)
         .overlay(alignment: .top) {
-            Rectangle().fill(Color.accentColor).frame(height: 2)
-                .opacity(dropTarget == panel ? 1 : 0)
+            ZStack(alignment: .top) {
+                Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
+                Rectangle().fill(Color.accentColor).frame(height: 2)
+                    .opacity(dropTarget == panel ? 1 : 0)
+            }
         }
         .overlay(alignment: .bottom) { Divider() }
         .draggable(panel.rawValue) {
@@ -175,6 +202,56 @@ struct RightRailPanels: View {
         case .diff:
             RepoDiffRail(store: diffStore, root: root)
         }
+    }
+
+    static let headerHeight: CGFloat = 28
+    static let minPanel: Double = 60
+    /// The collapse-all bar plus its divider.
+    private static let topBarHeight: CGFloat = 27
+
+    /// Height left for panel bodies once the bar and every header are laid out.
+    private var contentSpace: Double {
+        let headers = Self.headerHeight * CGFloat(RightRailPanel.allCases.count)
+        return Double(max(0, railHeight - Self.topBarHeight - headers))
+    }
+
+    /// Fixed heights for every expanded panel but the last, which fills. Stored
+    /// heights that no longer fit (a shorter window, a panel just expanded) are
+    /// scaled down together so the filler keeps at least `minPanel`.
+    private func sizedHeights(_ expanded: [RightRailPanel]) -> [RightRailPanel: Double] {
+        let fixed = expanded.dropLast()
+        guard !fixed.isEmpty, railHeight > 0 else { return [:] }
+        let stored = Self.heights(from: heightsRaw)
+        let space = contentSpace
+        let even = space / Double(expanded.count)
+        var want = Dictionary(uniqueKeysWithValues: fixed.map { ($0, stored[$0] ?? even) })
+        let budget = max(0, space - Self.minPanel)
+        let total = want.values.reduce(0, +)
+        if total > budget, total > 0 {
+            let k = budget / total
+            want = want.mapValues { max(min(Self.minPanel, budget / Double(fixed.count)), $0 * k) }
+        }
+        return want
+    }
+
+    private func heightBinding(_ panel: RightRailPanel, shown: Double) -> Binding<Double> {
+        Binding(get: { shown }, set: { v in
+            var h = Self.heights(from: heightsRaw)
+            h[panel] = v.rounded()
+            heightsRaw = RightRailPanel.allCases.compactMap { p in h[p].map { "\(p.rawValue):\(Int($0))" } }
+                .joined(separator: ",")
+        })
+    }
+
+    static func heights(from raw: String) -> [RightRailPanel: Double] {
+        var out: [RightRailPanel: Double] = [:]
+        for pair in raw.split(separator: ",") {
+            let kv = pair.split(separator: ":")
+            guard kv.count == 2, let p = RightRailPanel(rawValue: String(kv[0])),
+                  let v = Double(kv[1]) else { continue }
+            out[p] = v
+        }
+        return out
     }
 
     private func setCollapsed(_ c: Set<RightRailPanel>) {
