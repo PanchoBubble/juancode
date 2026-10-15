@@ -85,7 +85,9 @@ struct RightRailPanels: View {
             Divider()
             let expanded = order.filter { !collapsed.contains($0) }
             let sized = sizedHeights(expanded)
-            ForEach(order) { panel in
+            // Collapsed headers stack at the top, so none is stranded below the
+            // panel that fills; each group keeps the user's order.
+            ForEach(order.filter(collapsed.contains) + expanded) { panel in
                 let isCollapsed = collapsed.contains(panel)
                 header(panel, collapsed: isCollapsed)
                 if !isCollapsed {
