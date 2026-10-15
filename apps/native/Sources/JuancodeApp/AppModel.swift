@@ -795,6 +795,8 @@ final class AppModel {
     var oracleDockExpanded = false {
         didSet { if oracleDockExpanded { markOracleRead() } }
     }
+    /// Set by `OracleModel`, which owns the dock: closes it so a revealed pane is visible.
+    @ObservationIgnored var collapseOracleDock: (() -> Void)?
 
     /// Unread sessions surfaced in the notification list / bell — excludes Oracle's own
     /// sessions (handled by the dock) since they aren't selectable from the sidebar.
@@ -1845,6 +1847,7 @@ final class AppModel {
         if isOracleSession(id) {
             oracleDockExpanded = true
         } else {
+            collapseOracleDock?()
             selection = id
             flashFocusRim() // land the eye on the pane the notification pointed at
         }

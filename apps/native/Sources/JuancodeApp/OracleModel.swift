@@ -213,7 +213,10 @@ final class OracleModel {
         chatFocusToken += 1
     }
 
-    init(app: AppModel) { self.app = app }
+    init(app: AppModel) {
+        self.app = app
+        app.collapseOracleDock = { [weak self] in self?.expanded = false }
+    }
 
     deinit { loop?.cancel() }
 
@@ -607,11 +610,10 @@ final class OracleModel {
                 rejectDispatch(d)
                 continue
             }
-            // Spawn (or seed) the agent in the target project. Selecting it lets the
-            // user jump straight to freshly dispatched work.
+            // Spawn in the background: a dispatch must never pull you off what you're on.
             let s = await app.create(provider: d.resolvedProvider(default: oracleProvider), cwd: d.project,
                                      skipPermissions: true, isolateWorktree: d.worktree ?? false,
-                                     initialInput: d.prompt, select: true, model: d.model,
+                                     initialInput: d.prompt, select: false, model: d.model,
                                      dispatchId: d.dispatchId)
             recordDispatchOutcome(d, sessionId: s?.id,
                                   error: s == nil ? (app.errorMessage ?? "failed to start the session") : nil)
