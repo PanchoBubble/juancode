@@ -85,18 +85,21 @@ struct RightRailPanels: View {
             Divider()
             let expanded = order.filter { !collapsed.contains($0) }
             let sized = sizedHeights(expanded)
-            // Collapsed headers stack at the top, so none is stranded below the
-            // panel that fills; each group keeps the user's order.
-            ForEach(order.filter(collapsed.contains) + expanded) { panel in
+            // Panels keep the user's order whether collapsed or not: moving a header
+            // when it is toggled reads as the rail reshuffling under the cursor.
+            ForEach(order) { panel in
                 let isCollapsed = collapsed.contains(panel)
                 header(panel, collapsed: isCollapsed)
                 if !isCollapsed {
-                    if let h = sized[panel] {
-                        content(panel)
-                            .frame(maxWidth: .infinity, alignment: .top)
-                            .frame(height: h, alignment: .top)
-                            .clipped()
-                            .overlay(alignment: .bottom) {
+                    // One view for both the sized and the filling case, so a panel
+                    // becoming the filler resizes rather than being rebuilt.
+                    let h = sized[panel]
+                    content(panel)
+                        .frame(maxWidth: .infinity, minHeight: h ?? 0, maxHeight: h ?? .infinity,
+                               alignment: .top)
+                        .clipped()
+                        .overlay(alignment: .bottom) {
+                            if let h {
                                 DragResizeHandle(axis: .horizontal,
                                                  value: heightBinding(panel, shown: h),
                                                  min: Self.minPanel,
@@ -104,13 +107,9 @@ struct RightRailPanels: View {
                                                  invert: false)
                                     .offset(y: 7)
                             }
-                            .zIndex(1)
-                    } else {
-                        // The last expanded panel takes whatever the sized ones leave.
-                        content(panel)
-                            .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
-                            .clipped()
-                    }
+                        }
+                        .transition(.opacity)
+                        .zIndex(h == nil ? 0 : 1)
                 }
             }
             if !anyExpanded { Spacer(minLength: 0) }
