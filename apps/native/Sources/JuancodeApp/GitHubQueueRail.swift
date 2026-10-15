@@ -122,14 +122,15 @@ struct RightRailPanels: View {
     }
 
     private func header(_ panel: RightRailPanel, collapsed isCollapsed: Bool) -> some View {
-        HStack(spacing: 5) {
-            Button {
-                withAnimation(.snappy(duration: 0.2)) {
-                    var c = collapsed
-                    if isCollapsed { c.remove(panel) } else { c.insert(panel) }
-                    setCollapsed(c)
-                }
-            } label: {
+        let toggle = {
+            withAnimation(.snappy(duration: 0.2)) {
+                var c = collapsed
+                if isCollapsed { c.remove(panel) } else { c.insert(panel) }
+                setCollapsed(c)
+            }
+        }
+        return HStack(spacing: 5) {
+            Button(action: toggle) {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
@@ -155,6 +156,10 @@ struct RightRailPanels: View {
         }
         .padding(.horizontal, 10)
         .frame(height: Self.headerHeight)
+        // The Oracle accessory's spacer sits outside the button, so the gap up to
+        // its "+" would otherwise be dead; the whole row toggles.
+        .contentShape(Rectangle())
+        .onTapGesture(perform: toggle)
         .background(Color.appBand)
         .overlay(alignment: .top) {
             ZStack(alignment: .top) {
