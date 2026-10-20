@@ -430,6 +430,10 @@ final class AppModel {
     /// Which sessions have an in-place editor tab, and which tab is in front. The
     /// ptys themselves are in `editorPtys`, keyed by the pty id this records.
     var editorTabs = SessionEditorTabs()
+    /// Sessions shown two to a pane, made by dragging a sidebar session onto the open
+    /// one (juancode-8rk). Ghostty only: the SwiftTerm fallback has no pane pool to
+    /// show two live panes from.
+    var sessionPairs = SessionPairs()
     @ObservationIgnored private var editorPtys: [String: EphemeralPty] = [:]
     /// Bumped to pull the keyboard into the visible in-place editor.
     var editorFocusToken = 0
@@ -1328,9 +1332,82 @@ final class AppModel {
     /// detail view once a reactivation or a permissions flip mints a new live
     /// `Session` behind the same id.
     func noteLivePaneVisible(_ id: String) {
+        // A paired session's partner is on screen too, so it must not be the one the
+        // pool evicts. Noted first, so `id` still ends up at the MRU front.
+        if let partner = sessionPair(for: id)?.partner(of: id) {
+            livePanes.noteVisible(partner, refresh: terminalRefreshToken) { [core] in
+                core.pooledSession($0)
+            }
+        }
         livePanes.noteVisible(id, refresh: terminalRefreshToken) { [core] in
             core.pooledSession($0)
         }
+    }
+
+    /// The pair `id` is shown in, if any.
+    func sessionPair(for id: String) -> SessionPair? {
+        TerminalBackend.shared.useGhostty ? sessionPairs.pair(for: id) : nil
+    }
+
+    /// A sidebar session was dropped on `target`'s pane in `zone`: show both, with
+    /// `target` keeping the keyboard. An in-place editor split on either gives way
+    /// (its editor stays open as a tab, back once the pair ends).
+    func splitSession(_ target: String, with dropped: String, zone: SessionDropZone) {
+        guard TerminalBackend.shared.useGhostty,
+              sessions.contains(where: { $0.id == target }),
+              let meta = sessions.first(where: { $0.id == dropped }),
+              meta.kind != .editor
+        else { return }
+        LayoutTransitionGate.shared.begin()
+        for id in [target, dropped] where editorTabs.splitAxis(for: id) != nil {
+            editorTabs.unsplit(for: id, keeping: .agent)
+        }
+        editorTabs.select(.agent, for: target)
+        editorTabs.select(.agent, for: dropped)
+        sessionPairs.split(target, with: dropped, zone: zone)
+        if selection != target { selection = target }
+        noteLivePaneVisible(target)
+        markPaneOpening(dropped)
+        applyReaperProtection()
+        focusTerminal()
+    }
+
+    /// Back to one session in the pane, `keeping` it. The other keeps running, like
+    /// any session not on screen.
+    func closeSessionSplit(keeping: String) {
+        guard sessionPairs.pair(for: keeping) != nil else { return }
+        LayoutTransitionGate.shared.begin()
+        sessionPairs.remove(session: keeping)
+        if selection != keeping { selection = keeping }
+        applyReaperProtection()
+        focusTerminal()
+    }
+
+    /// Flip a pair between side by side and stacked.
+    func flipSessionSplit(_ id: String) {
+        guard let pair = sessionPairs.pair(for: id) else { return }
+        LayoutTransitionGate.shared.begin()
+        sessionPairs.setAxis(pair.axis.flipped, for: id)
+    }
+
+    /// Swap a pair's two panes.
+    func swapSessionSplit(_ id: String) {
+        guard sessionPairs.pair(for: id) != nil else { return }
+        LayoutTransitionGate.shared.begin()
+        sessionPairs.swap(for: id)
+    }
+
+    /// A pair's divider drag settled. Called once on release, like `setSplitFraction`.
+    func setSessionPairFraction(_ fraction: Double, for id: String) {
+        sessionPairs.setFraction(fraction, for: id)
+    }
+
+    /// Make the paired pane the user clicked into the selection, so the header,
+    /// the right rail and the shortcuts follow the keyboard. No focus bump: the click
+    /// already gave it the keyboard.
+    func activatePairedPane(_ id: String) {
+        guard selection != id, sessionPair(for: id)?.contains(selection ?? "") == true else { return }
+        selection = id
     }
 
     /// Whether the projects (sessions-by-folder) sidebar column is visible. RootView
@@ -1630,7 +1707,8 @@ final class AppModel {
     /// `selection` setter, the Oracle's session switch) and again on the health
     /// tick, so a navigation path added later can't silently leave the set stale.
     func applyReaperProtection() {
-        let ids = Set([selection, activeOracleSessionId].compactMap { $0 })
+        let partner = selection.flatMap { sessionPair(for: $0)?.partner(of: $0) }
+        let ids = Set([selection, partner, activeOracleSessionId].compactMap { $0 })
         guard ids != pushedProtectedIds else { return }
         pushedProtectedIds = ids
         Task { [core] in await core.setReaperProtectedIds(ids) }
@@ -2077,6 +2155,7 @@ final class AppModel {
               parent.kind != .editor else { return }
         let base = root ?? parent.effectiveCwd
         if selection != sessionId { selection = sessionId }
+        leaveSessionPairForEditor(sessionId)
         if editorTabs.hasEditor(sessionId) {
             if let file { retargetSessionEditor(sessionId, root: base, file: file, line: line) }
             showSessionTab(.editor, for: sessionId)
@@ -2137,6 +2216,7 @@ final class AppModel {
     /// Bring `tab` to the front of `sessionId`'s pane and give it the keyboard.
     func showSessionTab(_ tab: SessionPaneTab, for sessionId: String) {
         guard editorTabs.select(tab, for: sessionId) else { return }
+        if tab == .editor { leaveSessionPairForEditor(sessionId) }
         switch tab {
         case .agent: focusTerminal()
         case .editor: editorFocusToken &+= 1
@@ -2151,6 +2231,15 @@ final class AppModel {
         let next: SessionPaneTab = editorTabs.activeTab(for: sel) == .editor ? .agent : .editor
         showSessionTab(next, for: sel)
         return true
+    }
+
+    /// A pane shows a session pair or the session's editor, never both: bringing the
+    /// editor up ends the pair, keeping `sessionId`.
+    private func leaveSessionPairForEditor(_ sessionId: String) {
+        guard sessionPairs.pair(for: sessionId) != nil else { return }
+        LayoutTransitionGate.shared.begin()
+        sessionPairs.remove(session: sessionId)
+        applyReaperProtection()
     }
 
     /// Close `sessionId`'s editor tab by killing its pty; the exit drops the tab.
@@ -2187,6 +2276,7 @@ final class AppModel {
         guard let meta = core.liveSession(sessionId)?.meta ?? sessions.first(where: { $0.id == sessionId }),
               meta.kind != .editor else { return }
         paneLayouts.update(meta.cwd) { $0.split = true; $0.axis = axis }
+        leaveSessionPairForEditor(sessionId)
         guard editorTabs.hasEditor(sessionId) else {
             openEditorSession(sessionId)
             return
@@ -5471,6 +5561,7 @@ final class AppModel {
         remoteGridOwners.removeValue(forKey: id)
         stoppedPanes.remove(id)
         if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
+        sessionPairs.remove(session: id)
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
         navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
@@ -5559,6 +5650,7 @@ final class AppModel {
             remoteGridOwners.removeValue(forKey: id)
             stoppedPanes.remove(id)
             if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
+            sessionPairs.remove(session: id)
             pinnedSessions.remove(id)
             dismissedSessions.remove(id)
             if selection == id {

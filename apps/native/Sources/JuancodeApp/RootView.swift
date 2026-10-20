@@ -3041,6 +3041,8 @@ struct SessionContainer: View {
     /// Width of the right-side panel, persisted once the user drags its edge. Nil =
     /// never resized → the screen-size-proportional default applies (juancode-it1).
     @AppStorage("session.sidePanel.width") private var storedPanelWidth: Double?
+    /// The half a session dragged over the pane would land in, while one is.
+    @State private var dropZone: SessionDropZone?
     /// Persisted height of the bottom terminal panel in the split.
     @AppStorage("session.bottomPanel.height") private var bottomHeight: Double = 240
 
@@ -3081,7 +3083,14 @@ struct SessionContainer: View {
                 // repeat it here — this row is the session's tabs (once it has an
                 // editor) and its action buttons. The tabs sit in this row rather
                 // than above the pane so opening one never reflows the agent's grid.
-                if model.editorTabs.hasEditor(meta.id) {
+                if let pair {
+                    SessionPairStrip(pair: pair, active: meta.id,
+                                     title: { id in model.sessions.first(where: { $0.id == id })?.title ?? id },
+                                     onSelect: { model.activatePairedPane($0); model.focusTerminal() },
+                                     onFlip: { model.flipSessionSplit(meta.id) },
+                                     onSwap: { model.swapSessionSplit(meta.id) },
+                                     onClose: { model.closeSessionSplit(keeping: meta.id) })
+                } else if model.editorTabs.hasEditor(meta.id) {
                     SessionTabStrip(agent: meta.provider.rawValue.capitalized,
                                     active: model.editorTabs.activeTab(for: meta.id),
                                     onSelect: { model.showSessionTab($0, for: meta.id) },
@@ -3153,13 +3162,18 @@ struct SessionContainer: View {
             Divider()
             GeometryReader { geo in
             let frames = splitFrames(geo.size)
+            let pairFrames = pairFrames(geo.size)
+            let agentRect = pairFrames.map { pair?.first == meta.id ? $0.first : $0.second } ?? frames.agent
+            let partnerRect = pairFrames.map { pair?.first == meta.id ? $0.second : $0.first }
             ZStack(alignment: .topLeading) {
                 // A split only narrows (or shortens) the agent and, side by side, slides
                 // it right of the editor, so its view identity, and with it the live
                 // surface, never changes when a split opens or closes: one reflow, not a
-                // remount.
-                terminal
-                    .frame(width: frames.agent.width, height: frames.agent.height)
+                // remount. A session pair (juancode-8rk) does the same, and its partner
+                // is drawn from the same pool, offset into its own half.
+                terminal(partner: partnerRect.map { $0.offsetBy(dx: -agentRect.minX, dy: -agentRect.minY) },
+                         size: agentRect.size)
+                    .frame(width: agentRect.width, height: agentRect.height)
                     // Focus rim flash on teleport landings (juancode-vz1): belongs to
                     // the visible pane container, not the pooled panes inside `terminal`.
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
@@ -3171,6 +3185,14 @@ struct SessionContainer: View {
                     // Review nudge floated at the bottom edge — out of the way of the
                     // top badges + find bar, and an overlay so the pty grid never reflows.
                     .overlay(alignment: .bottom) { changeReviewBanner }
+                    // Which of a pair holds the keyboard.
+                    .overlay {
+                        if pair != nil {
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(Color.accentColor.opacity(0.65), lineWidth: 1.5)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     // In-pane find bar (⌘F, juancode-972) — overlays the visible
                     // session's pane; never reflows the pty grid.
                     .overlay(alignment: .top) {
@@ -3187,8 +3209,9 @@ struct SessionContainer: View {
                     // Closing slides it back into place (juancode).
                     // Stacked, the agent already sits above the panel (translating the
                     // top pane would push it out of sight), so only the other layouts move.
-                    .offset(y: model.bottomTerminalShown && splitAxis != .stacked ? -CGFloat(bottomHeight) : 0)
-                    .padding(.leading, frames.agent.minX)
+                    .offset(y: model.bottomTerminalShown && (pair?.axis ?? splitAxis) != .stacked ? -CGFloat(bottomHeight) : 0)
+                    .padding(.leading, agentRect.minX)
+                    .padding(.top, agentRect.minY)
 
                 // In-place editor tabs, above the agent pane and its overlays, or beside
                 // it in a split. Unlike the agent this one is resized (not translated) by
@@ -3213,6 +3236,22 @@ struct SessionContainer: View {
                 if let axis = splitAxis {
                     splitDivider(axis: axis, frames: frames, size: geo.size)
                 }
+                if let pair, let pairFrames {
+                    pairDivider(pair: pair, frames: pairFrames, size: geo.size)
+                }
+                // Where a session dragged in from the sidebar would land.
+                if let zone = dropZone {
+                    let r = zone.rect(in: geo.size).insetBy(dx: 4, dy: 4)
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.16))
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.accentColor.opacity(0.75), lineWidth: 2))
+                        .frame(width: max(0, r.width), height: max(0, r.height))
+                        .padding(.leading, r.minX)
+                        .padding(.top, r.minY)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
 
                 // Keep-alive bottom panel, pinned to the bottom edge and slid in from
                 // below via a transform. Once this folder has shells the panel stays
@@ -3236,6 +3275,14 @@ struct SessionContainer: View {
                     .allowsHitTesting(model.bottomTerminalShown)
                 }
             }
+            // Drag a sidebar session onto the pane to show it beside this one
+            // (juancode-8rk). A terminal only takes file drags, so a session row's
+            // text payload falls through to here.
+            .onDrop(of: [.utf8PlainText], delegate: SessionSplitDropDelegate(
+                size: geo.size, enabled: TerminalBackend.shared.useGhostty,
+                isSession: { id in id != meta.id && model.sessions.contains(where: { $0.id == id }) },
+                zone: $dropZone,
+                onDrop: { id, zone in model.splitSession(meta.id, with: id, zone: zone) }))
             }
             .clipped()
             // Breathing room so the terminal isn't glued to the window edges. Constant
@@ -3290,6 +3337,16 @@ struct SessionContainer: View {
         // pool keys panes by object identity, so re-note to mount the new pty's
         // pane (the stale entry is pruned by `AppModel.refresh`).
         .onChange(of: model.liveSession(meta.id).map(ObjectIdentifier.init)) { _, _ in
+            model.noteLivePaneVisible(meta.id)
+        }
+        // A pair's other half is opened like the selection is: revived if it exited,
+        // and kept in the pane pool (`noteLivePaneVisible` notes both).
+        .task(id: pair?.partner(of: meta.id)) {
+            guard let partner = pair?.partner(of: meta.id) else { return }
+            await model.openPersistedPane(partner)
+            model.noteLivePaneVisible(meta.id)
+        }
+        .onChange(of: pair.flatMap { $0.partner(of: meta.id) }.flatMap { model.liveSession($0) }.map(ObjectIdentifier.init)) { _, _ in
             model.noteLivePaneVisible(meta.id)
         }
     }
@@ -3377,8 +3434,10 @@ struct SessionContainer: View {
         model.bottomTerminalShown ? CGFloat(bottomHeight) : 0
     }
 
+    /// `partner` is the other half of a session pair, relative to this session's
+    /// pane, whose `size` every other pooled pane keeps.
     @ViewBuilder
-    private var terminal: some View {
+    private func terminal(partner: CGRect?, size: CGSize) -> some View {
         // Keep-alive pane pool (juancode-073): every recently-viewed live session
         // keeps its Ghostty surface MOUNTED here, hidden panes with rendering
         // suspended and pty sizing frozen (`GhosttyLive.hidden`). Switching
@@ -3390,9 +3449,16 @@ struct SessionContainer: View {
         // (new Session object) still fully recreate that one pane.
         if TerminalBackend.shared.useGhostty {
             let current = model.liveSession(meta.id)
-            ZStack {
+            let partnerId = partner == nil ? nil : pair?.partner(of: meta.id)
+            let partnerSession = partnerId.flatMap { model.liveSession($0) }
+            ZStack(alignment: .topLeading) {
                 ForEach(model.livePanes.entries) { entry in
-                    let visible = entry.session === current && agentShown
+                    // The pair's other session is on screen too, in its own half, but
+                    // passive: focus requests go to the selected one only, and a click
+                    // into it makes it the selection.
+                    let isPartner = partnerSession != nil && entry.session === partnerSession
+                    let visible = (entry.session === current && agentShown) || isPartner
+                    let rect = isPartner ? (partner ?? .zero) : CGRect(origin: .zero, size: size)
                     // `entry.live` re-types the pooled handle (see `LivePanePool.Entry.live`).
                     if let session = entry.live {
                         GhosttyLive(session: session,
@@ -3400,12 +3466,24 @@ struct SessionContainer: View {
                                     resyncToken: model.terminalResyncToken,
                                     autoFocusOnAppear: !model.suppressTerminalAutoFocus,
                                     hidden: !visible,
-                                    topHitInset: terminalTopHitInset)
+                                    topHitInset: terminalTopHitInset,
+                                    passive: isPartner,
+                                    onFocused: isPartner ? { [model] in model.activatePairedPane(entry.sessionId) } : nil)
+                            .frame(width: rect.width, height: rect.height)
+                            .offset(x: rect.minX, y: rect.minY)
                             .opacity(visible ? 1 : 0)
                             .allowsHitTesting(visible)
                     }
                 }
-                if current == nil { nonLivePane }
+                if current == nil { nonLivePane(meta).frame(width: size.width, height: size.height) }
+                if let partnerId, partnerSession == nil, let partner,
+                   let partnerMeta = model.sessions.first(where: { $0.id == partnerId }) {
+                    nonLivePane(partnerMeta)
+                        .frame(width: partner.width, height: partner.height)
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.activatePairedPane(partnerId) }
+                        .offset(x: partner.minX, y: partner.minY)
+                }
             }
         } else if let session = model.liveSession(meta.id) {
             // SwiftTerm fallback (JUANCODE_SWIFTTERM=1): no keep-alive pool —
@@ -3422,13 +3500,56 @@ struct SessionContainer: View {
                 .opacity(agentShown ? 1 : 0)
                 .allowsHitTesting(agentShown)
         } else {
-            nonLivePane
+            nonLivePane(meta)
         }
     }
 
-    private var agentShown: Bool { model.editorTabs.isShown(.agent, for: meta.id) }
-    private var editorShown: Bool { model.editorTabs.isShown(.editor, for: meta.id) }
-    private var splitAxis: SessionSplitAxis? { model.editorTabs.splitAxis(for: meta.id) }
+    /// The session pair this pane shows, if any (juancode-8rk). A pair shows two
+    /// agents, so while there is one the editor's tab and split stand aside.
+    private var pair: SessionPair? { model.sessionPair(for: meta.id) }
+    private var agentShown: Bool { pair != nil || model.editorTabs.isShown(.agent, for: meta.id) }
+    private var editorShown: Bool { pair == nil && model.editorTabs.isShown(.editor, for: meta.id) }
+    private var splitAxis: SessionSplitAxis? { pair == nil ? model.editorTabs.splitAxis(for: meta.id) : nil }
+
+    private func pairFrames(_ size: CGSize) -> SessionPairFrames? {
+        pair.map {
+            SessionPairFrames.layout(size: size, axis: $0.axis, fraction: $0.fraction,
+                                     bottomInset: model.bottomTerminalShown ? CGFloat(bottomHeight) : 0)
+        }
+    }
+
+    /// The bar between a pair's panes; commits once on release, like `splitDivider`.
+    private func pairDivider(pair: SessionPair, frames: SessionPairFrames, size: CGSize) -> some View {
+        let axis = pair.axis
+        let inset = model.bottomTerminalShown ? CGFloat(bottomHeight) : 0
+        let span = axis == .sideBySide ? size.width : size.height - inset
+        let usable = Double(max(0, span - SessionSplitFrames.gap))
+        let extent = Binding<Double>(
+            get: { Double(axis == .sideBySide ? frames.first.width : frames.first.height) },
+            set: { value in
+                LayoutTransitionGate.shared.begin()
+                model.setSessionPairFraction(SessionPairFrames.fraction(forFirstExtent: value, axis: axis,
+                                                                        size: size, bottomInset: inset),
+                                             for: meta.id)
+            })
+        let range = SessionPaneLayout.fractionRange
+        let handle = DragResizeHandle(axis: axis == .sideBySide ? .vertical : .horizontal,
+                                      value: extent,
+                                      min: usable * range.lowerBound, max: usable * range.upperBound,
+                                      invert: false, previewOnly: true)
+        let hit: CGFloat = 14
+        return Group {
+            if axis == .sideBySide {
+                handle
+                    .frame(height: frames.divider.height)
+                    .padding(.leading, frames.divider.midX - hit / 2)
+            } else {
+                handle
+                    .frame(width: frames.divider.width)
+                    .padding(.top, frames.divider.midY - hit / 2)
+            }
+        }
+    }
 
     private func splitFrames(_ size: CGSize) -> SessionSplitFrames {
         SessionSplitFrames.layout(size: size, axis: splitAxis,
@@ -3533,7 +3654,7 @@ struct SessionContainer: View {
     /// always starts) the loading card holds the pane instead; a kill this run gets the
     /// stopped card (juancode-x46x).
     @ViewBuilder
-    private var nonLivePane: some View {
+    private func nonLivePane(_ meta: SessionMeta) -> some View {
         switch model.panePhase(meta.id) {
         case .resuming: SessionLoadingCard(meta: meta)
         case .stopped: SessionStoppedCard(meta: meta)
@@ -3600,6 +3721,127 @@ private struct SessionTabStrip: View {
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(selected ? Color.appHairline(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .foregroundStyle(selected ? .primary : .secondary)
+    }
+}
+
+/// A session pair's header (juancode-8rk): the two sessions in pane order, the
+/// selected one emphasised, plus flip / swap and a close that keeps the selected one.
+private struct SessionPairStrip: View {
+    let pair: SessionPair
+    let active: String
+    let title: (String) -> String
+    let onSelect: (String) -> Void
+    let onFlip: () -> Void
+    let onSwap: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            member(pair.first)
+            Button(action: onSwap) {
+                Image(systemName: pair.axis == .sideBySide ? "arrow.left.arrow.right" : "arrow.up.arrow.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Swap the two panes")
+            .clickCursor()
+            member(pair.second)
+            Divider().frame(height: 12).padding(.horizontal, 4)
+            Button(action: onFlip) {
+                Image(systemName: pair.axis == .sideBySide ? "rectangle.split.1x2" : "rectangle.split.2x1")
+                    .font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(pair.axis == .sideBySide ? "Stack the two sessions" : "Put the two sessions side by side")
+            .clickCursor()
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .help("Back to one pane, keeping \"\(title(active))\"")
+            .clickCursor()
+        }
+        .padding(2)
+        .background(Color.appHairline(0.06), in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func member(_ id: String) -> some View {
+        let selected = id == active
+        return Button { onSelect(id) } label: {
+            Text(title(id))
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 180)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(selected ? Color.appHairline(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .foregroundStyle(selected ? .primary : .secondary)
+        .help(selected ? "Has the keyboard" : "Give \"\(title(id))\" the keyboard")
+        .clickCursor()
+    }
+}
+
+/// Drops a sidebar session row on the open pane to show the two together
+/// (juancode-8rk). The zone follows the pointer; the payload, the dragged row's
+/// session id, is read once on enter so a project header or text from another app
+/// never offers a split, and again on drop.
+private struct SessionSplitDropDelegate: DropDelegate {
+    let size: CGSize
+    let enabled: Bool
+    let isSession: @MainActor (String) -> Bool
+    @Binding var zone: SessionDropZone?
+    let onDrop: @MainActor (String, SessionDropZone) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        enabled && info.hasItemsConforming(to: [.utf8PlainText])
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard validateDrop(info: info) else { return }
+        withAnimation(.easeOut(duration: 0.12)) { zone = SessionDropZone.at(info.location, in: size) }
+        // Withdraw the offer once the payload turns out not to be another session. A
+        // payload that can't be read until the drop keeps it; the drop re-checks.
+        load(info) { id in
+            if let id, !isSession(id) { zone = nil }
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard validateDrop(info: info), zone != nil else { return DropProposal(operation: .forbidden) }
+        let next = SessionDropZone.at(info.location, in: size)
+        if next != zone { withAnimation(.easeOut(duration: 0.12)) { zone = next } }
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        withAnimation(.easeOut(duration: 0.12)) { zone = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let landed = zone else { return false }
+        zone = nil
+        load(info) { id in
+            guard let id, isSession(id) else { return }
+            onDrop(id, landed)
+        }
+        return true
+    }
+
+    private func load(_ info: DropInfo, _ then: @escaping @MainActor (String?) -> Void) {
+        guard let provider = info.itemProviders(for: [.utf8PlainText]).first else {
+            then(nil)
+            return
+        }
+        _ = provider.loadTransferable(type: String.self) { result in
+            let id = try? result.get()
+            Task { @MainActor in then(id) }
+        }
     }
 }
 

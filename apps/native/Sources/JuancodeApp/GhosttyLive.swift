@@ -119,6 +119,13 @@ struct GhosttyLive: View {
     /// `.offset` (the bottom shell panel's height). Clicks in that band fall through
     /// to the views drawn under the pane — see `TerminalHitClip`.
     var topHitInset: CGFloat = 0
+    /// On screen but not the pane holding the keyboard: the second session of a
+    /// pair (juancode-8rk). It renders and sizes like any visible pane, but never
+    /// takes focus on its own, so focus requests reach only the selected session.
+    var passive: Bool = false
+    /// Called when the keyboard moves into this pane (a click, mostly), so a pair
+    /// can make the pane the user clicked the selected one.
+    var onFocused: (() -> Void)? = nil
     /// Reports the real grid Ghostty measures for the current bounds (cols, rows).
     /// Lets a caller persist a surface-specific spawn size — e.g. the Oracle dock,
     /// which can't use the shared `TerminalGrid` (that's the main panes') and must
@@ -131,7 +138,8 @@ struct GhosttyLive: View {
                                  remembersSize: remembersSize, focusToken: focusToken,
                                  resyncToken: resyncToken,
                                  autoFocusOnAppear: autoFocusOnAppear,
-                                 hidden: hidden, topHitInset: topHitInset, onGrid: onGrid)
+                                 hidden: hidden, passive: passive, topHitInset: topHitInset,
+                                 onFocused: onFocused, onGrid: onGrid)
         }
     }
 }
@@ -156,6 +164,9 @@ final class GhosttyHostView: NSView {
     /// (the bottom shell panel's height). Clicks that land there belong to whatever
     /// is drawn under the pane — see `TerminalHitClip`.
     var topHitInset: CGFloat = 0
+    /// See `GhosttyLive.onFocused`.
+    var onTerminalFocused: (() -> Void)?
+    private var responderObservation: NSKeyValueObservation?
     private var didAutoFocus = false
 
     init(terminal: TerminalView) {
@@ -172,6 +183,15 @@ final class GhosttyHostView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        responderObservation = window?.observe(\.firstResponder, options: [.new]) { [weak self] _, _ in
+            // Hopped, not acted on in place: the handler can fire mid-update, and the
+            // callback changes the model's selection.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let responder = self.window?.firstResponder as? NSView,
+                      responder.isDescendant(of: self) else { return }
+                self.onTerminalFocused?()
+            }
+        }
         guard focusOnAppear, !didAutoFocus, window != nil else { return }
         didAutoFocus = true
         DispatchQueue.main.async { [weak self] in
@@ -274,7 +294,9 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     var resyncToken: Int = 0
     var autoFocusOnAppear: Bool = true
     var hidden: Bool = false
+    var passive: Bool = false
     var topHitInset: CGFloat = 0
+    var onFocused: (() -> Void)? = nil
     var onGrid: ((Int, Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
@@ -292,7 +314,8 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         context.coordinator.attach(to: tv)
         let host = GhosttyHostView(terminal: tv)
         // A pane mounted hidden (pool rebuild) must not race the visible one for focus.
-        host.focusOnAppear = autoFocusOnAppear && !hidden
+        host.focusOnAppear = autoFocusOnAppear && !hidden && !passive
+        host.onTerminalFocused = onFocused
         host.onDrop = { [session] text in session.write(text) }
         return host
     }
@@ -300,6 +323,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
         context.coordinator.onGrid = onGrid
         nsView.topHitInset = topHitInset
+        nsView.onTerminalFocused = onFocused
         // Hide/reveal first: on hide the freeze must land before this pass's
         // `applySize` (which is a no-op while frozen); on reveal the unfreeze must
         // land before it, so the fit below already runs at the live bounds.
@@ -307,7 +331,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         nsView.applySize(targetSize)
         if revealed {
             context.coordinator.completeReveal()
-            if autoFocusOnAppear { nsView.focusTerminal() }
+            if autoFocusOnAppear && !passive { nsView.focusTerminal() }
         }
         // Token bumps target the VISIBLE pane. Hidden keep-alive panes record them
         // (so nothing fires spuriously on reveal) but never act: a hidden pane
@@ -315,7 +339,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         // viewer owns the grid while we're off-screen.
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken
-            if !hidden { nsView.focusTerminal() }
+            if !hidden && !passive { nsView.focusTerminal() }
         }
         if resyncToken != context.coordinator.lastResyncToken {
             context.coordinator.lastResyncToken = resyncToken
