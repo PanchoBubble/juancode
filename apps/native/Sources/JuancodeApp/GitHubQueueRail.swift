@@ -1,5 +1,6 @@
 // The right rail: Oracles, the GitHub PR queue and the main checkout's Diff, each a
-// collapsible panel the user can drag into any order.
+// collapsible panel the user can drag into any order, and hide or bring back from
+// the pencil's edit mode.
 //
 // The queue was a toolbar badge with the list behind a popover. The rail is always
 // on screen, so the queue can be too: the same list, chips and row actions, with no
@@ -29,9 +30,7 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
 
     /// Stored order, healed: unknown names dropped, missing panels appended.
     static func order(from raw: String) -> [RightRailPanel] {
-        var seen = raw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) }
-        seen = seen.enumerated().filter { i, p in !seen[..<i].contains(p) }.map(\.1)
-        return seen + allCases.filter { !seen.contains($0) }
+        RightRailPrefs.order(from: raw, known: allCases)
     }
 }
 
@@ -70,8 +69,11 @@ struct RightRailPanels: View {
     @Environment(AppModel.self) private var model
     /// Shared with the old popover's key, so the chip you lived on carries over.
     @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
-    @AppStorage("rightRail.order") private var orderRaw = ""
-    @AppStorage("rightRail.collapsed") private var collapsedRaw = ""
+    @AppStorage(RightRailPrefs.orderKey) private var orderRaw = ""
+    @AppStorage(RightRailPrefs.collapsedKey) private var collapsedRaw = ""
+    /// Panels the user took off the rail in edit mode. A deny-list, so a panel new to
+    /// this build shows up until it is hidden.
+    @AppStorage(RightRailPrefs.hiddenKey) private var hiddenRaw = ""
     /// "panel:points" for each panel the user has resized. The rest fit their content,
     /// and the last expanded one fills whatever that leaves when it needs more.
     @AppStorage("rightRail.heights") private var heightsRaw = ""
@@ -85,10 +87,22 @@ struct RightRailPanels: View {
     /// Mirrors `collapsedRaw`: an `@AppStorage` write does not reliably carry the
     /// `withAnimation` transaction, so layout reads this instead.
     @State private var collapsedState: Set<RightRailPanel>?
+    @State private var hiddenState: Set<RightRailPanel>?
+    /// The pencil's mode: every panel's header is listed, hidden ones dimmed, each
+    /// with an eye to hide or restore it. Reordering works in both modes.
+    @State private var editing = false
 
     private var order: [RightRailPanel] { RightRailPanel.order(from: orderRaw) }
     private var collapsed: Set<RightRailPanel> {
-        collapsedState ?? Set(collapsedRaw.split(separator: ",").compactMap { RightRailPanel(rawValue: String($0)) })
+        collapsedState ?? RightRailPrefs.set(from: collapsedRaw)
+    }
+    private var hidden: Set<RightRailPanel> {
+        hiddenState ?? RightRailPrefs.set(from: hiddenRaw)
+    }
+    /// The panels with a header on screen: all of them while editing, else the unhidden.
+    private var listed: [RightRailPanel] {
+        let hidden = hidden
+        return editing ? order : order.filter { !hidden.contains($0) }
     }
     private var root: String? {
         guard let id = model.selection,
@@ -98,10 +112,25 @@ struct RightRailPanels: View {
 
     var body: some View {
         let collapsed = collapsed
-        let anyExpanded = collapsed.count < RightRailPanel.allCases.count
+        let hidden = hidden
+        let listed = listed
+        let expanded = listed.filter { !collapsed.contains($0) && !hidden.contains($0) }
+        let anyExpanded = !expanded.isEmpty
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 2) {
                 Spacer()
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { editing.toggle() }
+                } label: {
+                    Image(systemName: editing ? "checkmark" : "pencil")
+                        .font(.system(size: 12, weight: editing ? .semibold : .regular))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(editing ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .help(editing ? "Done editing panels" : "Show or hide panels")
+                .clickCursor()
                 Button {
                     withAnimation(.snappy(duration: 0.2)) {
                         setCollapsed(anyExpanded ? Set(RightRailPanel.allCases) : [])
@@ -117,16 +146,25 @@ struct RightRailPanels: View {
                 .foregroundStyle(.secondary)
                 .help(anyExpanded ? "Collapse all panels" : "Expand all panels")
                 .clickCursor()
+                .disabled(editing)
             }
             .padding(.horizontal, 6).padding(.vertical, 2)
             Divider()
-            let expanded = order.filter { !collapsed.contains($0) }
             let sized = sizedHeights(expanded)
+            if listed.isEmpty {
+                Button("All panels are hidden. Show some…") {
+                    withAnimation(.snappy(duration: 0.2)) { editing = true }
+                }
+                .buttonStyle(.link)
+                .font(.system(size: 11))
+                .padding(12)
+            }
             // Panels keep the user's order whether collapsed or not: moving a header
             // when it is toggled reads as the rail reshuffling under the cursor.
-            ForEach(order) { panel in
-                let isCollapsed = collapsed.contains(panel)
-                header(panel, collapsed: isCollapsed)
+            ForEach(listed) { panel in
+                let isHidden = hidden.contains(panel)
+                let isCollapsed = collapsed.contains(panel) || isHidden
+                header(panel, collapsed: isCollapsed, hidden: isHidden)
                 if !isCollapsed {
                     // One view for both the sized and the filling case, so a panel
                     // becoming the filler resizes rather than being rebuilt.
@@ -158,14 +196,20 @@ struct RightRailPanels: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { railHeight = $0 }
+        // ⌘C writes these keys from the model; drop the mirrors so the rail follows.
+        .onChange(of: collapsedRaw) { collapsedState = nil }
+        .onChange(of: hiddenRaw) { hiddenState = nil }
         .background(Color.appSurface)
         .task(id: root) { await diffStore.load(root: root, model: model, rewatch: true) }
         .onDisappear { diffStore.stopWatching() }
     }
 
-    private func header(_ panel: RightRailPanel, collapsed isCollapsed: Bool) -> some View {
+    private func header(_ panel: RightRailPanel, collapsed isCollapsed: Bool, hidden isHidden: Bool) -> some View {
         let toggle = {
             withAnimation(.snappy(duration: 0.2)) {
+                // A hidden panel's header only exists in edit mode; clicking it is
+                // asking for it back.
+                if isHidden { return setHidden(panel, false) }
                 var c = collapsed
                 if isCollapsed { c.remove(panel) } else { c.insert(panel) }
                 setCollapsed(c)
@@ -184,16 +228,32 @@ struct RightRailPanels: View {
                         .font(.system(size: 10, weight: .semibold))
                         .textCase(.uppercase).tracking(0.5)
                         .foregroundStyle(.secondary)
-                    if panel != .oracle { Spacer(minLength: 0) }
+                    if panel != .oracle || editing { Spacer(minLength: 0) }
                 }
                 .contentShape(Rectangle())
+                .opacity(isHidden ? 0.45 : 1)
             }
             .buttonStyle(.plain)
             .clickCursor()
-            switch panel {
-            case .oracle: OracleRailAccessory()
-            case .diff: diffPreview
-            case .prs: EmptyView()
+            if editing {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { setHidden(panel, !isHidden) }
+                } label: {
+                    Image(systemName: isHidden ? "eye.slash" : "eye")
+                        .font(.system(size: 11))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isHidden ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+                .help(isHidden ? "Show \(panel.title)" : "Hide \(panel.title)")
+                .clickCursor()
+            } else {
+                switch panel {
+                case .oracle: OracleRailAccessory()
+                case .diff: diffPreview
+                case .prs: EmptyView()
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -257,9 +317,10 @@ struct RightRailPanels: View {
     /// The collapse-all bar plus its divider.
     private static let topBarHeight: CGFloat = 27
 
-    /// Height left for panel bodies once the bar and every header are laid out.
+    /// Height left for panel bodies once the bar and every listed header are laid
+    /// out. Hidden panels have no header outside edit mode, so they take nothing.
     private var contentSpace: Double {
-        let headers = Self.headerHeight * CGFloat(RightRailPanel.allCases.count)
+        let headers = Self.headerHeight * CGFloat(listed.count)
         return Double(max(0, railHeight - Self.topBarHeight - headers))
     }
 
@@ -317,7 +378,14 @@ struct RightRailPanels: View {
 
     private func setCollapsed(_ c: Set<RightRailPanel>) {
         collapsedState = c
-        collapsedRaw = RightRailPanel.allCases.filter(c.contains).map(\.rawValue).joined(separator: ",")
+        collapsedRaw = RightRailPrefs.raw(c, known: RightRailPanel.allCases)
+    }
+
+    private func setHidden(_ panel: RightRailPanel, _ isHidden: Bool) {
+        var h = hidden
+        if isHidden { h.insert(panel) } else { h.remove(panel) }
+        hiddenState = h
+        hiddenRaw = RightRailPrefs.raw(h, known: RightRailPanel.allCases)
     }
 
     @ViewBuilder private var diffPreview: some View {

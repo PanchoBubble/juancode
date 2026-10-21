@@ -1452,24 +1452,21 @@ final class AppModel {
 
     var isRailDiffShown: Bool {
         let d = UserDefaults.standard
-        let rail = d.object(forKey: "oracle.sessionRail.shown") as? Bool ?? true
-        return rail && !railCollapsed.contains(RightRailPanel.diff.rawValue)
+        return RightRailPrefs.isOpen(RightRailPanel.diff.rawValue,
+                                     railShown: d.object(forKey: "oracle.sessionRail.shown") as? Bool ?? true,
+                                     collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
+                                     hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
     }
 
+    /// Showing Diff also un-hides it if the user hid it in the rail's edit mode.
     func setRailDiffShown(_ shown: Bool) {
-        var collapsed = railCollapsed
-        if shown {
-            collapsed.removeAll { $0 == RightRailPanel.diff.rawValue }
-            UserDefaults.standard.set(true, forKey: "oracle.sessionRail.shown")
-        } else if !collapsed.contains(RightRailPanel.diff.rawValue) {
-            collapsed.append(RightRailPanel.diff.rawValue)
-        }
-        UserDefaults.standard.set(collapsed.joined(separator: ","), forKey: "rightRail.collapsed")
-    }
-
-    private var railCollapsed: [String] {
-        (UserDefaults.standard.string(forKey: "rightRail.collapsed") ?? "")
-            .split(separator: ",").map(String.init)
+        let d = UserDefaults.standard
+        let next = RightRailPrefs.setting(RightRailPanel.diff.rawValue, open: shown,
+                                          collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
+                                          hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
+        if shown { d.set(true, forKey: "oracle.sessionRail.shown") }
+        d.set(next.collapsed, forKey: RightRailPrefs.collapsedKey)
+        d.set(next.hidden, forKey: RightRailPrefs.hiddenKey)
     }
 
     func scrollback(_ id: String) -> [UInt8] {
