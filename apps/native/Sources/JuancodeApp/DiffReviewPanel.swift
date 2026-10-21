@@ -12,6 +12,8 @@ import JuancodeDesktop
 /// The keyboard is vim's, with Space as leader — j/k with counts, gg/G, ⌃D/⌃U, ]c/[c
 /// hunks, gt/gT files, V visual, gcc / gc to comment, ]d/[d comments, Enter edits,
 /// dd/x deletes, ␣w sends, ␣n toggles the tree, ⌃H/⌃L move between tree and diff.
+/// Telescope-style finders open over the diff: ⌃P / ␣ff fuzzy-find a changed file,
+/// ␣fg / ␣/ grep every changed line of the review; / ? n N search the open file.
 /// Keys arrive through `ReviewKeyCatcher`, an AppKit first responder, so ⌃-keys and
 /// counts reach the panel intact and none of them leak into the pty underneath.
 ///
@@ -42,6 +44,25 @@ struct DiffReviewPanel: View {
         var text: String
     }
 
+    /// An open prompt: a finder over the diff, or vim's `/` `?` in the status bar.
+    private enum Prompt: Equatable {
+        case files
+        case text
+        case search(backward: Bool)
+    }
+
+    /// The last accepted `/` or `?` — what n/N step through.
+    private struct Search: Equatable {
+        var pattern: String
+        var backward: Bool
+    }
+
+    /// A grep hit whose file is still rendering: the cursor goes to `row` once it has.
+    private struct Jump: Equatable {
+        var path: String
+        var row: Int
+    }
+
     @AppStorage("diffReview.treeShown") private var treeShown = true
     @AppStorage("diffReview.treeWidth") private var treeWidth: Double = 300
 
@@ -61,6 +82,20 @@ struct DiffReviewPanel: View {
     @State private var centerNextScroll = false
     @State private var keyToken = 0
     @State private var frames = RowFrameStore()
+    @State private var prompt: Prompt?
+    @State private var promptText = ""
+    /// Distinct per opened prompt, so its field takes the keyboard again.
+    @State private var promptSerial = 0
+    @State private var pickerAt = 0
+    @State private var fileHits: [ReviewFileHit] = []
+    @State private var grepIndex: [ReviewGrepFile] = []
+    @State private var grepHits: [ReviewGrepHit] = []
+    @State private var search: Search?
+    /// Matches of `search` are highlighted; Esc in normal mode turns it off, n/N on.
+    @State private var searchHighlighted = false
+    /// Where the cursor was when `/` or `?` opened — Esc puts it back.
+    @State private var searchOrigin: Item?
+    @State private var pendingJump: Jump?
 
     private let rowHeight: CGFloat = 18
     private let dragSpace = "diff-review-lines"
@@ -79,6 +114,13 @@ struct DiffReviewPanel: View {
     private var treeRows: [ReviewTreeRow] { reviewTreeRows(files, collapsed: collapsedDirs) }
     private var fileOrder: [String] { reviewFileOrder(files) }
     private var isVisual: Bool { anchor != nil }
+    private var isFinderOpen: Bool { prompt == .files || prompt == .text }
+
+    /// What the diff highlights: the pattern being typed at `/`, else the last search.
+    private var highlightPattern: String? {
+        if case .search = prompt { return promptText.isEmpty ? nil : promptText }
+        return searchHighlighted ? search?.pattern : nil
+    }
 
     /// The diff's cursor stops, top to bottom: comments whose line has left the diff,
     /// then each row followed by the comments that end on it. An open editor sits
@@ -117,18 +159,21 @@ struct DiffReviewPanel: View {
             header
             Divider()
             content
+                .overlay(alignment: .top) { if isFinderOpen { finder } }
             Divider()
             statusBar
         }
         .background(Color.appSurface)
-        .background(ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken, enabled: draft == nil,
+        .background(ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
+                                     enabled: draft == nil && prompt == nil,
                                      onKey: handle).frame(width: 0, height: 0))
         .onAppear {
             if snapshot == nil { model.loadDiffReview(sessionId) }
             syncSelection()
         }
         .onChange(of: snapshot) { _, _ in syncSelection() }
-        .onChange(of: draft == nil) { _, closed in if closed { keyToken &+= 1 } }
+        .onChange(of: draft == nil && prompt == nil) { _, closed in if closed { keyToken &+= 1 } }
+        .onChange(of: promptText) { _, _ in promptTextChanged() }
         .perfTrackBody()
     }
 
@@ -357,6 +402,7 @@ struct DiffReviewPanel: View {
         let selected = selectedRows(list, positions: positions)
         let byId = Dictionary(fileComments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let commentedKeys = Set(fileComments.map(\.endKey))
+        let pattern = highlightPattern
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -368,7 +414,8 @@ struct DiffReviewPanel: View {
                                 generation: rf.generation, index: i, row: row, text: rf.text[i],
                                 isCursor: cursor == item && focus == .diff,
                                 isSelected: selected.contains(i),
-                                hasComment: row.line.map { commentedKeys.contains(reviewLineKey($0)) } ?? false)
+                                hasComment: row.line.map { commentedKeys.contains(reviewLineKey($0)) } ?? false,
+                                highlight: pattern.flatMap { reviewRowMatches(row, pattern: $0) ? $0 : nil })
                                 .equatable()
                                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(dragSpace)) }
                                     action: { frames.set(i, $0) }
@@ -398,6 +445,13 @@ struct DiffReviewPanel: View {
             // A fresh scroll position per file: gt lands at the top of the next one.
             .id(rf.path)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+            // A new file's scroll view is born with its cursor already set (a grep hit
+            // deep in the file), so there is no change to see: center it on arrival.
+            .onAppear {
+                guard centerNextScroll, let item = cursor else { return }
+                centerNextScroll = false
+                DispatchQueue.main.async { proxy.scrollTo(item, anchor: .center) }
+            }
             .onChange(of: cursor) { _, item in
                 guard let item else { return }
                 if centerNextScroll {
@@ -473,8 +527,19 @@ struct DiffReviewPanel: View {
                     .foregroundStyle(notice.isError ? Color.red : .secondary)
                     .lineLimit(1).truncationMode(.tail)
             }
+            if case .search(let backward) = prompt {
+                HStack(spacing: 2) {
+                    Text(backward ? "?" : "/").font(.system(size: 12, design: .monospaced))
+                    ReviewPromptField(
+                        text: $promptText, placeholder: "search this file", focusToken: promptSerial,
+                        onSubmit: acceptPrompt, onCancel: cancelPrompt, onMove: { _ in })
+                        .frame(minWidth: 160, maxWidth: 360)
+                }
+            }
             Spacer(minLength: 8)
-            Text("gcc comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ␣w send · ␣n tree · q close")
+            Text(prompt == nil
+                 ? "gcc comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · ␣w send · ␣n tree · q close"
+                 : "⏎ accept · esc cancel")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
         }
@@ -484,12 +549,15 @@ struct DiffReviewPanel: View {
 
     private var modeName: String {
         if draft != nil { return "INSERT" }
+        if case .search = prompt { return "SEARCH" }
+        if prompt != nil { return "FIND" }
         if focus == .tree { return "TREE" }
         return isVisual ? "VISUAL" : "NORMAL"
     }
 
     private var modeColor: Color {
         if draft != nil { return .green }
+        if prompt != nil { return .purple }
         if focus == .tree { return .blue }
         return isVisual ? .orange : .secondary
     }
@@ -514,6 +582,14 @@ struct DiffReviewPanel: View {
     /// After a re-render: on the same file, keep the cursor on the same line (found
     /// again by its line key); on a new file, start at its first code line.
     private func restoreCursor(after previous: RenderedReviewFile?, in now: RenderedReviewFile) {
+        if let jump = pendingJump, jump.path == now.path, !now.rows.isEmpty {
+            pendingJump = nil
+            anchor = nil
+            draft = nil
+            centerNextScroll = true
+            cursor = .row(min(jump.row, now.rows.count - 1))
+            return
+        }
         if let previous, previous.path == now.path {
             if case .row(let i)? = cursor, previous.rows.indices.contains(i) {
                 if let line = previous.rows[i].line,
@@ -591,8 +667,22 @@ struct DiffReviewPanel: View {
             if key == .escape { cancelDraft() }
             return true
         }
+        guard prompt == nil else {
+            if key == .escape { cancelPrompt() }
+            return true
+        }
         guard let command = parser.feed(key, visual: isVisual && focus == .diff) else { return true }
         switch command {
+        case .findFiles:
+            openPrompt(.files)
+        case .findText:
+            openPrompt(.text)
+        case .searchForward, .searchBackward:
+            focus = .diff
+            openPrompt(.search(backward: command == .searchBackward))
+        case .searchNext, .searchPrev:
+            focus = .diff
+            searchStep(next: command == .searchNext)
         case .send:
             model.sendDiffReview(sessionId)
         case .toggleTree:
@@ -663,10 +753,12 @@ struct DiffReviewPanel: View {
         case .deleteComment:
             deleteUnderCursor(list, at: at)
         case .escape:
+            if anchor == nil { searchHighlighted = false }
             anchor = nil
         case .close:
             model.closeDiffReview()
-        case .left, .right, .send, .toggleTree, .focusTree, .focusDiff, .refresh:
+        case .left, .right, .send, .toggleTree, .focusTree, .focusDiff, .refresh,
+             .findFiles, .findText, .searchForward, .searchBackward, .searchNext, .searchPrev:
             break
         }
     }
@@ -753,6 +845,245 @@ struct DiffReviewPanel: View {
         if let d = draft, d.editId == nil { return Set(min(d.from, d.to)...max(d.from, d.to)) }
         guard let anchor, let cursor, let a = positions[anchor], let c = positions[cursor] else { return [] }
         return Set(list[min(a, c)...max(a, c)].compactMap { if case .row(let i) = $0 { return i } else { return nil } })
+    }
+
+    // MARK: - Finders and search
+
+    /// The picker over the diff: a query field, then the ranked files or grep hits.
+    /// ⏎ opens the highlighted one; ↑↓ ⌃N/⌃P Tab move; Esc (or a click outside) cancels.
+    private var finder: some View {
+        let isFiles = prompt == .files
+        let count = isFiles ? fileHits.count : grepHits.count
+        return ZStack(alignment: .top) {
+            Color.black.opacity(0.12)
+                .contentShape(Rectangle())
+                .onTapGesture { cancelPrompt() }
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: isFiles ? "doc.text.magnifyingglass" : "text.magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    ReviewPromptField(
+                        text: $promptText,
+                        placeholder: isFiles ? "Find a changed file" : "Grep every changed line",
+                        focusToken: promptSerial,
+                        onSubmit: acceptPrompt, onCancel: cancelPrompt, onMove: movePicker)
+                    Text(isFiles || !promptText.isEmpty ? "\(count)" : "")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 8)
+                Divider()
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            if isFiles {
+                                ForEach(Array(fileHits.enumerated()), id: \.element.id) { i, hit in
+                                    fileHitRow(hit, isCurrent: i == pickerAt)
+                                        .id(i)
+                                        .onTapGesture { pickerAt = i; acceptPrompt() }
+                                }
+                            } else {
+                                ForEach(Array(grepHits.enumerated()), id: \.element.id) { i, hit in
+                                    grepHitRow(hit, isCurrent: i == pickerAt)
+                                        .id(i)
+                                        .onTapGesture { pickerAt = i; acceptPrompt() }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(height: min(420, CGFloat(count) * 22 + 8))
+                    .onChange(of: pickerAt) { _, at in proxy.scrollTo(at) }
+                }
+                if count == 0 {
+                    Text(isFiles ? "No changed file matches." : promptText.isEmpty
+                         ? "Type to search the text of every changed file." : "No changed line matches.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .padding(10)
+                }
+                Divider()
+                Text("⏎ open · ↑↓ ⌃N/⌃P move · esc cancel")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+            }
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.appPanelElevated))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.appHairline(0.2)))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+            .frame(maxWidth: 820)
+            .padding(.horizontal, 40)
+            .padding(.top, 24)
+        }
+    }
+
+    private func fileHitRow(_ hit: ReviewFileHit, isCurrent: Bool) -> some View {
+        let f = hit.file
+        let comments = allComments.filter { $0.path == f.path }.count
+        return HStack(spacing: 6) {
+            Text(statusLetter(f.status))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(statusColor(f.status))
+                .frame(width: 10)
+            Text(reviewHighlighted(f.path, hit.ranges, foreground: .accentColor))
+                .font(.system(size: 12, design: .monospaced))
+                .lineLimit(1).truncationMode(.head)
+            Spacer(minLength: 6)
+            if comments > 0 {
+                Text("●\(comments)").font(.system(size: 10)).foregroundStyle(Color.accentColor)
+            }
+            Text("+\(f.additions)").font(.system(size: 10)).foregroundStyle(VimSyntaxPalette.diffAdd)
+            Text("−\(f.deletions)").font(.system(size: 10)).foregroundStyle(VimSyntaxPalette.diffRemove)
+        }
+        .pickerRow(isCurrent: isCurrent)
+    }
+
+    private func grepHitRow(_ hit: ReviewGrepHit, isCurrent: Bool) -> some View {
+        // Drop the indent so the match is not pushed off the end of the row.
+        let lead = hit.line.text.prefix { $0 == " " }.count
+        let text = String(hit.line.text.dropFirst(lead))
+        let ranges = hit.ranges.map { ($0.lowerBound - lead)..<($0.upperBound - lead) }
+        return HStack(spacing: 6) {
+            Text(hit.location)
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.head)
+                .frame(maxWidth: 300, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+            Text(hit.line.kind == .insert ? "+" : hit.line.kind == .delete ? "-" : " ")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(hit.line.kind == .insert ? VimSyntaxPalette.diffAdd
+                                 : hit.line.kind == .delete ? VimSyntaxPalette.diffRemove : .secondary)
+            Text(reviewHighlighted(text, ranges, background: ReviewRowView.matchColor))
+                .font(.system(size: 12, design: .monospaced))
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .pickerRow(isCurrent: isCurrent)
+    }
+
+    private func openPrompt(_ kind: Prompt) {
+        parser.reset()
+        promptSerial &+= 1
+        pickerAt = 0
+        searchOrigin = nil
+        switch kind {
+        case .files: fileHits = reviewFileFinder(files, query: "")
+        case .text: grepIndex = reviewGrepIndex(files); grepHits = []
+        case .search: searchOrigin = cursor
+        }
+        promptText = ""
+        prompt = kind
+    }
+
+    private func promptTextChanged() {
+        pickerAt = 0
+        switch prompt {
+        case .files: fileHits = reviewFileFinder(files, query: promptText)
+        case .text: grepHits = reviewGrep(grepIndex, query: promptText)
+        case .search(let backward):
+            // Incremental, like vim's incsearch: every keystroke searches from where
+            // `/` was typed, so deleting a character walks back.
+            cursor = searchOrigin
+            guard !promptText.isEmpty, let rf = rendered,
+                  let hit = reviewSearch(rf.rows, pattern: promptText, from: cursorRow(), forward: !backward)
+            else { return }
+            centerNextScroll = true
+            cursor = .row(hit.row)
+        case nil: break
+        }
+    }
+
+    private func movePicker(_ by: Int) {
+        let count = prompt == .files ? fileHits.count : grepHits.count
+        pickerAt = min(max(0, count - 1), max(0, pickerAt + by))
+    }
+
+    private func acceptPrompt() {
+        let kind = prompt
+        let text = promptText
+        let fileHit = fileHits.indices.contains(pickerAt) ? fileHits[pickerAt] : nil
+        let grepHit = grepHits.indices.contains(pickerAt) ? grepHits[pickerAt] : nil
+        closePrompt()
+        switch kind {
+        case .files:
+            if let fileHit { openFile(fileHit.file.path) }
+        case .text:
+            if let grepHit { jump(to: grepHit, query: text) }
+        case .search(let backward):
+            guard !text.isEmpty else { return }
+            search = Search(pattern: text, backward: backward)
+            searchHighlighted = true
+            let found = rendered.map { $0.rows.contains { reviewRowMatches($0, pattern: text) } } ?? false
+            review.say(found ? "\(backward ? "?" : "/")\(text)" : "E486: Pattern not found: \(text)",
+                       isError: !found, in: sessionId)
+        case nil: break
+        }
+    }
+
+    private func cancelPrompt() {
+        if case .search = prompt, let origin = searchOrigin { cursor = origin }
+        closePrompt()
+    }
+
+    private func closePrompt() {
+        prompt = nil
+        promptText = ""
+        searchOrigin = nil
+        grepIndex = []
+        grepHits = []
+        fileHits = []
+    }
+
+    /// Open a grep hit's file with the cursor centered on its row. The query becomes
+    /// the search, so n/N step through the rest of that file's matches.
+    private func jump(to hit: ReviewGrepHit, query: String) {
+        search = Search(pattern: query, backward: false)
+        searchHighlighted = true
+        anchor = nil
+        if hit.path == selectedPath, let rf = rendered, rf.path == hit.path, rf.rows.indices.contains(hit.row) {
+            focus = .diff
+            centerNextScroll = true
+            cursor = .row(hit.row)
+            return
+        }
+        pendingJump = Jump(path: hit.path, row: hit.row)
+        openFile(hit.path)
+    }
+
+    /// n / N: the last search's next match, in its direction (N reverses it).
+    private func searchStep(next: Bool) {
+        guard let search else {
+            review.say("E35: No previous regular expression", isError: true, in: sessionId)
+            return
+        }
+        searchHighlighted = true
+        let forward = search.backward ? !next : next
+        guard let rf = rendered,
+              let hit = reviewSearch(rf.rows, pattern: search.pattern, from: cursorRow(), forward: forward) else {
+            review.say("E486: Pattern not found: \(search.pattern)", isError: true, in: sessionId)
+            return
+        }
+        if hit.wrapped {
+            review.say("search hit \(forward ? "BOTTOM, continuing at TOP" : "TOP, continuing at BOTTOM")",
+                       isError: true, in: sessionId)
+        } else {
+            review.say("\(search.backward ? "?" : "/")\(search.pattern)", in: sessionId)
+        }
+        centerNextScroll = true
+        cursor = .row(hit.row)
+    }
+
+    /// The row a search starts from: the cursor's, or for a comment the row it hangs
+    /// from; -1 (before the top) with no cursor.
+    private func cursorRow() -> Int {
+        switch cursor {
+        case .row(let i)?: return i
+        case .comment?, .draft?:
+            let list = items
+            guard let at = cursor.flatMap({ list.firstIndex(of: $0) }) else { return -1 }
+            for item in list[..<at].reversed() { if case .row(let i) = item { return i } }
+            return -1
+        case nil: return -1
+        }
     }
 
     // MARK: - Comments
@@ -934,13 +1265,17 @@ private struct ReviewRowView: View, Equatable {
     let isCursor: Bool
     let isSelected: Bool
     let hasComment: Bool
+    /// The search pattern this row matches, highlighted in its text; nil when none.
+    let highlight: String?
+
+    static let matchColor = Color.yellow.opacity(0.38)
 
     /// Where code starts — comment boxes and the editor line up with it.
     static let codeInset: CGFloat = 4 + 44 + 44 + 14 + 14
 
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.generation == b.generation && a.index == b.index && a.isCursor == b.isCursor
-            && a.isSelected == b.isSelected && a.hasComment == b.hasComment
+            && a.isSelected == b.isSelected && a.hasComment == b.hasComment && a.highlight == b.highlight
     }
 
     var body: some View {
@@ -975,7 +1310,8 @@ private struct ReviewRowView: View, Equatable {
                     .font(.system(size: 12.5, design: .monospaced))
                     .foregroundStyle(markerColor(line.kind))
                     .frame(width: 14, alignment: .leading)
-                Text(text)
+                Text(highlight.map { reviewHighlighted(text, reviewSmartcaseRanges($0, in: String(text.characters)),
+                                                       background: Self.matchColor) } ?? text)
                     .font(.system(size: 12.5, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1072,6 +1408,44 @@ private struct ReviewCommentBox: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onEdit)
         .onTapGesture(perform: onSelect)
+    }
+}
+
+// MARK: - Highlighting
+
+/// `text` with the character-offset `ranges` coloured — a match in a diff row or a
+/// picker result.
+private func reviewHighlighted(_ text: AttributedString, _ ranges: [Range<Int>],
+                               foreground: Color? = nil, background: Color? = nil) -> AttributedString {
+    var out = text
+    let chars = out.characters
+    for r in ranges where r.lowerBound >= 0 {
+        guard let lo = chars.index(chars.startIndex, offsetBy: r.lowerBound, limitedBy: chars.endIndex),
+              let hi = chars.index(lo, offsetBy: r.count, limitedBy: chars.endIndex) else { continue }
+        if let foreground {
+            out[lo..<hi].foregroundColor = foreground
+            out[lo..<hi].inlinePresentationIntent = .stronglyEmphasized
+        }
+        if let background { out[lo..<hi].backgroundColor = background }
+    }
+    return out
+}
+
+private func reviewHighlighted(_ text: String, _ ranges: [Range<Int>],
+                               foreground: Color? = nil, background: Color? = nil) -> AttributedString {
+    reviewHighlighted(AttributedString(text), ranges, foreground: foreground, background: background)
+}
+
+private extension View {
+    /// A finder result row; the current one is tinted and barred like the tree cursor.
+    func pickerRow(isCurrent: Bool) -> some View {
+        padding(.horizontal, 10).padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isCurrent ? Color.appSelection : Color.clear)
+            .overlay(alignment: .leading) {
+                if isCurrent { Rectangle().fill(Color.accentColor).frame(width: 2) }
+            }
+            .contentShape(Rectangle())
     }
 }
 
@@ -1240,6 +1614,86 @@ private struct ReviewDraftEditor: NSViewRepresentable {
                 view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
             } else if attempts > 0 {
                 focus(view, attempts: attempts - 1)
+            }
+        }
+    }
+}
+
+/// A finder's query field (and `/`'s): ⏎ accepts, Esc cancels, ↑↓ ⌃N/⌃P Tab/⇧Tab move
+/// the picker, and Backspace on an empty query cancels, as in the plugin. Takes the
+/// keyboard whenever `focusToken` changes; the panel's catcher takes it back on close.
+private struct ReviewPromptField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let focusToken: Int
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    let onMove: (Int) -> Void
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: ReviewPromptField
+        var focusedToken: Int?
+        init(_ parent: ReviewPromptField) { self.parent = parent }
+
+        func controlTextDidChange(_ note: Notification) {
+            guard let field = note.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onSubmit()
+            case #selector(NSResponder.cancelOperation(_:)):
+                parent.onCancel()
+            // ⌃N / ⌃P arrive as these through the standard key bindings.
+            case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.insertTab(_:)):
+                parent.onMove(1)
+            case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.insertBacktab(_:)):
+                parent.onMove(-1)
+            case #selector(NSResponder.deleteBackward(_:)) where textView.string.isEmpty:
+                parent.onCancel()
+            default:
+                return false
+            }
+            return true
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.delegate = context.coordinator
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        field.placeholderString = placeholder
+        field.cell?.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.stringValue = text
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text { field.stringValue = text }
+        field.placeholderString = placeholder
+        if context.coordinator.focusedToken != focusToken {
+            context.coordinator.focusedToken = focusToken
+            Self.focus(field, attempts: 20)
+        }
+    }
+
+    /// Make `field` first responder once it is in a window, as `ReviewDraftEditor` does.
+    private static func focus(_ field: NSTextField, attempts: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(attempts == 20 ? 0 : 50)) { [weak field] in
+            guard let field else { return }
+            if let window = field.window {
+                window.makeFirstResponder(field)
+            } else if attempts > 0 {
+                focus(field, attempts: attempts - 1)
             }
         }
     }

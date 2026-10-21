@@ -198,6 +198,27 @@ final class LineReviewTests: XCTestCase {
         XCTAssertEqual(run(chars("V")), [.toggleVisual])
     }
 
+    func testFinderKeys() {
+        XCTAssertEqual(run([.ctrl("p")]), [.findFiles])
+        XCTAssertEqual(run(chars(" ff")), [.findFiles])
+        XCTAssertEqual(run(chars(" fg")), [.findText])
+        XCTAssertEqual(run(chars(" /")), [.findText])
+        XCTAssertEqual(run(chars(" ff"), visual: true), [.findFiles])
+        XCTAssertEqual(run(chars("/?nN")), [.searchForward, .searchBackward, .searchNext, .searchPrev])
+        XCTAssertEqual(run(chars(" n")), [.toggleTree], "␣n is still the tree, not a search step")
+    }
+
+    func testLeaderFWaitsForItsSecondKey() {
+        var p = ReviewKeyParser()
+        XCTAssertNil(p.feed(.char(" "), visual: false))
+        XCTAssertNil(p.feed(.char("f"), visual: false))
+        XCTAssertEqual(p.pending, " f")
+        XCTAssertEqual(p.feed(.char("g"), visual: false), .findText)
+        XCTAssertEqual(p.pending, "")
+        XCTAssertEqual(run(chars(" fz")), [], "a broken ␣f sequence is dropped")
+        XCTAssertEqual(run(chars(" fzj")), [.down(1)])
+    }
+
     func testABrokenSequenceIsDroppedAndEscapeClearsPending() {
         XCTAssertEqual(run(chars("gz")), [])
         XCTAssertEqual(run(chars("gzj")), [.down(1)])

@@ -246,6 +246,14 @@ public enum ReviewKeyCommand: Sendable, Equatable {
     case focusTree, focusDiff
     case refresh
     case close
+    /// ⌃P / `␣ff`: the fuzzy picker over the review's changed files.
+    case findFiles
+    /// `␣fg` / `␣/`: live grep over every changed line of the review.
+    case findText
+    /// `/` and `?`: search the open file forward / backward.
+    case searchForward, searchBackward
+    /// `n` / `N`: the next / previous match of the last search, in its direction.
+    case searchNext, searchPrev
 }
 
 /// A key the parser reads: a character as typed (`j`, `G`, ` `, `]`) or a named key.
@@ -255,8 +263,8 @@ public enum ReviewKey: Sendable, Equatable {
     case enter, escape, up, down, left, right, pageUp, pageDown, home, end
 }
 
-/// vim-style counts and multi-key sequences (`3j`, `gg`, `]c`, `gcc`, `<space>w`).
-/// Space is the leader.
+/// vim-style counts and multi-key sequences (`3j`, `gg`, `]c`, `gcc`, `<space>w`,
+/// `<space>ff`). Space is the leader; `␣f` waits for its second key.
 public struct ReviewKeyParser: Sendable {
     /// What has been typed toward a sequence so far, count digits included. Shown in
     /// the status bar like vim's `showcmd`.
@@ -265,8 +273,9 @@ public struct ReviewKeyParser: Sendable {
     public init() {}
 
     private static let normalSeqs = ["gg", "gt", "gT", "gcc", "]c", "[c", "]d", "[d", "dd",
-                                     " w", " n", " e"]
-    private static let visualSeqs = ["gg", "gc", "]c", "[c", "]d", "[d", " w", " n", " e"]
+                                     " w", " n", " e", " ff", " fg", " /"]
+    private static let visualSeqs = ["gg", "gc", "]c", "[c", "]d", "[d", " w", " n", " e",
+                                     " ff", " fg", " /"]
 
     public mutating func reset() { pending = "" }
 
@@ -287,6 +296,7 @@ public struct ReviewKeyParser: Sendable {
             case "h": return .focusTree
             case "l": return .focusDiff
             case "c", "[": return .escape
+            case "p": return .findFiles
             default: return nil
             }
         case .escape: pending = ""; return .escape
@@ -335,6 +345,8 @@ public struct ReviewKeyParser: Sendable {
         case " w": return .send
         case " n": return .toggleTree
         case " e": return .focusTree
+        case " ff": return .findFiles
+        case " fg", " /": return .findText
         default: return nil
         }
     }
@@ -353,6 +365,10 @@ public struct ReviewKeyParser: Sendable {
         case "x": return .deleteComment
         case "q": return .close
         case "R": return .refresh
+        case "/": return .searchForward
+        case "?": return .searchBackward
+        case "n": return .searchNext
+        case "N": return .searchPrev
         default: return nil
         }
     }

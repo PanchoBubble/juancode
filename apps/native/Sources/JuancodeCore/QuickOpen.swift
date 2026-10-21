@@ -21,13 +21,13 @@ public struct FuzzyMatch: Sendable, Equatable {
     }
 }
 
-/// Case-insensitive subsequence match of `query` in a file `path`, scored, with the
-/// matched offsets. nil when the query is not a subsequence. Greedy left-to-right —
+/// Subsequence match of `query` in a file `path` — case-insensitive unless
+/// `caseSensitive` — scored, with the matched offsets. nil when the query is not a subsequence. Greedy left-to-right —
 /// cheap and predictable, not an optimal alignment. Scoring favours what an editor's
 /// Quick Open wants: matches in the filename over its directory, prefix and
 /// word-boundary hits (`/ - _ . space`), and consecutive runs.
-public func fuzzyMatchPath(query: String, in path: String) -> FuzzyMatch? {
-    let q = Array(query.lowercased())
+public func fuzzyMatchPath(query: String, in path: String, caseSensitive: Bool = false) -> FuzzyMatch? {
+    let q = Array(caseSensitive ? query : query.lowercased())
     if q.isEmpty { return FuzzyMatch(score: 0, ranges: []) }
     let t = Array(path)
     let boundaries: Set<Character> = ["/", "-", "_", ".", " "]
@@ -42,7 +42,7 @@ public func fuzzyMatchPath(query: String, in path: String) -> FuzzyMatch? {
     for ch in q {
         var found = false
         while ti < t.count {
-            if Character(t[ti].lowercased()) == ch {
+            if (caseSensitive ? t[ti] : Character(t[ti].lowercased())) == ch {
                 score += 1
                 if ti == prevMatch + 1 { score += 5 }
                 if ti == 0 { score += 8 } else if boundaries.contains(t[ti - 1]) { score += 6 }
