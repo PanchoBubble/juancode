@@ -21,6 +21,8 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
   let dir: string;
   let wss: WebSocketServer | null = null;
   let received: Record<string, unknown>[];
+  /** What the mock server's serverInfo advertises. */
+  let capabilities: string[];
   const prevDir = process.env.JUANCODE_ORACLE_DIR;
   const prevApi = process.env.JUANCODE_API;
 
@@ -32,7 +34,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     wss.on("connection", (sock: WsSocket) => {
       // Mirror the real server: serverInfo greets before anything else, and the
       // client must skip it while waiting for the create's outcome.
-      sock.send(JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: [] }));
+      sock.send(JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities }));
       sock.on("message", (data) => {
         const msg = JSON.parse(data.toString()) as Record<string, unknown>;
         received.push(msg);
@@ -46,6 +48,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
 
   beforeEach(() => {
     received = [];
+    capabilities = [];
     dir = mkdtempSync(join(tmpdir(), "oracle-dispatch-test-"));
     process.env.JUANCODE_ORACLE_DIR = dir;
     process.env.JUANCODE_API = "http://127.0.0.1:1"; // nothing listening by default
@@ -107,6 +110,51 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(frame.cols).toBeUndefined();
     expect(frame.rows).toBeUndefined();
     expect(String(frame.dispatchId)).toMatch(UUID_RE);
+    expect(frame).not.toHaveProperty("fromSessionId");
+  });
+
+  it("names the dispatching session to a core that advertises chainInherit", async () => {
+    capabilities = ["chains", "chainInherit"];
+    await startServer((msg, sock) => {
+      if (msg.type !== "create") return;
+      sock.send(JSON.stringify({ type: "created", session: { id: "s-1" } }));
+    });
+
+    const out = await dispatch({ project: "/abs/repo", prompt: "x", fromSessionId: "oracle-1" });
+
+    expect(out.sessionId).toBe("s-1");
+    expect(received).toHaveLength(1);
+    expect(received[0]!.fromSessionId).toBe("oracle-1");
+  });
+
+  it("leaves the source off for a core without chainInherit, and still dispatches", async () => {
+    capabilities = ["chains"];
+    await startServer((msg, sock) => {
+      if (msg.type !== "create") return;
+      sock.send(JSON.stringify({ type: "created", session: { id: "s-1" } }));
+    });
+
+    const out = await dispatch({ project: "/abs/repo", prompt: "x", fromSessionId: "oracle-1" });
+
+    expect(out.sessionId).toBe("s-1");
+    expect(received).toHaveLength(1);
+    expect(received[0]).not.toHaveProperty("fromSessionId");
+  });
+
+  it("carries the source on the mailbox line when the dispatch is queued", async () => {
+    const out = await dispatch({ project: "/abs/repo", prompt: "later", fromSessionId: "o-1" });
+
+    expect(out.queued).toBe(true);
+    expect(mailboxLines()).toEqual([
+      {
+        project: "/abs/repo",
+        prompt: "later",
+        provider: "claude",
+        worktree: false,
+        dispatchId: out.dispatchId,
+        fromSessionId: "o-1",
+      },
+    ]);
   });
 
   it("surfaces a server-side error verbatim and does NOT queue", async () => {

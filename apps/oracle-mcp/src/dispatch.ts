@@ -26,7 +26,7 @@ import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
-import { nativeApiBase, nativeWsUrl, oracleDir } from "./oracle.ts";
+import { nativeApiBase, nativeWsUrl, oracleDir, serverInfoCapabilities } from "./oracle.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
 import { recordDispatch, type TriggerOrigin } from "./dispatch-registry.ts";
 import {
@@ -66,6 +66,10 @@ export interface DispatchRequest {
   idempotencyKey?: string | null;
   /** Skip both guards. For "yes, I really do want a second session on this". */
   force?: boolean;
+  /** The session that asked for this one — the dispatching Oracle. The new session
+   *  joins that session's chain (see dispatch-origin.ts). Sent on `create` only to a
+   *  core advertising `chainInherit`; not part of the request's fingerprint. */
+  fromSessionId?: string | null;
 }
 
 export interface DispatchOutcome {
@@ -146,6 +150,7 @@ export async function appendDispatch(opts: DispatchRequest, dispatchId: string):
       provider: opts.provider ?? "claude",
       worktree: opts.worktree ?? false,
       dispatchId,
+      ...(opts.fromSessionId ? { fromSessionId: opts.fromSessionId } : {}),
     }) + "\n";
   await appendFile(dispatchFile(), line, "utf8");
 }
@@ -215,8 +220,10 @@ function wsCreate(
         connected,
       }),
     );
-    sock.on("open", () => {
-      connected = true;
+    // Without a source the create goes out on open, as it always has. With one it
+    // waits for this socket's `serverInfo`, whose capabilities say whether the core
+    // knows the field; the ack timeout above still bounds a core that never greets.
+    const sendCreate = (inherit: boolean) =>
       sock.send(
         JSON.stringify({
           type: "create",
@@ -230,10 +237,25 @@ function wsCreate(
           skipPermissions: true,
           isolateWorktree: opts.worktree ?? false,
           dispatchId,
+          ...(inherit ? { fromSessionId: opts.fromSessionId } : {}),
         }),
       );
+    let sent = false;
+    sock.on("open", () => {
+      connected = true;
+      if (!opts.fromSessionId) {
+        sent = true;
+        sendCreate(false);
+      }
     });
     sock.on("message", (data) => {
+      if (!sent) {
+        const capabilities = serverInfoCapabilities(data.toString());
+        if (capabilities === null) return;
+        sent = true;
+        sendCreate(capabilities.includes("chainInherit"));
+        return;
+      }
       let msg: Record<string, unknown>;
       try {
         msg = JSON.parse(data.toString()) as Record<string, unknown>;

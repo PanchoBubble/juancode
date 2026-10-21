@@ -24,6 +24,7 @@ import { listSessions } from "./oracle.ts";
 import {
   parseSessionList,
   projectName,
+  resolveSessionRef,
   stateIcon,
   stateLabel,
   type LiveActivity,
@@ -264,14 +265,7 @@ export async function resolveMemberRef(
   if (!raw) throw new Error("ref is empty.");
   if (kind === "session") {
     const sessions = await deps.sessions().catch(() => null);
-    if (!sessions) return raw;
-    if (sessions.some((s) => s.id === raw)) return raw;
-    const prefixed = sessions.filter((s) => s.id.startsWith(raw));
-    if (prefixed.length === 1) return prefixed[0]!.id;
-    if (prefixed.length > 1) {
-      throw new Error(`"${raw}" matches ${prefixed.length} sessions; give more of the id.`);
-    }
-    return raw;
+    return sessions ? resolveSessionRef(sessions, raw) : raw;
   }
   if (kind === "tracked_pr") {
     const number = raw.replace(/^#/, "");

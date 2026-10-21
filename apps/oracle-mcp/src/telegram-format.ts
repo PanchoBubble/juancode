@@ -50,6 +50,19 @@ export function parseSessionList(raw: unknown): SessionSummary[] {
   return out;
 }
 
+/** The session `raw` names: an exact id, else a unique id prefix. A prefix that
+ *  matches several is an error; one that matches none is returned as written, so the
+ *  core gives its own answer for an id this list does not have. */
+export function resolveSessionRef(sessions: SessionSummary[], raw: string): string {
+  if (sessions.some((s) => s.id === raw)) return raw;
+  const prefixed = sessions.filter((s) => s.id.startsWith(raw));
+  if (prefixed.length === 1) return prefixed[0]!.id;
+  if (prefixed.length > 1) {
+    throw new Error(`"${raw}" matches ${prefixed.length} sessions; give more of the id.`);
+  }
+  return raw;
+}
+
 /** Display order: non-archived only, running before exited, most recent first. */
 export function orderSessions(list: SessionSummary[]): SessionSummary[] {
   return list

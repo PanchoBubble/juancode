@@ -51,6 +51,7 @@ import {
   UnservedRead,
 } from "./session-reads.ts";
 import { dispatch, DispatchConflictError } from "./dispatch.ts";
+import { resolveDispatchOrigin } from "./dispatch-origin.ts";
 import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
@@ -165,11 +166,18 @@ function buildServer(): McpServer {
           .describe(
             "Dispatch even when an identical request or the same ticket already has a live session (default: false)",
           ),
+        fromSessionId: z
+          .string()
+          .optional()
+          .describe(
+            "Your own juancode session id (or a unique prefix), when you know it. The new session joins your chain. Omitted, the dispatching Oracle is worked out from the live sessions.",
+          ),
       },
     },
     async (args) => {
       try {
-        const outcome = await dispatch(args);
+        const fromSessionId = await resolveDispatchOrigin(args.fromSessionId);
+        const outcome = await dispatch({ ...args, fromSessionId });
         return ok(`${outcome.message} ${outcome.advice} (dispatchId: ${outcome.dispatchId})`);
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
@@ -714,8 +722,17 @@ app.post("/api/heavy/cancel", (req: Request, res: Response) => {
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {
   try {
-    const { project, prompt, provider, worktree, telegramChatId, ticket, idempotencyKey, force } =
-      req.body ?? {};
+    const {
+      project,
+      prompt,
+      provider,
+      worktree,
+      telegramChatId,
+      ticket,
+      idempotencyKey,
+      force,
+      fromSessionId,
+    } = req.body ?? {};
     if (typeof project !== "string" || typeof prompt !== "string" || !project || !prompt) {
       res.status(400).send("project and prompt are required");
       return;
@@ -731,6 +748,9 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       ticket: typeof ticket === "string" && ticket ? ticket : null,
       idempotencyKey: typeof idempotencyKey === "string" && idempotencyKey ? idempotencyKey : null,
       force: force === true,
+      // Only as given: an HTTP caller is the phone or a script, not an Oracle session,
+      // so there is no dispatching session to work out.
+      fromSessionId: typeof fromSessionId === "string" && fromSessionId ? fromSessionId : null,
     });
     res.json({ ok: true, ...outcome });
   } catch (e) {
