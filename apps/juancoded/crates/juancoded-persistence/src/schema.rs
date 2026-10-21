@@ -301,6 +301,12 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX chain_members_by_chain ON chain_members (chain_slug, added_at);
     "#,
+    // 13: whether a ticket member (beads, Linear) is done, as a client last reported
+    // it. The daemon cannot look either kind up, and a chain only auto-closes once
+    // every member is finished, so the report has to outlive a restart.
+    r#"
+    ALTER TABLE chain_members ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

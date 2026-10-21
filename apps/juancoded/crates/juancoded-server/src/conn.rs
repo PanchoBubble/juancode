@@ -2049,10 +2049,11 @@ fn handle_client_message(
             slug,
             title,
             url,
+            done,
             request_id,
         } => {
             let outcome = chains.map_or(Err("chain-unavailable"), |c| {
-                c.set_member(kind, &ref_id, slug.as_deref(), title, url)
+                c.set_member_reporting(kind, &ref_id, slug.as_deref(), title, url, done)
             });
             outbound.push(chain_result("setMember", slug, request_id, outcome));
         }
@@ -3706,6 +3707,7 @@ mod tests {
             slug: Some(slug.into()),
             title: None,
             url: None,
+            done: None,
             request_id: None,
         };
         assert_eq!(
@@ -3971,5 +3973,41 @@ mod tests {
         }
         let _ = wire.sessions().kill(&from);
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn the_last_ticket_reported_done_closes_its_chain_after_the_report_is_published() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        wire.step(ClientMessage::SubscribeChains, &mut fanout);
+        wire.step(
+            ClientMessage::CreateChain {
+                slug: "billing".into(),
+                request_id: None,
+            },
+            &mut fanout,
+        );
+        let ticket = |done: Option<bool>| ClientMessage::SetChainMember {
+            kind: ChainMemberKind::Linear,
+            ref_id: "ENG-1".into(),
+            slug: Some("billing".into()),
+            title: None,
+            url: None,
+            done,
+            request_id: None,
+        };
+        assert_eq!(
+            chain_frames(&wire.step(ticket(None), &mut fanout)),
+            ["result:setMember:ok", "chain:billing:active:1"]
+        );
+        assert_eq!(
+            chain_frames(&wire.step(ticket(Some(true)), &mut fanout)),
+            [
+                "result:setMember:ok",
+                "chain:billing:active:1",
+                "chain:billing:inactive:1"
+            ],
+            "the report lands, then the close it caused"
+        );
     }
 }

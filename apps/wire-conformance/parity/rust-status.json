@@ -3,7 +3,7 @@
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
   "measuredAt": "2026-10-21",
-  "specRevision": "1.21.0",
+  "specRevision": "1.22.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -36,7 +36,9 @@
     "heavyQueue",
     "changes",
     "github",
-    "chains"
+    "chains",
+    "chainInherit",
+    "chainAutoClose"
   ],
   "scenarios": {
     "handshake": {
@@ -270,6 +272,11 @@
       "passes": 3
     },
     "chains": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "chain-auto-close": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

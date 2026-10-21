@@ -245,6 +245,12 @@ pub const CAPABILITIES: &[&str] = &[
     // because a core can keep the book and still drop the hint, and a dispatcher has
     // to know whether to tag the session itself.
     "chainInherit",
+    // Chain auto-close (juancode-dbo.9). Advertised because `setChainMember.done` is
+    // honoured: a ticket reported done counts as finished, and a chain closes itself
+    // when its last unfinished member finishes. A core without it drops `done`, and the
+    // ticket then reads as live forever, which keeps the chain open rather than closing
+    // it on a guess.
+    "chainAutoClose",
 ];
 
 /// One queued occurrence on the wire.
@@ -665,7 +671,9 @@ pub enum ClientMessage {
     },
     /// Put one item in chain `slug`, moving it out of any chain that held it, or take
     /// it out of its chain when `slug` is absent or null. `title`/`url` snapshot an item
-    /// this core cannot look up (a beads or Linear ticket).
+    /// this core cannot look up (a beads or Linear ticket), and `done` is that ticket's
+    /// state as the client last saw it: absent leaves the stored one alone, and it is
+    /// ignored for the kinds this core reads for itself.
     ///
     /// An unknown `kind` is a decode error rather than `Unknown`: a client that sent a
     /// kind this core does not know asked for something specific, and silence would
@@ -676,6 +684,7 @@ pub enum ClientMessage {
         slug: Option<String>,
         title: Option<String>,
         url: Option<String>,
+        done: Option<bool>,
         request_id: Option<String>,
     },
     /// Watch the contribution list: the complete set now, and again on every change,
@@ -974,6 +983,9 @@ struct RawClient {
     r#ref: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    /// A ticket member's reported done-state (juancode-dbo.9, `chainAutoClose`).
+    #[serde(default)]
+    done: Option<bool>,
     #[serde(default)]
     prio: Option<i64>,
     #[serde(default)]
@@ -1295,6 +1307,7 @@ impl ClientMessage {
                 slug: raw.slug,
                 title: raw.title,
                 url: raw.url,
+                done: raw.done,
                 request_id: raw.request_id,
             }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
@@ -2534,6 +2547,7 @@ mod tests {
                     "github",
                     "chains",
                     "chainInherit",
+                    "chainAutoClose",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
@@ -2555,6 +2569,7 @@ mod tests {
                 title: None,
                 url: None,
                 added_at: 3,
+                done: false,
             }],
         };
         assert_eq!(
@@ -2601,9 +2616,17 @@ mod tests {
                 slug: None,
                 title: Some("t".into()),
                 url: None,
+                done: None,
                 request_id: None,
             }
         );
+        let ClientMessage::SetChainMember { done, .. } = ClientMessage::decode(
+            r#"{"type":"setChainMember","kind":"beads","ref":"x-1","slug":"a","done":true}"#,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(done, Some(true));
     }
 
     #[test]

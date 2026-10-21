@@ -320,11 +320,18 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
         tracked.start_if_tracking();
     }
     // A deleted or pruned session leaves its chain here, rather than staying a member
-    // nothing can draw. One sweep per daemon, like everything above.
+    // nothing can draw, and a chain whose last unfinished member just finished closes
+    // itself. One sweep per daemon, like everything above, and one follower of the
+    // watch list, because a merged PR is the other thing that finishes a member.
     let _chains = handles
         .chains
         .as_ref()
         .map(|chains| chains.spawn_session_sweep());
+    let _chain_prs = handles
+        .chains
+        .as_ref()
+        .zip(handles.tracked_prs.as_ref())
+        .map(|(chains, tracked)| chains.spawn_pr_watch(Arc::clone(tracked)));
     // And the third: a session goes dormant because it has been verifiably idle, not
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.

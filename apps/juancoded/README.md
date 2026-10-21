@@ -382,12 +382,13 @@ closedAt, members }`.
   an ordinary session), `tracked_pr`, `beads` or `linear`, and `ref` is the id that
   kind already has: the session id, `TrackedPr::key` (`<cwd>#<number>`), the beads id,
   the Linear identifier. `title`/`url` are the caller's snapshot for the kinds this
-  daemon cannot look up.
+  daemon cannot look up, and so is `done` (see [Auto-close](#auto-close)).
 
 **Storage** (migration 12, `juancoded-persistence/src/chain_store.rs`, service key
 `chain-store` on the same SQLite connection as `store`). `chains(slug PK, state,
 created_at, closed_at)` and `chain_members(kind, ref, chain_slug → chains ON DELETE
-CASCADE, title, url, added_at, UNIQUE(kind, ref))`. The unique index IS the
+CASCADE, title, url, added_at, done, UNIQUE(kind, ref))`, `done` added by migration
+13. The unique index IS the
 one-chain-per-item rule, and the cascade IS "deleting a chain only untags its members".
 
 **Engine** (`juancoded-server/src/chains.rs`, one per daemon on `CoreHandles::chains`).
@@ -403,7 +404,7 @@ the session bus), so a chain never lists a session nothing can draw.
 | --- | --- |
 | `subscribeChains` | the book now, then its changes, until the socket closes |
 | `createChain {slug}` / `closeChain {slug}` / `reopenChain {slug}` / `deleteChain {slug}` | lifecycle |
-| `setChainMember {kind, ref, slug?, title?, url?}` | tag (moving it out of any other chain), or untag when `slug` is absent/null |
+| `setChainMember {kind, ref, slug?, title?, url?, done?}` | tag (moving it out of any other chain), or untag when `slug` is absent/null; `done` is gated by `chainAutoClose` |
 
 Every write takes an optional `requestId` and is answered twice, in this order: a
 `chainResult {requestId?, op, slug?, ok, error?}` to the asker, then the change on the
@@ -456,6 +457,46 @@ entry point opens and leaves it through `AppModel`: `openChain(slug:member:)`,
 tab is the selection itself, so its pane is the ordinary keep-alive pane; a PR or ticket
 tab is a card over it; an Oracle tab shows the Oracle in its dock. The tab decisions
 (landing, stepping, what survives the chain changing) are `ChainTabs` in `JuancodeCore`.
+
+### Auto-close
+
+(juancode-dbo.9, capability `chainAutoClose`.) A chain goes inactive by itself when
+its **last unfinished member finishes**. Finished means, per kind:
+
+| kind | finished when | known how |
+| --- | --- | --- |
+| `session` | exited (and not `dormant` — a session the reaper put to sleep is waiting to be woken), archived, or deleted | the session bus (`Exit`, `Meta`, `Deleted`) |
+| `tracked_pr` | it left the watch list — what a merge or a close does to a watch, and an untrack too | the tracked-PR engine's `List` frames, diffed |
+| `beads`, `linear` | a client reported it `done` | `setChainMember.done`, stored in `chain_members.done` (migration 13) |
+
+**Decision: ticket state is client-reported, not looked up by the daemon.** A beads id
+names no repo, so the daemon would have to guess which `.beads` database to run `bd` in,
+and Linear needs credentials the daemon does not hold (and per the prime directive will
+not be handed). The app and the Oracle already know a ticket's state when they show or
+close it, so they report it on the frame they tag with: `done: true`/`false`, absent to
+keep the stored report, ignored for `session` and `tracked_pr` (the daemon reads those
+itself rather than keep a copy that could drift). A ticket nobody reported reads as
+live, so a core or client without the capability keeps the chain open rather than
+closing it on a guess. On the wire `done` appears on a member only while true.
+Re-tagging an item into the chain it is already in keeps its `addedAt`, so a report
+does not reorder the chain.
+
+**Edge-triggered.** Only a member finishing asks the question — a session exit, an
+archive, a deletion, a PR leaving the watch list, a ticket going from not-done to done
+while in the chain. A join, an untag, a manual reopen and a daemon restart never do.
+So an empty new chain stays active, tagging already-finished work into a chain does not
+close it, and a chain reopened by hand stays open until something in it finishes
+again. Nothing reopens a chain on its own: a reopened ticket or a revived session is a
+person's cue to reopen it. The cost of edge-triggering is that a member finishing while
+the daemon is down (or while the sweep lags the bus) is not seen as finishing; the
+chain then waits for a manual close or for another member to finish.
+
+The close is an ordinary `chain` frame, inactive with `closedAt` stamped, published
+after the frame of the change that caused it. Engine: `Chains::close_if_finished`,
+driven by `spawn_session_sweep` and `spawn_pr_watch`; the rule itself is
+`Chain::all_finished` in `juancoded-core`. Conformance:
+`spec/v1/scenarios/48-chain-auto-close.json` (tickets; sessions and PRs are covered by
+`chains::tests`, since a socket cannot merge a PR).
 
 ## Notifications: the daemon fires one webhook, the Node sidecar keeps Telegram
 

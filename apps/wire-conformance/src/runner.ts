@@ -485,6 +485,12 @@ export function seedVars(
     chainSlug: `conformance-chain-${stamp}`,
     chainSlugB: `conformance-chain-b-${stamp}`,
     chainTicket: `conformance-ticket-${stamp}`,
+    // Auto-close's own chain and tickets, so it never shares an item with the chain
+    // scenario: a ticket left tagged there by a failed attempt would make every tag
+    // here a move, and a move is two frames.
+    chainAutoCloseSlug: `conformance-autoclose-${stamp}`,
+    chainAutoCloseTicketA: `conformance-autoclose-a-${stamp}`,
+    chainAutoCloseTicketB: `conformance-autoclose-b-${stamp}`,
     // Where the fake agent's `SPAWN` records its helper's pid. Fixed per workspace
     // rather than stamped like the ids above, because the AGENT has to write it
     // knowing only its own cwd: an `input` frame carries one literal string, and

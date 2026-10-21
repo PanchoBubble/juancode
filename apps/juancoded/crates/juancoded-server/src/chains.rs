@@ -20,18 +20,41 @@
 //! cascade. This module keeps the rest: a valid slug, a session member that exists, and
 //! the order a mutation and its broadcast happen in — the store is written before
 //! anybody is told, so a client is never shown a chain the next restart would not have.
+//!
+//! ## Auto-close
+//!
+//! A chain closes itself when its last unfinished member finishes: a session exits
+//! (not one the reaper put to sleep, which is waiting to be woken) or is archived or
+//! deleted, a tracked PR leaves the watch list (which is what a merge or a close does
+//! to it), or a client reports a beads or Linear ticket done. The daemon can see the
+//! first two for itself. It cannot see tickets — a beads id names no repo, and Linear
+//! needs credentials the daemon does not hold — so their state is the client's report
+//! on `setChainMember.done`, stored with the member, and a ticket nobody reported reads
+//! as live.
+//!
+//! It is edge-triggered on purpose. Only a member FINISHING asks the question, never a
+//! join, an untag, a reopen or a restart, so a chain that was just created (empty), a
+//! chain somebody tags already-finished work into, and a chain somebody reopened by
+//! hand all stay open until something in them actually finishes. Nothing reopens a
+//! chain on its own either: a ticket reopened or a session revived is a person's cue to
+//! reopen the chain, not the daemon's.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-use juancoded_core::chain::{validate_slug, Chain, ChainMember, ChainMemberKind, ChainState};
-use juancoded_core::model::now_ms;
+use juancoded_core::chain::{
+    validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, MemberStatus,
+};
+use juancoded_core::model::{now_ms, SessionStatus};
 use juancoded_persistence::chain_store::ChainStore;
 use juancoded_state::registry::SessionEvent;
 use juancoded_state::SessionsApi;
+
+use crate::tracked_prs::{TrackedPrChange, TrackedPrs};
 
 /// How far a slow subscriber may fall behind before it loses changes. A loss is
 /// recoverable — the next `subscribeChains` on a reconnect is the whole book — but a
@@ -58,6 +81,10 @@ pub struct Chains {
     /// so two mutations cannot interleave and publish in an order the store did not
     /// apply them in.
     book: Mutex<Vec<Chain>>,
+    /// The keys of the PRs under watch, as the watch list last published them. `None`
+    /// until a watch list is attached — and for good on a daemon without one — and a
+    /// tracked-PR member then reads as live, because "not watched" would be a guess.
+    watched_prs: Mutex<Option<BTreeSet<String>>>,
 }
 
 impl Chains {
@@ -73,6 +100,7 @@ impl Chains {
             store,
             changes: broadcast::channel(CHANGE_BUFFER).0,
             book: Mutex::new(book),
+            watched_prs: Mutex::new(None),
         })
     }
 
@@ -146,6 +174,25 @@ impl Chains {
         title: Option<String>,
         url: Option<String>,
     ) -> Result<(), ChainRefusal> {
+        self.set_member_reporting(kind, ref_id, slug, title, url, None)
+    }
+
+    /// [`Self::set_member`], carrying a ticket's done-state as the client sees it.
+    ///
+    /// `done` is the report for a beads issue or a Linear ticket, the two kinds this
+    /// daemon cannot look up: `None` keeps whatever was reported before (so a re-tag
+    /// that only refreshes a title does not reopen the ticket), and it is ignored for a
+    /// session or a tracked PR, whose state is read live. A ticket reported done while
+    /// it was in this chain unfinished is a member finishing, which may close the chain.
+    pub fn set_member_reporting(
+        &self,
+        kind: ChainMemberKind,
+        ref_id: &str,
+        slug: Option<&str>,
+        title: Option<String>,
+        url: Option<String>,
+        done: Option<bool>,
+    ) -> Result<(), ChainRefusal> {
         if ref_id.trim().is_empty() {
             return Err("chain-member-invalid");
         }
@@ -158,13 +205,24 @@ impl Chains {
         if kind == ChainMemberKind::Session && self.sessions.meta(ref_id).is_none() {
             return Err("chain-member-not-found");
         }
+        let previous = self.member(kind, ref_id);
+        let stays = previous
+            .as_ref()
+            .filter(|(at, _)| at.as_str() == slug)
+            .map(|(_, m)| m);
+        let was_done = previous.as_ref().is_some_and(|(_, m)| m.done);
+        let done = ChainMember::is_reported(kind) && done.unwrap_or(was_done);
         let member = ChainMember {
             kind,
             ref_id: ref_id.to_string(),
             title,
             url,
-            added_at: now_ms(),
+            // Only a move restamps it: a report or a title refresh is not the item
+            // joining again, and must not send it to the end of the chain.
+            added_at: stays.map_or_else(now_ms, |m| m.added_at),
+            done,
         };
+        let finished_here = done && stays.is_some_and(|m| !m.done);
         self.mutate(|store| {
             // Checked against the book rather than left to the foreign key, so the
             // refusal says which thing was missing.
@@ -179,7 +237,11 @@ impl Chains {
                 }
                 Err(e) => Err(store_failed(e)),
             }
-        })
+        })?;
+        if finished_here {
+            self.close_if_finished(slug);
+        }
+        Ok(())
     }
 
     /// Put a just-created item in whatever chain `from_session` is in: the session an
@@ -234,6 +296,9 @@ impl Chains {
                 title,
                 url,
                 added_at: now_ms(),
+                // Only an item in no chain inherits one, so there is no earlier report
+                // to keep.
+                done: false,
             };
             store.set_member(&slug, &member).map_err(store_failed)?;
             joined = Some(slug.clone());
@@ -251,28 +316,157 @@ impl Chains {
 
     /// Untag a session that no longer exists. A deleted or pruned session would
     /// otherwise stay a member forever, as a tab nothing can draw.
+    ///
+    /// A deleted session is also a finished one, so the chain it left is asked whether
+    /// that was the last unfinished member.
     pub fn forget_session(&self, session_id: &str) {
-        if self
-            .chain_of(ChainMemberKind::Session, session_id)
-            .is_none()
-        {
+        let Some(slug) = self.chain_of(ChainMemberKind::Session, session_id) else {
             return;
-        }
+        };
         if let Err(code) = self.set_member(ChainMemberKind::Session, session_id, None, None, None) {
             warn!(session = %session_id, code, "could not untag a deleted session");
+            return;
+        }
+        self.close_if_finished(&slug);
+    }
+
+    /// A member finished: close its chain if that was the last unfinished one.
+    pub fn member_finished(&self, kind: ChainMemberKind, ref_id: &str) {
+        if let Some(slug) = self.chain_of(kind, ref_id) {
+            self.close_if_finished(&slug);
         }
     }
 
-    /// Watch the session bus and untag each session it reports deleted. One task per
-    /// daemon, ended with the handle.
+    /// Take in the watch list as it now is. A PR that was watched and no longer is
+    /// merged, closed or was untracked, which finishes it as a member. The first list
+    /// only sets the baseline: a PR missing from it may have left long ago, and that is
+    /// not news.
+    pub fn prs_changed(&self, watched: BTreeSet<String>) {
+        let left: Vec<String> = {
+            let mut held = self.watched_prs.lock().unwrap_or_else(|e| e.into_inner());
+            let left = held
+                .as_ref()
+                .map(|before| before.difference(&watched).cloned().collect())
+                .unwrap_or_default();
+            *held = Some(watched);
+            left
+        };
+        for key in left {
+            self.member_finished(ChainMemberKind::TrackedPr, &key);
+        }
+    }
+
+    /// Follow the watch list for as long as it publishes. One task per daemon.
+    pub fn spawn_pr_watch(
+        self: &Arc<Self>,
+        tracked: Arc<TrackedPrs>,
+    ) -> tokio::task::JoinHandle<()> {
+        // Subscribed before the baseline is read, so a change in between is not lost:
+        // at worst it is applied twice, and a list is whole, so twice is once.
+        let mut changes = tracked.subscribe();
+        self.prs_changed(watch_keys(&tracked.list()));
+        let chains = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match changes.recv().await {
+                    Ok(TrackedPrChange::List(list)) => chains.prs_changed(watch_keys(&list)),
+                    Ok(TrackedPrChange::Notification { .. }) => {}
+                    // The next list is whole, and the diff is against the last one this
+                    // saw, so a lag delays a PR finishing without losing it.
+                    Err(RecvError::Lagged(n)) => {
+                        debug!(dropped = n, "chain PR watch lagged behind the watch list")
+                    }
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        })
+    }
+
+    /// Whether a member is finished, as far as this daemon can tell.
+    fn status(&self, member: &ChainMember) -> MemberStatus {
+        let finished = match member.kind {
+            ChainMemberKind::Session => match self.sessions.meta(&member.ref_id) {
+                None => true,
+                // A dormant session exited because the reaper put it to sleep, and it
+                // is one click from running again.
+                Some(meta) => {
+                    meta.archived || (meta.status == SessionStatus::Exited && !meta.dormant)
+                }
+            },
+            ChainMemberKind::TrackedPr => self
+                .watched_prs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|watched| !watched.contains(&member.ref_id)),
+            ChainMemberKind::Beads | ChainMemberKind::Linear => member.done,
+        };
+        if finished {
+            MemberStatus::Finished
+        } else {
+            MemberStatus::Live
+        }
+    }
+
+    /// Close `slug` if it is active, not empty, and every member in it is finished.
+    /// Decided against the store under the book's lock, so a member that joined a
+    /// moment ago is part of the answer.
+    fn close_if_finished(&self, slug: &str) {
+        let mut closed = false;
+        let outcome = self.mutate(|store| {
+            let Some(chain) = store
+                .chains()
+                .map_err(store_failed)?
+                .into_iter()
+                .find(|c| c.slug == slug)
+            else {
+                return Ok(Vec::new());
+            };
+            if !chain.all_finished(|m| self.status(m)) {
+                return Ok(Vec::new());
+            }
+            match store.set_chain_state(slug, ChainState::Inactive, Some(now_ms())) {
+                Ok(true) => {
+                    closed = true;
+                    Ok(vec![slug.to_string()])
+                }
+                Ok(false) => Ok(Vec::new()),
+                Err(e) => Err(store_failed(e)),
+            }
+        });
+        match outcome {
+            Ok(()) if closed => info!(chain = slug, "every member is finished; chain closed"),
+            Ok(()) => {}
+            Err(code) => warn!(chain = slug, code, "could not auto-close a chain"),
+        }
+    }
+
+    /// Watch the session bus: untag each session it reports deleted, and ask a
+    /// session's chain whether it is done when the session exits or is archived. One
+    /// task per daemon, ended with the handle.
     pub fn spawn_session_sweep(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let mut events = self.sessions.subscribe();
         let chains = Arc::clone(self);
         tokio::spawn(async move {
+            // Sessions seen archived, so a later rename of an archived session is not
+            // the session finishing again — which would re-close a chain somebody
+            // reopened by hand.
+            let mut archived = BTreeSet::new();
             loop {
                 match events.recv().await {
                     Ok(SessionEvent::Deleted { session_id, .. }) => {
+                        archived.remove(&session_id);
                         chains.forget_session(&session_id)
+                    }
+                    Ok(SessionEvent::Exit { session_id, .. }) => {
+                        chains.member_finished(ChainMemberKind::Session, &session_id)
+                    }
+                    Ok(SessionEvent::Meta { session_id, meta }) => {
+                        if !meta.archived {
+                            archived.remove(&session_id);
+                        } else if archived.insert(session_id.clone()) {
+                            chains.member_finished(ChainMemberKind::Session, &session_id)
+                        }
                     }
                     Ok(_) => {}
                     Err(RecvError::Lagged(n)) => {
@@ -327,9 +521,23 @@ impl Chains {
         Ok(())
     }
 
+    /// The chain an item is in and the item as that chain holds it.
+    fn member(&self, kind: ChainMemberKind, ref_id: &str) -> Option<(String, ChainMember)> {
+        self.lock().iter().find_map(|c| {
+            c.members
+                .iter()
+                .find(|m| m.kind == kind && m.ref_id == ref_id)
+                .map(|m| (c.slug.clone(), m.clone()))
+        })
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Chain>> {
         self.book.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+fn watch_keys(list: &[juancoded_core::pr::TrackedPr]) -> BTreeSet<String> {
+    list.iter().map(|pr| pr.id.clone()).collect()
 }
 
 fn store_has(store: &dyn ChainStore, slug: &str) -> Result<bool, ChainRefusal> {
@@ -357,6 +565,47 @@ mod tests {
         let store: Arc<dyn ChainStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let chains = Chains::new(Arc::clone(&handles.sessions), store);
         (handles, chains)
+    }
+
+    fn spawn(h: &crate::serve::CoreHandles) -> String {
+        h.sessions
+            .create(CreateRequest {
+                provider: ProviderId::Claude,
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                skip_permissions: false,
+                model: None,
+                preset: None,
+                isolate_worktree: false,
+                worktree_name: None,
+                dispatch_id: None,
+                owner: 1,
+            })
+            .expect("create")
+            .id
+    }
+
+    fn state(chains: &Chains, slug: &str) -> ChainState {
+        chains.list().iter().find(|c| c.slug == slug).unwrap().state
+    }
+
+    /// Wait for the sweep task to act on an event, which it does on its own schedule.
+    async fn settles_to(chains: &Chains, slug: &str, want: ChainState) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state(chains, slug) != want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{slug} never went {want:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    fn report(chains: &Chains, ref_id: &str, slug: &str, done: Option<bool>) {
+        chains
+            .set_member_reporting(ChainMemberKind::Beads, ref_id, Some(slug), None, None, done)
+            .unwrap();
     }
 
     fn drain(rx: &mut broadcast::Receiver<ChainChange>) -> Vec<ChainChange> {
@@ -446,23 +695,7 @@ mod tests {
             chains.set_member(ChainMemberKind::Beads, "x-1", Some("missing"), None, None),
             Err("chain-not-found")
         );
-        let id = h
-            .sessions
-            .create(CreateRequest {
-                provider: ProviderId::Claude,
-                cwd: "/tmp".into(),
-                cols: 80,
-                rows: 24,
-                skip_permissions: false,
-                model: None,
-                preset: None,
-                isolate_worktree: false,
-                worktree_name: None,
-                dispatch_id: None,
-                owner: 1,
-            })
-            .expect("create")
-            .id;
+        let id = spawn(&h);
         chains
             .set_member(ChainMemberKind::Session, &id, Some("a"), None, None)
             .unwrap();
@@ -617,5 +850,174 @@ mod tests {
             .unwrap();
         let second = Chains::new(Arc::clone(&h.sessions), store);
         assert_eq!(second.list(), first.list());
+    }
+
+    #[tokio::test]
+    async fn a_ticket_reported_done_closes_the_chain_when_it_was_the_last_one_open() {
+        let (_h, chains) = engine();
+        chains.create("a").unwrap();
+        report(&chains, "x-1", "a", None);
+        report(&chains, "x-2", "a", None);
+        let added = chains.list()[0].members[0].added_at;
+
+        report(&chains, "x-1", "a", Some(true));
+        assert_eq!(state(&chains, "a"), ChainState::Active, "x-2 is still open");
+        let member = &chains.list()[0].members[0];
+        assert!(member.done);
+        assert_eq!(
+            (member.ref_id.as_str(), member.added_at),
+            ("x-1", added),
+            "a report is not a re-join"
+        );
+
+        // A re-tag that says nothing about done keeps the report it already has.
+        report(&chains, "x-1", "a", None);
+        assert!(chains.list()[0].members[0].done);
+
+        let mut rx = chains.subscribe();
+        report(&chains, "x-2", "a", Some(true));
+        let closed = chains.list()[0].clone();
+        assert_eq!(closed.state, ChainState::Inactive);
+        assert!(closed.closed_at.is_some());
+        assert_eq!(closed.members.len(), 2, "closing keeps the members");
+        let changes = drain(&mut rx);
+        assert_eq!(
+            changes.last(),
+            Some(&ChainChange::Upsert(closed)),
+            "the close is published like a manual one"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_member_finishing_closes_a_chain_never_a_join_or_a_reopen() {
+        let (_h, chains) = engine();
+        chains.create("a").unwrap();
+        chains.member_finished(ChainMemberKind::Beads, "nothing");
+        assert_eq!(
+            state(&chains, "a"),
+            ChainState::Active,
+            "an empty chain stays open"
+        );
+
+        // Tagging work that is already finished is not that work finishing.
+        report(&chains, "x-1", "a", Some(true));
+        assert_eq!(state(&chains, "a"), ChainState::Active);
+
+        report(&chains, "x-2", "a", None);
+        report(&chains, "x-2", "a", Some(true));
+        assert_eq!(state(&chains, "a"), ChainState::Inactive);
+
+        // Reopened by hand, it stays open while nothing in it finishes again — even a
+        // report that repeats what is already known is not a member finishing.
+        chains.reopen("a").unwrap();
+        report(&chains, "x-2", "a", Some(true));
+        assert_eq!(state(&chains, "a"), ChainState::Active);
+
+        // A member going live again does not reopen a closed chain, either.
+        chains.close("a").unwrap();
+        report(&chains, "x-2", "a", Some(false));
+        assert_eq!(state(&chains, "a"), ChainState::Inactive);
+        assert!(!chains.list()[0].members[1].done);
+    }
+
+    #[tokio::test]
+    async fn done_is_only_kept_for_the_kinds_a_client_reports() {
+        let (_h, chains) = engine();
+        chains.create("a").unwrap();
+        chains
+            .set_member_reporting(
+                ChainMemberKind::TrackedPr,
+                "/r#1",
+                Some("a"),
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap();
+        assert!(!chains.list()[0].members[0].done);
+        assert_eq!(state(&chains, "a"), ChainState::Active);
+    }
+
+    #[tokio::test]
+    async fn a_pr_leaving_the_watch_list_finishes_it() {
+        let (_h, chains) = engine();
+        chains.create("a").unwrap();
+        chains
+            .set_member(ChainMemberKind::TrackedPr, "/r#1", Some("a"), None, None)
+            .unwrap();
+        chains
+            .set_member(ChainMemberKind::TrackedPr, "/r#2", Some("a"), None, None)
+            .unwrap();
+        let watched = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect();
+
+        // Without a watch list, a PR's state is unknown and so not finished.
+        chains.member_finished(ChainMemberKind::TrackedPr, "/r#1");
+        assert_eq!(state(&chains, "a"), ChainState::Active);
+
+        // The first list is a baseline: /r#2 is missing from it, but that is old news.
+        chains.prs_changed(watched(&["/r#1", "/other#9"]));
+        assert_eq!(state(&chains, "a"), ChainState::Active);
+        chains.prs_changed(watched(&["/other#9"]));
+        assert_eq!(state(&chains, "a"), ChainState::Inactive);
+    }
+
+    #[tokio::test]
+    async fn a_session_exiting_or_being_archived_finishes_it_but_sleeping_does_not() {
+        let (h, chains) = engine();
+        let _sweep = chains.spawn_session_sweep();
+        chains.create("exits").unwrap();
+        chains.create("archived").unwrap();
+        chains.create("sleeps").unwrap();
+        let (exits, archived, sleeps) = (spawn(&h), spawn(&h), spawn(&h));
+        for (id, slug) in [
+            (&exits, "exits"),
+            (&archived, "archived"),
+            (&sleeps, "sleeps"),
+        ] {
+            chains
+                .set_member(ChainMemberKind::Session, id, Some(slug), None, None)
+                .unwrap();
+        }
+
+        h.sessions.kill(&exits).unwrap();
+        settles_to(&chains, "exits", ChainState::Inactive).await;
+
+        h.sessions.set_meta(&archived, None, Some(true)).unwrap();
+        settles_to(&chains, "archived", ChainState::Inactive).await;
+
+        // Put to sleep by the reaper: exited, but waiting to be woken.
+        h.sessions.sleep(&sleeps).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.sessions.is_running(&sleeps) {
+            assert!(tokio::time::Instant::now() < deadline, "never slept");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(state(&chains, "sleeps"), ChainState::Active);
+
+        let _ = h.sessions.kill(&archived);
+        let _ = h.sessions.kill(&sleeps);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_session_that_was_the_last_one_open_closes_its_chain() {
+        let (h, chains) = engine();
+        chains.create("a").unwrap();
+        report(&chains, "x-1", "a", None);
+        let id = spawn(&h);
+        chains
+            .set_member(ChainMemberKind::Session, &id, Some("a"), None, None)
+            .unwrap();
+        report(&chains, "x-1", "a", Some(true));
+        assert_eq!(
+            state(&chains, "a"),
+            ChainState::Active,
+            "the session is running"
+        );
+        chains.forget_session(&id);
+        let chain = chains.list()[0].clone();
+        assert_eq!(chain.state, ChainState::Inactive);
+        assert_eq!(chain.members.len(), 1);
+        let _ = h.sessions.kill(&id);
     }
 }

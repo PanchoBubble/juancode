@@ -97,8 +97,51 @@ pub struct ChainMember {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Epoch ms the item joined THIS chain. A move restamps it.
+    /// Epoch ms the item joined THIS chain. A move restamps it; re-tagging it into the
+    /// chain it is already in does not.
     pub added_at: i64,
+    /// Whether the work is finished, for the kinds whose state only a client can see:
+    /// a beads issue or a Linear ticket that was closed, as the client last reported
+    /// it. Always `false` for a session or a tracked PR — the daemon reads those itself
+    /// (see [`MemberStatus`]) and storing a copy would be a second answer that drifts.
+    /// On the wire only while `true`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
+}
+
+impl ChainMember {
+    /// Whether the kind is one whose done-state a client reports, rather than one the
+    /// daemon reads for itself.
+    pub fn is_reported(kind: ChainMemberKind) -> bool {
+        matches!(kind, ChainMemberKind::Beads | ChainMemberKind::Linear)
+    }
+}
+
+/// What the daemon knows about a member it can see for itself.
+///
+/// The auto-close rule (`juancoded-server::chains`) is "every member is finished", and
+/// this is the per-kind meaning of finished, kept beside the model so the rule is
+/// testable without a registry or a poller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberStatus {
+    /// Still being worked, or not knowable — which is treated the same, so a chain is
+    /// never closed on a guess.
+    Live,
+    Finished,
+}
+
+impl Chain {
+    /// Whether this chain is one auto-close should close: active, not empty, and every
+    /// member finished. An empty chain never qualifies, so a chain that was just
+    /// created (or emptied) stays open until somebody closes it.
+    pub fn all_finished(&self, status: impl Fn(&ChainMember) -> MemberStatus) -> bool {
+        self.state == ChainState::Active
+            && !self.members.is_empty()
+            && self
+                .members
+                .iter()
+                .all(|m| status(m) == MemberStatus::Finished)
+    }
 }
 
 /// A chain and everything in it, members in the order they joined.
@@ -199,6 +242,7 @@ mod tests {
             title: Some("Chains core".into()),
             url: None,
             added_at: 7,
+            done: false,
         };
         let v = serde_json::to_value(&member).unwrap();
         assert_eq!(
@@ -206,6 +250,47 @@ mod tests {
             serde_json::json!({
                 "kind": "beads", "ref": "juancode-dbo.1", "title": "Chains core", "addedAt": 7
             })
+        );
+        let done = ChainMember {
+            done: true,
+            ..member
+        };
+        assert_eq!(serde_json::to_value(&done).unwrap()["done"], true);
+    }
+
+    #[test]
+    fn only_an_active_chain_with_every_member_finished_qualifies_for_auto_close() {
+        let member = |ref_id: &str| ChainMember {
+            kind: ChainMemberKind::Beads,
+            ref_id: ref_id.into(),
+            title: None,
+            url: None,
+            added_at: 1,
+            done: false,
+        };
+        let mut chain = Chain {
+            slug: "a".into(),
+            state: ChainState::Active,
+            created_at: 1,
+            closed_at: None,
+            members: Vec::new(),
+        };
+        let finished = |_: &ChainMember| MemberStatus::Finished;
+        assert!(
+            !chain.all_finished(finished),
+            "an empty chain never closes itself"
+        );
+        chain.members = vec![member("x-1"), member("x-2")];
+        assert!(chain.all_finished(finished));
+        assert!(!chain.all_finished(|m| if m.ref_id == "x-2" {
+            MemberStatus::Live
+        } else {
+            MemberStatus::Finished
+        }));
+        chain.state = ChainState::Inactive;
+        assert!(
+            !chain.all_finished(finished),
+            "a closed chain is not closed twice"
         );
     }
 }

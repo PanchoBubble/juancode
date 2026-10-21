@@ -1,0 +1,200 @@
+{
+  "id": "chain-auto-close",
+  "title": "a chain closes itself when its last unfinished member finishes",
+  "asserts": "a core that advertises `chainAutoClose` honours `setChainMember.done` for a ticket and closes a chain on its own once every member is finished. An empty chain is not closed by anything. A ticket reported done while another is open is stored and published (`done: true` on the member) and the chain stays active; reporting the last open one done publishes that report and then the chain whole again, inactive with `closedAt` stamped and its members kept. Session exits, archives and PR merges finish members too and are covered by the core's own tests, since a socket cannot merge a PR.",
+  "capabilities": ["chains", "chainAutoClose"],
+  "steps": [
+    {
+      "send": {
+        "type": "subscribeChains"
+      }
+    },
+    {
+      "expect": {
+        "type": "chains",
+        "chains": {
+          "$type": "array"
+        }
+      },
+      "timeoutMs": 10000
+    },
+    {
+      "send": {
+        "type": "createChain",
+        "slug": "$chainAutoCloseSlug"
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "create",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "state": "active",
+          "members": []
+        }
+      },
+      "note": "empty and active, and nothing about being empty closes it"
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "beads",
+        "ref": "$chainAutoCloseTicketA",
+        "slug": "$chainAutoCloseSlug"
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setMember",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "members": {
+            "$length": 1
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "linear",
+        "ref": "$chainAutoCloseTicketB",
+        "slug": "$chainAutoCloseSlug"
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setMember",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "members": {
+            "$length": 2
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "beads",
+        "ref": "$chainAutoCloseTicketA",
+        "slug": "$chainAutoCloseSlug",
+        "done": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setMember",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "state": "active",
+          "members": [
+            {
+              "ref": "$chainAutoCloseTicketA",
+              "done": true
+            },
+            {
+              "ref": "$chainAutoCloseTicketB",
+              "done": {
+                "$absent": true
+              }
+            }
+          ]
+        }
+      },
+      "note": "one ticket done and one open: reported, kept in place, and the chain stays active"
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "linear",
+        "ref": "$chainAutoCloseTicketB",
+        "slug": "$chainAutoCloseSlug",
+        "done": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setMember",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "state": "active",
+          "members": {
+            "$length": 2
+          }
+        }
+      },
+      "note": "the report itself first"
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainAutoCloseSlug",
+          "state": "inactive",
+          "closedAt": {
+            "$type": "number"
+          },
+          "members": {
+            "$length": 2
+          }
+        }
+      },
+      "note": "then the close it caused, without anybody asking for one"
+    },
+    {
+      "send": {
+        "type": "deleteChain",
+        "slug": "$chainAutoCloseSlug"
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "delete",
+        "ok": true
+      }
+    },
+    {
+      "expect": {
+        "type": "chainRemoved",
+        "slug": "$chainAutoCloseSlug"
+      }
+    }
+  ]
+}
