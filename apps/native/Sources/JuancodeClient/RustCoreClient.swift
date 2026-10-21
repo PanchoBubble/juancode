@@ -47,7 +47,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     let lock = NSLock()
     private var handles: [String: RemoteLiveSession] = [:]
     private var createdListeners: [Int: (any LiveSession) -> Void] = [:]
-    private var nextListenerToken = 1
+    var nextListenerToken = 1
     private var pending: LifecycleWaiter?
     /// The session the in-flight lifecycle request is about, so an error frame for
     /// some other session is not read as its answer. Nil for a `create`, which has no
@@ -142,6 +142,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// once, and a draft takes seconds while a commit takes milliseconds.
     var changesWaiters: [String: ChangesWaiter] = [:]
     var nextChangesId = 1
+
+    /// The chains as the daemon last sent them, or nil while this connection has not
+    /// been sent the book. Nil and empty differ, as they do for `trackedList`.
+    var chainBook: ChainBook?
+    var chainListeners: [Int: @Sendable (ChainBook) -> Void] = [:]
+    /// Whether `subscribeChains` has gone out on THIS socket.
+    var chainSubscribed = false
+    /// Chain writes waiting on their `chainResult`, keyed by `requestId`.
+    var chainWaiters: [String: ChangesWaiter] = [:]
+    var nextChainId = 1
 
     /// Each session's steering queue as the daemon last sent it, keyed by session id.
     /// A missing key and an empty array are different answers: the daemon answers
@@ -1687,6 +1697,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             let waiter = lock.withLock { searchWaiters.removeValue(forKey: requestId) }
             waiter?.deliver(hits)
 
+        case "chains", "chain", "chainRemoved", "chainResult":
+            handleChainFrame(frame.type, body)
+
         case "changesResult":
             // Correlated on the requestId and nothing else. A discard and a commit can
             // be in flight together, and reading one's answer as the other's would tell
@@ -1760,6 +1773,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return true
             }
             if heavyAgain { ensureHeavySubscription() }
+            // And the chains: per connection, and the book is dropped rather than kept,
+            // because a chain may have been created, moved into or deleted from another
+            // surface while this socket was down.
+            let chainsAgain: Bool = lock.withLock {
+                guard chainSubscribed || !chainListeners.isEmpty else { return false }
+                chainSubscribed = false
+                chainBook = nil
+                return true
+            }
+            if chainsAgain { ensureChainSubscription() }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
             // The daemon's editor and shell ptys belong to the connection and die with
@@ -1795,6 +1818,13 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             for change in changes {
                 change.fail("the connection dropped: \(reason)")
             }
+            // Same for a chain write: unconfirmed is not done.
+            let chainWrites = lock.withLock { () -> [ChangesWaiter] in
+                let waiting = Array(chainWaiters.values)
+                chainWaiters.removeAll()
+                return waiting
+            }
+            for write in chainWrites { write.fail("chain-connection-lost") }
         }
         for l in listeners { l(up, reason) }
     }

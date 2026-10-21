@@ -272,6 +272,35 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sessions ADD COLUMN parked_branch TEXT;
     "#,
+    // 12: chains — named groups of sessions, tracked PRs and tickets.
+    //
+    // The slug is the primary key because it is the chain's identity and its name at
+    // once, and it never changes. `UNIQUE(kind, ref)` is the one-chain-per-item rule
+    // itself, so a second chain cannot claim an item even if a writer forgets to move it.
+    //
+    // No foreign key from `ref` to anything: it names a session, a tracked PR, a beads
+    // issue or a Linear ticket depending on `kind`, and two of those do not live in this
+    // database at all. The cascade from `chains` is what makes deleting a chain untag
+    // its members and nothing more.
+    r#"
+    CREATE TABLE chains (
+        slug       TEXT PRIMARY KEY,
+        state      TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        closed_at  INTEGER
+    );
+
+    CREATE TABLE chain_members (
+        kind       TEXT NOT NULL,
+        ref        TEXT NOT NULL,
+        chain_slug TEXT NOT NULL REFERENCES chains(slug) ON DELETE CASCADE,
+        title      TEXT,
+        url        TEXT,
+        added_at   INTEGER NOT NULL,
+        UNIQUE (kind, ref)
+    );
+    CREATE INDEX chain_members_by_chain ON chain_members (chain_slug, added_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

@@ -144,6 +144,20 @@ public enum ClientMessage: Sendable {
     case untrackPr(trackedId: String)
     /// Dismiss a surfaced needs-decision notification.
     case resolveTrackNotification(trackedId: String, notificationId: String)
+    // ── Chains (juancode-dbo.1) ──────────────────────────────────────────────────
+    /// Watch the chains: the whole book (`chains`), then each chain whole (`chain`)
+    /// or its removal (`chainRemoved`) as it moves.
+    case subscribeChains
+    /// The four chain lifecycle writes, each answered by a `chainResult` to the
+    /// asker (echoing `requestId`) and by the change stream to every subscriber.
+    case createChain(slug: String, requestId: String?)
+    case closeChain(slug: String, requestId: String?)
+    case reopenChain(slug: String, requestId: String?)
+    case deleteChain(slug: String, requestId: String?)
+    /// Put an item in chain `slug` (moving it out of any other), or take it out of its
+    /// chain when `slug` is nil.
+    case setChainMember(kind: ChainMemberKind, ref: String, slug: String?, title: String?,
+                        url: String?, requestId: String?)
     /// A well-formed message whose `type` this server doesn't implement — e.g. a
     /// newer client feature, or a TS-only message the embedded server doesn't
     /// support (`subscribeStructured`, `steerMessage`, …). Decoding degrades to
@@ -166,6 +180,8 @@ extension ClientMessage: Decodable {
         case text, messageId
         // Named control keys (juancode-uigs).
         case keys
+        // Chains (juancode-dbo.1).
+        case slug, kind, ref, title, url
     }
 
     public init(from decoder: Decoder) throws {
@@ -272,6 +288,30 @@ extension ClientMessage: Decodable {
         case "resolveTrackNotification":
             self = .resolveTrackNotification(trackedId: try c.decode(String.self, forKey: .trackedId),
                                              notificationId: try c.decode(String.self, forKey: .notificationId))
+        case "subscribeChains":
+            self = .subscribeChains
+        case "createChain":
+            self = .createChain(slug: try c.decode(String.self, forKey: .slug),
+                                requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "closeChain":
+            self = .closeChain(slug: try c.decode(String.self, forKey: .slug),
+                               requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "reopenChain":
+            self = .reopenChain(slug: try c.decode(String.self, forKey: .slug),
+                                requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "deleteChain":
+            self = .deleteChain(slug: try c.decode(String.self, forKey: .slug),
+                                requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "setChainMember":
+            // An unknown kind fails the decode rather than degrading to `.unknown`:
+            // the sender asked for something specific, and silence would read as a
+            // tag that landed.
+            self = .setChainMember(kind: try c.decode(ChainMemberKind.self, forKey: .kind),
+                                   ref: try c.decode(String.self, forKey: .ref),
+                                   slug: try c.decodeIfPresent(String.self, forKey: .slug),
+                                   title: try c.decodeIfPresent(String.self, forKey: .title),
+                                   url: try c.decodeIfPresent(String.self, forKey: .url),
+                                   requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
         default:
             // Degrade gracefully: a well-formed frame with an unrecognised `type`
             // is tolerated (a newer/other-server feature), not a decode error. Only
@@ -306,7 +346,7 @@ public enum WireProtocol {
                                       "inputAck", "resizeAck", "screen", "sessionMeta", "gridOwner",
                                       "restartFresh", "spawnModel", "spawnPreset",
                                       "isolateWorktree", "globalPause", "trackPrInSession",
-                                      "prWebhook", "namedKeys"]
+                                      "prWebhook", "namedKeys", "chains"]
 
     /// Capabilities that describe what this ENDPOINT serves a remote client, not
     /// what the app can ask a core for.
@@ -419,6 +459,16 @@ public enum ServerMessage: Sendable {
     /// A single needs-decision escalation fired for a tracked PR (the agent should
     /// NOT auto-apply it) — a ping the client can alert on without diffing the list.
     case trackNotification(trackedId: String, prNumber: Int, notification: TrackNotification)
+    // ── Chains (juancode-dbo.1) ──────────────────────────────────────────────────
+    /// Every chain, in answer to `subscribeChains`. Replace wholesale.
+    case chains(chains: [Chain])
+    /// One chain, whole, after it moved. Replace that slug's entry; never a patch.
+    case chain(chain: Chain)
+    /// A chain was deleted and its members untagged.
+    case chainRemoved(slug: String)
+    /// The answer to one chain write, to the client that sent it. `error` (a code such
+    /// as `chain-exists`) is present exactly when the write did not happen.
+    case chainResult(requestId: String?, op: String, slug: String?, error: String?)
 }
 
 /// Wire shape of a tracked PR (juancode-bt2). A hand-built mirror of `TrackedPr`
@@ -486,6 +536,8 @@ extension ServerMessage: Encodable {
         case reset, cursorX, cursorY, cursorVisible, alt, lines
         // Settle-edge change rollup + dispatch correlation on `activity`.
         case changes, dispatchId
+        // Chains (juancode-dbo.1).
+        case chains, chain, slug, op, ok, error
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -590,6 +642,22 @@ extension ServerMessage: Encodable {
             try c.encode(trackedId, forKey: .trackedId)
             try c.encode(prNumber, forKey: .prNumber)
             try c.encode(notification, forKey: .notification)
+        case let .chains(chains):
+            try c.encode("chains", forKey: .type)
+            try c.encode(chains, forKey: .chains)
+        case let .chain(chain):
+            try c.encode("chain", forKey: .type)
+            try c.encode(chain, forKey: .chain)
+        case let .chainRemoved(slug):
+            try c.encode("chainRemoved", forKey: .type)
+            try c.encode(slug, forKey: .slug)
+        case let .chainResult(requestId, op, slug, error):
+            try c.encode("chainResult", forKey: .type)
+            try c.encodeIfPresent(requestId, forKey: .requestId)
+            try c.encode(op, forKey: .op)
+            try c.encodeIfPresent(slug, forKey: .slug)
+            try c.encode(error == nil, forKey: .ok)
+            try c.encodeIfPresent(error, forKey: .error)
         }
     }
 

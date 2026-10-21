@@ -2,8 +2,8 @@
   "core": "rust",
   "coreLabel": "apps/juancoded, the Rust core",
   "source": "measured",
-  "measuredAt": "2026-09-20",
-  "specRevision": "1.20.0",
+  "measuredAt": "2026-10-21",
+  "specRevision": "1.21.0",
   "protocolVersion": 1,
   "capabilities": [
     "inputAck",
@@ -35,7 +35,8 @@
     "prWebhook",
     "heavyQueue",
     "changes",
-    "github"
+    "github",
+    "chains"
   ],
   "scenarios": {
     "handshake": {
@@ -264,6 +265,11 @@
       "passes": 3
     },
     "session-reads": {
+      "status": "passed",
+      "attempts": 3,
+      "passes": 3
+    },
+    "chains": {
       "status": "passed",
       "attempts": 3,
       "passes": 3

@@ -10,6 +10,7 @@
 pub mod actions_log;
 pub mod activity;
 pub mod at_risk;
+pub mod chain;
 pub mod changes;
 pub mod commit_message;
 pub mod diff;
@@ -36,6 +37,7 @@ pub use activity::{
     ActivityClock, ActivityDetector, Armed, ManualClock, MonotonicClock, ScreenText, Step,
     Transition,
 };
+pub use chain::{validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, SlugError};
 pub use changes::ChangeStat;
 pub use diff::{DiffFile, FileStatus};
 pub use gh::{

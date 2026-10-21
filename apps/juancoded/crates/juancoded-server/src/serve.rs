@@ -19,10 +19,11 @@ use juancoded_cordis::services::transcripts::TranscriptsService;
 use juancoded_cordis::{Bus, ContributionRegistry, Loader};
 use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::{
-    ReaperConfig, ReaperProbes, ReviewStoreService, SessionReaper, SessionsApi, StallPolicy,
-    StoreService, StuckWatch,
+    ChainStoreService, ReaperConfig, ReaperProbes, ReviewStoreService, SessionReaper, SessionsApi,
+    StallPolicy, StoreService, StuckWatch,
 };
 
+use crate::chains::Chains;
 use crate::conn;
 use crate::global_pause::GlobalPause;
 use crate::heavy_watch::HeavyWatch;
@@ -87,6 +88,10 @@ pub struct CoreHandles {
     /// mounted no store for them, and the review routes then say so rather than
     /// answering with an empty list — an empty list is a promise nothing was staged.
     pub reviews: Option<Arc<dyn ReviewStore>>,
+    /// The chains book. `None` when the tree mounted no store for it, and the chain
+    /// frames then refuse with `chain-unavailable`: a chain that is forgotten on
+    /// restart is not a chain anyone could build a view on.
+    pub chains: Option<Arc<Chains>>,
     pub bus: Bus,
     /// Captured once, here, and handed to every connection unchanged. A daemon that
     /// recomputed its identity per connection could not be caught being stale.
@@ -107,6 +112,11 @@ impl CoreHandles {
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
         let queue = loader.services().resolve::<QueueService>().ok();
         let reviews = loader.services().resolve::<ReviewStoreService>().ok();
+        let chains = loader
+            .services()
+            .resolve::<ChainStoreService>()
+            .ok()
+            .map(|store| Chains::new(Arc::clone(&sessions), store));
         let pty = loader.services().resolve::<PtySpawnService>().ok();
         // The reaper reads the transcripts hub directly for its size probe: the hub
         // already holds every binding it has resolved, so one call per sweep replaces a
@@ -160,6 +170,7 @@ impl CoreHandles {
             pty,
             tracked_prs,
             reviews,
+            chains,
             global_pause,
             // Its root and its config come from the environment, so a conformance run
             // (or a test) points `JUANCODE_HEAVY_ROOT` at a directory of its own rather
@@ -308,6 +319,12 @@ pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
     if let Some(tracked) = handles.tracked_prs.as_ref() {
         tracked.start_if_tracking();
     }
+    // A deleted or pruned session leaves its chain here, rather than staying a member
+    // nothing can draw. One sweep per daemon, like everything above.
+    let _chains = handles
+        .chains
+        .as_ref()
+        .map(|chains| chains.spawn_session_sweep());
     // And the third: a session goes dormant because it has been verifiably idle, not
     // because somebody is looking at the dock. Nothing here binds or spawns — the loop
     // is a no-op tick while the window is disabled and the cap is off.

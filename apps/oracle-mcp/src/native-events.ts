@@ -539,7 +539,9 @@ export function requestReview(sessionId: string, refresh = false): void {
 
 /** A `review` frame, or null if it is not one. `result` absent and `result: null` say
  *  the same thing, and both spellings reach here. */
-function parseReview(msg: Record<string, unknown>): { sessionId: string; pass: ReviewPass | null } | null {
+function parseReview(
+  msg: Record<string, unknown>,
+): { sessionId: string; pass: ReviewPass | null } | null {
   if (msg.type !== "review" || typeof msg.sessionId !== "string") return null;
   const raw = msg.result;
   if (raw === undefined || raw === null) return { sessionId: msg.sessionId, pass: null };
@@ -713,6 +715,238 @@ function emitHeavyQueue(queue: HeavyQueue): void {
   }
 }
 
+// ── Chains (juancode-dbo.1) ───────────────────────────────────────────────────
+// Named, cross-project groups of sessions (Oracles included), tracked PRs, beads
+// issues and Linear tickets. The book is the CORE's: this mirrors it from the
+// `chains` / `chain` / `chainRemoved` frames, and every write goes to the core and is
+// answered by a `chainResult` correlated on its requestId. Every frame is whole — the
+// book, one chain, or one removal — so applying them in arrival order converges on
+// the core's book. Membership is read off the book, never off `SessionMeta`.
+
+export type ChainState = "active" | "inactive";
+/** `ref` is the id the kind already has: a session id, a tracked PR's key
+ *  (`<cwd>#<number>`), a beads issue id, or a Linear identifier. */
+export type ChainMemberKind = "session" | "tracked_pr" | "beads" | "linear";
+
+const CHAIN_MEMBER_KINDS: readonly ChainMemberKind[] = ["session", "tracked_pr", "beads", "linear"];
+
+export interface ChainMember {
+  kind: ChainMemberKind;
+  ref: string;
+  /** The caller's snapshot, for kinds the core cannot look up (beads, Linear). */
+  title?: string;
+  url?: string;
+  /** Epoch ms the item joined this chain. */
+  addedAt: number;
+}
+
+export interface Chain {
+  /** The id and the display name at once; immutable. */
+  slug: string;
+  state: ChainState;
+  createdAt: number;
+  /** When it was last closed; null while active. */
+  closedAt: number | null;
+  /** In the order they joined. */
+  members: ChainMember[];
+}
+
+/** The answer to one chain write. `error` is a code (`chain-exists`,
+ *  `chain-not-found`, `chain-member-not-found`, `chain-slug-invalid`, ...) present
+ *  exactly when the write did not happen; this module adds `chain-unavailable`,
+ *  `chain-timeout` and `chain-connection-lost` for writes the core never answered. */
+export interface ChainResult {
+  ok: boolean;
+  op: string;
+  slug?: string;
+  error?: string;
+}
+
+/** The book as the endpoint last sent it, oldest first, or null before it has said. */
+let chainBook: Chain[] | null = null;
+/** Whether `subscribeChains` has gone out on THIS socket. */
+let chainsSubscribed = false;
+
+type ChainsListener = (chains: Chain[]) => void;
+const chainsListeners: ChainsListener[] = [];
+
+/** Writes waiting on their `chainResult`, keyed by requestId. */
+const chainWrites = new Map<string, (result: ChainResult) => void>();
+let nextChainRequest = 1;
+const CHAIN_WRITE_TIMEOUT_MS = 10_000;
+/** The `op` a `chainResult` names for each write, so a refusal this module makes
+ *  itself reads like one the core made. */
+const CHAIN_OPS: Record<string, string> = {
+  createChain: "create",
+  closeChain: "close",
+  reopenChain: "reopen",
+  deleteChain: "delete",
+  setChainMember: "setMember",
+};
+
+/** Whether the connected endpoint keeps chains. False before the handshake. */
+export function supportsChains(): boolean {
+  return nativeCapabilities.includes("chains");
+}
+
+/** Ask the core for the book and its changes. Idempotent per connection. */
+export function subscribeChains(): boolean {
+  if (!supportsChains()) return false;
+  if (chainsSubscribed) return true;
+  chainsSubscribed = true;
+  sendToNative({ type: "subscribeChains" });
+  return true;
+}
+
+/** The book the endpoint last sent, or null before it has sent one. */
+export function chains(): Chain[] | null {
+  return chainBook;
+}
+
+/** The chain an item is in, if any. */
+export function chainOf(kind: ChainMemberKind, ref: string): Chain | null {
+  return chainBook?.find((c) => c.members.some((m) => m.kind === kind && m.ref === ref)) ?? null;
+}
+
+/** The chain a session (agent or Oracle) is in, if any. */
+export function chainForSession(sessionId: string): Chain | null {
+  return chainOf("session", sessionId);
+}
+
+/** Watch the book. Fires with the whole book after every chain frame. */
+export function onChains(listener: ChainsListener): void {
+  chainsListeners.push(listener);
+}
+
+export function createChain(slug: string): Promise<ChainResult> {
+  return chainWrite({ type: "createChain", slug });
+}
+
+export function closeChain(slug: string): Promise<ChainResult> {
+  return chainWrite({ type: "closeChain", slug });
+}
+
+export function reopenChain(slug: string): Promise<ChainResult> {
+  return chainWrite({ type: "reopenChain", slug });
+}
+
+export function deleteChain(slug: string): Promise<ChainResult> {
+  return chainWrite({ type: "deleteChain", slug });
+}
+
+/** Put an item in chain `slug` (moving it out of any other), or untag it when
+ *  `slug` is omitted. */
+export function setChainMember(member: {
+  kind: ChainMemberKind;
+  ref: string;
+  slug?: string;
+  title?: string;
+  url?: string;
+}): Promise<ChainResult> {
+  return chainWrite({ type: "setChainMember", ...member });
+}
+
+/** One write, correlated. Silence is a failure, never a success. */
+function chainWrite(frame: Record<string, unknown>): Promise<ChainResult> {
+  const op = CHAIN_OPS[String(frame.type)] ?? String(frame.type);
+  if (!supportsChains() || ws?.readyState !== WebSocket.OPEN) {
+    return Promise.resolve({ ok: false, op, error: "chain-unavailable" });
+  }
+  const requestId = `chain-${nextChainRequest++}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      chainWrites.delete(requestId);
+      resolve({ ok: false, op, error: "chain-timeout" });
+    }, CHAIN_WRITE_TIMEOUT_MS);
+    chainWrites.set(requestId, (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    });
+    sendToNative({ ...frame, requestId });
+  });
+}
+
+function parseChainMember(raw: unknown): ChainMember | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const kind = CHAIN_MEMBER_KINDS.find((k) => k === row.kind);
+  if (!kind || typeof row.ref !== "string") return null;
+  const member: ChainMember = {
+    kind,
+    ref: row.ref,
+    addedAt: typeof row.addedAt === "number" ? row.addedAt : 0,
+  };
+  if (typeof row.title === "string") member.title = row.title;
+  if (typeof row.url === "string") member.url = row.url;
+  return member;
+}
+
+/** One chain off the wire, or null when it has no slug. Lenient: a member of a kind
+ *  this build does not know is dropped rather than failing the chain. */
+export function parseChain(raw: unknown): Chain | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.slug !== "string") return null;
+  return {
+    slug: row.slug,
+    state: row.state === "inactive" ? "inactive" : "active",
+    createdAt: typeof row.createdAt === "number" ? row.createdAt : 0,
+    closedAt: typeof row.closedAt === "number" ? row.closedAt : null,
+    members: Array.isArray(row.members)
+      ? row.members.map(parseChainMember).filter((m): m is ChainMember => m !== null)
+      : [],
+  };
+}
+
+/** Apply one `chains` / `chain` / `chainRemoved` frame to a book, returning the new
+ *  book, or null when the frame is not one of those. Pure, so the convergence rule
+ *  can be tested without a socket. */
+export function applyChainFrame(
+  book: Chain[] | null,
+  msg: Record<string, unknown>,
+): Chain[] | null {
+  if (msg.type === "chains") {
+    if (!Array.isArray(msg.chains)) return null;
+    return msg.chains.map(parseChain).filter((c): c is Chain => c !== null);
+  }
+  if (msg.type === "chain") {
+    const chain = parseChain(msg.chain);
+    if (!chain) return null;
+    const next = [...(book ?? [])];
+    const at = next.findIndex((c) => c.slug === chain.slug);
+    if (at >= 0) next[at] = chain;
+    else next.push(chain);
+    return next;
+  }
+  if (msg.type === "chainRemoved") {
+    if (typeof msg.slug !== "string") return null;
+    return (book ?? []).filter((c) => c.slug !== msg.slug);
+  }
+  return null;
+}
+
+function emitChains(book: Chain[]): void {
+  chainBook = book;
+  for (const listener of chainsListeners) {
+    try {
+      listener(book);
+    } catch (e) {
+      console.warn("oracle-mcp chains listener failed:", e instanceof Error ? e.message : e);
+    }
+  }
+}
+
+function settleChainWrite(msg: Record<string, unknown>): void {
+  if (typeof msg.requestId !== "string") return;
+  const settle = chainWrites.get(msg.requestId);
+  if (!settle) return;
+  chainWrites.delete(msg.requestId);
+  const result: ChainResult = { ok: msg.ok === true, op: typeof msg.op === "string" ? msg.op : "" };
+  if (typeof msg.slug === "string") result.slug = msg.slug;
+  if (typeof msg.error === "string") result.error = msg.error;
+  settle(result);
+}
+
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
     try {
@@ -759,6 +993,8 @@ function connect(): void {
     // core's side, so a reconnect has to ask again or the queue silently stops
     // updating. Only when something is actually watching.
     if (heavyListeners.length > 0) subscribeHeavyQueue();
+    // The chain subscription is NOT re-sent here: the handshake that says whether
+    // this endpoint keeps chains has not arrived yet. `serverInfo` re-sends it.
   });
 
   sock.on("message", (data) => {
@@ -776,6 +1012,15 @@ function connect(): void {
     // computed against.
     heavyQueueState = null;
     heavySubscribed = false;
+    // Same for the chains: another surface may have tagged, moved or deleted while
+    // this socket was down. And a write whose answer was riding this socket is not
+    // coming — unconfirmed is not done.
+    chainBook = null;
+    chainsSubscribed = false;
+    for (const settle of chainWrites.values()) {
+      settle({ ok: false, op: "", error: "chain-connection-lost" });
+    }
+    chainWrites.clear();
     scheduleReconnect();
   });
 
@@ -803,6 +1048,18 @@ function handleMessage(raw: string): void {
     nativeCapabilities = Array.isArray(msg.capabilities)
       ? msg.capabilities.filter((c): c is string => typeof c === "string")
       : [];
+    // Re-subscribe to the chains after a reconnect, once the handshake says the
+    // endpoint has them, and only when something is watching.
+    if (chainsListeners.length > 0) subscribeChains();
+    return;
+  }
+  if (msg.type === "chainResult") {
+    settleChainWrite(msg);
+    return;
+  }
+  if (msg.type === "chains" || msg.type === "chain" || msg.type === "chainRemoved") {
+    const book = applyChainFrame(chainBook, msg);
+    if (book) emitChains(book);
     return;
   }
   if (msg.type === "pauseState") {

@@ -12,11 +12,12 @@ use juancoded_cordis::plugin::{Context, Plugin};
 use juancoded_cordis::services::pty::PtySpawnService;
 use juancoded_cordis::services::terminal::TerminalService;
 use juancoded_cordis::{Entry, EntryList, Loader};
+use juancoded_persistence::chain_store::ChainStore;
 use juancoded_persistence::review_store::ReviewStore;
 use juancoded_persistence::{SessionStore, SqliteStore};
 
 use crate::registry::{RegistryConfig, SessionRegistry};
-use crate::service::{ReviewStoreService, SessionsService, StoreService};
+use crate::service::{ChainStoreService, ReviewStoreService, SessionsService, StoreService};
 
 /// Claims the `store` key with a real SQLite file. `config.path` overrides where it
 /// lives; `:memory:` gives a store that dies with the process, which is what a test
@@ -39,7 +40,8 @@ impl Plugin for SqliteStorePlugin {
         // connections, two locks and two writers of the same WAL, which is exactly the
         // arrangement this crate's single-mutex comment exists to prevent.
         ctx.provide::<StoreService>(Arc::clone(&sqlite) as Arc<dyn SessionStore>)?;
-        ctx.provide::<ReviewStoreService>(sqlite as Arc<dyn ReviewStore>)?;
+        ctx.provide::<ReviewStoreService>(Arc::clone(&sqlite) as Arc<dyn ReviewStore>)?;
+        ctx.provide::<ChainStoreService>(sqlite as Arc<dyn ChainStore>)?;
         Ok(())
     }
 }

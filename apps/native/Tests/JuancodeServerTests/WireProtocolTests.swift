@@ -537,4 +537,69 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(items?[0]["createdAt"] as? Int, 100)
         XCTAssertEqual(items?[1]["text"] as? String, "second")
     }
+
+    // ── Chains (juancode-dbo.1) ──────────────────────────────────────────────────
+
+    func testDecodesTheChainFrames() throws {
+        guard case let .createChain(slug, requestId) =
+                try decode(#"{"type":"createChain","slug":"auth-rewrite","requestId":"r"}"#)
+        else { return XCTFail("expected .createChain") }
+        XCTAssertEqual(slug, "auth-rewrite")
+        XCTAssertEqual(requestId, "r")
+
+        guard case let .setChainMember(kind, ref, target, title, url, rid) = try decode(
+            #"{"type":"setChainMember","kind":"tracked_pr","ref":"/repo#7","slug":"a","url":"u"}"#)
+        else { return XCTFail("expected .setChainMember") }
+        XCTAssertEqual(kind, .trackedPr)
+        XCTAssertEqual(ref, "/repo#7")
+        XCTAssertEqual(target, "a")
+        XCTAssertNil(title)
+        XCTAssertEqual(url, "u")
+        XCTAssertNil(rid)
+
+        // Untagging is the same frame with no slug.
+        guard case let .setChainMember(_, _, none, _, _, _) =
+                try decode(#"{"type":"setChainMember","kind":"session","ref":"s-1"}"#)
+        else { return XCTFail("expected .setChainMember") }
+        XCTAssertNil(none)
+
+        // A kind nobody knows is malformed, not ignored: silence would read as a tag
+        // that landed.
+        XCTAssertThrowsError(try decode(#"{"type":"setChainMember","kind":"pr","ref":"x"}"#))
+        guard case .subscribeChains = try decode(#"{"type":"subscribeChains"}"#) else {
+            return XCTFail("expected .subscribeChains")
+        }
+    }
+
+    func testEncodesAChainWholeAndAResultThatSaysWhetherItHappened() throws {
+        let chain = Chain(slug: "auth-rewrite", createdAt: 1, members: [
+            ChainMember(kind: .linear, ref: "ENG-1", title: "Rotate keys", addedAt: 2),
+        ])
+        let obj = try JSONSerialization.jsonObject(
+            with: Data(ServerMessage.chain(chain: chain).jsonString().utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "chain")
+        let body = try XCTUnwrap(obj?["chain"] as? [String: Any])
+        XCTAssertEqual(body["slug"] as? String, "auth-rewrite")
+        XCTAssertEqual(body["state"] as? String, "active")
+        // Null, not absent, while active: the shape the daemon sends.
+        XCTAssertTrue(body["closedAt"] is NSNull)
+        let member = try XCTUnwrap((body["members"] as? [[String: Any]])?.first)
+        XCTAssertEqual(member["kind"] as? String, "linear")
+        XCTAssertEqual(member["ref"] as? String, "ENG-1")
+        XCTAssertEqual(member["addedAt"] as? Int, 2)
+        XCTAssertNil(member["url"])
+
+        let refused = try JSONSerialization.jsonObject(with: Data(ServerMessage.chainResult(
+            requestId: "r", op: "create", slug: "a", error: "chain-exists").jsonString().utf8))
+            as? [String: Any]
+        XCTAssertEqual(refused?["ok"] as? Bool, false)
+        XCTAssertEqual(refused?["error"] as? String, "chain-exists")
+        XCTAssertEqual(refused?["requestId"] as? String, "r")
+        let done = try JSONSerialization.jsonObject(with: Data(ServerMessage.chainResult(
+            requestId: nil, op: "delete", slug: nil, error: nil).jsonString().utf8))
+            as? [String: Any]
+        XCTAssertEqual(done?["ok"] as? Bool, true)
+        XCTAssertNil(done?["error"])
+        XCTAssertNil(done?["requestId"])
+    }
 }

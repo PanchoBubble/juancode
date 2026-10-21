@@ -756,6 +756,7 @@ final class AppModel {
             Task { @MainActor [weak self] in self?.refresh() }
         }
         subscribeTrackedMirror()
+        subscribeChainsMirror()
         restoreTrackedIssues()
         restoreRecurringTasks()
         restorePromptTemplates()
@@ -5393,6 +5394,77 @@ final class AppModel {
             let result = await Task.detached(priority: .utility) { await getAllStatus() }.value
             providerStatus = result
             statusLoading = false
+        }
+    }
+
+    // MARK: - Chains (juancode-dbo.1)
+
+    /// The daemon's chains, mirrored from the `chains` frames. Read-only here: every
+    /// change goes to the core and comes back through this mirror, so two surfaces
+    /// tagging at once cannot leave this window disagreeing with the daemon. Empty on
+    /// a core with no `chains` capability.
+    private(set) var chains = ChainBook()
+    @ObservationIgnored private var chainsCancel: (@Sendable () -> Void)?
+
+    var supportsChains: Bool { core.supports(.chains) }
+
+    /// The chain a session (agent or Oracle) is in, if any. Membership is read off the
+    /// book rather than off `SessionMeta`, which does not carry it.
+    func chain(forSession sessionId: String) -> Chain? {
+        chains.chain(forSession: sessionId)
+    }
+
+    /// The chain any item is in, if any.
+    func chain(of kind: ChainMemberKind, ref: String) -> Chain? {
+        chains.chain(of: kind, ref: ref)
+    }
+
+    private func subscribeChainsMirror() {
+        guard chainsCancel == nil else { return }
+        chainsCancel = core.subscribeChains { [weak self] book in
+            Task { @MainActor in self?.chains = book }
+        }
+    }
+
+    /// The chain writes, each surfacing a refusal on `errorMessage` and answering
+    /// whether it landed. The mirror above updates from the core's own broadcast, not
+    /// from these returning.
+    @discardableResult
+    func createChain(_ slug: String) async -> Bool {
+        await chainWrite { try await $0.createChain(slug) }
+    }
+
+    @discardableResult
+    func closeChain(_ slug: String) async -> Bool {
+        await chainWrite { try await $0.closeChain(slug) }
+    }
+
+    @discardableResult
+    func reopenChain(_ slug: String) async -> Bool {
+        await chainWrite { try await $0.reopenChain(slug) }
+    }
+
+    @discardableResult
+    func deleteChain(_ slug: String) async -> Bool {
+        await chainWrite { try await $0.deleteChain(slug) }
+    }
+
+    /// Tag an item into `slug` (moving it out of any other chain), or untag it with nil.
+    @discardableResult
+    func setChain(_ slug: String?, for kind: ChainMemberKind, ref: String,
+                  title: String? = nil, url: String? = nil) async -> Bool {
+        await chainWrite {
+            try await $0.setChainMember(kind, ref: ref, slug: slug, title: title, url: url)
+        }
+    }
+
+    private func chainWrite(_ write: (CoreClient) async throws -> Void) async -> Bool {
+        do {
+            try await write(core)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 

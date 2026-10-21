@@ -422,7 +422,6 @@ function seedGhFixtures(dir: string): string {
   return dir;
 }
 
-
 /** A token unique to this suite process.
  *
  * Ids a scenario claims inside a core outlive the scenario: the core persists a
@@ -479,6 +478,13 @@ export function seedVars(
     // exists and a branch that exists, and every attempt runs against the same repo,
     // so a fixed name would pass once and then error for the rest of the run.
     worktreeName: `conformance-${stamp}`,
+    // Two chain slugs and a ticket to tag. Stamped because a chain outlives the
+    // scenario in the core's store, and a slug is unique for as long as it exists, so a
+    // fixed one would be `chain-exists` from the second attempt on. The stamp is
+    // already slug-shaped: base36 and dashes.
+    chainSlug: `conformance-chain-${stamp}`,
+    chainSlugB: `conformance-chain-b-${stamp}`,
+    chainTicket: `conformance-ticket-${stamp}`,
     // Where the fake agent's `SPAWN` records its helper's pid. Fixed per workspace
     // rather than stamped like the ids above, because the AGENT has to write it
     // knowing only its own cwd: an `input` frame carries one literal string, and
@@ -928,10 +934,7 @@ export function interpolate(path: string, vars: Vars): string {
 /** The HTTP half of the wire: `${wsUrl}` minus `/ws`, plus the path a step names. */
 export function httpBaseOf(ctx: RunContext): string {
   if (ctx.httpBase) return ctx.httpBase.replace(/\/$/, "");
-  return ctx.wsUrl
-    .replace(/^ws/, "http")
-    .replace(/\/ws$/, "")
-    .replace(/\/$/, "");
+  return ctx.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "").replace(/\/$/, "");
 }
 
 /** One `get`, `post` or `delete` step: make the request, assert the status, assert

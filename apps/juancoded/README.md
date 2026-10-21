@@ -165,7 +165,8 @@ migration, and the file name says which core wrote it even if someone points bot
 one directory.
 
 Schema (`crates/juancoded-persistence/src/schema.rs`): `sessions`, `scrollback`
-(`session_id`, **`cols`**, **`rows`**, `bytes`), `queue`, `tracked_prs`, `dispatches`.
+(`session_id`, **`cols`**, **`rows`**, `bytes`), `queue`, `tracked_prs`, `dispatches`,
+`chains` and `chain_members` (see [Chains](#chains-named-groups-of-work)).
 `cols`/`rows` are not metadata — without them the bytes can only be replayed by
 guessing a width, and a wrong guess garbles every hard wrap in the history.
 
@@ -359,6 +360,77 @@ cd client-spike && swift build
 Launch the daemon from a **plain terminal**, not from inside a `claude` session: env
 inheritance is faithful, so a `CLAUDE_CODE_CHILD_SESSION` marker in the parent is
 passed straight through and the spawned CLI turns transcript saving off.
+
+## Chains: named groups of work
+
+A chain is a badge-style tag that groups related work across projects (epic
+juancode-dbo). The daemon owns the book so the app, the Oracle and Telegram all see one
+answer; this section is the API the badge, chain view, rail panel, join flows, auto-join,
+auto-close and the oracle-mcp tools build on.
+
+**Model** (`juancoded-core/src/chain.rs`). A chain is `{ slug, state, createdAt,
+closedAt, members }`.
+
+- `slug` is the id and the display name at once, and never changes: lowercase letters
+  and digits in dash-separated words, at most 48 characters (`validate_slug`). A slug
+  that is not one is refused, never normalised — a client handed back a name it did not
+  choose would hold a different id from the one it asked for. Badge colour is derived
+  from the slug on the client; nothing about colour is stored.
+- `state` is `active` or `inactive`. Closing keeps the members and stamps `closedAt`;
+  reopening clears it.
+- A member is `{ kind, ref, title?, url?, addedAt }`. `kind` is `session` (an Oracle is
+  an ordinary session), `tracked_pr`, `beads` or `linear`, and `ref` is the id that
+  kind already has: the session id, `TrackedPr::key` (`<cwd>#<number>`), the beads id,
+  the Linear identifier. `title`/`url` are the caller's snapshot for the kinds this
+  daemon cannot look up.
+
+**Storage** (migration 12, `juancoded-persistence/src/chain_store.rs`, service key
+`chain-store` on the same SQLite connection as `store`). `chains(slug PK, state,
+created_at, closed_at)` and `chain_members(kind, ref, chain_slug → chains ON DELETE
+CASCADE, title, url, added_at, UNIQUE(kind, ref))`. The unique index IS the
+one-chain-per-item rule, and the cascade IS "deleting a chain only untags its members".
+
+**Engine** (`juancoded-server/src/chains.rs`, one per daemon on `CoreHandles::chains`).
+`create`, `close`, `reopen`, `delete`, `set_member(kind, ref, Some(slug) | None, title,
+url)`, `list`, `chain_of(kind, ref)`. Every write lands in the store before anything is
+published. A session member must be a session this daemon holds; the other kinds are
+not looked up. A session that is deleted or pruned leaves its chain (one sweep task on
+the session bus), so a chain never lists a session nothing can draw.
+
+**Wire** (capability `chains`):
+
+| Client → core | |
+| --- | --- |
+| `subscribeChains` | the book now, then its changes, until the socket closes |
+| `createChain {slug}` / `closeChain {slug}` / `reopenChain {slug}` / `deleteChain {slug}` | lifecycle |
+| `setChainMember {kind, ref, slug?, title?, url?}` | tag (moving it out of any other chain), or untag when `slug` is absent/null |
+
+Every write takes an optional `requestId` and is answered twice, in this order: a
+`chainResult {requestId?, op, slug?, ok, error?}` to the asker, then the change on the
+stream to every subscriber. `error` is a code — `chain-exists`, `chain-not-found`,
+`chain-member-not-found`, `chain-member-invalid`, `chain-slug-empty`,
+`chain-slug-invalid`, `chain-slug-too-long`, `chain-store-failed`,
+`chain-unavailable` — and a no-op (closing a closed chain, untagging an untagged item)
+is `ok` and publishes nothing. A frame of its own rather than `error`, because a
+sessionless `error` is read by clients as the answer to whatever request is in flight.
+
+| Core → client | |
+| --- | --- |
+| `chains {chains}` | the whole book, oldest first, in answer to `subscribeChains` |
+| `chain {chain}` | one chain, whole, after it moved; a move is two of these (joined, then left) |
+| `chainRemoved {slug}` | a chain was deleted |
+
+No frame is a patch, so the snapshot and the stream may overlap without a sequence
+number: the last frame for a slug is the truth about it. A session's chain is **not**
+on `SessionMeta` — membership has one home, and a move that had to update both would be
+two frames that could disagree. Clients answer "which chain is this session in" off
+the book: `ChainBook.chain(forSession:)` / `AppModel.chain(forSession:)` in Swift,
+`chainForSession()` in `apps/oracle-mcp/src/native-events.ts`.
+
+Conformance: `apps/wire-conformance/spec/v1/scenarios/47-chains.json`. Persistence
+across a restart is not provable from one socket and is asserted by
+`chain_store::tests::chains_and_members_survive_reopening_the_file` and
+`chains::tests::the_book_is_reloaded_from_the_store_on_restart`.
 
 ## Notifications: the daemon fires one webhook, the Node sidecar keeps Telegram
 

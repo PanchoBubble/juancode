@@ -6,6 +6,7 @@
 //! needs no FFI: the boundary the Swift app would talk over already exists and
 //! remote clients already use it.
 
+pub mod chains;
 pub mod changes;
 pub mod conn;
 pub mod ephemeral;
@@ -30,6 +31,7 @@ pub mod wire;
 #[cfg(test)]
 mod testing;
 
+pub use chains::{ChainChange, Chains};
 pub use identity::DaemonIdentity;
 pub use owner::{Orphaned, Ownership, Watchdog};
 pub use serve::{serve, CoreHandles, ServeConfig};

@@ -19,7 +19,7 @@ fn entries() -> juancoded_cordis::EntryList {
 }
 
 const DUMP: &str = "\
-juancoded config: 13 entries (13 active, 0 pending, 0 disabled, 0 failed), 8 services, 4 events, 5 contributions
+juancoded config: 13 entries (13 active, 0 pending, 0 disabled, 0 failed), 9 services, 4 events, 5 contributions
 
 entries
 ├─ [ACTIVE  ] sessions             session-registry     needs=pty,store,terminal  effects=1
@@ -28,7 +28,7 @@ entries
 ├─ [ACTIVE  ] input-guard          input-guard          needs=pty  effects=1
 ├─ [ACTIVE  ] goal                 session-goal         effects=2
 ├─ [ACTIVE  ] pty-to-grid          pty-to-grid          needs=pty,terminal  effects=3
-├─ [ACTIVE  ] store                sqlite-store         effects=2
+├─ [ACTIVE  ] store                sqlite-store         effects=3
 ├─ [ACTIVE  ] transcripts          transcripts          effects=1
 ├─ [ACTIVE  ] queue                steering-queue       effects=3
 ├─ [ACTIVE  ] transcript-claude    transcript-claude    needs=transcripts  effects=1
@@ -37,6 +37,7 @@ entries
 └─ [ACTIVE  ] session-chrome       session-chrome       effects=3
 
 services
+├─ chain-store   <- store
 ├─ goal          <- goal
 ├─ pty           <- pty
 ├─ queue         <- queue

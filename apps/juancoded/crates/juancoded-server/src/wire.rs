@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
+use juancoded_core::chain::{Chain, ChainMemberKind};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{SessionActivity, SessionMeta};
@@ -235,6 +236,10 @@ pub const CAPABILITIES: &[&str] = &[
     // whichever machine the app happens to be on, which is exactly what the phone
     // console cannot do.
     "github",
+    // Chains (juancode-dbo.1): named groups of sessions, tracked PRs and tickets.
+    // Advertised because the whole book answers here: kept across a restart, one chain
+    // per item enforced by the store, and every change pushed to every subscriber.
+    "chains",
 ];
 
 /// One queued occurrence on the wire.
@@ -613,6 +618,47 @@ pub enum ClientMessage {
         tracked_id: String,
         notification_id: String,
     },
+    /// Watch the chains: the whole book now (`chains`), then each chain whole again
+    /// (`chain`) or its slug (`chainRemoved`) whenever it moves, until the socket
+    /// closes. One subscribe per connection, like `subscribeTrackedPrs`.
+    SubscribeChains,
+    /// Create an empty active chain. Every chain mutation is answered by a
+    /// `chainResult` to the asker (with `requestId` echoed when one was sent), and by
+    /// the `chain` frames on the change stream to every subscriber.
+    CreateChain {
+        slug: String,
+        request_id: Option<String>,
+    },
+    /// Mark a chain inactive. Its members stay; a no-op on a closed chain.
+    CloseChain {
+        slug: String,
+        request_id: Option<String>,
+    },
+    /// Mark a chain active again. A no-op on an active chain.
+    ReopenChain {
+        slug: String,
+        request_id: Option<String>,
+    },
+    /// Delete a chain, untagging its members.
+    DeleteChain {
+        slug: String,
+        request_id: Option<String>,
+    },
+    /// Put one item in chain `slug`, moving it out of any chain that held it, or take
+    /// it out of its chain when `slug` is absent or null. `title`/`url` snapshot an item
+    /// this core cannot look up (a beads or Linear ticket).
+    ///
+    /// An unknown `kind` is a decode error rather than `Unknown`: a client that sent a
+    /// kind this core does not know asked for something specific, and silence would
+    /// read as a tag that landed.
+    SetChainMember {
+        kind: ChainMemberKind,
+        ref_id: String,
+        slug: Option<String>,
+        title: Option<String>,
+        url: Option<String>,
+        request_id: Option<String>,
+    },
     /// Watch the contribution list: the complete set now, and again on every change,
     /// until `unsubscribeContributions` or the socket closes.
     SubscribeContributions,
@@ -898,6 +944,15 @@ struct RawClient {
     hunk_index: Option<usize>,
     #[serde(default)]
     pid: Option<i32>,
+    /// Chains (juancode-dbo.1).
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(rename = "ref", default)]
+    r#ref: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     #[serde(default)]
     prio: Option<i64>,
     #[serde(default)]
@@ -1189,6 +1244,35 @@ impl ClientMessage {
             "resolveTrackNotification" => Ok(Self::ResolveTrackNotification {
                 tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
                 notification_id: raw.notification_id.ok_or("missing notificationId")?,
+            }),
+            "subscribeChains" => Ok(Self::SubscribeChains),
+            "createChain" => Ok(Self::CreateChain {
+                slug: raw.slug.ok_or("missing slug")?,
+                request_id: raw.request_id,
+            }),
+            "closeChain" => Ok(Self::CloseChain {
+                slug: raw.slug.ok_or("missing slug")?,
+                request_id: raw.request_id,
+            }),
+            "reopenChain" => Ok(Self::ReopenChain {
+                slug: raw.slug.ok_or("missing slug")?,
+                request_id: raw.request_id,
+            }),
+            "deleteChain" => Ok(Self::DeleteChain {
+                slug: raw.slug.ok_or("missing slug")?,
+                request_id: raw.request_id,
+            }),
+            "setChainMember" => Ok(Self::SetChainMember {
+                kind: raw
+                    .kind
+                    .as_deref()
+                    .and_then(ChainMemberKind::parse)
+                    .ok_or("missing or unknown kind")?,
+                ref_id: raw.r#ref.ok_or("missing ref")?,
+                slug: raw.slug,
+                title: raw.title,
+                url: raw.url,
+                request_id: raw.request_id,
             }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
             "unsubscribeContributions" => Ok(Self::UnsubscribeContributions),
@@ -1490,6 +1574,31 @@ pub enum ServerMessage {
         tracked_id: String,
         pr_number: i64,
         notification: TrackNotification,
+    },
+    /// Every chain, in answer to `subscribeChains`. Replace wholesale.
+    Chains {
+        chains: Vec<Chain>,
+    },
+    /// One chain, whole, after it moved: created, closed, reopened, or a member joined
+    /// or left. Replace that slug's entry; never a patch on its members.
+    Chain {
+        chain: Chain,
+    },
+    /// A chain was deleted and its members untagged.
+    ChainRemoved {
+        slug: String,
+    },
+    /// The answer to one chain mutation, to the client that asked. `error` is present
+    /// exactly when the mutation did not happen, carrying a code (`chain-exists`,
+    /// `chain-not-found`, `chain-slug-invalid`, …). A frame of its own rather than
+    /// `error`, because a sessionless `error` is read by clients as the answer to
+    /// whatever lifecycle request is in flight.
+    ChainResult {
+        request_id: Option<String>,
+        /// `create`, `close`, `reopen`, `delete` or `setMember`.
+        op: &'static str,
+        slug: Option<String>,
+        error: Option<String>,
     },
     Unresumable {
         session_id: String,
@@ -1844,6 +1953,33 @@ impl ServerMessage {
             Self::Unresumable { session_id, reason } => json!({
                 "type": "unresumable", "sessionId": session_id, "reason": reason,
             }),
+            Self::Chains { chains } => json!({
+                "type": "chains", "chains": chains,
+            }),
+            Self::Chain { chain } => json!({
+                "type": "chain", "chain": chain,
+            }),
+            Self::ChainRemoved { slug } => json!({
+                "type": "chainRemoved", "slug": slug,
+            }),
+            Self::ChainResult {
+                request_id,
+                op,
+                slug,
+                error,
+            } => {
+                let mut v = json!({ "type": "chainResult", "op": op, "ok": error.is_none() });
+                if let Some(id) = request_id {
+                    v["requestId"] = json!(id);
+                }
+                if let Some(slug) = slug {
+                    v["slug"] = json!(slug);
+                }
+                if let Some(error) = error {
+                    v["error"] = json!(error);
+                }
+                v
+            }
             Self::TrackedPrs { tracked } => json!({
                 "type": "trackedPrs",
                 "tracked": tracked.iter().map(tracked_pr).collect::<Vec<_>>(),
@@ -2218,6 +2354,16 @@ mod tests {
             r#"{"type":"sessionReview","sessionId":"s"}"#,
             r#"{"type":"diffCommentAdd","sessionId":"s","file":"a.rs","side":"new","line":3,"body":"why"}"#,
             r#"{"type":"diffCommentDelete","sessionId":"s"}"#,
+            // And for `chains`, every frame: a badge, a rail and a context menu draw
+            // off the capability, and a mutation reaching `Unknown` would be a tag that
+            // silently never landed.
+            r#"{"type":"subscribeChains"}"#,
+            r#"{"type":"createChain","slug":"auth-rewrite","requestId":"r"}"#,
+            r#"{"type":"closeChain","slug":"auth-rewrite"}"#,
+            r#"{"type":"reopenChain","slug":"auth-rewrite"}"#,
+            r#"{"type":"deleteChain","slug":"auth-rewrite"}"#,
+            r#"{"type":"setChainMember","kind":"beads","ref":"juancode-dbo.1","slug":"auth-rewrite","title":"t","url":"u"}"#,
+            r#"{"type":"setChainMember","kind":"session","ref":"s","slug":null}"#,
         ] {
             assert!(
                 !matches!(
@@ -2255,6 +2401,13 @@ mod tests {
             r#"{"type":"heavyCancel"}"#,
             r#"{"type":"heavySetPriority","pid":4242}"#,
             r#"{"type":"heavySetSlots"}"#,
+            // And a chain frame with nothing to act on: a mutation without its slug,
+            // and a member whose kind this core does not know.
+            r#"{"type":"createChain"}"#,
+            r#"{"type":"deleteChain"}"#,
+            r#"{"type":"setChainMember","ref":"x","slug":"a"}"#,
+            r#"{"type":"setChainMember","kind":"pr","ref":"x","slug":"a"}"#,
+            r#"{"type":"setChainMember","kind":"beads","slug":"a"}"#,
             // And a git write with nothing to act on. A `sessionRevert` that lost its
             // path must NOT become a discard of the tree, and a `sessionCommit` with a
             // blank message must not put words this core invented into a history.
@@ -2322,11 +2475,77 @@ mod tests {
                     "heavyQueue",
                     "changes",
                     "github",
+                    "chains",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
             );
         }
+    }
+
+    #[test]
+    fn chain_frames_carry_the_chain_whole_and_a_result_says_whether_it_happened() {
+        use juancoded_core::chain::{ChainMember, ChainState};
+        let chain = Chain {
+            slug: "auth-rewrite".into(),
+            state: ChainState::Inactive,
+            created_at: 1,
+            closed_at: Some(2),
+            members: vec![ChainMember {
+                kind: ChainMemberKind::TrackedPr,
+                ref_id: "/repo#7".into(),
+                title: None,
+                url: None,
+                added_at: 3,
+            }],
+        };
+        assert_eq!(
+            ServerMessage::Chain { chain }.to_value(),
+            json!({
+                "type": "chain",
+                "chain": {
+                    "slug": "auth-rewrite", "state": "inactive", "createdAt": 1, "closedAt": 2,
+                    "members": [{ "kind": "tracked_pr", "ref": "/repo#7", "addedAt": 3 }],
+                },
+            })
+        );
+        assert_eq!(
+            ServerMessage::ChainResult {
+                request_id: Some("r".into()),
+                op: "create",
+                slug: Some("a".into()),
+                error: Some("chain-exists".into()),
+            }
+            .to_value(),
+            json!({
+                "type": "chainResult", "requestId": "r", "op": "create", "slug": "a",
+                "ok": false, "error": "chain-exists",
+            })
+        );
+        assert_eq!(
+            ServerMessage::ChainResult {
+                request_id: None,
+                op: "delete",
+                slug: None,
+                error: None,
+            }
+            .to_value(),
+            json!({ "type": "chainResult", "op": "delete", "ok": true })
+        );
+        assert_eq!(
+            ClientMessage::decode(
+                r#"{"type":"setChainMember","kind":"linear","ref":"ENG-1","title":"t"}"#
+            )
+            .unwrap(),
+            ClientMessage::SetChainMember {
+                kind: ChainMemberKind::Linear,
+                ref_id: "ENG-1".into(),
+                slug: None,
+                title: Some("t".into()),
+                url: None,
+                request_id: None,
+            }
+        );
     }
 
     #[test]

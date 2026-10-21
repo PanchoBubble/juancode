@@ -248,6 +248,28 @@ public protocol CoreClient: AnyObject, Sendable {
     /// Stop a queued or running heavy job (wire `heavyCancel`).
     func heavyCancel(pid: Int)
 
+    // MARK: - Chains (wire: subscribeChains, createChain, closeChain, reopenChain,
+    //         deleteChain, setChainMember)
+
+    /// Watch the chains (wire `subscribeChains`). The subscriber is handed the book as
+    /// soon as the core answers and again after every change; each call is the whole
+    /// book. Returns a cancel handle.
+    func subscribeChains(_ onBook: @escaping @Sendable (ChainBook) -> Void) -> @Sendable () -> Void
+
+    /// Create an empty active chain (wire `createChain`). Throws `ChainError` with the
+    /// core's code when it refused (`chain-exists`, `chain-slug-invalid`, …).
+    func createChain(_ slug: String) async throws
+    /// Mark a chain inactive, keeping its members (wire `closeChain`).
+    func closeChain(_ slug: String) async throws
+    /// Mark a chain active again (wire `reopenChain`).
+    func reopenChain(_ slug: String) async throws
+    /// Delete a chain, untagging its members (wire `deleteChain`).
+    func deleteChain(_ slug: String) async throws
+    /// Put an item in chain `slug`, moving it out of any other, or untag it when `slug`
+    /// is nil (wire `setChainMember`). `title`/`url` snapshot a beads or Linear ticket.
+    func setChainMember(_ kind: ChainMemberKind, ref: String, slug: String?,
+                        title: String?, url: String?) async throws
+
     // MARK: - The GitHub surface (capability: github)
 
     /// The core's HTTP root, for the GitHub reads that are requests rather than
@@ -372,6 +394,23 @@ public extension CoreClient {
     func heavySetPriority(pid: Int, prio: Int) {}
     func heavySetSlots(_ slots: Int) {}
     func heavyCancel(pid: Int) {}
+
+    /// What a core with no `chains` capability does: an empty book, and a refusal for
+    /// every write. One implementation exists — the daemon's — so a stand-in core is not
+    /// made to write a second answer to the same question.
+    func subscribeChains(_ onBook: @escaping @Sendable (ChainBook) -> Void) -> @Sendable () -> Void {
+        onBook(ChainBook())
+        return {}
+    }
+
+    func createChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
+    func closeChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
+    func reopenChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
+    func deleteChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
+    func setChainMember(_ kind: ChainMemberKind, ref: String, slug: String?,
+                        title: String?, url: String?) async throws {
+        throw ChainError("chain-unavailable")
+    }
 
     /// What a core with no `github` capability does: refuse, by name.
     ///

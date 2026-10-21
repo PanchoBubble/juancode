@@ -21,6 +21,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use juancoded_core::model::{ProviderId, SessionKind, SessionMeta, SessionStatus, SessionUsage};
 
+pub mod chain_store;
 pub mod discovery;
 pub mod import_swift;
 pub mod review_store;
@@ -299,6 +300,11 @@ impl SqliteStore {
     /// `pub(crate)` rather than `pub`: one lock over one connection is an invariant of
     /// this crate, and a handle handed outside it would be a second writer.
     pub(crate) fn conn_for_reviews(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn()
+    }
+
+    /// The same connection again, for the chains in their own module. Same reason.
+    pub(crate) fn conn_for_chains(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn()
     }
 }

@@ -31,6 +31,7 @@ use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
 
+use crate::chains::{ChainChange, Chains};
 use crate::ephemeral::EphemeralPtys;
 use crate::global_pause::GlobalPause;
 use crate::heavy_watch::HeavyWatch;
@@ -81,6 +82,11 @@ struct Fanout {
     /// that was told twice would see its own reorder answered by the snapshot before
     /// it. Dropped with the watch.
     heavy_sent: Option<Arc<HeavyQueueSnapshot>>,
+    /// Whether this connection asked for the chains. The change stream is received for
+    /// the whole connection and only forwarded once this is set, for the reason the
+    /// tracked-PR receiver is: one created at subscribe time could miss a change
+    /// published between the snapshot and its first `recv`.
+    chains: bool,
     carries: HashMap<String, Utf8Stream>,
     /// Frames a background task owes this client, out of band from the request that
     /// started it. Seeded delivery is the only one today: it outlives the create it
@@ -122,6 +128,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         pty,
         tracked_prs,
         reviews,
+        chains,
         global_pause,
         heavy,
         bus,
@@ -224,6 +231,15 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         }
     };
     let mut tracked_bus_live = true;
+    // The chain change stream, on the same terms and for the same reason.
+    let (_chains_idle, mut chains_rx) = match chains.as_ref() {
+        Some(engine) => (None, engine.subscribe()),
+        None => {
+            let (tx, rx) = tokio::sync::broadcast::channel::<ChainChange>(1);
+            (Some(tx), rx)
+        }
+    };
+    let mut chains_bus_live = true;
 
     let (oob_tx, mut oob_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut fanout = Fanout {
@@ -234,6 +250,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         tracked_prs: None,
         heavy: None,
         heavy_sent: None,
+        chains: false,
         carries: HashMap::new(),
         oob: oob_tx,
     };
@@ -273,6 +290,24 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                 }
             }
 
+            change = chains_rx.recv(), if chains_bus_live => {
+                match change {
+                    Ok(change) => push_chain(change, &fanout, &mut outbound),
+                    Err(RecvError::Lagged(n)) => {
+                        // Not self-healing the way the tracked list is: a chain frame is
+                        // one chain, so the ones dropped here stay stale on this client
+                        // until it resubscribes. Resend the whole book instead.
+                        debug!(dropped = n, "connection lagged behind the chain bus");
+                        if fanout.chains {
+                            if let Some(engine) = chains.as_ref() {
+                                outbound.push(ServerMessage::Chains { chains: engine.list() });
+                            }
+                        }
+                    }
+                    Err(RecvError::Closed) => chains_bus_live = false,
+                }
+            }
+
             Some(batch) = transcript_rx.recv() => {
                 // Gated on a watch, like output and like the queue: a transcript is a
                 // stream a client opted into.
@@ -297,6 +332,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     reaper: reaper.as_ref(),
                                     tracked_prs: tracked_prs.as_ref(),
                                     reviews: reviews.as_ref(),
+                                    chains: chains.as_ref(),
                                     global_pause: &global_pause,
                                     heavy: &heavy,
                                 },
@@ -519,6 +555,33 @@ fn push_tracked(change: TrackedPrChange, fanout: &mut Fanout, outbound: &mut Vec
 /// Its own message rather than silence, and not the `queue-unavailable` shape either:
 /// retrying will never help, and a client that heard nothing would leave a Track button
 /// spinning on a PR this core is never going to watch.
+/// The frame this connection owes for one chain change: nothing until it subscribed,
+/// and the chain whole (or its removal) after.
+fn push_chain(change: ChainChange, fanout: &Fanout, outbound: &mut Vec<ServerMessage>) {
+    if !fanout.chains {
+        return;
+    }
+    outbound.push(match change {
+        ChainChange::Upsert(chain) => ServerMessage::Chain { chain },
+        ChainChange::Removed(slug) => ServerMessage::ChainRemoved { slug },
+    });
+}
+
+/// The answer to one chain mutation.
+fn chain_result(
+    op: &'static str,
+    slug: Option<String>,
+    request_id: Option<String>,
+    outcome: Result<(), &'static str>,
+) -> ServerMessage {
+    ServerMessage::ChainResult {
+        request_id,
+        op,
+        slug,
+        error: outcome.err().map(str::to_string),
+    }
+}
+
 fn tracked_unavailable() -> ServerMessage {
     ServerMessage::Error {
         session_id: None,
@@ -866,6 +929,9 @@ struct Tree<'a> {
     /// mounted no store for them, and the three review frames then say so rather than
     /// answering with an empty list — an empty list is a promise nothing was staged.
     reviews: Option<&'a Arc<dyn ReviewStore>>,
+    /// The chains book. `None` when the tree mounted no store for it, and the chain
+    /// frames then answer `chain-unavailable`.
+    chains: Option<&'a Arc<Chains>>,
     /// The paused set. Not optional: a pause needs only the registry, and the store is
     /// what it survives a restart on rather than what it needs to work.
     global_pause: &'a Arc<GlobalPause>,
@@ -913,6 +979,7 @@ fn handle_client_message(
         reaper,
         tracked_prs,
         reviews,
+        chains,
         global_pause,
         heavy,
     } = *tree;
@@ -1905,6 +1972,61 @@ fn handle_client_message(
             engine.resolve_notification(&tracked_id, &notification_id);
         }
 
+        // ── Chains (juancode-dbo.1) ───────────────────────────────────────────────
+        ClientMessage::SubscribeChains => {
+            let Some(engine) = chains else {
+                outbound.push(chain_result(
+                    "subscribe",
+                    None,
+                    None,
+                    Err("chain-unavailable"),
+                ));
+                return;
+            };
+            // Idempotent: a second subscribe is not a second snapshot.
+            if fanout.chains {
+                return;
+            }
+            fanout.chains = true;
+            outbound.push(ServerMessage::Chains {
+                chains: engine.list(),
+            });
+        }
+
+        ClientMessage::CreateChain { slug, request_id } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| c.create(&slug));
+            outbound.push(chain_result("create", Some(slug), request_id, outcome));
+        }
+
+        ClientMessage::CloseChain { slug, request_id } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| c.close(&slug));
+            outbound.push(chain_result("close", Some(slug), request_id, outcome));
+        }
+
+        ClientMessage::ReopenChain { slug, request_id } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| c.reopen(&slug));
+            outbound.push(chain_result("reopen", Some(slug), request_id, outcome));
+        }
+
+        ClientMessage::DeleteChain { slug, request_id } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| c.delete(&slug));
+            outbound.push(chain_result("delete", Some(slug), request_id, outcome));
+        }
+
+        ClientMessage::SetChainMember {
+            kind,
+            ref_id,
+            slug,
+            title,
+            url,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| {
+                c.set_member(kind, &ref_id, slug.as_deref(), title, url)
+            });
+            outbound.push(chain_result("setMember", slug, request_id, outcome));
+        }
+
         ClientMessage::Unknown { r#type } => debug!(r#type, "ignoring unimplemented message"),
     }
 }
@@ -1919,6 +2041,7 @@ fn grid_or_default(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use juancoded_core::chain::ChainMemberKind;
     use juancoded_state::registry::CreateRequest;
 
     fn fanout() -> Fanout {
@@ -1930,6 +2053,7 @@ mod tests {
             tracked_prs: None,
             heavy: None,
             heavy_sent: None,
+            chains: false,
             carries: HashMap::new(),
             // Nothing in these tests reads the side channel; the receiver is dropped
             // and a send on it is the no-op a departed client already gets.
@@ -1957,6 +2081,7 @@ mod tests {
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
                 reviews: handles.reviews.as_ref(),
+                chains: handles.chains.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy: &handles.heavy,
             },
@@ -2019,6 +2144,7 @@ mod tests {
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
                 reviews: handles.reviews.as_ref(),
+                chains: handles.chains.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy,
             },
@@ -2369,6 +2495,8 @@ mod tests {
         tracked: tokio::sync::broadcast::Receiver<TrackedPrChange>,
         /// The paused-set changes the loop folds in ahead of everything else.
         pause: tokio::sync::broadcast::Receiver<Vec<String>>,
+        /// The chain changes, which the loop forwards on its own arm after the reply.
+        chains: tokio::sync::broadcast::Receiver<ChainChange>,
         _listener: juancoded_cordis::Effect,
     }
 
@@ -2388,6 +2516,11 @@ mod tests {
                 .expect("the test tree mounts a store, so it has a watch list")
                 .subscribe();
             let pause = handles.global_pause.subscribe();
+            let chains = handles
+                .chains
+                .as_ref()
+                .expect("the test tree mounts a store, so it has a chains book")
+                .subscribe();
             Self {
                 ephemeral: EphemeralPtys::with_commands(
                     handles.pty.clone(),
@@ -2400,6 +2533,7 @@ mod tests {
                 oob,
                 tracked,
                 pause,
+                chains,
                 _listener: listener,
             }
         }
@@ -2510,6 +2644,7 @@ mod tests {
                     reaper: self.handles.reaper.as_ref(),
                     tracked_prs: self.handles.tracked_prs.as_ref(),
                     reviews: self.handles.reviews.as_ref(),
+                    chains: self.handles.chains.as_ref(),
                     global_pause: &self.handles.global_pause,
                     heavy: &self.handles.heavy,
                 },
@@ -2525,6 +2660,11 @@ mod tests {
             ahead.extend(reply);
             ahead.extend(behind);
             ahead.extend(self.forwarded(fanout));
+            // Behind the reply, as the loop's own arm delivers them: the mutation
+            // published while the handler ran, and the arm runs on the next pass.
+            while let Ok(change) = self.chains.try_recv() {
+                push_chain(change, fanout, &mut ahead);
+            }
             // Last, and it goes to the FRONT: the same rule the loop applies at its
             // flush, so a test sees the set ahead of the exits it caused.
             prepend_pause(&mut self.pause, &mut ahead);
@@ -3452,5 +3592,134 @@ mod tests {
         wire.tracked_prs().untrack("nothing-tracked-under-this-id");
         assert!(wire.queued_tracked_frames(&mut fanout).is_empty());
         assert!(fanout.tracked_prs.is_none());
+    }
+
+    fn chain_frames(frames: &[ServerMessage]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                ServerMessage::Chains { chains } => Some(format!(
+                    "chains[{}]",
+                    chains
+                        .iter()
+                        .map(|c| c.slug.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
+                ServerMessage::Chain { chain } => Some(format!(
+                    "chain:{}:{}:{}",
+                    chain.slug,
+                    chain.state.as_str(),
+                    chain.members.len()
+                )),
+                ServerMessage::ChainRemoved { slug } => Some(format!("removed:{slug}")),
+                ServerMessage::ChainResult { op, error, .. } => {
+                    Some(format!("result:{op}:{}", error.as_deref().unwrap_or("ok")))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_chain_mutation_answers_the_asker_and_then_tells_every_subscriber() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        // Before subscribing, a mutation is answered but its change is not forwarded.
+        let early = wire.step(
+            ClientMessage::CreateChain {
+                slug: "early".into(),
+                request_id: Some("r0".into()),
+            },
+            &mut fanout,
+        );
+        assert_eq!(chain_frames(&early), ["result:create:ok"]);
+
+        let subscribed = wire.step(ClientMessage::SubscribeChains, &mut fanout);
+        assert_eq!(chain_frames(&subscribed), ["chains[early]"]);
+        assert!(chain_frames(&wire.step(ClientMessage::SubscribeChains, &mut fanout)).is_empty());
+
+        let created = wire.step(
+            ClientMessage::CreateChain {
+                slug: "auth-rewrite".into(),
+                request_id: Some("r1".into()),
+            },
+            &mut fanout,
+        );
+        assert_eq!(
+            chain_frames(&created),
+            ["result:create:ok", "chain:auth-rewrite:active:0"]
+        );
+        let [ServerMessage::ChainResult {
+            request_id, slug, ..
+        }, ..] = &created[..]
+        else {
+            panic!("{created:?}")
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        assert_eq!(slug.as_deref(), Some("auth-rewrite"));
+
+        let refused = wire.step(
+            ClientMessage::CreateChain {
+                slug: "Auth".into(),
+                request_id: None,
+            },
+            &mut fanout,
+        );
+        assert_eq!(chain_frames(&refused), ["result:create:chain-slug-invalid"]);
+
+        let session = wire.session();
+        let tag = |slug: &str| ClientMessage::SetChainMember {
+            kind: ChainMemberKind::Session,
+            ref_id: session.clone(),
+            slug: Some(slug.into()),
+            title: None,
+            url: None,
+            request_id: None,
+        };
+        assert_eq!(
+            chain_frames(&wire.step(tag("auth-rewrite"), &mut fanout)),
+            ["result:setMember:ok", "chain:auth-rewrite:active:1"]
+        );
+        assert_eq!(
+            chain_frames(&wire.step(tag("early"), &mut fanout)),
+            [
+                "result:setMember:ok",
+                "chain:early:active:1",
+                "chain:auth-rewrite:active:0"
+            ],
+            "a move publishes the chain it joined and the chain it left"
+        );
+
+        assert_eq!(
+            chain_frames(&wire.step(
+                ClientMessage::CloseChain {
+                    slug: "early".into(),
+                    request_id: None
+                },
+                &mut fanout
+            )),
+            ["result:close:ok", "chain:early:inactive:1"]
+        );
+        assert_eq!(
+            chain_frames(&wire.step(
+                ClientMessage::DeleteChain {
+                    slug: "early".into(),
+                    request_id: None
+                },
+                &mut fanout
+            )),
+            ["result:delete:ok", "removed:early"]
+        );
+        assert_eq!(
+            wire.handles
+                .chains
+                .as_ref()
+                .unwrap()
+                .chain_of(ChainMemberKind::Session, &session),
+            None,
+            "deleting the chain untagged the session"
+        );
+        let _ = wire.sessions().kill(&session);
     }
 }

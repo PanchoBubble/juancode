@@ -3,6 +3,15 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import {
   ScreenMirror,
+  applyChainFrame,
+  chainForSession,
+  chains,
+  createChain,
+  onChains,
+  parseChain,
+  setChainMember,
+  subscribeChains,
+  supportsChains,
   heavyCancel,
   heavyMoveToFrontPriority,
   heavyQueue,
@@ -592,5 +601,147 @@ describe("parseHeavyQueue", () => {
         ],
       }),
     ).toBe(5);
+  });
+});
+
+// The book belongs to the core; this module mirrors it from whole frames and sends
+// every write correlated on a requestId.
+describe("chains over the shared native WS", () => {
+  let wss: WebSocketServer;
+  let server: WsSocket | null = null;
+  let received: Record<string, unknown>[];
+  const prev = process.env.JUANCODE_API;
+
+  beforeEach(async () => {
+    received = [];
+    server = null;
+    wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    wss.on("connection", (sock) => {
+      server = sock;
+      sock.on("message", (data) => received.push(JSON.parse(data.toString())));
+    });
+    await new Promise<void>((resolve) => wss.on("listening", () => resolve()));
+    process.env.JUANCODE_API = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    stopActivityListener();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    if (prev === undefined) delete process.env.JUANCODE_API;
+    else process.env.JUANCODE_API = prev;
+  });
+
+  const until = async (cond: () => boolean) => {
+    const deadline = Date.now() + 2000;
+    while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(cond()).toBe(true);
+  };
+
+  it("fails closed before the handshake, then mirrors the book and correlates writes", async () => {
+    const seen: string[][] = [];
+    onChains((book) => seen.push(book.map((c) => c.slug)));
+    expect(supportsChains()).toBe(false);
+    expect(subscribeChains()).toBe(false);
+    expect(await createChain("a")).toEqual({ ok: false, op: "create", error: "chain-unavailable" });
+
+    startActivityListener();
+    await until(() => server !== null);
+    server!.send(
+      JSON.stringify({ type: "serverInfo", protocolVersion: 1, capabilities: ["chains"] }),
+    );
+    // A watcher is registered, so the handshake itself sends the subscribe.
+    await until(() => received.some((m) => m.type === "subscribeChains"));
+    expect(subscribeChains()).toBe(true);
+    expect(received.filter((m) => m.type === "subscribeChains")).toHaveLength(1);
+
+    server!.send(JSON.stringify({ type: "chains", chains: [] }));
+    await until(() => chains() !== null);
+
+    const pending = setChainMember({ kind: "session", ref: "s-1", slug: "auth" });
+    await until(() => received.some((m) => m.type === "setChainMember"));
+    const sent = received.find((m) => m.type === "setChainMember")!;
+    expect(sent).toMatchObject({ kind: "session", ref: "s-1", slug: "auth" });
+    // An answer for somebody else's request settles nothing.
+    server!.send(
+      JSON.stringify({ type: "chainResult", requestId: "other", op: "setMember", ok: true }),
+    );
+    server!.send(
+      JSON.stringify({
+        type: "chainResult",
+        requestId: sent.requestId,
+        op: "setMember",
+        slug: "auth",
+        ok: false,
+        error: "chain-not-found",
+      }),
+    );
+    expect(await pending).toEqual({
+      ok: false,
+      op: "setMember",
+      slug: "auth",
+      error: "chain-not-found",
+    });
+
+    server!.send(
+      JSON.stringify({
+        type: "chain",
+        chain: {
+          slug: "auth",
+          state: "active",
+          createdAt: 1,
+          closedAt: null,
+          members: [{ kind: "session", ref: "s-1", addedAt: 2 }],
+        },
+      }),
+    );
+    await until(() => chainForSession("s-1")?.slug === "auth");
+    server!.send(JSON.stringify({ type: "chainRemoved", slug: "auth" }));
+    await until(() => chainForSession("s-1") === null);
+    expect(seen.at(-1)).toEqual([]);
+  });
+});
+
+describe("applyChainFrame", () => {
+  const chain = (slug: string, refs: string[] = []) => ({
+    slug,
+    state: "active",
+    createdAt: 1,
+    closedAt: null,
+    members: refs.map((ref) => ({ kind: "session", ref, addedAt: 1 })),
+  });
+
+  it("converges on the last whole frame for each slug, whatever the order", () => {
+    let book = applyChainFrame(null, { type: "chain", chain: chain("a", ["s-1"]) });
+    book = applyChainFrame(book, { type: "chains", chains: [chain("a", ["s-1"]), chain("b")] });
+    // A move: the chain it joined, then the chain it left, each whole.
+    book = applyChainFrame(book, { type: "chain", chain: chain("b", ["s-1"]) });
+    book = applyChainFrame(book, { type: "chain", chain: chain("a") });
+    expect(book?.map((c) => [c.slug, c.members.map((m) => m.ref)])).toEqual([
+      ["a", []],
+      ["b", ["s-1"]],
+    ]);
+    book = applyChainFrame(book, { type: "chainRemoved", slug: "a" });
+    expect(book?.map((c) => c.slug)).toEqual(["b"]);
+    expect(applyChainFrame(book, { type: "heavyQueue" })).toBeNull();
+  });
+
+  it("drops a member of a kind it does not know rather than the whole chain", () => {
+    const parsed = parseChain({
+      slug: "a",
+      state: "inactive",
+      closedAt: 5,
+      members: [
+        { kind: "jira", ref: "X-1" },
+        { kind: "beads", ref: "juancode-dbo.1", title: "Chains core" },
+      ],
+    });
+    expect(parsed).toEqual({
+      slug: "a",
+      state: "inactive",
+      createdAt: 0,
+      closedAt: 5,
+      members: [{ kind: "beads", ref: "juancode-dbo.1", title: "Chains core", addedAt: 0 }],
+    });
+    expect(parseChain({ state: "active" })).toBeNull();
   });
 });

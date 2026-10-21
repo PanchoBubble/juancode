@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use juancoded_cordis::Service;
+use juancoded_persistence::chain_store::ChainStore;
 use juancoded_persistence::review_store::ReviewStore;
 use juancoded_persistence::{QueuedMessage, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
@@ -250,6 +251,16 @@ pub struct ReviewStoreService;
 impl Service for ReviewStoreService {
     const KEY: &'static str = "review-store";
     type Api = dyn ReviewStore;
+}
+
+/// `ctx.resolve::<ChainStoreService>()` yields `Arc<dyn ChainStore>` — the chains and
+/// their members. A key of its own for the reason `review-store` has one: it is not
+/// what a session is, and a tree can mount sessions without it.
+pub struct ChainStoreService;
+
+impl Service for ChainStoreService {
+    const KEY: &'static str = "chain-store";
+    type Api = dyn ChainStore;
 }
 
 impl SessionsApi for SessionRegistry {

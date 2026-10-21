@@ -1,0 +1,174 @@
+{
+  "id": "chains",
+  "title": "group sessions and tickets into named chains, one chain per item",
+  "asserts": "a core that advertises `chains` keeps a book of named groups that every subscriber sees change. A mutation is answered twice, in this order: a `chainResult` to the asker, then the chain whole on the change stream. A slug is the chain's identity and is refused rather than normalised when it is not one, and refused when taken. An item is in at most one chain: tagging a session that is already in a chain MOVES it, and the stream carries both chains whole - the one it joined, then the one it left - so a client that replaces entries by slug ends up right. A session member must exist; a ticket is the caller's snapshot. Closing keeps the members and stamps `closedAt`, reopening clears it, and deleting untags the members and frees the slug. Persistence across a restart is not provable from one socket and is asserted by the core's own tests.",
+  "capabilities": ["chains"],
+  "requires": ["pty"],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "exit",
+    "queue",
+    "pauseState",
+    "screen"
+  ],
+  "steps": [
+    { "send": { "type": "subscribeChains" } },
+    {
+      "expect": { "type": "chains", "chains": { "$type": "array" } },
+      "timeoutMs": 10000,
+      "note": "the whole book, which may hold chains an earlier scenario or attempt left behind"
+    },
+    { "send": { "type": "createChain", "slug": "$chainSlug", "requestId": "$requestId" } },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "create",
+        "ok": true,
+        "requestId": "$requestId",
+        "slug": "$chainSlug",
+        "error": { "$absent": true }
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainSlug", "state": "active", "closedAt": null, "members": [] }
+      },
+      "note": "after the result, on the change stream: the asker hears it the way every other subscriber does"
+    },
+    { "send": { "type": "createChain", "slug": "$chainSlugB" } },
+    { "expect": { "type": "chainResult", "op": "create", "ok": true } },
+    { "expect": { "type": "chain", "chain": { "slug": "$chainSlugB" } } },
+    { "send": { "type": "createChain", "slug": "$chainSlug" } },
+    {
+      "expect": { "type": "chainResult", "op": "create", "ok": false, "error": "chain-exists" },
+      "note": "a slug is an identity, and a refusal publishes nothing"
+    },
+    { "send": { "type": "createChain", "slug": "Not A Slug" } },
+    {
+      "expect": { "type": "chainResult", "ok": false, "error": "chain-slug-invalid" },
+      "note": "refused, not normalised: a client handed back `not-a-slug` would hold a name it never chose"
+    },
+    { "send": { "type": "create", "provider": "claude", "cwd": "$cwd", "cols": 80, "rows": 24 } },
+    { "expect": { "type": "created" }, "bind": { "session": "session.id" }, "timeoutMs": 20000 },
+    { "expect": { "type": "attached", "sessionId": "$session" } },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "session",
+        "ref": "$session",
+        "slug": "$chainSlug"
+      }
+    },
+    { "expect": { "type": "chainResult", "op": "setMember", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainSlug", "members": [{ "kind": "session", "ref": "$session" }] }
+      }
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "session",
+        "ref": "$session",
+        "slug": "$chainSlugB"
+      },
+      "note": "the same item into a second chain: a move, never a second membership"
+    },
+    { "expect": { "type": "chainResult", "op": "setMember", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainSlugB", "members": [{ "kind": "session", "ref": "$session" }] }
+      }
+    },
+    {
+      "expect": { "type": "chain", "chain": { "slug": "$chainSlug", "members": [] } },
+      "note": "and the chain it left, whole and without it"
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "session",
+        "ref": "conformance-no-such-session",
+        "slug": "$chainSlug"
+      }
+    },
+    {
+      "expect": { "type": "chainResult", "ok": false, "error": "chain-member-not-found" },
+      "note": "a session member must be a session the core holds: a tab for one that does not exist is a tab nothing can draw"
+    },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "beads",
+        "ref": "$chainTicket",
+        "slug": "$chainSlug",
+        "title": "Chains core",
+        "url": "https://example.invalid/ticket"
+      }
+    },
+    { "expect": { "type": "chainResult", "op": "setMember", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainSlug",
+          "members": [
+            {
+              "kind": "beads",
+              "ref": "$chainTicket",
+              "title": "Chains core",
+              "url": "https://example.invalid/ticket"
+            }
+          ]
+        }
+      },
+      "note": "a ticket is not looked up: its title and url are the snapshot the caller sent"
+    },
+    { "send": { "type": "closeChain", "slug": "$chainSlug" } },
+    { "expect": { "type": "chainResult", "op": "close", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": {
+          "slug": "$chainSlug",
+          "state": "inactive",
+          "closedAt": { "$type": "number" },
+          "members": { "$length": 1 }
+        }
+      },
+      "note": "closing keeps the members"
+    },
+    { "send": { "type": "reopenChain", "slug": "$chainSlug" } },
+    { "expect": { "type": "chainResult", "op": "reopen", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainSlug", "state": "active", "closedAt": null }
+      }
+    },
+    { "send": { "type": "deleteChain", "slug": "$chainSlug" } },
+    { "expect": { "type": "chainResult", "op": "delete", "ok": true } },
+    { "expect": { "type": "chainRemoved", "slug": "$chainSlug" } },
+    {
+      "send": {
+        "type": "setChainMember",
+        "kind": "beads",
+        "ref": "$chainTicket",
+        "slug": "$chainSlug"
+      }
+    },
+    {
+      "expect": { "type": "chainResult", "ok": false, "error": "chain-not-found" },
+      "note": "the slug is gone with the chain"
+    },
+    { "send": { "type": "deleteChain", "slug": "$chainSlugB" } },
+    { "expect": { "type": "chainResult", "op": "delete", "ok": true } },
+    { "expect": { "type": "chainRemoved", "slug": "$chainSlugB" } }
+  ]
+}

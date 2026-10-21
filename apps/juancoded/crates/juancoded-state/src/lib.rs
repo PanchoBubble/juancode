@@ -22,7 +22,9 @@ pub use registry::{
     AdoptRequest, Attached, CreateRequest, Deleted, RegistryConfig, SessionEvent, SessionRegistry,
     StateError, UNRESUMABLE_REASON,
 };
-pub use service::{ReviewStoreService, SessionsApi, SessionsService, StoreService};
+pub use service::{
+    ChainStoreService, ReviewStoreService, SessionsApi, SessionsService, StoreService,
+};
 pub use stuck::{StallPolicy, StuckAlert, StuckKind, StuckWatch};
 
 /// Re-exported so the wire layer can speak about queued messages without taking a

@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.20.0",
+  "specRevision": "1.21.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -11,11 +11,7 @@
     "firstServerFrame": "serverInfo, ahead of every reply; unsolicited activity broadcasts for sessions that already existed may precede it"
   },
   "capabilities": {
-    "required": [
-      "inputAck",
-      "resizeAck",
-      "screen"
-    ],
+    "required": ["inputAck", "resizeAck", "screen"],
     "known": [
       "queue",
       "trackedPrs",
@@ -46,16 +42,11 @@
       "namedKeys",
       "heavyQueue",
       "changes",
-      "github"
+      "github",
+      "chains"
     ],
     "gates": {
-      "queue": [
-        "subscribeQueue",
-        "unsubscribeQueue",
-        "queueMessage",
-        "dequeueMessage",
-        "queue"
-      ],
+      "queue": ["subscribeQueue", "unsubscribeQueue", "queueMessage", "dequeueMessage", "queue"],
       "trackedPrs": [
         "subscribeTrackedPrs",
         "trackPr",
@@ -64,95 +55,31 @@
         "trackedPrs",
         "trackNotification"
       ],
-      "editor": [
-        "openEditor",
-        "editorReady"
-      ],
-      "terminal": [
-        "openTerminal",
-        "terminalReady"
-      ],
-      "adoptExternal": [
-        "adoptExternal"
-      ],
-      "inputAck": [
-        "inputAck"
-      ],
-      "resizeAck": [
-        "resizeAck"
-      ],
-      "screen": [
-        "subscribeScreen",
-        "unsubscribeScreen",
-        "screen"
-      ],
-      "sessionMeta": [
-        "sessionMeta"
-      ],
-      "gridOwner": [
-        "gridChange"
-      ],
-      "restartFresh": [
-        "restartFresh"
-      ],
-      "spawnModel": [
-        "create.model"
-      ],
-      "spawnPreset": [
-        "create.preset"
-      ],
-      "isolateWorktree": [
-        "create.isolateWorktree",
-        "create.worktreeName",
-        "create.reclaimSlot"
-      ],
-      "queueEdit": [
-        "editQueued"
-      ],
-      "transcript": [
-        "subscribeTranscript",
-        "unsubscribeTranscript",
-        "transcript"
-      ],
-      "reaper": [
-        "setReaperPolicy",
-        "setReaperProtectedIds"
-      ],
-      "stuck": [
-        "stuck"
-      ],
-      "sessionList": [
-        "listSessions",
-        "sessions"
-      ],
-      "sessionSearch": [
-        "searchSessions",
-        "searchResults"
-      ],
-      "sessionDelete": [
-        "deleteSession",
-        "sessionDeleted"
-      ],
-      "sessionSleep": [
-        "sleepSession"
-      ],
-      "sessionEdit": [
-        "setMeta"
-      ],
-      "globalPause": [
-        "pauseAll",
-        "resumeAll",
-        "pauseState"
-      ],
-      "trackPrInSession": [
-        "trackPrInSession"
-      ],
-      "prWebhook": [
-        "prWebhook"
-      ],
-      "namedKeys": [
-        "key"
-      ],
+      "editor": ["openEditor", "editorReady"],
+      "terminal": ["openTerminal", "terminalReady"],
+      "adoptExternal": ["adoptExternal"],
+      "inputAck": ["inputAck"],
+      "resizeAck": ["resizeAck"],
+      "screen": ["subscribeScreen", "unsubscribeScreen", "screen"],
+      "sessionMeta": ["sessionMeta"],
+      "gridOwner": ["gridChange"],
+      "restartFresh": ["restartFresh"],
+      "spawnModel": ["create.model"],
+      "spawnPreset": ["create.preset"],
+      "isolateWorktree": ["create.isolateWorktree", "create.worktreeName", "create.reclaimSlot"],
+      "queueEdit": ["editQueued"],
+      "transcript": ["subscribeTranscript", "unsubscribeTranscript", "transcript"],
+      "reaper": ["setReaperPolicy", "setReaperProtectedIds"],
+      "stuck": ["stuck"],
+      "sessionList": ["listSessions", "sessions"],
+      "sessionSearch": ["searchSessions", "searchResults"],
+      "sessionDelete": ["deleteSession", "sessionDeleted"],
+      "sessionSleep": ["sleepSession"],
+      "sessionEdit": ["setMeta"],
+      "globalPause": ["pauseAll", "resumeAll", "pauseState"],
+      "trackPrInSession": ["trackPrInSession"],
+      "prWebhook": ["prWebhook"],
+      "namedKeys": ["key"],
       "heavyQueue": [
         "heavyQueueSubscribe",
         "heavyQueueUnsubscribe",
@@ -168,22 +95,25 @@
         "sessionCommitMessage",
         "changesResult"
       ],
-      "github": [
-        "sessionReview",
-        "diffCommentAdd",
-        "diffCommentDelete",
-        "review",
-        "diffComments"
+      "github": ["sessionReview", "diffCommentAdd", "diffCommentDelete", "review", "diffComments"],
+      "chains": [
+        "subscribeChains",
+        "createChain",
+        "closeChain",
+        "reopenChain",
+        "deleteChain",
+        "setChainMember",
+        "chains",
+        "chain",
+        "chainRemoved",
+        "chainResult"
       ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
   },
   "clientMessages": {
     "create": {
-      "required": [
-        "provider",
-        "cwd"
-      ],
+      "required": ["provider", "cwd"],
       "optional": [
         "cols",
         "rows",
@@ -206,107 +136,58 @@
       }
     },
     "attach": {
-      "required": [
-        "sessionId",
-        "cols",
-        "rows"
-      ],
+      "required": ["sessionId", "cols", "rows"],
       "optional": []
     },
     "reactivate": {
-      "required": [
-        "sessionId",
-        "cols",
-        "rows"
-      ],
+      "required": ["sessionId", "cols", "rows"],
       "optional": [],
       "notes": "The resume path: answers `attached` when the prior CLI conversation came back, and `unresumable` when there is no conversation id to resume. A core MAY self-heal a pinned id whose transcript never got written by booting fresh instead (the Swift core does), so a client that specifically WANTS a fresh conversation must ask for one with `restartFresh` rather than infer it here."
     },
     "restartFresh": {
-      "required": [
-        "sessionId",
-        "cols",
-        "rows"
-      ],
+      "required": ["sessionId", "cols", "rows"],
       "optional": [],
       "capability": "restartFresh",
       "notes": "Restart an exited session as a brand-new CLI conversation under the same juancode id, discarding the prior one, and answer `attached` for it. Unlike `reactivate` it needs no resumable conversation id, so it has no `unresumable` leg, and it carries no prior scrollback: the conversation the session is leaving behind is the point. A core that pins its own session ids pins a NEW one, so the restarted session is resumable from its first completed turn. Only defined for a session that is not running: on a live one the core answers `error` rather than throwing the running conversation away. See ADDITIVE_FIELDS for why this is a message and not a flag on reactivate."
     },
     "adoptExternal": {
-      "required": [
-        "provider",
-        "cliSessionId",
-        "cwd",
-        "startMs",
-        "cols",
-        "rows"
-      ],
+      "required": ["provider", "cliSessionId", "cwd", "startMs", "cols", "rows"],
       "optional": [],
       "capability": "adoptExternal"
     },
     "setSkipPermissions": {
-      "required": [
-        "sessionId",
-        "skipPermissions",
-        "cols",
-        "rows"
-      ],
+      "required": ["sessionId", "skipPermissions", "cols", "rows"],
       "optional": []
     },
     "input": {
-      "required": [
-        "sessionId",
-        "data"
-      ],
-      "optional": [
-        "seq"
-      ],
+      "required": ["sessionId", "data"],
+      "optional": ["seq"],
       "notes": "seq present means the core must reply with a matching inputAck; absent means no ack."
     },
     "key": {
-      "required": [
-        "sessionId",
-        "keys"
-      ],
-      "optional": [
-        "seq"
-      ],
+      "required": ["sessionId", "keys"],
+      "optional": ["seq"],
       "capability": "namedKeys",
       "notes": "Named control keys for a pty - Esc, Ctrl-C, an arrow (juancode-uigs). `keys` are NAMES, never bytes: the vocabulary and its resolution belong to the CORE, so a client cannot invent an escape sequence and the two cores cannot disagree about one. The vocabulary is Enter, Escape, Tab, Backspace, Space, Up, Down, Left, Right and C-a .. C-z; resolution is case-insensitive, `ctrl-c` resolves wherever `C-c` is spelled, and `esc` / `return` are aliases. Arrows are the normal-mode CSI forms (ESC [ A .. ESC [ D), because no client can know which cursor mode the pty is in. The resolved bytes reach the pty RAW - a key is never bracketed-pasted, which is what `input` is for and what made every remote keystroke arrive as literal text, leaving a session stopped on a permission prompt (arrows + Enter) unreachable from a phone. A batch is all or nothing: an unrecognised name is answered with `error` and writes NOTHING, because a half-applied `Up, Up, Enter` answers a prompt on the wrong row. Its own frame rather than a flag on `input`, because a core that ignored such a flag would type the word \"Escape\" into the agent's prompt box while answering exactly as it would for a real keystroke. `seq` present means the core must reply with a matching inputAck, as `input` does."
     },
     "resize": {
-      "required": [
-        "sessionId",
-        "cols",
-        "rows"
-      ],
-      "optional": [
-        "seq"
-      ],
+      "required": ["sessionId", "cols", "rows"],
+      "optional": ["seq"],
       "notes": "seq present means the core must reply with a matching resizeAck."
     },
     "kill": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": []
     },
     "sleepSession": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "sessionSleep",
       "notes": "Put a session to sleep on purpose: the core flags its row `dormant` and only then kills the CLI tree, so the ~300MB comes back and the row it leaves behind is a conversation to return to rather than one that died. No reply, for the same reason `setReaperPolicy` has none: the effect IS the `sessionMeta` carrying `dormant: true` followed by the session's `exit`, in that order, and a core that flagged after the kill would leave a row every client renders as a crash. A session with no live pty is answered with `error` and not flagged, because `dormant` is the set a global play revives and a relabelled crash would be woken as if somebody had paused it. Waking is `reactivate`, which already clears the flag on every path that respawns a pty - see the `sleepAndWake` decision for why there is no second frame for that half."
     },
     "setMeta": {
-      "required": [
-        "sessionId"
-      ],
-      "optional": [
-        "title",
-        "archived"
-      ],
+      "required": ["sessionId"],
+      "optional": ["title", "archived"],
       "capability": "sessionEdit",
       "notes": "Write the two fields of a session's row that belong to the person using it: its name and whether it is archived. A patch, not a replacement - an absent field is left alone, so a rename sheet does not have to send back an archive flag it never asked about, and a blank title is not a rename and is dropped. One frame for both because they are the same statement (this row is mine to arrange) and because they are the two fields with no other writer: everything else on the row is derived by the core. Setting the title also PINS it, and the pin is the load-bearing half rather than the write. Before this frame existed the desktop wrote a rename into its OWN mirror row and sent nothing, which would only have been a rename other clients could not see - but a CLI repaints its OSC 0/2 window title several times a turn, the core adopts each one and broadcasts the row, and a mirror is a cache that takes the broadcast. So a new name held for a few seconds and flipped back, and an archived session came back unarchived on the next launch when the boot backfill replaced the whole list (29 sessions created under the Rust core on 2026-08-24 carried 27 distinct titles, so the adoption fires routinely - juancode-0yao). A frame that set the title without pinning it would be walked over by the same escape a second later. The pin is core-side state and deliberately not a field on `sessionMeta`: no client acts on it, its whole job is to stop the core that holds it adopting a title over a name a person chose, and the Swift core keeps the identical flag private to its `Session`. It is persisted, though, because the core outlives its clients and a relaunch is exactly when a resumed CLI repaints a window title. No reply, for the same reason `sleepSession` has none: the effect IS the `sessionMeta` carrying the new row, which every connection hears including the one that asked. A session the core does not hold is answered with `error` - a rename that reached nobody must not look like one that landed."
     },
@@ -317,112 +198,71 @@
       "notes": "Ask what this core holds. Answered with one `sessions` frame carrying every session, and it is not a subscription: `created`, `sessionMeta`, `exit` and `sessionDeleted` are the deltas, so a client asks this once on the handshake and keeps up from the broadcasts. It exists because protocol v1 had no way to ask: the desktop got the list from REST routes (/api/sessions) that the Rust daemon does not serve, so its mirror held only what arrived over the wire while it happened to be connected - 28 sessions against the daemon's 379, measured 2026-08-24 (juancode-3l2p, juancode-75c5)."
     },
     "searchSessions": {
-      "required": [
-        "query",
-        "requestId"
-      ],
-      "optional": [
-        "limit"
-      ],
+      "required": ["query", "requestId"],
+      "optional": ["limit"],
       "capability": "sessionSearch",
       "notes": "Ask what this core's own history mentions. Answered with one `searchResults` carrying the `requestId` back, and answered off the connection's task so a scan does not hold up the pty bytes on the same socket. `limit` defaults to 50. It exists because a client's own index cannot answer it: a desktop mirror learns a session's bytes by attaching to it, so searching there matched the title of every session and the text of only the ones that Mac had opened - 508 of 857 sessions on the real pair, against 772 the daemon can answer for, measured 2026-09-17 (juancode-rz4c)."
     },
     "deleteSession": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "sessionDelete",
       "notes": "Forget a session: kill its pty, drop its row, keep its CLI conversation from being adopted back, and reap the worktree it owned. A type of its own rather than a flag on `kill`, per ADDITIVE_FIELDS: a core that did not know the flag would answer by killing the session and keeping the row, which is a different operation from the one the client asked for, and an unknown type is ignored whole so the client can see the silence. Answered with a `sessionDeleted` broadcast, or an `error` for a session this core does not have (juancode-lxe3, juancode-oe30)."
     },
     "subscribeQueue": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "queue"
     },
     "unsubscribeQueue": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "queue"
     },
     "queueMessage": {
-      "required": [
-        "sessionId",
-        "text"
-      ],
+      "required": ["sessionId", "text"],
       "optional": [],
       "capability": "queue"
     },
     "dequeueMessage": {
-      "required": [
-        "sessionId",
-        "messageId"
-      ],
+      "required": ["sessionId", "messageId"],
       "optional": [],
       "capability": "queue"
     },
     "editQueued": {
-      "required": [
-        "sessionId",
-        "messageId",
-        "text"
-      ],
+      "required": ["sessionId", "messageId", "text"],
       "optional": [],
       "capability": "queueEdit",
       "notes": "Replace a still-pending message's text in place, addressed by the id its last `queue` snapshot gave it. Not a cancel-and-requeue: the occurrence keeps its id, its position in delivery order and the surface it arrived from, so editing the third message in a queue does not send it to the back of one nobody asked to reorder. Answered with the whole new `queue` snapshot, or with an `error` whose message is `queue-item-not-found` (no pending occurrence has that id, which includes one already claimed for delivery) or `queue-item-not-text` (the occurrence holds key bytes rather than text). Gated separately from `queue` because it is a separate promise: `queue` says messages can be queued and will be typed, `queueEdit` says every occurrence has an id that survives being rewritten, and a core with the first and not the second is not a liar."
     },
     "subscribeTranscript": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "transcript",
       "notes": "Watch a session's structured transcript: the history the core kept, answered at once as one `transcript` frame with `replay: true`, and every record read afterwards as live batches until `unsubscribeTranscript` or the socket closes. Per connection, like `subscribeQueue` and `subscribeScreen`; a second subscribe on the same connection is not a second baseline. A session with no transcript is answered with an empty replay rather than silence, so a client draws an empty panel instead of waiting for a frame that is not coming. This is a SECOND data plane beside the pty bytes: `attached.scrollback` is unchanged and stays what a pane repaints from."
     },
     "unsubscribeTranscript": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "transcript"
     },
     "subscribeScreen": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "screen"
     },
     "unsubscribeScreen": {
-      "required": [
-        "sessionId"
-      ],
+      "required": ["sessionId"],
       "optional": [],
       "capability": "screen"
     },
     "openEditor": {
-      "required": [
-        "cwd",
-        "file",
-        "cols",
-        "rows"
-      ],
-      "optional": [
-        "line"
-      ],
+      "required": ["cwd", "file", "cols", "rows"],
+      "optional": ["line"],
       "capability": "editor"
     },
     "openTerminal": {
-      "required": [
-        "cwd",
-        "cols",
-        "rows",
-        "requestId"
-      ],
+      "required": ["cwd", "cols", "rows", "requestId"],
       "optional": [],
       "capability": "terminal"
     },
@@ -432,61 +272,40 @@
       "capability": "trackedPrs"
     },
     "trackPr": {
-      "required": [
-        "cwd",
-        "pr"
-      ],
+      "required": ["cwd", "pr"],
       "optional": [],
       "capability": "trackedPrs"
     },
     "trackPrInSession": {
-      "required": [
-        "cwd",
-        "pr",
-        "sessionId"
-      ],
+      "required": ["cwd", "pr", "sessionId"],
       "optional": [],
       "capability": "trackPrInSession",
       "notes": "Track `pr` in the session `sessionId` names instead of spawning one for it: the \"Track PR in this session\" path, where the conversation asking is the one whose branch opened the PR, so it already holds the context a spawned tracker would have to rebuild. The core hands that session the watch contract and nothing else - no worktree is cut and no agent is spawned - and from there it is an ordinary tracked PR: the poll loop types fixes into it and raises decisions out of it exactly as it would for a spawned tracker. A TYPE of its own rather than an optional `sessionId` on `trackPr`, for the reason ADDITIVE_FIELDS gives: a core that dropped the field would not do nothing, it would spawn a second agent on its own worktree for a PR the user asked one conversation to watch, and two agents committing to one branch is worse than no watch at all. An unknown type is ignored whole, so an old core answers with the silence the client can see - the same choice `restartFresh` made over a `fresh` flag on `reactivate`. Answered by the `trackedPrs` list, like `trackPr`, and never by a reply of its own. Refused - and a refusal publishes NOTHING, so the asking client's track times out rather than being answered by a watch it did not ask for - when the session is one this core does not hold, when it cannot be brought back up, or when it already drives another tracked PR. That last one is the rule the poll loop depends on: one session, one watch contract, or two PRs' fix prompts interleave in one conversation."
     },
     "prWebhook": {
-      "required": [
-        "repo",
-        "number"
-      ],
+      "required": ["repo", "number"],
       "optional": [],
       "capability": "prWebhook",
       "notes": "A GitHub webhook said something happened to PR `number` in `repo` (`owner/name`): refresh every watch it matches, sooner than the poll would. Without it the poll is a core's only update path and a review comment or a CI result takes up to a poll interval to land. A TRIGGER, never a payload - the event body does not cross this wire and nothing in it is stored or believed, because the core re-reads the PR through `gh` on the same classify-inject-notify path a poll pass uses. That is what makes the frame safe to serve with no auth of its own: the HMAC that says GitHub really sent the event is checked before anything reaches a socket (in juancode, by the oracle sidecar), and the most a frame that got past it can do is ask for a fetch. Matching is by the repo identity a watch resolved through `gh`, compared case-insensitively because GitHub slugs are, falling back to the owner/name in the watch's own PR url for one that has not resolved yet. Answered by the `trackedPrs` list if the refresh moves it and by nothing at all if it does not, so a repo and number no watch matches is an ordinary no-op rather than an error: a webhook fires for every PR in a repo and a core watches a handful. A burst - one push fires a push, a check_suite and a check_run per job within moments - coalesces into one refresh per PR rather than a round of `gh` spawns each."
     },
     "untrackPr": {
-      "required": [
-        "trackedId"
-      ],
+      "required": ["trackedId"],
       "optional": [],
       "capability": "trackedPrs"
     },
     "resolveTrackNotification": {
-      "required": [
-        "trackedId",
-        "notificationId"
-      ],
+      "required": ["trackedId", "notificationId"],
       "optional": [],
       "capability": "trackedPrs"
     },
     "setReaperPolicy": {
       "required": [],
-      "optional": [
-        "minutes",
-        "windowMs",
-        "maxLive"
-      ],
+      "optional": ["minutes", "windowMs", "maxLive"],
       "capability": "reaper",
       "notes": "The Settings idle window and the live-session ceiling for a core that reaps in its own process. Every field is optional and only the ones present are applied, so a client with just an idle-window stepper does not have to invent a ceiling. windowMs is the precise spelling of the same quantity as minutes and wins when both are sent; it exists because a core in a separate process can only be told exactly through a frame. 0 in either spelling disables idle reaping, and the ceiling is separate and keeps applying. There is no reply: the effect is visible as sessionMeta frames carrying dormant, and as the exit that follows one."
     },
     "setReaperProtectedIds": {
-      "required": [
-        "sessionIds"
-      ],
+      "required": ["sessionIds"],
       "optional": [],
       "capability": "reaper",
       "notes": "The sessions this client says must never be slept: the pane it has open and the active Oracle. Replaces this connection's whole set - never a patch - and an empty list clears it. Scoped to the connection, so a client that goes away stops protecting a pane nobody is looking at; a core that kept it would make those sessions permanently un-reapable."
@@ -516,148 +335,119 @@
       "notes": "Stop the queue frames for this connection. It really stops them, and it is also what releases the core's registry poll when it is the last watch: a client that only stopped drawing would leave a core stat-ing a directory forever for nobody."
     },
     "heavySetPriority": {
-      "required": [
-        "pid",
-        "prio"
-      ],
+      "required": ["pid", "prio"],
       "optional": [],
       "capability": "heavyQueue",
       "notes": "Move a job in line by rewriting its registry entry's priority. Higher runs sooner; ties break on how long the job has been queued. Not a move-up/move-down pair, because the line is not the core's to order: the waiting wrapper re-reads its own priority every poll (~3s) and admits itself, so a number in that file is the only thing anybody can change, and no signal is needed for it to take effect. A client that wants \"run this next\" computes the number off the snapshot it is already holding. Answered by the queue rather than by a reply of its own, and by `error` when there is no entry for `pid` - a job that finished between a client's snapshot and its click."
     },
     "heavySetSlots": {
-      "required": [
-        "slots"
-      ],
+      "required": ["slots"],
       "optional": [],
       "capability": "heavyQueue",
       "notes": "How many heavy jobs may run at once, written into the `heavy` wrapper's own config. Every other key in that file is preserved - the rules in particular, which belong to the wrapper and are read by other tooling on the machine. Raising it lets jobs already in line through, because the waiting wrappers re-read the capacity on every poll; it is not a knob that only applies to new jobs. Anything below one slot is answered with `error` rather than clamped: a queue that admits nothing forever is not a narrower queue, and a client that asked for zero is better told than silently given one."
     },
     "heavyCancel": {
-      "required": [
-        "pid"
-      ],
+      "required": ["pid"],
       "optional": [],
       "capability": "heavyQueue",
       "notes": "SIGTERM a job's wrapper, which forwards it to the running command and frees its slot. Refused with `error` for a pid the core's own snapshot does not hold, and that refusal is the frame's safety property rather than tidiness: without it this is an arbitrary-signal gadget aimed at any process on the machine by anything that can reach the socket. The check is membership in the queue, so the worst a client can do is stop a job in the list it was just sent. Answered by the queue when the job goes."
     },
     "sessionCommit": {
-      "required": [
-        "sessionId",
-        "message",
-        "requestId"
-      ],
-      "optional": [
-        "cwd"
-      ],
+      "required": ["sessionId", "message", "requestId"],
+      "optional": ["cwd"],
       "capability": "changes",
       "notes": "Stage everything in the session's working tree and commit it. A frame rather than an HTTP POST so it is ordered against the session's other traffic on the same socket, and so a refusal can carry git's own first useful line - a hook's rejection, or \"Nothing to commit.\", which is the whole answer and is not recoverable from a status code. A blank or absent `message` is refused rather than defaulted: a commit message this core invented would be in somebody's history forever. `cwd` names another worktree of the same repo and is validated against that repo's own `git worktree list`; anything git has not just listed falls back to the session's own tree."
     },
     "sessionPush": {
-      "required": [
-        "sessionId",
-        "requestId"
-      ],
-      "optional": [
-        "cwd"
-      ],
+      "required": ["sessionId", "requestId"],
+      "optional": ["cwd"],
       "capability": "changes",
       "notes": "Push the branch checked out in the session's tree, setting the upstream to origin on the first push. A detached HEAD is refused by name rather than pushed to whatever the last upstream was."
     },
     "sessionRevert": {
-      "required": [
-        "sessionId",
-        "path",
-        "requestId"
-      ],
-      "optional": [
-        "file",
-        "hunkIndex",
-        "cwd"
-      ],
+      "required": ["sessionId", "path", "requestId"],
+      "optional": ["file", "hunkIndex", "cwd"],
       "capability": "changes",
       "notes": "Discard uncommitted work: one file, or one hunk of it when `hunkIndex` is present. The destructive frame, and the one with a guard that is load-bearing rather than tidy - `path` is resolved lexically against the target worktree's root and refused unless it lands strictly inside it, so `../`, an absolute path elsewhere, and the root itself are all rejected before git runs. Without that this frame is an arbitrary write primitive aimed at the whole filesystem by anything that can reach the socket. A missing path is refused and never widened into the tree: the one thing this must not become is `git checkout .`. `file` is accepted as a synonym for `path`, because that is what the Swift core's own POST body called it."
     },
     "sessionCommitMessage": {
-      "required": [
-        "sessionId",
-        "requestId"
-      ],
-      "optional": [
-        "cwd"
-      ],
+      "required": ["sessionId", "requestId"],
+      "optional": ["cwd"],
       "capability": "changes",
       "notes": "Draft a commit message for what is currently uncommitted, by running the genuine `claude` CLI in headless print mode against the diff the CORE reads - not one the client sends, which would describe a snapshot that may already be stale. Seconds rather than milliseconds, and answered out of band, so it does not hold up the pty bytes on the same socket."
     },
     "sessionReview": {
-      "required": [
-        "sessionId"
-      ],
-      "optional": [
-        "refresh"
-      ],
+      "required": ["sessionId"],
+      "optional": ["refresh"],
       "capability": "github",
       "notes": "A session's review: the cached one, or a fresh pass when `refresh` is true. A frame rather than only `GET /api/sessions/{id}/review` because a refresh is a whole model turn over the session's working tree - held open as an HTTP request it would block for minutes, and answered as a frame it arrives when the pass is done while the pty bytes on the same socket keep flowing. `refresh` absent or false is a read and costs nothing. The two are one frame rather than two because 'show me the review' and 'review it again' are questions about the same thing, and a client must not be able to confuse them. Answered by `review`, and by `error` for a session this core does not hold or a tree that mounted no review store."
     },
     "diffCommentAdd": {
-      "required": [
-        "sessionId",
-        "file",
-        "side",
-        "line",
-        "body"
-      ],
-      "optional": [
-        "endLine",
-        "quote",
-        "commitSha",
-        "commitSubject"
-      ],
+      "required": ["sessionId", "file", "side", "line", "body"],
+      "optional": ["endLine", "quote", "commitSha", "commitSubject"],
       "capability": "github",
       "notes": "Stage an inline comment against a session's diff. `side` is required rather than defaulted and anything but `old`/`new` is answered with `error`: a comment on the wrong side of a hunk hangs off a line the author never wrote. A backwards range (endLine < line) is NORMALISED rather than refused, because a selection dragged upwards is a selection. An empty body after trimming is refused. Answered by `diffComments` with the whole list."
     },
     "diffCommentDelete": {
-      "required": [
-        "sessionId"
-      ],
-      "optional": [
-        "commentId"
-      ],
+      "required": ["sessionId"],
+      "optional": ["commentId"],
       "capability": "github",
       "notes": "Drop one staged comment, or - with no `commentId` - every one of the session's. One frame at two scopes rather than two frames, because a separate clear is a second way to get the same set wrong. A `commentId` this session does not hold is answered with `error` as well as the list: the client was holding a comment this core does not have, which is worth it knowing. Answered by `diffComments` with the whole list."
+    },
+    "subscribeChains": {
+      "required": [],
+      "optional": [],
+      "capability": "chains",
+      "notes": "Watch the chains: the whole book now (`chains`), then each chain whole again (`chain`) or its slug (`chainRemoved`) whenever it moves, until the socket closes. One subscribe per connection; a second is not a second snapshot. A change frame is never a patch, so the snapshot and the stream may overlap without a sequence number: the last frame for a slug is the truth about it."
+    },
+    "createChain": {
+      "required": ["slug"],
+      "optional": ["requestId"],
+      "capability": "chains",
+      "notes": "Create an empty active chain. `slug` is the chain's id and its display name at once and never changes: lowercase letters and digits in dash-separated words, at most 48 characters. A slug that is not one is refused (`chain-slug-empty`, `chain-slug-invalid`, `chain-slug-too-long`), never normalised; a taken one is `chain-exists`, active or not. Answered by `chainResult` to the asker and by the change stream to every subscriber."
+    },
+    "closeChain": {
+      "required": ["slug"],
+      "optional": ["requestId"],
+      "capability": "chains",
+      "notes": "Mark a chain inactive. Its members stay - closing is \"this is done\", not \"forget this\" - and `closedAt` is stamped. A no-op on a closed chain, and a no-op publishes nothing. Answered by `chainResult` to the asker and by the change stream to every subscriber."
+    },
+    "reopenChain": {
+      "required": ["slug"],
+      "optional": ["requestId"],
+      "capability": "chains",
+      "notes": "Mark a chain active again and clear `closedAt`. A no-op on an active chain. Answered by `chainResult` to the asker and by the change stream to every subscriber."
+    },
+    "deleteChain": {
+      "required": ["slug"],
+      "optional": ["requestId"],
+      "capability": "chains",
+      "notes": "Delete a chain. Its members are untagged, never deleted: a chain is a label on work and removing the label must not reach the work. The slug is free again afterwards. Answered by `chainResult` to the asker and by the change stream to every subscriber."
+    },
+    "setChainMember": {
+      "required": ["kind", "ref"],
+      "optional": ["slug", "title", "url", "requestId"],
+      "capability": "chains",
+      "notes": "Put one item in chain `slug`, or take it out of its chain when `slug` is absent or null. An item is in at most one chain - `UNIQUE(kind, ref)` in the core's store - so tagging an item that is already in another chain MOVES it, and the change stream carries both chains. `kind` is `session` (an Oracle is an ordinary session), `tracked_pr`, `beads` or `linear`, and `ref` is the id that kind already has: the session id, the tracked PR's key (`<cwd>#<number>`), the beads issue id, the Linear identifier. An unknown kind is a malformed frame rather than an ignored one, because silence would read as a tag that landed. A session member must be a session the core holds (`chain-member-not-found`); the other kinds are not looked up, so `title`/`url` are the caller's snapshot for them. A slug that names no chain is `chain-not-found`."
     }
   },
   "serverMessages": {
     "serverInfo": {
-      "required": [
-        "protocolVersion",
-        "capabilities"
-      ],
-      "optional": [
-        "clientId",
-        "daemon"
-      ],
+      "required": ["protocolVersion", "capabilities"],
+      "optional": ["clientId", "daemon"],
       "notes": "Frame 0 on every connection. Nothing precedes it, not even the unsolicited activity broadcasts for sessions that were already live, so a client always knows the version and capability list before it has to interpret anything. See the SERVER_INFO_ORDERING rule. clientId is this connection's grid-ownership token, present on a core that advertises gridOwner: it is the value that comes back as the owner of gridChange and resizeAck when this connection holds the grid, and without it a client can see who drives the grid but not whether that is itself. daemon is who the core process is - { pid, startedAt, exePath, buildStamp, version, buildId, dataDir, sessionsPerProject, ownerState, ownerPid, ownerGraceMs } - and is present only on a core that runs as a separate process from its client, because that is the only kind that can be stale relative to it. The three owner fields are the lifetime half of that: ownerState is owned | orphaned | unowned, ownerPid is the process that will reap it, and ownerGraceMs is how long the core waits after that process is gone before ending itself (0 disables it). They are live rather than captured at boot, because ownership changes hands when a later launch claims a running core, and a core reporting unowned is the one that can outlive every client and go stale. A client compares it against its own launch time, build stamp and environment and says so when they disagree; an in-process core omits the key entirely. Every value inside may be null, which means unknown and never means agreement."
     },
     "created": {
-      "required": [
-        "session"
-      ],
+      "required": ["session"],
       "optional": []
     },
     "attached": {
-      "required": [
-        "sessionId",
-        "scrollback",
-        "session"
-      ],
+      "required": ["sessionId", "scrollback", "session"],
       "optional": [],
       "notes": "Also re-sent as a repaint when a stalled connection's output buffer overflowed."
     },
     "output": {
-      "required": [
-        "sessionId",
-        "data"
-      ],
+      "required": ["sessionId", "data"],
       "optional": []
     },
     "screen": {
@@ -677,251 +467,163 @@
       "notes": "reset: true carries every row; reset: false only the changed rows. Geometry or alt-buffer flips force a reset."
     },
     "inputAck": {
-      "required": [
-        "sessionId",
-        "seq"
-      ],
+      "required": ["sessionId", "seq"],
       "optional": [],
       "capability": "inputAck"
     },
     "resizeAck": {
-      "required": [
-        "sessionId",
-        "seq",
-        "cols",
-        "rows",
-        "applied",
-        "denied"
-      ],
-      "optional": [
-        "owner"
-      ],
+      "required": ["sessionId", "seq", "cols", "rows", "applied", "denied"],
+      "optional": ["owner"],
       "capability": "resizeAck",
       "notes": "applied: the grid reached a live pty. denied: another client owns the shared grid, so re-sending is futile. owner (gridOwner cores): who holds the grid after the arbitration, so a denied client learns who to wait for; string | null, always present as a key, null for an unclaimed grid and for the unarbitrated ephemeral editor/terminal ptys."
     },
     "gridChange": {
-      "required": [
-        "sessionId",
-        "owner",
-        "cols",
-        "rows"
-      ],
+      "required": ["sessionId", "owner", "cols", "rows"],
       "optional": [],
       "capability": "gridOwner",
       "notes": "Broadcast to every connection whenever the arbitrated grid changes hands: a resize granted, or an owner letting go (its pane torn down, its connection closed). owner is string | null and is always present as a key; null means the grid is unclaimed again. Also sent once per already-owned session when a connection opens, so a client arriving mid-flight starts from the truth rather than assuming the grid is free. NOT sent for an unclaimed grid on connect: silence already means nobody is driving. resizeAck is the private answer to one client's request; this is the shared state."
     },
     "exit": {
-      "required": [
-        "sessionId",
-        "exitCode"
-      ],
+      "required": ["sessionId", "exitCode"],
       "optional": [],
       "notes": "exitCode is number | null and is always present as a key."
     },
     "activity": {
-      "required": [
-        "sessionId",
-        "state",
-        "notify"
-      ],
-      "optional": [
-        "changes",
-        "dispatchId"
-      ],
+      "required": ["sessionId", "state", "notify"],
+      "optional": ["changes", "dispatchId"],
       "notes": "state is busy | idle | waiting_input. changes rides only the settle edge; both optionals are omitted, not null."
     },
     "sessionMeta": {
-      "required": [
-        "sessionId",
-        "session"
-      ],
+      "required": ["sessionId", "session"],
       "optional": [],
       "capability": "sessionMeta",
       "notes": "A session's persisted meta changed out of band: a title landing from the CLI-title poll or an OSC 0/2 window title, a rename, an archive or dormant flip. Carries the whole SessionMeta — replace the row wholesale, do not patch fields. created and attached remain the snapshot; this is the delta, so a client's session row is not frozen at whatever meta it attached with. Editor sessions are included, unlike activity: a meta edit is not a turn."
     },
     "sessions": {
-      "required": [
-        "sessions"
-      ],
+      "required": ["sessions"],
       "optional": [],
       "capability": "sessionList",
       "notes": "Every session this core holds, oldest first, in answer to `listSessions`. Replace wholesale: it is a snapshot and never a patch, so a client's list after applying it is exactly this list, and a row the client holds that is not in here is a row this core does not have. That deletion half is why the frame carries everything rather than a page. Metas only and deliberately no scrollback: a session's scrollback is routinely tens of kilobytes, and hundreds of them in one frame would be a multi-megabyte handshake for bytes a sidebar never draws. Scrollback stays on `attached`."
     },
     "sessionDeleted": {
-      "required": [
-        "sessionId"
-      ],
-      "optional": [
-        "worktreePath",
-        "worktreeRemoved"
-      ],
+      "required": ["sessionId"],
+      "optional": ["worktreePath", "worktreeRemoved"],
       "capability": "sessionDelete",
       "notes": "A session was forgotten. Broadcast to every connection and not just the one that asked, because a row another client is still drawing is the same rot from the other side. Never a substitute for `exit`: an exit says the process is gone and the row is still there to attach to and replay, this says there is nothing to come back for, and a client drops the row. `worktreePath` and `worktreeRemoved` travel together and are both omitted for a session that never had a tree, so \"there was nothing to reap\" cannot read like \"the reap is pending\"; a failed reap reports the path with `worktreeRemoved: false`, because the directory a human has to remove by hand is the one thing worth saying."
     },
     "queue": {
-      "required": [
-        "sessionId",
-        "items"
-      ],
+      "required": ["sessionId", "items"],
       "optional": [],
       "capability": "queue"
     },
     "transcript": {
-      "required": [
-        "sessionId",
-        "replay",
-        "records"
-      ],
+      "required": ["sessionId", "replay", "records"],
       "optional": [],
       "capability": "transcript",
       "notes": "Structured transcript records for one session, oldest first. Two kinds of frame, one shape: `replay: true` is the history a `subscribeTranscript` is answered with, `replay: false` is a batch the core has just read. A record carries at least `session`, `source`, `seq` and `kind`, plus the fields of its kind; the eight kinds are turnStart, turnEnd, step, assistant, thinking, toolCall, toolResult and usage. Append by `seq`, never replace: `seq` is append-only per session and never repeats, restarts included, so a client's whole job is to drop a `seq` it already holds. That is also why a record may legitimately arrive twice, once in a replay and again live when a subscribe lands mid-poll, and why it costs a client nothing."
     },
     "editorReady": {
-      "required": [
-        "editorId"
-      ],
+      "required": ["editorId"],
       "optional": [],
       "capability": "editor"
     },
     "terminalReady": {
-      "required": [
-        "terminalId",
-        "requestId"
-      ],
+      "required": ["terminalId", "requestId"],
       "optional": [],
       "capability": "terminal"
     },
     "searchResults": {
-      "required": [
-        "requestId",
-        "hits"
-      ],
+      "required": ["requestId", "hits"],
       "optional": [],
       "capability": "sessionSearch",
       "notes": "The answer to one `searchSessions`, newest session first. Each hit is `{ sessionId, snippet }` and nothing else: the client that asked already holds every row this core has (it backfilled them with `listSessions`), so a session row here would be a second copy of what it is about to look up. `requestId` is the asking client's own, echoed back - a search box has a frame per keystroke in flight and the core answers whichever scan finishes first."
     },
     "stuck": {
-      "required": [
-        "sessionId",
-        "kind",
-        "run",
-        "quietMs",
-        "advice"
-      ],
-      "optional": [
-        "tool",
-        "dispatchId"
-      ],
+      "required": ["sessionId", "kind", "run", "quietMs", "advice"],
+      "optional": ["tool", "dispatchId"],
       "capability": "stuck",
       "notes": "A session looks like it is going nowhere: kind repeat is the same tool called run times in a row with identical canonicalised arguments, kind stall is a session claiming to work with no transcript record and no output for quietMs. Advisory and unsolicited - there is nothing to subscribe to and nothing acts on it, the core does not kill, sleep or type. advice is the whole human-readable sentence, arguments already head-truncated; a client that renders nothing but advice is a complete client. tool is present on a repeat only. Only a core with the transcript seam can produce it, which is why it is gated."
     },
     "unresumable": {
-      "required": [
-        "sessionId",
-        "reason"
-      ],
+      "required": ["sessionId", "reason"],
       "optional": []
     },
     "error": {
-      "required": [
-        "message"
-      ],
-      "optional": [
-        "sessionId",
-        "code",
-        "reclaim"
-      ],
+      "required": ["message"],
+      "optional": ["sessionId", "code", "reclaim"],
       "notes": "`code: worktreeReclaimConfirm` answers a `create` whose repo has no free worktree slot; `reclaim` is `{slot, sessionId, title, updatedAt}`, the session that a resend with `reclaimSlot` deletes."
     },
     "trackedPrs": {
-      "required": [
-        "tracked"
-      ],
+      "required": ["tracked"],
       "optional": [],
       "capability": "trackedPrs",
       "notes": "The whole watch list, replaced wholesale. Sent once in answer to subscribeTrackedPrs and after that only when the list changed. See TRACKED_PRS_ARE_CHANGES."
     },
     "trackNotification": {
-      "required": [
-        "trackedId",
-        "prNumber",
-        "notification"
-      ],
+      "required": ["trackedId", "prNumber", "notification"],
       "optional": [],
       "capability": "trackedPrs"
     },
     "pauseState": {
-      "required": [
-        "paused"
-      ],
+      "required": ["paused"],
       "optional": [],
       "capability": "globalPause",
       "notes": "The set a global pause is holding asleep, sorted. Sent once right after `serverInfo` to a connection that arrives while a pause is IN EFFECT, so a client joining mid-pause starts from the truth rather than assuming nothing is paused - and not sent at all when the set is empty, the same rule `gridChange` follows for an unclaimed grid: a connect-time snapshot is for state that exists, and to a client whose button starts out reading \"pause\" no frame and the empty set say the same thing. and broadcast to every connection whenever the set changes - whichever surface changed it, which is the point: the desktop button and a remote `pauseAll` write the same set. Always complete; replace wholesale. Empty means no pause is in effect. It is NOT the set of `dormant` rows: dormancy has four other producers (the idle reaper, the live-session cap, a graceful quit, a per-session `sleepSession`), so a play driven off `dormant` would wake sessions somebody slept themselves weeks ago."
     },
     "heavyQueue": {
-      "required": [
-        "slots",
-        "workerCap",
-        "running",
-        "waiting"
-      ],
+      "required": ["slots", "workerCap", "running", "waiting"],
       "optional": [],
       "capability": "heavyQueue",
       "notes": "The whole `heavy` slot queue: its capacity and the two ordered lists - running first by slot, waiting in the order the wrappers will admit themselves (priority first, then how long each has been queued). Sent once in answer to `heavyQueueSubscribe`, and after that only when the registry actually moved: the core polls on a timer, so \"nothing changed\" is the common case and an identical snapshot carries no information. Always complete; replace wholesale, never a patch - the registry has other writers, so a delta a client applied to its own copy would drift from the line the wrappers are reading. Empty lists mean nothing is queued, which is a queue and not a missing one. `slots` is how many may run at once and `workerCap` how many test-runner workers each admitted job may fan out to; both are read out of the wrapper's own config rather than invented, so a client never disagrees with the shell script about the capacity. Each job is { pid, child?, prio, since, started?, slot, cmd, cwd }: `pid` is the wrapper's, which is the registry filename and the id a cancel names; `child` and `started` are absent while a job waits; `slot` is 0 for a waiting job and its slot index for a running one."
     },
     "changesResult": {
-      "required": [
-        "requestId",
-        "sessionId",
-        "op",
-        "ok"
-      ],
-      "optional": [
-        "result",
-        "error"
-      ],
+      "required": ["requestId", "sessionId", "op", "ok"],
+      "optional": ["result", "error"],
       "capability": "changes",
       "notes": "The answer to one of the four `session*` git writes. One frame for all four because a client does the same thing with each: match the `requestId`, then draw the result or show the reason. `op` is `commit`, `push`, `revert` or `commitMessage`, so a late answer cannot be read as the wrong one. `error` is present exactly when the write did NOT happen, and `result` exactly when it did - a refusal that arrived looking like a success is the failure mode this shape exists to make impossible, and it is pointed at a destructive action."
     },
     "review": {
-      "required": [
-        "sessionId"
-      ],
-      "optional": [
-        "result"
-      ],
+      "required": ["sessionId"],
+      "optional": ["result"],
       "capability": "github",
       "notes": "A session's review - the cached one, or the pass that has just finished. `result` is ABSENT for a session nothing has reviewed, which is a different thing from a pass that found nothing and draws a different panel. Sent on the connection that asked, out of band for a refresh because the pass takes as long as a model turn. The result is { status: ok|empty|error, findings[], summary?, createdAt, error? }; each finding is { file, side, line?, severity, title, note } with severity one of critical/high/medium/low/info. A failed pass is cached and reported like any other: 'the last pass errored, and this is why' is what the panel shows, and losing it would make a failure look like a review nobody ran."
     },
     "diffComments": {
-      "required": [
-        "sessionId",
-        "comments"
-      ],
+      "required": ["sessionId", "comments"],
       "optional": [],
       "capability": "github",
       "notes": "A session's staged diff comments, oldest first, ALWAYS complete and never a delta - two surfaces stage comments against one session, so a client applying a patch to its own copy would drift from the set the composer reads. Each is { id, sessionId, file, side, line, endLine, body, createdAt, quote?, commitSha?, commitSubject? }. Empty means nothing is staged, which is a set and not a missing one."
+    },
+    "chains": {
+      "required": ["chains"],
+      "optional": [],
+      "capability": "chains",
+      "notes": "Every chain, in answer to `subscribeChains`, oldest first. Each is { slug, state: active|inactive, createdAt, closedAt (null while active), members: [{ kind, ref, title?, url?, addedAt }] } with members in the order they joined. Replace wholesale. Membership travels here and not on `SessionMeta`: one fact, one frame, so a move is never two frames that could disagree."
+    },
+    "chain": {
+      "required": ["chain"],
+      "optional": [],
+      "capability": "chains",
+      "notes": "One chain, whole, after it moved: created, closed, reopened, or a member joined or left. Replace that slug's entry - never a patch on its member list. A move is two of these, the chain the item joined and then the one it left. Sent only to a connection that subscribed, and after the asker's `chainResult`."
+    },
+    "chainRemoved": {
+      "required": ["slug"],
+      "optional": [],
+      "capability": "chains",
+      "notes": "A chain was deleted and its members untagged. Sent only to a connection that subscribed."
+    },
+    "chainResult": {
+      "required": ["op", "ok"],
+      "optional": ["requestId", "slug", "error"],
+      "capability": "chains",
+      "notes": "The answer to one chain mutation, to the client that sent it. `op` is `create`, `close`, `reopen`, `delete`, `setMember` (or `subscribe`, refused on a core with no store for chains). `requestId` is echoed when the frame carried one. `error` is present exactly when the mutation did not happen and is a code (`chain-exists`, `chain-not-found`, `chain-member-not-found`, `chain-member-invalid`, `chain-slug-invalid`, `chain-unavailable`, ...). A frame of its own rather than `error`, because a sessionless `error` is read by clients as the answer to whatever lifecycle request is in flight."
     }
   },
   "enums": {
-    "activityState": [
-      "busy",
-      "idle",
-      "waiting_input"
-    ],
-    "sessionStatus": [
-      "running",
-      "exited"
-    ],
-    "sessionKind": [
-      "agent",
-      "editor"
-    ],
-    "trackedPrState": [
-      "watching",
-      "fixing",
-      "needs_decision"
-    ]
+    "activityState": ["busy", "idle", "waiting_input"],
+    "sessionStatus": ["running", "exited"],
+    "sessionKind": ["agent", "editor"],
+    "trackedPrState": ["watching", "fixing", "needs_decision"]
   },
   "sessionMeta": {
     "required": [
