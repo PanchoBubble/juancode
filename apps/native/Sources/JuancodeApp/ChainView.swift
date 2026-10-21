@@ -18,7 +18,14 @@ struct ChainTabStrip: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ChainBadge(chain: chain, opens: false, size: 11)
+            Button {
+                model.showChainDetail(slug: chain.slug)
+            } label: {
+                ChainBadge(chain: chain, opens: false, size: 11)
+            }
+            .buttonStyle(.plain)
+            .help("Every member of \(chain.slug), grouped, with search")
+            .clickCursor()
             Button {
                 model.exitChain()
             } label: {
@@ -318,7 +325,7 @@ private struct ChainTicketCard: View {
 
     var body: some View {
         if member.kind == .beads {
-            let found = beadsIssue
+            let found = model.beadsIssue(id: member.ref)
             CardHeader(icon: "circle.hexagongrid", kicker: "Beads · \(member.ref)",
                        title: found?.issue.title ?? member.title ?? member.ref)
             if let found {
@@ -348,15 +355,6 @@ private struct ChainTicketCard: View {
         if let url = URL(string: member.url ?? ""), !(member.url ?? "").isEmpty {
             CardRow(label: "Link") { Link(url.absoluteString, destination: url).lineLimit(1).truncationMode(.middle) }
         }
-    }
-
-    /// The issue in whichever loaded tracker has it. The ref carries no project, so
-    /// this is a lookup across every listing the app has loaded.
-    private var beadsIssue: (issue: BeadsIssue, cwd: String)? {
-        for (cwd, result) in model.beadsByCwd {
-            if let issue = result.issues.first(where: { $0.id == member.ref }) { return (issue, cwd) }
-        }
-        return nil
     }
 }
 

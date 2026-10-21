@@ -137,6 +137,11 @@ private struct WindowContent: View {
         .sheet(isPresented: $model.showingSettingsAI) {
             SettingsAIView()
         }
+        .sheet(isPresented: Binding(
+            get: { model.chainDetail != nil }, set: { if !$0 { model.chainDetail = nil } }
+        )) {
+            if let slug = model.chainDetail { ChainDetailView(slug: slug) }
+        }
         // On-disk DB failed to open at launch → running in-memory; surface recovery.
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()

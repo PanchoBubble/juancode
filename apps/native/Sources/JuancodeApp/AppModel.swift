@@ -5433,6 +5433,7 @@ final class AppModel {
         let old = chainView.flatMap { chains[$0.slug] }
         chains = book
         reconcileChainView(old: old)
+        if let slug = chainDetail, chains[slug] == nil { chainDetail = nil }
     }
 
     /// The chain writes, each surfacing a refusal on `errorMessage` and answering
@@ -5599,6 +5600,28 @@ final class AppModel {
         let tab = ChainTabs.reconcile(open.selected, old: old, new: chain)
         guard tab != open.selected else { return }
         if let tab { selectChainMember(tab) } else { chainView?.selected = nil }
+    }
+
+    // MARK: - Chain detail
+    //
+    // The expanded view of one chain: every member grouped by kind, with search and
+    // row actions, and the chain's own close/reopen/delete. A sheet over the window,
+    // so the chain view's header, the rail panel and the toolbar popover all reach it
+    // the same way, through `showChainDetail(slug:)`.
+
+    /// The chain whose detail sheet is up, if any. Cleared when that chain is deleted.
+    var chainDetail: String?
+
+    /// Show `slug`'s detail sheet. A no-op for a slug the book does not have.
+    func showChainDetail(slug: String) {
+        guard chains[slug] != nil else { return }
+        chainDetail = slug
+    }
+
+    /// From the detail sheet: close it and open the chain view on `member`'s tab.
+    func openChainMemberFromDetail(slug: String, member: ChainMemberRef) {
+        chainDetail = nil
+        openChain(slug: slug, member: member)
     }
 
     // MARK: - Heavy command queue (juancode-ik11, moved to the core in juancode-52e8.14.3)
