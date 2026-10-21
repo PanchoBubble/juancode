@@ -158,6 +158,9 @@ final class AppModel {
             // landing path routes through this setter (juancode-2t6).
             showingGitHub = false
             showingBeads = false
+            // The diff review belongs to the session it was opened on; switching
+            // sessions closes it rather than carrying it over to the next one.
+            if selection != oldValue { showingDiffReview = false }
             // Remember the pane for the next launch to land on. A click-rate plist
             // write, and only when it actually changed.
             if let sel = selection, sel != oldValue, pendingCreate(sel) == nil {
@@ -369,8 +372,8 @@ final class AppModel {
     }
     /// The full-width diff-review panel (DiffReviewPanel.swift, juancode-a5j): the
     /// same kind of overlay as the GitHub and Beads views, and never with either.
-    /// Unlike them it survives a session switch — it reviews whichever session the
-    /// window shows, and sends to that session.
+    /// Like them, a session switch dismisses it (`selection.didSet`); its comments
+    /// live in `diffReview` and are still there when it is reopened.
     var showingDiffReview = false {
         didSet { if showingDiffReview { showingGitHub = false; showingBeads = false } }
     }
