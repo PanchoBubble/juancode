@@ -60,6 +60,28 @@ public enum RunCommand {
         }
     }
 
+    /// Where the app mirrors every project's run commands, so an agent asked to
+    /// "start the stack for this worktree" can read what the ▶ buttons would run.
+    public static var mirrorPath: String {
+        (NSHomeDirectory() as NSString).appendingPathComponent(".juancode/run-commands.json")
+    }
+
+    /// The mirror's contents: project path → {"main", "worktree"}, sorted keys so a
+    /// rewrite with nothing changed is byte-identical.
+    public static func mirrorJSON(_ byProject: [String: Pair]) -> Data {
+        let body = byProject.filter { !$0.value.isEmpty }.mapValues(\.plist)
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]))
+            ?? Data("{}".utf8)
+    }
+
+    /// Write the mirror atomically; failures are ignored, it is a convenience copy.
+    public static func writeMirror(_ byProject: [String: Pair], to path: String = mirrorPath) {
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? mirrorJSON(byProject).write(to: url, options: .atomic)
+    }
+
     /// What a placeholder can be filled from.
     public struct Context: Equatable, Sendable {
         public var worktree: String

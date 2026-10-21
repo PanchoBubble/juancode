@@ -30,6 +30,15 @@ import Testing
         #expect(RunCommand.Pair(plist: nil).isEmpty)
     }
 
+    @Test func mirrorListsOnlyProjectsWithACommand() throws {
+        let data = RunCommand.mirrorJSON([
+            "/r/luma-core": .init(main: "vr", worktree: "vr -w {worktree}"),
+            "/r/empty": .init(),
+        ])
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: [String: String]]
+        #expect(parsed == ["/r/luma-core": ["main": "vr", "worktree": "vr -w {worktree}"]])
+    }
+
     @Test func fillsEveryPlaceholder() {
         #expect(RunCommand.expand("vr -w {worktree}", worktree)
                 == "vr -w /Users/me/luma-core-worktrees/slot-01")

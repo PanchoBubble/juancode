@@ -797,6 +797,9 @@ final class AppModel {
         // still nil this early in `App.main()`, so chain optionally — if it's not up
         // yet the didBecomeActive observer above stamps presence the moment it is.
         if NSApp?.isActive == true { core.markDesktopActive() }
+        // Refresh the agents' copy of the run commands from what is saved, in case it
+        // was deleted or predates a command (the didSet only fires on a change).
+        RunCommand.writeMirror(runCommandsByProject)
     }
 
     // MARK: - Turn-end notifications (Dock bounce + unread badge)
@@ -1889,6 +1892,7 @@ final class AppModel {
             .mapValues { RunCommand.Pair(plist: $0) } {
         didSet {
             UserDefaults.standard.set(runCommandsByProject.mapValues(\.plist), forKey: runCommandByProjectKey)
+            RunCommand.writeMirror(runCommandsByProject)
         }
     }
 
