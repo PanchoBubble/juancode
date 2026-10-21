@@ -56,7 +56,7 @@ use juancoded_core::model::{now_ms, ProviderId};
 use juancoded_core::pr::{
     auto_fix_prompt, classify_pr_activity, repo_slug_from_pr_url, stalled_ci_fix_reason,
     stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree, PrActivity, TrackEvent,
-    TrackNotification, TrackedPr,
+    TrackNotification, TrackedPr, PR_SKILL_PATH,
 };
 use juancoded_core::worktree;
 use juancoded_persistence::SessionStore;
@@ -267,6 +267,7 @@ impl TrackedPrs {
             &req.branch,
             &req.url,
             worktree.as_ref(),
+            has_pr_skill(&req.cwd),
         );
         let meta = match self.sessions.create(CreateRequest {
             provider: ProviderId::Claude,
@@ -380,7 +381,14 @@ impl TrackedPrs {
 
         // No worktree argument: the seed's worktree paragraph tells the agent where the
         // tree it was given is, and this session was not given one.
-        let seed = track_seed_prompt(req.number, &req.title, &req.branch, &req.url, None);
+        let seed = track_seed_prompt(
+            req.number,
+            &req.title,
+            &req.branch,
+            &req.url,
+            None,
+            has_pr_skill(&req.cwd),
+        );
         let entry = TrackedPr {
             id: key.clone(),
             number: req.number,
@@ -731,7 +739,12 @@ impl TrackedPrs {
         if fix_reasons.is_empty() {
             return;
         }
-        let prompt = auto_fix_prompt(number, &entry.branch, &fix_reasons);
+        let prompt = auto_fix_prompt(
+            number,
+            &entry.branch,
+            &fix_reasons,
+            has_pr_skill(&entry.cwd),
+        );
         match self.hand_over(&entry, &prompt, session_live).await {
             HandOver::Delivered => self.clear_handover_failures(key),
             HandOver::Busy => {
@@ -966,6 +979,17 @@ impl TrackedPrs {
     fn held(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, TrackedPr>> {
         self.tracked.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Whether the repo at `cwd` ships its own `/pr` skill, which switches the tracking
+/// prompts from a generic `gh` routine to that skill's workflow.
+///
+/// Asked of the REPO checkout, which is what a watch is keyed by, rather than the
+/// worktree the agent stands in: both are the same repo, and an adopted session has no
+/// worktree to ask. Read on every hand-off, not stored, so a repo that gains or drops
+/// the skill is followed without re-tracking.
+fn has_pr_skill(cwd: &str) -> bool {
+    std::path::Path::new(cwd).join(PR_SKILL_PATH).is_file()
 }
 
 fn is_mid_turn_failure(message: &str) -> bool {

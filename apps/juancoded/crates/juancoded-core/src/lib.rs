@@ -59,7 +59,7 @@ pub use pr::{
     auto_fix_prompt, classify_pr_activity, derive_track_state, stalled_ci_fix_reason,
     stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree, PrActivity, PrBaseline,
     PrChecks, PrClassification, PrComment, PrReview, TrackEvent, TrackNotification, TrackState,
-    TrackedPr,
+    TrackedPr, PR_SKILL_PATH,
 };
 pub use pr_timeline::{
     check_outcome, pr_visible_timeline, PrCheckOutcome, PrThreadGroup, PrTimelineItem,

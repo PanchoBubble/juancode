@@ -443,14 +443,24 @@ pub struct BranchWorktree {
     pub branch: Option<String>,
 }
 
+/// Where a repo keeps its own `/pr` skill, relative to the checkout root. luma-core
+/// ships one; the server crate stats it and hands the answer to the prompts below as
+/// `pr_skill`.
+pub const PR_SKILL_PATH: &str = ".claude/skills/pr/SKILL.md";
+
 /// The seed prompt handed to the tracking session when a PR starts being watched.
 /// Establishes the PR context and the auto-fix-vs-escalate contract once, up front.
+///
+/// `pr_skill` (the checkout has a [`PR_SKILL_PATH`]) adds the repo's own workflow on top of the
+/// contract, and with it the house rules that only hold in that repo — the Dagger
+/// flakes and the Codex → Mergify merge path are luma-core's, not every repo's.
 pub fn track_seed_prompt(
     number: i64,
     title: &str,
     branch: &str,
     url: &str,
     worktree: Option<&BranchWorktree>,
+    pr_skill: bool,
 ) -> String {
     let place = match worktree {
         None => String::new(),
@@ -469,6 +479,11 @@ pub fn track_seed_prompt(
             ),
         },
     };
+    let house = if pr_skill {
+        pr_skill_rules(branch)
+    } else {
+        String::new()
+    };
     format!(
         "[juancode PR-tracker] You are now tracking pull request #{number} \"{title}\" \
          (branch `{branch}`): {url}{place}\n\n\
@@ -481,7 +496,30 @@ pub fn track_seed_prompt(
          not obviously combine, STOP and show me the conflict instead of picking a side.\n\
          - If it needs a real decision (ambiguous feedback, conflicting requirements, a risky \
          refactor, or a non-obvious failure), STOP and explain what you need from me instead of \
-         guessing.\n\n\
+         guessing.{house}\n\n\
+         Start by reviewing the PR and its diff with `gh pr view {number}` and \
+         `gh pr diff {number}`."
+    )
+}
+
+/// The `/pr` skill half of [`track_seed_prompt`]: which subcommand answers which kind
+/// of activity, and the ones that must never run here. `grind` and an `approve` loop
+/// poll CI themselves and `ship`/`merge` stop for a person, while this session runs
+/// unattended and the poller is already the loop — so every hand-off is one pass.
+fn pr_skill_rules(branch: &str) -> String {
+    format!(
+        "\n\n\
+         This repo ships its own `/pr` skill (`{PR_SKILL_PATH}`). Use it — through the Skill \
+         tool, one subcommand at a time — rather than improvising:\n\
+         - New review comments or reviews: `/pr resolve`. Address every thread, and reply to \
+         each one with the commit that fixed it or the reason you are not acting on it.\n\
+         - CI failing: fix it by the `/pr grind` rules (merge the base, minimal fixes, never \
+         rebase or force-push), but make ONE pass — push to `{branch}` and stop. I am \
+         already watching CI and will tell you if it is still red, so do not poll checks in \
+         a loop.\n\
+         - Never run `/pr ship`, `/pr merge`, a full `/pr grind` or an `approve` loop from \
+         this session: they wait on CI or on a person, and nobody is at this terminal. If a \
+         step asks me to confirm something, skip it and tell me at the end instead.\n\n\
          CI flakes: the Dagger checks are known to fail intermittently. If a Dagger check fails \
          and nothing in its logs points to a real problem in this PR's changes, just re-run it \
          (`gh run rerun <run-id> --failed`) rather than treating it as something to fix. Only dig \
@@ -490,29 +528,38 @@ pub fn track_seed_prompt(
          Codex review fallback: this PR is normally code-reviewed by Codex, and only added to the \
          Mergify merge queue after that review. If you see a comment saying Codex has reached its \
          usage limits for code reviews (i.e. it couldn't review this PR), do the code review \
-         yourself: read the full diff, post your review as a PR comment, and fix anything clearly \
-         wrong per the rules above. Once your review is clean and CI is green, add the PR to the \
+         yourself with `/pr review` then `/pr post`, and fix anything clearly wrong per the \
+         rules above. Once your review is clean and CI is green, add the PR to the \
          Mergify queue by commenting `@mergifyio queue` on it. If your review turns up something \
-         that needs a real decision, STOP and escalate to me instead of queueing.\n\n\
-         Start by reviewing the PR and its diff with `gh pr view {number}` and \
-         `gh pr diff {number}`."
+         that needs a real decision, STOP and escalate to me instead of queueing."
     )
 }
 
 /// The prompt injected mid-session when a poll detects auto-fixable activity.
 /// Summarises what changed and re-states the contract; the agent reads the specifics
 /// itself through `gh`.
-pub fn auto_fix_prompt(number: i64, branch: &str, reasons: &[String]) -> String {
+///
+/// With `pr_skill` it re-points at the repo's `/pr` skill as well. The seed said so
+/// once, but a long-lived tracking session compacts, and a revived one may never have
+/// read it.
+pub fn auto_fix_prompt(number: i64, branch: &str, reasons: &[String], pr_skill: bool) -> String {
     let summary = if reasons.is_empty() {
         "new activity".to_string()
     } else {
         reasons.join("; ")
     };
+    let skill = if pr_skill {
+        " Use this repo's `/pr` skill for it — `/pr resolve` for review feedback (reply to \
+         every thread), the `/pr grind` rules for CI — and make one pass: no polling loops, no \
+         `ship`, `merge` or `approve`."
+    } else {
+        ""
+    };
     format!(
         "[juancode PR-tracker] New activity on PR #{number}: {summary}. Check the latest state \
          with `gh pr view {number}`, `gh pr checks {number}`, and `gh pr diff {number}`. If it's \
-         an obvious fix, make it, commit, and push to `{branch}`. If it needs a real decision, \
-         STOP and tell me what you need."
+         an obvious fix, make it, commit, and push to `{branch}`.{skill} If it needs a real \
+         decision, STOP and tell me what you need."
     )
 }
 
@@ -746,6 +793,7 @@ mod tests {
                 path: "/w/pr-7".into(),
                 branch: Some("feature".into()),
             }),
+            false,
         );
         assert!(attached.contains("with `feature` checked out"));
         assert!(!attached.contains("DETACHED"));
@@ -759,11 +807,48 @@ mod tests {
                 path: "/w/pr-7".into(),
                 branch: None,
             }),
+            false,
         );
         assert!(detached.contains("DETACHED HEAD"));
 
-        let bare = track_seed_prompt(7, "t", "feature", "u", None);
+        let bare = track_seed_prompt(7, "t", "feature", "u", None, false);
         assert!(!bare.contains("worktree"), "{bare}");
+    }
+
+    /// A repo with its own `/pr` skill gets that workflow, one pass at a time, and only
+    /// that repo gets luma-core's house rules — Dagger flakes and the Codex → Mergify
+    /// path mean nothing in a repo that has neither.
+    #[test]
+    fn the_seed_points_at_the_repos_pr_skill_only_when_it_has_one() {
+        let plain = track_seed_prompt(7, "t", "feature", "u", None, false);
+        assert!(!plain.contains("/pr resolve"), "{plain}");
+        assert!(!plain.contains("Dagger"), "{plain}");
+        assert!(!plain.contains("mergifyio"), "{plain}");
+        assert!(plain.ends_with("`gh pr diff 7`."), "{plain}");
+
+        let skilled = track_seed_prompt(7, "t", "feature", "u", None, true);
+        assert!(skilled.contains(PR_SKILL_PATH));
+        assert!(skilled.contains("`/pr resolve`"));
+        assert!(skilled.contains("ONE pass"));
+        assert!(skilled.contains("Never run `/pr ship`, `/pr merge`"));
+        assert!(skilled.contains("Dagger"));
+        assert!(skilled.contains("`/pr review` then `/pr post`"));
+        assert!(skilled.ends_with("`gh pr diff 7`."), "{skilled}");
+    }
+
+    /// The fix prompt re-states the skill on every hand-off, because the seed that said
+    /// it first may have been compacted away by then.
+    #[test]
+    fn the_fix_prompt_repeats_the_pr_skill_only_when_the_repo_has_one() {
+        let reasons = vec!["CI checks are failing".to_string()];
+        let plain = auto_fix_prompt(7, "feature", &reasons, false);
+        assert!(plain.contains("CI checks are failing"));
+        assert!(!plain.contains("/pr"), "{plain}");
+
+        let skilled = auto_fix_prompt(7, "feature", &reasons, true);
+        assert!(skilled.contains("`/pr resolve`"));
+        assert!(skilled.contains("one pass"));
+        assert!(skilled.ends_with("tell me what you need."), "{skilled}");
     }
 
     /// The fallback half of webhook matching. Lowercased on the way out, because the
