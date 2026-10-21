@@ -47,9 +47,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info, warn};
 
 use juancoded_core::chain::{
-    validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, MemberStatus,
+    slug_from_text, validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, MemberStatus,
 };
-use juancoded_core::model::{now_ms, SessionStatus};
+use juancoded_core::model::{now_ms, SessionMeta, SessionStatus};
 use juancoded_persistence::chain_store::ChainStore;
 use juancoded_state::registry::SessionEvent;
 use juancoded_state::SessionsApi;
@@ -251,9 +251,16 @@ impl Chains {
     /// Once, at creation, and never a move. An item that is already in a chain stays
     /// where it is — a PR that was untracked and tracked again keeps the chain a person
     /// may have moved it to — and after this it is an ordinary member that
-    /// `set_member` retags or untags like any other. A `from_session` in no chain, or
-    /// one this daemon does not know, is not a refusal: the item is simply untagged,
-    /// which is what it would have been without the hint.
+    /// `set_member` retags or untags like any other. A `from_session` this daemon does
+    /// not know is not a refusal: the item is simply untagged, which is what it would
+    /// have been without the hint.
+    ///
+    /// A session dispatched from a session in no chain starts one: every dispatched
+    /// agent belongs to a chain, so the work it was handed off from and the work it is
+    /// doing are grouped from the first moment. The chain is named after the source
+    /// session's title (`-2`, `-3`… when taken) and holds the source, then the new
+    /// session. Only a session does this; a PR tracked from an unchained session stays
+    /// untagged, because a lone PR is not a dispatch.
     ///
     /// The chain's state is not consulted. An Oracle in a closed chain that dispatches
     /// more work is doing that chain's work, and the badge saying so is truer than no
@@ -272,7 +279,12 @@ impl Chains {
         if kind == ChainMemberKind::Session && self.sessions.meta(ref_id).is_none() {
             return None;
         }
+        // Only needed to start a chain; a source this daemon does not know starts none.
+        let source = (kind == ChainMemberKind::Session)
+            .then(|| self.sessions.meta(from_session))
+            .flatten();
         let mut joined = None;
+        let mut started = false;
         // One mutation, read off the store inside it, so a retag that lands between
         // looking up the parent's chain and joining it cannot be overwritten.
         let outcome = self.mutate(|store| {
@@ -283,12 +295,27 @@ impl Chains {
             if book.iter().any(|c| holds(c, kind, ref_id)) {
                 return Ok(Vec::new());
             }
-            let Some(slug) = book
+            let found = book
                 .iter()
                 .find(|c| holds(c, ChainMemberKind::Session, from_session))
-                .map(|c| c.slug.clone())
-            else {
-                return Ok(Vec::new());
+                .map(|c| c.slug.clone());
+            let slug = match (found, &source) {
+                (Some(slug), _) => slug,
+                (None, Some(source)) if kind == ChainMemberKind::Session => {
+                    let slug = start_chain_for(store, source)?;
+                    let parent = ChainMember {
+                        kind: ChainMemberKind::Session,
+                        ref_id: from_session.to_string(),
+                        title: None,
+                        url: None,
+                        added_at: now_ms(),
+                        done: false,
+                    };
+                    store.set_member(&slug, &parent).map_err(store_failed)?;
+                    started = true;
+                    slug
+                }
+                _ => return Ok(Vec::new()),
             };
             let member = ChainMember {
                 kind,
@@ -309,7 +336,11 @@ impl Chains {
             return None;
         }
         if let Some(slug) = &joined {
-            debug!(from = %from_session, item = %ref_id, chain = %slug, "inherited a chain");
+            if started {
+                info!(from = %from_session, item = %ref_id, chain = %slug, "started a chain for a dispatch");
+            } else {
+                debug!(from = %from_session, item = %ref_id, chain = %slug, "inherited a chain");
+            }
         }
         joined
     }
@@ -538,6 +569,27 @@ impl Chains {
 
 fn watch_keys(list: &[juancoded_core::pr::TrackedPr]) -> BTreeSet<String> {
     list.iter().map(|pr| pr.id.clone()).collect()
+}
+
+/// Create a chain named after `source`'s title, or after its id when the title has no
+/// letters or digits in it, suffixing `-2`, `-3`… past any slug already taken.
+fn start_chain_for(store: &dyn ChainStore, source: &SessionMeta) -> Result<String, ChainRefusal> {
+    // Room for a `-NNN` suffix, so a suffixed slug is never too long.
+    const ROOM: usize = 4;
+    let base = slug_from_text(&source.title, ROOM)
+        .or_else(|| slug_from_text(&format!("session {}", source.id), ROOM))
+        .unwrap_or_else(|| "session".to_string());
+    for n in 1..1000 {
+        let slug = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        if store.create_chain(&slug, now_ms()).map_err(store_failed)? {
+            return Ok(slug);
+        }
+    }
+    Err("chain-exists")
 }
 
 fn store_has(store: &dyn ChainStore, slug: &str) -> Result<bool, ChainRefusal> {
@@ -801,6 +853,57 @@ mod tests {
         );
         assert!(drain(&mut rx).is_empty());
         for id in [oracle, child, loner] {
+            let _ = h.sessions.kill(&id);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_dispatched_from_an_unchained_session_starts_a_chain() {
+        let (h, chains) = engine();
+        let oracle = session(&h);
+        let title = h.sessions.meta(&oracle).unwrap().title;
+        let base = slug_from_text(&title, 4)
+            .unwrap_or_else(|| slug_from_text(&format!("session {oracle}"), 4).unwrap());
+        // The name is taken, so the new chain is suffixed rather than refused.
+        chains.create(&base).unwrap();
+        let first = session(&h);
+        let second = session(&h);
+        let mut rx = chains.subscribe();
+
+        let slug = chains
+            .inherit(&oracle, ChainMemberKind::Session, &first, None, None)
+            .expect("a chain is started");
+        assert_eq!(slug, format!("{base}-2"));
+        assert_eq!(slugs_of(&drain(&mut rx)), [slug.clone()]);
+        let chain = chains.list().into_iter().find(|c| c.slug == slug).unwrap();
+        assert_eq!(chain.state, ChainState::Active);
+        let ids: Vec<_> = chain.members.iter().map(|m| m.ref_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [oracle.as_str(), first.as_str()],
+            "the source, then the dispatch"
+        );
+
+        // The next dispatch from it joins that chain rather than starting another.
+        assert_eq!(
+            chains.inherit(&oracle, ChainMemberKind::Session, &second, None, None),
+            Some(slug.clone())
+        );
+        assert_eq!(chains.list().len(), 2);
+
+        // A source this daemon does not know starts nothing, and a PR never does.
+        let loner = session(&h);
+        let orphan = session(&h);
+        assert_eq!(
+            chains.inherit("nope", ChainMemberKind::Session, &orphan, None, None),
+            None
+        );
+        assert_eq!(
+            chains.inherit(&loner, ChainMemberKind::TrackedPr, "/r#9", None, None),
+            None
+        );
+        assert_eq!(chains.list().len(), 2);
+        for id in [oracle, first, second, loner, orphan] {
             let _ = h.sessions.kill(&id);
         }
     }

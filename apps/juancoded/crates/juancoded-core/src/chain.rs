@@ -186,9 +186,61 @@ pub fn validate_slug(slug: &str) -> Result<(), SlugError> {
     Ok(())
 }
 
+/// Make a slug out of free text, for a chain the daemon names itself (a dispatch from a
+/// session in no chain starts one, named after that session). Lowercase ASCII words,
+/// everything else a separator, cut at a word boundary to leave `room` bytes of
+/// [`MAX_SLUG_LEN`] for a `-2` style suffix. `None` when nothing of the text survives.
+pub fn slug_from_text(text: &str, room: usize) -> Option<String> {
+    let limit = MAX_SLUG_LEN.saturating_sub(room);
+    let mut slug = String::new();
+    for word in text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let word = word.to_ascii_lowercase();
+        let needed = if slug.is_empty() {
+            word.len()
+        } else {
+            word.len() + 1
+        };
+        if slug.len() + needed > limit {
+            if slug.is_empty() {
+                slug.push_str(&word[..limit]);
+            }
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&word);
+    }
+    (!slug.is_empty()).then_some(slug)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_text_becomes_a_valid_slug_cut_at_a_word() {
+        assert_eq!(
+            slug_from_text("Fix the Auth_Rewrite (v2)!", 4).as_deref(),
+            Some("fix-the-auth-rewrite-v2")
+        );
+        assert_eq!(slug_from_text("  ¿qué?  ", 4).as_deref(), Some("qu"));
+        assert_eq!(slug_from_text("—", 4), None);
+        let long = "word ".repeat(30);
+        let slug = slug_from_text(&long, 4).unwrap();
+        assert!(
+            slug.len() <= MAX_SLUG_LEN - 4 && !slug.ends_with('-'),
+            "{slug}"
+        );
+        let one = slug_from_text(&"a".repeat(100), 4).unwrap();
+        assert_eq!(one.len(), MAX_SLUG_LEN - 4);
+        for s in [slug, one] {
+            assert_eq!(validate_slug(&s), Ok(()));
+        }
+    }
 
     #[test]
     fn a_slug_is_lowercase_words_joined_by_single_dashes() {

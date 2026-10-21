@@ -170,7 +170,7 @@ function buildServer(): McpServer {
           .string()
           .optional()
           .describe(
-            "Your own juancode session id (or a unique prefix), when you know it. The new session joins your chain. Omitted, the dispatching Oracle is worked out from the live sessions.",
+            "Your own session id: $CLAUDE_CODE_SESSION_ID in a Claude Code shell, or a juancode session id or unique prefix. The new session joins your chain, which is started for you if you are in none. Omitted, the dispatching Oracle is worked out from the live sessions.",
           ),
       },
     },
@@ -748,9 +748,13 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       ticket: typeof ticket === "string" && ticket ? ticket : null,
       idempotencyKey: typeof idempotencyKey === "string" && idempotencyKey ? idempotencyKey : null,
       force: force === true,
-      // Only as given: an HTTP caller is the phone or a script, not an Oracle session,
-      // so there is no dispatching session to work out.
-      fromSessionId: typeof fromSessionId === "string" && fromSessionId ? fromSessionId : null,
+      // Only as given: an HTTP caller is the phone, a script, or a session running the
+      // dispatch skill (which passes its $CLAUDE_CODE_SESSION_ID), so nothing is
+      // inferred — a given id is only resolved to the juancode session it names.
+      fromSessionId:
+        typeof fromSessionId === "string" && fromSessionId.trim()
+          ? await resolveDispatchOrigin(fromSessionId)
+          : null,
     });
     res.json({ ok: true, ...outcome });
   } catch (e) {

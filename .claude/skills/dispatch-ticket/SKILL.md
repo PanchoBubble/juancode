@@ -73,13 +73,16 @@ or run `bd ready` and offer the top items. Never guess an id.
 
    ```bash
    jq -n --arg project "$(git rev-parse --show-toplevel)" --arg ticket "<id>" \
+         --arg from "${CLAUDE_CODE_SESSION_ID:-}" \
          --rawfile prompt "$SCRATCH/dispatch-<id>.txt" \
-     '{project:$project, prompt:$prompt, provider:"claude", worktree:true, ticket:$ticket}' \
+     '{project:$project, prompt:$prompt, provider:"claude", worktree:true, ticket:$ticket, fromSessionId:$from}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
 
    Pass `ticket` — it is what stops a second session landing on the same bd id.
+   Pass `fromSessionId` — it puts the new session in this session's chain (starting
+   one named after this session if it is in none). An empty one is ignored.
 
    The response is the truth. Read `state`, and read it as accepted-or-not:
 

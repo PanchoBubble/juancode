@@ -433,9 +433,12 @@ chain of the session it came from, once, at creation:
 
 Inheriting never moves anything: an item already in a chain stays where it is (a PR
 untracked and tracked again keeps the chain someone moved it to), and afterwards the
-item is an ordinary member that `setChainMember` retags or untags. A source in no
-chain, or unknown to this daemon, leaves the item untagged — the same answer a core
-that ignores the field gives. The chain's state is not consulted: an Oracle in a closed
+item is an ordinary member that `setChainMember` retags or untags. A source unknown
+to this daemon leaves the item untagged — the same answer a core that ignores the field
+gives. A **session** dispatched from a known session in no chain starts one: the daemon
+creates a chain named after the source's title (slugified, `-2`, `-3`… when taken),
+holding the source and then the new session, so every dispatched agent is chained. A PR
+tracked from an unchained session stays untagged. The chain's state is not consulted: an Oracle in a closed
 chain is still doing that chain's work.
 
 No frame is a patch, so the snapshot and the stream may overlap without a sequence

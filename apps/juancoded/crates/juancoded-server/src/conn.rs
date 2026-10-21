@@ -3833,7 +3833,27 @@ mod tests {
             None
         );
 
-        for id in [oracle, child, plain] {
+        // A dispatch from a session in no chain starts one holding both.
+        let loner = wire.session();
+        let sent = wire.step(dispatch(Some(loner.clone())), &mut fanout);
+        let orphan = created_id(&sent);
+        let started = chain_book(&wire)
+            .chain_of(ChainMemberKind::Session, &orphan)
+            .expect("the dispatch is chained");
+        assert_eq!(
+            chain_book(&wire)
+                .chain_of(ChainMemberKind::Session, &loner)
+                .as_deref(),
+            Some(started.as_str())
+        );
+        assert!(
+            sent.iter().any(
+                |f| matches!(f, ServerMessage::Chain { chain } if chain.slug == started && chain.members.len() == 2)
+            ),
+            "the new chain is published whole: {sent:?}"
+        );
+
+        for id in [oracle, child, plain, loner, orphan] {
             let _ = wire.sessions().kill(&id);
         }
     }

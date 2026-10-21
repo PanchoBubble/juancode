@@ -38,6 +38,11 @@ describe("resolveDispatchOrigin", () => {
     expect(await resolveDispatchOrigin("abd456", deps(list))).toBe("abd456");
   });
 
+  it("maps a CLI session id to the juancode session that runs it", async () => {
+    const list = [session("abc123", { cliSessionId: "cli-1" }), session("cli-1x")];
+    expect(await resolveDispatchOrigin("cli-1", deps(list))).toBe("abc123");
+  });
+
   it("refuses a prefix that names several sessions", async () => {
     const list = [session("abc123"), session("abd456")];
     await expect(resolveDispatchOrigin("ab", deps(list))).rejects.toThrow(/matches 2 sessions/);

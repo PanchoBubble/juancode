@@ -335,16 +335,19 @@ identifier. `title`/`url` are a snapshot for the kinds the daemon cannot look up
 On Telegram, `/chains` lists the active chains numbered, `/chains all` every chain, and
 `/chains <n|slug>` shows one. Read-only by design: tagging is the Oracle's job.
 
-**Dispatches inherit the Oracle's chain.** `oracle_dispatch` sends `create.fromSessionId`
-(daemon capability `chainInherit`) so the new session joins the dispatching Oracle's
-chain. The shared MCP endpoint does not know which Oracle is calling, so
-`src/dispatch-origin.ts` works it out: the `fromSessionId` the Oracle passed (a prefix
-is resolved), else the one running Oracle session in the control dir that is busy — an
+**Dispatches inherit the dispatching session's chain.** `oracle_dispatch` sends
+`create.fromSessionId` (daemon capability `chainInherit`) so the new session joins the
+dispatching session's chain — and the daemon starts a chain, named after that session,
+when it is in none. The shared MCP endpoint does not know which session is calling, so
+`src/dispatch-origin.ts` works it out: the `fromSessionId` the caller passed (a Claude
+Code `$CLAUDE_CODE_SESSION_ID`, matched against `cliSessionId`, or a juancode id or
+prefix), else the one running Oracle session in the control dir that is busy — an
 Oracle making a tool call is mid-turn. Anything else (several busy, none, the headless
 phone chat dispatching) sends no source and the session starts unchained. The field goes
 on the wire only once that socket's `serverInfo` advertises `chainInherit`, and rides the
-`dispatch.jsonl` line for the queued path. `POST /api/dispatch` passes a `fromSessionId`
-through as given and infers nothing.
+`dispatch.jsonl` line for the queued path. `POST /api/dispatch` resolves a given
+`fromSessionId` the same way and infers nothing; the dispatch-ticket skill passes its own
+`$CLAUDE_CODE_SESSION_ID`.
 
 ## SessionEnd memory candidates
 

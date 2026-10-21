@@ -16,6 +16,8 @@ export interface SessionSummary {
   status: string; // "running" | "exited"
   archived: boolean;
   updatedAt: number;
+  /** The CLI's own session id (Claude Code's `CLAUDE_CODE_SESSION_ID`), when known. */
+  cliSessionId?: string;
 }
 
 /** Live activity as broadcast on the native WS (`activity` messages). */
@@ -45,6 +47,9 @@ export function parseSessionList(raw: unknown): SessionSummary[] {
       status: typeof r.status === "string" ? r.status : "unknown",
       archived: r.archived === true,
       updatedAt: typeof r.updatedAt === "number" ? r.updatedAt : 0,
+      ...(typeof r.cliSessionId === "string" && r.cliSessionId
+        ? { cliSessionId: r.cliSessionId }
+        : {}),
     });
   }
   return out;
