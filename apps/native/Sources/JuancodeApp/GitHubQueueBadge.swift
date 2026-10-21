@@ -482,6 +482,10 @@ struct GitHubQueueBadge: View {
                     Circle().fill(pr.checks.color).frame(width: 7, height: 7)
                         .frame(height: 14)
                     if let t = tracked { trackEye(t) }
+                    if let t = tracked, let chain = model.chain(of: .trackedPr, ref: t.id) {
+                        ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: t.id),
+                                   compact: true, willOpen: dismiss)
+                    }
                 }
                 .frame(width: Self.leadColumn)
                 VStack(alignment: .leading, spacing: 2) {
@@ -694,6 +698,10 @@ struct GitHubQueueBadge: View {
                                 .foregroundStyle(.secondary)
                             TrackBadge(state: t.state,
                                        waiting: model.activity(t.sessionId) == .waitingInput)
+                            if let chain = model.chain(of: .trackedPr, ref: t.id) {
+                                ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: t.id),
+                                           willOpen: { showing = false; dismiss() })
+                            }
                             Text(t.repoNwo ?? (t.cwd as NSString).lastPathComponent)
                                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                                 .lineLimit(1).truncationMode(.middle)

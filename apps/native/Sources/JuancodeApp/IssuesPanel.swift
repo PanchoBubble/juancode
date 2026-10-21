@@ -146,6 +146,9 @@ private struct IssuePanelRow: View {
                 Badge(text: "p\(issue.priority)", palette: priorityPalette)
                 Badge(text: issue.issueType, palette: .neutral)
                 Text(issue.id).font(.system(size: 11)).foregroundStyle(.secondary)
+                if let chain = model.chain(of: .beads, ref: issue.id) {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .beads, ref: issue.id))
+                }
                 Spacer(minLength: 4)
                 if issue.dependencyCount > 0 {
                     DepBadge(systemName: "arrow.down.right", count: issue.dependencyCount,

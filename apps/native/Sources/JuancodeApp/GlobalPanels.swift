@@ -450,6 +450,10 @@ private struct TrackedIssueRow: View {
                 Text(issue.identifier).font(.system(size: 12).monospaced()).foregroundStyle(.secondary)
                 Text(issue.title).font(.system(size: 13)).lineLimit(1).help(issue.title)
                 IssueTrackBadge(state: issue.state)
+                if let chain = model.chain(of: .linear, ref: issue.identifier) {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .linear, ref: issue.identifier),
+                               willOpen: dismiss)
+                }
                 Spacer(minLength: 8)
                 Text((issue.cwd as NSString).lastPathComponent)
                     .font(.system(size: 10)).foregroundStyle(.tertiary)

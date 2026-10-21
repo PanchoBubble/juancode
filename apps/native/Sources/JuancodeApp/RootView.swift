@@ -2004,6 +2004,7 @@ private struct SessionRowHost: View {
                    branchPr: external || meta.worktreePath == nil
                        ? nil : model.openPr(forSession: meta),
                    trackedIssue: external ? nil : model.trackedIssue(forSession: meta.id),
+                   chain: external ? nil : model.chain(forSession: meta.id),
                    unread: model.unreadSessions.contains(meta.id),
                    unseenDone: model.unseenCompletions.contains(meta.id),
                    atRisk: !external && model.workAtRisk(forSession: meta) != nil,
@@ -2508,6 +2509,8 @@ struct SessionRow: View {
     var branchPr: PullRequest? = nil
     /// The Linear issue this session is tracking, if any — drives the issue label (juancode-7sa).
     var trackedIssue: TrackedIssue? = nil
+    /// The chain this session is in, if any — drives the chain badge.
+    var chain: Chain? = nil
     /// Pending turn-end notification for this session — shows an unread dot until viewed.
     var unread: Bool = false
     /// The agent finished a turn while this session wasn't selected (juancode-t9p) —
@@ -2615,8 +2618,11 @@ struct SessionRow: View {
                 // Badge line, under the subtitle: the tracking capsule sits next to the
                 // change badge on the leading edge, so the trailing edge stays free for
                 // the hover pill (which used to land on top of the PR capsule).
-                if showPr || showIssue || changeBadge != nil {
+                if showPr || showIssue || changeBadge != nil || chain != nil {
                     HStack(spacing: 5) {
+                        if let chain {
+                            ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
+                        }
                         if showPr, let t = tracked {
                             prCapsule(t)
                         } else if showPr, let pr = branchPr {

@@ -18,7 +18,7 @@ struct ChainTabStrip: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ChainBadgeLabel(chain: chain)
+            ChainBadge(chain: chain, opens: false, size: 11)
             Button {
                 model.exitChain()
             } label: {
@@ -57,21 +57,6 @@ struct ChainTabStrip: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color.appBand)
-    }
-}
-
-/// The chain's name, as the badge every chain surface draws.
-struct ChainBadgeLabel: View {
-    let chain: Chain
-
-    var body: some View {
-        Label(chain.slug, systemImage: "link")
-            .font(.caption.weight(.semibold))
-            .lineLimit(1)
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(Capsule().fill(Color.accentColor.opacity(chain.isActive ? 0.2 : 0.08)))
-            .foregroundStyle(chain.isActive ? Color.accentColor : Color.secondary)
-            .help(chain.isActive ? "Chain \(chain.slug)" : "Chain \(chain.slug) (closed)")
     }
 }
 

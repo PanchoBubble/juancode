@@ -5512,6 +5512,10 @@ final class AppModel {
     /// the first one's way back, so exit always returns to where you started.
     func openChain(slug: String, member: ChainMemberRef? = nil) {
         guard let chain = chains[slug] else { return }
+        // The chain draws in the detail area, under these overlays: opened from a
+        // badge on a PR or beads row, it would otherwise open out of sight.
+        showingGitHub = false
+        showingBeads = false
         let returnTo = chainView?.returnTo ?? selection
         let remembered = (UserDefaults.standard.dictionary(forKey: Self.chainLastTabKey)?[slug] as? String)
             .flatMap(ChainMemberRef.init(key:))

@@ -478,6 +478,9 @@ private struct BeadsCard: View {
                     Text(issue.id).font(.system(size: 10.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.accentColor)
                     Pill(text: "P\(issue.priority)", tint: priorityTint(issue.priority))
+                    if let chain = model.chain(of: .beads, ref: issue.id) {
+                        ChainBadge(chain: chain, member: ChainMemberRef(kind: .beads, ref: issue.id))
+                    }
                     Spacer(minLength: 0)
                     if issue.ready { Pill(text: "ready", tint: .green) }
                 }

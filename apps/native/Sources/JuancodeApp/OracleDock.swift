@@ -572,6 +572,7 @@ struct OracleGlobalRail: View {
             unseenDone: model.unseenCompletions.contains(meta.id),
             asleep: model.isResting(meta),
             pinned: entry.pinned,
+            chain: model.chain(forSession: meta.id),
             onTogglePin: { model.togglePinned(meta.id) },
             // Reveal first: tapping a row with the drawer closed slides the chat in
             // from this edge; with it open, it just switches the active Oracle.
@@ -626,6 +627,8 @@ private struct OracleRailRow: View {
     /// Pinned to the top of the rail — a pin ornament at rest, and the hover chip's
     /// pin flips to "unpin".
     let pinned: Bool
+    /// The chain this Oracle is in, if any — a badge under the subtitle.
+    let chain: Chain?
     let onTogglePin: () -> Void
     let onSelect: () -> Void
     /// Stop the running agent but keep the conversation in the rail (kill ≠ delete);
@@ -650,6 +653,9 @@ private struct OracleRailRow: View {
                     .font(.system(size: 12, weight: unread ? .semibold : .regular))
                     .lineLimit(2)
                 Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                if let chain {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
+                }
             }
             Spacer(minLength: 0)
             // A pinned row says so at rest — the hover chip carries the state the

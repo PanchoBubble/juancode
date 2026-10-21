@@ -1184,6 +1184,9 @@ private struct GitHubPrRow: View {
                             .help("Opened \(age) ago by \(pr.author.isEmpty ? "someone" : pr.author)")
                     }
                     if let t = tracked { TrackBadge(state: t.state) }
+                    if let chain = model.chain(of: .trackedPr, ref: key) {
+                        ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: key))
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.leading, 13)
@@ -1823,6 +1826,9 @@ private struct GitHubPrDetail: View {
                     PrStateChip(state: state)
                 }
                 if let t = tracked { TrackBadge(state: t.state) }
+                if let chain = model.chain(of: .trackedPr, ref: key) {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: key))
+                }
                 Spacer()
             }
             HStack(spacing: 8) {
