@@ -449,6 +449,14 @@ across a restart is not provable from one socket and is asserted by
 `chain_store::tests::chains_and_members_survive_reopening_the_file` and
 `chains::tests::the_book_is_reloaded_from_the_store_on_restart`.
 
+**Chain view** (native app, `apps/native/Sources/JuancodeApp/ChainView.swift`). Every
+entry point opens and leaves it through `AppModel`: `openChain(slug:member:)`,
+`exitChain()` (back to the selection it was opened from), `selectChainMember(_:)`,
+`stepChainTab(by:)`, and `chainView` (slug, showing tab, way back) to read it. A session
+tab is the selection itself, so its pane is the ordinary keep-alive pane; a PR or ticket
+tab is a card over it; an Oracle tab shows the Oracle in its dock. The tab decisions
+(landing, stepping, what survives the chain changing) are `ChainTabs` in `JuancodeCore`.
+
 ## Notifications: the daemon fires one webhook, the Node sidecar keeps Telegram
 
 **Decided, and not to be re-opened** (juancode-52e8.14.7). `apps/oracle-mcp` stays where

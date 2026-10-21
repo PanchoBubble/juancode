@@ -1818,6 +1818,11 @@ struct SidebarView: View {
             Button(model.isPinned(meta.id) ? "Unpin" : "Pin to Top") {
                 model.togglePinned(meta.id)
             }
+            if let chain = model.chain(forSession: meta.id) {
+                Button("Open Chain \u{201C}\(chain.slug)\u{201D}") {
+                    model.openChain(slug: chain.slug, member: ChainMemberRef(kind: .session, ref: meta.id))
+                }
+            }
             if meta.archived {
                 Button("Unarchive") { model.setArchived(meta.id, false) }
             } else {
@@ -2973,7 +2978,35 @@ func sessionDotColor(live: Bool, activity: SessionActivity?) -> Color {
 struct DetailView: View {
     @Environment(AppModel.self) private var model
 
+    /// The open chain and its showing member, while a chain view is open.
+    private var openChain: (chain: Chain, member: ChainMember?)? {
+        guard let open = model.chainView, let chain = model.chains[open.slug] else { return nil }
+        return (chain, open.selected.flatMap { chain.member($0) })
+    }
+
+    /// A chain tab that is not a live session pane, drawn as a card over the content.
+    private func chainCard(_ member: ChainMember?) -> ChainMember? {
+        guard let member else { return nil }
+        if member.kind != .session { return member }
+        if model.isOracleSession(member.ref) { return member }
+        return model.sessions.contains { $0.id == member.ref } ? nil : member
+    }
+
     var body: some View {
+        let chain = openChain
+        // The chain strip sits above the content rather than in the
+        // ZStack, and the ZStack keeps its place in this VStack whether or not a chain
+        // is open, so opening one never remounts the session container below.
+        VStack(spacing: 0) {
+            if let chain {
+                ChainTabStrip(chain: chain.chain, selected: chain.member?.memberRef)
+                Divider()
+            }
+            content(chainCard: chainCard(chain?.member))
+        }
+    }
+
+    private func content(chainCard: ChainMember?) -> some View {
         // The GitHub view overlays the session content in a ZStack rather than
         // replacing it: the container underneath must stay MOUNTED so the
         // keep-alive terminal panes survive (juancode-073, juancode-2t6).
@@ -3000,6 +3033,10 @@ struct DetailView: View {
             }
             if let pending {
                 PendingSessionCard(pending: pending)
+            }
+            if let chainCard {
+                ChainMemberCard(member: chainCard)
+                    .id(chainCard.memberRef)
             }
             if model.showingGitHub {
                 GitHubView()

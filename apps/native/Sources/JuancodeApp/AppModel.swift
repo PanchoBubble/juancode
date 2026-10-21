@@ -130,6 +130,9 @@ final class AppModel {
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
         didSet {
+            // A chain view follows a sidebar click onto one of its sessions, and closes
+            // on a click anywhere else.
+            if selection != oldValue { followSelectionIntoChain() }
             // Remember where we came from so the mouse's back button (⌘[) can return.
             // Every navigation path lands here, so this one hook covers the jump
             // palette, notifications, search hits and plain sidebar clicks alike.
@@ -5422,8 +5425,14 @@ final class AppModel {
     private func subscribeChainsMirror() {
         guard chainsCancel == nil else { return }
         chainsCancel = core.subscribeChains { [weak self] book in
-            Task { @MainActor in self?.chains = book }
+            Task { @MainActor in self?.applyChains(book) }
         }
+    }
+
+    private func applyChains(_ book: ChainBook) {
+        let old = chainView.flatMap { chains[$0.slug] }
+        chains = book
+        reconcileChainView(old: old)
     }
 
     /// The chain writes, each surfacing a refusal on `errorMessage` and answering
@@ -5466,6 +5475,126 @@ final class AppModel {
             errorMessage = error.localizedDescription
             return false
         }
+    }
+
+    // MARK: - Chain view
+    //
+    // The API every chain entry point calls (the rail panel, the badge, the toolbar,
+    // the context menu, the shortcuts): `openChain(slug:member:)`, `exitChain()`,
+    // `selectChainMember(_:)`, `stepChainTab(by:)`, and `chainView` to read what is open.
+    //
+    // A session tab IS the selection: picking one sets `selection`, so the session's
+    // pane is the same keep-alive pooled pane the sidebar shows and no terminal is
+    // ever mounted twice or torn down by a tab switch. A PR or ticket tab draws a
+    // card over the detail area and leaves the selection (and its pane) where it was.
+    // An Oracle tab shows that Oracle live in the Oracle dock, its one surface.
+
+    /// The open chain view, if any.
+    struct ChainViewState: Equatable {
+        let slug: String
+        /// The member tab showing; nil only while the chain has no members.
+        var selected: ChainMemberRef?
+        /// The selection when the chain was opened, restored by `exitChain()`.
+        let returnTo: String?
+    }
+
+    /// Non-nil while a chain replaces the detail area's content with its tabs.
+    private(set) var chainView: ChainViewState?
+    /// Set while the chain view itself moves `selection`, so the `selection` hook
+    /// below can tell a tab switch from the user navigating somewhere else.
+    @ObservationIgnored private var chainDrivesSelection = false
+    /// Points the Oracle dock at an Oracle and slides it in. Set by `OracleModel`.
+    @ObservationIgnored var revealOracle: ((String) -> Void)?
+    private static let chainLastTabKey = "chain.lastTab"
+
+    /// Open `slug`'s chain view on `member`, or on the tab last viewed in it. A no-op
+    /// for a slug the book does not have. Opening another chain over an open one keeps
+    /// the first one's way back, so exit always returns to where you started.
+    func openChain(slug: String, member: ChainMemberRef? = nil) {
+        guard let chain = chains[slug] else { return }
+        let returnTo = chainView?.returnTo ?? selection
+        let remembered = (UserDefaults.standard.dictionary(forKey: Self.chainLastTabKey)?[slug] as? String)
+            .flatMap(ChainMemberRef.init(key:))
+        chainView = ChainViewState(slug: slug, selected: nil, returnTo: returnTo)
+        if let tab = ChainTabs.landing(in: chain, asked: member, remembered: remembered, showing: selection) {
+            selectChainMember(tab)
+        }
+    }
+
+    /// Close the chain view and go back to the selection it was opened from (nothing,
+    /// if that session is gone).
+    func exitChain() {
+        guard let open = chainView else { return }
+        chainView = nil
+        let back = open.returnTo.flatMap { id in sessions.contains { $0.id == id } ? id : nil }
+        if selection != back { selection = back }
+    }
+
+    /// Show one member's tab. Remembered per chain for the next `openChain`.
+    func selectChainMember(_ member: ChainMemberRef) {
+        guard let open = chainView, chains[open.slug]?.contains(member) == true else { return }
+        chainView?.selected = member
+        rememberChainTab(member, in: open.slug)
+        guard member.kind == .session else { return }
+        if isOracleSession(member.ref) {
+            revealOracle?(member.ref)
+        } else if sessions.contains(where: { $0.id == member.ref }) {
+            collapseOracleDock?()
+            guard selection != member.ref else { return }
+            chainDrivesSelection = true
+            selection = member.ref
+            chainDrivesSelection = false
+        }
+    }
+
+    /// The next (`1`) or previous (`-1`) tab, wrapping.
+    func stepChainTab(by offset: Int) {
+        guard let open = chainView, let chain = chains[open.slug],
+              let tab = ChainTabs.step(in: chain, from: open.selected, by: offset)
+        else { return }
+        selectChainMember(tab)
+    }
+
+    /// The chain shortcut: exit an open chain view, else open the selected session's.
+    func toggleChainForSelection() {
+        if chainView != nil {
+            exitChain()
+        } else if let id = selection, let chain = chain(forSession: id) {
+            openChain(slug: chain.slug, member: ChainMemberRef(kind: .session, ref: id))
+        }
+    }
+
+    private func rememberChainTab(_ member: ChainMemberRef, in slug: String) {
+        var tabs = UserDefaults.standard.dictionary(forKey: Self.chainLastTabKey) ?? [:]
+        guard tabs[slug] as? String != member.key else { return }
+        tabs[slug] = member.key
+        UserDefaults.standard.set(tabs, forKey: Self.chainLastTabKey)
+    }
+
+    /// `selection` moved. A session of the open chain makes its tab the showing one
+    /// (a sidebar click on a member is a tab switch); anywhere else leaves the chain.
+    private func followSelectionIntoChain() {
+        guard !chainDrivesSelection, let open = chainView else { return }
+        if let id = selection, chains[open.slug]?.contains(ChainMemberRef(kind: .session, ref: id)) == true {
+            let tab = ChainMemberRef(kind: .session, ref: id)
+            chainView?.selected = tab
+            rememberChainTab(tab, in: open.slug)
+        } else {
+            chainView = nil
+        }
+    }
+
+    /// The book changed under an open chain view: leave a deleted chain, and move off
+    /// a tab whose member left.
+    private func reconcileChainView(old: Chain?) {
+        guard let open = chainView else { return }
+        guard let chain = chains[open.slug] else {
+            exitChain()
+            return
+        }
+        let tab = ChainTabs.reconcile(open.selected, old: old, new: chain)
+        guard tab != open.selected else { return }
+        if let tab { selectChainMember(tab) } else { chainView?.selected = nil }
     }
 
     // MARK: - Heavy command queue (juancode-ik11, moved to the core in juancode-52e8.14.3)

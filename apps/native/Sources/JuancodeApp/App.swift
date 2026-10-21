@@ -391,7 +391,7 @@ struct JuancodeApp: App {
                 }
                 .appShortcut(.navigateBack, shortcuts)
                 .disabled(!model.canGoBack && !model.showingGitHub && !model.showingBeads && !model.showingFindBar
-                          && !model.showingDiffReview
+                          && !model.showingDiffReview && model.chainView == nil
                           && model.editing == nil && !oracle.expanded)
                 Button("Forward") {
                     performShortcut(.navigateForward, model: model, oracle: oracle)
@@ -463,6 +463,24 @@ struct JuancodeApp: App {
                 }
                 .appShortcut(.diffReview, shortcuts)
                 .disabled(model.selection == nil && !model.showingDiffReview)
+                // ⌃⌘C: the selected session's chain, one tab per member across
+                // projects; again to leave it.
+                Button(model.chainView != nil ? "Leave Chain" : "Open Chain") {
+                    performShortcut(.toggleChain, model: model, oracle: oracle)
+                }
+                .appShortcut(.toggleChain, shortcuts)
+                .disabled(model.chainView == nil
+                          && model.selection.flatMap { model.chain(forSession: $0) } == nil)
+                Button("Next Chain Tab") {
+                    performShortcut(.nextChainTab, model: model, oracle: oracle)
+                }
+                .appShortcut(.nextChainTab, shortcuts)
+                .disabled(model.chainView == nil)
+                Button("Previous Chain Tab") {
+                    performShortcut(.previousChainTab, model: model, oracle: oracle)
+                }
+                .appShortcut(.previousChainTab, shortcuts)
+                .disabled(model.chainView == nil)
                 // ⌘⇧E shows/hides the file-tree sidebar over the selected session's
                 // worktree (the Files side-panel tab).
                 Button("Toggle File Tree") {

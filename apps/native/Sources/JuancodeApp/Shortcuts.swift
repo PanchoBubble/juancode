@@ -44,6 +44,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case navigateBack
     case navigateForward
     case diffReview
+    case toggleChain
+    case nextChainTab
+    case previousChainTab
 
     var id: String { rawValue }
 
@@ -80,6 +83,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .navigateBack: return "Back"
         case .navigateForward: return "Forward"
         case .diffReview: return "Review Diff"
+        case .toggleChain: return "Open / Leave Chain"
+        case .nextChainTab: return "Next Chain Tab"
+        case .previousChainTab: return "Previous Chain Tab"
         }
     }
 
@@ -137,6 +143,12 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .navigateForward: return KeyBinding(key: "]", command: true)
         // ⌘⇧D opens the full-width diff review over the session (juancode-a5j).
         case .diffReview: return KeyBinding(key: "d", command: true, shift: true)
+        // The chain view: ⌃⌘C opens the selected session's chain and
+        // leaves an open one; ⌃⌘] / ⌃⌘[ step through its tabs. Not ⌘⇧] — a shifted
+        // bracket arrives as "}" and could never match from inside a terminal.
+        case .toggleChain: return KeyBinding(key: "c", command: true, control: true)
+        case .nextChainTab: return KeyBinding(key: "]", command: true, control: true)
+        case .previousChainTab: return KeyBinding(key: "[", command: true, control: true)
         }
     }
 }
@@ -328,6 +340,9 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         if !dismissTopOverlay(model: model, oracle: oracle) { model.goBack() }
     case .navigateForward: model.goForward()
     case .diffReview: model.toggleDiffReview()
+    case .toggleChain: model.toggleChainForSelection()
+    case .nextChainTab: model.stepChainTab(by: 1)
+    case .previousChainTab: model.stepChainTab(by: -1)
     }
 }
 
@@ -367,5 +382,8 @@ func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
     }
     if model.showingBeads { model.beadsBack(); return true }
     if oracle.expanded { oracle.collapse(); return true }
+    // The chain view is a place you went to, so Back leaves it — after the dock,
+    // which an Oracle tab slid in over it.
+    if model.chainView != nil { model.exitChain(); return true }
     return false
 }
