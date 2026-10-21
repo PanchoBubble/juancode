@@ -391,6 +391,7 @@ struct JuancodeApp: App {
                 }
                 .appShortcut(.navigateBack, shortcuts)
                 .disabled(!model.canGoBack && !model.showingGitHub && !model.showingBeads && !model.showingFindBar
+                          && !model.showingDiffReview
                           && model.editing == nil && !oracle.expanded)
                 Button("Forward") {
                     performShortcut(.navigateForward, model: model, oracle: oracle)
@@ -455,6 +456,13 @@ struct JuancodeApp: App {
                     performShortcut(.openChangesForCurrentSession, model: model, oracle: oracle)
                 }
                 .appShortcut(.openChangesForCurrentSession, shortcuts)
+                // ⌘⇧D: the full-width diff review — comment on lines, send them all to
+                // the session as one review (juancode-a5j).
+                Button(model.showingDiffReview ? "Close Diff Review" : "Review Diff") {
+                    performShortcut(.diffReview, model: model, oracle: oracle)
+                }
+                .appShortcut(.diffReview, shortcuts)
+                .disabled(model.selection == nil && !model.showingDiffReview)
                 // ⌘⇧E shows/hides the file-tree sidebar over the selected session's
                 // worktree (the Files side-panel tab).
                 Button("Toggle File Tree") {

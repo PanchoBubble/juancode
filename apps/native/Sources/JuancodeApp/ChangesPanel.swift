@@ -352,6 +352,10 @@ struct ChangesPanel: View {
     }
 
     @ViewBuilder private var headerActions: some View {
+        Button { model.openDiffReview() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right.square") }
+            .buttonStyle(.borderless)
+            .help("Open the full-width review: comment on lines, send them to the session (⌘⇧D)")
+            .clickCursor()
         Button(model.isReviewing(sessionId) ? "Reviewing…" : "Review with Claude") {
             model.runReview(sessionId)
         }

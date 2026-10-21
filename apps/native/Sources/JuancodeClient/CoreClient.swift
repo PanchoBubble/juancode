@@ -304,6 +304,7 @@ public protocol CoreClient: AnyObject, Sendable {
     func diff(cwd: String) async throws -> DiffResult
     func baseDiff(cwd: String, base: String?) async throws -> BaseDiffResult
     func commitDiff(cwd: String, sha: String) async throws -> DiffResult
+    func stagedDiff(cwd: String) async throws -> DiffResult
     func gitState(cwd: String) async throws -> GitState
     func recentCommits(cwd: String, limit: Int) async throws -> [RecentCommit]
     func recentCommits(cwd: String, limit: Int, until: String?) async throws -> [RecentCommit]

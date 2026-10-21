@@ -399,6 +399,22 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         // While the Changes panel holds the keyboard, let its own `.onKeyPress` see
         // every plain key — don't pre-empt j/k/n/p as sidebar nav.
         if model.changesKeyboardActive { return false }
+        // The diff-review panel reads its own keys (vim motions, ⌃D/⌃U, ⌃H/⌃L) —
+        // stand aside entirely while it has the keyboard.
+        if window.firstResponder is ReviewKeyCatcherView { return false }
+        // It also covers the session's terminal, which can still take first responder
+        // (a pane appearing under it focuses itself). A key typed at the review must
+        // not land in the pty underneath: give the panel the keyboard back and let
+        // this same key through to it — dispatch reads the first responder after us.
+        if model.showingDiffReview, window.firstResponder is JuancodeTerminalResponder,
+           !mods.contains(.command) {
+            if let catcher = ReviewKeyCatcherView.mounted(in: window),
+               window.makeFirstResponder(catcher) {
+                return false
+            }
+            model.diffReviewFocusToken &+= 1
+            return true
+        }
         // Esc backs out of the GitHub overlay from anywhere in the window — including
         // while a terminal holds first responder, where `.onExitCommand` on the
         // overlay never fires (juancode-2t6). One level at a time: the PR detail

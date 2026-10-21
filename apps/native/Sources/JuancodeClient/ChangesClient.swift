@@ -33,6 +33,9 @@ public extension CoreClient {
         throw changesUnsupported
     }
 
+    /// What is staged in `cwd`: the index vs HEAD, without untracked files.
+    func stagedDiff(cwd: String) async throws -> DiffResult { throw changesUnsupported }
+
     /// Branch, upstream, ahead/behind and dirtiness for `cwd`.
     func gitState(cwd: String) async throws -> GitState { throw changesUnsupported }
 

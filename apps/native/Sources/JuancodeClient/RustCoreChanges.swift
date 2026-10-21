@@ -41,6 +41,12 @@ public extension RustCoreClient {
         try await gitGet("/api/git/diff", [("cwd", cwd), ("commit", sha)], as: DiffResult.self)
     }
 
+    /// A daemon older than juancode-a5j has no such route and answers 404, which
+    /// surfaces as an error rather than as the working tree under a "staged" heading.
+    func stagedDiff(cwd: String) async throws -> DiffResult {
+        try await gitGet("/api/git/staged-diff", [("cwd", cwd)], as: DiffResult.self)
+    }
+
     func gitState(cwd: String) async throws -> GitState {
         try await gitGet("/api/git/state", [("cwd", cwd)], as: GitState.self)
     }

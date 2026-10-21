@@ -302,7 +302,30 @@ pub fn diff(cwd: &str) -> DiffResult {
     } else {
         EMPTY_TREE.to_string()
     };
-    collect_diff(cwd, &root, &base)
+    collect_diff(cwd, &root, &base, Tree::Work)
+}
+
+/// What is staged: the index vs HEAD, in the same per-file shape as [`diff`]. No
+/// untracked files — they are by definition not in the index.
+pub fn staged_diff(cwd: &str) -> DiffResult {
+    let Some(root) = repo_root(cwd) else {
+        return DiffResult::none();
+    };
+    let base = if git_line(cwd, &["rev-parse", "--verify", "HEAD"]).is_some() {
+        "HEAD".to_string()
+    } else {
+        EMPTY_TREE.to_string()
+    };
+    collect_diff(cwd, &root, &base, Tree::Index)
+}
+
+/// Which side [`collect_diff`] compares `base` with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tree {
+    /// The working tree, untracked files included.
+    Work,
+    /// The index (`git diff --cached`).
+    Index,
 }
 
 /// Everything this branch introduced relative to where it diverged from `base` —
@@ -330,7 +353,7 @@ pub fn base_diff(cwd: &str, requested: Option<&str>) -> Result<BaseDiffResult> {
     }
     Ok(BaseDiffResult {
         base,
-        result: collect_diff(cwd, &root, &merge_base),
+        result: collect_diff(cwd, &root, &merge_base, Tree::Work),
     })
 }
 
@@ -370,13 +393,23 @@ pub fn commit_diff(cwd: &str, sha: &str) -> Result<DiffResult> {
     })
 }
 
-/// Per-file diffs of a known work tree against `base`: name-status for the tracked
-/// changes (with `-M` so a rename is one entry, not a delete and an add), then one
-/// patch per file, then the untracked files against `/dev/null`.
-fn collect_diff(cwd: &str, root: &str, base: &str) -> DiffResult {
+/// Per-file diffs of a known work tree (or its index) against `base`: name-status
+/// for the tracked changes (with `-M` so a rename is one entry, not a delete and an
+/// add), then one patch per file, then — for the work tree — the untracked files
+/// against `/dev/null`.
+fn collect_diff(cwd: &str, root: &str, base: &str, tree: Tree) -> DiffResult {
     let mut files: Vec<DiffFile> = Vec::new();
+    // `git diff --cached <base>` compares the index with base; without it, the work tree.
+    let diff = |rest: &[&str]| {
+        let mut args = vec!["diff"];
+        if tree == Tree::Index {
+            args.push("--cached");
+        }
+        args.extend_from_slice(rest);
+        git(cwd, &args).unwrap_or_default()
+    };
 
-    let name_status = git(cwd, &["diff", "--name-status", "-M", base]).unwrap_or_default();
+    let name_status = diff(&["--name-status", "-M", base]);
     for raw in name_status.lines() {
         if raw.trim().is_empty() {
             continue;
@@ -393,7 +426,7 @@ fn collect_diff(cwd: &str, root: &str, base: &str) -> DiffResult {
             ) else {
                 continue;
             };
-            let patch = git(cwd, &["diff", "-M", base, "--", old, new]).unwrap_or_default();
+            let patch = diff(&["-M", base, "--", old, new]);
             files.push(build_file(new, Some(old), FileStatus::Renamed, &patch));
         } else if let Some(path) = parts.get(1).copied().filter(|p| !p.is_empty()) {
             let status = match code.chars().next() {
@@ -401,12 +434,15 @@ fn collect_diff(cwd: &str, root: &str, base: &str) -> DiffResult {
                 Some('D') => FileStatus::Deleted,
                 _ => FileStatus::Modified,
             };
-            let patch = git(cwd, &["diff", base, "--", path]).unwrap_or_default();
+            let patch = diff(&[base, "--", path]);
             files.push(build_file(path, None, status, &patch));
         }
     }
 
-    let untracked = git(cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    let untracked = match tree {
+        Tree::Work => git(cwd, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default(),
+        Tree::Index => String::new(),
+    };
     for path in untracked.lines() {
         if path.trim().is_empty() {
             continue;
@@ -955,6 +991,33 @@ pub(crate) mod tests {
         assert_eq!(a.deletions, 0);
         assert!(a.diff.contains("+four"));
         assert_eq!(d.files[1].status, FileStatus::Untracked);
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_staged_diff_is_the_index_only() {
+        let dir = repo("staged");
+        let cwd = dir.to_str().unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        run(&dir, &["add", "a.txt"]);
+        // An unstaged edit on top of the staged one, and an untracked file: neither
+        // is in the index, so neither is in the staged diff.
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "bee\n").unwrap();
+        run(&dir, &["add", "b.txt"]);
+
+        let d = staged_diff(cwd);
+        assert!(d.git);
+        let paths: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.txt", "b.txt"]);
+        assert!(d.files[0].diff.contains("+four"));
+        assert!(!d.files[0].diff.contains("+five"));
+        assert_eq!(d.files[0].additions, 1);
+        assert_eq!(d.files[1].status, FileStatus::Added);
+        // The working-tree diff still sees all of it.
+        assert_eq!(diff(cwd).files.len(), 3);
+        assert!(!staged_diff(scratch("nogit-staged").to_str().unwrap()).git);
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 

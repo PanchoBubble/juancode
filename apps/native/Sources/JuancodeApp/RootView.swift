@@ -3009,6 +3009,13 @@ struct DetailView: View {
                 BeadsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            // The diff review (juancode-a5j) reviews whichever session is showing and
+            // sends to it; keyed by session so a switch starts its view state afresh.
+            if model.showingDiffReview, let id = shownId, pending == nil {
+                DiffReviewPanel(sessionId: id)
+                    .id(id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 }

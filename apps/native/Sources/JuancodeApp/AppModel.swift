@@ -360,13 +360,24 @@ final class AppModel {
     /// underneath (juancode-073); `selection.didSet` auto-dismisses it so every
     /// navigation path lands back on the session.
     var showingGitHub = false {
-        didSet { if showingGitHub { showingBeads = false } }
+        didSet { if showingGitHub { showingBeads = false; showingDiffReview = false } }
     }
     /// The app-wide Beads view (BeadsView.swift): the same kind of overlay as the
     /// GitHub view, and never both at once.
     var showingBeads = false {
-        didSet { if showingBeads { showingGitHub = false } }
+        didSet { if showingBeads { showingGitHub = false; showingDiffReview = false } }
     }
+    /// The full-width diff-review panel (DiffReviewPanel.swift, juancode-a5j): the
+    /// same kind of overlay as the GitHub and Beads views, and never with either.
+    /// Unlike them it survives a session switch — it reviews whichever session the
+    /// window shows, and sends to that session.
+    var showingDiffReview = false {
+        didSet { if showingDiffReview { showingGitHub = false; showingBeads = false } }
+    }
+    /// Comments, bases and loaded diffs behind the diff-review panel.
+    let diffReview = DiffReviewModel()
+    /// Bumped to ask the diff-review panel to take the keyboard back.
+    var diffReviewFocusToken = 0
     let beadsBoard = BeadsBoardModel()
     /// Selection + per-PR detail caches for the GitHub view (see GitHubPanel.swift).
     let github = GitHubModel()
@@ -488,7 +499,7 @@ final class AppModel {
     /// panel refreshes on external edits without a manual Refresh. Consumers (open
     /// panels) hold `changesWatchTokens`; the stream is torn down when the last is
     /// released, so idle CPU stays at zero with many worktrees open.
-    private let worktreeWatchers = WorktreeWatcherRegistry()
+    let worktreeWatchers = WorktreeWatcherRegistry()
     /// sessionId → live worktree-watch subscription while its Changes panel is open.
     private var changesWatchTokens: [String: WorktreeWatchToken] = [:]
 
@@ -4601,7 +4612,7 @@ final class AppModel {
     /// agent entered when one is detected, else the session cwd. Every diff-rooted
     /// action (diff, commit, push, PR, revert, review, editor) resolves through
     /// this so the panel follows the tree the agent actually edits.
-    private func gitCwd(of id: String) -> String? {
+    func gitCwd(of id: String) -> String? {
         agentWorktreeBySession[id] ?? cwd(of: id)
     }
 
@@ -4610,7 +4621,7 @@ final class AppModel {
     /// the agent can enter or leave a worktree at any point mid-session. Only
     /// resolvable while the session runs (the pid match needs a live child);
     /// afterwards the last known value is kept.
-    private func resolveAgentWorktree(_ id: String) async {
+    func resolveAgentWorktree(_ id: String) async {
         guard let session = liveSession(id), let pid = session.childPid else { return }
         let cwd = session.meta.cwd
         let detected = try? await core.agentWorktree(cwd: cwd, childPid: pid)

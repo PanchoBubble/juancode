@@ -47,6 +47,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/sessions/{id}/file", get(session_file))
         .route("/api/git/state", get(path_state))
         .route("/api/git/diff", get(path_diff))
+        .route("/api/git/staged-diff", get(path_staged_diff))
         .route("/api/git/worktrees", get(path_worktrees))
         .route("/api/git/commits", get(path_commits))
         .route("/api/git/status", get(path_status))
@@ -205,6 +206,16 @@ async fn path_diff(Query(p): Query<GitParams>) -> Response {
         return missing_cwd();
     };
     diff_for(cwd, p).await
+}
+
+/// The index vs HEAD (juancode-a5j). Its own route rather than a `?staged=` flag on
+/// `/api/git/diff`: a daemon that predates it then answers 404 instead of ignoring the
+/// flag and serving the working-tree diff under a "staged" heading.
+async fn path_staged_diff(Query(p): Query<GitParams>) -> Response {
+    let Some(cwd) = required_cwd(&p) else {
+        return missing_cwd();
+    };
+    blocking(move || Json(git::staged_diff(&cwd)).into_response()).await
 }
 
 async fn path_worktrees(Query(p): Query<GitParams>) -> Response {
@@ -654,6 +665,19 @@ mod tests {
         )
         .await;
         assert_eq!(body["path"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn the_staged_diff_route_answers_the_index() {
+        let scratch = Scratch::new("stageddiff");
+        let (_loader, handles) = scratch.boot();
+        let cwd = urlencode(&scratch.cwd());
+        let (status, body) = get(&handles, &format!("/api/git/staged-diff?cwd={cwd}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["git"], true);
+        assert!(body["files"].is_array());
+        let (status, _) = get(&handles, "/api/git/staged-diff").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

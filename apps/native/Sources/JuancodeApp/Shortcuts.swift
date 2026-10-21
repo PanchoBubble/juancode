@@ -43,6 +43,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case terminalZoomReset
     case navigateBack
     case navigateForward
+    case diffReview
 
     var id: String { rawValue }
 
@@ -78,6 +79,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .terminalZoomReset: return "Reset Terminal Font"
         case .navigateBack: return "Back"
         case .navigateForward: return "Forward"
+        case .diffReview: return "Review Diff"
         }
     }
 
@@ -133,6 +135,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         // sessions you've viewed. Back closes an open overlay first, if any.
         case .navigateBack: return KeyBinding(key: "[", command: true)
         case .navigateForward: return KeyBinding(key: "]", command: true)
+        // ⌘⇧D opens the full-width diff review over the session (juancode-a5j).
+        case .diffReview: return KeyBinding(key: "d", command: true, shift: true)
         }
     }
 }
@@ -323,6 +327,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         // only step back through the session history once the view is bare.
         if !dismissTopOverlay(model: model, oracle: oracle) { model.goBack() }
     case .navigateForward: model.goForward()
+    case .diffReview: model.toggleDiffReview()
     }
 }
 
@@ -352,6 +357,7 @@ func pinCommandTitle(model: AppModel, oracle: OracleModel) -> String {
 func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
     if model.showingFindBar { model.closeFindBar(); return true }
     if model.editing != nil { model.editing = nil; return true }
+    if model.showingDiffReview { model.closeDiffReview(); return true }
     // The GitHub overlay has two levels: back out of the PR detail to the list
     // before closing the overlay itself.
     if model.showingGitHub {
