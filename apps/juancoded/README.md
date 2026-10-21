@@ -420,6 +420,23 @@ sessionless `error` is read by clients as the answer to whatever request is in f
 | `chain {chain}` | one chain, whole, after it moved; a move is two of these (joined, then left) |
 | `chainRemoved {slug}` | a chain was deleted |
 
+**Auto-join** (capability `chainInherit`, `Chains::inherit`). A new item inherits the
+chain of the session it came from, once, at creation:
+
+- `create {…, fromSessionId}` — the session that asked for this one, i.e. the Oracle a
+  dispatch came from. The new session joins that session's chain before `created` goes
+  out, so the `chain` frame behind it names a session the client already has.
+- `trackPrInSession` — the PR joins the chain of the session it is tracked in.
+- `trackPr {…, fromSessionId}` — the PR joins that session's chain (the frame still
+  spawns its own tracker, which is not tagged). A refused or no-op track joins nothing.
+
+Inheriting never moves anything: an item already in a chain stays where it is (a PR
+untracked and tracked again keeps the chain someone moved it to), and afterwards the
+item is an ordinary member that `setChainMember` retags or untags. A source in no
+chain, or unknown to this daemon, leaves the item untagged — the same answer a core
+that ignores the field gives. The chain's state is not consulted: an Oracle in a closed
+chain is still doing that chain's work.
+
 No frame is a patch, so the snapshot and the stream may overlap without a sequence
 number: the last frame for a slug is the truth about it. A session's chain is **not**
 on `SessionMeta` — membership has one home, and a move that had to update both would be

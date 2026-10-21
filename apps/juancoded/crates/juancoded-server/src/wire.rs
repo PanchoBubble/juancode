@@ -240,6 +240,11 @@ pub const CAPABILITIES: &[&str] = &[
     // Advertised because the whole book answers here: kept across a restart, one chain
     // per item enforced by the store, and every change pushed to every subscriber.
     "chains",
+    // Chain auto-join: `create.fromSessionId` and `trackPr.fromSessionId` are read, and
+    // the new session or watch joins that session's chain. Separate from `chains`
+    // because a core can keep the book and still drop the hint, and a dispatcher has
+    // to know whether to tag the session itself.
+    "chainInherit",
 ];
 
 /// One queued occurrence on the wire.
@@ -318,6 +323,12 @@ pub enum ClientMessage {
         /// its session was updated today, deleting that session.
         reclaim_slot: Option<bool>,
         dispatch_id: Option<String>,
+        /// The session that asked for this one — the Oracle a dispatch came from.
+        /// Read once, at creation: the new session joins whatever chain that session
+        /// is in, and is an ordinary member from then on. Absent, unknown, or in no
+        /// chain all leave it untagged, which is also what a core without
+        /// `chainInherit` does with it.
+        from_session_id: Option<String>,
     },
     Attach {
         session_id: String,
@@ -566,6 +577,11 @@ pub enum ClientMessage {
     TrackPr {
         cwd: String,
         pr: TrackPrInput,
+        /// The session the PR was tracked from, whose chain the watch joins. Not the
+        /// tracker: this frame still spawns one. An optional field rather than a frame
+        /// of its own because dropping it is a defensible default — the PR is tracked
+        /// exactly as asked, just untagged — and `chainInherit` says whether it is read.
+        from_session_id: Option<String>,
     },
     /// Track `pr` in a session that already exists, instead of spawning one for it.
     /// The session the user is sitting in is typically the one whose branch opened the
@@ -579,6 +595,9 @@ pub enum ClientMessage {
     /// watch at all. An unknown TYPE is ignored whole, so an old core answers this with
     /// the silence the client can see (juancode-jlhz). Same choice, same reason, as
     /// `restartFresh` over a `fresh` flag on `reactivate`.
+    ///
+    /// The PR joins the chain that session is in, if it is in one (`chainInherit`): the
+    /// session it is tracked in is, by construction, the session it was tracked from.
     ///
     /// Answered by the list, like `trackPr`. A session this core does not hold, one that
     /// cannot be brought back up, and one that already drives another tracked PR are all
@@ -884,6 +903,8 @@ struct RawClient {
     start_ms: Option<i64>,
     #[serde(rename = "dispatchId", default)]
     dispatch_id: Option<String>,
+    #[serde(rename = "fromSessionId", default)]
+    from_session_id: Option<String>,
     #[serde(rename = "sessionId", default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -1022,6 +1043,7 @@ impl ClientMessage {
                 worktree_name: raw.worktree_name,
                 reclaim_slot: raw.reclaim_slot,
                 dispatch_id: raw.dispatch_id,
+                from_session_id: raw.from_session_id.filter(|s| !s.is_empty()),
             }),
             "attach" => Ok(Self::Attach {
                 session_id: need_session()?,
@@ -1228,6 +1250,7 @@ impl ClientMessage {
             "trackPr" => Ok(Self::TrackPr {
                 cwd: raw.cwd.ok_or("missing cwd")?,
                 pr: raw.pr.ok_or("missing pr")?,
+                from_session_id: raw.from_session_id.filter(|s| !s.is_empty()),
             }),
             "trackPrInSession" => Ok(Self::TrackPrInSession {
                 cwd: raw.cwd.ok_or("missing cwd")?,
@@ -2096,8 +2119,42 @@ mod tests {
                 worktree_name: None,
                 reclaim_slot: None,
                 dispatch_id: None,
+                from_session_id: None,
             }
         );
+    }
+
+    #[test]
+    fn create_and_track_pr_carry_the_session_they_came_from() {
+        let create = ClientMessage::decode(
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","fromSessionId":"oracle-1"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&create, ClientMessage::Create { from_session_id: Some(s), .. } if s == "oracle-1"),
+            "{create:?}"
+        );
+        let track = ClientMessage::decode(
+            r#"{"type":"trackPr","cwd":"/r","pr":{"number":7},"fromSessionId":"s-1"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&track, ClientMessage::TrackPr { from_session_id: Some(s), .. } if s == "s-1"),
+            "{track:?}"
+        );
+        // Empty reads as absent, like `model`: a client that always sends the key is
+        // not naming a session.
+        let empty = ClientMessage::decode(
+            r#"{"type":"trackPr","cwd":"/r","pr":{"number":7},"fromSessionId":""}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            empty,
+            ClientMessage::TrackPr {
+                from_session_id: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2476,6 +2533,7 @@ mod tests {
                     "changes",
                     "github",
                     "chains",
+                    "chainInherit",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"

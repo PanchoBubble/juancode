@@ -56,7 +56,7 @@ capability gate is how a client feature-detects. Both had `restartFresh`, `spawn
 `namedKeys` and
 `globalPause`; the Rust core also has
 `queueEdit`, `transcript`, `reaper`, `stuck`, `sessionList`, `sessionDelete`,
-`sessionSleep`, `sessionEdit`, `heavyQueue` and `chains` on top of that. The catalogue describes **all** of it, and a
+`sessionSleep`, `sessionEdit`, `heavyQueue`, `chains` and `chainInherit` on top of that. The catalogue describes **all** of it, and a
 message's capability gate is what says which core speaks it. Each core is then
 measured against the subset its own advertised capability list entails:
 

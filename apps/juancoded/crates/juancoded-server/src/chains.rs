@@ -182,6 +182,73 @@ impl Chains {
         })
     }
 
+    /// Put a just-created item in whatever chain `from_session` is in: the session an
+    /// Oracle dispatched joins the Oracle's chain, and a PR tracked from a chained
+    /// session joins that session's chain. Returns the slug it joined.
+    ///
+    /// Once, at creation, and never a move. An item that is already in a chain stays
+    /// where it is — a PR that was untracked and tracked again keeps the chain a person
+    /// may have moved it to — and after this it is an ordinary member that
+    /// `set_member` retags or untags like any other. A `from_session` in no chain, or
+    /// one this daemon does not know, is not a refusal: the item is simply untagged,
+    /// which is what it would have been without the hint.
+    ///
+    /// The chain's state is not consulted. An Oracle in a closed chain that dispatches
+    /// more work is doing that chain's work, and the badge saying so is truer than no
+    /// badge; whether that reopens the chain is the chain's business, not this one's.
+    pub fn inherit(
+        &self,
+        from_session: &str,
+        kind: ChainMemberKind,
+        ref_id: &str,
+        title: Option<String>,
+        url: Option<String>,
+    ) -> Option<String> {
+        if ref_id.trim().is_empty() || from_session == ref_id {
+            return None;
+        }
+        if kind == ChainMemberKind::Session && self.sessions.meta(ref_id).is_none() {
+            return None;
+        }
+        let mut joined = None;
+        // One mutation, read off the store inside it, so a retag that lands between
+        // looking up the parent's chain and joining it cannot be overwritten.
+        let outcome = self.mutate(|store| {
+            let book = store.chains().map_err(store_failed)?;
+            let holds = |c: &Chain, kind: ChainMemberKind, id: &str| {
+                c.members.iter().any(|m| m.kind == kind && m.ref_id == id)
+            };
+            if book.iter().any(|c| holds(c, kind, ref_id)) {
+                return Ok(Vec::new());
+            }
+            let Some(slug) = book
+                .iter()
+                .find(|c| holds(c, ChainMemberKind::Session, from_session))
+                .map(|c| c.slug.clone())
+            else {
+                return Ok(Vec::new());
+            };
+            let member = ChainMember {
+                kind,
+                ref_id: ref_id.to_string(),
+                title,
+                url,
+                added_at: now_ms(),
+            };
+            store.set_member(&slug, &member).map_err(store_failed)?;
+            joined = Some(slug.clone());
+            Ok(vec![slug])
+        });
+        if let Err(code) = outcome {
+            warn!(from = %from_session, item = %ref_id, code, "could not inherit a chain");
+            return None;
+        }
+        if let Some(slug) = &joined {
+            debug!(from = %from_session, item = %ref_id, chain = %slug, "inherited a chain");
+        }
+        joined
+    }
+
     /// Untag a session that no longer exists. A deleted or pruned session would
     /// otherwise stay a member forever, as a tab nothing can draw.
     pub fn forget_session(&self, session_id: &str) {
@@ -404,6 +471,105 @@ mod tests {
         assert_eq!(slugs_of(&drain(&mut rx)), ["a"]);
         assert!(chains.list()[0].members.is_empty());
         let _ = h.sessions.kill(&id);
+    }
+
+    fn session(h: &crate::serve::CoreHandles) -> String {
+        h.sessions
+            .create(CreateRequest {
+                provider: ProviderId::Claude,
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                skip_permissions: false,
+                model: None,
+                preset: None,
+                isolate_worktree: false,
+                worktree_name: None,
+                dispatch_id: None,
+                owner: 1,
+            })
+            .expect("create")
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_new_item_inherits_its_parents_chain_once_and_never_moves() {
+        let (h, chains) = engine();
+        chains.create("a").unwrap();
+        chains.create("b").unwrap();
+        let oracle = session(&h);
+        let child = session(&h);
+        let loner = session(&h);
+        chains
+            .set_member(ChainMemberKind::Session, &oracle, Some("a"), None, None)
+            .unwrap();
+        let mut rx = chains.subscribe();
+
+        assert_eq!(
+            chains.inherit(&oracle, ChainMemberKind::Session, &child, None, None),
+            Some("a".into())
+        );
+        assert_eq!(slugs_of(&drain(&mut rx)), ["a"]);
+        assert_eq!(
+            chains.chain_of(ChainMemberKind::Session, &child).as_deref(),
+            Some("a")
+        );
+
+        // A PR tracked from a chained session joins with the caller's snapshot.
+        assert_eq!(
+            chains.inherit(
+                &child,
+                ChainMemberKind::TrackedPr,
+                "/r#1",
+                Some("Fix it".into()),
+                Some("https://example.invalid/1".into()),
+            ),
+            Some("a".into())
+        );
+        let pr = chains.list()[0]
+            .members
+            .iter()
+            .find(|m| m.kind == ChainMemberKind::TrackedPr)
+            .cloned()
+            .expect("the PR is a member");
+        assert_eq!(pr.title.as_deref(), Some("Fix it"));
+        drain(&mut rx);
+
+        // Overridden afterwards, and a second inherit does not drag it back.
+        chains
+            .set_member(ChainMemberKind::TrackedPr, "/r#1", Some("b"), None, None)
+            .unwrap();
+        drain(&mut rx);
+        assert_eq!(
+            chains.inherit(&oracle, ChainMemberKind::TrackedPr, "/r#1", None, None),
+            None
+        );
+        assert!(drain(&mut rx).is_empty(), "a no-op publishes nothing");
+        assert_eq!(
+            chains
+                .chain_of(ChainMemberKind::TrackedPr, "/r#1")
+                .as_deref(),
+            Some("b")
+        );
+
+        // A parent in no chain, or one this daemon never heard of, tags nothing.
+        assert_eq!(
+            chains.inherit(&loner, ChainMemberKind::TrackedPr, "/r#2", None, None),
+            None
+        );
+        assert_eq!(
+            chains.inherit("nope", ChainMemberKind::TrackedPr, "/r#2", None, None),
+            None
+        );
+        // Nor does a session member that does not exist.
+        assert_eq!(
+            chains.inherit(&oracle, ChainMemberKind::Session, "ghost", None, None),
+            None
+        );
+        assert!(drain(&mut rx).is_empty());
+        for id in [oracle, child, loner] {
+            let _ = h.sessions.kill(&id);
+        }
     }
 
     #[tokio::test]

@@ -25,6 +25,7 @@ use juancoded_cordis::contribution::ContributionRegistry;
 use juancoded_cordis::plugins::QueueChanged;
 use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnapshot};
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
+use juancoded_core::chain::ChainMemberKind;
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::ProviderId;
 use juancoded_persistence::review_store::ReviewStore;
@@ -598,11 +599,16 @@ fn tracked_unavailable() -> ServerMessage {
 /// daemon must not disagree about what is being watched. That is also what carries a
 /// REFUSED adopt, by carrying nothing: the asking client times out on a list that never
 /// names the PR.
+///
+/// `inherit` is the session the PR was tracked from and the book its chain is in: a
+/// watch that was made joins that chain, behind the list that announced it. A watch
+/// that was refused joins nothing, so a refusal still publishes nothing at all.
 fn start_track(
     engine: &Arc<TrackedPrs>,
     cwd: String,
     pr: crate::wire::TrackPrInput,
     adopt_session_id: Option<String>,
+    inherit: Option<(String, Arc<Chains>)>,
     owner: ClientId,
 ) {
     let engine = Arc::clone(engine);
@@ -615,7 +621,19 @@ fn start_track(
         adopt_session_id,
         owner,
     };
-    tokio::spawn(async move { engine.track(req).await });
+    tokio::spawn(async move {
+        let entry = engine.track(req).await;
+        if let (Some(entry), Some((from, chains))) = (entry, inherit) {
+            let snapshot = |s: String| Some(s).filter(|s| !s.is_empty());
+            chains.inherit(
+                &from,
+                ChainMemberKind::TrackedPr,
+                &entry.id,
+                snapshot(entry.title),
+                snapshot(entry.url),
+            );
+        }
+    });
 }
 
 /// Fold every event already queued on the bus into frames, splitting them by whether
@@ -1000,6 +1018,7 @@ fn handle_client_message(
             // asks: a reclaim parks the old session rather than deleting it.
             reclaim_slot: _,
             dispatch_id,
+            from_session_id,
         } => {
             let Some(provider_id) = ProviderId::parse(&provider) else {
                 outbound.push(ServerMessage::Error {
@@ -1028,6 +1047,11 @@ fn handle_client_message(
             match sessions.create(req) {
                 Ok(meta) => {
                     let id = meta.id.clone();
+                    // Before `created` goes out, so the chain frame the asker is sent
+                    // behind it already lists the session it was just told about.
+                    if let (Some(from), Some(chains)) = (from_session_id.as_deref(), chains) {
+                        chains.inherit(from, ChainMemberKind::Session, &id, None, None);
+                    }
                     attached.insert(id.clone());
                     outbound.push(ServerMessage::Created {
                         session: meta.clone(),
@@ -1917,12 +1941,17 @@ fn handle_client_message(
             outbound.push(ServerMessage::TrackedPrs { tracked });
         }
 
-        ClientMessage::TrackPr { cwd, pr } => {
+        ClientMessage::TrackPr {
+            cwd,
+            pr,
+            from_session_id,
+        } => {
             let Some(engine) = tracked_prs else {
                 outbound.push(tracked_unavailable());
                 return;
             };
-            start_track(engine, cwd, pr, None, client);
+            let inherit = from_session_id.zip(chains.cloned());
+            start_track(engine, cwd, pr, None, inherit, client);
         }
 
         ClientMessage::TrackPrInSession {
@@ -1934,7 +1963,8 @@ fn handle_client_message(
                 outbound.push(tracked_unavailable());
                 return;
             };
-            start_track(engine, cwd, pr, Some(session_id), client);
+            let inherit = chains.map(|c| (session_id.clone(), Arc::clone(c)));
+            start_track(engine, cwd, pr, Some(session_id), inherit, client);
         }
 
         ClientMessage::PrWebhook { repo, number } => {
@@ -3469,6 +3499,7 @@ mod tests {
                     url: "https://example.invalid/pr/4242".into(),
                     branch: "main".into(),
                 },
+                from_session_id: None,
             },
             &mut fanout,
         );
@@ -3721,5 +3752,224 @@ mod tests {
             "deleting the chain untagged the session"
         );
         let _ = wire.sessions().kill(&session);
+    }
+
+    fn chain_book(wire: &Wire) -> &Arc<Chains> {
+        wire.handles
+            .chains
+            .as_ref()
+            .expect("the test tree mounts a chains book")
+    }
+
+    #[tokio::test]
+    async fn a_session_dispatched_from_a_chained_oracle_joins_its_chain() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let oracle = wire.session();
+        chain_book(&wire).create("auth-rewrite").unwrap();
+        chain_book(&wire)
+            .set_member(
+                ChainMemberKind::Session,
+                &oracle,
+                Some("auth-rewrite"),
+                None,
+                None,
+            )
+            .unwrap();
+        wire.step(ClientMessage::SubscribeChains, &mut fanout);
+
+        let dispatch = |from: Option<String>| ClientMessage::Create {
+            provider: "claude".into(),
+            cwd: "/tmp".into(),
+            cols: None,
+            rows: None,
+            initial_input: None,
+            skip_permissions: None,
+            model: None,
+            preset: None,
+            isolate_worktree: None,
+            worktree_name: None,
+            reclaim_slot: None,
+            dispatch_id: None,
+            from_session_id: from,
+        };
+        let created_id = |frames: &[ServerMessage]| {
+            frames
+                .iter()
+                .find_map(|f| match f {
+                    ServerMessage::Created { session } => Some(session.id.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no created in {frames:?}"))
+        };
+
+        let sent = wire.step(dispatch(Some(oracle.clone())), &mut fanout);
+        let child = created_id(&sent);
+        assert_eq!(
+            chain_book(&wire)
+                .chain_of(ChainMemberKind::Session, &child)
+                .as_deref(),
+            Some("auth-rewrite")
+        );
+        let created_at = sent
+            .iter()
+            .position(|f| matches!(f, ServerMessage::Created { .. }))
+            .unwrap();
+        let chain_at = sent
+            .iter()
+            .position(|f| matches!(f, ServerMessage::Chain { chain } if chain.members.len() == 2))
+            .unwrap_or_else(|| panic!("no chain frame listing the child in {sent:?}"));
+        assert!(
+            created_at < chain_at,
+            "the chain names a session the client already has"
+        );
+
+        // No hint, no chain: an ordinary create is untouched.
+        let plain = created_id(&wire.step(dispatch(None), &mut fanout));
+        assert_eq!(
+            chain_book(&wire).chain_of(ChainMemberKind::Session, &plain),
+            None
+        );
+
+        for id in [oracle, child, plain] {
+            let _ = wire.sessions().kill(&id);
+        }
+    }
+
+    /// The join happens on the track's own task, after the list is published, so it
+    /// is waited for by content like the list is.
+    async fn chain_of_eventually(wire: &Wire, kind: ChainMemberKind, id: &str) -> Option<String> {
+        let hang = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let slug = chain_book(wire).chain_of(kind, id);
+            if slug.is_some() || std::time::Instant::now() >= hang {
+                return slug;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pr_tracked_in_a_chained_session_joins_that_sessions_chain() {
+        std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let root = tracked_pr_repo("chain-adopt");
+        let cwd = root.to_string_lossy().to_string();
+        let mine = wire.session();
+        chain_book(&wire).create("auth-rewrite").unwrap();
+        chain_book(&wire)
+            .set_member(
+                ChainMemberKind::Session,
+                &mine,
+                Some("auth-rewrite"),
+                None,
+                None,
+            )
+            .unwrap();
+        wire.step(ClientMessage::SubscribeTrackedPrs, &mut fanout);
+
+        wire.step(
+            ClientMessage::TrackPrInSession {
+                cwd: cwd.clone(),
+                pr: crate::wire::TrackPrInput {
+                    number: 4243,
+                    title: "chained fixture PR".into(),
+                    url: "https://example.invalid/pr/4243".into(),
+                    branch: "main".into(),
+                },
+                session_id: mine.clone(),
+            },
+            &mut fanout,
+        );
+        let frames = wire.tracked_frames(&mut fanout).await;
+        let [ServerMessage::TrackedPrs { tracked }] = &frames[..] else {
+            panic!("expected one replacement list, got {frames:?}");
+        };
+        let key = tracked[0].id.clone();
+        assert_eq!(
+            chain_of_eventually(&wire, ChainMemberKind::TrackedPr, &key)
+                .await
+                .as_deref(),
+            Some("auth-rewrite")
+        );
+        let member = chain_book(&wire).list()[0]
+            .members
+            .iter()
+            .find(|m| m.kind == ChainMemberKind::TrackedPr)
+            .cloned()
+            .unwrap();
+        assert_eq!(member.title.as_deref(), Some("chained fixture PR"));
+        assert_eq!(
+            member.url.as_deref(),
+            Some("https://example.invalid/pr/4243")
+        );
+
+        let _ = wire.sessions().kill(&mine);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_spawned_track_joins_the_chain_of_the_session_it_was_tracked_from() {
+        std::env::set_var("JUANCODE_GH_BIN", "/usr/bin/false");
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let root = tracked_pr_repo("chain-spawn");
+        let cwd = root.to_string_lossy().to_string();
+        let from = wire.session();
+        chain_book(&wire).create("auth-rewrite").unwrap();
+        chain_book(&wire)
+            .set_member(
+                ChainMemberKind::Session,
+                &from,
+                Some("auth-rewrite"),
+                None,
+                None,
+            )
+            .unwrap();
+        wire.step(ClientMessage::SubscribeTrackedPrs, &mut fanout);
+
+        wire.step(
+            ClientMessage::TrackPr {
+                cwd: cwd.clone(),
+                pr: crate::wire::TrackPrInput {
+                    number: 4244,
+                    title: "spawned fixture PR".into(),
+                    url: String::new(),
+                    branch: "main".into(),
+                },
+                from_session_id: Some(from.clone()),
+            },
+            &mut fanout,
+        );
+        let frames = wire.tracked_frames(&mut fanout).await;
+        let [ServerMessage::TrackedPrs { tracked }] = &frames[..] else {
+            panic!("expected one replacement list, got {frames:?}");
+        };
+        let entry = &tracked[0];
+        assert_ne!(
+            entry.session_id.as_deref(),
+            Some(from.as_str()),
+            "it still spawned"
+        );
+        assert_eq!(
+            chain_of_eventually(&wire, ChainMemberKind::TrackedPr, &entry.id)
+                .await
+                .as_deref(),
+            Some("auth-rewrite")
+        );
+        let member = chain_book(&wire).list()[0]
+            .members
+            .iter()
+            .find(|m| m.kind == ChainMemberKind::TrackedPr)
+            .cloned()
+            .unwrap();
+        assert_eq!(member.url, None, "an empty snapshot is no snapshot");
+
+        if let Some(tracker) = entry.session_id.clone() {
+            let _ = wire.sessions().kill(&tracker);
+        }
+        let _ = wire.sessions().kill(&from);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }
