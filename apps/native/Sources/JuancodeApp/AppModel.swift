@@ -54,8 +54,8 @@ private let worktreeByProjectKey = "juancode.worktreeByProject"
 /// `worktreeByProject`.
 private let worktreeDefaultAllKey = "juancode.worktreeDefaultAll"
 
-/// UserDefaults key for each project's run command (the play button): project
-/// cwd → shell line with `RunCommand` placeholders (a plist-safe [String: String]).
+/// UserDefaults key for each project's run commands (the play buttons): project
+/// cwd → `RunCommand.Pair.plist` (["main": …, "worktree": …]).
 private let runCommandByProjectKey = "juancode.runCommandByProject"
 
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
@@ -1882,23 +1882,33 @@ final class AppModel {
         worktreeByProject = next
     }
 
-    /// Per-project run command behind the play buttons, keyed by project cwd.
-    /// Persisted; a project without one shows its play button as "set up".
-    var runCommandByProject: [String: String] = (UserDefaults.standard.dictionary(forKey: runCommandByProjectKey) as? [String: String]) ?? [:] {
-        didSet { UserDefaults.standard.set(runCommandByProject, forKey: runCommandByProjectKey) }
+    /// Per-project run commands behind the play buttons, keyed by project cwd.
+    /// Persisted; a project without a main command shows its play button as "set up".
+    var runCommandsByProject: [String: RunCommand.Pair] =
+        (UserDefaults.standard.dictionary(forKey: runCommandByProjectKey) ?? [:])
+            .mapValues { RunCommand.Pair(plist: $0) } {
+        didSet {
+            UserDefaults.standard.set(runCommandsByProject.mapValues(\.plist), forKey: runCommandByProjectKey)
+        }
     }
 
-    /// The saved run command for project `cwd`, nil when none is set.
-    func runCommand(forProject cwd: String) -> String? {
-        runCommandByProject[cwd]
+    /// The saved run commands for project `cwd` (empty when none are set).
+    func runCommands(forProject cwd: String) -> RunCommand.Pair {
+        runCommandsByProject[cwd] ?? .init()
     }
 
-    /// Save (or, when blank, clear) the run command for project `cwd`.
-    func setRunCommand(_ command: String, forProject cwd: String) {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        var next = runCommandByProject
-        next[cwd] = trimmed.isEmpty ? nil : trimmed
-        runCommandByProject = next
+    /// Save the run commands for project `cwd`, dropping the entry when both are blank.
+    func setRunCommands(_ pair: RunCommand.Pair, forProject cwd: String) {
+        var next = runCommandsByProject
+        next[cwd] = pair.isEmpty ? nil : pair
+        runCommandsByProject = next
+    }
+
+    /// The command a session's ▶ runs: its project's worktree command when the
+    /// session is on a worktree (falling back to the main one), else the main one.
+    func runCommand(forSession meta: SessionMeta) -> String? {
+        let project = repoRoot(forSession: meta)
+        return runCommands(forProject: project).command(inWorktree: meta.cwd != project)
     }
 
     /// Persist a new manual order for one project, pruning ids of deleted
@@ -5095,22 +5105,24 @@ final class AppModel {
         } else {
             host = project
         }
-        startRun(project: project, checkout: project, host: host)
+        guard let template = runCommands(forProject: project).main else { return }
+        startRun(template, project: project, checkout: project, host: host)
     }
 
-    /// Play on a session: run its project's command in that session's checkout
-    /// (its worktree when isolated, else the main one).
+    /// Play on a session row: run its command (see `runCommand(forSession:)`) in
+    /// that session's checkout, selecting the session so its panel is on screen.
     func runInSession(_ meta: SessionMeta) {
-        startRun(project: repoRoot(forSession: meta), checkout: meta.cwd, host: meta.cwd)
+        guard let template = runCommand(forSession: meta) else { return }
+        selection = meta.id
+        startRun(template, project: repoRoot(forSession: meta), checkout: meta.cwd, host: meta.cwd)
     }
 
     /// Open a "Run" tab in `host`'s terminal panel, start a shell in `checkout`, and
-    /// type the project's expanded run command into it. Typed rather than passed as
-    /// argv so it runs in the same interactive shell a terminal would give (rc
-    /// functions, aliases) and Ctrl-C leaves a prompt to rerun from. The pty
-    /// buffers input until the shell reads it.
-    private func startRun(project: String, checkout: String, host: String) {
-        guard let template = runCommand(forProject: project) else { return }
+    /// type `template`, expanded, into it. Typed rather than passed as argv so it
+    /// runs in the same interactive shell a terminal would give (rc functions,
+    /// aliases) and Ctrl-C leaves a prompt to rerun from. The pty buffers input
+    /// until the shell reads it.
+    private func startRun(_ template: String, project: String, checkout: String, host: String) {
         let branch = folderGitState(checkout)?.branch ?? RunCommand.currentBranch(at: checkout)
         let line = RunCommand.expand(template, .init(worktree: checkout, branch: branch, project: project))
         var panel = terminalPanel(host)

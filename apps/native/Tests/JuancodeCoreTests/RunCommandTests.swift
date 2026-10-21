@@ -10,6 +10,26 @@ import Testing
         branch: "juancode/fix-scroll",
         project: "/Users/me/luma-core")
 
+    @Test func worktreeCommandFallsBackToMain() {
+        let both = RunCommand.Pair(main: "vr", worktree: "vr -w {worktree}")
+        #expect(both.command(inWorktree: false) == "vr")
+        #expect(both.command(inWorktree: true) == "vr -w {worktree}")
+        let mainOnly = RunCommand.Pair(main: "vr", worktree: "  ")
+        #expect(mainOnly.worktree == nil)
+        #expect(mainOnly.command(inWorktree: true) == "vr")
+        let worktreeOnly = RunCommand.Pair(worktree: "make dev")
+        #expect(worktreeOnly.command(inWorktree: false) == nil)
+        #expect(RunCommand.Pair(main: " ").isEmpty)
+    }
+
+    @Test func pairRoundTripsAndReadsTheOldSingleString() {
+        let pair = RunCommand.Pair(main: "vr", worktree: "vr -w {worktree}")
+        #expect(RunCommand.Pair(plist: pair.plist) == pair)
+        #expect(RunCommand.Pair(main: "vr").plist == ["main": "vr"])
+        #expect(RunCommand.Pair(plist: "make vroom") == RunCommand.Pair(main: "make vroom"))
+        #expect(RunCommand.Pair(plist: nil).isEmpty)
+    }
+
     @Test func fillsEveryPlaceholder() {
         #expect(RunCommand.expand("vr -w {worktree}", worktree)
                 == "vr -w /Users/me/luma-core-worktrees/slot-01")

@@ -19,6 +19,9 @@ struct RowHoverActions: View {
     /// Items for the ellipsis menu; nil hides the menu.
     let menuContent: (() -> AnyView)?
     let menuHelp: String
+    /// Run the project's run command in this row's checkout; nil hides the ▶.
+    var onRun: (() -> Void)? = nil
+    var runHelp: String = ""
     /// Pin/unpin this row (sticks it to the top of its group); nil hides the pin.
     var onTogglePin: (() -> Void)? = nil
     /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
@@ -38,6 +41,15 @@ struct RowHoverActions: View {
 
     var body: some View {
         HStack(spacing: 1) {
+            if let onRun {
+                Button(action: onRun) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: glyphSize - 2, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help(runHelp)
+                .clickCursor()
+            }
             if let onTogglePin {
                 Button(action: onTogglePin) {
                     // The chip is a button, so it shows the ACTION, not the state: a

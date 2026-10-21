@@ -15,6 +15,51 @@ import Foundation
 /// A value is single-quoted only when the shell would split or expand it, so the
 /// common case reads in the terminal exactly as typed.
 public enum RunCommand {
+    /// A project's two run commands: one for its main checkout, and one for its
+    /// worktrees, which falls back to the main one when unset (a worktree usually
+    /// wants the same command, sometimes with a flag pointing at itself).
+    public struct Pair: Equatable, Sendable {
+        public var main: String?
+        public var worktree: String?
+
+        public init(main: String? = nil, worktree: String? = nil) {
+            self.main = Self.clean(main)
+            self.worktree = Self.clean(worktree)
+        }
+
+        public var isEmpty: Bool { main == nil && worktree == nil }
+
+        /// The command to run in a checkout: the worktree one in a worktree when
+        /// set, else the main one.
+        public func command(inWorktree: Bool) -> String? {
+            inWorktree ? (worktree ?? main) : main
+        }
+
+        /// The plist-safe form UserDefaults stores, without unset entries.
+        public var plist: [String: String] {
+            var out: [String: String] = [:]
+            out["main"] = main
+            out["worktree"] = worktree
+            return out
+        }
+
+        /// Reads `plist`, and also the bare string an earlier build stored as the
+        /// main command.
+        public init(plist: Any?) {
+            if let single = plist as? String {
+                self.init(main: single)
+            } else {
+                let dict = plist as? [String: String] ?? [:]
+                self.init(main: dict["main"], worktree: dict["worktree"])
+            }
+        }
+
+        private static func clean(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            return t
+        }
+    }
+
     /// What a placeholder can be filled from.
     public struct Context: Equatable, Sendable {
         public var worktree: String

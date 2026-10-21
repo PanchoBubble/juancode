@@ -1968,6 +1968,10 @@ private struct SessionRowHost: View {
     /// The hover ellipsis menu's content (the context menu's items).
     let menu: () -> AnyView
 
+    /// What this row's hover ▶ would run, nil when the project has nothing set for
+    /// this session's checkout.
+    private var runCommand: String? { model.runCommand(forSession: meta) }
+
     var body: some View {
         if let bodySnippet {
             VStack(alignment: .leading, spacing: 1) {
@@ -2024,6 +2028,10 @@ private struct SessionRowHost: View {
                    onCloseRequested: external ? nil : confirmClose,
                    pinned: !external && model.isPinned(meta.id),
                    onTogglePin: external ? nil : { model.togglePinned(meta.id) },
+                   onRun: external || runCommand == nil ? nil : { model.runInSession(meta) },
+                   runHelp: runCommand.map {
+                       "Run `\($0)` in \(URL(fileURLWithPath: meta.cwd).lastPathComponent)"
+                   } ?? "",
                    selected: selected,
                    activating: model.isActivating(meta.id),
                    asleep: model.isResting(meta),
@@ -2190,7 +2198,7 @@ private struct FolderHeader: View {
                 // The project's run command, in the main checkout. Unset, it opens the
                 // editor instead, so the button is how you discover the feature.
                 Button {
-                    if model.runCommand(forProject: group.cwd) != nil {
+                    if model.runCommands(forProject: group.cwd).main != nil {
                         model.runProject(group.cwd)
                     } else {
                         showingRunEditor = true
@@ -2198,7 +2206,7 @@ private struct FolderHeader: View {
                 } label: {
                     Image(systemName: "play.fill")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(model.runCommand(forProject: group.cwd) == nil
+                        .foregroundStyle(model.runCommands(forProject: group.cwd).main == nil
                                          ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
@@ -2207,7 +2215,7 @@ private struct FolderHeader: View {
                                 .fill(Color.appHairline(runHovering ? 0.14 : 0)))
                 }
                 .buttonStyle(.plain)
-                .help(model.runCommand(forProject: group.cwd).map {
+                .help(model.runCommands(forProject: group.cwd).main.map {
                     "Run `\($0)` in \(group.name) (edit it in the … menu)"
                 } ?? "Set a run command for \(group.name)")
                 .clickCursor()
@@ -2254,8 +2262,8 @@ private struct FolderHeader: View {
                             // One popover at a time: open the editor once this one is gone.
                             DispatchQueue.main.async { showingRunEditor = true }
                         } label: {
-                            Text(model.runCommand(forProject: group.cwd) == nil
-                                 ? "Set run command…" : "Edit run command…")
+                            Text(model.runCommands(forProject: group.cwd).isEmpty
+                                 ? "Set run commands…" : "Edit run commands…")
                                 .foregroundStyle(.primary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
@@ -2423,29 +2431,35 @@ private struct FolderHeader: View {
     }
 }
 
-/// Edits a project's run command: one shell line plus the placeholders it may use.
-/// Saving a blank line clears it.
+/// Edits a project's two run commands: one for the main checkout (the project's
+/// ▶, and sessions on it) and one for worktrees (their sessions' ▶), which falls
+/// back to the main one when left blank. Saving both blank clears them.
 private struct RunCommandEditor: View {
     @Environment(AppModel.self) private var model
     let project: String
     let done: () -> Void
-    @State private var draft = ""
+    @State private var main = ""
+    @State private var worktree = ""
+    /// The field a placeholder click inserts into: the one last focused.
+    @FocusState private var focused: Field?
+    @State private var target: Field = .main
+
+    private enum Field { case main, worktree }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Run command").font(.headline)
-            Text("Typed into a new terminal tab, in the main checkout from the project's ▶ and in the session's worktree from a session's ▶.")
+            Text("Run commands").font(.headline)
+            Text("Typed into a new terminal tab in the checkout it runs in. The project's ▶ uses the main checkout; a session's ▶ (on hover) uses its own.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            TextField("make dev", text: $draft)
-                .font(.system(.body, design: .monospaced))
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(save)
+            field("Main checkout", text: $main, prompt: "make dev", as: .main)
+            field("Worktrees", text: $worktree,
+                  prompt: main.isEmpty ? "make dev" : "same as main checkout", as: .worktree)
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(RunCommand.placeholders, id: \.token) { p in
                     HStack(spacing: 6) {
-                        Button(p.token) { draft += p.token }
+                        Button(p.token) { insert(p.token) }
                             .buttonStyle(.link)
                             .font(.system(size: 11, design: .monospaced))
                             .help("Insert \(p.token)")
@@ -2454,8 +2468,8 @@ private struct RunCommandEditor: View {
                 }
             }
             HStack {
-                if model.runCommand(forProject: project) != nil {
-                    Button("Clear", role: .destructive) { draft = ""; save() }
+                if !model.runCommands(forProject: project).isEmpty {
+                    Button("Clear", role: .destructive) { main = ""; worktree = ""; save() }
                 }
                 Spacer()
                 Button("Cancel", action: done).keyboardShortcut(.cancelAction)
@@ -2463,12 +2477,35 @@ private struct RunCommandEditor: View {
             }
         }
         .padding(14)
-        .frame(width: 340)
-        .onAppear { draft = model.runCommand(forProject: project) ?? "" }
+        .frame(width: 360)
+        .onAppear {
+            let saved = model.runCommands(forProject: project)
+            main = saved.main ?? ""
+            worktree = saved.worktree ?? ""
+        }
+        .onChange(of: focused) { _, f in if let f { target = f } }
+    }
+
+    private func field(_ label: String, text: Binding<String>, prompt: String, as f: Field) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption.weight(.semibold))
+            TextField(prompt, text: text)
+                .font(.system(.body, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+                .focused($focused, equals: f)
+                .onSubmit(save)
+        }
+    }
+
+    private func insert(_ token: String) {
+        switch target {
+        case .main: main += token
+        case .worktree: worktree += token
+        }
     }
 
     private func save() {
-        model.setRunCommand(draft, forProject: project)
+        model.setRunCommands(.init(main: main, worktree: worktree), forProject: project)
         done()
     }
 }
@@ -2654,6 +2691,10 @@ struct SessionRow: View {
     var pinned: Bool = false
     /// Pin/unpin this session — the hover chip's pin. Nil for external rows.
     var onTogglePin: (() -> Void)? = nil
+    /// Run the project's run command in this session's checkout — the hover chip's
+    /// ▶. Nil when there is no command for it, or for external rows.
+    var onRun: (() -> Void)? = nil
+    var runHelp: String = ""
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2799,9 +2840,11 @@ struct SessionRow: View {
     private var hoverActions: some View {
         if !external, hovering,
            menuContent != nil || onCloseRequested != nil || onTogglePin != nil
-               || onToggleDismissed != nil {
+               || onToggleDismissed != nil || onRun != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
+                            onRun: onRun,
+                            runHelp: runHelp,
                             onTogglePin: onTogglePin,
                             pinned: pinned,
                             onToggleDismissed: onToggleDismissed,
@@ -3280,17 +3323,6 @@ struct SessionContainer: View {
                           : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
                     .clickCursor()
                     splitButton
-                }
-                // The project's run command, in this session's own checkout. Only
-                // once the project has one; it is set from the project header.
-                if let command = model.runCommand(forProject: model.repoRoot(forSession: meta)) {
-                    Button {
-                        model.runInSession(meta)
-                    } label: {
-                        Image(systemName: "play.fill")
-                    }
-                    .help("Run `\(command)` in this session's checkout (\(URL(fileURLWithPath: meta.cwd).lastPathComponent))")
-                    .clickCursor()
                 }
                 Button {
                     model.deepRefreshSelectedTerminal()
