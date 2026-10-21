@@ -2056,7 +2056,9 @@ private struct FolderHeader: View {
     let toggle: () -> Void
     @State private var showingAgentPicker = false
     @State private var showingProjectMenu = false
+    @State private var showingRunEditor = false
     @State private var plusHovering = false
+    @State private var runHovering = false
     @State private var beadsHovering = false
     @State private var menuHovering = false
     @State private var headerHovering = false
@@ -2185,6 +2187,34 @@ private struct FolderHeader: View {
                     .padding(4)
                     .fixesPopoverFirstClick()
                 }
+                // The project's run command, in the main checkout. Unset, it opens the
+                // editor instead, so the button is how you discover the feature.
+                Button {
+                    if model.runCommand(forProject: group.cwd) != nil {
+                        model.runProject(group.cwd)
+                    } else {
+                        showingRunEditor = true
+                    }
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(model.runCommand(forProject: group.cwd) == nil
+                                         ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.appHairline(runHovering ? 0.14 : 0)))
+                }
+                .buttonStyle(.plain)
+                .help(model.runCommand(forProject: group.cwd).map {
+                    "Run `\($0)` in \(group.name) (edit it in the … menu)"
+                } ?? "Set a run command for \(group.name)")
+                .clickCursor()
+                .onHover { runHovering = $0 }
+                .popover(isPresented: $showingRunEditor, arrowEdge: .bottom) {
+                    RunCommandEditor(project: group.cwd) { showingRunEditor = false }
+                }
                 // The project's Beads board; PRs live in the global GitHub view.
                 // Always shown so every header has the same buttons in the same place.
                 Button { model.openBeads(project: group.cwd) } label: {
@@ -2219,6 +2249,22 @@ private struct FolderHeader: View {
                 .onHover { menuHovering = $0 }
                 .popover(isPresented: $showingProjectMenu, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 2) {
+                        Button {
+                            showingProjectMenu = false
+                            // One popover at a time: open the editor once this one is gone.
+                            DispatchQueue.main.async { showingRunEditor = true }
+                        } label: {
+                            Text(model.runCommand(forProject: group.cwd) == nil
+                                 ? "Set run command…" : "Edit run command…")
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("The command the ▶ buttons run, on the project and on each session")
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .clickCursor()
                         if !closableSessions.isEmpty {
                             Button {
                                 model.closeSessions(closableSessions.map(\.id))
@@ -2374,6 +2420,56 @@ private struct FolderHeader: View {
             .padding(.vertical, 6)
             .clickCursor()
         }
+    }
+}
+
+/// Edits a project's run command: one shell line plus the placeholders it may use.
+/// Saving a blank line clears it.
+private struct RunCommandEditor: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+    let done: () -> Void
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Run command").font(.headline)
+            Text("Typed into a new terminal tab, in the main checkout from the project's ▶ and in the session's worktree from a session's ▶.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("make dev", text: $draft)
+                .font(.system(.body, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(RunCommand.placeholders, id: \.token) { p in
+                    HStack(spacing: 6) {
+                        Button(p.token) { draft += p.token }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11, design: .monospaced))
+                            .help("Insert \(p.token)")
+                        Text(p.help).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                if model.runCommand(forProject: project) != nil {
+                    Button("Clear", role: .destructive) { draft = ""; save() }
+                }
+                Spacer()
+                Button("Cancel", action: done).keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 340)
+        .onAppear { draft = model.runCommand(forProject: project) ?? "" }
+    }
+
+    private func save() {
+        model.setRunCommand(draft, forProject: project)
+        done()
     }
 }
 
@@ -3184,6 +3280,17 @@ struct SessionContainer: View {
                           : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
                     .clickCursor()
                     splitButton
+                }
+                // The project's run command, in this session's own checkout. Only
+                // once the project has one; it is set from the project header.
+                if let command = model.runCommand(forProject: model.repoRoot(forSession: meta)) {
+                    Button {
+                        model.runInSession(meta)
+                    } label: {
+                        Image(systemName: "play.fill")
+                    }
+                    .help("Run `\(command)` in this session's checkout (\(URL(fileURLWithPath: meta.cwd).lastPathComponent))")
+                    .clickCursor()
                 }
                 Button {
                     model.deepRefreshSelectedTerminal()

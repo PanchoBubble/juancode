@@ -54,6 +54,10 @@ private let worktreeByProjectKey = "juancode.worktreeByProject"
 /// `worktreeByProject`.
 private let worktreeDefaultAllKey = "juancode.worktreeDefaultAll"
 
+/// UserDefaults key for each project's run command (the play button): project
+/// cwd → shell line with `RunCommand` placeholders (a plist-safe [String: String]).
+private let runCommandByProjectKey = "juancode.runCommandByProject"
+
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
@@ -1876,6 +1880,25 @@ final class AppModel {
         var next = worktreeByProject
         if on == worktreeDefaultAll { next[cwd] = nil } else { next[cwd] = on }
         worktreeByProject = next
+    }
+
+    /// Per-project run command behind the play buttons, keyed by project cwd.
+    /// Persisted; a project without one shows its play button as "set up".
+    var runCommandByProject: [String: String] = (UserDefaults.standard.dictionary(forKey: runCommandByProjectKey) as? [String: String]) ?? [:] {
+        didSet { UserDefaults.standard.set(runCommandByProject, forKey: runCommandByProjectKey) }
+    }
+
+    /// The saved run command for project `cwd`, nil when none is set.
+    func runCommand(forProject cwd: String) -> String? {
+        runCommandByProject[cwd]
+    }
+
+    /// Save (or, when blank, clear) the run command for project `cwd`.
+    func setRunCommand(_ command: String, forProject cwd: String) {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        var next = runCommandByProject
+        next[cwd] = trimmed.isEmpty ? nil : trimmed
+        runCommandByProject = next
     }
 
     /// Persist a new manual order for one project, pruning ids of deleted
@@ -5055,6 +5078,47 @@ final class AppModel {
         var panel = terminalPanel(cwd)
         panel.selectTab(tab)
         terminalPanels[cwd] = panel
+    }
+
+    /// Play on a project header: run its command in the main checkout. The tab opens
+    /// in the panel you are looking at when the selected session is in this project
+    /// (so the output is on screen), else in the panel of one of its sessions,
+    /// which gets selected.
+    func runProject(_ project: String) {
+        let selected = sessions.first { $0.id == selection }
+        let host: String
+        if let selected, repoRoot(forSession: selected) == project {
+            host = selected.cwd
+        } else if let member = sessions.first(where: { repoRoot(forSession: $0) == project }) {
+            selection = member.id
+            host = member.cwd
+        } else {
+            host = project
+        }
+        startRun(project: project, checkout: project, host: host)
+    }
+
+    /// Play on a session: run its project's command in that session's checkout
+    /// (its worktree when isolated, else the main one).
+    func runInSession(_ meta: SessionMeta) {
+        startRun(project: repoRoot(forSession: meta), checkout: meta.cwd, host: meta.cwd)
+    }
+
+    /// Open a "Run" tab in `host`'s terminal panel, start a shell in `checkout`, and
+    /// type the project's expanded run command into it. Typed rather than passed as
+    /// argv so it runs in the same interactive shell a terminal would give (rc
+    /// functions, aliases) and Ctrl-C leaves a prompt to rerun from. The pty
+    /// buffers input until the shell reads it.
+    private func startRun(project: String, checkout: String, host: String) {
+        guard let template = runCommand(forProject: project) else { return }
+        let branch = folderGitState(checkout)?.branch ?? RunCommand.currentBranch(at: checkout)
+        let line = RunCommand.expand(template, .init(worktree: checkout, branch: branch, project: project))
+        var panel = terminalPanel(host)
+        let pane = panel.addTab(title: "Run")
+        guard spawnShell(for: pane, cwd: checkout) else { return }
+        terminalPanels[host] = panel
+        shellPtys[pane]?.write(line + "\n")
+        if !bottomTerminalShown { toggleBottomTerminal() } else { shellFocusToken &+= 1 }
     }
 
     /// Spawn a shell pty for `pane` in `cwd`; returns false (and notes nothing) if

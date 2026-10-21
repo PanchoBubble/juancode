@@ -54,11 +54,12 @@ public struct TerminalPanelModel: Equatable, Sendable {
     }
 
     /// Append a fresh single-pane tab and make it active. Returns the new pane id
-    /// (the caller spawns a pty for it).
+    /// (the caller spawns a pty for it). `title` names the tab instead of the
+    /// sequential default, e.g. "Run" for the project run command.
     @discardableResult
-    public mutating func addTab() -> TerminalPaneID {
+    public mutating func addTab(title: String? = nil) -> TerminalPaneID {
         let pane = TerminalPaneID()
-        let tab = TerminalTab(title: nextTitle(), panes: [pane])
+        let tab = TerminalTab(title: title ?? nextTitle(), panes: [pane])
         tabs.append(tab)
         activeTabID = tab.id
         return pane
