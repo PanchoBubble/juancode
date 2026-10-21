@@ -1,6 +1,6 @@
-// The right rail: Oracles, the GitHub PR queue and the main checkout's Diff, each a
-// collapsible panel the user can drag into any order, and hide or bring back from
-// the pencil's edit mode.
+// The right rail: Oracles, the GitHub PR queue, the main checkout's Diff and Chains,
+// each a collapsible panel the user can drag into any order, and hide or bring back
+// from the pencil's edit mode.
 //
 // The queue was a toolbar badge with the list behind a popover. The rail is always
 // on screen, so the queue can be too: the same list, chips and row actions, with no
@@ -11,13 +11,14 @@ import JuancodeCore
 import JuancodeClient
 
 enum RightRailPanel: String, CaseIterable, Identifiable {
-    case oracle, prs, diff
+    case oracle, prs, diff, chains
     var id: String { rawValue }
     var title: String {
         switch self {
         case .oracle: "Oracles"
         case .prs: "PRs"
         case .diff: "Diff"
+        case .chains: "Chains"
         }
     }
     var icon: String {
@@ -25,6 +26,7 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
         case .oracle: "sparkles"
         case .prs: "arrow.triangle.pull"
         case .diff: "plusminus"
+        case .chains: "link"
         }
     }
 
@@ -252,6 +254,7 @@ struct RightRailPanels: View {
                 switch panel {
                 case .oracle: OracleRailAccessory()
                 case .diff: diffPreview
+                case .chains: ChainsRailAccessory()
                 case .prs: EmptyView()
                 }
             }
@@ -309,6 +312,8 @@ struct RightRailPanels: View {
                 .onAppear { model.refreshViewerPrs() }
         case .diff:
             RepoDiffRail(store: diffStore, root: root)
+        case .chains:
+            ChainsRailPanel()
         }
     }
 
