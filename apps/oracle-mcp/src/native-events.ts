@@ -188,7 +188,16 @@ export function onSessionEvent(listener: SessionEventListener): void {
   sessionEventListeners.push(listener);
 }
 
+/** The last live state each session reported, warmed by the connect-time snapshot. */
+const lastActivity = new Map<string, SessionActivityEvent["state"]>();
+
+/** A session's last reported live state, or undefined before it has reported one. */
+export function sessionActivity(sessionId: string): SessionActivityEvent["state"] | undefined {
+  return lastActivity.get(sessionId);
+}
+
 function emitSessionEvent(ev: SessionActivityEvent): void {
+  lastActivity.set(ev.sessionId, ev.state);
   for (const listener of sessionEventListeners) {
     try {
       listener(ev);

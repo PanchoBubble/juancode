@@ -8,15 +8,15 @@ Oracle from your phone.
 The pty/agent work always stays on the Mac (the CLAUDE.md prime directive). This
 sidecar only **relays intent and reads state**:
 
-| Tool | What it does | Mechanism |
-|------|--------------|-----------|
-| `oracle_list_issues` | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle` |
-| `oracle_create_issue` | Create a global tracker item | `bd create` |
-| `oracle_dispatch` | Spawn/seed an agent in a project | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down |
-| `oracle_dispatch_status` | What happened to a dispatch | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions` |
-| `oracle_list_sessions` | List live + persisted sessions | `GET` the native app's `/api/sessions` |
-| `oracle_session_screen` | What a session's pane shows right now | `GET /api/sessions/:id/screen` — the RENDERED grid, not the byte log; falls back to `/scrollback` for a reaped pty or a core without the route |
-| `oracle_ask` | Ask the live Oracle agent | append `ask.jsonl` (native app tails it) |
+| Tool                     | What it does                                        | Mechanism                                                                                                                                      |
+| ------------------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oracle_list_issues`     | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle`                                                                                                    |
+| `oracle_create_issue`    | Create a global tracker item                        | `bd create`                                                                                                                                    |
+| `oracle_dispatch`        | Spawn/seed an agent in a project                    | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down                                                                      |
+| `oracle_dispatch_status` | What happened to a dispatch                         | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions`                                                              |
+| `oracle_list_sessions`   | List live + persisted sessions                      | `GET` the native app's `/api/sessions`                                                                                                         |
+| `oracle_session_screen`  | What a session's pane shows right now               | `GET /api/sessions/:id/screen` — the RENDERED grid, not the byte log; falls back to `/scrollback` for a reaped pty or a core without the route |
+| `oracle_ask`             | Ask the live Oracle agent                           | append `ask.jsonl` (native app tails it)                                                                                                       |
 
 `dispatch` is WS-first: with the app up you get a real ack (the session id, or the
 real error for a bad path/provider); with the app down the dispatch is durably
@@ -53,7 +53,7 @@ The Chat tab shells out to `claude -p` in `~/.juancode/oracle`. The sidecar **st
 `ANTHROPIC_API_KEY` from that subprocess** so claude uses your **claude.ai
 subscription + connectors** — identical to how the GUI Oracle authenticates (the key
 is only present in interactive shells via `~/.zshrc`, never in the GUI app's login
-env, and when set it *disables* claude.ai connectors). Run `JUANCODE_CLAUDE_BIN` /
+env, and when set it _disables_ claude.ai connectors). Run `JUANCODE_CLAUDE_BIN` /
 ensure `claude` is on PATH and logged in.
 
 ## Architecture
@@ -67,7 +67,6 @@ swap. The daemon owes this sidecar a complete `activity` stream, which it emits;
 thing it now sends itself is the user's outbound notification webhook, because that has
 to keep firing with the desktop app closed. See `apps/juancoded/README.md` →
 "Notifications".
-
 
 ```
 Phone (Claude app, custom connector)
@@ -93,9 +92,9 @@ There used to be a second answer here — the app's own in-process Swift core, w
 served the full REST set out of its own registry. juancode-nqpm deleted it, so 4280
 means one thing now.
 
-| 4280 is                     | `/ws`                   | REST                                            |
-| --------------------------- | ----------------------- | ----------------------------------------------- |
-| a relay to the daemon       | forwarded to the daemon | sessions + search + delete, everything else 501 |
+| 4280 is               | `/ws`                   | REST                                            |
+| --------------------- | ----------------------- | ----------------------------------------------- |
+| a relay to the daemon | forwarded to the daemon | sessions + search + delete, everything else 501 |
 
 The `juancoded` daemon on `JUANCODED_PORT` (4290) serves only `/health`,
 `/api/health` and `/ws`, so pointing `JUANCODE_API` straight at it would leave the
@@ -121,18 +120,18 @@ pnpm --filter @juancode/oracle-mcp start
 
 Environment variables (all optional):
 
-| Var | Default | Purpose |
-|-----|---------|---------|
-| `ORACLE_MCP_PORT` | `4281` | Port the sidecar listens on |
-| `ORACLE_MCP_HOST` | `127.0.0.1` | Bind address (keep on localhost — the tunnel reaches it) |
-| `JUANCODE_ORACLE_DIR` | `~/.juancode/oracle` | Oracle control dir (mailboxes + `bd` tracker) |
-| `JUANCODE_API` | `http://127.0.0.1:4280` | Native app's embedded server base URL |
-| `JUANCODE_BD_BIN` | `bd` | Path to the `bd` binary |
-| `TELEGRAM_BOT_TOKEN` | _(unset)_ | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
-| `ALLOWED_USER_IDS` | _(empty)_ | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored. |
-| `JUANCODE_GH_WEBHOOK_SECRET` | _(unset)_ | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below. |
-| `JUANCODE_CONTEXT_ALERT_PERCENT` | `80` | Context-pressure line (percent of the model's window) that pings observing Telegram chats. `0` disables it. See "Cost + context alerts". |
-| `JUANCODE_SESSION_SPEND_CAP_USD` | _(unset)_ | Estimated spend on one session that pings observing chats, in USD. Unset/`0` ⇒ no spend alerts. |
+| Var                              | Default                 | Purpose                                                                                                                                                              |
+| -------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ORACLE_MCP_PORT`                | `4281`                  | Port the sidecar listens on                                                                                                                                          |
+| `ORACLE_MCP_HOST`                | `127.0.0.1`             | Bind address (keep on localhost — the tunnel reaches it)                                                                                                             |
+| `JUANCODE_ORACLE_DIR`            | `~/.juancode/oracle`    | Oracle control dir (mailboxes + `bd` tracker)                                                                                                                        |
+| `JUANCODE_API`                   | `http://127.0.0.1:4280` | Native app's embedded server base URL                                                                                                                                |
+| `JUANCODE_BD_BIN`                | `bd`                    | Path to the `bd` binary                                                                                                                                              |
+| `TELEGRAM_BOT_TOKEN`             | _(unset)_               | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
+| `ALLOWED_USER_IDS`               | _(empty)_               | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored.                                                         |
+| `JUANCODE_GH_WEBHOOK_SECRET`     | _(unset)_               | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below.                           |
+| `JUANCODE_CONTEXT_ALERT_PERCENT` | `80`                    | Context-pressure line (percent of the model's window) that pings observing Telegram chats. `0` disables it. See "Cost + context alerts".                             |
+| `JUANCODE_SESSION_SPEND_CAP_USD` | _(unset)_               | Estimated spend on one session that pings observing chats, in USD. Unset/`0` ⇒ no spend alerts.                                                                      |
 
 ### Cost + context alerts (juancode-lncw)
 
@@ -257,14 +256,14 @@ This is what lets the phone authenticate. In **Zero Trust → Access → Applica
    standard OAuth 2.0 endpoints (`/authorize`, `/token`, dynamic client
    registration) that the Claude app's connector flow expects, and lets
    non-browser clients complete the flow.
-3. **Policy:** Allow → Include → *Emails* → your email. For the login method, a
+3. **Policy:** Allow → Include → _Emails_ → your email. For the login method, a
    **One-time PIN** identity provider needs no external IdP.
 4. Save. Access now intercepts unauthenticated requests to `oracle.<your-domain>`,
    runs the OAuth login, and injects a `Cf-Access-Jwt-Assertion` header before
    traffic reaches the sidecar.
 
 > Note: Cloudflare's MCP-with-Access docs are written around Workers origins, but a
-> self-hosted Access app is just *a public hostname* and the Tunnel provides exactly
+> self-hosted Access app is just _a public hostname_ and the Tunnel provides exactly
 > that — so the same **Managed OAuth** toggle covers this tunnel origin. Validate the
 > OAuth handshake end-to-end when you add the connector (step 4); that's the one part
 > to confirm live.
@@ -278,10 +277,10 @@ instead of capturing anything new — no vector DB, no extra runtime, no always-
 
 One store, several readers (an `IndexSource` each):
 
-| agent | source | incremental on |
-| --- | --- | --- |
-| `claude` | `~/.claude/projects/<slug>/<sessionId>.jsonl` | file mtime + size, reading only appended bytes |
-| `opencode` | `~/.local/share/opencode/opencode.db` (`message` + `part`) | `time_updated`, message and parts alike |
+| agent      | source                                                     | incremental on                                 |
+| ---------- | ---------------------------------------------------------- | ---------------------------------------------- |
+| `claude`   | `~/.claude/projects/<slug>/<sessionId>.jsonl`              | file mtime + size, reading only appended bytes |
+| `opencode` | `~/.local/share/opencode/opencode.db` (`message` + `part`) | `time_updated`, message and parts alike        |
 
 Every row carries its `agent`, and every hit returns it, so an answer can say which agent
 said a thing. Rows are **never** merged across agents — two agents saying the same thing
@@ -294,10 +293,10 @@ unlike Claude Code's transcripts.
 
 Two tools, on purpose:
 
-| tool | returns |
-| --- | --- |
-| `oracle_session_search` | compact hit list — id, agent, session, project, branch, ts, one-line snippet |
-| `oracle_session_excerpt` | full text for **one** id, optionally ±N surrounding turns |
+| tool                     | returns                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| `oracle_session_search`  | compact hit list — id, agent, session, project, branch, ts, one-line snippet |
+| `oracle_session_excerpt` | full text for **one** id, optionally ±N surrounding turns                    |
 
 Dumping matches straight into context is what makes transcript recall expensive, so the
 hit list carries no bodies. Ask for the ids that look relevant, nothing more.
@@ -309,6 +308,32 @@ First call builds the whole index (~9s for 940 Claude files / 121k entries here,
 The index is **local only**. Transcripts contain confidential tool output, so nothing
 here fans out on its own — no web-console view, no Telegram surface. Callers decide what
 to surface.
+
+## Chains (`chain_*` tools, Telegram `/chains`)
+
+A chain is a named, cross-project group — sessions (Oracles included), tracked PRs,
+beads issues and Linear tickets — that the **daemon** keeps (see
+[apps/juancoded/README.md](../juancoded/README.md#chains-named-groups-of-work)). The
+sidecar holds no copy of its own: `native-events.ts` mirrors the book off the shared
+`:4280` socket and every write goes to the core and waits for its `chainResult`.
+`src/chains.ts` is the one reader and writer, so the tools and Telegram describe a chain
+the same way.
+
+| Tool           | What it does                                                                         |
+| -------------- | ------------------------------------------------------------------------------------ |
+| `chain_list`   | chains with a member count per kind; `state` = `active` (default), `inactive`, `all` |
+| `chain_show`   | one chain, members grouped by kind; sessions carry project, provider and live status |
+| `chain_create` | a new active chain; the slug is its id forever (`auth-rewrite`)                      |
+| `chain_add`    | tag an item in, **moving** it out of any other chain (one chain per item)            |
+| `chain_remove` | untag an item; with `slug`, only if it is still in that chain                        |
+| `chain_close`  | mark it inactive; members stay tagged                                                |
+
+Members are `kind` + `ref`: a session id (a unique prefix is resolved), a PR's tracked
+key `<absolute repo path>#<number>` (or the number plus `prCwd`), a beads id, a Linear
+identifier. `title`/`url` are a snapshot for the kinds the daemon cannot look up.
+
+On Telegram, `/chains` lists the active chains numbered, `/chains all` every chain, and
+`/chains <n|slug>` shows one. Read-only by design: tagging is the Oracle's job.
 
 ## SessionEnd memory candidates
 
@@ -372,7 +397,7 @@ The event is a **trigger, not a payload** — the native side re-fetches PR stat
    1. **Add an application → Self-hosted**, hostname `oracle.<your-domain>`,
       path `api/github-webhook` (a path-scoped application; more specific paths
       win over the site-wide app from step 3 above).
-   2. Give it a single policy with action **Bypass** → Include → *Everyone*.
+   2. Give it a single policy with action **Bypass** → Include → _Everyone_.
    3. Save. Everything else on the hostname stays behind the existing Access app.
 
    (Equivalent via API: create an app with `domain: "oracle.<your-domain>/api/github-webhook"`
@@ -438,9 +463,7 @@ It is re-read on every tick and every webhook, so **no restart** is needed:
       "prompt": "Run pnpm loose and report anything uncommitted or unpushed."
     }
   ],
-  "labels": [
-    { "repo": "PanchoBubble/juancode", "label": "agent:fix", "worktree": true }
-  ]
+  "labels": [{ "repo": "PanchoBubble/juancode", "label": "agent:fix", "worktree": true }]
 }
 ```
 

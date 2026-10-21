@@ -84,6 +84,14 @@ import {
 } from "./native-events.ts";
 import { makeTranscriber } from "./transcribe.ts";
 import {
+  chainListText,
+  chainShowText,
+  defaultChainDeps,
+  filterChains,
+  readBook,
+  type ChainDeps,
+} from "./chains.ts";
+import {
   readUsageAlertThresholds,
   UsageAlertLatch,
   usageAlertLine,
@@ -282,6 +290,8 @@ export interface SendOptions {
  *  kind per chat+session (a second de-dup layer over the server's gate). */
 export interface BridgeState {
   lastList: Map<number, string[]>;
+  /** The numbered chain slugs each chat last saw, so "/chains 2" resolves. */
+  lastChains: Map<number, string[]>;
   activity: Map<string, LiveActivity>;
   lastNotified: Map<string, string>;
   /** `chatId:sessionId` → when a stuck advisory was last sent there. The daemon caps
@@ -299,6 +309,7 @@ export function newBridgeState(
 ): BridgeState {
   return {
     lastList: new Map(),
+    lastChains: new Map(),
     activity: new Map(),
     lastNotified: new Map(),
     lastStuck: new Map(),
@@ -375,6 +386,8 @@ export interface TelegramDeps {
     all: () => boolean;
     resume: () => boolean;
   };
+  /** The daemon's chain book (chains.ts), read-only from the phone. */
+  chains: ChainDeps;
 }
 
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
@@ -408,6 +421,7 @@ function defaultDeps(token: string): TelegramDeps {
       all: pauseAllSessions,
       resume: resumeAllSessions,
     },
+    chains: defaultChainDeps(),
   };
 }
 
@@ -417,6 +431,7 @@ const HELP_TEXT = [
   "/status — your observed sessions right now",
   "/observe <n|id> — get pinged when a session needs input or finishes",
   "/unobserve [n|id] — stop observing one (or all) sessions",
+  "/chains [n|slug|all] — active chains, one chain's members, or every chain",
   "/pauseall — sleep every live agent (frees their RAM, keeps the conversations)",
   "/playall — bring back exactly the sessions /pauseall slept",
   "/new — start a fresh Oracle thread",
@@ -498,6 +513,10 @@ export async function handleUpdate(
     await handleStatusCommand(chatId, deps, state);
     return;
   }
+  if (command === "/chains" || command.startsWith("/chains ")) {
+    await handleChainsCommand(chatId, text.slice("/chains".length).trim(), deps, state);
+    return;
+  }
   if (command === "/pauseall") {
     await handlePauseCommand(chatId, deps);
     return;
@@ -520,6 +539,44 @@ export async function handleUpdate(
   }
 
   await runOracleTurn(chatId, messageId, text, deps);
+}
+
+/** List the active chains (numbered), every chain with `all`, or show one chain by its
+ *  number in the last list or its slug, members grouped by kind with live status. */
+async function handleChainsCommand(
+  chatId: number,
+  arg: string,
+  deps: TelegramDeps,
+  state: BridgeState,
+): Promise<void> {
+  try {
+    const book = await readBook(deps.chains);
+    if (!arg || arg.toLowerCase() === "all") {
+      const filter = arg ? "all" : "active";
+      state.lastChains.set(
+        chatId,
+        filterChains(book, filter).map((c) => c.slug),
+      );
+      const list = chainListText(book, filter);
+      const hint = book.length > 0 ? "\n\n/chains <n|slug> shows one." : "";
+      await deps.send(
+        chatId,
+        `🔗 ${filter === "all" ? "Chains" : "Active chains"}\n${list}${hint}`,
+      );
+      return;
+    }
+    const last = state.lastChains.get(chatId) ?? filterChains(book, "active").map((c) => c.slug);
+    const slug = /^\d+$/.test(arg) ? last[Number(arg) - 1] : arg;
+    if (!slug) {
+      await deps.send(chatId, `⚠️ No chain #${arg} in the last list. Send /chains to refresh it.`);
+      return;
+    }
+    for (const chunk of chunkMessage(`🔗 ${await chainShowText(deps.chains, slug)}`)) {
+      await deps.send(chatId, chunk);
+    }
+  } catch (e) {
+    await deps.send(chatId, `⚠️ ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Sleep every live agent session from the phone — the remote half of the desktop's

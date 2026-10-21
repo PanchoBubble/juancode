@@ -76,12 +76,10 @@ import {
   supportsHeavyQueue,
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
+import { watchChains } from "./chains.ts";
+import { registerChainTools } from "./chain-tools.ts";
+import { fail, ok, tool } from "./tool-result.ts";
 import { notifyOracleText, startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
-
-type ToolResult = {
-  content: { type: "text"; text: string }[];
-  isError?: boolean;
-};
 
 /** Where phone-composer uploads land. The Oracle's `claude -p` runs on this same
  *  machine, so a temp-dir path is directly readable once inlined into the message. */
@@ -92,24 +90,6 @@ function safeUploadName(raw: string): string {
   const base = raw.split(/[\\/]/).pop() ?? "";
   const cleaned = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
   return cleaned.slice(-128) || "file";
-}
-
-const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
-const fail = (message: string): ToolResult => ({
-  content: [{ type: "text", text: message }],
-  isError: true,
-});
-
-/** Wrap a tool body so any thrown error becomes a clean `isError` result the model
- *  can read, rather than a transport-level failure. */
-function tool(run: () => Promise<ToolResult>): () => Promise<ToolResult> {
-  return async () => {
-    try {
-      return await run();
-    } catch (e) {
-      return fail(e instanceof Error ? e.message : String(e));
-    }
-  };
 }
 
 /** A fresh MCP server per request (stateless mode) with the Oracle tools bound. */
@@ -536,6 +516,8 @@ function buildServer(): McpServer {
       }
     },
   );
+
+  registerChainTools(server);
 
   return server;
 }
@@ -1135,6 +1117,8 @@ app.listen(port, host, () => {
   // Watch the native backend over WS and fan session activity out to subscribers
   // (the Telegram bridge). Owns the single long-lived client socket.
   startActivityListener();
+  // Have the chain book in hand before the first chain_* tool or /chains asks.
+  watchChains();
   // Telegram bridge (juancode-c6y): if TELEGRAM_BOT_TOKEN is set, long-poll Telegram
   // and route messages through the same Oracle backend as the browser chat.
   startTelegramBridge();

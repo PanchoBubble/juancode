@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { markQueuedDispatch, type DispatchResultRecord } from "./dispatch-results.ts";
 import type { SessionSummary } from "./telegram-format.ts";
 import type { ChatReply } from "./oracle.ts";
+import { fakeChainDeps } from "./chains-fake.ts";
 
 describe("readTelegramConfig", () => {
   it("returns null without a token", () => {
@@ -177,6 +178,7 @@ function makeDeps(overrides: Partial<TelegramDeps> = {}): TelegramDeps {
       all: () => true,
       resume: () => true,
     },
+    chains: fakeChainDeps(),
     ...overrides,
   };
 }
@@ -954,11 +956,23 @@ describe("notifyOracleText", () => {
   it("sends to every resolved chat and records outbound for each", async () => {
     const send = vi.fn(async (_chatId: number, _text: string) => 42);
     const record = vi.fn(
-      async (_ref: { chatId: number; messageId: number; sessionId: string; title: string; at: number }) => {},
+      async (_ref: {
+        chatId: number;
+        messageId: number;
+        sessionId: string;
+        title: string;
+        at: number;
+      }) => {},
     );
     const resolveChats = vi.fn(async () => [100, 200]);
     const fetchSessions = async () => [
-      { id: "sess-1", title: "Build the thing", cwd: "/x/juancode", provider: "claude", status: "running" },
+      {
+        id: "sess-1",
+        title: "Build the thing",
+        cwd: "/x/juancode",
+        provider: "claude",
+        status: "running",
+      },
     ];
 
     const result = await notifyOracleText(
@@ -1285,7 +1299,10 @@ describe("the control-key pad", () => {
       }),
     });
     await handleUpdate(cb("k:Enter:s1"), allowed, deps);
-    expect(deps.answerCallback).toHaveBeenCalledWith("cb-1", expect.stringContaining("app is down"));
+    expect(deps.answerCallback).toHaveBeenCalledWith(
+      "cb-1",
+      expect.stringContaining("app is down"),
+    );
   });
 
   it("rides along on a needs-input ping, which is the prompt you cannot type at", async () => {
@@ -1316,7 +1333,11 @@ describe("the control-key pad", () => {
         chatsFor: vi.fn(async () => [100]),
       },
     });
-    await notifySessionEvent({ sessionId: "s1", state: "idle", notify: true }, deps, newBridgeState());
+    await notifySessionEvent(
+      { sessionId: "s1", state: "idle", notify: true },
+      deps,
+      newBridgeState(),
+    );
     const opts = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[2];
     expect(opts).toBeUndefined();
   });
@@ -1336,5 +1357,68 @@ describe("the control-key pad", () => {
     await handleUpdate(msg(5, "/keys nope"), allowed, deps, newBridgeState());
     const last = (deps.send as ReturnType<typeof vi.fn>).mock.calls.at(-1);
     expect(last?.[1]).toContain("No session matches");
+  });
+});
+
+describe("/chains", () => {
+  const msg = (text: string): TgUpdate => ({
+    update_id: 1,
+    message: { message_id: 1, from: { id: 7 }, chat: { id: 100 }, text },
+  });
+  const allowed = new Set([7]);
+  const book = [
+    {
+      slug: "auth-rewrite",
+      state: "active" as const,
+      createdAt: 1,
+      closedAt: null,
+      members: [
+        { kind: "session" as const, ref: SESSIONS[0]!.id, addedAt: 1 },
+        { kind: "beads" as const, ref: "juancode-dbo.10", title: "chain tools", addedAt: 2 },
+      ],
+    },
+    { slug: "old-thing", state: "inactive" as const, createdAt: 1, closedAt: 5, members: [] },
+  ];
+  const sent = (deps: TelegramDeps) =>
+    (deps.send as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1] as string);
+
+  it("lists the active chains, numbered, and shows one by its number", async () => {
+    const deps = makeDeps({ chains: fakeChainDeps({ book, sessions: SESSIONS }) });
+    const state = newBridgeState();
+    await handleUpdate(msg("/chains"), allowed, deps, state);
+    expect(sent(deps)[0]).toContain("1. auth-rewrite · 1 session, 1 beads issue");
+    expect(sent(deps)[0]).not.toContain("old-thing");
+
+    await handleUpdate(msg("/chains 1"), allowed, deps, state);
+    const shown = sent(deps)[1]!;
+    expect(shown).toContain("auth-rewrite · active");
+    expect(shown).toContain(SESSIONS[0]!.title);
+    expect(shown).toContain("juancode-dbo.10 · chain tools");
+  });
+
+  it("lists every chain with `all`, and shows one by slug", async () => {
+    const deps = makeDeps({ chains: fakeChainDeps({ book }) });
+    await handleUpdate(msg("/chains all"), allowed, deps, newBridgeState());
+    expect(sent(deps)[0]).toContain("2. old-thing (closed) · empty");
+    await handleUpdate(msg("/chains old-thing"), allowed, deps, newBridgeState());
+    expect(sent(deps)[1]).toContain("No members yet.");
+  });
+
+  it("says so when the daemon has no chains or the chain is unknown", async () => {
+    const deps = makeDeps({ chains: fakeChainDeps({ supported: false }) });
+    await handleUpdate(msg("/chains"), allowed, deps, newBridgeState());
+    expect(sent(deps)[0]).toMatch(/^⚠️ Chains are unavailable/);
+
+    const known = makeDeps({ chains: fakeChainDeps({ book }) });
+    await handleUpdate(msg("/chains nope"), allowed, known, newBridgeState());
+    expect(sent(known)[0]).toBe('⚠️ No chain named "nope".');
+    await handleUpdate(msg("/chains 9"), allowed, known, newBridgeState());
+    expect(sent(known)[1]).toContain("No chain #9");
+  });
+
+  it("never reaches the Oracle", async () => {
+    const deps = makeDeps({ chains: fakeChainDeps({ book }) });
+    await handleUpdate(msg("/chains"), allowed, deps, newBridgeState());
+    expect(deps.chat).not.toHaveBeenCalled();
   });
 });
