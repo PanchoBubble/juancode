@@ -2657,12 +2657,25 @@ final class AppModel {
     /// The Tickets rail's "Work on": a fresh Claude session in `cwd`, on its own
     /// worktree named after the ticket, seeded with the ticket and selected. The
     /// ticket's Linear state is left alone.
+    ///
+    /// The session joins the ticket's chain, reopening it if it was closed. A ticket in
+    /// no chain starts one named after it, holding the ticket and then the session —
+    /// the same rule a dispatch from an unchained session follows.
     func workOnLinearTicket(_ ticket: LinearTicket, cwd: String) {
         let worktreeName = "\(ticket.identifier.lowercased())-\(String(UUID().uuidString.prefix(4)).lowercased())"
         Task {
-            await create(provider: .claude, cwd: cwd, skipPermissions: true,
-                         isolateWorktree: true, initialInput: linearTicketPrompt(ticket),
-                         select: true, worktreeName: worktreeName)
+            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
+                                             isolateWorktree: true, initialInput: linearTicketPrompt(ticket),
+                                             select: true, worktreeName: worktreeName),
+                  supportsChains else { return }
+            let slug: String?
+            if let chain = chain(of: .linear, ref: ticket.identifier) {
+                if !chain.isActive { await reopenChain(chain.slug) }
+                slug = chain.slug
+            } else {
+                slug = await startChain(forTicket: ticket)
+            }
+            if let slug { await setChain(slug, for: .session, ref: session.id) }
         }
     }
 
@@ -5540,6 +5553,41 @@ final class AppModel {
         await chainWrite {
             try await $0.setChainMember(kind, ref: ref, slug: slug, title: title, url: url)
         }
+    }
+
+    /// Put a Linear ticket in `slug`, or take it out of its chain with nil. Its title and
+    /// url go along, since the daemon cannot look a ticket up itself.
+    @discardableResult
+    func setChain(_ slug: String?, forTicket t: LinearTicket) async -> Bool {
+        await setChain(slug, for: .linear, ref: t.identifier, title: t.title, url: t.url)
+    }
+
+    /// Start a chain named after the ticket ("luma-123", then "luma-123-2"… past a taken
+    /// slug) and put the ticket in it. The new slug, or nil when either write failed.
+    @discardableResult
+    func startChain(forTicket t: LinearTicket) async -> String? {
+        guard let slug = freeChainSlug(from: t.identifier),
+              await createChain(slug), await setChain(slug, forTicket: t) else { return nil }
+        return slug
+    }
+
+    /// A slug the daemon will take, made from free text: lowercase ASCII words joined by
+    /// dashes, short enough for a "-2" style suffix, and not already a chain's.
+    func freeChainSlug(from text: String) -> String? {
+        let words = text.lowercased()
+            .split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }
+        var base = ""
+        for w in words where base.count + w.count + 1 <= 44 {
+            base += base.isEmpty ? String(w) : "-\(w)"
+        }
+        guard !base.isEmpty else { return nil }
+        var slug = base
+        var n = 2
+        while chains[slug] != nil {
+            slug = "\(base)-\(n)"
+            n += 1
+        }
+        return slug
     }
 
     private func chainWrite(_ write: (CoreClient) async throws -> Void) async -> Bool {

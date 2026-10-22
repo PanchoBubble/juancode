@@ -282,6 +282,10 @@ private struct LinearTicketRow: View {
                 Text(ticket.title)
                     .font(.system(size: 12))
                     .lineLimit(1).truncationMode(.tail)
+                if let chain {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .linear, ref: ticket.identifier),
+                               compact: true)
+                }
                 Spacer(minLength: 4)
                 priority
                 if hovering {
@@ -308,11 +312,38 @@ private struct LinearTicketRow: View {
         .contextMenu {
             Button("Open in Linear", action: open)
             Button(workOnHelp, action: workOn).disabled(root == nil)
+            if model.supportsChains { chainMenu }
             Divider()
             Button("Copy ID") { copy(ticket.identifier) }
             Button("Copy Link") { copy(ticket.url) }
             if !ticket.branchName.isEmpty {
                 Button("Copy Branch Name") { copy(ticket.branchName) }
+            }
+        }
+    }
+
+    private var chain: Chain? { model.chain(of: .linear, ref: ticket.identifier) }
+
+    /// Tag the ticket into an active chain, start one named after it, or untag it.
+    private var chainMenu: some View {
+        Menu(chain.map { "Chain: \($0.slug)" } ?? "Add to Chain") {
+            ForEach(model.chains.active) { c in
+                Button {
+                    Task { await model.setChain(c.slug, forTicket: ticket) }
+                } label: {
+                    if c.slug == chain?.slug { Label(c.slug, systemImage: "checkmark") } else { Text(c.slug) }
+                }
+            }
+            if !model.chains.active.isEmpty { Divider() }
+            Button("New Chain “\(model.freeChainSlug(from: ticket.identifier) ?? ticket.identifier)”") {
+                Task { await model.startChain(forTicket: ticket) }
+            }
+            if let chain {
+                Button("Open Chain") {
+                    model.openChain(slug: chain.slug,
+                                    member: ChainMemberRef(kind: .linear, ref: ticket.identifier))
+                }
+                Button("Remove from Chain") { Task { await model.setChain(nil, forTicket: ticket) } }
             }
         }
     }
