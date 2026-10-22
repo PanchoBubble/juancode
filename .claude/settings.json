@@ -4,11 +4,22 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/apps/oracle-mcp/src/memory-candidates.ts\"",
-            "timeout": 120
+            "timeout": 120,
+            "type": "command"
           }
         ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime --hook-json",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ]
   }

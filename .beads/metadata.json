@@ -1,8 +1,8 @@
 {
   "database": "dolt",
-  "jsonl_export": "issues.jsonl",
   "backend": "dolt",
   "dolt_mode": "server",
   "dolt_server_port": 3308,
-  "dolt_database": "beads_juancode"
+  "dolt_database": "beads_juancode",
+  "project_id": "050449f0-78d7-4525-bc83-aafc5313e396"
 }

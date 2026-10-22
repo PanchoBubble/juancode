@@ -52,3 +52,23 @@ beads.right.meta.json
 # contributors to accidentally commit upstream issue databases.
 # The JSONL files (issues.jsonl, interactions.jsonl) and config files
 # are tracked by git by default since no pattern above ignores them.
+
+# Added by bd (missing required patterns)
+.env
+*.gate.lock*
+export-state.json
+last_pull
+embeddeddolt/
+proxieddb/
+dolt-server.pid
+dolt-server.log
+dolt-server.lock
+dolt-server.port
+dolt-server.activity
+dolt-server-config.yaml
+daemon.*
+*.lock
+*.corrupt.backup/
+.beads-credential-key
+proxied_server_client_info.json
+backup/
