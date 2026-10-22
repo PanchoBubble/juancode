@@ -118,4 +118,34 @@ final class SyntaxHighlightTests: XCTestCase {
         let r = tok("class X {}", "Foo.SWIFT")
         XCTAssertTrue(r.contains { $0 == (.keyword, "class") })
     }
+
+    // MARK: - Markdown / prose
+
+    func testMarkdownProseStaysPlain() {
+        // An apostrophe used to open a string that ran to end of line; quotes and
+        // digits in prose used to light up too.
+        let line = "the board's name, the ticket's \"Netflix\" question on PRO-20646 (403)"
+        XCTAssertTrue(tok(line, "plan.md").isEmpty)
+    }
+
+    func testMarkdownHeadingIsOneToken() {
+        XCTAssertEqual(tok("## Architecture overview", "plan.md").map(\.0), [.keyword])
+        XCTAssertEqual(tok("## Architecture overview", "plan.md").first?.1, "## Architecture overview")
+        // `#tag` is not a heading, and seven hashes is not either.
+        XCTAssertTrue(tok("#tag", "plan.md").isEmpty)
+        XCTAssertTrue(tok("####### x", "plan.md").isEmpty)
+    }
+
+    func testMarkdownFenceAndInlineCode() {
+        XCTAssertEqual(tok("```swift", "README.md").map(\.0), [.comment])
+        let r = tok("call `route_for(board)` then ``a ` b``", "README.markdown")
+        XCTAssertEqual(r.map(\.1), ["`route_for(board)`", "``a ` b``"])
+        XCTAssertTrue(r.allSatisfy { $0.0 == .string })
+        // An unclosed backtick is just a character.
+        XCTAssertTrue(tok("it's a ` stray", "a.md").isEmpty)
+    }
+
+    func testPlainTextHasNoTokens() {
+        XCTAssertTrue(tok("don't # 42 \"x\"", "notes.txt").isEmpty)
+    }
 }

@@ -107,7 +107,56 @@ func languageProfile(forPath path: String) -> LanguageProfile {
 /// the non-plain regions (callers render gaps as plain text). Pure + allocation-light:
 /// one left-to-right scan, O(n) in the line length.
 public func highlightLine(_ line: String, path: String) -> [SyntaxToken] {
-    highlightLine(line, profile: languageProfile(forPath: path))
+    switch (path as NSString).pathExtension.lowercased() {
+    // Prose is not code: run through the C-like fallback, an apostrophe ("board's")
+    // opens a string that colors the rest of the line, `#` headings read as comments
+    // and every digit lights up. These get prose-aware handling instead.
+    case "md", "markdown", "mdx":
+        return highlightMarkdownLine(line)
+    case "txt", "text":
+        return []
+    default:
+        return highlightLine(line, profile: languageProfile(forPath: path))
+    }
+}
+
+/// Markdown, one line at a time: a heading is a keyword, a code fence a comment, and
+/// an inline `code` span a string. Everything else is prose and stays plain. Like the
+/// code tokenizer this has no cross-line state, so a fenced block's body is plain.
+func highlightMarkdownLine(_ line: String) -> [SyntaxToken] {
+    let body = line.drop { $0 == " " }
+    // Indented four or more is a code block, not a heading or fence.
+    guard line.distance(from: line.startIndex, to: body.startIndex) < 4 else { return [] }
+
+    if body.hasPrefix("```") || body.hasPrefix("~~~") {
+        return [SyntaxToken(range: body.startIndex..<line.endIndex, kind: .comment)]
+    }
+    let hashes = body.prefix { $0 == "#" }.count
+    if (1...6).contains(hashes) {
+        let rest = body.dropFirst(hashes)
+        if rest.isEmpty || rest.first == " " || rest.first == "\t" {
+            return [SyntaxToken(range: body.startIndex..<line.endIndex, kind: .keyword)]
+        }
+    }
+
+    var tokens: [SyntaxToken] = []
+    var i = line.startIndex
+    while let open = line[i...].firstIndex(of: "`") {
+        // A span opened by N backticks closes at the next run of exactly N.
+        let ticks = line[open...].prefix { $0 == "`" }.count
+        let fence = String(repeating: "`", count: ticks)
+        var search = line.index(open, offsetBy: ticks)
+        var close: Range<String.Index>?
+        while let r = line.range(of: fence, range: search..<line.endIndex) {
+            let after = line[r.upperBound...].prefix { $0 == "`" }.count
+            if after == 0 { close = r; break }
+            search = line.index(r.upperBound, offsetBy: after)
+        }
+        guard let close else { break }
+        tokens.append(SyntaxToken(range: open..<close.upperBound, kind: .string))
+        i = close.upperBound
+    }
+    return tokens
 }
 
 /// Tokenize using an explicit profile (the testable core).
