@@ -13,7 +13,10 @@ session is a real `claude` pty in the native app: visible in the grid, steerable
 Telegram, isolated in its own git worktree. The generic mechanics (preflight, repo
 resolution, worktree flag, follow-up endpoints, concurrency cap) live in the
 user-scope **dispatch-agents** skill — read it if anything below is unclear. This
-skill is the bd-ticket-shaped wrapper around it.
+skill is the bd-ticket-shaped wrapper around it. Its source is tracked here at
+`.claude/user-skills/dispatch-agents/` (outside `.claude/skills/`, so it is not also
+a project skill); install it with
+`ln -s "$PWD/.claude/user-skills/dispatch-agents" ~/.claude/skills/dispatch-agents`.
 
 **Prime directive of this repo:** never inject a shadow HOME/CODEX_HOME or override
 mcpServers — the dispatched CLI inherits the environment untouched, exactly like a
