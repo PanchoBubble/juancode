@@ -64,7 +64,42 @@ private enum SwiftTermTheme {
 /// `CSI Ps SP q`) still wins; the CLIs we host don't.
 @MainActor
 func applySteadyCursor(to tv: TerminalView) {
-    tv.getTerminal().setCursorStyle(.steadyBlock)
+    tv.setCursorStyle(.steadyBlock)
+}
+
+/// A `TerminalView` that remembers whether the alternate screen is active.
+///
+/// SwiftTerm v2 made the view's `Terminal` internal and exposes no alternate-screen
+/// query on the view, but it still reports every buffer switch through the overridable
+/// `bufferActivated(source:)`. That fires on the parse thread, so the flag sits behind a
+/// lock. Every SwiftTerm surface we wheel-forward or resize-nudge is one of these;
+/// read it through `TerminalView.isAlternateScreen`.
+class AltScreenTrackingTerminalView: TerminalView {
+    private let alternate = OSAllocatedUnfairLock(initialState: false)
+
+    nonisolated var isOnAlternateScreen: Bool { alternate.withLock { $0 } }
+
+    nonisolated override func bufferActivated(source: Terminal) {
+        let isAlternate = source.isCurrentBufferAlternate
+        alternate.withLock { $0 = isAlternate }
+        super.bufferActivated(source: source)
+    }
+}
+
+/// Lets a `@Sendable` callback (notification observer, heal timer) hold a view weakly.
+/// SwiftTerm v2's `TerminalView` is not `Sendable`, so a bare `[weak tv]` capture can't
+/// cross into those closures. Read `view` only on the main actor.
+final class WeakTerminalViewRef: @unchecked Sendable {
+    weak var view: TerminalView?
+    init(_ view: TerminalView?) { self.view = view }
+}
+
+extension TerminalView {
+    /// Whether the program has the alternate screen up. Always false for a plain
+    /// `TerminalView`, which does not track it.
+    nonisolated var isAlternateScreen: Bool {
+        (self as? AltScreenTrackingTerminalView)?.isOnAlternateScreen ?? false
+    }
 }
 
 private extension NSColor {
@@ -81,7 +116,7 @@ private extension NSColor {
 /// copy lands ~120ms after the selection stops changing — one write per highlight,
 /// not dozens of partial ones (which would spam clipboard-history tools). Opt out
 /// with `defaults write dev.juancode.app terminal.copyOnSelect -bool false`.
-final class CopyOnSelectTerminalView: TerminalView {
+final class CopyOnSelectTerminalView: AltScreenTrackingTerminalView {
     private var copyWork: DispatchWorkItem?
     /// Called with a `path` (and optional 1-based `line`) when a ⌘-click / ⌘⇧-click
     /// lands on a `path:line` token — routed to the in-app editor pane. Set by the
@@ -110,13 +145,13 @@ final class CopyOnSelectTerminalView: TerminalView {
     /// Screen cell (col/row relative to the visible viewport) under a window-space
     /// point. Replicates SwiftTerm's own (internal) cell math from the public font.
     private func screenCell(at windowPoint: NSPoint) -> (col: Int, row: Int)? {
-        guard let terminal else { return nil }
+        let grid = terminalDimensions
         let p = convert(windowPoint, from: nil)
         let (w, h) = cellSize()
         guard w > 0, h > 0 else { return nil }
         let row = Int((bounds.height - p.y) / h)
-        guard row >= 0, row < terminal.rows else { return nil }
-        let col = min(max(0, Int(p.x / w)), max(0, terminal.cols - 1))
+        guard row >= 0, row < grid.rows else { return nil }
+        let col = min(max(0, Int(p.x / w)), max(0, grid.cols - 1))
         return (col, row)
     }
 
@@ -131,26 +166,35 @@ final class CopyOnSelectTerminalView: TerminalView {
         return (ceil(width * scale) / scale, ceil(height * scale) / scale)
     }
 
-    /// The full rendered text of the buffer line under `cell`, read via public API.
-    /// Callers scan it for a URL or a `path:line` token spanning the clicked column.
+    /// The full rendered text of the viewport row under `cell`, read via public API.
+    /// Callers scan it for a URL or a `path:line` token spanning the clicked column;
+    /// unwritten cells before text read as spaces, so columns line up with `cell.col`.
     private func lineText(at cell: (col: Int, row: Int)) -> String? {
-        guard let terminal else { return nil }
-        let bufferRow = cell.row + terminal.buffer.yDisp
-        guard bufferRow >= 0 else { return nil }
-        return terminal.getText(start: Position(col: 0, row: bufferRow),
-                                end: Position(col: max(0, terminal.cols - 1), row: bufferRow))
+        guard cell.row >= 0 else { return nil }
+        return visibleRowsText(cell.row..<(cell.row + 1)).first
     }
 
     override func selectionChanged(source: Terminal) {
         super.selectionChanged(source: source)
+        // SwiftTerm calls this nonisolated, possibly off the main thread (its own
+        // implementation hops via `onMain`), so do the same before touching state.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.scheduleCopyOnSelect() }
+        }
+    }
+
+    @MainActor private func scheduleCopyOnSelect() {
         copyWork?.cancel()
         let enabled = UserDefaults.standard.object(forKey: "terminal.copyOnSelect") as? Bool ?? true
         guard enabled, selectionActive else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.selectionActive,
-                  let text = self.getSelection(), !text.isEmpty else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            // Scheduled on the main queue below, so this runs on the main actor.
+            MainActor.assumeIsolated {
+                guard let self, self.selectionActive,
+                      let text = self.getSelection(), !text.isEmpty else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
         }
         copyWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
@@ -167,12 +211,13 @@ final class CopyOnSelectTerminalView: TerminalView {
 /// pointer has mouse reporting on, forward the wheel as xterm wheel-button events
 /// so the app scrolls its own transcript and swallow the event; otherwise let it
 /// through to SwiftTerm's native scrollback behaviour.
+@MainActor
 func installWheelForwarding(on tv: TerminalView) -> Any? {
     // All view access lives in this main-actor-isolated handler (so it's implicitly
     // Sendable). Returns true when it consumed the wheel. Args are plain scalars so
     // nothing non-Sendable crosses into the nonisolated monitor closure below.
     let handle: @MainActor (Double, CGPoint, Int) -> Bool = { [weak tv] deltaY, location, windowNumber in
-        guard let tv, let terminal = tv.terminal,
+        guard let tv,
               // Only consume for the terminal that is genuinely under the pointer.
               // A plain `tv.bounds.contains(...)` is wrong: overlays like the Oracle
               // dock and Changes panel sit *on top of* the terminal's rectangle (and a
@@ -186,18 +231,18 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
         // Forward the wheel to the program when it either asked for mouse reporting OR is
         // on the alternate screen. Gate on the program's requested mouseMode — NOT on the
         // view's `allowMouseReporting`, which we deliberately disable (see `attach`) to stop
-        // hover/motion from being typed into the pty; our events go through `terminal.sendEvent`
+        // hover/motion from being typed into the pty; our events go through `sendMouseEvent`
         // directly, which is independent of that flag. The alt-screen clause matters because an
         // idle claude/codex turn drops mouse reporting while staying on the alternate screen,
         // which has no local scrollback — without it the wheel falls through to SwiftTerm's
         // native scrollback (empty on the alt screen) and does nothing. These panes run the
         // agent CLI directly on the pty, so forwarding to the alt-screen program is safe.
-        guard terminal.mouseMode != .off || terminal.isCurrentBufferAlternate else { return false }
+        guard tv.currentMouseMode != .off || tv.isAlternateScreen else { return false }
         let ticks = max(1, min(6, Int(abs(deltaY))))
-        // xterm encodes wheel-up as button 64 and wheel-down as 65. Position is
-        // irrelevant for these apps' full-screen scroll regions, so report (0,0).
-        let button = deltaY > 0 ? 64 : 65
-        for _ in 0..<ticks { terminal.sendEvent(buttonFlags: button, x: 0, y: 0) }
+        // Wheel-up is X11 button 4 and wheel-down 5 (xterm encodes them as 64/65).
+        // Position is irrelevant for these apps' full-screen scroll regions, so report (0,0).
+        let button = deltaY > 0 ? 4 : 5
+        for _ in 0..<ticks { tv.sendMouseEvent(button: button, release: false, col: 0, row: 0) }
         return true
     }
     // The monitor always fires on the main thread, so assuming isolation is safe.
@@ -450,6 +495,8 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             default: break // every other key stays the responder chain's
             }
         }
+        // Everything below is vim nav, which only runs while armed (⌃ ⌃, juancode-v2d).
+        guard model.vimNavActive else { return false }
         let fr = window.firstResponder
         let ctrl = mods.contains(.control)
 
@@ -483,7 +530,29 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         default: return true                                    // swallow; don't leak to the pty
         }
     }
-    return NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    // ⌃ ⌃ arms/disarms vim nav. A flagsChanged monitor is the only way to see a
+    // bare modifier; keyDowns feed it too, so a ⌃-chord in between never counts.
+    var doubleTap = ModifierDoubleTap()
+    let ctrlTapped: @MainActor (NSEvent) -> Void = { [weak host] event in
+        let held = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        let fired = doubleTap.flagsChanged(onlyTarget: held == .control, none: held.isEmpty,
+                                           at: event.timestamp)
+        guard fired, let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
+        else { return }
+        let fr = window.firstResponder
+        if !model.vimNavActive {
+            window.makeFirstResponder(nil) // off the terminal, so the sidebar can take it
+        } else if !(fr is JuancodeTerminalResponder), !(fr is NSTextView) {
+            model.focusTerminal() // disarming from the sidebar: back to typing
+        }
+        model.toggleVimNav()
+    }
+    return NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+        if event.type == .flagsChanged {
+            MainActor.assumeIsolated { ctrlTapped(event) }
+            return event
+        }
+        MainActor.assumeIsolated { doubleTap.keyDown() }
         if MainActor.assumeIsolated({ routeAppShortcut(event) }) { return nil }
         let keyCode = event.keyCode
         let mods = event.modifierFlags
@@ -619,7 +688,8 @@ final class TerminalHostView: NSView {
             // toggle): drop the pending intermediate, nothing ever reflowed.
             pendingSize = nil
             settleWork?.cancel(); settleWork = nil
-            if reportStale, let t = terminal.terminal, t.cols > 0, t.rows > 0 {
+            let t = terminal.terminalDimensions
+            if reportStale, t.cols > 0, t.rows > 0 {
                 onGrid?(t.cols, t.rows)
             }
             return
@@ -672,7 +742,8 @@ final class TerminalHostView: NSView {
         resizeDebugLog.log("applyGrid size=\(Int(size.width))x\(Int(size.height))")
         terminal.frame = f
         terminal.needsDisplay = true
-        if let t = terminal.terminal, t.cols > 0, t.rows > 0 {
+        let t = terminal.terminalDimensions
+        if t.cols > 0, t.rows > 0 {
             onGrid?(t.cols, t.rows)
         }
     }
@@ -965,9 +1036,10 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // surface is live immediately (no lazy attach), so apply the current level now.
             baseFontPoints = Double(tv.font.pointSize)
             applySwiftTermZoom(view: tv, basePoints: baseFontPoints)
+            let tvRef = WeakTerminalViewRef(tv)
             zoomObserver = NotificationCenter.default.addObserver(
-                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak tv, base = baseFontPoints] _ in
-                MainActor.assumeIsolated { applySwiftTermZoom(view: tv, basePoints: base) }
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [tvRef, base = baseFontPoints] _ in
+                MainActor.assumeIsolated { applySwiftTermZoom(view: tvRef.view, basePoints: base) }
             }
             // Seed the fresh view from the shared headless model (juancode-a2h.2),
             // then stream live output. The seed is a clean VT repaint synthesized
@@ -985,9 +1057,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // Post-resize heal (juancode-8llo). Fires on the main queue once the CLI
             // has been quiet for the delay; `noteOutput` below feeds it from the pty
             // side (the heal is thread-safe for exactly that).
-            let heal = TerminalResizeHeal(quietMs: 250) { [weak tv, weak coalescer, session] action in
+            let heal = TerminalResizeHeal(quietMs: 250) { [tvRef, weak coalescer, session] action in
                 MainActor.assumeIsolated {
-                    Self.fireHeal(action, tv: tv, session: session, coalescer: coalescer)
+                    Self.fireHeal(action, tv: tvRef.view, session: session, coalescer: coalescer)
                 }
             }
             self.heal = heal
@@ -999,7 +1071,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                 // it so the settle check below can tell whether the seed is still
                 // exact once the pane's real bounds land. The pty's actual grid is
                 // the ground truth; the view's grid is a fallback approximation.
-                seedGrid = session.appliedGrid() ?? tv.terminal.map { ($0.cols, $0.rows) }
+                seedGrid = session.appliedGrid()
+                    ?? { let d = tv.terminalDimensions; return (d.cols, d.rows) }()
                 // Atomically seed from the model and subscribe (juancode-a2h.2): the
                 // clean seed and the live stream partition with no gap, so a brand-new
                 // session's boot burst can't be dropped between seed and subscribe.
@@ -1026,7 +1099,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // twice on every app activation, and a flap landing mid-stream is itself a
             // garble source (juancode-msnf). `didChangeScreen` covers dragging the
             // window to another monitor; `didChangeScreenParameters` covers resolution
-            // changes and displays being (un)plugged. Capture only the weak view +
+            // changes and displays being (un)plugged. Capture only the weak view ref +
             // Sendable session — never `self` — so these `@Sendable` notification
             // closures stay race-free.
             for name in [NSApplication.didBecomeActiveNotification,
@@ -1034,8 +1107,8 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                          NSWindow.didChangeScreenNotification,
                          NSApplication.didChangeScreenParametersNotification] {
                 activeObservers.append(NotificationCenter.default.addObserver(
-                    forName: name, object: nil, queue: .main) { [weak tv] _ in
-                    MainActor.assumeIsolated { Self.resyncIfDrifted(tv, session) }
+                    forName: name, object: nil, queue: .main) { [tvRef] _ in
+                    MainActor.assumeIsolated { Self.resyncIfDrifted(tvRef.view, session) }
                 })
             }
             // The boot-time resync (slow CLI missing early SIGWINCHs) is now owned by
@@ -1058,8 +1131,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
             // Gated on alt-buffer so a plain shell (line-based, reflows correctly)
             // isn't nudged for nothing.
             let repaint = DispatchWorkItem { [weak self] in
-                guard let self, let tv = self.view, let t = tv.terminal,
-                      self.session.isRunning, t.isCurrentBufferAlternate else { return }
+                guard let self, let tv = self.view,
+                      self.session.isRunning, tv.isAlternateScreen else { return }
+                let t = tv.terminalDimensions
                 guard let seed = self.seedGrid, seed != (t.cols, t.rows) else { return }
                 if let applied = self.session.appliedGrid(),
                    applied.cols == t.cols, applied.rows == t.rows {
@@ -1082,7 +1156,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
                                                 tv: TerminalView?,
                                                 session: any LiveSession,
                                                 coalescer: TerminalFeedCoalescer?) {
-            guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
+            guard let t = tv?.terminalDimensions, t.cols > 0, t.rows > 0 else { return }
             let g = (cols: t.cols, rows: t.rows)
             if action.sigwinch {
                 nudgeResize(tv, session)
@@ -1114,7 +1188,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// re-lays-out — never a flap. Static with Sendable-only captures so it's
         /// safe to call from `@Sendable` notification closures.
         @MainActor private static func resyncIfDrifted(_ tv: TerminalView?, _ session: any LiveSession) {
-            guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
+            guard let t = tv?.terminalDimensions, t.cols > 0, t.rows > 0 else { return }
             guard let applied = session.appliedGrid(),
                   applied.cols != t.cols || applied.rows != t.rows else { return }
             resizeDebugLog.log("resyncIfDrifted pty=\(applied.cols)x\(applied.rows) view=\(t.cols)x\(t.rows)")
@@ -1129,9 +1203,9 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         /// the attach settle. Static with Sendable-only captures so it's safe to call
         /// from `@Sendable` closures.
         @MainActor private static func nudgeResize(_ tv: TerminalView?, _ session: any LiveSession) {
-            guard let t = tv?.terminal, t.cols > 0, t.rows > 0 else { return }
+            guard let tv, case let t = tv.terminalDimensions, t.cols > 0, t.rows > 0 else { return }
             let cols = t.cols, rows = t.rows
-            resizeDebugLog.log("nudgeResize FLAP cols=\(cols) rows=\(rows) alt=\(t.isCurrentBufferAlternate)")
+            resizeDebugLog.log("nudgeResize FLAP cols=\(cols) rows=\(rows) alt=\(tv.isAlternateScreen)")
             session.resizeLocal(cols: cols, rows: rows > 2 ? rows - 1 : rows + 1)
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60)) {
                 session.resizeLocal(cols: cols, rows: rows)
@@ -1284,12 +1358,14 @@ private struct SwiftTermReplayRepresentable: NSViewRepresentable {
 
         /// Parse the scrollback into `tv` at its current width, from a clean state.
         func refeed(_ tv: TerminalView) {
-            guard let term = tv.terminal, term.cols > 0 else { return }
+            let cols = tv.terminalDimensions.cols
+            guard cols > 0 else { return }
             SwiftTermParse.locked {
-                term.resetToInitialState()
+                // RIS through the feed path, so it lands ahead of the scrollback in order.
+                tv.resetToInitialState()
                 if !scrollback.isEmpty { tv.feed(byteArray: scrollback[...]) }
             }
-            fedCols = term.cols
+            fedCols = cols
             tv.needsDisplay = true
         }
 

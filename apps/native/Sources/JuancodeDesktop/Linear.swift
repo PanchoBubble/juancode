@@ -189,3 +189,174 @@ public func getAssignedIssues(env: [String: String] = ProcessInfo.processInfo.en
         return []
     }
 }
+
+// MARK: - assigned tickets, paged (the right rail's Tickets panel)
+
+/// One of the viewer's assigned issues as the Tickets panel lists it. Codable so the
+/// panel can keep the last page across a relaunch instead of refetching.
+public struct LinearTicket: Sendable, Equatable, Identifiable, Codable {
+    public let id: String
+    public let identifier: String
+    public let title: String
+    public let url: String
+    /// 0 none, 1 urgent, 2 high, 3 medium, 4 low (Linear's numbering).
+    public let priority: Int
+    public let stateName: String
+    public let stateType: String
+    /// The workflow state's colour, "#rrggbb".
+    public let stateColor: String
+    public let teamKey: String
+    public let branchName: String
+    public let updatedAt: Date?
+
+    public init(id: String, identifier: String, title: String, url: String, priority: Int,
+                stateName: String, stateType: String, stateColor: String, teamKey: String,
+                branchName: String, updatedAt: Date?) {
+        self.id = id; self.identifier = identifier; self.title = title; self.url = url
+        self.priority = priority; self.stateName = stateName; self.stateType = stateType
+        self.stateColor = stateColor; self.teamKey = teamKey; self.branchName = branchName
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Which workflow states the panel shows. Filtered server-side, so a page of ten is
+/// ten matching tickets rather than ten that are then thinned out.
+public enum LinearTicketScope: String, CaseIterable, Identifiable, Sendable {
+    case open, inProgress, todo, backlog, done
+    public var id: String { rawValue }
+    public var label: String {
+        switch self {
+        case .open: "Open"
+        case .inProgress: "In progress"
+        case .todo: "Todo"
+        case .backlog: "Backlog"
+        case .done: "Done"
+        }
+    }
+
+    /// The `state.type` comparator for this scope.
+    var stateType: [String: [String]] {
+        switch self {
+        case .open: ["nin": ["completed", "canceled"]]
+        case .inProgress: ["in": ["started"]]
+        case .todo: ["in": ["unstarted"]]
+        case .backlog: ["in": ["backlog", "triage"]]
+        case .done: ["in": ["completed", "canceled"]]
+        }
+    }
+}
+
+public struct LinearTicketPage: Sendable, Equatable {
+    public let tickets: [LinearTicket]
+    public let hasNextPage: Bool
+    public let endCursor: String?
+}
+
+public enum LinearTicketsError: Error, Equatable, Sendable {
+    case noToken
+    case failed(String)
+
+    public var message: String {
+        switch self {
+        case .noToken: "Set LINEAR_API_KEY (or JUANCODE_LINEAR_TOKEN) in your shell environment, then relaunch."
+        case .failed(let m): m
+        }
+    }
+}
+
+/// The `IssueFilter` for a scope plus the search box. A query shaped like an issue id
+/// ("ENG-42") also matches that issue by team key and number, since titles rarely
+/// contain their own identifier.
+func linearTicketFilter(scope: LinearTicketScope, search: String) -> [String: Any] {
+    var filter: [String: Any] = ["state": ["type": scope.stateType]]
+    let q = search.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !q.isEmpty else { return filter }
+    var or: [[String: Any]] = [["title": ["containsIgnoreCase": q]]]
+    let parts = q.split(separator: "-")
+    if parts.count == 2, parts[0].allSatisfy(\.isLetter), let n = Int(parts[1]) {
+        or.append(["team": ["key": ["eqIgnoreCase": String(parts[0])]], "number": ["eq": n]])
+    }
+    filter["or"] = or
+    return filter
+}
+
+private struct RawTicketState: Decodable { var name: String?; var type: String?; var color: String? }
+private struct RawTeam: Decodable { var key: String? }
+private struct RawTicket: Decodable {
+    var id: String?; var identifier: String?; var title: String?; var url: String?
+    var priority: Double?; var updatedAt: String?; var branchName: String?
+    var state: RawTicketState?; var team: RawTeam?
+}
+private struct RawPageInfo: Decodable { var hasNextPage: Bool?; var endCursor: String? }
+private struct RawTicketConnection: Decodable { var nodes: [RawTicket]?; var pageInfo: RawPageInfo? }
+private struct RawTicketViewer: Decodable { var assignedIssues: RawTicketConnection? }
+private struct RawTicketData: Decodable { var viewer: RawTicketViewer? }
+private struct RawGraphQLError: Decodable { var message: String? }
+
+/// Test seam mirroring the paged `viewer.assignedIssues` envelope, errors included.
+public struct RawTicketsForTest: Decodable {
+    fileprivate var data: RawTicketData?
+    fileprivate var errors: [RawGraphQLError]?
+}
+
+/// Map the paged envelope onto `LinearTicketPage`, or the first GraphQL error.
+func parseLinearTickets(_ raw: RawTicketsForTest) -> Result<LinearTicketPage, LinearTicketsError> {
+    if let first = raw.errors?.first {
+        return .failure(.failed(first.message ?? "Linear returned an error."))
+    }
+    guard let conn = raw.data?.viewer?.assignedIssues else {
+        return .failure(.failed("Linear's response had no assigned issues."))
+    }
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let tickets = (conn.nodes ?? []).compactMap { t -> LinearTicket? in
+        guard let id = t.id, let identifier = t.identifier else { return nil }
+        return LinearTicket(
+            id: id, identifier: identifier, title: t.title ?? "", url: t.url ?? "",
+            priority: Int(t.priority ?? 0),
+            stateName: t.state?.name ?? "", stateType: t.state?.type ?? "",
+            stateColor: t.state?.color ?? "", teamKey: t.team?.key ?? "",
+            branchName: t.branchName ?? "", updatedAt: t.updatedAt.flatMap(iso.date(from:)))
+    }
+    let info = conn.pageInfo
+    return .success(LinearTicketPage(tickets: tickets, hasNextPage: info?.hasNextPage ?? false,
+                                     endCursor: info?.endCursor))
+}
+
+private let TICKETS_QUERY = """
+query($first:Int!,$after:String,$filter:IssueFilter){ viewer{ assignedIssues(first:$first,after:$after,\
+filter:$filter,orderBy:updatedAt){ nodes{ id identifier title url priority updatedAt branchName \
+state{name type color} team{key} } pageInfo{ hasNextPage endCursor } } } }
+"""
+
+/// One page of the viewer's assigned issues, most recently updated first. Unlike the
+/// picker's `getAssignedIssues`, failures come back as a reason the panel can show.
+public func getAssignedTickets(scope: LinearTicketScope, search: String, first: Int, after: String?,
+                               env: [String: String] = ProcessInfo.processInfo.environment)
+    async -> Result<LinearTicketPage, LinearTicketsError> {
+    guard let token = linearToken(env) else { return .failure(.noToken) }
+    var req = URLRequest(url: LINEAR_GRAPHQL_URL)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue(token, forHTTPHeaderField: "Authorization")
+    var variables: [String: Any] = ["first": first, "filter": linearTicketFilter(scope: scope, search: search)]
+    if let after { variables["after"] = after }
+    guard let body = try? JSONSerialization.data(withJSONObject: ["query": TICKETS_QUERY,
+                                                                  "variables": variables]) else {
+        return .failure(.failed("Couldn't encode the Linear query."))
+    }
+    req.httpBody = body
+    do {
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        // GraphQL errors arrive with a 400 too; decode before judging the status.
+        if let raw = try? JSONDecoder().decode(RawTicketsForTest.self, from: data),
+           raw.errors != nil || raw.data != nil {
+            return parseLinearTickets(raw)
+        }
+        if status == 401 { return .failure(.failed("Linear rejected the API key.")) }
+        return .failure(.failed("Linear answered HTTP \(status)."))
+    } catch {
+        return .failure(.failed(error.localizedDescription))
+    }
+}

@@ -229,6 +229,9 @@ extension AppModel {
                     // By id: a comment staged while the paste was in flight was not in it.
                     review.removeSent(sent, from: id)
                     review.say("Sent \(sent.count) comment\(sent.count == 1 ? "" : "s") to the session", in: id)
+                    // Hand the window back to the agent so its answer is in view. Only
+                    // if the review still shows this session: a switch meanwhile wins.
+                    if self.selection == id { self.closeDiffReview() }
                 case .rejected(let reason), .aborted(let reason):
                     review.say("Review not sent: \(reason). Your comments are kept.", isError: true, in: id)
                 }

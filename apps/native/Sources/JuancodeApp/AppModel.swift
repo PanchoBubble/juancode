@@ -301,6 +301,18 @@ final class AppModel {
     // monitor (see `installPaneNavigation`). The monitor pre-empts the terminal's
     // first responder, so these all work even while a session is focused.
 
+    /// Whether vim sidebar nav (j/k/g/G, ⌃H/⌃L pane focus) is armed. Off by default so
+    /// those keys stay the pty's / the list's; a double tap of ⌃ toggles it, and a dot
+    /// beside the Tools button shows it is on (juancode-v2d).
+    var vimNavActive = false
+
+    /// Double-tap-⌃ toggle. Turning it on lands the keyboard on the sidebar, the
+    /// only place the motions do anything besides ⌃H.
+    func toggleVimNav() {
+        vimNavActive.toggle()
+        if vimNavActive { focusSidebar() }
+    }
+
     /// Session IDs in the order they appear in the sidebar, top-to-bottom (folders
     /// flattened, externals excluded). Published by `SidebarView`; drives j/k.
     var navOrder: [String] = []
@@ -502,7 +514,6 @@ final class AppModel {
     private var branchPrPending: [String: Set<String>] = [:]
 
     private var activityCancels: [String: () -> Void] = [:]
-    private var gridCancels: [String: () -> Void] = [:]
     private var metaCancels: [String: () -> Void] = [:]
 
     /// Shared FSEvents watchers, one stream per worktree path, so an open Changes
@@ -556,18 +567,6 @@ final class AppModel {
     /// should-notify decision is the pure `agentNotificationEffect`; this only
     /// delivers, coalesces per session, and routes a click back to the session.
     private let agentNotifier = AgentNotifier()
-
-    /// sessionId → remote client id, for sessions whose pty grid a web/phone
-    /// viewer currently owns (juancode-2t4). Bridged from `Session.onGridChange`
-    /// in `watch` the same way activity edges flow; drives the "remote is
-    /// driving" overlay on the visible pane (`RemoteDriveOverlay`). Only remote
-    /// owners are recorded — a local claim or a release removes the entry, so
-    /// the overlay auto-dismisses the moment this pane re-takes the grid.
-    private(set) var remoteGridOwners: [String: String] = [:]
-
-    /// The remote client id driving `id`'s pty grid, or nil when the local pane
-    /// owns it / it's unclaimed.
-    func remoteGridOwner(_ id: String) -> String? { remoteGridOwners[id] }
 
     /// sessionId → active "restored from disk" banner phase (juancode-mya), or absent
     /// when hidden. Keyed by id so switching sessions never leaks one pane's banner
@@ -1578,23 +1577,6 @@ final class AppModel {
         metaCancels[s.id]?()
         metaCancels[s.id] = s.onMetaChange { [weak self] meta in
             Task { @MainActor in self?.applyMetaPatch(meta) }
-        }
-        // Grid-ownership bridge (juancode-2t4): seed from the current owner (a
-        // remote may already be driving when this model attaches — app relaunch
-        // while a phone viewer holds the grid), then follow arbitrated changes.
-        // The listener fires on the resizing client's queue; hop to main.
-        gridCancels[s.id]?()
-        setRemoteGridOwner(s.id, gridOwner: s.gridOwner())
-        gridCancels[s.id] = s.onGridChange { [weak self] owner, _, _ in
-            Task { @MainActor in self?.setRemoteGridOwner(s.id, gridOwner: owner) }
-        }
-    }
-
-    private func setRemoteGridOwner(_ id: String, gridOwner: String?) {
-        if let remote = RemoteDriveBadge.remoteOwner(from: gridOwner) {
-            remoteGridOwners[id] = remote
-        } else {
-            remoteGridOwners.removeValue(forKey: id)
         }
     }
 
@@ -5873,11 +5855,9 @@ final class AppModel {
         core.kill(id)
         core.deleteSession(id)
         activityCancels[id]?(); activityCancels[id] = nil
-        gridCancels[id]?(); gridCancels[id] = nil
         metaCancels[id]?(); metaCancels[id] = nil
         stopWatchingChanges(id)
         agentWorktreeBySession.removeValue(forKey: id)
-        remoteGridOwners.removeValue(forKey: id)
         stoppedPanes.remove(id)
         if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
         sessionPairs.remove(session: id)
@@ -5963,10 +5943,8 @@ final class AppModel {
             core.kill(id)
             core.deleteSession(id)
             activityCancels[id]?(); activityCancels[id] = nil
-            gridCancels[id]?(); gridCancels[id] = nil
             stopWatchingChanges(id)
             agentWorktreeBySession.removeValue(forKey: id)
-            remoteGridOwners.removeValue(forKey: id)
             stoppedPanes.remove(id)
             if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
             sessionPairs.remove(session: id)

@@ -145,13 +145,14 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
 
     func makeNSView(context: Context) -> TerminalHostView {
-        let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        // Alt-screen tracking so wheel forwarding reaches the editor's alternate screen.
+        let tv = AltScreenTrackingTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
         if isEditor { EditorKeyRouting.mark(tv) }
         tv.terminalDelegate = context.coordinator
         applySteadyCursor(to: tv)
         context.coordinator.attach(to: tv)
         // Sync the freshly spawned pty to the view's real size so the editor repaints.
-        let t = tv.getTerminal()
+        let t = tv.terminalDimensions
         pty.resize(cols: t.cols, rows: t.rows)
         DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
         // The initial spawn already grabs focus above — record the token so the first
@@ -166,6 +167,9 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     // intermediate animation frame resizes the NSView — so the freeze lands first.
     func updateNSView(_ nsView: TerminalHostView, context: Context) {
         context.coordinator.setHidden(hidden)
+        // Opacity alone leaves a hidden pane in AppKit's drag routing — see
+        // `GhosttyEphemeral.Coordinator.setHidden`.
+        nsView.isHidden = hidden
         // A bumped token means "focus me now" — but only once it's actually visible.
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken
@@ -224,7 +228,10 @@ struct SwiftTermEphemeral: NSViewRepresentable {
             if hidden {
                 resizeWork?.cancel(); resizeWork = nil
             } else {
-                let g = view.map { (cols: $0.getTerminal().cols, rows: $0.getTerminal().rows) }
+                let g = view.map { v in
+                    let d = v.terminalDimensions
+                    return (cols: d.cols, rows: d.rows)
+                }
                     ?? frozenGrid
                 frozenGrid = nil
                 if let g, g.cols >= 10, g.rows >= 3 { pty.resize(cols: g.cols, rows: g.rows) }
@@ -234,8 +241,9 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         @MainActor func attach(to tv: TerminalView) {
             view = tv
             wheelMonitor = installWheelForwarding(on: tv)
-            cancelOutput = pty.onOutput { [weak tv] bytes in
-                DispatchQueue.main.async { SwiftTermParse.locked { tv?.feed(byteArray: bytes[...]) } }
+            let tvRef = WeakTerminalViewRef(tv)
+            cancelOutput = pty.onOutput { [tvRef] bytes in
+                DispatchQueue.main.async { SwiftTermParse.locked { tvRef.view?.feed(byteArray: bytes[...]) } }
             }
             // Capture the exit handler directly (not `self`) so the `@Sendable`
             // closure doesn't pull in the non-Sendable Coordinator.
@@ -245,8 +253,8 @@ struct SwiftTermEphemeral: NSViewRepresentable {
             baseFontPoints = Double(tv.font.pointSize)
             applySwiftTermZoom(view: tv, basePoints: baseFontPoints)
             zoomObserver = NotificationCenter.default.addObserver(
-                forName: TerminalZoom.didChange, object: nil, queue: .main) { [weak tv, base = baseFontPoints] _ in
-                MainActor.assumeIsolated { applySwiftTermZoom(view: tv, basePoints: base) }
+                forName: TerminalZoom.didChange, object: nil, queue: .main) { [tvRef, base = baseFontPoints] _ in
+                MainActor.assumeIsolated { applySwiftTermZoom(view: tvRef.view, basePoints: base) }
             }
         }
 

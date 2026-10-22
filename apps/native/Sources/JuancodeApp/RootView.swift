@@ -36,6 +36,7 @@ struct RootView: View {
                     RunningSessionsBadge()
                     NotificationsBell()
                     ToolsMenu()
+                    VimNavDot()
                 }
             }
             // No toolbar material — the top strip stays the window's black (dark
@@ -532,6 +533,22 @@ private struct NotificationsBell: View {
             }
         }
         .padding(.top, 4)
+    }
+}
+
+/// Beside Tools: a dot while vim sidebar nav is armed (⌃ ⌃ toggles, juancode-v2d).
+/// Its own view so only it re-renders when the flag flips (see `RootView`).
+private struct VimNavDot: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Circle()
+            .fill(model.vimNavActive ? Color.accentColor : Color.clear)
+            .frame(width: 7, height: 7)
+            .help(model.vimNavActive
+                  ? "Vim nav on — j/k/g/G in the sidebar, ⌃H/⌃L between panes. ⌃ ⌃ to turn off"
+                  : "Vim nav off — ⌃ ⌃ to turn on")
+            .animation(.easeOut(duration: 0.15), value: model.vimNavActive)
     }
 }
 
@@ -3371,7 +3388,6 @@ struct SessionContainer: View {
                     // Focus rim flash on teleport landings (juancode-vz1): belongs to
                     // the visible pane container, not the pooled panes inside `terminal`.
                     .overlay { FocusRimFlash(token: model.focusRimFlashToken) }
-                    .overlay(alignment: .topTrailing) { remoteDriveBadge }
                     .overlay(alignment: .topLeading) { sessionRestoredBadge }
                     // "Starting agent…" over a live-but-unpainted pane, faded out on
                     // its first pty byte (juancode-p6tw).
@@ -3569,28 +3585,10 @@ struct SessionContainer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// "Remote is driving" overlay (juancode-2t4): while a web/phone viewer owns
-    /// this session's pty grid, badge the visible pane and offer a one-click
-    /// take-back. Take-back is the existing geometry resync — its forced local
-    /// SIGWINCH preempts the remote owner by policy (juancode-1th.1) and the
-    /// resulting grid change dismisses the badge through `remoteGridOwner`.
-    /// Keyed by owner so a different viewer taking over restarts the overlay's
-    /// collapse timer. Hidden pool panes deliberately released their grid
-    /// (juancode-073) — they're off-screen, so only the visible pane is badged.
-    @ViewBuilder
-    private var remoteDriveBadge: some View {
-        if model.isLive(meta.id), let owner = model.remoteGridOwner(meta.id) {
-            RemoteDriveOverlay(owner: owner) { model.resyncTerminalGeometry() }
-                .id(owner)
-                .padding(10)
-        }
-    }
-
     /// "Restored from disk" banner (juancode-mya): shown top-leading over a pane a
     /// cold launch replayed from persisted scrollback, so a frozen-looking wall of
     /// old output is self-explaining. Keyed by session id so switching panes shows
-    /// the new one's banner (or none). Stacks beside the top-trailing remote-drive
-    /// badge instead of overlapping it.
+    /// the new one's banner (or none).
     @ViewBuilder
     private var sessionRestoredBadge: some View {
         VStack(alignment: .leading, spacing: 6) {

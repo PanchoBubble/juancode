@@ -217,16 +217,16 @@ struct DiffReviewPanel: View {
             .clickCursor()
             let count = allComments.count
             Button {
-                model.sendDiffReview(sessionId)
-                keyToken &+= 1
+                sendReview()
             } label: {
                 Label(count == 0 ? "Send review" : "Send \(count) comment\(count == 1 ? "" : "s")",
                       systemImage: "paperplane")
             }
             .controlSize(.small)
             .buttonStyle(.borderedProminent)
-            .disabled(count == 0 || review.sending.contains(sessionId))
-            .help("Send every comment to the session as one review message (␣w)")
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled((count == 0 && !hasDraftText) || review.sending.contains(sessionId))
+            .help("Send every comment to the session as one review message (⌘⏎ or ␣w)")
             .clickCursor()
             Button { model.closeDiffReview() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
@@ -476,6 +476,7 @@ struct DiffReviewPanel: View {
                 text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 }),
                 focusToken: d.serial,
                 onSubmit: saveDraft,
+                onSend: sendReview,
                 onCancel: cancelDraft)
                 .frame(height: 64)
                 .background(Color.appPanel)
@@ -486,7 +487,7 @@ struct DiffReviewPanel: View {
                     .disabled((draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .clickCursor()
                 Button("Cancel") { cancelDraft() }.controlSize(.small).clickCursor()
-                Text("⏎ save · ⇧⏎ newline · esc cancel")
+                Text("⏎ save · ⌘⏎ save & send · ⇧⏎ newline · esc cancel")
                     .font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
@@ -538,7 +539,7 @@ struct DiffReviewPanel: View {
             }
             Spacer(minLength: 8)
             Text(prompt == nil
-                 ? "gcc comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · ␣w send · ␣n tree · q close"
+                 ? "gcc comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · ␣w/⌘⏎ send · ␣n tree · q close"
                  : "⏎ accept · esc cancel")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
@@ -684,7 +685,7 @@ struct DiffReviewPanel: View {
             focus = .diff
             searchStep(next: command == .searchNext)
         case .send:
-            model.sendDiffReview(sessionId)
+            sendReview()
         case .toggleTree:
             treeShown.toggle()
             if !treeShown { focus = .diff }
@@ -1140,6 +1141,18 @@ struct DiffReviewPanel: View {
         review.say("\(n) comment\(n == 1 ? "" : "s") staged — ␣w sends", in: sessionId)
     }
 
+    private var hasDraftText: Bool {
+        !(draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// ⌘⏎, ␣w or the Send button: a comment still being typed is saved first, so
+    /// ⌘⏎ from the editor sends it along with the rest.
+    private func sendReview() {
+        if draft != nil { saveDraft() }
+        model.sendDiffReview(sessionId)
+        keyToken &+= 1
+    }
+
     private func cancelDraft() {
         draft = nil
         anchor = nil
@@ -1280,10 +1293,6 @@ private struct ReviewRowView: View, Equatable {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Rectangle()
-                .fill(isCursor ? Color.accentColor : Color.clear)
-                .frame(width: 3)
-                .padding(.trailing, 1)
             switch row {
             case .hunk:
                 Text(text)
@@ -1317,8 +1326,16 @@ private struct ReviewRowView: View, Equatable {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // The cursor bar is an overlay, not an HStack child: a Rectangle has no text
+        // baseline, so under .firstTextBaseline its bottom sat on the code's first
+        // baseline and, on a wrapped row, it rose a line above the code, pushing the
+        // code's second line down over the next row.
+        .padding(.leading, 4)
         .frame(minHeight: 18)
         .background(background)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(isCursor ? Color.accentColor : Color.clear).frame(width: 3)
+        }
         .overlay(isSelected ? Color.accentColor.opacity(0.20) : Color.clear)
         .overlay(isCursor ? Color.appHairline(0.07) : Color.clear)
     }
@@ -1530,14 +1547,16 @@ final class ReviewKeyCatcherView: NSView {
     }
 }
 
-/// The comment editor: a plain NSTextView where Enter saves, ⇧Enter (or ⌥Enter) is a
-/// newline and Esc cancels. Takes focus as soon as it is on screen.
+/// The comment editor: a plain NSTextView where Enter saves, ⌘Enter saves and sends,
+/// ⇧Enter (or ⌥Enter) is a newline and Esc cancels. Takes focus as soon as it is on screen.
 private struct ReviewDraftEditor: NSViewRepresentable {
     @Binding var text: String
     /// A change takes the keyboard. SwiftUI may reuse this view for the next draft,
     /// so "focus when first made" is not enough.
     let focusToken: Int
     let onSubmit: () -> Void
+    /// ⌘⏎: save and send the whole review.
+    let onSend: () -> Void
     let onCancel: () -> Void
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -1554,7 +1573,9 @@ private struct ReviewDraftEditor: NSViewRepresentable {
             switch selector {
             case #selector(NSResponder.insertNewline(_:)):
                 let flags = NSApp.currentEvent?.modifierFlags ?? []
-                if flags.contains(.shift) || flags.contains(.option) {
+                if flags.contains(.command) {
+                    parent.onSend()
+                } else if flags.contains(.shift) || flags.contains(.option) {
                     view.insertNewlineIgnoringFieldEditor(nil)
                 } else {
                     parent.onSubmit()
@@ -1610,7 +1631,7 @@ private struct ReviewDraftEditor: NSViewRepresentable {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(attempts == 20 ? 0 : 50)) { [weak view] in
             guard let view else { return }
             if let window = view.window {
-                let ok = window.makeFirstResponder(view)
+                window.makeFirstResponder(view)
                 view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
             } else if attempts > 0 {
                 focus(view, attempts: attempts - 1)

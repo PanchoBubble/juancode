@@ -1,6 +1,6 @@
-// The right rail: Oracles, the GitHub PR queue, the main checkout's Diff and Chains,
-// each a collapsible panel the user can drag into any order, and hide or bring back
-// from the pencil's edit mode.
+// The right rail: Oracles, the GitHub PR queue, the main checkout's Diff, Chains and
+// your Linear tickets, each a collapsible panel the user can drag into any order, and
+// hide or bring back from the pencil's edit mode.
 //
 // The queue was a toolbar badge with the list behind a popover. The rail is always
 // on screen, so the queue can be too: the same list, chips and row actions, with no
@@ -11,7 +11,7 @@ import JuancodeCore
 import JuancodeClient
 
 enum RightRailPanel: String, CaseIterable, Identifiable {
-    case oracle, prs, diff, chains
+    case oracle, prs, diff, chains, tickets
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -19,6 +19,7 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
         case .prs: "PRs"
         case .diff: "Diff"
         case .chains: "Chains"
+        case .tickets: "Tickets"
         }
     }
     var icon: String {
@@ -27,6 +28,7 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
         case .prs: "arrow.triangle.pull"
         case .diff: "plusminus"
         case .chains: "link"
+        case .tickets: "checklist"
         }
     }
 
@@ -85,6 +87,8 @@ struct RightRailPanels: View {
     /// Owned here rather than by the Diff panel, so its title bar can show +/−
     /// while the panel is collapsed.
     @State private var diffStore = RepoDiffStore()
+    /// Here for the same reason, and so the hourly refresh outlives a collapse.
+    @State private var ticketsStore = LinearTicketsStore()
     @State private var dropTarget: RightRailPanel?
     /// Mirrors `collapsedRaw`: an `@AppStorage` write does not reliably carry the
     /// `withAnimation` transaction, so layout reads this instead.
@@ -203,6 +207,7 @@ struct RightRailPanels: View {
         .onChange(of: hiddenRaw) { hiddenState = nil }
         .background(Color.appSurface)
         .task(id: root) { await diffStore.load(root: root, model: model, rewatch: true) }
+        .task { await ticketsStore.run() }
         .onDisappear { diffStore.stopWatching() }
     }
 
@@ -255,6 +260,7 @@ struct RightRailPanels: View {
                 case .oracle: OracleRailAccessory()
                 case .diff: diffPreview
                 case .chains: ChainsRailAccessory()
+                case .tickets: ticketsPreview
                 case .prs: EmptyView()
                 }
             }
@@ -314,6 +320,8 @@ struct RightRailPanels: View {
             RepoDiffRail(store: diffStore, root: root)
         case .chains:
             ChainsRailPanel()
+        case .tickets:
+            LinearTicketsRail(store: ticketsStore)
         }
     }
 
@@ -391,6 +399,14 @@ struct RightRailPanels: View {
         if isHidden { h.insert(panel) } else { h.remove(panel) }
         hiddenState = h
         hiddenRaw = RightRailPrefs.raw(h, known: RightRailPanel.allCases)
+    }
+
+    @ViewBuilder private var ticketsPreview: some View {
+        if !ticketsStore.tickets.isEmpty {
+            Text("\(ticketsStore.tickets.count)\(ticketsStore.hasMore ? "+" : "")")
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder private var diffPreview: some View {

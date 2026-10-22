@@ -1047,6 +1047,11 @@ struct GhosttyEphemeral: NSViewRepresentable {
         func setHidden(_ hidden: Bool, host: GhosttyHostView) {
             guard hidden != sizingFrozen else { return }
             sizingFrozen = hidden
+            // AppKit-hide the host, as the live pane does: SwiftUI's opacity is
+            // visual-only, and the editor tabs sit ABOVE the agent pane, so a
+            // hidden editor still registered for file drags and took every drop
+            // meant for the agent, typing the path into nvim instead.
+            host.isHidden = hidden
             // Occlusion also stops render-tick scheduling — a hidden pane running
             // a build/tail stops Metal-drawing on every output burst.
             host.terminal.setSurfaceVisible(!hidden)

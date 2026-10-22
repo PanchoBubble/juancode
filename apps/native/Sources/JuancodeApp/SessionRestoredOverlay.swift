@@ -12,8 +12,7 @@ import JuancodeCore
 ///   `.unresumable` — the prior conversation couldn't be resumed; the pane stays
 ///                    replay-only, so this one carries an X to dismiss.
 ///
-/// Placed top-leading so it stacks beside the top-trailing `RemoteDriveOverlay`
-/// (juancode-2t4) rather than overlapping it. Keyed per session id by
+/// Keyed per session id by
 /// `AppModel.restoredBanners`, so a session switch shows the new pane's banner (or
 /// none) and never leaks the old one's.
 struct SessionRestoredOverlay: View {
