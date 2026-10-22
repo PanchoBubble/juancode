@@ -2654,6 +2654,18 @@ final class AppModel {
         }
     }
 
+    /// The Tickets rail's "Work on": a fresh Claude session in `cwd`, on its own
+    /// worktree named after the ticket, seeded with the ticket and selected. The
+    /// ticket's Linear state is left alone.
+    func workOnLinearTicket(_ ticket: LinearTicket, cwd: String) {
+        let worktreeName = "\(ticket.identifier.lowercased())-\(String(UUID().uuidString.prefix(4)).lowercased())"
+        Task {
+            await create(provider: .claude, cwd: cwd, skipPermissions: true,
+                         isolateWorktree: true, initialInput: linearTicketPrompt(ticket),
+                         select: true, worktreeName: worktreeName)
+        }
+    }
+
     // MARK: - GitHub view (juancode-2t6)
 
     /// The project folders the GitHub view lists: the trackable project roots of

@@ -321,7 +321,7 @@ struct RightRailPanels: View {
         case .chains:
             ChainsRailPanel()
         case .tickets:
-            LinearTicketsRail(store: ticketsStore)
+            LinearTicketsRail(store: ticketsStore, root: root)
         }
     }
 

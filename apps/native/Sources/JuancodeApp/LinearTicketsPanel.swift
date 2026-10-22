@@ -149,6 +149,8 @@ final class LinearTicketsStore {
 
 struct LinearTicketsRail: View {
     let store: LinearTicketsStore
+    /// The selected session's project: where "Work on" starts its session.
+    let root: String?
     @State private var draft = ""
 
     var body: some View {
@@ -229,7 +231,7 @@ struct LinearTicketsRail: View {
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.tickets) { LinearTicketRow(ticket: $0) }
+                    ForEach(store.tickets) { LinearTicketRow(ticket: $0, root: root) }
                     if store.hasMore {
                         // Scrolling this into view is what asks for the next page.
                         HStack {
@@ -255,9 +257,12 @@ struct LinearTicketsRail: View {
     }
 }
 
-/// One ticket: state dot, id, title, priority and age. Click opens it in Linear.
+/// One ticket: state dot, id, title, priority and age. Click opens it in Linear; on
+/// hover the age gives way to a "Work on" button.
 private struct LinearTicketRow: View {
+    @Environment(AppModel.self) private var model
     let ticket: LinearTicket
+    let root: String?
     @State private var hovering = false
 
     var body: some View {
@@ -277,7 +282,9 @@ private struct LinearTicketRow: View {
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
                 priority
-                if let at = ticket.updatedAt {
+                if hovering {
+                    workOnButton
+                } else if let at = ticket.updatedAt {
                     Text(relativeTime(Int(at.timeIntervalSince1970 * 1000)))
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                         .lineLimit(1).fixedSize()
@@ -297,6 +304,7 @@ private struct LinearTicketRow: View {
         .clickCursor()
         .contextMenu {
             Button("Open in Linear", action: open)
+            Button(workOnHelp, action: workOn).disabled(root == nil)
             Divider()
             Button("Copy ID") { copy(ticket.identifier) }
             Button("Copy Link") { copy(ticket.url) }
@@ -304,6 +312,30 @@ private struct LinearTicketRow: View {
                 Button("Copy Branch Name") { copy(ticket.branchName) }
             }
         }
+    }
+
+    private var workOnButton: some View {
+        Button(action: workOn) {
+            Image(systemName: "play.fill").font(.system(size: 9))
+                .frame(width: 18, height: 16)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.accentColor.opacity(root == nil ? 0.08 : 0.2)))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(root == nil ? Color.secondary : Color.accentColor)
+        .disabled(root == nil)
+        .help(workOnHelp)
+        .clickCursor()
+    }
+
+    private var workOnHelp: String {
+        guard let root else { return "Select a session to work on \(ticket.identifier) in its project" }
+        return "Work on \(ticket.identifier) in \((root as NSString).lastPathComponent)"
+    }
+
+    private func workOn() {
+        guard let root else { return }
+        model.workOnLinearTicket(ticket, cwd: root)
     }
 
     @ViewBuilder private var priority: some View {
@@ -341,4 +373,11 @@ private extension Color {
                   green: Double((v >> 8) & 0xff) / 255,
                   blue: Double(v & 0xff) / 255)
     }
+}
+
+/// The seed prompt for a session started from a ticket's "Work on".
+func linearTicketPrompt(_ t: LinearTicket) -> String {
+    var s = "Please help me work on Linear ticket \(t.identifier) \"\(t.title)\": \(t.url)"
+    if !t.branchName.isEmpty { s += " (Linear's branch name: \(t.branchName))" }
+    return s + " — start by reading the ticket and its comments."
 }
