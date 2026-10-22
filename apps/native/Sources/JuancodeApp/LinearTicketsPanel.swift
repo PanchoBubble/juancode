@@ -264,6 +264,8 @@ private struct LinearTicketRow: View {
     let ticket: LinearTicket
     let root: String?
     @State private var hovering = false
+    /// Briefly true after the hover copy button, which then shows a checkmark.
+    @State private var copied = false
 
     var body: some View {
         Button(action: open) {
@@ -283,6 +285,7 @@ private struct LinearTicketRow: View {
                 Spacer(minLength: 4)
                 priority
                 if hovering {
+                    copyLinkButton
                     workOnButton
                 } else if let at = ticket.updatedAt {
                     Text(relativeTime(Int(at.timeIntervalSince1970 * 1000)))
@@ -312,6 +315,26 @@ private struct LinearTicketRow: View {
                 Button("Copy Branch Name") { copy(ticket.branchName) }
             }
         }
+    }
+
+    private var copyLinkButton: some View {
+        Button {
+            copy(ticket.url)
+            copied = true
+            Task {
+                await Nap.duration(.seconds(1.2))
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "link").font(.system(size: 9))
+                .frame(width: 18, height: 16)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.primary.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(copied ? Color.green : Color.secondary)
+        .help(copied ? "Copied" : "Copy link to \(ticket.identifier)")
+        .clickCursor()
     }
 
     private var workOnButton: some View {
