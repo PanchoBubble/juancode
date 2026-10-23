@@ -1,0 +1,71 @@
+{
+  "id": "chain-handoffs",
+  "title": "durable handoffs separate ownership, delivery, acknowledgement and closure",
+  "asserts": "A core advertising chainHandoffs persists complete handoff history. Session owners are validated when created, human is an explicit owner, advancement atomically closes and links exactly one successor, exact retries are safe, and delivery does not acknowledge. Closure is explicit and history remains readable.",
+  "capabilities": ["chains", "chainHandoffs"],
+  "steps": [
+    { "send": { "type": "subscribeHandoffs" } },
+    { "expect": { "type": "handoffs", "handoffs": { "$type": "array" } }, "timeoutMs": 10000 },
+    { "send": { "type": "createChain", "slug": "$chainHandoffSlug", "requestId": "$requestId" } },
+    { "expect": { "type": "chainResult", "op": "create", "ok": true, "requestId": "$requestId" } },
+    { "expect": { "type": "chain", "chain": { "slug": "$chainHandoffSlug", "state": "active" } } },
+    {
+      "send": {
+        "type": "createHandoff",
+        "requestId": "$requestId",
+        "handoff": {
+          "id": "$chainHandoffId",
+          "chainSlug": "$chainHandoffSlug",
+          "source": { "kind": "human" },
+          "target": { "kind": "human" },
+          "beadsIssue": "juancode-043.1",
+          "summary": "Continue the chain handoff test",
+          "evidenceRef": "scenario:49"
+        }
+      }
+    },
+    { "expect": { "type": "handoffResult", "op": "create", "ok": true, "id": "$chainHandoffId" } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffId", "state": "pending", "delivery": "not_sent" } } },
+    {
+      "send": {
+        "type": "advanceHandoff",
+        "predecessorId": "$chainHandoffId",
+        "handoff": {
+          "id": "$chainHandoffNextId",
+          "chainSlug": "$chainHandoffSlug",
+          "source": { "kind": "human" },
+          "target": { "kind": "human" },
+          "summary": "Next step"
+        }
+      }
+    },
+    { "expect": { "type": "handoffResult", "op": "advance", "ok": true, "id": "$chainHandoffNextId" } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffId", "state": "closed", "closureReason": "handed_off_to", "successorId": "$chainHandoffNextId" } } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffNextId", "state": "pending", "predecessorId": "$chainHandoffId" } } },
+    {
+      "send": {
+        "type": "advanceHandoff",
+        "predecessorId": "$chainHandoffId",
+        "handoff": {
+          "id": "$chainHandoffNextId",
+          "chainSlug": "$chainHandoffSlug",
+          "source": { "kind": "human" },
+          "target": { "kind": "human" },
+          "summary": "Next step"
+        }
+      }
+    },
+    { "expect": { "type": "handoffResult", "op": "advance", "ok": true, "id": "$chainHandoffNextId" } },
+    {
+      "send": { "type": "markHandoffDelivered", "handoffId": "$chainHandoffNextId", "requestId": "$requestId" }
+    },
+    { "expect": { "type": "handoffResult", "op": "markDelivered", "ok": true } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffNextId", "state": "pending", "delivery": "sent" } } },
+    { "send": { "type": "acknowledgeHandoff", "handoffId": "$chainHandoffNextId" } },
+    { "expect": { "type": "handoffResult", "op": "acknowledge", "ok": true } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffNextId", "state": "acknowledged", "delivery": "sent" } } },
+    { "send": { "type": "closeHandoff", "handoffId": "$chainHandoffNextId", "closureReason": "no-follow-on" } },
+    { "expect": { "type": "handoffResult", "op": "close", "ok": true } },
+    { "expect": { "type": "handoff", "handoff": { "id": "$chainHandoffNextId", "state": "closed", "closureReason": "no-follow-on" } } }
+  ]
+}

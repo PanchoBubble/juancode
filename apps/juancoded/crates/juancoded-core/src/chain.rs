@@ -13,6 +13,60 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A durable transfer of responsibility within a chain. Beads remains the issue
+/// tracker; `beads_issue` is only a link to its authoritative record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Handoff {
+    pub id: String,
+    pub chain_slug: String,
+    pub source: HandoffOwner,
+    pub target: HandoffOwner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beads_issue: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub state: HandoffState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<String>,
+    #[serde(default)]
+    pub delivery: HandoffDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "sessionId", rename_all = "snake_case")]
+pub enum HandoffOwner {
+    Human,
+    Session(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffState {
+    #[default]
+    Pending,
+    Acknowledged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffDelivery {
+    #[default]
+    NotSent,
+    Sent,
+}
+
 /// The longest slug a chain may have. A badge draws the whole slug, so this is a
 /// layout bound as much as a sanity one.
 pub const MAX_SLUG_LEN: usize = 48;

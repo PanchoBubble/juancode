@@ -47,7 +47,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info, warn};
 
 use juancoded_core::chain::{
-    slug_from_text, validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, MemberStatus,
+    slug_from_text, validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, Handoff,
+    HandoffDelivery, HandoffOwner, HandoffState, MemberStatus,
 };
 use juancoded_core::model::{now_ms, SessionMeta, SessionStatus};
 use juancoded_persistence::chain_store::ChainStore;
@@ -68,6 +69,7 @@ pub enum ChainChange {
     Upsert(Chain),
     /// The chain is gone and its members are untagged.
     Removed(String),
+    Handoff(Handoff),
 }
 
 /// Why a mutation was refused. The string is the code that goes on the wire.
@@ -125,6 +127,190 @@ impl Chains {
             .map(|c| c.slug.clone())
     }
 
+    pub fn handoffs(&self) -> Result<Vec<Handoff>, ChainRefusal> {
+        self.store.handoffs().map_err(store_failed)
+    }
+
+    pub fn create_handoff(&self, mut handoff: Handoff) -> Result<(), ChainRefusal> {
+        self.validate_handoff(&handoff)?;
+        handoff.created_at = now_ms();
+        handoff.updated_at = handoff.created_at;
+        handoff.state = HandoffState::Pending;
+        handoff.closure_reason = None;
+        handoff.predecessor_id = None;
+        handoff.successor_id = None;
+        handoff.delivery = HandoffDelivery::NotSent;
+        let _book = self.lock();
+        match self.store.create_handoff(&handoff) {
+            Ok(true) => {
+                let _ = self.changes.send(ChainChange::Handoff(handoff));
+                Ok(())
+            }
+            Ok(false) => match self
+                .store
+                .handoffs()
+                .map_err(store_failed)?
+                .into_iter()
+                .find(|h| h.id == handoff.id)
+            {
+                Some(existing) if same_handoff_request(&existing, &handoff) => Ok(()),
+                _ => Err("handoff-id-conflict"),
+            },
+            Err(e) => Err(store_failed(e)),
+        }
+    }
+
+    pub fn advance_handoff(
+        &self,
+        predecessor: &str,
+        mut successor: Handoff,
+    ) -> Result<(), ChainRefusal> {
+        successor.predecessor_id = Some(predecessor.to_string());
+        successor.created_at = now_ms();
+        successor.updated_at = successor.created_at;
+        successor.state = HandoffState::Pending;
+        successor.closure_reason = None;
+        successor.successor_id = None;
+        successor.delivery = HandoffDelivery::NotSent;
+        self.validate_handoff(&successor)?;
+        if successor.predecessor_id.as_deref() != Some(predecessor) {
+            return Err("handoff-predecessor-invalid");
+        }
+        let _book = self.lock();
+        match self
+            .store
+            .advance_handoff(predecessor, &successor, now_ms())
+        {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                if let Some(previous) = self
+                    .store
+                    .handoffs()
+                    .map_err(store_failed)?
+                    .into_iter()
+                    .find(|h| h.id == predecessor)
+                {
+                    let _ = self.changes.send(ChainChange::Handoff(previous));
+                }
+                if let Some(next) = self
+                    .store
+                    .handoffs()
+                    .map_err(store_failed)?
+                    .into_iter()
+                    .find(|h| h.id == successor.id)
+                {
+                    let _ = self.changes.send(ChainChange::Handoff(next));
+                }
+                Ok(())
+            }
+            Err(e) => match e.to_string().as_str() {
+                "handoff-not-found" => Err("handoff-not-found"),
+                "handoff-conflict" => Err("handoff-conflict"),
+                "handoff-id-conflict" => Err("handoff-id-conflict"),
+                _ => Err(store_failed(e)),
+            },
+        }
+    }
+
+    pub fn acknowledge_handoff(&self, id: &str) -> Result<(), ChainRefusal> {
+        if let Some(h) = self
+            .store
+            .handoffs()
+            .map_err(store_failed)?
+            .into_iter()
+            .find(|h| h.id == id)
+        {
+            if h.state == HandoffState::Closed {
+                return Err("handoff-closed");
+            }
+            if h.state == HandoffState::Acknowledged {
+                return Ok(());
+            }
+        } else {
+            return Err("handoff-not-found");
+        }
+        self.update_handoff(id, Some(HandoffState::Acknowledged), None, None)
+    }
+    pub fn close_handoff(&self, id: &str, reason: &str) -> Result<(), ChainRefusal> {
+        if reason.trim().is_empty() {
+            return Err("handoff-closure-reason-required");
+        }
+        self.update_handoff(id, Some(HandoffState::Closed), Some(reason), None)
+    }
+    pub fn mark_handoff_delivered(&self, id: &str) -> Result<(), ChainRefusal> {
+        self.update_handoff(id, None, None, Some(HandoffDelivery::Sent))
+    }
+
+    fn update_handoff(
+        &self,
+        id: &str,
+        state: Option<HandoffState>,
+        reason: Option<&str>,
+        delivery: Option<HandoffDelivery>,
+    ) -> Result<(), ChainRefusal> {
+        let _book = self.lock();
+        let current = self
+            .store
+            .handoffs()
+            .map_err(store_failed)?
+            .into_iter()
+            .find(|h| h.id == id)
+            .ok_or("handoff-not-found")?;
+        if state == Some(HandoffState::Closed) && current.state == HandoffState::Closed {
+            if reason == current.closure_reason.as_deref() {
+                return Ok(());
+            }
+            return Err("handoff-closed");
+        }
+        if delivery == Some(HandoffDelivery::Sent) && current.delivery == HandoffDelivery::Sent {
+            return Ok(());
+        }
+        if state.is_some() && current.state == HandoffState::Closed {
+            return Err("handoff-closed");
+        }
+        match self
+            .store
+            .update_handoff(id, state, reason, delivery, now_ms())
+        {
+            Ok(true) => {
+                let h = self
+                    .store
+                    .handoffs()
+                    .map_err(store_failed)?
+                    .into_iter()
+                    .find(|h| h.id == id)
+                    .ok_or("handoff-not-found")?;
+                let _ = self.changes.send(ChainChange::Handoff(h));
+                Ok(())
+            }
+            Ok(false) => Err("handoff-not-found"),
+            Err(e) => Err(store_failed(e)),
+        }
+    }
+
+    fn validate_handoff(&self, h: &Handoff) -> Result<(), ChainRefusal> {
+        if h.id.trim().is_empty()
+            || h.id.trim() != h.id
+            || h.summary.trim().is_empty()
+            || h.beads_issue
+                .as_ref()
+                .is_some_and(|issue| issue.trim().is_empty())
+        {
+            return Err("handoff-invalid");
+        }
+        if !self.lock().iter().any(|c| c.slug == h.chain_slug) {
+            return Err("chain-not-found");
+        }
+        for owner in [&h.source, &h.target] {
+            if let HandoffOwner::Session(id) = owner {
+                if self.sessions.meta(id).is_none() {
+                    return Err("handoff-session-not-found");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn create(&self, slug: &str) -> Result<(), ChainRefusal> {
         validate_slug(slug).map_err(|e| e.0)?;
         self.mutate(|store| match store.create_chain(slug, now_ms()) {
@@ -148,6 +334,15 @@ impl Chains {
     /// work, and removing the label must not reach the work.
     pub fn delete(&self, slug: &str) -> Result<(), ChainRefusal> {
         let mut book = self.lock();
+        if self
+            .store
+            .handoffs()
+            .map_err(store_failed)?
+            .iter()
+            .any(|h| h.chain_slug == slug)
+        {
+            return Err("chain-has-handoffs");
+        }
         match self.store.delete_chain(slug) {
             Ok(true) => {}
             Ok(false) => return Err("chain-not-found"),
@@ -453,6 +648,14 @@ impl Chains {
             else {
                 return Ok(Vec::new());
             };
+            if store
+                .handoffs()
+                .map_err(store_failed)?
+                .iter()
+                .any(|h| h.chain_slug == slug && h.state != HandoffState::Closed)
+            {
+                return Ok(Vec::new());
+            }
             if !chain.all_finished(|m| self.status(m)) {
                 return Ok(Vec::new());
             }
@@ -567,6 +770,17 @@ impl Chains {
     }
 }
 
+fn same_handoff_request(existing: &Handoff, requested: &Handoff) -> bool {
+    existing.id == requested.id
+        && existing.chain_slug == requested.chain_slug
+        && existing.source == requested.source
+        && existing.target == requested.target
+        && existing.beads_issue == requested.beads_issue
+        && existing.summary == requested.summary
+        && existing.evidence_ref == requested.evidence_ref
+        && existing.predecessor_id == requested.predecessor_id
+}
+
 fn watch_keys(list: &[juancoded_core::pr::TrackedPr]) -> BTreeSet<String> {
     list.iter().map(|pr| pr.id.clone()).collect()
 }
@@ -642,6 +856,110 @@ mod tests {
         chains.list().iter().find(|c| c.slug == slug).unwrap().state
     }
 
+    #[tokio::test]
+    async fn open_handoffs_block_auto_close_and_deleted_owners_remain_historical() {
+        let (handles, chains) = engine();
+        let owner = spawn(&handles);
+        chains.create("handoff-test").unwrap();
+        let unknown_owner = Handoff {
+            id: "unknown".into(),
+            chain_slug: "handoff-test".into(),
+            source: HandoffOwner::Session("missing-session".into()),
+            target: HandoffOwner::Human,
+            beads_issue: None,
+            summary: "Must be refused".into(),
+            created_at: 0,
+            updated_at: 0,
+            state: HandoffState::Pending,
+            closure_reason: None,
+            predecessor_id: None,
+            successor_id: None,
+            evidence_ref: None,
+            delivery: HandoffDelivery::NotSent,
+        };
+        assert_eq!(
+            chains.create_handoff(unknown_owner),
+            Err("handoff-session-not-found")
+        );
+        chains
+            .set_member_reporting(
+                ChainMemberKind::Beads,
+                "juancode-043.1",
+                Some("handoff-test"),
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap();
+        let handoff = Handoff {
+            id: "stable-1".into(),
+            chain_slug: "handoff-test".into(),
+            source: HandoffOwner::Session(owner.clone()),
+            target: HandoffOwner::Human,
+            beads_issue: Some("juancode-043.1".into()),
+            summary: "Continue the slice".into(),
+            created_at: 1,
+            updated_at: 1,
+            state: HandoffState::Pending,
+            closure_reason: None,
+            predecessor_id: None,
+            successor_id: None,
+            evidence_ref: None,
+            delivery: HandoffDelivery::NotSent,
+        };
+        chains.create_handoff(handoff.clone()).unwrap();
+        chains.create_handoff(handoff.clone()).unwrap();
+        let mut conflicting = handoff.clone();
+        conflicting.summary = "a different request under the same id".into();
+        assert_eq!(
+            chains.create_handoff(conflicting),
+            Err("handoff-id-conflict")
+        );
+        assert_eq!(chains.delete("handoff-test"), Err("chain-has-handoffs"));
+        chains.mark_handoff_delivered("stable-1").unwrap();
+        assert_eq!(
+            chains.handoffs().unwrap()[0].state,
+            HandoffState::Pending,
+            "delivery is not acknowledgement"
+        );
+        chains
+            .set_member_reporting(
+                ChainMemberKind::Beads,
+                "juancode-043.1",
+                Some("handoff-test"),
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap();
+        assert_eq!(state(&chains, "handoff-test"), ChainState::Active);
+        handles.sessions.delete(&owner).unwrap();
+        let historical = chains.handoffs().unwrap();
+        assert_eq!(historical[0].source, HandoffOwner::Session(owner));
+        chains.close_handoff("stable-1", "no-follow-on").unwrap();
+        chains
+            .set_member_reporting(
+                ChainMemberKind::Beads,
+                "juancode-043.1",
+                Some("handoff-test"),
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap();
+        chains
+            .set_member_reporting(
+                ChainMemberKind::Beads,
+                "juancode-043.1",
+                Some("handoff-test"),
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap();
+        assert_eq!(state(&chains, "handoff-test"), ChainState::Inactive);
+    }
+
     /// Wait for the sweep task to act on an event, which it does on its own schedule.
     async fn settles_to(chains: &Chains, slug: &str, want: ChainState) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -670,6 +988,7 @@ mod tests {
             .map(|c| match c {
                 ChainChange::Upsert(chain) => chain.slug.clone(),
                 ChainChange::Removed(slug) => format!("-{slug}"),
+                ChainChange::Handoff(handoff) => format!("handoff:{}", handoff.id),
             })
             .collect()
     }

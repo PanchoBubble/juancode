@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use juancoded_cordis::contribution::{ActivationOutcome, Snapshot as ContributionSnapshot};
 use juancoded_cordis::services::queue::{Content, ItemState, Occurrence, QueueSnapshot};
-use juancoded_core::chain::{Chain, ChainMemberKind};
+use juancoded_core::chain::{Chain, ChainMemberKind, Handoff};
 use juancoded_core::changes::ChangeStat;
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{SessionActivity, SessionMeta};
@@ -251,6 +251,7 @@ pub const CAPABILITIES: &[&str] = &[
     // ticket then reads as live forever, which keeps the chain open rather than closing
     // it on a guess.
     "chainAutoClose",
+    "chainHandoffs",
 ];
 
 /// One queued occurrence on the wire.
@@ -687,6 +688,29 @@ pub enum ClientMessage {
         done: Option<bool>,
         request_id: Option<String>,
     },
+    SubscribeHandoffs,
+    CreateHandoff {
+        handoff: Handoff,
+        request_id: Option<String>,
+    },
+    AdvanceHandoff {
+        predecessor_id: String,
+        handoff: Handoff,
+        request_id: Option<String>,
+    },
+    AcknowledgeHandoff {
+        handoff_id: String,
+        request_id: Option<String>,
+    },
+    CloseHandoff {
+        handoff_id: String,
+        reason: String,
+        request_id: Option<String>,
+    },
+    MarkHandoffDelivered {
+        handoff_id: String,
+        request_id: Option<String>,
+    },
     /// Watch the contribution list: the complete set now, and again on every change,
     /// until `unsubscribeContributions` or the socket closes.
     SubscribeContributions,
@@ -1009,6 +1033,14 @@ struct RawClient {
     commit_subject: Option<String>,
     #[serde(rename = "commentId", default)]
     comment_id: Option<String>,
+    #[serde(default)]
+    handoff: Option<Handoff>,
+    #[serde(rename = "predecessorId", default)]
+    predecessor_id: Option<String>,
+    #[serde(rename = "handoffId", default)]
+    handoff_id: Option<String>,
+    #[serde(rename = "closureReason", default)]
+    closure_reason: Option<String>,
 }
 
 /// The PR a `trackPr` names, reduced to what a watch is made of.
@@ -1308,6 +1340,29 @@ impl ClientMessage {
                 title: raw.title,
                 url: raw.url,
                 done: raw.done,
+                request_id: raw.request_id,
+            }),
+            "subscribeHandoffs" => Ok(Self::SubscribeHandoffs),
+            "createHandoff" => Ok(Self::CreateHandoff {
+                handoff: raw.handoff.ok_or("missing handoff")?,
+                request_id: raw.request_id,
+            }),
+            "advanceHandoff" => Ok(Self::AdvanceHandoff {
+                predecessor_id: raw.predecessor_id.ok_or("missing predecessorId")?,
+                handoff: raw.handoff.ok_or("missing handoff")?,
+                request_id: raw.request_id,
+            }),
+            "acknowledgeHandoff" => Ok(Self::AcknowledgeHandoff {
+                handoff_id: raw.handoff_id.ok_or("missing handoffId")?,
+                request_id: raw.request_id,
+            }),
+            "closeHandoff" => Ok(Self::CloseHandoff {
+                handoff_id: raw.handoff_id.ok_or("missing handoffId")?,
+                reason: raw.closure_reason.ok_or("missing closureReason")?,
+                request_id: raw.request_id,
+            }),
+            "markHandoffDelivered" => Ok(Self::MarkHandoffDelivered {
+                handoff_id: raw.handoff_id.ok_or("missing handoffId")?,
                 request_id: raw.request_id,
             }),
             "subscribeContributions" => Ok(Self::SubscribeContributions),
@@ -1634,6 +1689,18 @@ pub enum ServerMessage {
         /// `create`, `close`, `reopen`, `delete` or `setMember`.
         op: &'static str,
         slug: Option<String>,
+        error: Option<String>,
+    },
+    Handoffs {
+        handoffs: Vec<Handoff>,
+    },
+    Handoff {
+        handoff: Handoff,
+    },
+    HandoffResult {
+        request_id: Option<String>,
+        op: &'static str,
+        id: Option<String>,
         error: Option<String>,
     },
     Unresumable {
@@ -2010,6 +2077,26 @@ impl ServerMessage {
                 }
                 if let Some(slug) = slug {
                     v["slug"] = json!(slug);
+                }
+                if let Some(error) = error {
+                    v["error"] = json!(error);
+                }
+                v
+            }
+            Self::Handoffs { handoffs } => json!({ "type": "handoffs", "handoffs": handoffs }),
+            Self::Handoff { handoff } => json!({ "type": "handoff", "handoff": handoff }),
+            Self::HandoffResult {
+                request_id,
+                op,
+                id,
+                error,
+            } => {
+                let mut v = json!({ "type": "handoffResult", "op": op, "ok": error.is_none() });
+                if let Some(request_id) = request_id {
+                    v["requestId"] = json!(request_id);
+                }
+                if let Some(id) = id {
+                    v["id"] = json!(id);
                 }
                 if let Some(error) = error {
                     v["error"] = json!(error);
@@ -2548,6 +2635,7 @@ mod tests {
                     "chains",
                     "chainInherit",
                     "chainAutoClose",
+                    "chainHandoffs",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
@@ -2627,6 +2715,23 @@ mod tests {
             panic!()
         };
         assert_eq!(done, Some(true));
+    }
+
+    #[test]
+    fn handoff_wire_contract_keeps_delivery_separate_from_acknowledgement() {
+        let message = ClientMessage::decode(r#"{"type":"createHandoff","requestId":"r1","handoff":{"id":"h1","chainSlug":"chain-a","source":{"kind":"human"},"target":{"kind":"session","sessionId":"s1"},"beadsIssue":"juancode-043.1","summary":"Continue","createdAt":1,"updatedAt":1,"state":"pending","delivery":"not_sent"}}"#).unwrap();
+        assert!(matches!(message, ClientMessage::CreateHandoff { .. }));
+        assert!(CAPABILITIES.contains(&"chainHandoffs"));
+        assert_eq!(
+            ServerMessage::HandoffResult {
+                request_id: Some("r1".into()),
+                op: "markDelivered",
+                id: Some("h1".into()),
+                error: None
+            }
+            .to_value(),
+            json!({"type":"handoffResult","requestId":"r1","op":"markDelivered","id":"h1","ok":true})
+        );
     }
 
     #[test]

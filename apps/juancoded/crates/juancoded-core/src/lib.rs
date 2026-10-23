@@ -37,7 +37,10 @@ pub use activity::{
     ActivityClock, ActivityDetector, Armed, ManualClock, MonotonicClock, ScreenText, Step,
     Transition,
 };
-pub use chain::{validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, SlugError};
+pub use chain::{
+    validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, Handoff, HandoffDelivery,
+    HandoffOwner, HandoffState, SlugError,
+};
 pub use changes::ChangeStat;
 pub use diff::{DiffFile, FileStatus};
 pub use gh::{

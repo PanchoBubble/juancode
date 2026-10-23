@@ -88,6 +88,7 @@ struct Fanout {
     /// tracked-PR receiver is: one created at subscribe time could miss a change
     /// published between the snapshot and its first `recv`.
     chains: bool,
+    handoffs: bool,
     carries: HashMap<String, Utf8Stream>,
     /// Frames a background task owes this client, out of band from the request that
     /// started it. Seeded delivery is the only one today: it outlives the create it
@@ -252,6 +253,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         heavy: None,
         heavy_sent: None,
         chains: false,
+        handoffs: false,
         carries: HashMap::new(),
         oob: oob_tx,
     };
@@ -304,6 +306,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                 outbound.push(ServerMessage::Chains { chains: engine.list() });
                             }
                         }
+                        if fanout.handoffs { if let Some(engine) = chains.as_ref() { if let Ok(items) = engine.handoffs() { outbound.push(ServerMessage::Handoffs { handoffs: items }); } } }
                     }
                     Err(RecvError::Closed) => chains_bus_live = false,
                 }
@@ -559,13 +562,18 @@ fn push_tracked(change: TrackedPrChange, fanout: &mut Fanout, outbound: &mut Vec
 /// The frame this connection owes for one chain change: nothing until it subscribed,
 /// and the chain whole (or its removal) after.
 fn push_chain(change: ChainChange, fanout: &Fanout, outbound: &mut Vec<ServerMessage>) {
-    if !fanout.chains {
-        return;
+    match change {
+        ChainChange::Upsert(chain) if fanout.chains => {
+            outbound.push(ServerMessage::Chain { chain })
+        }
+        ChainChange::Removed(slug) if fanout.chains => {
+            outbound.push(ServerMessage::ChainRemoved { slug })
+        }
+        ChainChange::Handoff(handoff) if fanout.handoffs => {
+            outbound.push(ServerMessage::Handoff { handoff })
+        }
+        _ => {}
     }
-    outbound.push(match change {
-        ChainChange::Upsert(chain) => ServerMessage::Chain { chain },
-        ChainChange::Removed(slug) => ServerMessage::ChainRemoved { slug },
-    });
 }
 
 /// The answer to one chain mutation.
@@ -2058,7 +2066,107 @@ fn handle_client_message(
             outbound.push(chain_result("setMember", slug, request_id, outcome));
         }
 
+        ClientMessage::SubscribeHandoffs => {
+            let Some(engine) = chains else {
+                outbound.push(handoff_result(
+                    "subscribe",
+                    None,
+                    None,
+                    Err("handoff-unavailable"),
+                ));
+                return;
+            };
+            if fanout.handoffs {
+                return;
+            }
+            match engine.handoffs() {
+                Ok(handoffs) => {
+                    fanout.handoffs = true;
+                    outbound.push(ServerMessage::Handoffs { handoffs });
+                }
+                Err(error) => outbound.push(handoff_result("subscribe", None, None, Err(error))),
+            }
+        }
+        ClientMessage::CreateHandoff {
+            handoff,
+            request_id,
+        } => {
+            let id = handoff.id.clone();
+            let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
+                engine.create_handoff(handoff)
+            });
+            outbound.push(handoff_result("create", Some(id), request_id, outcome));
+        }
+        ClientMessage::AdvanceHandoff {
+            predecessor_id,
+            handoff,
+            request_id,
+        } => {
+            let id = handoff.id.clone();
+            let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
+                engine.advance_handoff(&predecessor_id, handoff)
+            });
+            outbound.push(handoff_result("advance", Some(id), request_id, outcome));
+        }
+        ClientMessage::AcknowledgeHandoff {
+            handoff_id,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
+                engine.acknowledge_handoff(&handoff_id)
+            });
+            outbound.push(handoff_result(
+                "acknowledge",
+                Some(handoff_id),
+                request_id,
+                outcome,
+            ));
+        }
+        ClientMessage::CloseHandoff {
+            handoff_id,
+            reason,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
+                engine.close_handoff(&handoff_id, &reason)
+            });
+            outbound.push(handoff_result(
+                "close",
+                Some(handoff_id),
+                request_id,
+                outcome,
+            ));
+        }
+        ClientMessage::MarkHandoffDelivered {
+            handoff_id,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
+                engine.mark_handoff_delivered(&handoff_id)
+            });
+            outbound.push(handoff_result(
+                "markDelivered",
+                Some(handoff_id),
+                request_id,
+                outcome,
+            ));
+        }
+
         ClientMessage::Unknown { r#type } => debug!(r#type, "ignoring unimplemented message"),
+    }
+}
+
+fn handoff_result(
+    op: &'static str,
+    id: Option<String>,
+    request_id: Option<String>,
+    outcome: Result<(), &str>,
+) -> ServerMessage {
+    ServerMessage::HandoffResult {
+        request_id,
+        op,
+        id,
+        error: outcome.err().map(str::to_string),
     }
 }
 
@@ -2085,6 +2193,7 @@ mod tests {
             heavy: None,
             heavy_sent: None,
             chains: false,
+            handoffs: false,
             carries: HashMap::new(),
             // Nothing in these tests reads the side channel; the receiver is dropped
             // and a send on it is the no-op a departed client already gets.

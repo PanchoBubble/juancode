@@ -9,10 +9,24 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use juancoded_core::chain::{Chain, ChainMember, ChainMemberKind, ChainState};
+use juancoded_core::chain::{Handoff, HandoffDelivery, HandoffOwner, HandoffState};
 
 use crate::SqliteStore;
 
 pub trait ChainStore: Send + Sync {
+    fn handoffs(&self) -> Result<Vec<Handoff>>;
+    fn create_handoff(&self, handoff: &Handoff) -> Result<bool>;
+    /// Atomically close `predecessor` as handed off and insert its successor.
+    /// Repeating the same successor id is idempotent; a different successor conflicts.
+    fn advance_handoff(&self, predecessor: &str, successor: &Handoff, at: i64) -> Result<bool>;
+    fn update_handoff(
+        &self,
+        id: &str,
+        state: Option<HandoffState>,
+        closure_reason: Option<&str>,
+        delivery: Option<HandoffDelivery>,
+        at: i64,
+    ) -> Result<bool>;
     /// Every chain with its members, chains oldest first and members in the order they
     /// joined.
     fn chains(&self) -> Result<Vec<Chain>>;
@@ -50,6 +64,109 @@ fn previous_chain(
 }
 
 impl ChainStore for SqliteStore {
+    fn handoffs(&self) -> Result<Vec<Handoff>> {
+        let conn = self.conn_for_chains();
+        let mut stmt = conn.prepare("SELECT id, chain_slug, source_kind, source_ref, target_kind, target_ref, beads_issue, summary, created_at, updated_at, state, closure_reason, predecessor_id, successor_id, evidence_ref, delivery FROM handoffs ORDER BY created_at, id")?;
+        let rows = stmt.query_map([], |r| {
+            let owner =
+                |kind: String, reference: Option<String>| -> rusqlite::Result<HandoffOwner> {
+                    match kind.as_str() {
+                        "human" => Ok(HandoffOwner::Human),
+                        "session" => reference
+                            .map(HandoffOwner::Session)
+                            .ok_or(rusqlite::Error::InvalidQuery),
+                        _ => Err(rusqlite::Error::InvalidQuery),
+                    }
+                };
+            let state: String = r.get(10)?;
+            let delivery: String = r.get(15)?;
+            Ok(Handoff {
+                id: r.get(0)?,
+                chain_slug: r.get(1)?,
+                source: owner(r.get(2)?, r.get(3)?)?,
+                target: owner(r.get(4)?, r.get(5)?)?,
+                beads_issue: r.get(6)?,
+                summary: r.get(7)?,
+                created_at: r.get(8)?,
+                updated_at: r.get(9)?,
+                state: match state.as_str() {
+                    "pending" => HandoffState::Pending,
+                    "acknowledged" => HandoffState::Acknowledged,
+                    "closed" => HandoffState::Closed,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                },
+                closure_reason: r.get(11)?,
+                predecessor_id: r.get(12)?,
+                successor_id: r.get(13)?,
+                evidence_ref: r.get(14)?,
+                delivery: match delivery.as_str() {
+                    "not_sent" => HandoffDelivery::NotSent,
+                    "sent" => HandoffDelivery::Sent,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                },
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    fn create_handoff(&self, h: &Handoff) -> Result<bool> {
+        let conn = self.conn_for_chains();
+        let inserted = conn.execute("INSERT INTO handoffs(id,chain_slug,source_kind,source_ref,target_kind,target_ref,beads_issue,summary,created_at,updated_at,state,closure_reason,predecessor_id,successor_id,evidence_ref,delivery) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,NULL,?13,?14) ON CONFLICT(id) DO NOTHING", params![h.id,h.chain_slug,owner_parts(&h.source).0,owner_parts(&h.source).1,owner_parts(&h.target).0,owner_parts(&h.target).1,h.beads_issue,h.summary,h.created_at,h.updated_at,state_str(h.state),h.closure_reason,h.evidence_ref,delivery_str(h.delivery)])?;
+        Ok(inserted > 0)
+    }
+
+    fn advance_handoff(&self, predecessor: &str, h: &Handoff, at: i64) -> Result<bool> {
+        let mut conn = self.conn_for_chains();
+        let tx = conn.transaction()?;
+        let current: Option<(String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT state, chain_slug, successor_id FROM handoffs WHERE id=?1",
+                [predecessor],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((state, chain_slug, successor)) = current else {
+            anyhow::bail!("handoff-not-found")
+        };
+        if chain_slug != h.chain_slug {
+            anyhow::bail!("handoff-chain-mismatch")
+        }
+        if successor.as_deref() == Some(&h.id) {
+            if !handoff_matches(&tx, &h.id, h)? {
+                anyhow::bail!("handoff-id-conflict")
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        if successor.is_some() || state == "closed" {
+            anyhow::bail!("handoff-conflict")
+        }
+        let inserted = insert_handoff(&tx, h)?;
+        if !inserted {
+            anyhow::bail!("handoff-id-conflict")
+        }
+        let changed = tx.execute("UPDATE handoffs SET state='closed', closure_reason='handed_off_to', successor_id=?2, updated_at=?3 WHERE id=?1 AND successor_id IS NULL AND state!='closed'", params![predecessor,h.id,at])?;
+        if changed != 1 {
+            anyhow::bail!("handoff-conflict")
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn update_handoff(
+        &self,
+        id: &str,
+        state: Option<HandoffState>,
+        reason: Option<&str>,
+        delivery: Option<HandoffDelivery>,
+        at: i64,
+    ) -> Result<bool> {
+        let conn = self.conn_for_chains();
+        let changed = conn.execute("UPDATE handoffs SET state=COALESCE(?2,state), closure_reason=COALESCE(?3,closure_reason), delivery=COALESCE(?4,delivery), updated_at=?5 WHERE id=?1", params![id,state.map(state_str),reason,delivery.map(delivery_str),at])?;
+        Ok(changed > 0)
+    }
+
     fn chains(&self) -> Result<Vec<Chain>> {
         let conn = self.conn_for_chains();
         let mut stmt = conn.prepare(
@@ -174,9 +291,107 @@ impl ChainStore for SqliteStore {
     }
 }
 
+fn owner_parts(owner: &HandoffOwner) -> (&'static str, Option<&str>) {
+    match owner {
+        HandoffOwner::Human => ("human", None),
+        HandoffOwner::Session(id) => ("session", Some(id)),
+    }
+}
+fn state_str(state: HandoffState) -> &'static str {
+    match state {
+        HandoffState::Pending => "pending",
+        HandoffState::Acknowledged => "acknowledged",
+        HandoffState::Closed => "closed",
+    }
+}
+fn delivery_str(delivery: HandoffDelivery) -> &'static str {
+    match delivery {
+        HandoffDelivery::NotSent => "not_sent",
+        HandoffDelivery::Sent => "sent",
+    }
+}
+fn insert_handoff(tx: &rusqlite::Transaction<'_>, h: &Handoff) -> Result<bool> {
+    let src = owner_parts(&h.source);
+    let dst = owner_parts(&h.target);
+    Ok(tx.execute("INSERT INTO handoffs(id,chain_slug,source_kind,source_ref,target_kind,target_ref,beads_issue,summary,created_at,updated_at,state,closure_reason,predecessor_id,successor_id,evidence_ref,delivery) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,NULL,?14,?15) ON CONFLICT(id) DO NOTHING", params![h.id,h.chain_slug,src.0,src.1,dst.0,dst.1,h.beads_issue,h.summary,h.created_at,h.updated_at,state_str(h.state),h.closure_reason,h.predecessor_id,h.evidence_ref,delivery_str(h.delivery)])? > 0)
+}
+
+fn handoff_matches(conn: &rusqlite::Connection, id: &str, h: &Handoff) -> Result<bool> {
+    let src = owner_parts(&h.source);
+    let dst = owner_parts(&h.target);
+    let row: Option<(String, String, Option<String>, String, Option<String>, Option<String>, String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT chain_slug, source_kind, source_ref, target_kind, target_ref, beads_issue, summary, predecessor_id, evidence_ref FROM handoffs WHERE id=?1", [id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)),
+    ).optional()?;
+    Ok(row.is_some_and(|r| {
+        r == (
+            h.chain_slug.clone(),
+            src.0.into(),
+            src.1.map(str::to_string),
+            dst.0.into(),
+            dst.1.map(str::to_string),
+            h.beads_issue.clone(),
+            h.summary.clone(),
+            h.predecessor_id.clone(),
+            h.evidence_ref.clone(),
+        )
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn handoff(id: &str, predecessor_id: Option<&str>) -> Handoff {
+        Handoff {
+            id: id.into(),
+            chain_slug: "a".into(),
+            source: HandoffOwner::Human,
+            target: HandoffOwner::Session("s1".into()),
+            beads_issue: Some("juancode-043.1".into()),
+            summary: format!("work {id}"),
+            created_at: 1,
+            updated_at: 1,
+            state: HandoffState::Pending,
+            closure_reason: None,
+            predecessor_id: predecessor_id.map(str::to_string),
+            successor_id: None,
+            evidence_ref: Some("commit:abc".into()),
+            delivery: HandoffDelivery::NotSent,
+        }
+    }
+
+    #[test]
+    fn handoffs_survive_restart_and_advancement_is_atomic_idempotent_and_single_successor() {
+        let dir = std::env::temp_dir().join(format!("juancoded-handoffs-{}", uuid_like()));
+        let path = dir.join("juancoded-rust.db");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store.create_chain("a", 1).unwrap();
+            assert!(store.create_handoff(&handoff("h1", None)).unwrap());
+            assert!(!store.create_handoff(&handoff("h1", None)).unwrap());
+            assert!(store
+                .advance_handoff("h1", &handoff("h2", Some("h1")), 2)
+                .unwrap());
+            assert!(!store
+                .advance_handoff("h1", &handoff("h2", Some("h1")), 3)
+                .unwrap());
+            let mut changed_retry = handoff("h2", Some("h1"));
+            changed_retry.summary = "different payload".into();
+            assert!(store.advance_handoff("h1", &changed_retry, 3).is_err());
+            assert!(store
+                .advance_handoff("h1", &handoff("h3", Some("h1")), 4)
+                .is_err());
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let history = store.handoffs().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].successor_id.as_deref(), Some("h2"));
+        assert_eq!(history[0].state, HandoffState::Closed);
+        assert_eq!(history[0].closure_reason.as_deref(), Some("handed_off_to"));
+        assert_eq!(history[1].predecessor_id.as_deref(), Some("h1"));
+        assert_eq!(history[1].delivery, HandoffDelivery::NotSent);
+    }
 
     fn member(kind: ChainMemberKind, ref_id: &str, at: i64) -> ChainMember {
         ChainMember {

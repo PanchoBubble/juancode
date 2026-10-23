@@ -421,6 +421,28 @@ sessionless `error` is read by clients as the answer to whatever request is in f
 | `chain {chain}` | one chain, whole, after it moved; a move is two of these (joined, then left) |
 | `chainRemoved {slug}` | a chain was deleted |
 
+**Durable handoffs** (capability `chainHandoffs`). Handoffs are daemon records linked
+to a chain and optionally a Beads issue; Beads remains the authority for issue state.
+Migration 14 retains closed rows and prevents deleting a chain that still has history.
+Owners are `{"kind":"human"}` or `{"kind":"session","sessionId":"…"}`.
+Session owners must exist when written; if a session is later removed, its owner id is
+kept as history and consumers treat it as stale. No wire write sends a notification.
+`delivery` records `not_sent`/`sent` independently of `state` (`pending`,
+`acknowledged`, `closed`).
+
+| Client → core | |
+| --- | --- |
+| `subscribeHandoffs` | full history now, then changed records; repeat is idempotent |
+| `createHandoff {handoff}` | create a stable client-id record; exact retry is idempotent |
+| `advanceHandoff {predecessorId, handoff}` | atomically close predecessor as `handed_off_to`, link one successor and insert it; exact retry is idempotent |
+| `acknowledgeHandoff {handoffId}` / `closeHandoff {handoffId, closureReason}` | explicit lifecycle; closure reason is required |
+| `markHandoffDelivered {handoffId}` | record transport delivery only; it does not acknowledge |
+
+Every write answers with `handoffResult {requestId?, op, id?, ok, error?}`. Subscribers
+receive `handoffs {handoffs}` and then `handoff {handoff}`. Handoffs do not auto-close
+their chain: any pending or acknowledged handoff blocks automatic chain closure. This
+capability is daemon-only in this slice; clients without it continue using `chains`.
+
 **Auto-join** (capability `chainInherit`, `Chains::inherit`). A new item inherits the
 chain of the session it came from, once, at creation:
 

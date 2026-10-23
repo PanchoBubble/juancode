@@ -307,6 +307,24 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE chain_members ADD COLUMN done INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 14: durable handoff history. Closure leaves rows in place; the partial unique
+    // predecessor index makes a handoff advance a single-successor transaction.
+    r#"
+    CREATE TABLE handoffs (
+        id TEXT PRIMARY KEY,
+        chain_slug TEXT NOT NULL REFERENCES chains(slug) ON DELETE RESTRICT,
+        source_kind TEXT NOT NULL, source_ref TEXT,
+        target_kind TEXT NOT NULL, target_ref TEXT,
+        beads_issue TEXT, summary TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        state TEXT NOT NULL, closure_reason TEXT,
+        predecessor_id TEXT REFERENCES handoffs(id) ON DELETE RESTRICT,
+        successor_id TEXT REFERENCES handoffs(id) ON DELETE RESTRICT,
+        evidence_ref TEXT, delivery TEXT NOT NULL DEFAULT 'not_sent'
+    );
+    CREATE UNIQUE INDEX handoffs_one_successor ON handoffs(predecessor_id) WHERE predecessor_id IS NOT NULL;
+    CREATE INDEX handoffs_by_chain ON handoffs(chain_slug, created_at, id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
