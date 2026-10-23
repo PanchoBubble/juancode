@@ -147,6 +147,12 @@ private struct WindowContent: View {
         .sheet(isPresented: $showDbRecovery) {
             DatabaseRecoveryView()
         }
+        .task {
+            while !Task.isCancelled {
+                await model.tiltRuntime.refresh()
+                do { try await Task.sleep(for: .seconds(5)) } catch { break }
+            }
+        }
         .onAppear { if model.degradedReason != nil { showDbRecovery = true } }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -2049,6 +2055,7 @@ private struct SessionRowHost: View {
                    runHelp: runCommand.map {
                        "Run `\($0)` in \(URL(fileURLWithPath: meta.cwd).lastPathComponent)"
                    } ?? "",
+                   tiltRuntime: external ? nil : model.tiltRuntime,
                    selected: selected,
                    activating: model.isActivating(meta.id),
                    asleep: model.isResting(meta),
@@ -2212,6 +2219,7 @@ private struct FolderHeader: View {
                     .padding(4)
                     .fixesPopoverFirstClick()
                 }
+                TiltRuntimeBadge(monitor: model.tiltRuntime, path: group.cwd, project: true)
                 // The project's run command, in the main checkout. Unset, it opens the
                 // editor instead, so the button is how you discover the feature.
                 Button {
@@ -2712,6 +2720,7 @@ struct SessionRow: View {
     /// ▶. Nil when there is no command for it, or for external rows.
     var onRun: (() -> Void)? = nil
     var runHelp: String = ""
+    var tiltRuntime: TiltRuntimeMonitor? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
     var selected: Bool = false
@@ -2757,6 +2766,9 @@ struct SessionRow: View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let tiltRuntime {
+                TiltRuntimeBadge(monitor: tiltRuntime, path: meta.cwd)
+            }
             statusIndicator
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             VStack(alignment: .leading, spacing: 2) {

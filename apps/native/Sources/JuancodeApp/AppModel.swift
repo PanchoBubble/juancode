@@ -1867,6 +1867,8 @@ final class AppModel {
         worktreeByProject = next
     }
 
+    let tiltRuntime = TiltRuntimeMonitor()
+
     /// Per-project run commands behind the play buttons, keyed by project cwd.
     /// Persisted; a project without a main command shows its play button as "set up".
     var runCommandsByProject: [String: RunCommand.Pair] =
@@ -5134,6 +5136,24 @@ final class AppModel {
     /// aliases) and Ctrl-C leaves a prompt to rerun from. The pty buffers input
     /// until the shell reads it.
     private func startRun(_ template: String, project: String, checkout: String, host: String) {
+        Task {
+            await tiltRuntime.refresh()
+            let others = tiltRuntime.inProject(project).filter {
+                $0.checkout != TiltRuntime.canonical(checkout)
+            }
+            if !others.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = "Tilt is running in another checkout"
+                alert.informativeText = "Running in \(others.map(\.name).joined(separator: ", ")). Starting here may stop or replace that stack."
+                alert.addButton(withTitle: "Run Here")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+            }
+            launchRun(template, project: project, checkout: checkout, host: host)
+        }
+    }
+
+    private func launchRun(_ template: String, project: String, checkout: String, host: String) {
         let branch = folderGitState(checkout)?.branch ?? RunCommand.currentBranch(at: checkout)
         let line = RunCommand.expand(template, .init(worktree: checkout, branch: branch, project: project))
         var panel = terminalPanel(host)
