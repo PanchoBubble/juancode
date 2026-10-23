@@ -3,7 +3,7 @@ import AppKit
 import JuancodeCore
 import JuancodeDesktop
 
-// The chain view: opening a chain puts a strip over the detail area
+// The chain view: opening a chain puts an overview and member strip over the detail area
 // — the chain's badge, an exit button, and one tab per member. A session tab is the
 // selection itself, so its pane is the ordinary keep-alive session pane underneath;
 // every other tab draws one of the cards below over it. The open/exit/tab API is on
@@ -19,12 +19,12 @@ struct ChainTabStrip: View {
     var body: some View {
         HStack(spacing: 8) {
             Button {
-                model.showChainDetail(slug: chain.slug)
+                model.selectChainOverview()
             } label: {
                 ChainBadge(chain: chain, opens: false, size: 11)
             }
             .buttonStyle(.plain)
-            .help("Every member of \(chain.slug), grouped, with search")
+            .help("Show the \(chain.slug) overview")
             .clickCursor()
             Button {
                 model.exitChain()
@@ -64,6 +64,148 @@ struct ChainTabStrip: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color.appBand)
+    }
+}
+
+/// Actionable landing surface for a chain. The member strip remains available above
+/// it, while this compact grouped list exposes current state and direct navigation.
+struct ChainOverviewView: View {
+    @Environment(AppModel.self) private var model
+    let chain: Chain
+    @State private var query = ""
+
+    var body: some View {
+        let rows = model.chainDetailRows(chain)
+        let sections = ChainDetail.sections(rows, query: query)
+        let attention = model.chainAttention(chain)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(chain.slug).font(.title2.weight(.semibold)).textSelection(.enabled)
+                    HStack(spacing: 8) {
+                        Label(chain.isActive ? "Active" : "Closed", systemImage: chain.isActive ? "circle.fill" : "checkmark.circle")
+                            .foregroundStyle(chain.isActive ? Color.green : Color.secondary)
+                        Text("\(chain.members.count) member\(chain.members.count == 1 ? "" : "s")")
+                        Text("·")
+                        Text(chain.isActive ? "Started \(relativeTime(chain.createdAt))" : "Closed \(chain.closedAt.map(relativeTime) ?? "")")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    if attention.total > 0 {
+                        Label("\(attention.total) need attention", systemImage: "exclamationmark.circle.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("\(attention.waitingInput) sessions need input, \(attention.needsDecision) pull requests need a decision")
+                    } else {
+                        Label("No attention needed", systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 4)
+                Menu {
+                    if chain.isActive {
+                        Button("Close Chain") { Task { await model.closeChain(chain.slug) } }
+                    } else {
+                        Button("Reopen Chain") { Task { await model.reopenChain(chain.slug) } }
+                    }
+                    Button("Manage Members…") { model.showChainDetail(slug: chain.slug) }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .help("Chain actions")
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search members", text: $query)
+                    .textFieldStyle(.plain)
+                    .accessibilityLabel("Search chain members")
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
+
+            if sections.isEmpty {
+                ContentUnavailableView(
+                    chain.members.isEmpty ? "No members yet" : "No matching members",
+                    systemImage: chain.members.isEmpty ? "link" : "magnifyingglass",
+                    description: Text(chain.members.isEmpty ? "Add sessions, pull requests or tickets to this chain." : "Try a different search.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(section.group.title.uppercased())
+                                        .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                                    Text("\(section.rows.count)").font(.caption2).foregroundStyle(.tertiary)
+                                    Spacer()
+                                }
+                                ForEach(section.rows) { row in
+                                    ChainOverviewMemberRow(row: row) {
+                                        model.selectChainMember(row.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.appSurface)
+    }
+}
+
+private struct ChainOverviewMemberRow: View {
+    @Environment(AppModel.self) private var model
+    let row: ChainDetailRow
+    let open: () -> Void
+
+    var body: some View {
+        let label = ChainTabLabel(row.member, model: model)
+        Button(action: open) {
+            HStack(spacing: 10) {
+                Image(systemName: label.icon).foregroundStyle(label.tint).frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title).font(.callout).lineLimit(1).truncationMode(.tail)
+                    HStack(spacing: 5) {
+                        Text(row.member.ref).lineLimit(1)
+                        if let project = row.project, !project.isEmpty {
+                            Text("·")
+                            Text(project).lineLimit(1)
+                        }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                if let status = row.status {
+                    Text(status).font(.caption).lineLimit(1)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.appHairline(0.1)))
+                }
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 9).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.04)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(label.missing ? 0.65 : 1)
+        .help(label.missing ? "Missing member: \(row.title)" : "Open \(row.title)")
+        .accessibilityLabel("\(row.title), \(row.group.title), \(row.status ?? "status unavailable")\(row.project.map { ", \($0)" } ?? "")")
+        .accessibilityHint("Opens this member inside the chain")
     }
 }
 

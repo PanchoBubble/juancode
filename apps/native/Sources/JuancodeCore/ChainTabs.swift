@@ -47,19 +47,11 @@ extension Chain {
 /// open/exit/step paths and a book update all agree. Tabs are the members in the
 /// order they joined.
 public enum ChainTabs {
-    /// The tab opening `chain` lands on: the member asked for, else the one last
-    /// viewed in this chain, else the session already on screen when it is a member
-    /// (opening your own session's chain should not move you), else the first.
-    /// Nil only for an empty chain.
-    public static func landing(in chain: Chain, asked: ChainMemberRef?,
-                               remembered: ChainMemberRef?, showing: String?) -> ChainMemberRef? {
-        if let asked, chain.contains(asked) { return asked }
-        if let remembered, chain.contains(remembered) { return remembered }
-        if let showing {
-            let session = ChainMemberRef(kind: .session, ref: showing)
-            if chain.contains(session) { return session }
-        }
-        return chain.members.first?.memberRef
+    /// A chain opens to its overview unless an entry point explicitly requested a
+    /// member tab. Ignore stale references that no longer belong to the chain.
+    public static func opening(in chain: Chain, requested: ChainMemberRef?) -> ChainMemberRef? {
+        guard let requested, chain.contains(requested) else { return nil }
+        return requested
     }
 
     /// The tab `offset` places from `current`, wrapping at both ends. From no tab (or

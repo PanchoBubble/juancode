@@ -22,13 +22,12 @@ import Testing
         #expect(ChainMemberRef(key: "session") == nil)
     }
 
-    @Test func openingLandsOnTheAskedThenRememberedThenShowingThenFirst() {
+    @Test func openingUsesTheRequestedMemberOrShowsTheOverview() {
         let c = chain([pr, s1, bd])
-        #expect(ChainTabs.landing(in: c, asked: bd, remembered: pr, showing: "s1") == bd)
-        #expect(ChainTabs.landing(in: c, asked: lin, remembered: pr, showing: "s1") == pr)
-        #expect(ChainTabs.landing(in: c, asked: nil, remembered: lin, showing: "s1") == s1)
-        #expect(ChainTabs.landing(in: c, asked: nil, remembered: nil, showing: "other") == pr)
-        #expect(ChainTabs.landing(in: chain([]), asked: nil, remembered: nil, showing: nil) == nil)
+        #expect(ChainTabs.opening(in: c, requested: bd) == bd)
+        #expect(ChainTabs.opening(in: c, requested: lin) == nil)
+        #expect(ChainTabs.opening(in: c, requested: nil) == nil)
+        #expect(ChainTabs.opening(in: chain([]), requested: nil) == nil)
     }
 
     @Test func steppingWrapsBothWays() {

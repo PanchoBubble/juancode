@@ -3169,7 +3169,11 @@ struct DetailView: View {
                 ChainTabStrip(chain: chain.chain, selected: chain.member?.memberRef)
                 Divider()
             }
-            content(chainCard: chainCard(chain?.member))
+            if let chain, chain.member == nil {
+                ChainOverviewView(chain: chain.chain)
+            } else {
+                content(chainCard: chainCard(chain?.member))
+            }
         }
     }
 

@@ -5628,9 +5628,8 @@ final class AppModel {
     @ObservationIgnored private var chainDrivesSelection = false
     /// Points the Oracle dock at an Oracle and slides it in. Set by `OracleModel`.
     @ObservationIgnored var revealOracle: ((String) -> Void)?
-    private static let chainLastTabKey = "chain.lastTab"
 
-    /// Open `slug`'s chain view on `member`, or on the tab last viewed in it. A no-op
+    /// Open `slug`'s chain overview, or a requested member tab. A no-op
     /// for a slug the book does not have. Opening another chain over an open one keeps
     /// the first one's way back, so exit always returns to where you started.
     func openChain(slug: String, member: ChainMemberRef? = nil) {
@@ -5640,10 +5639,8 @@ final class AppModel {
         showingGitHub = false
         showingBeads = false
         let returnTo = chainView?.returnTo ?? selection
-        let remembered = (UserDefaults.standard.dictionary(forKey: Self.chainLastTabKey)?[slug] as? String)
-            .flatMap(ChainMemberRef.init(key:))
         chainView = ChainViewState(slug: slug, selected: nil, returnTo: returnTo)
-        if let tab = ChainTabs.landing(in: chain, asked: member, remembered: remembered, showing: selection) {
+        if let tab = ChainTabs.opening(in: chain, requested: member) {
             selectChainMember(tab)
         }
     }
@@ -5661,7 +5658,6 @@ final class AppModel {
     func selectChainMember(_ member: ChainMemberRef) {
         guard let open = chainView, chains[open.slug]?.contains(member) == true else { return }
         chainView?.selected = member
-        rememberChainTab(member, in: open.slug)
         guard member.kind == .session else { return }
         if isOracleSession(member.ref) {
             revealOracle?(member.ref)
@@ -5672,6 +5668,12 @@ final class AppModel {
             selection = member.ref
             chainDrivesSelection = false
         }
+    }
+
+    /// Return from a member card or pane to the open chain's overview.
+    func selectChainOverview() {
+        guard chainView != nil else { return }
+        chainView?.selected = nil
     }
 
     /// The next (`1`) or previous (`-1`) tab, wrapping.
@@ -5691,13 +5693,6 @@ final class AppModel {
         }
     }
 
-    private func rememberChainTab(_ member: ChainMemberRef, in slug: String) {
-        var tabs = UserDefaults.standard.dictionary(forKey: Self.chainLastTabKey) ?? [:]
-        guard tabs[slug] as? String != member.key else { return }
-        tabs[slug] = member.key
-        UserDefaults.standard.set(tabs, forKey: Self.chainLastTabKey)
-    }
-
     /// `selection` moved. A session of the open chain makes its tab the showing one
     /// (a sidebar click on a member is a tab switch); anywhere else leaves the chain.
     private func followSelectionIntoChain() {
@@ -5705,7 +5700,6 @@ final class AppModel {
         if let id = selection, chains[open.slug]?.contains(ChainMemberRef(kind: .session, ref: id)) == true {
             let tab = ChainMemberRef(kind: .session, ref: id)
             chainView?.selected = tab
-            rememberChainTab(tab, in: open.slug)
         } else {
             chainView = nil
         }
@@ -5719,6 +5713,8 @@ final class AppModel {
             exitChain()
             return
         }
+        // nil is the overview, which remains useful as members arrive or disappear.
+        guard open.selected != nil else { return }
         let tab = ChainTabs.reconcile(open.selected, old: old, new: chain)
         guard tab != open.selected else { return }
         if let tab { selectChainMember(tab) } else { chainView?.selected = nil }

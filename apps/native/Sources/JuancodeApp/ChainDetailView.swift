@@ -60,12 +60,11 @@ struct ChainDetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                Button("Open Chain") {
+                Button("Open Overview") {
                     model.chainDetail = nil
                     model.openChain(slug: slug)
                 }
-                .disabled(chain.members.isEmpty)
-                .help("Show this chain's members as tabs over the detail area")
+                .help("Open this chain's overview in the detail area")
                 .clickCursor()
                 Menu {
                     if chain.isActive {
