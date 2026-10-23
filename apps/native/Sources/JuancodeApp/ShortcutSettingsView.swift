@@ -6,6 +6,14 @@ import SwiftUI
 
 struct ShortcutSettingsView: View {
     @Environment(Shortcuts.self) private var shortcuts
+    @State private var query = ""
+
+    private var filteredActions: [ShortcutAction] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ShortcutAction.allCases.filter {
+            search.isEmpty || $0.title.localizedStandardContains(search)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -18,13 +26,37 @@ struct ShortcutSettingsView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
 
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Find a command…", text: $query)
+                    .textFieldStyle(.plain)
+                    .accessibilityLabel("Find a keyboard shortcut")
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear shortcut search")
+                    .help("Clear search")
+                }
+            }
+            .padding(8)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+
             Divider()
 
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(Array(ShortcutAction.allCases.enumerated()), id: \.element.id) { idx, action in
+                    ForEach(Array(filteredActions.enumerated()), id: \.element.id) { idx, action in
                         ShortcutRow(action: action)
-                        if idx < ShortcutAction.allCases.count - 1 { Divider() }
+                        if idx < filteredActions.count - 1 { Divider() }
+                    }
+                    if filteredActions.isEmpty {
+                        Text("No matching commands. Try “session”, “terminal”, or “editor”.")
+                            .foregroundStyle(.secondary)
+                            .padding(24)
                     }
                 }
             }
@@ -94,6 +126,7 @@ private struct ShortcutRow: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .onAppear { keyText = displayKey(binding.key) }
+        .onChange(of: binding.key) { _, key in keyText = displayKey(key) }
     }
 
     private func modChip(_ symbol: String, _ keyPath: WritableKeyPath<KeyBinding, Bool>) -> some View {
