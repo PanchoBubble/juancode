@@ -1377,8 +1377,8 @@ final class AppModel {
     /// `target` keeping the keyboard. An in-place editor split on either gives way
     /// (its editor stays open as a tab, back once the pair ends).
     func splitSession(_ target: String, with dropped: String, zone: SessionDropZone) {
-        guard TerminalBackend.shared.useGhostty,
-              sessions.contains(where: { $0.id == target }),
+        guard TerminalBackend.shared.useGhostty, target != dropped,
+              sessions.contains(where: { $0.id == target && $0.kind != .editor }),
               let meta = sessions.first(where: { $0.id == dropped }),
               meta.kind != .editor
         else { return }
@@ -2164,6 +2164,37 @@ final class AppModel {
         let root = repoRoot(forSession: meta)
         let worktree = worktreeDefault(forProject: root)
         createInFolder(provider: meta.provider, cwd: worktree ? root : meta.cwd, isolateWorktree: worktree)
+    }
+
+    /// Create alongside the selected agent, leaving it visible during the spawn.
+    private(set) var creatingSplit = false
+
+    func quickNewSplitSession() {
+        guard TerminalBackend.shared.useGhostty else {
+            errorMessage = "Session splits require the Ghostty terminal backend."
+            return
+        }
+        guard !creatingSplit else { return }
+        guard let target = selection,
+              let meta = sessions.first(where: { $0.id == target && $0.kind != .editor }) else {
+            showingNewSession = true
+            return
+        }
+        creatingSplit = true
+        let root = repoRoot(forSession: meta)
+        let worktree = worktreeDefault(forProject: root)
+        Task {
+            defer { creatingSplit = false }
+            guard let created = await create(provider: meta.provider,
+                                             cwd: worktree ? root : meta.cwd,
+                                             skipPermissions: true,
+                                             isolateWorktree: worktree) else { return }
+            // A completed spawn must not pull the user away from another session.
+            guard selection == target, sessions.contains(where: { $0.id == target }) else { return }
+            splitSession(target, with: created.id, zone: .trailing)
+            selection = created.id
+            focusTerminal()
+        }
     }
 
     /// Open the user's editor (`JUANCODE_EDITOR`, default nvim) IN PLACE for

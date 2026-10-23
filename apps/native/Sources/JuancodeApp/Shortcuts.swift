@@ -15,6 +15,7 @@ import AppKit
 /// don't rename cases without a migration.
 enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case newSessionSameProject
+    case newSessionSplit
     case newSessionSheet
     case jumpPalette
     case quickOpen
@@ -53,6 +54,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     /// Matches the existing menu titles in App.swift.
     var title: String {
         switch self {
+        case .newSessionSplit: return "New Session in Split"
         case .newSessionSameProject: return "New Session (same agent & folder)"
         case .newSessionSheet: return "New Session…"
         case .jumpPalette: return "Jump to Session…"
@@ -92,6 +94,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     /// The factory binding — must mirror the original hardcoded shortcuts.
     var defaultBinding: KeyBinding {
         switch self {
+        case .newSessionSplit: return KeyBinding(key: "s", command: true)
         case .newSessionSameProject: return KeyBinding(key: "n", command: true)
         case .newSessionSheet: return KeyBinding(key: "n", command: true, shift: true)
         // ⌘K is the jump palette (juancode-dr0); prompt templates moved to ⌘⇧K.
@@ -302,6 +305,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         // With the Oracle dock open, "new" means a new Oracle session — the dock is
         // the surface you're looking at (⌘N and ⌃N both land here via the monitor).
         if oracle.expanded { oracle.newOracle() } else { model.quickNewSession() }
+    case .newSessionSplit: model.quickNewSplitSession()
     case .newSessionSheet: model.showingNewSession = true
     case .jumpPalette: model.showingJumpPalette = true
     case .quickOpen: model.openQuickOpen()

@@ -85,6 +85,20 @@ public struct SessionPairs: Equatable, Sendable {
         return true
     }
 
+    /// Keep visible partners adjacent without reintroducing filtered-out sessions.
+    public func sidebarOrder(_ ids: [String]) -> [String] {
+        let visible = Set(ids)
+        var emitted = Set<String>()
+        var result: [String] = []
+        for id in ids where !emitted.contains(id) {
+            let members = pair(for: id).map { [$0.first, $0.second] } ?? [id]
+            for member in members where visible.contains(member) && emitted.insert(member).inserted {
+                result.append(member)
+            }
+        }
+        return result
+    }
+
     /// End the pair `id` is in (it closed, or went back to one pane). Returns the
     /// pair that ended.
     @discardableResult

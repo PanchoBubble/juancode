@@ -4,6 +4,17 @@ import Testing
 
 /// Two sessions in one pane, made by dragging one onto the other (juancode-8rk).
 @Suite struct SessionPairsTests {
+    @Test func sidebarKeepsPartnersTogetherInPaneOrder() {
+        var pairs = SessionPairs()
+        pairs.split("a", with: "b", zone: .trailing)
+        #expect(pairs.sidebarOrder(["b", "c", "a", "d"]) == ["a", "b", "c", "d"])
+        #expect(pairs.sidebarOrder(["c", "a", "d", "b"]) == ["c", "a", "b", "d"])
+        // Filtering and project boundaries must not bring excluded rows back.
+        #expect(pairs.sidebarOrder(["b", "c"]) == ["b", "c"])
+        pairs.remove(session: "a")
+        #expect(pairs.sidebarOrder(["b", "c", "a"]) == ["b", "c", "a"])
+    }
+
     @Test func droppingOnTheTrailingHalfPutsTheDroppedSessionSecond() {
         var pairs = SessionPairs()
         #expect(pairs.split("a", with: "b", zone: .trailing))

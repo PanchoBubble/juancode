@@ -749,9 +749,6 @@ struct SidebarView: View {
     @State private var expandedFolders: Set<String> = []
     /// The folder header currently under a drag (by cwd), for the drop highlight.
     @State private var dropTarget: String?
-    /// The scroll-box session row currently under a drag (by id), for the drop
-    /// highlight. The native List rows get theirs from `.onMove` for free.
-    @State private var sessionDropTarget: String?
 
     /// How many session rows a folder shows before offering "Load more".
     private let folderPreviewCount = 5
@@ -1250,21 +1247,6 @@ struct SidebarView: View {
         }
     }
 
-    /// `.onMove` handler for the List's session rows. `shown` is the ForEach's
-    /// data — the whole group or the folded preview — and `from`/`to` are in its
-    /// coordinates; rows hidden behind "Load more" keep their relative order.
-    private func moveSessions(in group: FolderGroup, shown: [SessionMeta], from: IndexSet, to: Int) {
-        guard let first = from.first else { return }
-        var shownIds = shown.map(\.id)
-        let movedId = shownIds[first]
-        shownIds.move(fromOffsets: from, toOffset: to)
-        // The preview isn't necessarily a prefix (`previewSessions` pulls live rows
-        // up out of the tail), so the hidden remainder is "everything not shown".
-        let shownSet = Set(shownIds)
-        let displayed = shownIds + group.sessions.map(\.id).filter { !shownSet.contains($0) }
-        persistSessionOrder(group, displayedAfterMove: displayed, moved: movedId)
-    }
-
     /// The rows a folder shows while folded: the first `folderPreviewCount`, plus any
     /// live session sorting below them, plus any session we auto-slept that the user
     /// hasn't dismissed. Live rows usually float to the top, but a manual drag order
@@ -1274,12 +1256,12 @@ struct SidebarView: View {
     /// user, so the fold only takes them once the user waves them off — or once
     /// they've been asleep a full day (`AppModel.isResting`, `foldedPreviewKeeps`).
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
-        let s = group.sessions
+        let s = pairedOrder(group.sessions)
         guard !filterActive, s.count > folderPreviewCount else { return s }
         return s.enumerated()
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
-                                   live: model.isLive($0.element.id),
+                                   live: model.isLive($0.element.id) || model.sessionPair(for: $0.element.id) != nil,
                                    sleepingUndismissed: model.isResting($0.element))
             }
             .map(\.element)
@@ -1307,7 +1289,7 @@ struct SidebarView: View {
         var ids: [String] = []
         for group in groups where !isCollapsed(group.cwd) {
             let shown = expandedFolders.contains(group.cwd)
-                ? group.sessions : previewSessions(group)
+                ? pairedOrder(group.sessions) : previewSessions(group)
             for meta in shown where !model.isExternal(meta.id) { ids.append(meta.id) }
         }
         return ids
@@ -1614,29 +1596,28 @@ struct SidebarView: View {
         }
     }
 
+    private func pairedOrder(_ sessions: [SessionMeta]) -> [SessionMeta] {
+        let byID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+        return model.sessionPairs.sidebarOrder(sessions.map(\.id)).compactMap { byID[$0] }
+    }
+
     /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
     /// with a "Load more" affordance, and once expanded a fixed-height box that scrolls
     /// internally so the sidebar doesn't grow. The preview always carries every active
     /// (live) session, wherever it sorts — see `previewSessions`.
     @ViewBuilder
     private func sessionList(_ group: FolderGroup, dividerFirst: Bool) -> some View {
-        let sessions = group.sessions
-        let shown = previewSessions(group)
+        let sessions = pairedOrder(group.sessions)
+        let shown = pairedOrder(previewSessions(group))
         if shown.count == sessions.count {
             ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
-                nativeRow(meta, divider: dividerFirst || index > 0)
-            }
-            .onMove { from, to in
-                moveSessions(in: group, shown: sessions, from: from, to: to)
+                nativeRow(meta, in: group, divider: dividerFirst || index > 0)
             }
         } else if expandedFolders.contains(group.cwd) {
             scrollBox(group, dividerFirst: dividerFirst)
         } else {
             ForEach(Array(shown.enumerated()), id: \.element.id) { index, meta in
-                nativeRow(meta, divider: dividerFirst || index > 0)
-            }
-            .onMove { from, to in
-                moveSessions(in: group, shown: shown, from: from, to: to)
+                nativeRow(meta, in: group, divider: dividerFirst || index > 0)
             }
             foldButton("Load more (\(sessions.count - shown.count))", systemImage: "chevron.down.circle") {
                 _ = expandedFolders.insert(group.cwd)
@@ -1663,41 +1644,17 @@ struct SidebarView: View {
     }
 
     /// All of a folder's sessions inside a height-capped, internally scrolling box.
-    /// These rows can't use the List's selection or `.onMove`, so taps set the
-    /// selection by hand and reordering is drag-a-row-onto-another, like the
-    /// project headers.
+    /// Taps set selection by hand; the shared drag modifier handles splits and
+    /// top-edge drops for reordering, just like ordinary rows.
     @ViewBuilder
     private func scrollBox(_ group: FolderGroup, dividerFirst: Bool) -> some View {
-        let sessions = group.sessions
+        let sessions = pairedOrder(group.sessions)
         let cwd = group.cwd
         VStack(spacing: 0) {
             ContainedScroll(maxHeight: CGFloat(folderScrollMaxHeight)) {
                 VStack(spacing: 0) {
                     ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
-                        scrollRow(meta, divider: dividerFirst || index > 0)
-                            .overlay(alignment: .top) {
-                                Rectangle()
-                                    .fill(Color.accentColor)
-                                    .frame(height: 2)
-                                    .opacity(sessionDropTarget == meta.id ? 1 : 0)
-                            }
-                            .draggable(meta.id) {
-                                Text(meta.title)
-                                    .font(.system(size: 12))
-                                    .padding(.horizontal, 8).padding(.vertical, 4)
-                                    .background(Color.appSurface.opacity(0.8))
-                            }
-                            .dropDestination(for: String.self) { items, _ in
-                                sessionDropTarget = nil
-                                guard let dragged = items.first else { return false }
-                                return reorderSessions(in: group, moving: dragged, onto: meta.id)
-                            } isTargeted: { hovering in
-                                withAnimation(.easeOut(duration: 0.12)) {
-                                    sessionDropTarget = hovering
-                                        ? meta.id
-                                        : (sessionDropTarget == meta.id ? nil : sessionDropTarget)
-                                }
-                            }
+                        scrollRow(meta, in: group, divider: dividerFirst || index > 0)
                     }
                 }
             }
@@ -1716,9 +1673,11 @@ struct SidebarView: View {
 
     /// A row rendered as a native List cell (selection + keyboard nav via `.tag`).
     @ViewBuilder
-    private func nativeRow(_ meta: SessionMeta, divider: Bool) -> some View {
+    private func nativeRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
         sessionRow(meta, external: external)
+            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model,
+                                         reorder: { reorderSessions(in: group, moving: $0, onto: meta.id) }))
             .modifier(SidebarRowChrome(divider: divider,
                                        selected: external ? nil : model.selection == meta.id))
             .modifier(SidebarListRow())
@@ -1738,9 +1697,11 @@ struct SidebarView: View {
     /// A row inside the scroll box: manual tap-to-select + highlight (the List's own
     /// selection machinery doesn't reach views nested in a ScrollView).
     @ViewBuilder
-    private func scrollRow(_ meta: SessionMeta, divider: Bool) -> some View {
+    private func scrollRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
         sessionRow(meta, external: external)
+            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model,
+                                         reorder: { reorderSessions(in: group, moving: $0, onto: meta.id) }))
             .modifier(SidebarRowChrome(divider: divider,
                                        selected: external ? nil : model.selection == meta.id))
             .pointerCursor(enabled: !external)
@@ -1810,13 +1771,28 @@ struct SidebarView: View {
 
     /// One session's row, as its own view so the per-session state it paints is
     /// observed there instead of here (see `SessionRowHost`).
-    private func sessionRow(_ meta: SessionMeta, external: Bool) -> SessionRowHost {
-        SessionRowHost(meta: meta, external: external,
-                       selected: model.selection == meta.id,
-                       titleHighlight: titleHighlight,
-                       bodySnippet: bodyHits[meta.id].flatMap { $0.isEmpty ? nil : $0 },
-                       confirmClose: { confirmingClose = meta },
-                       menu: { AnyView(rowContextMenu(meta)) })
+    private func sessionRow(_ meta: SessionMeta, external: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let pair = model.sessionPair(for: meta.id),
+               let partner = model.sessions.first(where: { $0.id == pair.partner(of: meta.id) }) {
+                Label("Split · " + partner.title, systemImage: pair.axis == .sideBySide ? "rectangle.split.2x1" : "rectangle.split.1x2")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+            }
+            SessionRowHost(meta: meta, external: external,
+                           selected: model.selection == meta.id,
+                           titleHighlight: titleHighlight,
+                           bodySnippet: bodyHits[meta.id].flatMap { $0.isEmpty ? nil : $0 },
+                           confirmClose: { confirmingClose = meta },
+                           menu: { AnyView(rowContextMenu(meta)) })
+        }
+        .overlay(alignment: .leading) {
+            if model.sessionPair(for: meta.id) != nil {
+                Rectangle().fill(Color.accentColor).frame(width: 2)
+            }
+        }
     }
 
     /// The query to mark in row titles, nil when there isn't one.
@@ -1836,6 +1812,9 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func rowContextMenu(_ meta: SessionMeta) -> some View {
+        if model.sessionPair(for: meta.id) != nil {
+            Button("Ungroup Split") { model.closeSessionSplit(keeping: meta.id) }
+        }
         if model.isExternal(meta.id) {
             Button("Resume in juancode") { model.importExternalSession(meta.id) }
         } else {
@@ -3504,7 +3483,7 @@ struct SessionContainer: View {
             // Drag a sidebar session onto the pane to show it beside this one
             // (juancode-8rk). A terminal only takes file drags, so a session row's
             // text payload falls through to here.
-            .onDrop(of: [.utf8PlainText], delegate: SessionSplitDropDelegate(
+            .onDrop(of: [.text], delegate: SessionSplitDropDelegate(
                 size: geo.size, enabled: TerminalBackend.shared.useGhostty,
                 isSession: { id in id != meta.id && model.sessions.contains(where: { $0.id == id }) },
                 zone: $dropZone,
@@ -3670,6 +3649,7 @@ struct SessionContainer: View {
                     // `entry.live` re-types the pooled handle (see `LivePanePool.Entry.live`).
                     if let session = entry.live {
                         GhosttyLive(session: session,
+                                    remembersSize: pair == nil,
                                     focusToken: model.terminalFocusToken,
                                     resyncToken: model.terminalResyncToken,
                                     autoFocusOnAppear: !model.suppressTerminalAutoFocus,
@@ -4007,7 +3987,7 @@ private struct SessionSplitDropDelegate: DropDelegate {
     let onDrop: @MainActor (String, SessionDropZone) -> Void
 
     func validateDrop(info: DropInfo) -> Bool {
-        enabled && info.hasItemsConforming(to: [.utf8PlainText])
+        enabled && info.hasItemsConforming(to: [.text])
     }
 
     func dropEntered(info: DropInfo) {
@@ -4042,7 +4022,7 @@ private struct SessionSplitDropDelegate: DropDelegate {
     }
 
     private func load(_ info: DropInfo, _ then: @escaping @MainActor (String?) -> Void) {
-        guard let provider = info.itemProviders(for: [.utf8PlainText]).first else {
+        guard let provider = info.itemProviders(for: [.text]).first else {
             then(nil)
             return
         }

@@ -372,6 +372,10 @@ struct JuancodeApp: App {
                     performShortcut(.newSessionSameProject, model: model, oracle: oracle)
                 }
                 .appShortcut(.newSessionSameProject, shortcuts)
+                Button("New Session in Split") {
+                    performShortcut(.newSessionSplit, model: model, oracle: oracle)
+                }
+                .appShortcut(.newSessionSplit, shortcuts)
                 Button("New Session…") {
                     performShortcut(.newSessionSheet, model: model, oracle: oracle)
                 }

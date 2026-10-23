@@ -321,6 +321,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
+        context.coordinator.remembersSize = remembersSize
         context.coordinator.onGrid = onGrid
         nsView.topHitInset = topHitInset
         nsView.onTerminalFocused = onFocused
@@ -416,7 +417,7 @@ private struct GhosttyRepresentable: NSViewRepresentable {
         /// front — a fullscreen / Space / display change while we were away can
         /// re-lay-out the window without the surface hearing a frame change.
         private var activeObservers: [Any] = []
-        private let remembersSize: Bool
+        var remembersSize: Bool
         /// True while this pane is pool-hidden (juancode-073): surface resizes are
         /// recorded but never forwarded to the pty, and wake/heal machinery stays
         /// quiet. Mirrors `GhosttyEphemeral.sizingFrozen`.
