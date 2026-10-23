@@ -763,6 +763,7 @@ final class AppModel {
         }
         subscribeTrackedMirror()
         subscribeChainsMirror()
+        subscribeHandoffsMirror()
         restoreTrackedIssues()
         restoreRecurringTasks()
         restorePromptTemplates()
@@ -5564,6 +5565,44 @@ final class AppModel {
         guard chainsCancel == nil else { return }
         chainsCancel = core.subscribeChains { [weak self] book in
             Task { @MainActor in self?.applyChains(book) }
+        }
+    }
+
+    /// The daemon's chain handoff history, mirrored read-only from the `handoffs` frames
+    /// (capability `chainHandoffs`, juancode-043.1). Empty on an older core; read
+    /// `supportsChainHandoffs` to tell "no handoffs" from "this core cannot say".
+    private(set) var chainHandoffs = ChainHandoffBook()
+    @ObservationIgnored private var handoffsCancel: (@Sendable () -> Void)?
+
+    var supportsChainHandoffs: Bool { core.supports(.chainHandoffs) }
+
+    private func subscribeHandoffsMirror() {
+        guard handoffsCancel == nil else { return }
+        handoffsCancel = core.subscribeHandoffs { [weak self] book in
+            Task { @MainActor in self?.chainHandoffs = book }
+        }
+    }
+
+    /// The explicit non-handoff links between `chain`'s members, read off this app's
+    /// own records: a tracked PR's watching session and a tracked Linear ticket's
+    /// session. Nothing is inferred from titles or branches.
+    func chainGraphLinks(_ chain: Chain) -> [ChainGraphLink] {
+        chain.members.compactMap { member -> ChainGraphLink? in
+            let sessionId: String?
+            let kind: ChainGraphEdgeKind
+            switch member.kind {
+            case .trackedPr:
+                sessionId = tracked[member.ref]?.sessionId
+                kind = .watchesPr
+            case .linear:
+                sessionId = trackedIssues.values.first { $0.identifier == member.ref }?.sessionId
+                kind = .tracksTicket
+            case .session, .beads:
+                return nil
+            }
+            guard let sessionId, !sessionId.isEmpty else { return nil }
+            return ChainGraphLink(from: ChainMemberRef(kind: .session, ref: sessionId),
+                                  to: member.memberRef, kind: kind)
         }
     }
 

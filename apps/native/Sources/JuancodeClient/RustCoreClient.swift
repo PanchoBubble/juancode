@@ -152,6 +152,12 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// Chain writes waiting on their `chainResult`, keyed by `requestId`.
     var chainWaiters: [String: ChangesWaiter] = [:]
     var nextChainId = 1
+    /// The handoff history as the daemon last sent it, or nil while this connection has
+    /// not been sent it (capability `chainHandoffs`).
+    var handoffBook: ChainHandoffBook?
+    var handoffListeners: [Int: @Sendable (ChainHandoffBook) -> Void] = [:]
+    /// Whether `subscribeHandoffs` has gone out on THIS socket.
+    var handoffSubscribed = false
 
     /// Each session's steering queue as the daemon last sent it, keyed by session id.
     /// A missing key and an empty array are different answers: the daemon answers
@@ -1700,6 +1706,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         case "chains", "chain", "chainRemoved", "chainResult":
             handleChainFrame(frame.type, body)
 
+        case "handoffs", "handoff", "handoffResult":
+            handleHandoffFrame(frame.type, body)
+
         case "changesResult":
             // Correlated on the requestId and nothing else. A discard and a commit can
             // be in flight together, and reading one's answer as the other's would tell
@@ -1783,6 +1792,14 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return true
             }
             if chainsAgain { ensureChainSubscription() }
+            // Handoffs likewise: history may have moved on another surface meanwhile.
+            let handoffsAgain: Bool = lock.withLock {
+                guard handoffSubscribed || !handoffListeners.isEmpty else { return false }
+                handoffSubscribed = false
+                handoffBook = nil
+                return true
+            }
+            if handoffsAgain { ensureHandoffSubscription() }
         } else if let reason {
             NSLog("juancode: rust core connection lost (\(reason))")
             // The daemon's editor and shell ptys belong to the connection and die with

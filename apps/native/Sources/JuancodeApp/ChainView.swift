@@ -67,12 +67,23 @@ struct ChainTabStrip: View {
     }
 }
 
+/// How the overview draws a chain: connected cards (the default) or the grouped list.
+enum ChainOverviewMode: String {
+    case graph
+    case list
+
+    /// The one `@AppStorage` key both the overview and its entry points write.
+    static let storageKey = "chainOverview.mode"
+}
+
 /// Actionable landing surface for a chain. The member strip remains available above
-/// it, while this compact grouped list exposes current state and direct navigation.
+/// it; below, the chain draws as a graph of connected cards (juancode-043.8) or as a
+/// compact grouped list, both with current state and direct navigation.
 struct ChainOverviewView: View {
     @Environment(AppModel.self) private var model
     let chain: Chain
     @State private var query = ""
+    @AppStorage(ChainOverviewMode.storageKey) private var mode: ChainOverviewMode = .graph
 
     var body: some View {
         let rows = model.chainDetailRows(chain)
@@ -103,6 +114,15 @@ struct ChainOverviewView: View {
                     }
                 }
                 Spacer(minLength: 4)
+                Picker("View", selection: $mode) {
+                    Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").tag(ChainOverviewMode.graph)
+                    Label("List", systemImage: "list.bullet").tag(ChainOverviewMode.list)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Show the chain as connected cards or as a grouped list")
+                .accessibilityLabel("Chain view mode")
                 Menu {
                     if chain.isActive {
                         Button("Close Chain") { Task { await model.closeChain(chain.slug) } }
@@ -132,7 +152,9 @@ struct ChainOverviewView: View {
             .padding(.horizontal, 8).padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
 
-            if sections.isEmpty {
+            if mode == .graph && !chain.members.isEmpty {
+                ChainGraphView(chain: chain, query: query)
+            } else if sections.isEmpty {
                 ContentUnavailableView(
                     chain.members.isEmpty ? "No members yet" : "No matching members",
                     systemImage: chain.members.isEmpty ? "link" : "magnifyingglass",

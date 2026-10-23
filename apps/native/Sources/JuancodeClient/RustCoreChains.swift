@@ -153,3 +153,68 @@ public struct ChainError: LocalizedError, Equatable {
         }
     }
 }
+
+/// Chain handoffs over the wire (capability `chainHandoffs`, juancode-043.1). Read-only
+/// here (juancode-043.8): the history is subscribed to and mirrored whole; the write
+/// frames exist on the daemon, but no surface of this client sends them yet.
+extension RustCoreClient {
+    /// One subscription per connection, sent once and again after a reconnect.
+    func ensureHandoffSubscription() {
+        guard supports(.chainHandoffs) else { return }
+        let send: Bool = lock.withLock {
+            guard !handoffSubscribed, !handoffListeners.isEmpty else { return false }
+            handoffSubscribed = true
+            return true
+        }
+        if send { connection.send(["type": "subscribeHandoffs"]) }
+    }
+
+    public func subscribeHandoffs(
+        _ onBook: @escaping @Sendable (ChainHandoffBook) -> Void) -> @Sendable () -> Void {
+        // An older daemon has no history to send: hand over an empty book once, and let
+        // the caller read `supports(.chainHandoffs)` to tell "none" from "can't know".
+        guard supports(.chainHandoffs) else {
+            onBook(ChainHandoffBook())
+            return {}
+        }
+        let (token, known) = lock.withLock { () -> (Int, ChainHandoffBook?) in
+            let t = nextListenerToken
+            nextListenerToken += 1
+            handoffListeners[t] = onBook
+            return (t, handoffBook)
+        }
+        ensureHandoffSubscription()
+        if let known { onBook(known) }
+        return { [weak self] in
+            guard let self else { return }
+            lock.withLock { _ = handoffListeners.removeValue(forKey: token) }
+        }
+    }
+
+    /// The handoff frames. Called from the frame switch.
+    func handleHandoffFrame(_ type: String, _ body: [String: Any]) {
+        switch type {
+        case "handoffs":
+            let handoffs = (body["handoffs"] as? [Any] ?? [])
+                .compactMap { Self.decodeJSON(ChainHandoff.self, $0) }
+            publishHandoffs { $0.replace(with: handoffs) }
+        case "handoff":
+            guard let handoff = Self.decodeJSON(ChainHandoff.self, body["handoff"]) else { return }
+            publishHandoffs { $0.upsert(handoff) }
+        default:
+            // `handoffResult` answers a write, and this client sends none.
+            return
+        }
+    }
+
+    private func publishHandoffs(_ apply: (inout ChainHandoffBook) -> Void) {
+        let (book, listeners) = lock.withLock {
+            () -> (ChainHandoffBook, [@Sendable (ChainHandoffBook) -> Void]) in
+            var book = handoffBook ?? ChainHandoffBook()
+            apply(&book)
+            handoffBook = book
+            return (book, Array(handoffListeners.values))
+        }
+        for l in listeners { l(book) }
+    }
+}

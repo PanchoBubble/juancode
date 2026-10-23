@@ -270,6 +270,11 @@ public protocol CoreClient: AnyObject, Sendable {
     func setChainMember(_ kind: ChainMemberKind, ref: String, slug: String?,
                         title: String?, url: String?) async throws
 
+    /// Watch the chains' handoff history (wire `subscribeHandoffs`, capability
+    /// `chainHandoffs`). Each call is the whole history. Returns a cancel handle.
+    func subscribeHandoffs(
+        _ onBook: @escaping @Sendable (ChainHandoffBook) -> Void) -> @Sendable () -> Void
+
     // MARK: - The GitHub surface (capability: github)
 
     /// The core's HTTP root, for the GitHub reads that are requests rather than
@@ -410,6 +415,13 @@ public extension CoreClient {
     func setChainMember(_ kind: ChainMemberKind, ref: String, slug: String?,
                         title: String?, url: String?) async throws {
         throw ChainError("chain-unavailable")
+    }
+
+    /// A core with no `chainHandoffs` capability has no history to hand over.
+    func subscribeHandoffs(
+        _ onBook: @escaping @Sendable (ChainHandoffBook) -> Void) -> @Sendable () -> Void {
+        onBook(ChainHandoffBook())
+        return {}
     }
 
     /// What a core with no `github` capability does: refuse, by name.

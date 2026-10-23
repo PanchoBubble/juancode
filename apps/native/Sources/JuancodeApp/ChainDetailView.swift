@@ -16,6 +16,7 @@ struct ChainDetailView: View {
     @State private var query = ""
     @State private var confirmDelete = false
     @State private var confirmRemove: ChainDetailRow?
+    @AppStorage(ChainOverviewMode.storageKey) private var graphMode = ChainOverviewMode.graph.rawValue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,11 +61,15 @@ struct ChainDetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                Button("Open Overview") {
+                Button {
+                    graphMode = ChainOverviewMode.graph.rawValue
                     model.chainDetail = nil
                     model.openChain(slug: slug)
+                } label: {
+                    Label("Open Graph", systemImage: "point.3.connected.trianglepath.dotted")
                 }
-                .help("Open this chain's overview in the detail area")
+                .keyboardShortcut(.defaultAction)
+                .help("Open this chain as a graph of connected sessions, handoffs, tickets and PRs")
                 .clickCursor()
                 Menu {
                     if chain.isActive {
