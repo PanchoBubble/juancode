@@ -1140,6 +1140,10 @@ private struct GitHubPrRow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
+                    if let counts = pr.diffCounts {
+                        DiffStatLabel(counts: counts)
+                            .fixedSize()
+                    }
                     if let t = tracked, !t.notifications.isEmpty {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 9))
@@ -1265,6 +1269,10 @@ private struct ViewerPrRow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
+                    if let counts = pr.diffCounts {
+                        DiffStatLabel(counts: counts)
+                            .fixedSize()
+                    }
                     Image(systemName: "arrow.up.right.square")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
@@ -1846,6 +1854,10 @@ private struct GitHubPrDetail: View {
                 }
             }
             HStack(spacing: 10) {
+                if let counts = pr.diffCounts {
+                    DiffStatLabel(counts: counts, size: 11)
+                        .fixedSize()
+                }
                 GitHubPrActions(pr: pr, cwd: cwd)
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
