@@ -172,6 +172,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 pub const CAPABILITIES: &[&str] = &[
+    "programStatus",
     "inputAck",
     "resizeAck",
     "screen",
@@ -1415,6 +1416,10 @@ pub enum ServerMessage {
         error: Option<String>,
         request_id: Option<String>,
     },
+    ProgramStatus {
+        session_id: String,
+        records: Vec<juancoded_vt::program_status::ProgramStatusRecord>,
+    },
     ServerInfo {
         client_id: ClientId,
         /// Who this daemon is: build, boot time and effective retention. The one
@@ -1817,6 +1822,10 @@ impl ServerMessage {
                 error,
                 request_id,
             } => json!({"type":"attentionResult", "ok":ok, "error":error, "requestId":request_id}),
+            Self::ProgramStatus {
+                session_id,
+                records,
+            } => json!({ "type": "programStatus", "sessionId": session_id, "records": records }),
             Self::ServerInfo {
                 client_id,
                 identity,
@@ -2627,6 +2636,7 @@ mod tests {
         for advertised in CAPABILITIES {
             assert!(
                 [
+                    "programStatus",
                     "inputAck",
                     "resizeAck",
                     "screen",

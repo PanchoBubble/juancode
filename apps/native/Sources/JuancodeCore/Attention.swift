@@ -10,6 +10,7 @@ public struct AttentionItem: Codable, Identifiable, Equatable, Sendable {
     public let updatedAt: Int64
     public let acknowledged: Bool
     public let resolved: Bool
+    public let source: String?
 
     public var isActionable: Bool {
         !resolved && (kind == "waiting" || !acknowledged)
@@ -20,6 +21,14 @@ public struct AttentionItem: Codable, Identifiable, Equatable, Sendable {
         }
     }
     public var title: String {
+        if source == "program" {
+            switch kind {
+            case "waiting": return "Program waiting for input"
+            case "error": return "Program reported an error"
+            case "completion": return "Program completed"
+            default: return "Program needs attention"
+            }
+        }
         switch kind {
         case "waiting": return "Waiting for input"
         case "error": return "Session exited with an error"

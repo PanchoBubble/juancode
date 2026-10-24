@@ -465,6 +465,13 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
 /// session a client may never have attached to.
 fn push_event(event: SessionEvent, fanout: &mut Fanout, outbound: &mut Vec<ServerMessage>) {
     match event {
+        SessionEvent::ProgramStatusChanged {
+            session_id,
+            records,
+        } => outbound.push(ServerMessage::ProgramStatus {
+            session_id,
+            records,
+        }),
         SessionEvent::Output { session_id, bytes } => {
             if fanout.attached.contains(&session_id) {
                 let carry = fanout.carries.entry(session_id.clone()).or_default();
@@ -792,6 +799,7 @@ fn grid_snapshot(sessions: &Arc<dyn SessionsApi>) -> Vec<ServerMessage> {
 /// the replay baseline second, and it is attached from the moment it hears about the
 /// session rather than after a round trip.
 fn push_attached(
+    sessions: &Arc<dyn SessionsApi>,
     session_id: &str,
     attached_payload: Attached,
     attached: &mut HashSet<String>,
@@ -803,6 +811,10 @@ fn push_attached(
         session_id: session_id.to_string(),
         scrollback: attached_payload.scrollback,
         session: attached_payload.meta,
+    });
+    outbound.push(ServerMessage::ProgramStatus {
+        session_id: session_id.into(),
+        records: sessions.program_status(session_id),
     });
     // A session that is already over re-states its exit, so a client that missed the
     // live event is not left waiting for one that will never come again.
@@ -1140,7 +1152,7 @@ fn handle_client_message(
                     let id = meta.id.clone();
                     outbound.push(ServerMessage::Created { session: meta });
                     match sessions.attach(&id, client, cols, rows) {
-                        Ok(payload) => push_attached(&id, payload, attached, outbound),
+                        Ok(payload) => push_attached(sessions, &id, payload, attached, outbound),
                         Err(e) => outbound.push(ServerMessage::Error {
                             session_id: Some(id),
                             message: e.to_string(),
@@ -1159,7 +1171,7 @@ fn handle_client_message(
             cols,
             rows,
         } => match sessions.attach(&session_id, client, cols, rows) {
-            Ok(payload) => push_attached(&session_id, payload, attached, outbound),
+            Ok(payload) => push_attached(sessions, &session_id, payload, attached, outbound),
             Err(e) => outbound.push(ServerMessage::Error {
                 session_id: Some(session_id),
                 message: e.to_string(),
@@ -1175,7 +1187,7 @@ fn handle_client_message(
             Ok(None) => {
                 attached.insert(session_id);
             }
-            Ok(Some(payload)) => push_attached(&session_id, payload, attached, outbound),
+            Ok(Some(payload)) => push_attached(sessions, &session_id, payload, attached, outbound),
             Err(StateError::Unresumable(reason)) => {
                 outbound.push(ServerMessage::Unresumable { session_id, reason })
             }
@@ -1194,7 +1206,7 @@ fn handle_client_message(
             cols,
             rows,
         } => match sessions.restart_fresh(&session_id, client, cols, rows) {
-            Ok(payload) => push_attached(&session_id, payload, attached, outbound),
+            Ok(payload) => push_attached(sessions, &session_id, payload, attached, outbound),
             Err(e) => outbound.push(ServerMessage::Error {
                 session_id: Some(session_id),
                 message: e.to_string(),
@@ -1210,7 +1222,7 @@ fn handle_client_message(
             let (cols, rows) =
                 grid_or_default(Some(cols).filter(|c| *c > 0), Some(rows).filter(|r| *r > 0));
             match sessions.set_skip_permissions(&session_id, skip_permissions, client, cols, rows) {
-                Ok(payload) => push_attached(&session_id, payload, attached, outbound),
+                Ok(payload) => push_attached(sessions, &session_id, payload, attached, outbound),
                 Err(e) => outbound.push(ServerMessage::Error {
                     session_id: Some(session_id),
                     message: e.to_string(),
@@ -1414,6 +1426,12 @@ fn handle_client_message(
             outbound.push(ServerMessage::Sessions {
                 sessions: sessions.sessions(),
             });
+            for meta in sessions.sessions() {
+                outbound.push(ServerMessage::ProgramStatus {
+                    records: sessions.program_status(&meta.id),
+                    session_id: meta.id,
+                });
+            }
         }
 
         ClientMessage::SessionReview {
@@ -3449,6 +3467,67 @@ mod tests {
         assert_eq!(pairs[0].0, "req-a");
         assert_eq!(pairs[1].0, "req-b");
         assert_ne!(pairs[0].1, pairs[1].1, "two opens, two ptys");
+    }
+
+    #[tokio::test]
+    async fn a_plain_shell_reports_progress_and_input_acknowledges_completion() {
+        let mut rig = Wire::new();
+        let mut fanout = fanout();
+        let opened = rig.step(
+            ClientMessage::OpenTerminal {
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                request_id: "status".into(),
+            },
+            &mut fanout,
+        );
+        let [ServerMessage::TerminalReady { terminal_id, .. }] = &opened[..] else {
+            panic!("{opened:?}")
+        };
+        let id = terminal_id.clone();
+        for (data, wanted) in [
+            ("\x1b]7501;state=working:progress=40\x07\n", "working"),
+            ("\x1b]7501;state=done\x07\n", "done"),
+            ("next\n", ""),
+        ] {
+            rig.step(
+                ClientMessage::Input {
+                    session_id: id.clone(),
+                    data: data.into(),
+                    seq: None,
+                },
+                &mut fanout,
+            );
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let frame = rig
+                        .awaited(Duration::from_secs(5))
+                        .await
+                        .expect("status reply");
+                    if let ServerMessage::ProgramStatus {
+                        session_id,
+                        records,
+                    } = frame
+                    {
+                        assert_eq!(session_id, id);
+                        if records.first().map_or("", |r| r.state.as_str()) == wanted {
+                            if wanted == "working" {
+                                assert_eq!(records[0].progress, Some(40));
+                            }
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("bounded status wait");
+        }
+        assert!(
+            rig.sessions().meta(&id).is_none(),
+            "a shell is not a duplicate session/inbox"
+        );
+        rig.ephemeral.kill(&id);
     }
 
     /// An ephemeral pty is addressed by the frames a session is addressed by, which is

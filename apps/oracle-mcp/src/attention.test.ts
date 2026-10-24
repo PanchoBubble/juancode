@@ -26,6 +26,13 @@ describe("shared attention", () => {
       ]).map((i) => i.id),
     ).toEqual(["a", "waiting", "z"]);
   });
+  it("retains program provenance while older records keep their shape", () => {
+    expect(parseAttention([item])).toEqual([item]);
+    expect(parseAttention([{ ...item, source: "program" }])).toEqual([
+      { ...item, source: "program" },
+    ]);
+    expect(parseAttention([{ ...item, source: "guessed-approval" }])).toEqual([item]);
+  });
   it("validates full snapshots while tolerating future kinds", () => {
     expect(parseAttention([{ ...item, kind: "future" }])?.[0]?.kind).toBe("future");
     expect(parseAttention([item, { ...item, acknowledged: "false" }])).toBeNull();

@@ -217,6 +217,12 @@ final class RemoteEphemeralPtys: @unchecked Sendable {
     /// and `exit` handlers ask before they reach for a session handle.
     func holds(_ id: String) -> Bool { lock.withLock { live[id] != nil } }
 
+    func programStatus(_ id: String, records: [ProgramStatusRecord]) -> Bool {
+        guard let pane = lock.withLock({ live[id] }) else { return false }
+        pane.pty.programStatus.replace(records)
+        return true
+    }
+
     /// Route output; false when the id is not one of ours.
     func output(_ id: String, bytes: [UInt8]) -> Bool {
         guard let pane = lock.withLock({ live[id] }) else { return false }

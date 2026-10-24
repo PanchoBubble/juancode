@@ -47,10 +47,12 @@
       "chains",
       "chainInherit",
       "chainAutoClose",
-      "chainHandoffs"
+      "chainHandoffs",
+      "programStatus"
     ],
     "gates": {
       "attention": ["subscribeAttention", "acknowledgeAttention", "attention", "attentionResult"],
+      "programStatus": ["programStatus"],
       "queue": ["subscribeQueue", "unsubscribeQueue", "queueMessage", "dequeueMessage", "queue"],
       "trackedPrs": [
         "subscribeTrackedPrs",
@@ -507,6 +509,12 @@
     }
   },
   "serverMessages": {
+    "programStatus": {
+      "required": ["sessionId", "records"],
+      "optional": [],
+      "capability": "programStatus",
+      "notes": "Full replacement OSC 7501 record snapshot (id, state; optional kind, app, title, msg, progress). Empty records clears. Emitted on change, listSessions and attach; ephemeral terminals emit to their owning connection. Metadata only: never approval or queue readiness. Unknown peers ignore the frame."
+    },
     "serverInfo": {
       "required": ["protocolVersion", "capabilities"],
       "optional": ["clientId", "daemon"],
@@ -673,7 +681,7 @@
       "required": ["items"],
       "optional": [],
       "capability": "attention",
-      "notes": "Full replacement ordered by createdAt then id. Each item: id, sessionId, kind (waiting|error|completion), createdAt/updatedAt epoch milliseconds, acknowledged and resolved booleans. Actionable means not resolved and (waiting or not acknowledged). Unknown reasons remain waiting. Latest occurrence per session/kind is retained; new occurrences receive new IDs. No replay-created completions."
+      "notes": "Full replacement ordered by createdAt then id. Each item: id, sessionId, kind (waiting|error|completion), createdAt/updatedAt epoch milliseconds, acknowledged and resolved booleans. Actionable means not resolved and (waiting or not acknowledged). Unknown reasons remain waiting. Latest occurrence per session/kind is retained; new occurrences receive new IDs. No replay-created completions. Optional item source=program identifies OSC evidence. Program and agent evidence share one item per session/kind; clearing one source never erases the other. Acknowledgement never writes to the PTY."
     },
     "attentionResult": {
       "required": ["ok"],

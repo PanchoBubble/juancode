@@ -1,0 +1,169 @@
+{
+  "id": "program-status",
+  "title": "program status reports, snapshots and lifecycle",
+  "asserts": "OSC 7501 reports reach a full replacement wire event without changing the terminal output contract; a late connection gets the current records via listSessions, input acknowledges completed records, and parent clear removes children.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "programStatus",
+    "sessionList"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "exit"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO \u001b]7501;state=working:app=build:progress=40\u0007\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": [
+          {
+            "id": "",
+            "state": "working",
+            "app": "build",
+            "progress": 40
+          }
+        ]
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "open": "b"
+    },
+    {
+      "send": {
+        "type": "listSessions"
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "sessions"
+      },
+      "on": "b"
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": [
+          {
+            "state": "working",
+            "progress": 40
+          }
+        ]
+      },
+      "on": "b",
+      "ignore": [
+        "*"
+      ]
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO \u001b]7501;state=done:msg=Y2Fmw6k\u0007\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": [
+          {
+            "id": "",
+            "state": "done",
+            "msg": "café"
+          }
+        ]
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO next\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": []
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO \u001b]7501;state=blocked:id=build/test:kind=question\u0007\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": [
+          {
+            "id": "build/test",
+            "state": "blocked",
+            "kind": "question"
+          }
+        ]
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO \u001b]7501;state=clear:id=build\u0007\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": []
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

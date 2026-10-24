@@ -1,0 +1,115 @@
+{
+  "id": "program-attention",
+  "title": "OSC reports feed the shared attention inbox",
+  "asserts": "Structured program evidence uses the existing attention lifecycle and acknowledgement API without generating input or a second inbox.",
+  "requires": [
+    "pty"
+  ],
+  "capabilities": [
+    "programStatus",
+    "attention"
+  ],
+  "ignore": [
+    "activity",
+    "output",
+    "gridChange",
+    "sessionMeta",
+    "attention"
+  ],
+  "steps": [
+    {
+      "send": {
+        "type": "create",
+        "provider": "claude",
+        "cwd": "$cwd",
+        "cols": 80,
+        "rows": 24
+      }
+    },
+    {
+      "expect": {
+        "type": "created"
+      },
+      "bind": {
+        "session": "session.id"
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "expect": {
+        "type": "attached",
+        "sessionId": "$session"
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO \u001b]7501;state=done:app=build\u0007\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": [
+          {
+            "state": "done"
+          }
+        ]
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "send": {
+        "type": "subscribeAttention"
+      }
+    },
+    {
+      "expect": {
+        "type": "attention",
+        "items": {
+          "$some": {
+            "sessionId": "$session",
+            "kind": "completion",
+            "source": "program",
+            "resolved": false,
+            "acknowledged": false
+          }
+        }
+      }
+    },
+    {
+      "send": {
+        "type": "input",
+        "sessionId": "$session",
+        "data": "ECHO next\r"
+      }
+    },
+    {
+      "expect": {
+        "type": "programStatus",
+        "sessionId": "$session",
+        "records": []
+      }
+    },
+    {
+      "send": {
+        "type": "subscribeAttention"
+      }
+    },
+    {
+      "expect": {
+        "type": "attention",
+        "items": {
+          "$some": {
+            "sessionId": "$session",
+            "kind": "completion",
+            "source": "program",
+            "resolved": true
+          }
+        }
+      }
+    }
+  ]
+}

@@ -361,6 +361,7 @@ fn mark(event: SessionEvent, dirty: &mut HashSet<String>) {
         // grid change moves no transcript, and the store queue's notification is not
         // about this plane at all.
         SessionEvent::Activity { .. }
+        | SessionEvent::ProgramStatusChanged { .. }
         | SessionEvent::GridChange { .. }
         | SessionEvent::Stuck { .. }
         | SessionEvent::QueueChanged { .. } => {}

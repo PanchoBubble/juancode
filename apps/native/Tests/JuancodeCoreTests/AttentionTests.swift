@@ -23,6 +23,13 @@ struct AttentionTests {
         #expect(active.first?.sessionId == "session-old")
         #expect(decoded == snapshot)
     }
+    @Test func programEvidenceIsLabelledWithoutChangingActions() throws {
+        let body = Data(#"{"id":"p","sessionId":"s","kind":"error","createdAt":1,"updatedAt":1,"acknowledged":false,"resolved":false,"source":"program"}"#.utf8)
+        let program = try JSONDecoder().decode(AttentionItem.self, from: body)
+        #expect(program.title == "Program reported an error")
+        #expect(program.isActionable)
+        #expect(try item("old", kind: "error").title == "Session exited with an error")
+    }
     @Test func tiesAreStableAndFutureKindsRemainReadable() throws {
         let a = try item("a", kind: "future")
         let z = try item("z")

@@ -21,6 +21,7 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VteColor, NamedColor, Processor};
 use alacritty_terminal::Term;
 
+pub mod program_status;
 pub mod wire;
 
 /// A cell's colour, mirroring Swift's `TerminalColor`.
@@ -184,6 +185,7 @@ impl EventListener for TitleSink {
 pub struct TerminalModel {
     term: Term<TitleSink>,
     parser: Processor,
+    pub program_status: program_status::ProgramStatus,
     titles: TitleSink,
     cols: usize,
     rows: usize,
@@ -205,6 +207,7 @@ impl TerminalModel {
         Self {
             term: Term::new(config, &size, titles.clone()),
             parser: Processor::new(),
+            program_status: Default::default(),
             titles,
             cols,
             rows,
@@ -214,6 +217,7 @@ impl TerminalModel {
 
     /// Feed pty bytes. The only mutation path into the grid.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.program_status.feed(bytes);
         self.parser.advance(&mut self.term, bytes);
     }
 

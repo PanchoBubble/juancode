@@ -38,6 +38,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
 
     let connection: WireConnection
     private let mirror: GRDBStore
+    private var programStatuses: [String: ProgramStatusFeed] = [:]
     private let activityLog: SessionActivityLog
     /// The editor and shell panes this connection has open in the daemon. Not
     /// sessions: no row, no mirror, no `listSessions` — they live exactly as long as
@@ -1442,6 +1443,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             if ephemeral.output(id, bytes: bytes) { return }
             handleFor(id)?.apply(output: bytes)
 
+        case "programStatus":
+            guard let id = sessionId, let records = ProgramStatusRecord.decode(body["records"]) else { return }
+            if ephemeral.programStatus(id, records: records) { return }
+            programStatus(id)?.replace(records)
+
         case "activity":
             guard let id = sessionId,
                   let raw = body["state"] as? String,
@@ -1818,6 +1824,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             // painting a shell that will never answer another keystroke — and told
             // before a reconnect, whose ids are a different id space.
             ephemeral.closeAll(reason: reason)
+            for feed in lock.withLock({ Array(programStatuses.values) }) { feed.replace([]) }
             // Every queue write in flight fails now rather than waiting out its budget:
             // the socket that would have carried the confirmation is gone, so the write
             // is unconfirmable and the caller has to be told while the user is still
@@ -1858,6 +1865,16 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     }
 
     // MARK: - Internals
+
+    public func programStatus(_ sessionId: String) -> ProgramStatusFeed? {
+        guard info.has("programStatus") else { return nil }
+        return lock.withLock {
+            if let existing = programStatuses[sessionId] { return existing }
+            let feed = ProgramStatusFeed()
+            programStatuses[sessionId] = feed
+            return feed
+        }
+    }
 
     private func handleFor(_ id: String) -> RemoteLiveSession? { lock.withLock { handles[id] } }
 
@@ -1936,6 +1953,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     /// alternative — only trusting the broadcast — leaves the row on screen for the
     /// round trip.
     private func forget(_ id: String) {
+        lock.withLock { programStatuses.removeValue(forKey: id) }?.replace([])
         let handle = lock.withLock { () -> RemoteLiveSession? in
             seedFailureReporters[id] = nil
             _ = probing.remove(id)

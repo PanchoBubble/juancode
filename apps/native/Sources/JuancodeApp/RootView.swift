@@ -2008,6 +2008,7 @@ private struct SessionRowHost: View {
 
     private var row: some View {
         SessionRow(meta: meta,
+                   programStatus: model.core.programStatus(meta.id),
                    titleHighlight: titleHighlight,
                    activity: model.activityBox(meta.id)?.activity,
                    live: model.isLive(meta.id), external: external,
@@ -2637,6 +2638,7 @@ struct TrackBadge: View {
 
 struct SessionRow: View {
     let meta: SessionMeta
+    var programStatus: ProgramStatusFeed? = nil
     /// Filter text to mark in the title (case-insensitive), nil for none.
     var titleHighlight: String? = nil
     let activity: SessionActivity?
@@ -2755,6 +2757,9 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 highlightedTitle.lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
+                if let programStatus {
+                    ProgramStatusBadge(feed: programStatus, source: meta.id)
+                }
                 if isWorktree || !subtitle.isEmpty {
                     HStack(spacing: 3) {
                         // A branch glyph marks a worktree session — the fastest way to

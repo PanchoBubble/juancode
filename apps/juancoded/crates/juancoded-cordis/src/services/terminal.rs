@@ -27,6 +27,17 @@ pub trait TerminalApi: Send + Sync {
     /// Taking rather than reading: the caller adopts a title once, and a TUI repaints
     /// its own title many times per turn.
     fn take_title(&self, session: &str) -> Option<String>;
+    fn program_status(
+        &self,
+        _session: &str,
+    ) -> Vec<juancoded_vt::program_status::ProgramStatusRecord> {
+        Vec::new()
+    }
+    fn program_status_reply(&self, _session: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn program_status_input(&self, _session: &str) {}
+    fn reset_program_status(&self, _session: &str) {}
     fn resize(&self, session: &str, cols: usize, rows: usize);
     fn snapshot(&self, session: &str) -> Option<Snapshot>;
     /// A one-shot rendered read: the visible grid, `scrollback_rows` of history above
@@ -95,6 +106,31 @@ impl TerminalApi for VtTerminals {
 
     fn take_title(&self, session: &str) -> Option<String> {
         self.grids().get_mut(session).and_then(|m| m.take_title())
+    }
+
+    fn program_status(
+        &self,
+        session: &str,
+    ) -> Vec<juancoded_vt::program_status::ProgramStatusRecord> {
+        self.grids()
+            .get(session)
+            .map(|m| m.program_status.records())
+            .unwrap_or_default()
+    }
+    fn program_status_reply(&self, session: &str) -> Option<Vec<u8>> {
+        self.grids()
+            .get_mut(session)
+            .and_then(|m| m.program_status.take_reply())
+    }
+    fn program_status_input(&self, session: &str) {
+        if let Some(m) = self.grids().get_mut(session) {
+            m.program_status.input();
+        }
+    }
+    fn reset_program_status(&self, session: &str) {
+        if let Some(m) = self.grids().get_mut(session) {
+            m.program_status.reset();
+        }
     }
 
     fn resize(&self, session: &str, cols: usize, rows: usize) {

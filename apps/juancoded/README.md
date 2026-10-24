@@ -589,3 +589,61 @@ inert. See `juancoded-core/src/activity.rs`.
 Nothing in `apps/native` was modified, and nothing here runs unless started by hand:
 the daemon binds no port until launched, and mounting the tree spawns no child until a
 client asks for a session.
+
+### Program status from scripts (OSC 7501)
+
+The daemon reads [Program Status Protocol revision 0.4](https://www.superlogical.com/rex/docs/build/program-status)
+from ordinary PTY output. No environment changes, hooks, or runtime package are
+needed. Agent sessions and the native bottom shell panel show a program-labelled
+status line; hover for all records and the originating session/pane ID. Text is
+untrusted plain metadata, including when `kind=permission` or `app=claude`.
+It never approves an action, changes queue readiness, or overrides transcript or
+screen-derived agent activity. Existing agent notifications remain unchanged.
+
+For example, run these in a juancode terminal (POSIX shell):
+
+```sh
+printf '\033]7501;state=working:app=build:progress=40\033\\'
+# Run your build here, then report its result:
+printf '\033]7501;state=done:app=build:msg=QnVpbGQgY29tcGxldGU=\033\\'
+# Clear all records:
+printf '\033]7501;state=clear\033\\'
+```
+
+`msg` and `title` are standard base64 UTF-8; padding is optional. Encode a message
+with `printf '%s' 'your message' | base64 | tr -d '\n'`. Text must fit on one line
+and contain no control characters. Write to `/dev/tty` if stdout is redirected.
+Each report replaces its record, so repeat any fields you want to keep.
+`id=build/test` addresses a child; `state=clear:id=build` removes that subtree.
+A missing `app` inherits the closest ancestor's app. The displayed summary orders
+blocked, error, done, working, idle, preferring the root then the latest update.
+
+Working, blocked, and idle records expire at OSC 133 A (shell prompt) or PTY exit;
+done/error survive those events until input is successfully delivered. RIS clears
+all records; DECSTR and alternate-screen changes do not. Respawn and daemon
+restart start empty: replayed scrollback is not fresh status evidence. Shells
+without prompt markers must clear/report their own state when a child returns;
+this implementation does not infer child-process ownership from output bytes.
+
+The `programStatus` wire capability gates a full replacement event:
+`{type:"programStatus",sessionId,records:[{id,state,kind?,app?,title?,msg?,progress?}]}`.
+Empty `records` clears. `listSessions` and `attach` supply current snapshots;
+changes are broadcast for sessions and sent to the owning connection for ephemeral
+panes. Older clients ignore this additive frame; older daemons leave status empty.
+`SessionsApi::program_status` and `SessionEvent::ProgramStatusChanged` expose the
+same records to daemon consumers. The shared attention inbox aggregates program
+blocked/error/done records into waiting/error/completion items. Repeated reports
+and corroborating agent evidence share one item per session/kind. A program clear
+cannot erase agent evidence, and agent activity cannot erase an independently
+blocked program. Program-only items carry optional `source:"program"`; native and
+Telegram inboxes label them as program reports. Acknowledgement never writes input.
+Ephemeral shells show status in their own pane and do not create inbox sessions.
+
+Limits: 4096 bytes per sequence, 256 records (oldest update evicted), IDs up to
+128 bytes/eight levels, messages up to 2048 decoded bytes, titles up to 192.
+Malformed/oversized reports cannot partially change a record. Feature detection
+`ESC ] 7501 ; ? ST` receives only the fixed support reply, with the query's
+terminator; query floods in one output chunk coalesce. No report text is sent back.
+The parser was independently implemented from the specification, with lifecycle
+and presentation inspiration from [tuios](https://github.com/Gaurav-Gosain/tuios/blob/main/docs/PROGRAM_STATUS.md);
+no upstream source code was copied.

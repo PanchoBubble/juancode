@@ -528,7 +528,10 @@ export async function handleUpdate(
           ? "No sessions need attention."
           : "Attention inbox (oldest first):\n" +
             rows
-              .map((item) => `${item.kind} — session ${item.sessionId} (item ${item.id})`)
+              .map(
+                (item) =>
+                  `${item.source === "program" ? "program " : ""}${item.kind} — session ${item.sessionId} (item ${item.id})`,
+              )
               .join("\n");
     for (const chunk of chunkMessage(message)) await deps.send(chatId, chunk);
     return;

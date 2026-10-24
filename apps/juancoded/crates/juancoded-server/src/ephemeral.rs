@@ -20,9 +20,10 @@
 //! `input` / `resize` / `kill` / `output` / `exit` messages as a session, which is
 //! the whole point of handing the client an id at all.
 
+use juancoded_vt::program_status::ProgramStatus;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
@@ -95,6 +96,7 @@ pub struct EphemeralPtys {
     oob: UnboundedSender<ServerMessage>,
     commands: Commands,
     open: HashMap<String, PtyHandle>,
+    statuses: HashMap<String, Arc<Mutex<ProgramStatus>>>,
 }
 
 impl EphemeralPtys {
@@ -112,6 +114,7 @@ impl EphemeralPtys {
             oob,
             commands,
             open: HashMap::new(),
+            statuses: HashMap::new(),
         }
     }
 
@@ -169,7 +172,9 @@ impl EphemeralPtys {
                 },
             )
             .map_err(|e| EphemeralError::Spawn(e.to_string()))?;
-        self.pump(id.clone(), handle.clone(), pty);
+        let status = Arc::new(Mutex::new(ProgramStatus::default()));
+        self.statuses.insert(id.clone(), Arc::clone(&status));
+        self.pump(id.clone(), handle.clone(), pty, status);
         self.open.insert(id.clone(), handle);
         Ok(id)
     }
@@ -181,7 +186,13 @@ impl EphemeralPtys {
     /// No scrollback and no grid, unlike a session: there is nothing to replay to,
     /// because the pane that opened this pty is the only thing that will ever read it
     /// and it has been listening since the `editorReady`.
-    fn pump(&self, id: String, handle: PtyHandle, pty: Arc<dyn PtySpawnApi>) {
+    fn pump(
+        &self,
+        id: String,
+        handle: PtyHandle,
+        pty: Arc<dyn PtySpawnApi>,
+        status: Arc<Mutex<ProgramStatus>>,
+    ) {
         let oob = self.oob.clone();
         let mut rx = handle.stream();
         tokio::spawn(async move {
@@ -189,6 +200,21 @@ impl EphemeralPtys {
             loop {
                 match rx.recv().await {
                     Ok(PtyEvent::Output(bytes)) => {
+                        {
+                            let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
+                            let before = status.records();
+                            status.feed(&bytes);
+                            if let Some(reply) = status.take_reply() {
+                                let _ = handle.write(&reply);
+                            }
+                            let records = status.records();
+                            if records != before {
+                                let _ = oob.send(ServerMessage::ProgramStatus {
+                                    session_id: id.clone(),
+                                    records,
+                                });
+                            }
+                        }
                         let data = carry.push(&bytes);
                         if !data.is_empty()
                             && oob
@@ -202,6 +228,17 @@ impl EphemeralPtys {
                         }
                     }
                     Ok(PtyEvent::Exit(exit_code)) => {
+                        {
+                            let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
+                            status.exit_or_prompt();
+                            let _ = oob.send(ServerMessage::ProgramStatus {
+                                session_id: id.clone(),
+                                records: status.records(),
+                            });
+                            // The pane retains its last snapshot; this per-connection
+                            // pump cannot be reattached after exit.
+                            status.reset();
+                        }
                         let _ = oob.send(ServerMessage::Exit {
                             session_id: id.clone(),
                             exit_code,
@@ -229,8 +266,26 @@ impl EphemeralPtys {
 
     pub fn input(&self, id: &str, bytes: &[u8]) {
         if let Some(handle) = self.open.get(id) {
+            // Acknowledge the old completion before output responding to this input
+            // can publish a new one. The pump uses the same lock.
+            let mut status = self
+                .statuses
+                .get(id)
+                .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()));
             if let Err(e) = handle.write(bytes) {
                 debug!(pty = id, error = %e, "input to an ephemeral pty went nowhere");
+            } else if !bytes.is_empty() {
+                if let Some(status) = status.as_mut() {
+                    let before = status.records();
+                    status.input();
+                    let records = status.records();
+                    if before != records {
+                        let _ = self.oob.send(ServerMessage::ProgramStatus {
+                            session_id: id.into(),
+                            records,
+                        });
+                    }
+                }
             }
         }
     }
@@ -266,6 +321,7 @@ impl EphemeralPtys {
     /// cost one grace rather than N — the same shape `PtyHost`'s own shutdown uses,
     /// and for the same reason.
     pub fn close_all(&mut self) {
+        self.statuses.clear();
         for handle in self.open.values() {
             handle.request_stop();
         }

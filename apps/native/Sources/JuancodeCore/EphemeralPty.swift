@@ -34,6 +34,7 @@ public final class EphemeralPty: @unchecked Sendable {
     public typealias ExitListener = @Sendable (_ exitCode: Int?) -> Void
 
     public let id: String
+    public let programStatus = ProgramStatusFeed()
 
     private let lock = NSLock()
     private var backend: (any EphemeralPtyBackend)?

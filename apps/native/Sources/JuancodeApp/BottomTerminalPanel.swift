@@ -137,7 +137,8 @@ struct BottomTerminalPanel: View {
     @ViewBuilder
     private func paneView(_ pane: TerminalPaneID, focusToken: Int = 0) -> some View {
         if let pty = model.shellPty(pane) {
-            Group {
+            VStack(spacing: 0) {
+                ProgramStatusBadge(feed: pty.programStatus, source: pty.id)
                 if TerminalBackend.shared.useGhostty {
                     GhosttyEphemeral(pty: pty, hidden: hidden, isEditor: false, onExit: {})
                 } else {

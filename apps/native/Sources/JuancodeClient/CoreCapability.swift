@@ -10,6 +10,7 @@ import Foundation
 /// capability string the core actually sent.
 public enum CoreCapability: String, Sendable, CaseIterable {
     case queue
+    case programStatus
     case trackedPrs
     case trackPrInSession
     case prWebhook
@@ -35,6 +36,7 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     /// What the user calls this.
     public var title: String {
         switch self {
+        case .programStatus: return "Program status"
         case .queue: return "Message queue"
         case .trackedPrs: return "Tracked PRs"
         case .trackPrInSession: return "Track a PR in an existing session"
@@ -64,6 +66,8 @@ public enum CoreCapability: String, Sendable, CaseIterable {
     /// the UI shows, so it names the consequence rather than the missing frame.
     public var degradation: String {
         switch self {
+        case .programStatus:
+            return "Program-reported progress and status are unavailable."
         case .queue:
             return "Send-to-agent and review feedback are unavailable: nothing holds a message until the agent is idle, so the action is disabled rather than pasted mid-turn."
         case .trackedPrs:

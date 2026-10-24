@@ -8,6 +8,7 @@ export interface AttentionItem {
   updatedAt: number;
   acknowledged: boolean;
   resolved: boolean;
+  source?: "program";
 }
 export interface AttentionResult {
   ok: boolean;
@@ -41,6 +42,7 @@ export function parseAttention(raw: unknown): AttentionItem[] | null {
       updatedAt: row.updatedAt,
       acknowledged: row.acknowledged,
       resolved: row.resolved,
+      ...(row.source === "program" ? { source: "program" as const } : {}),
     });
   }
   return items;

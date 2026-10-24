@@ -25,6 +25,7 @@ import JuancodeServices
 /// from wire frames instead. `LiveSession` names the three members that still have
 /// no frame behind them.
 public protocol CoreClient: AnyObject, Sendable {
+    func programStatus(_ sessionId: String) -> ProgramStatusFeed?
 
     // MARK: - Handshake (wire: serverInfo)
 
@@ -551,4 +552,8 @@ public extension CoreClient {
     func queueMessageConfirmed(_ sessionId: String, text: String) async throws -> QueuedMessage {
         queueMessage(sessionId, text: text)
     }
+}
+
+public extension CoreClient {
+    func programStatus(_ sessionId: String) -> ProgramStatusFeed? { nil }
 }

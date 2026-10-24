@@ -897,7 +897,9 @@ async function runStep(step: Step, s: StepContext): Promise<void> {
     const frame = await s.clientFor(step.on).waitFor(resolveVars(step.expect, s.vars) as Frame, {
       vars: s.vars,
       timeoutMs: step.timeoutMs,
-      ignore: step.ignore ?? s.ignore,
+      // Additive program metadata is passive for older scenarios. waitFor checks
+      // the matcher first, so the OSC scenario still asserts these frames in full.
+      ignore: ["programStatus", ...(step.ignore ?? s.ignore)],
     });
     if (step.bind) {
       Object.assign(s.vars, readBindings(frame, step.bind));

@@ -40,6 +40,9 @@ pub trait SessionsApi: Send + Sync {
     fn sessions(&self) -> Vec<SessionMeta>;
     fn meta(&self, id: &str) -> Option<SessionMeta>;
     fn is_running(&self, id: &str) -> bool;
+    fn program_status(&self, _id: &str) -> Vec<juancoded_vt::program_status::ProgramStatusRecord> {
+        Vec::new()
+    }
     fn activity(&self, id: &str) -> Option<SessionActivity>;
     fn snapshot(&self, id: &str) -> Option<Snapshot>;
     /// The rendered screen plus `scrollback_rows` of history above it and the window
@@ -284,6 +287,9 @@ impl SessionsApi for SessionRegistry {
         SessionRegistry::is_running(self, id)
     }
 
+    fn program_status(&self, id: &str) -> Vec<juancoded_vt::program_status::ProgramStatusRecord> {
+        SessionRegistry::program_status(self, id)
+    }
     fn activity(&self, id: &str) -> Option<SessionActivity> {
         SessionRegistry::activity(self, id)
     }

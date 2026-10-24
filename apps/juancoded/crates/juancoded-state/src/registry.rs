@@ -62,6 +62,10 @@ const FLUSH_EVERY: Duration = Duration::from_secs(2);
 /// the sidecar, a future TUI.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
+    ProgramStatusChanged {
+        session_id: String,
+        records: Vec<juancoded_vt::program_status::ProgramStatusRecord>,
+    },
     Output {
         session_id: String,
         bytes: Arc<Vec<u8>>,
@@ -358,6 +362,9 @@ struct LiveSession {
     scrollback: Mutex<Ring>,
     grid: Mutex<GridState>,
     activity: Mutex<ActivityDetector>,
+    program_status: Mutex<Vec<juancoded_vt::program_status::ProgramStatusRecord>>,
+    // Serialize stream updates with input acknowledgements before publishing snapshots.
+    program_status_gate: Mutex<()>,
     opts: Mutex<SpawnOptions>,
     signals: LiveSignals,
     /// Bumped on every spawn. A pump whose epoch is stale lost its pty to a respawn
@@ -686,6 +693,8 @@ impl SessionRegistry {
                 scrollback: Mutex::new(ring),
                 grid: Mutex::new(GridState::new(cols, rows_)),
                 activity: Mutex::new(ActivityDetector::new()),
+                program_status: Mutex::new(Vec::new()),
+                program_status_gate: Mutex::new(()),
                 opts: Mutex::new(opts),
                 signals: LiveSignals::default(),
                 // An adopted session is already on its first pty as far as every pump
@@ -768,6 +777,40 @@ impl SessionRegistry {
     pub fn is_running(&self, id: &str) -> bool {
         self.get(id)
             .is_some_and(|l| l.pty.lock().unwrap_or_else(|e| e.into_inner()).is_some())
+    }
+
+    pub fn program_status(
+        &self,
+        id: &str,
+    ) -> Vec<juancoded_vt::program_status::ProgramStatusRecord> {
+        self.get(id)
+            .map(|live| {
+                live.program_status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
+    fn publish_program_status(
+        &self,
+        id: &str,
+        live: &LiveSession,
+        records: Vec<juancoded_vt::program_status::ProgramStatusRecord>,
+    ) {
+        let mut current = live
+            .program_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *current == records {
+            return;
+        }
+        *current = records.clone();
+        let _ = self.inner.events.send(SessionEvent::ProgramStatusChanged {
+            session_id: id.into(),
+            records,
+        });
     }
 
     pub fn activity(&self, id: &str) -> Option<SessionActivity> {
@@ -936,6 +979,8 @@ impl SessionRegistry {
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
             activity: Mutex::new(ActivityDetector::new()),
+            program_status: Mutex::new(Vec::new()),
+            program_status_gate: Mutex::new(()),
             opts: Mutex::new(opts),
             signals: LiveSignals::default(),
             epoch: AtomicU64::new(0),
@@ -1041,6 +1086,8 @@ impl SessionRegistry {
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
             activity: Mutex::new(ActivityDetector::new()),
+            program_status: Mutex::new(Vec::new()),
+            program_status_gate: Mutex::new(()),
             opts: Mutex::new(opts),
             signals: LiveSignals::default(),
             epoch: AtomicU64::new(0),
@@ -1289,12 +1336,20 @@ impl SessionRegistry {
         // Input goes through the around chain, so policy (a live-pty guard today, a
         // steering queue's claim boundary later) can refuse it without the registry
         // knowing that any policy exists.
+        let _status_guard = live
+            .program_status_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut request = InputRequest::new(id, data.to_vec());
         let decision = self.inner.bus.waterfall::<SessionInput>(&mut request, |_| {
             InputDecision::Refused("no writer is mounted for `session.input`".into())
         });
         match decision {
             InputDecision::Delivered(_) => {
+                if !data.is_empty() {
+                    self.inner.terminal.program_status_input(id);
+                    self.publish_program_status(id, &live, self.inner.terminal.program_status(id));
+                }
                 // A keystroke that reached the pty. Not liveness — see `LiveSignals` —
                 // but the one thing that protects a prompt typed and not yet sent.
                 live.signals
@@ -1935,6 +1990,7 @@ impl SessionRegistry {
         self.retire_pty(id, live);
         // The old grid held a dead session's replay; the CLI is about to repaint from
         // scratch, so start it clean at the grid the reviving client asked for.
+        self.publish_program_status(id, live, Vec::new());
         self.inner.terminal.close(id);
         self.inner.terminal.open(id, cols as usize, rows as usize);
         {
@@ -2016,6 +2072,10 @@ impl SessionRegistry {
     }
 
     fn on_output(&self, id: &str, live: &Arc<LiveSession>, bytes: Arc<Vec<u8>>) {
+        let status_guard = live
+            .program_status_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let chunk = Arc::clone(&bytes);
         // What the pty says, as a running total. The reaper reads it as a rate, so a
         // TUI redrawing its status line cannot hold a session alive while a tool
@@ -2035,6 +2095,12 @@ impl SessionRegistry {
         });
         // The grid has parsed this chunk, so any window title in it is readable now.
         self.adopt_osc_title(id, live);
+        if let Some(reply) = self.inner.terminal.program_status_reply(id) {
+            // Protocol reply, not user input: bypass queue/readiness and completion acknowledgement.
+            let _ = self.inner.pty.write(id, &reply);
+        }
+        self.publish_program_status(id, live, self.inner.terminal.program_status(id));
+        drop(status_guard);
         {
             let mut ring = live.scrollback.lock().unwrap_or_else(|e| e.into_inner());
             ring.push(&bytes);
@@ -2263,6 +2329,18 @@ impl SessionRegistry {
         // Reap the pty service's entry for a child that ended on its own, so the
         // input guard starts refusing writes and a later revive can reuse the key.
         let _ = self.inner.pty.stop(id);
+        {
+            let _status_guard = live
+                .program_status_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let records = self
+                .program_status(id)
+                .into_iter()
+                .filter(|r| r.completed())
+                .collect();
+            self.publish_program_status(id, live, records);
+        }
         // Persist before the grid goes: the bytes and the grid they were written at
         // have to land together or the replay has to guess.
         self.flush_scrollback(id, live, true);
@@ -2458,6 +2536,7 @@ impl SessionRegistry {
         if !bytes.is_empty() {
             self.inner.terminal.feed(id, &bytes);
         }
+        self.inner.terminal.reset_program_status(id);
         // The bytes are now the picture at this grid, so the store has to say so
         // before anything else reads it back.
         self.flush_scrollback(id, live, true);
