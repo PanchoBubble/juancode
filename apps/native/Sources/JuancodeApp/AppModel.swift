@@ -763,6 +763,9 @@ final class AppModel {
         }
         subscribeTrackedMirror()
         subscribeChainsMirror()
+        attentionCancel = core.subscribeAttention { [weak self] items in
+            Task { @MainActor in self?.attentionItems = items }
+        }
         subscribeHandoffsMirror()
         restoreTrackedIssues()
         restoreRecurringTasks()
@@ -5538,6 +5541,15 @@ final class AppModel {
             statusLoading = false
         }
     }
+
+    // MARK: - Shared attention inbox (juancode-01n)
+
+    private(set) var attentionItems: [AttentionItem]?
+    @ObservationIgnored private var attentionCancel: (@Sendable () -> Void)?
+    var showingAttention = false
+    var supportsAttention: Bool { core.supports(.attention) }
+    var activeAttention: [AttentionItem] { AttentionItem.actionable(attentionItems ?? []) }
+    func acknowledgeAttention(_ id: String) async throws { try await core.acknowledgeAttention(id) }
 
     // MARK: - Chains (juancode-dbo.1)
 

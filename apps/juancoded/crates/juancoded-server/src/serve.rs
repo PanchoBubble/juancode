@@ -45,6 +45,8 @@ use crate::transcript_pump::{self, TranscriptPlane};
 /// no error, no log, just a dock that never updates.
 #[derive(Clone)]
 pub struct CoreHandles {
+    /// Shared inbox; unavailable if its persisted book cannot be loaded.
+    pub attention: Option<Arc<crate::attention::Attention>>,
     pub sessions: Arc<dyn SessionsApi>,
     pub contributions: ContributionRegistry,
     /// `None` when the tree mounted no `queue` row. Queue frames then say so rather
@@ -110,6 +112,19 @@ impl CoreHandles {
             .ok()
             .zip(loader.services().resolve::<StoreService>().ok())
             .map(|(hub, store)| TranscriptPlane::new(hub, store));
+        let attention = loader
+            .services()
+            .resolve::<StoreService>()
+            .ok()
+            .and_then(|store| {
+                match crate::attention::Attention::new(Arc::clone(&sessions), store) {
+                    Ok(engine) => Some(engine),
+                    Err(e) => {
+                        warn!("attention unavailable: {e:#}");
+                        None
+                    }
+                }
+            });
         let queue = loader.services().resolve::<QueueService>().ok();
         let reviews = loader.services().resolve::<ReviewStoreService>().ok();
         let chains = loader
@@ -161,6 +176,7 @@ impl CoreHandles {
             loader.services().resolve::<StoreService>().ok(),
         );
         Self {
+            attention,
             sessions,
             contributions: loader.contributions().clone(),
             queue,
@@ -286,6 +302,8 @@ async fn ws_handler(ws: WebSocketUpgrade, State(handles): State<CoreHandles>) ->
 
 /// Serve on both listeners until one of them fails.
 pub async fn serve(handles: CoreHandles, config: ServeConfig) -> Result<()> {
+    // Capture attention even with no clients connected. The guard aborts on shutdown.
+    let _attention = handles.attention.as_ref().map(|engine| engine.spawn());
     // One pump for the daemon, not one per connection: a queued message is delivered
     // because a session can take it, not because somebody is watching the dock.
     let identity = Arc::clone(&handles.identity);

@@ -325,6 +325,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX handoffs_one_successor ON handoffs(predecessor_id) WHERE predecessor_id IS NOT NULL;
     CREATE INDEX handoffs_by_chain ON handoffs(chain_slug, created_at, id);
     "#,
+    // 15: the daemon-owned inbox. One atomic replacement preserves acknowledgement
+    // and occurrence IDs together. The engine prunes deleted/archived sessions.
+    r#"
+    CREATE TABLE attention_book (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        json TEXT NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

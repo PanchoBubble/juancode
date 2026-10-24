@@ -231,6 +231,42 @@ const msg = (userId: number, text: string, chatId = 100, messageId = 7): TgUpdat
 describe("handleUpdate", () => {
   const allowed = new Set([5]);
 
+  it("reads the shared inbox without deriving state or sending provider input", async () => {
+    const deps = makeDeps({
+      attention: () => [
+        {
+          id: "read",
+          sessionId: "old",
+          kind: "completion",
+          createdAt: 0,
+          updatedAt: 0,
+          acknowledged: true,
+          resolved: false,
+        },
+        {
+          id: "waiting",
+          sessionId: "correct-session",
+          kind: "waiting",
+          createdAt: 1,
+          updatedAt: 1,
+          acknowledged: false,
+          resolved: false,
+        },
+      ],
+    });
+    await handleUpdate(msg(5, "/inbox"), allowed, deps);
+    expect(deps.send).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.stringContaining("correct-session"),
+    );
+    expect(deps.send).not.toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.stringContaining("session old"),
+    );
+    expect(deps.keys).not.toHaveBeenCalled();
+    expect(deps.chat).not.toHaveBeenCalled();
+  });
+
   it("ignores messages from non-allowed users (no chat, no send)", async () => {
     const deps = makeDeps();
     await handleUpdate(msg(999, "hello"), allowed, deps);

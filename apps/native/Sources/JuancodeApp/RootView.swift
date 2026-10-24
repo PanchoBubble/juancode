@@ -34,6 +34,7 @@ struct RootView: View {
                     // Appearance into the ⌘, Settings window. The Oracle has the
                     // right-edge rail and ⌃Space, so it does not need a slot here too.
                     RunningSessionsBadge()
+                    AttentionButton()
                     NotificationsBell()
                     ToolsMenu()
                     VimNavDot()
@@ -96,6 +97,7 @@ private struct WindowContent: View {
         // collapsing Oracle reveals the editor underneath. Both are `.overlay`s, so
         // neither reflows the split view beneath — no layout shift on open/close.
         .overlay { OracleDock() }
+        .sheet(isPresented: $model.showingAttention) { AttentionInbox() }
         .sheet(isPresented: $model.showingWorktrees) {
             WorktreesSheet()
         }

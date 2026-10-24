@@ -78,6 +78,7 @@ import {
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { watchChains } from "./chains.ts";
+import { registerAttentionTools } from "./attention-tools.ts";
 import { registerChainTools } from "./chain-tools.ts";
 import { fail, ok, tool } from "./tool-result.ts";
 import { notifyOracleText, startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
@@ -526,6 +527,7 @@ function buildServer(): McpServer {
   );
 
   registerChainTools(server);
+  registerAttentionTools(server);
 
   return server;
 }

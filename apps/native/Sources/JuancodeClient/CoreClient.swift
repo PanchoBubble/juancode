@@ -248,6 +248,10 @@ public protocol CoreClient: AnyObject, Sendable {
     /// Stop a queued or running heavy job (wire `heavyCancel`).
     func heavyCancel(pid: Int)
 
+    /// Shared daemon inbox. Nil means unavailable or awaiting a fresh snapshot.
+    func subscribeAttention(_ listener: @escaping @Sendable ([AttentionItem]?) -> Void) -> @Sendable () -> Void
+    func acknowledgeAttention(_ id: String) async throws
+
     // MARK: - Chains (wire: subscribeChains, createChain, closeChain, reopenChain,
     //         deleteChain, setChainMember)
 
@@ -399,6 +403,12 @@ public extension CoreClient {
     func heavySetPriority(pid: Int, prio: Int) {}
     func heavySetSlots(_ slots: Int) {}
     func heavyCancel(pid: Int) {}
+
+    func subscribeAttention(_ listener: @escaping @Sendable ([AttentionItem]?) -> Void) -> @Sendable () -> Void {
+        listener(nil)
+        return {}
+    }
+    func acknowledgeAttention(_ id: String) async throws { throw AttentionError("attention-unavailable") }
 
     /// What a core with no `chains` capability does: an empty book, and a refusal for
     /// every write. One implementation exists — the daemon's — so a stand-in core is not

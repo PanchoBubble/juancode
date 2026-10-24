@@ -8,6 +8,10 @@
 // see WebSocketConnection.start()), so we just connect and fan those out.
 
 import { WebSocket } from "ws";
+import { AttentionMirror } from "./attention.ts";
+
+/** Shared daemon inbox for Oracle/Telegram consumers; null while unavailable. */
+export const attention = new AttentionMirror((frame) => sendToNative(frame));
 
 /** Resolve the native backend's WS URL from the same base oracle.ts uses for its
  *  HTTP calls. Kept local (oracle.ts doesn't export nativeApiBase). */
@@ -982,6 +986,7 @@ export function startActivityListener(): void {
 
 export function stopActivityListener(): void {
   stopped = true;
+  attention.reset();
   ws?.close();
   ws = null;
 }
@@ -1014,6 +1019,7 @@ function connect(): void {
     if (ws === sock) ws = null;
     // Fail closed until the next handshake: an endpoint that went away is not one
     // whose capabilities or paused set we still know.
+    attention.reset();
     nativeCapabilities = [];
     pausedSessionIds = null;
     // Dropped rather than kept: jobs have started and finished while this socket was
@@ -1053,6 +1059,7 @@ function handleMessage(raw: string): void {
   } catch {
     return;
   }
+  attention.handle(msg);
   if (msg.type === "serverInfo") {
     nativeCapabilities = Array.isArray(msg.capabilities)
       ? msg.capabilities.filter((c): c is string => typeof c === "string")

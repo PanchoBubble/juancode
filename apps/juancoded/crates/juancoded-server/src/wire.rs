@@ -240,6 +240,8 @@ pub const CAPABILITIES: &[&str] = &[
     // Advertised because the whole book answers here: kept across a restart, one chain
     // per item enforced by the store, and every change pushed to every subscriber.
     "chains",
+    // Shared, persisted session attention inbox (juancode-01n).
+    "attention",
     // Chain auto-join: `create.fromSessionId` and `trackPr.fromSessionId` are read, and
     // the new session or watch joins that session's chain. Separate from `chains`
     // because a core can keep the book and still drop the hint, and a dispatcher has
@@ -644,6 +646,12 @@ pub enum ClientMessage {
         tracked_id: String,
         notification_id: String,
     },
+    /// Full replacement inbox snapshots; acknowledgement never sends provider input.
+    SubscribeAttention,
+    AcknowledgeAttention {
+        id: String,
+        request_id: Option<String>,
+    },
     /// Watch the chains: the whole book now (`chains`), then each chain whole again
     /// (`chain`) or its slug (`chainRemoved`) whenever it moves, until the socket
     /// closes. One subscribe per connection, like `subscribeTrackedPrs`.
@@ -905,6 +913,8 @@ pub enum ClientMessage {
 
 #[derive(Deserialize)]
 struct RawClient {
+    #[serde(default)]
+    id: Option<String>,
     r#type: String,
     #[serde(default)]
     provider: Option<String>,
@@ -1312,6 +1322,11 @@ impl ClientMessage {
                 tracked_id: raw.tracked_id.ok_or("missing trackedId")?,
                 notification_id: raw.notification_id.ok_or("missing notificationId")?,
             }),
+            "subscribeAttention" => Ok(Self::SubscribeAttention),
+            "acknowledgeAttention" => Ok(Self::AcknowledgeAttention {
+                id: raw.id.ok_or("missing id")?,
+                request_id: raw.request_id,
+            }),
             "subscribeChains" => Ok(Self::SubscribeChains),
             "createChain" => Ok(Self::CreateChain {
                 slug: raw.slug.ok_or("missing slug")?,
@@ -1392,6 +1407,14 @@ impl From<&str> for ClientMessage {
 /// visible at the call site instead of hiding in attributes.
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
+    Attention {
+        items: Vec<crate::attention::AttentionItem>,
+    },
+    AttentionResult {
+        ok: bool,
+        error: Option<String>,
+        request_id: Option<String>,
+    },
     ServerInfo {
         client_id: ClientId,
         /// Who this daemon is: build, boot time and effective retention. The one
@@ -1788,6 +1811,12 @@ fn tracked_pr(pr: &TrackedPrWire) -> Value {
 impl ServerMessage {
     pub fn to_value(&self) -> Value {
         match self {
+            Self::Attention { items } => json!({"type":"attention", "items":items}),
+            Self::AttentionResult {
+                ok,
+                error,
+                request_id,
+            } => json!({"type":"attentionResult", "ok":ok, "error":error, "requestId":request_id}),
             Self::ServerInfo {
                 client_id,
                 identity,
@@ -2633,6 +2662,7 @@ mod tests {
                     "changes",
                     "github",
                     "chains",
+                    "attention",
                     "chainInherit",
                     "chainAutoClose",
                     "chainHandoffs",

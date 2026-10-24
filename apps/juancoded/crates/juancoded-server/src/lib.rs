@@ -6,6 +6,7 @@
 //! needs no FFI: the boundary the Swift app would talk over already exists and
 //! remote clients already use it.
 
+pub mod attention;
 pub mod chains;
 pub mod changes;
 pub mod conn;

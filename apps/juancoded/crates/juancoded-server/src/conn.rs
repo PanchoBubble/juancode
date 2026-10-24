@@ -83,6 +83,8 @@ struct Fanout {
     /// that was told twice would see its own reorder answered by the snapshot before
     /// it. Dropped with the watch.
     heavy_sent: Option<Arc<HeavyQueueSnapshot>>,
+    /// Last full inbox snapshot sent to this subscriber. None means no subscription.
+    attention: Option<Vec<crate::attention::AttentionItem>>,
     /// Whether this connection asked for the chains. The change stream is received for
     /// the whole connection and only forwarded once this is set, for the reason the
     /// tracked-PR receiver is: one created at subscribe time could miss a change
@@ -95,6 +97,22 @@ struct Fanout {
     /// belongs to by the whole of a CLI's boot window, and a delivery that failed has
     /// to say so on the wire rather than in a log nobody dispatching is reading.
     oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
+}
+
+/// Read current state, never a queued stale snapshot. Repeated ticks do not spam.
+fn push_attention(
+    engine: Option<&Arc<crate::attention::Attention>>,
+    fanout: &mut Fanout,
+    outbound: &mut Vec<ServerMessage>,
+) {
+    if let (Some(seen), Some(engine)) = (&mut fanout.attention, engine) {
+        if let Ok(items) = engine.list() {
+            if *seen != items {
+                *seen = items.clone();
+                outbound.push(ServerMessage::Attention { items });
+            }
+        }
+    }
 }
 
 /// Screen-diff cadence: at most one frame per tick, matching the Swift streamer.
@@ -119,6 +137,7 @@ fn release(sessions: &Arc<dyn SessionsApi>, reaper: Option<&Arc<SessionReaper>>,
 
 pub async fn handle(socket: WebSocket, handles: CoreHandles) {
     let CoreHandles {
+        attention,
         sessions,
         contributions,
         queue,
@@ -252,6 +271,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         tracked_prs: None,
         heavy: None,
         heavy_sent: None,
+        attention: None,
         chains: false,
         handoffs: false,
         carries: HashMap::new(),
@@ -336,6 +356,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                                     reaper: reaper.as_ref(),
                                     tracked_prs: tracked_prs.as_ref(),
                                     reviews: reviews.as_ref(),
+                                    attention: attention.as_ref(),
                                     chains: chains.as_ref(),
                                     global_pause: &global_pause,
                                     heavy: &heavy,
@@ -392,6 +413,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
                 }
             }
             _ = ticker.tick() => {
+                push_attention(attention.as_ref(), &mut fanout, &mut outbound);
                 for (session_id, streamer) in screens.iter_mut() {
                     if let Some(snapshot) = sessions.snapshot(session_id) {
                         if let Some(frame) = streamer.frame(snapshot) {
@@ -955,6 +977,8 @@ struct Tree<'a> {
     /// mounted no store for them, and the three review frames then say so rather than
     /// answering with an empty list — an empty list is a promise nothing was staged.
     reviews: Option<&'a Arc<dyn ReviewStore>>,
+    /// The shared inbox, absent when its persistent store is unavailable.
+    attention: Option<&'a Arc<crate::attention::Attention>>,
     /// The chains book. `None` when the tree mounted no store for it, and the chain
     /// frames then answer `chain-unavailable`.
     chains: Option<&'a Arc<Chains>>,
@@ -998,6 +1022,7 @@ fn handle_client_message(
     outbound: &mut Vec<ServerMessage>,
 ) {
     let Tree {
+        attention: _,
         sessions,
         contributions,
         queue,
@@ -2010,6 +2035,31 @@ fn handle_client_message(
             engine.resolve_notification(&tracked_id, &notification_id);
         }
 
+        // Shared attention inbox (juancode-01n).
+        ClientMessage::SubscribeAttention => {
+            match tree.attention.and_then(|engine| engine.list().ok()) {
+                Some(items) => {
+                    fanout.attention = Some(items.clone());
+                    outbound.push(ServerMessage::Attention { items });
+                }
+                None => outbound.push(ServerMessage::AttentionResult {
+                    ok: false,
+                    error: Some("attention-unavailable".into()),
+                    request_id: None,
+                }),
+            }
+        }
+        ClientMessage::AcknowledgeAttention { id, request_id } => {
+            let result = tree
+                .attention
+                .ok_or_else(|| anyhow::anyhow!("attention-unavailable"))
+                .and_then(|engine| engine.acknowledge(&id));
+            outbound.push(ServerMessage::AttentionResult {
+                ok: result.is_ok(),
+                error: result.err().map(|e| e.to_string()),
+                request_id,
+            });
+        }
         // ── Chains (juancode-dbo.1) ───────────────────────────────────────────────
         ClientMessage::SubscribeChains => {
             let Some(engine) = chains else {
@@ -2192,6 +2242,7 @@ mod tests {
             tracked_prs: None,
             heavy: None,
             heavy_sent: None,
+            attention: None,
             chains: false,
             handoffs: false,
             carries: HashMap::new(),
@@ -2221,6 +2272,7 @@ mod tests {
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
                 reviews: handles.reviews.as_ref(),
+                attention: handles.attention.as_ref(),
                 chains: handles.chains.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy: &handles.heavy,
@@ -2284,6 +2336,7 @@ mod tests {
                 reaper: handles.reaper.as_ref(),
                 tracked_prs: handles.tracked_prs.as_ref(),
                 reviews: handles.reviews.as_ref(),
+                attention: handles.attention.as_ref(),
                 chains: handles.chains.as_ref(),
                 global_pause: &handles.global_pause,
                 heavy,
@@ -2784,6 +2837,7 @@ mod tests {
                     reaper: self.handles.reaper.as_ref(),
                     tracked_prs: self.handles.tracked_prs.as_ref(),
                     reviews: self.handles.reviews.as_ref(),
+                    attention: self.handles.attention.as_ref(),
                     chains: self.handles.chains.as_ref(),
                     global_pause: &self.handles.global_pause,
                     heavy: &self.handles.heavy,
@@ -3733,6 +3787,78 @@ mod tests {
         wire.tracked_prs().untrack("nothing-tracked-under-this-id");
         assert!(wire.queued_tracked_frames(&mut fanout).is_empty());
         assert!(fanout.tracked_prs.is_none());
+    }
+
+    #[tokio::test]
+    async fn attention_subscribers_converge_and_unknown_acknowledgements_are_refused() {
+        use juancoded_core::model::SessionActivity;
+        use juancoded_persistence::SqliteStore;
+        let child = crate::testing::FakeChild::new(false);
+        let engine = crate::attention::Attention::new(
+            child.api(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+        )
+        .unwrap();
+        let mut wire = Wire::new();
+        wire.handles.attention = Some(engine.clone());
+        let mut desktop = fanout();
+        let mut phone = fanout();
+        let mut old_client = fanout();
+        assert!(
+            matches!(wire.step(ClientMessage::SubscribeAttention, &mut desktop).as_slice(), [ServerMessage::Attention { items }] if items.is_empty())
+        );
+        wire.step(ClientMessage::SubscribeAttention, &mut phone);
+        child.publish(SessionEvent::Activity {
+            session_id: "fake".into(),
+            state: SessionActivity::Busy,
+            notify: false,
+            changes: None,
+            dispatch_id: None,
+        });
+        child.publish(SessionEvent::Activity {
+            session_id: "fake".into(),
+            state: SessionActivity::Idle,
+            notify: true,
+            changes: None,
+            dispatch_id: None,
+        });
+        let mut frames = Vec::new();
+        push_attention(Some(&engine), &mut old_client, &mut frames);
+        assert!(
+            frames.is_empty(),
+            "old clients get no new unsolicited frames"
+        );
+        push_attention(Some(&engine), &mut desktop, &mut frames);
+        let id = desktop.attention.as_ref().unwrap()[0].id.clone();
+        assert_eq!(frames.len(), 1);
+        push_attention(Some(&engine), &mut desktop, &mut frames);
+        assert_eq!(frames.len(), 1, "unchanged snapshots do not spam");
+        let request = ClientMessage::decode(&format!(
+            r#"{{"type":"acknowledgeAttention","id":"{id}","requestId":"read-1"}}"#
+        ))
+        .unwrap();
+        let result = wire.step(request, &mut phone);
+        assert_eq!(result[0].to_value()["ok"], true);
+        assert_eq!(result[0].to_value()["requestId"], "read-1");
+        push_attention(Some(&engine), &mut desktop, &mut frames);
+        push_attention(Some(&engine), &mut phone, &mut frames);
+        assert_eq!(desktop.attention, phone.attention);
+        assert!(desktop.attention.as_ref().unwrap()[0].acknowledged);
+        let mut reconnect = fanout();
+        wire.step(ClientMessage::SubscribeAttention, &mut reconnect);
+        assert_eq!(reconnect.attention, desktop.attention);
+        let result = wire.step(
+            ClientMessage::AcknowledgeAttention {
+                id: "unknown".into(),
+                request_id: None,
+            },
+            &mut phone,
+        );
+        assert_eq!(result[0].to_value()["error"], "attention-not-found");
+        assert!(child.written().is_empty());
+        wire.handles.attention = None;
+        let result = wire.step(ClientMessage::SubscribeAttention, &mut reconnect);
+        assert_eq!(result[0].to_value()["error"], "attention-unavailable");
     }
 
     fn chain_frames(frames: &[ServerMessage]) -> Vec<String> {

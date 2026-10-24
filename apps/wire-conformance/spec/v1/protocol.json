@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.23.0",
+  "specRevision": "1.24.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -43,12 +43,14 @@
       "heavyQueue",
       "changes",
       "github",
+      "attention",
       "chains",
       "chainInherit",
       "chainAutoClose",
       "chainHandoffs"
     ],
     "gates": {
+      "attention": ["subscribeAttention", "acknowledgeAttention", "attention", "attentionResult"],
       "queue": ["subscribeQueue", "unsubscribeQueue", "queueMessage", "dequeueMessage", "queue"],
       "trackedPrs": [
         "subscribeTrackedPrs",
@@ -113,7 +115,17 @@
       ],
       "chainInherit": ["create.fromSessionId", "trackPr.fromSessionId"],
       "chainAutoClose": ["setChainMember.done"],
-      "chainHandoffs": ["subscribeHandoffs", "createHandoff", "advanceHandoff", "acknowledgeHandoff", "closeHandoff", "markHandoffDelivered", "handoffs", "handoff", "handoffResult"]
+      "chainHandoffs": [
+        "subscribeHandoffs",
+        "createHandoff",
+        "advanceHandoff",
+        "acknowledgeHandoff",
+        "closeHandoff",
+        "markHandoffDelivered",
+        "handoffs",
+        "handoff",
+        "handoffResult"
+      ]
     },
     "notes": "A gate entry is a message `type`, or `type.field` for a capability that gates one optional field of an otherwise ungated message. The field form exists because an old core still runs a frame whose field it does not know, so a client has to be able to ask beforehand whether the field will be honoured. The gate is also what says WHICH core speaks a message: see the CATALOGUE_IS_THE_UNION rule."
   },
@@ -406,6 +418,18 @@
       "capability": "github",
       "notes": "Drop one staged comment, or - with no `commentId` - every one of the session's. One frame at two scopes rather than two frames, because a separate clear is a second way to get the same set wrong. A `commentId` this session does not hold is answered with `error` as well as the list: the client was holding a comment this core does not have, which is worth it knowing. Answered by `diffComments` with the whole list."
     },
+    "subscribeAttention": {
+      "required": [],
+      "optional": [],
+      "capability": "attention",
+      "notes": "Subscribe to complete attention snapshots, including read/resolved records. Every subscribe answers with the current book; subsequent changes replace it wholesale. Older peers must feature-detect."
+    },
+    "acknowledgeAttention": {
+      "required": ["id"],
+      "optional": ["requestId"],
+      "capability": "attention",
+      "notes": "Persist an acknowledgement by stable item ID, idempotently. Never sends provider input. Unknown IDs are refused, not interpreted as session IDs."
+    },
     "subscribeChains": {
       "required": [],
       "optional": [],
@@ -445,12 +469,42 @@
       },
       "notes": "Put one item in chain `slug`, or take it out of its chain when `slug` is absent or null. An item is in at most one chain - `UNIQUE(kind, ref)` in the core's store - so tagging an item that is already in another chain MOVES it, and the change stream carries both chains. `kind` is `session` (an Oracle is an ordinary session), `tracked_pr`, `beads` or `linear`, and `ref` is the id that kind already has: the session id, the tracked PR's key (`<cwd>#<number>`), the beads issue id, the Linear identifier. An unknown kind is a malformed frame rather than an ignored one, because silence would read as a tag that landed. A session member must be a session the core holds (`chain-member-not-found`); the other kinds are not looked up, so `title`/`url` are the caller's snapshot for them. A slug that names no chain is `chain-not-found`. `done` is gated by `chainAutoClose` and is the caller's report of a ticket's state (`beads`, `linear`), because the core cannot look either up: absent keeps what was reported before, and it is ignored for `session` and `tracked_pr`, whose state the core reads itself. Re-tagging an item into the chain it is already in keeps its `addedAt`. A core advertising `chainAutoClose` closes a chain on its own when its LAST unfinished member finishes - a session exits (not one put to sleep) or is archived or deleted, a tracked PR leaves the watch list, a ticket is reported done while in the chain - and publishes that close as a `chain` frame like a manual one, after the frame of the change that caused it. Only a member finishing triggers it: an empty chain, a join of already-finished work, and a manual reopen never close a chain, and nothing reopens one on its own."
     },
-    "subscribeHandoffs": { "required": [], "optional": [], "capability": "chainHandoffs", "notes": "Subscribe to durable handoff history: one complete `handoffs` snapshot, then changed `handoff` records. A repeated subscribe is a no-op." },
-    "createHandoff": { "required": ["handoff"], "optional": ["requestId"], "capability": "chainHandoffs", "notes": "Create a handoff with a client-stable id. The daemon validates its chain and any session owners, stamps times and initializes pending/not_sent. Exact retries with the same payload are idempotent; reusing an id with different payload conflicts. Handoff body: {id, chainSlug, source, target, beadsIssue?, summary, evidenceRef?}; owner is {kind: human} or {kind: session, sessionId}. Beads remains the issue authority." },
-    "advanceHandoff": { "required": ["predecessorId", "handoff"], "optional": ["requestId"], "capability": "chainHandoffs", "notes": "Atomically close the predecessor with closureReason handed_off_to, link its single successor, and insert the new pending handoff. The successor must be on the same chain. Exact retry is idempotent; a different successor conflicts. No delivery is performed." },
-    "acknowledgeHandoff": { "required": ["handoffId"], "optional": ["requestId"], "capability": "chainHandoffs", "notes": "Record explicit acknowledgement. Transport delivery does not acknowledge, and a closed handoff cannot be acknowledged." },
-    "closeHandoff": { "required": ["handoffId", "closureReason"], "optional": ["requestId"], "capability": "chainHandoffs", "notes": "Close a handoff with a non-empty explicit closure reason. History remains readable." },
-    "markHandoffDelivered": { "required": ["handoffId"], "optional": ["requestId"], "capability": "chainHandoffs", "notes": "Mark transport delivery only; state remains pending until acknowledgement or closure. This frame never sends anything." }
+    "subscribeHandoffs": {
+      "required": [],
+      "optional": [],
+      "capability": "chainHandoffs",
+      "notes": "Subscribe to durable handoff history: one complete `handoffs` snapshot, then changed `handoff` records. A repeated subscribe is a no-op."
+    },
+    "createHandoff": {
+      "required": ["handoff"],
+      "optional": ["requestId"],
+      "capability": "chainHandoffs",
+      "notes": "Create a handoff with a client-stable id. The daemon validates its chain and any session owners, stamps times and initializes pending/not_sent. Exact retries with the same payload are idempotent; reusing an id with different payload conflicts. Handoff body: {id, chainSlug, source, target, beadsIssue?, summary, evidenceRef?}; owner is {kind: human} or {kind: session, sessionId}. Beads remains the issue authority."
+    },
+    "advanceHandoff": {
+      "required": ["predecessorId", "handoff"],
+      "optional": ["requestId"],
+      "capability": "chainHandoffs",
+      "notes": "Atomically close the predecessor with closureReason handed_off_to, link its single successor, and insert the new pending handoff. The successor must be on the same chain. Exact retry is idempotent; a different successor conflicts. No delivery is performed."
+    },
+    "acknowledgeHandoff": {
+      "required": ["handoffId"],
+      "optional": ["requestId"],
+      "capability": "chainHandoffs",
+      "notes": "Record explicit acknowledgement. Transport delivery does not acknowledge, and a closed handoff cannot be acknowledged."
+    },
+    "closeHandoff": {
+      "required": ["handoffId", "closureReason"],
+      "optional": ["requestId"],
+      "capability": "chainHandoffs",
+      "notes": "Close a handoff with a non-empty explicit closure reason. History remains readable."
+    },
+    "markHandoffDelivered": {
+      "required": ["handoffId"],
+      "optional": ["requestId"],
+      "capability": "chainHandoffs",
+      "notes": "Mark transport delivery only; state remains pending until acknowledgement or closure. This frame never sends anything."
+    }
   },
   "serverMessages": {
     "serverInfo": {
@@ -615,6 +669,18 @@
       "capability": "github",
       "notes": "A session's staged diff comments, oldest first, ALWAYS complete and never a delta - two surfaces stage comments against one session, so a client applying a patch to its own copy would drift from the set the composer reads. Each is { id, sessionId, file, side, line, endLine, body, createdAt, quote?, commitSha?, commitSubject? }. Empty means nothing is staged, which is a set and not a missing one."
     },
+    "attention": {
+      "required": ["items"],
+      "optional": [],
+      "capability": "attention",
+      "notes": "Full replacement ordered by createdAt then id. Each item: id, sessionId, kind (waiting|error|completion), createdAt/updatedAt epoch milliseconds, acknowledged and resolved booleans. Actionable means not resolved and (waiting or not acknowledged). Unknown reasons remain waiting. Latest occurrence per session/kind is retained; new occurrences receive new IDs. No replay-created completions."
+    },
+    "attentionResult": {
+      "required": ["ok"],
+      "optional": ["requestId", "error"],
+      "capability": "attention",
+      "notes": "Acknowledgement result, requestId echoed, error string on failure (null on success). Success only after persistence. Subscribe failure is attention-unavailable with no requestId."
+    },
     "chains": {
       "required": ["chains"],
       "optional": [],
@@ -639,9 +705,24 @@
       "capability": "chains",
       "notes": "The answer to one chain mutation, to the client that sent it. `op` is `create`, `close`, `reopen`, `delete`, `setMember` (or `subscribe`, refused on a core with no store for chains). `requestId` is echoed when the frame carried one. `error` is present exactly when the mutation did not happen and is a code (`chain-exists`, `chain-not-found`, `chain-member-not-found`, `chain-member-invalid`, `chain-slug-invalid`, `chain-unavailable`, ...). A frame of its own rather than `error`, because a sessionless `error` is read by clients as the answer to whatever lifecycle request is in flight."
     },
-    "handoffs": { "required": ["handoffs"], "optional": [], "capability": "chainHandoffs", "notes": "Complete durable history snapshot. Records include id, chainSlug, source/target owner, beadsIssue?, summary, createdAt, updatedAt, state, closureReason?, predecessorId?, successorId?, evidenceRef?, delivery. A missing session owner remains in history as a stale id; the daemon does not claim it is live." },
-    "handoff": { "required": ["handoff"], "optional": [], "capability": "chainHandoffs", "notes": "One whole handoff record after a create, advance, acknowledgement, closure, or delivery update. Sent only to subscribers; replace the record with this id." },
-    "handoffResult": { "required": ["op", "ok"], "optional": ["requestId", "id", "error"], "capability": "chainHandoffs", "notes": "Answer to one handoff write. Request id is echoed; error appears only when the operation was refused." }
+    "handoffs": {
+      "required": ["handoffs"],
+      "optional": [],
+      "capability": "chainHandoffs",
+      "notes": "Complete durable history snapshot. Records include id, chainSlug, source/target owner, beadsIssue?, summary, createdAt, updatedAt, state, closureReason?, predecessorId?, successorId?, evidenceRef?, delivery. A missing session owner remains in history as a stale id; the daemon does not claim it is live."
+    },
+    "handoff": {
+      "required": ["handoff"],
+      "optional": [],
+      "capability": "chainHandoffs",
+      "notes": "One whole handoff record after a create, advance, acknowledgement, closure, or delivery update. Sent only to subscribers; replace the record with this id."
+    },
+    "handoffResult": {
+      "required": ["op", "ok"],
+      "optional": ["requestId", "id", "error"],
+      "capability": "chainHandoffs",
+      "notes": "Answer to one handoff write. Request id is echoed; error appears only when the operation was refused."
+    }
   },
   "enums": {
     "activityState": ["busy", "idle", "waiting_input"],

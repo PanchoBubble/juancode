@@ -71,6 +71,7 @@ import {
 } from "./oracle.ts";
 import { unknownKey, unknownKeyMessage } from "./keys.ts";
 import {
+  attention,
   onSessionEvent,
   onSessionStuck,
   pauseAllSessions,
@@ -82,6 +83,7 @@ import {
   type SessionStuckEvent,
   type SessionUsageSample,
 } from "./native-events.ts";
+import { actionableAttention, type AttentionItem } from "./attention.ts";
 import { makeTranscriber } from "./transcribe.ts";
 import {
   chainListText,
@@ -388,6 +390,7 @@ export interface TelegramDeps {
   };
   /** The daemon's chain book (chains.ts), read-only from the phone. */
   chains: ChainDeps;
+  attention?: () => AttentionItem[] | null;
 }
 
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
@@ -422,6 +425,7 @@ function defaultDeps(token: string): TelegramDeps {
       resume: resumeAllSessions,
     },
     chains: defaultChainDeps(),
+    attention: () => attention.items,
   };
 }
 
@@ -431,6 +435,7 @@ const HELP_TEXT = [
   "/status — your observed sessions right now",
   "/observe <n|id> — get pinged when a session needs input or finishes",
   "/unobserve [n|id] — stop observing one (or all) sessions",
+  "/inbox — shared session attention, oldest first",
   "/chains [n|slug|all] — active chains, one chain's members, or every chain",
   "/pauseall — sleep every live agent (frees their RAM, keeps the conversations)",
   "/playall — bring back exactly the sessions /pauseall slept",
@@ -511,6 +516,21 @@ export async function handleUpdate(
   }
   if (command === "/status") {
     await handleStatusCommand(chatId, deps, state);
+    return;
+  }
+  if (command === "/inbox") {
+    const items = deps.attention?.();
+    const rows = items ? actionableAttention(items) : null;
+    const message =
+      rows === null
+        ? "Attention inbox unavailable."
+        : rows.length === 0
+          ? "No sessions need attention."
+          : "Attention inbox (oldest first):\n" +
+            rows
+              .map((item) => `${item.kind} — session ${item.sessionId} (item ${item.id})`)
+              .join("\n");
+    for (const chunk of chunkMessage(message)) await deps.send(chatId, chunk);
     return;
   }
   if (command === "/chains" || command.startsWith("/chains ")) {

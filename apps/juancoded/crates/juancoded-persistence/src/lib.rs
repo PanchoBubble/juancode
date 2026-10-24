@@ -165,6 +165,14 @@ pub fn transcript_records_kept() -> usize {
 /// an in-memory double, and so the cordis mount site is the only place that knows
 /// this is SQLite at all.
 pub trait SessionStore: Send + Sync {
+    /// Atomic persisted inbox snapshot; unsupported stores fail explicitly.
+    fn attention(&self) -> Result<String> {
+        anyhow::bail!("attention unavailable")
+    }
+    fn save_attention(&self, _json: &str) -> Result<()> {
+        anyhow::bail!("attention unavailable")
+    }
+
     fn upsert(&self, meta: &SessionMeta) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<SessionMeta>>;
     fn all(&self) -> Result<Vec<SessionMeta>>;
@@ -350,6 +358,20 @@ const SESSION_COLUMNS: &str = "id, provider, cwd, title, status, exit_code, crea
      title_is_manual, kind, parent_session_id, dispatch_id, parked_branch";
 
 impl SessionStore for SqliteStore {
+    fn attention(&self) -> Result<String> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row("SELECT json FROM attention_book WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or_else(|| "[]".into()))
+    }
+    fn save_attention(&self, json: &str) -> Result<()> {
+        self.conn().execute("INSERT INTO attention_book (id,json) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [json])?;
+        Ok(())
+    }
+
     fn upsert(&self, meta: &SessionMeta) -> Result<()> {
         let status = match meta.status {
             SessionStatus::Running => "running",

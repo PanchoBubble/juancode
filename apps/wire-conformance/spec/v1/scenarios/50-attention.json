@@ -1,0 +1,29 @@
+{
+  "id": "attention",
+  "title": "shared attention snapshots and safe acknowledgements",
+  "asserts": "Attention is capability gated. Every subscription, including reconnect/resubscribe, receives a full snapshot. Unknown acknowledgement IDs are refused with correlation and cannot send provider input. Lifecycle, deduplication and disk restart are covered by daemon unit tests.",
+  "capabilities": ["attention"],
+  "requires": [],
+  "ignore": ["activity", "output", "gridChange", "sessionMeta", "exit", "pauseState"],
+  "steps": [
+    { "send": { "type": "subscribeAttention" } },
+    { "expect": { "type": "attention", "items": { "$type": "array" } } },
+    {
+      "send": {
+        "type": "acknowledgeAttention",
+        "id": "nonexistent-attention-item",
+        "requestId": "inbox-refusal"
+      }
+    },
+    {
+      "expect": {
+        "type": "attentionResult",
+        "ok": false,
+        "requestId": "inbox-refusal",
+        "error": "attention-not-found"
+      }
+    },
+    { "send": { "type": "subscribeAttention" } },
+    { "expect": { "type": "attention", "items": { "$type": "array" } } }
+  ]
+}

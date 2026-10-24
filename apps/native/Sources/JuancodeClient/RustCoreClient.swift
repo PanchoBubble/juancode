@@ -143,6 +143,11 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     var changesWaiters: [String: ChangesWaiter] = [:]
     var nextChangesId = 1
 
+    /// Nil until the connected daemon has sent a fresh inbox snapshot.
+    var attentionItems: [AttentionItem]?
+    var attentionListeners: [Int: @Sendable ([AttentionItem]?) -> Void] = [:]
+    var attentionSubscribed = false
+
     /// The chains as the daemon last sent them, or nil while this connection has not
     /// been sent the book. Nil and empty differ, as they do for `trackedList`.
     var chainBook: ChainBook?
@@ -1703,6 +1708,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             let waiter = lock.withLock { searchWaiters.removeValue(forKey: requestId) }
             waiter?.deliver(hits)
 
+        case "attention", "attentionResult":
+            handleAttentionFrame(frame.type, body)
         case "chains", "chain", "chainRemoved", "chainResult":
             handleChainFrame(frame.type, body)
 
@@ -1792,6 +1799,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
                 return true
             }
             if chainsAgain { ensureChainSubscription() }
+            lock.withLock { attentionSubscribed = false; attentionItems = nil }
+            ensureAttentionSubscription()
             // Handoffs likewise: history may have moved on another surface meanwhile.
             let handoffsAgain: Bool = lock.withLock {
                 guard handoffSubscribed || !handoffListeners.isEmpty else { return false }
@@ -1801,6 +1810,8 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             }
             if handoffsAgain { ensureHandoffSubscription() }
         } else if let reason {
+            publishAttention(nil)
+            lock.withLock { attentionSubscribed = false }
             NSLog("juancode: rust core connection lost (\(reason))")
             // The daemon's editor and shell ptys belong to the connection and die with
             // it, so every open pane is already over. Told now rather than left
