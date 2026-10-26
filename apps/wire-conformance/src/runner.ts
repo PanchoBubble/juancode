@@ -241,6 +241,7 @@ function seedGhFixtures(dir: string): string {
   write("pr-create.txt", `${url(99)}\n`);
   write("pr-comment.txt", `${url(42)}#issuecomment-999\n`);
   write("run-rerun.txt", "\u2713 Requested rerun of run 901\n");
+  write("resolve-thread.json", { data: { resolveReviewThread: { thread: { isResolved: true } } } });
   // The viewer's cross-repo queue: one authored PR with red CI and one somebody else
   // wrote that asked for the viewer's review, so the two buckets and the two attention
   // reasons are both exercised by one fetch.

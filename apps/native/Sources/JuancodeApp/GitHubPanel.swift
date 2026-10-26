@@ -368,6 +368,21 @@ final class GitHubModel {
         }
     }
 
+    /// Resolve (or reopen) an inline review thread, then refetch the conversation so
+    /// the thread redraws in its new state. Returns the error to surface, or nil.
+    func setThreadResolved(cwd: String, pr: PullRequest, threadId: String, resolved: Bool) async -> String? {
+        guard let reads else { return readsUnavailable ?? "This core cannot write to GitHub." }
+        do {
+            try await reads.resolveThread(cwd: cwd, threadId: threadId, resolved: resolved)
+            loadDetail(cwd: cwd, pr: pr)
+            return nil
+        } catch let e as GitHubError {
+            return e.message
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// Compose the diff-review basket staged for this PR (line notes added in the
     /// Diff tab, keyed by the PR key so they survive tab/PR switches) into one
     /// feedback prompt and route it to the agent — queued on the tracking session
@@ -2298,7 +2313,7 @@ private struct CommitRow: View {
 /// the `<details>`/`<summary>` blocks GitHub bots emit become native collapsible
 /// disclosures instead of rendering their tags literally, and inline HTML
 /// (`<strong>`, lists, tables, …) is converted to markdown in `parseCommentSegments`.
-private struct CommentMarkdown: View {
+struct CommentMarkdown: View {
     let text: String
 
     var body: some View {

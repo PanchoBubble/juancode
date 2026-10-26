@@ -64,6 +64,7 @@ case "$1 $2" in
       *"pullRequests(states: OPEN"*) serve thread-counts.json ;;
       *"pullRequest(number:"*) serve conversation.json ;;
       *"search(query: \$mine"*) serve viewer-prs.json ;;
+      *"ReviewThread(input:"*) serve resolve-thread.json ;;
       *) fail "$@" ;;
     esac
     ;;

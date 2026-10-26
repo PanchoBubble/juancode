@@ -46,6 +46,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/pr/create", post(create_pr))
         .route("/api/pr/comment", post(comment))
         .route("/api/pr/rerun", post(rerun))
+        .route("/api/pr/resolve-thread", post(resolve_thread))
         .route("/api/pr/close", post(close_pr))
         .route("/api/repo", get(repo))
         .route("/api/pr/conversation", get(conversation))
@@ -470,6 +471,33 @@ async fn rerun(State(_): State<CoreHandles>, Json(body): Json<RerunBody>) -> Res
         return bad_request("a positive PR number required");
     };
     match gh::rerun_checks(&cwd, number, body.failed_only).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveThreadBody {
+    pub cwd: Option<String>,
+    /// The thread's GraphQL node id, as the timeline's `threads` carry it.
+    pub thread_id: Option<String>,
+    /// False reopens a resolved thread. Defaults to resolving, the common case.
+    pub resolved: Option<bool>,
+}
+
+/// Resolve (or reopen) an inline review thread — the diff review's Resolve button.
+async fn resolve_thread(
+    State(_): State<CoreHandles>,
+    Json(body): Json<ResolveThreadBody>,
+) -> Response {
+    let Some(cwd) = non_empty(body.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(thread_id) = non_empty(body.thread_id) else {
+        return bad_request("threadId (the review thread's node id) required");
+    };
+    match gh::set_review_thread_resolved(&cwd, &thread_id, body.resolved.unwrap_or(true)).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => gh_write_failed(e),
     }

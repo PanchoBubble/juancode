@@ -435,6 +435,31 @@
       "note": "an empty comment is a comment somebody has to delete"
     },
     {
+      "post": "/api/pr/resolve-thread",
+      "body": {
+        "cwd": "$ghCwd",
+        "threadId": "PRRT_1",
+        "resolved": true
+      },
+      "expectBody": {
+        "ok": true
+      },
+      "note": "resolving an inline thread from the diff review: one GraphQL mutation on the thread's node id, the same id the timeline's threads carry"
+    },
+    {
+      "post": "/api/pr/resolve-thread",
+      "body": {
+        "cwd": "$ghCwd"
+      },
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "threadId"
+        }
+      },
+      "note": "no thread, nothing to resolve"
+    },
+    {
       "post": "/api/pr/rerun",
       "body": {
         "cwd": "$ghCwd",

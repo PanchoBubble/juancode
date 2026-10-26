@@ -1187,6 +1187,39 @@ pub async fn reply_to_review_comment(
     .map(|_| ())
 }
 
+/// The `gh` arguments that resolve (or reopen) an inline review thread: GitHub's
+/// "Resolve conversation" button. `thread_id` is the thread's GraphQL node id — the
+/// `id` the conversation query reads off `reviewThreads` — since the mutation takes
+/// nothing else.
+pub fn resolve_thread_args(thread_id: &str, resolved: bool) -> Vec<String> {
+    let mutation = if resolved {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    vec![
+        "api".into(),
+        "graphql".into(),
+        "-f".into(),
+        format!(
+            "query=mutation($id: ID!) {{ {mutation}(input: {{threadId: $id}}) {{ thread {{ isResolved }} }} }}"
+        ),
+        "-f".into(),
+        format!("id={thread_id}"),
+    ]
+}
+
+/// Resolve or reopen an inline review thread.
+pub async fn set_review_thread_resolved(
+    cwd: &str,
+    thread_id: &str,
+    resolved: bool,
+) -> Result<(), GhError> {
+    let args = resolve_thread_args(thread_id, resolved);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    gh_write(cwd, &borrowed).await.map(|_| ())
+}
+
 /// Re-run a PR's CI. `failed_only` passes `--failed`, which is GitHub's "re-run failed
 /// jobs"; otherwise every job of every run behind the PR's checks is re-run. This is
 /// always user-initiated — a button — and never something a poll does.
@@ -2341,6 +2374,17 @@ mod list_tests {
         merge_unresolved_counts(&mut prs, &counts);
         assert_eq!(prs[0].unresolved_comments, 2);
         assert_eq!(prs[1].unresolved_comments, 0);
+    }
+
+    #[test]
+    fn resolving_a_thread_is_one_mutation_on_its_node_id_and_reopening_is_its_twin() {
+        let args = resolve_thread_args("PRRT_kwDO", true);
+        assert_eq!(&args[..3], ["api", "graphql", "-f"]);
+        assert!(args[3].contains("resolveReviewThread(input: {threadId: $id})"));
+        assert!(!args[3].contains("unresolve"));
+        assert_eq!(&args[4..], ["-f", "id=PRRT_kwDO"]);
+        let reopen = resolve_thread_args("PRRT_kwDO", false);
+        assert!(reopen[3].contains("unresolveReviewThread(input: {threadId: $id})"));
     }
 
     #[test]

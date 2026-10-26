@@ -284,6 +284,15 @@ public struct GitHubReads: Sendable {
                                        "Could not post the comment")
     }
 
+    /// Resolve an inline review thread, or reopen it (`resolved: false`). By the
+    /// thread's GraphQL node id, the `id` the timeline's `threads` carry.
+    public func resolveThread(cwd: String, threadId: String, resolved: Bool) async throws {
+        let _: OkBody = try await tell("/api/pr/resolve-thread",
+                                       ["cwd": cwd, "threadId": threadId, "resolved": resolved],
+                                       resolved ? "Could not resolve the thread"
+                                                : "Could not reopen the thread")
+    }
+
     /// Re-run a PR's CI, or only its failed jobs.
     public func rerunChecks(cwd: String, number: Int, failedOnly: Bool) async throws {
         let _: OkBody = try await tell("/api/pr/rerun",

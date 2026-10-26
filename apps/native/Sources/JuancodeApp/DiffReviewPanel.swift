@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import JuancodeCore
+import JuancodeClient
 import JuancodeDesktop
 
 /// The full-width diff-review panel (juancode-a5j): the session's diff with a file
@@ -32,6 +33,15 @@ struct DiffReviewPanel: View {
         case row(Int)
         case comment(String)
         case draft
+        /// A PR's GitHub review thread (by node id), read-only bar reply and resolve.
+        case thread(String)
+    }
+
+    /// A reply being written to a GitHub thread.
+    private struct ThreadReply: Equatable {
+        var threadId: String
+        var serial: Int
+        var text = ""
     }
 
     /// A comment being written: over rows `from...to`, or replacing comment `editId`.
@@ -96,6 +106,14 @@ struct DiffReviewPanel: View {
     /// Where the cursor was when `/` or `?` opened — Esc puts it back.
     @State private var searchOrigin: Item?
     @State private var pendingJump: Jump?
+    /// A PR review also draws the PR's GitHub threads under their lines.
+    @AppStorage("diffReview.showGitHubThreads") private var showThreads = true
+    /// Resolved threads draw folded to one line until opened.
+    @State private var expandedThreads: Set<String> = []
+    @State private var reply: ThreadReply?
+    @State private var replySerial = 0
+    /// Threads with a reply or a resolve on its way to GitHub.
+    @State private var threadBusy: Set<String> = []
 
     private let rowHeight: CGFloat = 18
     private let dragSpace = "diff-review-lines"
@@ -113,6 +131,17 @@ struct DiffReviewPanel: View {
         guard let path = selectedPath else { return [] }
         return allComments.filter { $0.path == path }
     }
+    /// The PR's inline threads, when this reviews a PR and they are shown.
+    private var prThreads: [PrReviewThread] {
+        guard showThreads, let t = prTarget else { return [] }
+        let key = TrackedPr.key(cwd: t.cwd, number: t.pr.number)
+        return (model.github.timelines[key]?.threads ?? []).filter { !$0.comments.isEmpty }
+    }
+    private var fileThreads: [PrReviewThread] {
+        guard let path = selectedPath else { return [] }
+        return prThreads.filter { $0.path == path }
+    }
+    private func thread(_ id: String) -> PrReviewThread? { prThreads.first { $0.id == id } }
     private var treeRows: [ReviewTreeRow] { reviewTreeRows(files, collapsed: collapsedDirs) }
     private var fileOrder: [String] { reviewFileOrder(files) }
     private var isVisual: Bool { anchor != nil }
@@ -145,8 +174,19 @@ struct DiffReviewPanel: View {
         var byKey: [String: [ReviewComment]] = [:]
         for c in comments { byKey[c.endKey, default: []].append(c) }
         var out: [Item] = comments.filter { !keys.contains($0.endKey) }.map { .comment($0.id) }
+        // GitHub's threads hang under their line, ahead of your own comments on it;
+        // an outdated one, or one whose line is not in this diff, heads the file.
+        var threadsAt: [Int: [String]] = [:]
+        for t in fileThreads {
+            if let i = githubThreadRow(t, in: rf.rows) {
+                threadsAt[i, default: []].append(t.id)
+            } else {
+                out.append(.thread(t.id))
+            }
+        }
         for (i, row) in rf.rows.enumerated() {
             out.append(.row(i))
+            for id in threadsAt[i] ?? [] { out.append(.thread(id)) }
             if let line = row.line {
                 for c in byKey[reviewLineKey(line)] ?? [] { out.append(.comment(c.id)) }
             }
@@ -167,14 +207,14 @@ struct DiffReviewPanel: View {
         }
         .background(Color.appSurface)
         .background(ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
-                                     enabled: draft == nil && prompt == nil,
+                                     enabled: draft == nil && prompt == nil && reply == nil,
                                      onKey: handle).frame(width: 0, height: 0))
         .onAppear {
             if snapshot == nil { model.loadDiffReview(sessionId) }
             syncSelection()
         }
         .onChange(of: snapshot) { _, _ in syncSelection() }
-        .onChange(of: draft == nil && prompt == nil) { _, closed in if closed { keyToken &+= 1 } }
+        .onChange(of: draft == nil && prompt == nil && reply == nil) { _, closed in if closed { keyToken &+= 1 } }
         .onChange(of: promptText) { _, _ in promptTextChanged() }
         .perfTrackBody()
     }
@@ -218,6 +258,19 @@ struct DiffReviewPanel: View {
                     Text("−\(dels)").foregroundStyle(VimSyntaxPalette.diffRemove)
                 }
                 .font(.system(size: 11)).fixedSize()
+            }
+            if prTarget != nil {
+                let open = prThreads.filter { !$0.isResolved }.count
+                Button { showThreads.toggle(); keyToken &+= 1 } label: {
+                    Label(showThreads ? "\(open)" : "",
+                          systemImage: showThreads ? "bubble.left.and.bubble.right.fill"
+                                                   : "bubble.left.and.bubble.right")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(showThreads ? Color.purple : .secondary)
+                .help(showThreads ? "Hide the PR's GitHub comments (\(open) unresolved)"
+                                  : "Show the PR's GitHub comments under their lines")
+                .clickCursor()
             }
             Button { model.loadDiffReview(sessionId); keyToken &+= 1 } label: {
                 Image(systemName: "arrow.clockwise")
@@ -313,6 +366,7 @@ struct DiffReviewPanel: View {
         let isSelected = row.file?.path == selectedPath && row.file != nil
         let isCursor = focus == .tree && row.id == treeCursor
         let comments = row.file.map { f in allComments.filter { $0.path == f.path }.count } ?? 0
+        let threads = row.file.map { f in prThreads.filter { $0.path == f.path && !$0.isResolved }.count } ?? 0
         return HStack(spacing: 5) {
             if row.isDirectory {
                 Image(systemName: row.isCollapsed ? "chevron.right" : "chevron.down")
@@ -329,6 +383,10 @@ struct DiffReviewPanel: View {
                               design: row.isDirectory ? .default : .monospaced))
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
+            if threads > 0 {
+                Text("◆\(threads)").font(.system(size: 9.5)).foregroundStyle(Color.purple)
+                    .help("\(threads) unresolved GitHub thread\(threads == 1 ? "" : "s")")
+            }
             if comments > 0 {
                 Text("●\(comments)").font(.system(size: 9.5)).foregroundStyle(Color.accentColor)
             }
@@ -438,6 +496,23 @@ struct DiffReviewPanel: View {
                                 .id(item)
                         case .draft:
                             if let d = draft { draftEditor(d).id(item) }
+                        case .thread(let id):
+                            if let t = thread(id) {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    GitHubThreadBox(
+                                        thread: t,
+                                        isCursor: cursor == item && focus == .diff,
+                                        expanded: expandedThreads.contains(id),
+                                        busy: threadBusy.contains(id),
+                                        canReply: t.comments.first?.databaseId != nil,
+                                        onSelect: { cursor = item; anchor = nil; focus = .diff; keyToken &+= 1 },
+                                        onToggle: { toggleThread(id) },
+                                        onReply: { cursor = item; openReply(id) },
+                                        onResolve: { setResolved(t, !t.isResolved) })
+                                    if let r = reply, r.threadId == id { replyEditor(r) }
+                                }
+                                .id(item)
+                            }
                         case .comment(let id):
                             if let c = byId[id] {
                                 ReviewCommentBox(
@@ -479,6 +554,40 @@ struct DiffReviewPanel: View {
                 if serial != nil { proxy.scrollTo(Item.draft) }
             }
         }
+    }
+
+    /// The reply box under a GitHub thread. Enter posts, ⇧Enter is a newline, Esc
+    /// cancels.
+    private func replyEditor(_ r: ThreadReply) -> some View {
+        let busy = threadBusy.contains(r.threadId)
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("Reply on GitHub").font(.system(size: 10)).foregroundStyle(.secondary)
+            ReviewDraftEditor(
+                text: Binding(get: { reply?.text ?? "" }, set: { reply?.text = $0 }),
+                focusToken: r.serial,
+                onSubmit: submitReply,
+                onSend: submitReply,
+                onCancel: cancelReply)
+                .frame(height: 64)
+                .background(Color.appPanel)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.purple.opacity(0.6)))
+            HStack(spacing: 8) {
+                Button("Reply") { submitReply() }
+                    .controlSize(.small)
+                    .disabled(busy || r.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .clickCursor()
+                Button("Cancel") { cancelReply() }.controlSize(.small).clickCursor()
+                if busy { ProgressView().controlSize(.mini) }
+                Text("⏎ post · ⇧⏎ newline · esc cancel")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.purple.opacity(0.35)))
+        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.trailing, 16)
+        .padding(.vertical, 4)
     }
 
     /// The comment editor, right under the commented lines. Enter saves, ⇧Enter is a
@@ -563,7 +672,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeName: String {
-        if draft != nil { return "INSERT" }
+        if draft != nil || reply != nil { return "INSERT" }
         if case .search = prompt { return "SEARCH" }
         if prompt != nil { return "FIND" }
         if focus == .tree { return "TREE" }
@@ -571,7 +680,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeColor: Color {
-        if draft != nil { return .green }
+        if draft != nil || reply != nil { return .green }
         if prompt != nil { return .purple }
         if focus == .tree { return .blue }
         return isVisual ? .orange : .secondary
@@ -686,6 +795,10 @@ struct DiffReviewPanel: View {
             if key == .escape { cancelPrompt() }
             return true
         }
+        guard reply == nil else {
+            if key == .escape { cancelReply() }
+            return true
+        }
         guard let command = parser.feed(key, visual: isVisual && focus == .diff) else { return true }
         switch command {
         case .findFiles:
@@ -760,7 +873,9 @@ struct DiffReviewPanel: View {
         case .comment:
             openDraft()
         case .activate:
-            if case .comment(let id)? = cursor, let c = allComments.first(where: { $0.id == id }) {
+            if case .thread(let id)? = cursor {
+                openReply(id)
+            } else if case .comment(let id)? = cursor, let c = allComments.first(where: { $0.id == id }) {
                 beginEdit(c)
             } else {
                 openDraft()
@@ -818,8 +933,10 @@ struct DiffReviewPanel: View {
     }
 
     private func isComment(_ item: Item) -> Bool {
-        if case .comment = item { return true }
-        return false
+        switch item {
+        case .comment, .thread: return true
+        default: return false
+        }
     }
 
     /// Move the cursor to the `n`th stop matching `test` past `from`. False if none.
@@ -1092,7 +1209,7 @@ struct DiffReviewPanel: View {
     private func cursorRow() -> Int {
         switch cursor {
         case .row(let i)?: return i
-        case .comment?, .draft?:
+        case .comment?, .draft?, .thread?:
             let list = items
             guard let at = cursor.flatMap({ list.firstIndex(of: $0) }) else { return -1 }
             for item in list[..<at].reversed() { if case .row(let i) = item { return i } }
@@ -1104,6 +1221,11 @@ struct DiffReviewPanel: View {
     // MARK: - Comments
 
     private func openDraft() {
+        // On a GitHub thread, "comment here" means reply to it.
+        if anchor == nil, case .thread(let id)? = cursor {
+            openReply(id)
+            return
+        }
         // On a comment, "comment here" means edit that one — the plugin's `openDraft`.
         if anchor == nil, case .comment(let id)? = cursor,
            let c = allComments.first(where: { $0.id == id }) {
@@ -1165,6 +1287,63 @@ struct DiffReviewPanel: View {
         if draft != nil { saveDraft() }
         model.sendDiffReview(sessionId)
         keyToken &+= 1
+    }
+
+    // MARK: - GitHub threads
+
+    private func toggleThread(_ id: String) {
+        if expandedThreads.remove(id) == nil { expandedThreads.insert(id) }
+    }
+
+    private func openReply(_ id: String) {
+        guard let t = thread(id), t.comments.first?.databaseId != nil else {
+            review.say("GitHub gave this thread no reply target — reply on github.com", isError: true, in: sessionId)
+            return
+        }
+        // Replying opens a folded (resolved) thread so you see what you answer.
+        expandedThreads.insert(id)
+        replySerial &+= 1
+        reply = ThreadReply(threadId: id, serial: replySerial)
+    }
+
+    private func cancelReply() {
+        reply = nil
+    }
+
+    private func submitReply() {
+        guard let r = reply, let target = prTarget, let t = thread(r.threadId),
+              let root = t.comments.first?.databaseId, !threadBusy.contains(r.threadId) else { return }
+        let body = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        threadBusy.insert(r.threadId)
+        Task {
+            // GitHub threads replies under the thread's first comment.
+            let error = await model.github.postReply(cwd: target.cwd, pr: target.pr,
+                                                     replyTargetId: root, body: body)
+            threadBusy.remove(r.threadId)
+            if let error {
+                review.say("Reply not posted: \(error). Your text is kept.", isError: true, in: sessionId)
+            } else {
+                if reply?.threadId == r.threadId { reply = nil }
+                review.say("Reply posted on GitHub", in: sessionId)
+            }
+        }
+    }
+
+    private func setResolved(_ t: PrReviewThread, _ resolved: Bool) {
+        guard let target = prTarget, !threadBusy.contains(t.id) else { return }
+        threadBusy.insert(t.id)
+        Task {
+            let error = await model.github.setThreadResolved(cwd: target.cwd, pr: target.pr,
+                                                             threadId: t.id, resolved: resolved)
+            threadBusy.remove(t.id)
+            if let error {
+                review.say(error, isError: true, in: sessionId)
+            } else {
+                if resolved { expandedThreads.remove(t.id) }
+                review.say(resolved ? "Thread resolved on GitHub" : "Thread reopened on GitHub", in: sessionId)
+            }
+        }
     }
 
     private func cancelDraft() {
@@ -1439,6 +1618,110 @@ private struct ReviewCommentBox: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onEdit)
         .onTapGesture(perform: onSelect)
+    }
+}
+
+/// The row a GitHub thread hangs under: its `line` on the new side, or for a thread
+/// on a removed line, the old side. Nil for an outdated thread (its line is from an
+/// older push) or a line this diff does not show.
+private func githubThreadRow(_ t: PrReviewThread, in rows: [ReviewRow]) -> Int? {
+    guard !t.isOutdated, let n = t.line else { return nil }
+    return rows.firstIndex { $0.line.map { $0.kind != .delete && $0.newLine == n } ?? false }
+        ?? rows.firstIndex { $0.line.map { $0.kind == .delete && $0.oldLine == n } ?? false }
+}
+
+/// A GitHub review thread, inline under its line: every comment in it, with Reply
+/// and Resolve. A resolved thread folds to its first line until opened.
+private struct GitHubThreadBox: View {
+    let thread: PrReviewThread
+    let isCursor: Bool
+    let expanded: Bool
+    let busy: Bool
+    let canReply: Bool
+    let onSelect: () -> Void
+    let onToggle: () -> Void
+    let onReply: () -> Void
+    let onResolve: () -> Void
+
+    private var folded: Bool { thread.isResolved && !expanded }
+    private var location: String { thread.line.map { "\(thread.path):\($0)" } ?? thread.path }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "bubble.left.and.bubble.right.fill").font(.system(size: 9))
+                    .foregroundStyle(.purple)
+                Text(location)
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.head)
+                if thread.isResolved { chip("resolved", .green) }
+                if thread.isOutdated { chip("outdated", .orange) }
+                if folded, let first = thread.comments.first {
+                    Text("@\(first.author): \(firstLine(first.body))")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    if thread.comments.count > 1 {
+                        Text("+\(thread.comments.count - 1)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer(minLength: 4)
+                if busy { ProgressView().controlSize(.mini) }
+                if thread.isResolved {
+                    Button(folded ? "Show" : "Fold", action: onToggle)
+                        .buttonStyle(.borderless).font(.system(size: 10)).clickCursor()
+                }
+                if canReply {
+                    Button("Reply", action: onReply)
+                        .buttonStyle(.borderless).font(.system(size: 10)).clickCursor()
+                        .help("Reply on GitHub (⏎ or gcc on the thread)")
+                }
+                Button(thread.isResolved ? "Unresolve" : "Resolve", action: onResolve)
+                    .buttonStyle(.borderless).font(.system(size: 10)).clickCursor()
+                    .disabled(busy)
+                if let url = thread.comments.first.flatMap({ URL(string: $0.url) }) {
+                    Button { NSWorkspace.shared.open(url) } label: {
+                        Image(systemName: "arrow.up.right.square").font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Open the thread on github.com")
+                    .clickCursor()
+                }
+            }
+            if !folded {
+                ForEach(thread.comments) { c in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("@\(c.author)").font(.system(size: 11, weight: .semibold))
+                            if let ms = c.createdAt {
+                                Text(relativeTime(ms)).font(.system(size: 10)).foregroundStyle(.tertiary)
+                            }
+                        }
+                        CommentMarkdown(text: c.body)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(isCursor ? Color.accentColor : Color.purple.opacity(0.35), lineWidth: isCursor ? 1.5 : 1))
+        .opacity(thread.isResolved && !isCursor ? 0.75 : 1)
+        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.trailing, 16)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+
+    private func chip(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.16)))
+    }
+
+    private func firstLine(_ body: String) -> String {
+        body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
     }
 }
 

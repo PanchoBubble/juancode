@@ -169,6 +169,9 @@ extension AppModel {
         review.inFlight.insert(id)
         review.setLoading(true, id)
         if let target = review.prTarget(id) {
+            // The PR's inline threads, drawn under their lines, are the GitHub view's
+            // conversation — the same cache, refreshed with the diff.
+            github.loadDetail(cwd: target.cwd, pr: target.pr)
             Task {
                 var snapshot: DiffReviewModel.Snapshot?
                 var failure: String?
