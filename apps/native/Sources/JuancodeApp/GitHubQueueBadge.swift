@@ -770,12 +770,17 @@ struct GitHubQueueBadge: View {
                         Text(repo).font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(current ? Color.accentColor : .primary)
                             .lineLimit(1).truncationMode(.middle)
+                            .layoutPriority(1)
                         Text(verbatim: "\(rows.count)")
                             .font(.system(size: 10).monospacedDigit()).foregroundStyle(.tertiary)
+                            .fixedSize()
+                        // Fixed size: squeezed, the badge wrapped letter by letter
+                        // into a tall bubble instead of letting the name truncate.
                         if current {
                             Text("this session")
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
+                                .lineLimit(1).fixedSize()
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.15)))
                         }
@@ -811,6 +816,7 @@ struct GitHubQueueBadge: View {
                         Image(systemName: "eye").font(.system(size: 9))
                         Text("Track all").font(.system(size: 10, weight: .medium))
                     }
+                    .fixedSize()
                 }
                 .buttonStyle(.borderless)
                 .disabled(!model.supports(.trackedPrs))

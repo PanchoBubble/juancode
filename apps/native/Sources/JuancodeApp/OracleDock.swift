@@ -723,8 +723,6 @@ private struct OracleRailRow: View {
                             menuHelp: "Oracle actions",
                             onTogglePin: onTogglePin,
                             pinned: pinned,
-                            onCloseRequested: onDeleteRequested,
-                            closeHelp: "Delete this Oracle (asks to confirm)",
                             glyphSize: 11)
         }
     }
@@ -737,7 +735,7 @@ private struct OracleRailRow: View {
             // it stays in the rail and can be resumed by selecting it.
             Button("Kill Agent", role: .destructive, action: onKill)
         }
-        // Routed through the confirm alert (same one as the hover ✕).
+        // Routed through the confirm alert.
         Button("Delete", role: .destructive, action: onDeleteRequested)
     }
 }

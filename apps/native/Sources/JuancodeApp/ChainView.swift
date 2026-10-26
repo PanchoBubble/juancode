@@ -16,6 +16,17 @@ struct ChainTabStrip: View {
     let chain: Chain
     let selected: ChainMemberRef?
 
+    /// Whether the chain's sessions span more than one project, so a session tab has
+    /// to say which one it is in.
+    private var crossProject: Bool {
+        let roots = Set(chain.members.compactMap { member -> String? in
+            guard member.kind == .session,
+                  let meta = model.sessions.first(where: { $0.id == member.ref }) else { return nil }
+            return model.repoRoot(forSession: meta)
+        })
+        return roots.count > 1
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Button {
@@ -49,7 +60,8 @@ struct ChainTabStrip: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
                             ForEach(chain.members, id: \.memberRef) { member in
-                                ChainTab(member: member, active: member.memberRef == selected)
+                                ChainTab(member: member, active: member.memberRef == selected,
+                                         crossProject: crossProject)
                                     .id(member.memberRef)
                             }
                         }
@@ -232,15 +244,17 @@ private struct ChainOverviewMemberRow: View {
 }
 
 /// One member's tab: an icon for its kind, and what tells it apart from the rest of
-/// a cross-project chain — project and provider, a PR's number, a ticket's id.
+/// the chain — a session's title (and project, in a cross-project chain), a PR's
+/// number, a ticket's id.
 private struct ChainTab: View {
     @Environment(AppModel.self) private var model
     let member: ChainMember
     let active: Bool
+    let crossProject: Bool
     @State private var hovering = false
 
     var body: some View {
-        let label = ChainTabLabel(member, model: model)
+        let label = ChainTabLabel(member, model: model, crossProject: crossProject)
         Button {
             model.selectChainMember(member.memberRef)
         } label: {
@@ -251,6 +265,8 @@ private struct ChainTab: View {
                 Text(label.title)
                     .font(.caption.weight(active ? .semibold : .regular))
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 220, alignment: .leading)
                 if let detail = label.detail {
                     Text(detail)
                         .font(.caption)
@@ -283,7 +299,7 @@ struct ChainTabLabel {
     var missing = false
 
     @MainActor
-    init(_ member: ChainMember, model: AppModel) {
+    init(_ member: ChainMember, model: AppModel, crossProject: Bool = false) {
         switch member.kind {
         case .session:
             let meta = model.sessions.first { $0.id == member.ref }
@@ -295,10 +311,11 @@ struct ChainTabLabel {
                 detail = meta?.provider.rawValue
                 help = "Oracle — " + (meta?.title ?? member.ref)
             } else if let meta {
+                let project = (model.repoRoot(forSession: meta) as NSString).lastPathComponent
                 icon = "terminal"
-                title = (model.repoRoot(forSession: meta) as NSString).lastPathComponent
-                detail = meta.provider.rawValue
-                help = meta.title
+                title = meta.title.isEmpty ? project : meta.title
+                detail = crossProject ? project : nil
+                help = "\(meta.title.isEmpty ? project : meta.title)\n\(project) · \(meta.provider.rawValue)"
             } else {
                 icon = "terminal"
                 title = member.title ?? "Session"

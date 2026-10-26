@@ -115,7 +115,11 @@ private struct ChainRailRow: View {
                      help: attention.needsDecision == 1 ? "A PR needs your decision"
                          : "\(attention.needsDecision) PRs need your decision")
             }
-            if hovering { stateButton }
+            // Always laid out, only shown on hover: inserting it grew the row and
+            // shifted every row under it.
+            stateButton
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous)

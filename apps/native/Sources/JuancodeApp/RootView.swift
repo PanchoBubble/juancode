@@ -793,29 +793,6 @@ struct SidebarView: View {
         groups.reduce(0) { $0 + $1.sessions.count }
     }
 
-    /// Aggregate token/cost usage across visible non-archived sessions, for the
-    /// sidebar footer total. Nil when nothing has usage yet.
-    private var totalUsage: SessionUsage? {
-        model.sessions.filter { !$0.archived }.aggregateUsage()
-    }
-
-    /// Colour for a budget level, or nil (secondary) when off/ok (juancode-qoc).
-    private func budgetTint(_ level: BudgetLevel) -> Color? {
-        switch level {
-        case .off, .ok: return nil
-        case .warn: return .orange
-        case .over: return .red
-        }
-    }
-
-    private func budgetHelp(_ b: BudgetStatus) -> String {
-        switch b.level {
-        case .off: return "Total token usage across visible sessions"
-        case .ok, .warn: return "Estimated spend: \(b.progressLabel ?? "") budget"
-        case .over: return "Over budget: \(b.progressLabel ?? "")"
-        }
-    }
-
     /// The funnel next to the filter field: click for the facet list, with a live
     /// count beside each one and a dot when any are on.
     @ViewBuilder
@@ -1497,29 +1474,8 @@ struct SidebarView: View {
                 }
             }
             }
-            if let total = totalUsage, let label = total.badgeLabel {
-                Divider()
-                // Colour + budget progress when a cost budget is set (juancode-qoc):
-                // amber past the warn threshold, red at/over budget.
-                let budget = model.budgetStatus(forSpend: total.costUsd)
-                let tint = budgetTint(budget.level)
-                HStack(spacing: 4) {
-                    Text("Total").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Spacer()
-                    if let progress = budget.progressLabel {
-                        Text(progress)
-                            .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(tint ?? .secondary)
-                    }
-                    Text(label)
-                        .font(.system(size: 11).monospacedDigit())
-                        .foregroundStyle(tint ?? .secondary)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .help(budgetHelp(budget)
-                    + (total.costUsd != nil ? " · estimated cost" : ""))
-            }
+            // Claude plan usage — weekly + 5-hour, as `/usage` shows them.
+            ClaudePlanUsageFooter()
             // Removed projects live here, not lost: one menu to bring any of them
             // back. Without this the ellipsis "Remove project" would be one-way.
             if !model.hiddenProjects.isEmpty {
@@ -1544,15 +1500,7 @@ struct SidebarView: View {
                 .padding(.vertical, 4)
                 .help("Bring a project you removed back into the sidebar")
             }
-            if archivedCount > 0 {
-                Divider()
-                Toggle(isOn: $showArchived) {
-                    Text("Show archived (\(archivedCount))").font(.system(size: 11))
-                }
-                .toggleStyle(.checkbox)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-            }
+            // "Show archived" lives in the filter menu ("Include archived").
         }
         .background(Color.appSurface)
         .onAppear { model.loadExternalSessions(); model.navOrder = visibleIDs }
@@ -1787,7 +1735,6 @@ struct SidebarView: View {
                            selected: model.selection == meta.id,
                            titleHighlight: titleHighlight,
                            bodySnippet: bodyHits[meta.id].flatMap { $0.isEmpty ? nil : $0 },
-                           confirmClose: { confirmingClose = meta },
                            menu: { AnyView(rowContextMenu(meta)) })
         }
         .overlay(alignment: .leading) {
@@ -1890,7 +1837,7 @@ struct SidebarView: View {
             if model.isLive(meta.id) {
                 Button("Kill Agent", role: .destructive) { model.killSession(meta.id) }
             }
-            // Routed through the confirm alert (same one as the row's hover ✕) —
+            // Routed through the confirm alert —
             // closing discards scrollback and any worktree, so no one-click delete.
             Button("Delete", role: .destructive) { confirmingClose = meta }
         }
@@ -1970,8 +1917,6 @@ private struct SessionRowHost: View {
     let titleHighlight: String?
     /// Where a body search matched this session, `[term]`-marked.
     let bodySnippet: String?
-    /// Ask to close this session; the caller owns the confirmation alert.
-    let confirmClose: () -> Void
     /// The hover ellipsis menu's content (the context menu's items).
     let menu: () -> AnyView
 
@@ -2033,7 +1978,6 @@ private struct SessionRowHost: View {
                    onOpenTrackedPr: external ? nil : { model.openGitHubForTrackedPr($0) },
                    onOpenBranchPr: external ? nil : { model.openGitHubForSession(meta) },
                    menuContent: external ? nil : menu,
-                   onCloseRequested: external ? nil : confirmClose,
                    pinned: !external && model.isPinned(meta.id),
                    onTogglePin: external ? nil : { model.togglePinned(meta.id) },
                    onRun: external || runCommand == nil ? nil : { model.runInSession(meta) },
@@ -2694,9 +2638,6 @@ struct SessionRow: View {
     /// as an ellipsis on the trailing edge, replacing the old pencil (Open in Editor
     /// lives inside it, still on ⌘E too). Nil for external rows.
     var menuContent: (() -> AnyView)? = nil
-    /// Ask to close (kill + delete) this session — the hover ✕. The caller owns the
-    /// confirmation alert; nil for external rows.
-    var onCloseRequested: (() -> Void)? = nil
     /// The user pinned this session to the top of its project — shows a pin ornament
     /// at rest and a filled pin in the hover chip.
     var pinned: Bool = false
@@ -2752,9 +2693,6 @@ struct SessionRow: View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            if let tiltRuntime {
-                TiltRuntimeBadge(monitor: tiltRuntime, path: meta.cwd)
-            }
             statusIndicator
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             VStack(alignment: .leading, spacing: 2) {
@@ -2778,8 +2716,11 @@ struct SessionRow: View {
                 // Badge line, under the subtitle: the tracking capsule sits next to the
                 // change badge on the leading edge, so the trailing edge stays free for
                 // the hover pill (which used to land on top of the PR capsule).
-                if showPr || showIssue || changeBadge != nil || chain != nil {
+                if showPr || showIssue || changeBadge != nil || chain != nil || stackRunning {
                     HStack(spacing: 5) {
+                        if stackRunning, let tiltRuntime {
+                            TiltRuntimeBadge(monitor: tiltRuntime, path: meta.cwd)
+                        }
                         if let chain {
                             ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
                         }
@@ -2813,6 +2754,9 @@ struct SessionRow: View {
     /// being offered as open work. Not the same as `meta.dormant` — see
     /// `AppModel.isResting`.
     private var sleeping: Bool { !live && asleep }
+
+    /// A Tilt stack is running from this row's checkout.
+    private var stackRunning: Bool { tiltRuntime.map { !$0.inCheckout(meta.cwd).isEmpty } ?? false }
 
     /// The at-risk warning plus (for external rows) a hover-revealed resume button.
     /// Usage moved into the subtitle and the tracking capsule moved to the leading
@@ -2852,12 +2796,12 @@ struct SessionRow: View {
     }
 
     /// Hover-revealed row actions for own sessions — the shared `RowHoverActions` chip
-    /// (ellipsis menu + ✕ that closes the session after confirmation), floated over the
+    /// (▶, pin, dismiss and the ellipsis menu, whose Delete confirms first), floated over the
     /// row's trailing edge.
     @ViewBuilder
     private var hoverActions: some View {
         if !external, hovering,
-           menuContent != nil || onCloseRequested != nil || onTogglePin != nil
+           menuContent != nil || onTogglePin != nil
                || onToggleDismissed != nil || onRun != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
@@ -2869,9 +2813,7 @@ struct SessionRow: View {
                             dismissed: dismissed,
                             dismissHelp: dismissed
                                 ? "Keep this sleeping session surfaced in the list"
-                                : "Dismiss — let this sleeping session fold away (wheel click)",
-                            onCloseRequested: onCloseRequested,
-                            closeHelp: "Close session (asks to confirm)")
+                                : "Dismiss — let this sleeping session fold away (wheel click)")
         }
     }
 

@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Hover-revealed trailing actions for a list row — an ellipsis menu (the row's
-/// context-menu items, made discoverable without a right-click) and a ✕.
+/// Hover-revealed trailing actions for a list row — ▶, pin, dismiss and an ellipsis
+/// menu (the row's context-menu items, Delete included, made discoverable without a
+/// right-click).
 ///
 /// Meant to be floated by the caller (`.overlay(alignment: .trailing)`) rather than
 /// laid out inline: as inline content the buttons took width from the title, so every
@@ -32,21 +33,17 @@ struct RowHoverActions: View {
     /// Whether the row is currently dismissed — flips the chevron to the undo.
     var dismissed: Bool = false
     var dismissHelp: String = ""
-    /// Nil hides the ✕.
-    let onCloseRequested: (() -> Void)?
-    let closeHelp: String
     var glyphSize: CGFloat = 12
 
     private let corner: CGFloat = 7
 
     var body: some View {
-        HStack(spacing: 1) {
+        HStack(spacing: 4) {
             if let onRun {
                 Button(action: onRun) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: glyphSize - 2, weight: .semibold))
+                    tile("play.fill", size: glyphSize - 3, accent: true)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help(runHelp)
                 .clickCursor()
             }
@@ -56,30 +53,10 @@ struct RowHoverActions: View {
                     // pinned row offers "unpin" (struck-through pin, tinted so the
                     // pill also answers "is this one pinned?" at a glance), an
                     // unpinned one the plain pin.
-                    Image(systemName: pinned ? "pin.slash.fill" : "pin")
-                        .font(.system(size: glyphSize - 1, weight: .semibold))
-                        .foregroundStyle(pinned ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.primary))
+                    tile(pinned ? "pin.slash.fill" : "pin", size: glyphSize - 3, accent: pinned)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help(pinned ? "Unpin — let this session sort normally" : "Pin to top of this project")
-                .clickCursor()
-            }
-            if let menuContent {
-                Menu { menuContent() } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: glyphSize, weight: .semibold))
-                        // A Menu tints its own label from the control tint, so the
-                        // container's `.foregroundStyle(.primary)` below never reaches
-                        // it — the glyph rendered grey next to a white ✕. Set it here
-                        // and match the tint so both glyphs read the same.
-                        .foregroundStyle(.primary)
-                }
-                .tint(.primary)
-                .menuStyle(.button)
-                .buttonStyle(.borderless)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help(menuHelp)
                 .clickCursor()
             }
             if let onToggleDismissed {
@@ -87,32 +64,44 @@ struct RowHoverActions: View {
                     // Same chevron the fold's own "Load more" button wears, pointed the
                     // way the row is about to travel: down into the fold, or back up
                     // out of it.
-                    Image(systemName: dismissed ? "chevron.up.circle" : "chevron.down.circle")
-                        .font(.system(size: glyphSize - 1, weight: .semibold))
+                    tile(dismissed ? "chevron.up" : "chevron.down", size: glyphSize - 3)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help(dismissHelp)
                 .clickCursor()
             }
-            if let onCloseRequested {
-                Button(action: onCloseRequested) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: glyphSize - 1, weight: .semibold))
+            if let menuContent {
+                // Last, so the destructive Delete lives one click deeper than the
+                // everyday actions instead of as a ✕ a pixel from ▶ and the pin.
+                Menu { menuContent() } label: {
+                    tile("ellipsis", size: glyphSize - 2)
                 }
-                .buttonStyle(.borderless)
-                .help(closeHelp)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(menuHelp)
                 .clickCursor()
             }
         }
-        // A borderless button tints its glyph with the accent colour, which reads as
-        // low-contrast mud on the pill — force the full-contrast glyph instead (white
-        // on the dark theme, near-black on the light one).
-        .foregroundStyle(.primary)
-        .padding(.horizontal, 5)
+        .padding(.horizontal, 4)
         .padding(.vertical, 3)
         .background(pill)
         // Keeps the pill clear of the row's own rounded edge.
         .padding(.trailing, 5)
+    }
+
+    /// One action as a small rounded tile — the Tickets rail's copy-link / Work on
+    /// buttons, so hover actions read the same everywhere and each has its own hit
+    /// target instead of bare glyphs crowded together.
+    private func tile(_ symbol: String, size: CGFloat, accent: Bool = false) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(accent ? Color.accentColor : Color.secondary)
+            .frame(width: 20, height: 18)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(accent ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.08)))
+            .contentShape(Rectangle())
     }
 
     /// Frosted pill: a blur strong enough to fully hide the title behind it (a
