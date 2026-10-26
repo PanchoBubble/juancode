@@ -1355,7 +1355,9 @@ private struct GitHubPrActions: View {
             if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
         }
         Button("Open Diff") { model.openPrDiff(pr, cwd: cwd) }
-        Button("Review Diff") { model.openPrDiffReview(pr, cwd: cwd) }
+        Button { model.openPrDiffReview(pr, cwd: cwd) } label: {
+            Label("Review Diff", systemImage: "text.bubble")
+        }
             .help("Review the PR's diff against its base branch in the full-width review (⌘⇧D): comment on lines, send them to the PR's agent")
         if let t = tracked {
             // `selection`'s didSet closes the GitHub view.
@@ -1519,6 +1521,12 @@ private struct PrDiffTab: View {
                 }
             }
             Spacer(minLength: 0)
+            Button { model.openPrDiffReview(pr, cwd: cwd) } label: {
+                Label("Review", systemImage: "text.bubble")
+            }
+            .controlSize(.small)
+            .help("Open this diff in the full-width review (⌘⇧D): vim keys, line comments, sent to the PR's agent")
+            .clickCursor()
         }
         .onChange(of: contentQ) { _, _ in
             // A new search jumps to (and expands) the first hit.

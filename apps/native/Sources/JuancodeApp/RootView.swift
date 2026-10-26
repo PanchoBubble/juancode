@@ -1856,6 +1856,9 @@ struct SidebarView: View {
                 Button("Open PR #\(pr.number) on GitHub") {
                     if let u = URL(string: pr.url) { NSWorkspace.shared.open(u) }
                 }
+                Button("Review PR #\(pr.number) Diff") {
+                    model.openPrDiffReview(pr, cwd: model.repoRoot(forSession: meta))
+                }
                 // Track it right here instead of handing it to a freshly spawned
                 // agent on its own worktree: this session already wrote the branch,
                 // so it keeps the context and takes the watch contract.
