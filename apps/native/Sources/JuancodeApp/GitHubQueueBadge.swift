@@ -554,8 +554,9 @@ struct GitHubQueueBadge: View {
             .disabled(model.isTrackPending(t))
         }
 
-        /// Track, Agent and GitHub, on hover. Track hands the PR to an agent that keeps
-        /// watching it, Agent opens one session on it right now; both need a checkout,
+        /// Track, Agent, Review and GitHub, on hover. Track hands the PR to an agent that keeps
+        /// watching it, Agent opens one session on it right now, Review opens its diff in
+        /// the full-width review; all three need a checkout,
         /// so a repo juancode has never opened gets only the GitHub button. That one is
         /// always there because a click on a mapped row opens the GitHub view instead.
         /// Nearly row-height, with each button's whole cell clickable.
@@ -592,6 +593,11 @@ struct GitHubQueueBadge: View {
                             help: "Agent: a fresh session on this PR, seeded with its details") {
                 model.workOnPr(pr, cwd: cwd)
             }
+            HoverCellButton(symbol: "text.bubble",
+                            help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
+                dismiss()
+                model.openPrDiffReview(pr, cwd: cwd)
+            }
         }
 
         /// The same frosted pill the sidebar's hover actions wear (`RowHoverActions`),
@@ -625,6 +631,10 @@ struct GitHubQueueBadge: View {
                         .disabled(!model.supports(.trackedPrs))
                 }
                 Button("Work on PR") { model.workOnPr(pr, cwd: cwd) }
+                Button("Review Diff") {
+                    dismiss()
+                    model.openPrDiffReview(pr, cwd: cwd)
+                }
             }
             ClosePrMenuItem(confirming: $confirmingClose)
         }
