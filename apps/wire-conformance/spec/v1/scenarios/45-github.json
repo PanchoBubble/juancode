@@ -447,6 +447,36 @@
       "note": "resolving an inline thread from the diff review: one GraphQL mutation on the thread's node id, the same id the timeline's threads carry"
     },
     {
+      "post": "/api/pr/submit-review",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "comments": [
+          { "path": "README.md", "line": 3, "side": "RIGHT", "body": "typo" },
+          { "path": "README.md", "line": 9, "side": "RIGHT", "startLine": 5, "startSide": "RIGHT", "body": "this block is unused" }
+        ]
+      },
+      "expectBody": {
+        "ok": true
+      },
+      "note": "the diff review's GitHub-bound comments go up as ONE review, so the author gets one notification and not one per line"
+    },
+    {
+      "post": "/api/pr/submit-review",
+      "body": {
+        "cwd": "$ghCwd",
+        "number": 42,
+        "comments": [{ "path": "README.md", "line": 0, "side": "RIGHT", "body": "x" }]
+      },
+      "status": 400,
+      "expectBody": {
+        "error": {
+          "$contains": "line"
+        }
+      },
+      "note": "a comment GitHub would 422 is refused here, before it costs a round trip"
+    },
+    {
       "post": "/api/pr/resolve-thread",
       "body": {
         "cwd": "$ghCwd"

@@ -1209,6 +1209,72 @@ pub fn resolve_thread_args(thread_id: &str, resolved: bool) -> Vec<String> {
     ]
 }
 
+/// One inline comment of a review being submitted: GitHub's review-comment shape,
+/// where `side` is `RIGHT` (the new side) or `LEFT` (a removed line), and a range
+/// adds `start_line` / `start_side`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCommentDraft {
+    pub path: String,
+    pub line: i64,
+    pub side: String,
+    #[serde(default)]
+    pub start_line: Option<i64>,
+    #[serde(default)]
+    pub start_side: Option<String>,
+    pub body: String,
+}
+
+/// The body of `POST /repos/{owner}/{repo}/pulls/{n}/reviews` for a plain COMMENT
+/// review carrying `comments`. An empty `body` is left out rather than sent empty.
+pub fn review_payload(body: &str, comments: &[ReviewCommentDraft]) -> serde_json::Value {
+    let comments: Vec<serde_json::Value> = comments
+        .iter()
+        .map(|c| {
+            let mut o = serde_json::json!({
+                "path": c.path, "line": c.line, "side": c.side, "body": c.body,
+            });
+            if let Some(start) = c.start_line.filter(|s| *s != c.line || c.start_side.is_some()) {
+                o["start_line"] = start.into();
+                o["start_side"] = c.start_side.clone().unwrap_or_else(|| c.side.clone()).into();
+            }
+            o
+        })
+        .collect();
+    let mut payload = serde_json::json!({ "event": "COMMENT", "comments": comments });
+    if !body.trim().is_empty() {
+        payload["body"] = body.into();
+    }
+    payload
+}
+
+/// Submit one review of inline comments on a PR — what GitHub's "Start a review" then
+/// "Submit" does, so the author gets one notification rather than one per line. The
+/// JSON goes through a temp file because `gh api -f` cannot build an array of objects.
+pub async fn submit_review(
+    cwd: &str,
+    number: i64,
+    body: &str,
+    comments: &[ReviewCommentDraft],
+) -> Result<(), GhError> {
+    let payload = review_payload(body, comments);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let file = std::env::temp_dir().join(format!(
+        "juancoded-review-{}-{nanos}.json",
+        std::process::id()
+    ));
+    std::fs::write(&file, payload.to_string())
+        .map_err(|e| GhError(format!("could not stage the review: {e}")))?;
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews");
+    let input = file.to_string_lossy().into_owned();
+    let result = gh_write(cwd, &["api", "--method", "POST", &path, "--input", &input]).await;
+    let _ = std::fs::remove_file(&file);
+    result.map(|_| ())
+}
+
 /// Resolve or reopen an inline review thread.
 pub async fn set_review_thread_resolved(
     cwd: &str,
@@ -2374,6 +2440,34 @@ mod list_tests {
         merge_unresolved_counts(&mut prs, &counts);
         assert_eq!(prs[0].unresolved_comments, 2);
         assert_eq!(prs[1].unresolved_comments, 0);
+    }
+
+    #[test]
+    fn a_review_is_one_comment_event_with_ranges_only_where_a_range_was_drawn() {
+        let one = ReviewCommentDraft {
+            path: "src/a.rs".into(),
+            line: 12,
+            side: "RIGHT".into(),
+            start_line: None,
+            start_side: None,
+            body: "why?".into(),
+        };
+        let range = ReviewCommentDraft {
+            path: "src/b.rs".into(),
+            line: 20,
+            side: "RIGHT".into(),
+            start_line: Some(14),
+            start_side: Some("LEFT".into()),
+            body: "split this".into(),
+        };
+        let p = review_payload("", &[one, range]);
+        assert_eq!(p["event"], "COMMENT");
+        assert!(p.get("body").is_none());
+        assert_eq!(p["comments"][0]["line"], 12);
+        assert!(p["comments"][0].get("start_line").is_none());
+        assert_eq!(p["comments"][1]["start_line"], 14);
+        assert_eq!(p["comments"][1]["start_side"], "LEFT");
+        assert_eq!(review_payload("overall", &[])["body"], "overall");
     }
 
     #[test]

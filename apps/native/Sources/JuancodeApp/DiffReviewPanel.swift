@@ -52,6 +52,8 @@ struct DiffReviewPanel: View {
         var to: Int
         var editId: String?
         var text: String
+        /// Opened with `r`: saved as a GitHub review comment, not one for the agent.
+        var toGitHub = false
     }
 
     /// An open prompt: a finder over the diff, or vim's `/` `?` in the status bar.
@@ -67,10 +69,12 @@ struct DiffReviewPanel: View {
         var backward: Bool
     }
 
-    /// A grep hit whose file is still rendering: the cursor goes to `row` once it has.
+    /// A grep hit whose file is still rendering: the cursor goes to `row` once it has
+    /// — or to GitHub thread `thread`, when the jump was to one.
     private struct Jump: Equatable {
         var path: String
         var row: Int
+        var thread: String? = nil
     }
 
     @AppStorage("diffReview.treeShown") private var treeShown = true
@@ -259,6 +263,7 @@ struct DiffReviewPanel: View {
                 }
                 .font(.system(size: 11)).fixedSize()
             }
+            if prTarget != nil, showThreads { threadSummary }
             if prTarget != nil {
                 let open = prThreads.filter { !$0.isResolved }.count
                 Button { showThreads.toggle(); keyToken &+= 1 } label: {
@@ -279,21 +284,18 @@ struct DiffReviewPanel: View {
             .help("Refresh the diff (R)")
             .clickCursor()
             let count = allComments.count
+            let toGitHub = allComments.filter(\.isForGitHub).count
             Button {
                 sendReview()
             } label: {
-                Label(count == 0 ? "Send review" : "Send \(count) comment\(count == 1 ? "" : "s")",
-                      systemImage: "paperplane")
+                Label(sendLabel(count: count, toGitHub: toGitHub), systemImage: "paperplane")
             }
             .controlSize(.small)
             .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.return, modifiers: .command)
             .disabled((count == 0 && !hasDraftText) || review.sending.contains(sessionId))
             .help(prTarget == nil
-                  ? "Send every comment to the session as one review message (⌘⏎ or ␣w)"
-                  : model.trackedPr(cwd: prTarget!.cwd, number: prTarget!.pr.number) != nil
-                    ? "Queue every comment on the PR's tracking session as one review (⌘⏎ or ␣w)"
-                    : "Track this PR and queue every comment on its new agent session (⌘⏎ or ␣w)")
+                  ? "Send every comment to the session as one review message (s or ␣w)"
+                  : "Post the r comments on GitHub as one review, and queue the rest on the PR's agent (s or ␣w)")
             .clickCursor()
             Button { model.closeDiffReview() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
@@ -303,6 +305,81 @@ struct DiffReviewPanel: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(Color.appPanel)
+    }
+
+    private func sendLabel(count: Int, toGitHub: Int) -> String {
+        if count == 0 { return "Send review" }
+        let agent = count - toGitHub
+        if toGitHub == 0 { return "Send \(count) comment\(count == 1 ? "" : "s")" }
+        if agent == 0 { return "Post \(toGitHub) on GitHub" }
+        return "Send \(agent) · \(toGitHub) on GitHub"
+    }
+
+    /// The PR's threads at a glance, wherever the cursor is: how many are still open
+    /// and how many are resolved. Clicking the open count steps to the next open one,
+    /// across files.
+    @ViewBuilder
+    private var threadSummary: some View {
+        let all = prThreads
+        let open = all.filter { !$0.isResolved }.count
+        let resolved = all.count - open
+        if !all.isEmpty {
+            HStack(spacing: 8) {
+                Button { jumpToNextOpenThread() } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: open > 0 ? "exclamationmark.bubble.fill" : "checkmark.bubble.fill")
+                        Text("\(open) open")
+                    }
+                    .foregroundStyle(open > 0 ? Color.orange : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .disabled(open == 0)
+                .help(open > 0 ? "Jump to the next unresolved GitHub thread" : "No unresolved GitHub threads")
+                .clickCursor()
+                HStack(spacing: 3) {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("\(resolved) resolved")
+                }
+                .foregroundStyle(resolved > 0 ? Color.green : .secondary)
+                .help("\(resolved) resolved GitHub thread\(resolved == 1 ? "" : "s")")
+            }
+            .font(.system(size: 11))
+            .fixedSize()
+        }
+    }
+
+    /// Step to the next unresolved thread after the cursor, in file order then line
+    /// order, wrapping around.
+    private func jumpToNextOpenThread() {
+        let order = fileOrder
+        let open = prThreads.filter { !$0.isResolved && order.contains($0.path) }
+        guard !open.isEmpty else { return }
+        func rank(_ t: PrReviewThread) -> (Int, Int) {
+            (order.firstIndex(of: t.path) ?? 0, t.isOutdated ? -1 : (t.line ?? -1))
+        }
+        let sorted = open.sorted { rank($0) < rank($1) }
+        var next = sorted.first!
+        if let path = selectedPath, let here = order.firstIndex(of: path) {
+            let line: Int
+            switch cursor {
+            case .thread(let id)?: line = thread(id).map { rank($0).1 } ?? -2
+            case .row(let i)?:
+                let rows = rendered?.rows ?? []
+                line = rows.indices.contains(i) ? rows[i].line.flatMap { $0.newLine ?? $0.oldLine } ?? -2 : -2
+            default: line = -2
+            }
+            if let after = sorted.first(where: { rank($0) > (here, line) }) { next = after }
+        }
+        focus = .diff
+        anchor = nil
+        if next.path == selectedPath, items.contains(.thread(next.id)) {
+            centerNextScroll = true
+            cursor = .thread(next.id)
+        } else {
+            pendingJump = Jump(path: next.path, row: 0, thread: next.id)
+            openFile(next.path)
+        }
+        keyToken &+= 1
     }
 
     // MARK: - Content
@@ -603,7 +680,8 @@ struct DiffReviewPanel: View {
                 onCancel: cancelDraft)
                 .frame(height: 64)
                 .background(Color.appPanel)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accentColor.opacity(0.6)))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke((d.toGitHub ? Color.purple : Color.accentColor).opacity(0.6)))
             HStack(spacing: 8) {
                 Button("Comment") { saveDraft() }
                     .controlSize(.small)
@@ -626,10 +704,11 @@ struct DiffReviewPanel: View {
         if let id = d.editId, let c = allComments.first(where: { $0.id == id }) {
             return "Edit comment on \(c.location)"
         }
+        let kind = d.toGitHub ? "GitHub review comment" : "Comment"
         guard let rf = rendered, let path = selectedPath,
               let c = makeReviewComment(path: path, rows: rf.rows, from: d.from, to: d.to, text: "")
-        else { return "Comment" }
-        return "Comment on \(c.location)"
+        else { return kind }
+        return "\(kind) on \(c.location)"
     }
 
     // MARK: - Status bar
@@ -662,7 +741,7 @@ struct DiffReviewPanel: View {
             }
             Spacer(minLength: 8)
             Text(prompt == nil
-                 ? "gcc comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · ␣w/⌘⏎ send · ␣n tree · q close"
+                 ? "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q close"
                  : "⏎ accept · esc cancel")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
@@ -711,7 +790,7 @@ struct DiffReviewPanel: View {
             anchor = nil
             draft = nil
             centerNextScroll = true
-            cursor = .row(min(jump.row, now.rows.count - 1))
+            cursor = jump.thread.map(Item.thread) ?? .row(min(jump.row, now.rows.count - 1))
             return
         }
         if let previous, previous.path == now.path {
@@ -872,6 +951,17 @@ struct DiffReviewPanel: View {
             anchor = anchor == nil ? (cursor ?? list[at]) : nil
         case .comment:
             openDraft()
+        case .githubComment:
+            if prTarget == nil {
+                review.say("r posts a review comment on GitHub — open a PR's review for that", isError: true, in: sessionId)
+            } else if anchor == nil, case .comment(let id)? = cursor,
+                      let c = allComments.first(where: { $0.id == id }) {
+                // On a staged comment, r moves it between the agent and GitHub.
+                review.setForGitHub(!c.isForGitHub, id, in: sessionId)
+                review.say(c.isForGitHub ? "Comment goes to the agent" : "Comment goes to GitHub", in: sessionId)
+            } else {
+                openDraft(toGitHub: true)
+            }
         case .activate:
             if case .thread(let id)? = cursor {
                 openReply(id)
@@ -1220,7 +1310,7 @@ struct DiffReviewPanel: View {
 
     // MARK: - Comments
 
-    private func openDraft() {
+    private func openDraft(toGitHub: Bool = false) {
         // On a GitHub thread, "comment here" means reply to it.
         if anchor == nil, case .thread(let id)? = cursor {
             openReply(id)
@@ -1246,7 +1336,7 @@ struct DiffReviewPanel: View {
         // will render once saved.
         let last = (lo...hi).last { rf.rows[$0].line != nil } ?? hi
         draftSerial &+= 1
-        draft = Draft(serial: draftSerial, from: lo, to: last, editId: nil, text: "")
+        draft = Draft(serial: draftSerial, from: lo, to: last, editId: nil, text: "", toGitHub: toGitHub)
         parser.reset()
     }
 
@@ -1254,7 +1344,8 @@ struct DiffReviewPanel: View {
         guard let rf = rendered else { return }
         let at = reviewRowIndex(forKey: c.endKey, in: rf.rows) ?? 0
         draftSerial &+= 1
-        draft = Draft(serial: draftSerial, from: at, to: at, editId: c.id, text: c.text)
+        draft = Draft(serial: draftSerial, from: at, to: at, editId: c.id, text: c.text,
+                      toGitHub: c.isForGitHub)
         anchor = nil
         parser.reset()
     }
@@ -1269,20 +1360,21 @@ struct DiffReviewPanel: View {
             return
         }
         guard let rf = rendered, let path = selectedPath,
-              let c = makeReviewComment(path: path, rows: rf.rows, from: d.from, to: d.to, text: text)
+              var c = makeReviewComment(path: path, rows: rf.rows, from: d.from, to: d.to, text: text)
         else { return }
+        if d.toGitHub { c.forGitHub = true }
         review.add(c, to: sessionId)
         cursor = .row(d.to)
         let n = allComments.count
-        review.say("\(n) comment\(n == 1 ? "" : "s") staged — ␣w sends", in: sessionId)
+        review.say("\(n) comment\(n == 1 ? "" : "s") staged — s sends", in: sessionId)
     }
 
     private var hasDraftText: Bool {
         !(draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// ⌘⏎, ␣w or the Send button: a comment still being typed is saved first, so
-    /// ⌘⏎ from the editor sends it along with the rest.
+    /// s, ␣w or the Send button: a comment still being typed is saved first, so ⌘⏎
+    /// from the editor sends it along with the rest.
     private func sendReview() {
         if draft != nil { saveDraft() }
         model.sendDiffReview(sessionId)
@@ -1586,8 +1678,13 @@ private struct ReviewCommentBox: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Image(systemName: "text.bubble.fill").font(.system(size: 9))
-                        .foregroundStyle(Color.accentColor)
+                    Image(systemName: comment.isForGitHub ? "arrow.triangle.pull" : "text.bubble.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(comment.isForGitHub ? Color.purple : Color.accentColor)
+                    if comment.isForGitHub {
+                        Text("GitHub · pending").font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.purple)
+                    }
                     Text(comment.location)
                         .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                     if isOrphan {

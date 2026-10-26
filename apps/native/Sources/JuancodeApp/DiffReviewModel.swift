@@ -69,6 +69,12 @@ final class DiffReviewModel {
         comments[id]?[i].text = text
     }
 
+    /// Move a staged comment between the agent and GitHub.
+    func setForGitHub(_ on: Bool, _ commentId: String, in id: String) {
+        guard let i = comments[id]?.firstIndex(where: { $0.id == commentId }) else { return }
+        comments[id]?[i].forGitHub = on ? true : nil
+    }
+
     func delete(_ commentId: String, in id: String) {
         comments[id]?.removeAll { $0.id == commentId }
     }
@@ -316,8 +322,51 @@ extension AppModel {
     /// session tracking the PR (delivered on its next idle), or — untracked — onto a
     /// new tracking session. The comments are cleared only once the queue write is
     /// confirmed.
+    ///
+    /// Comments staged with `r` go to GitHub instead, first, as one COMMENT review; the
+    /// rest then go to the agent. A GitHub failure stops there with everything kept.
     private func sendPrDiffReview(_ id: String, target: DiffReviewModel.PrTarget,
                                   staged: [ReviewComment]) {
+        let review = diffReview
+        let pr = target.pr
+        let toGitHub = staged.filter(\.isForGitHub)
+        let toAgent = staged.filter { !$0.isForGitHub }
+        review.setSending(true, id)
+        Task {
+            if !toGitHub.isEmpty {
+                let n = toGitHub.count
+                review.say("Posting \(n) review comment\(n == 1 ? "" : "s") on GitHub…", in: id)
+                guard let reads = core.github else {
+                    review.setSending(false, id)
+                    review.say(core.unavailableReason(.github) ?? "This core cannot write to GitHub.",
+                               isError: true, in: id)
+                    return
+                }
+                do {
+                    try await reads.submitReview(cwd: target.cwd, number: pr.number,
+                                                 comments: toGitHub.compactMap(githubReviewComment))
+                } catch {
+                    review.setSending(false, id)
+                    let text = (error as? GitHubError)?.message ?? error.localizedDescription
+                    review.say("GitHub review not posted: \(text). Your comments are kept.",
+                               isError: true, in: id)
+                    return
+                }
+                review.removeSent(Set(toGitHub.map(\.id)), from: id)
+                // They come back as threads under their lines.
+                github.loadDetail(cwd: target.cwd, pr: pr)
+                review.say("Posted \(n) review comment\(n == 1 ? "" : "s") on GitHub", in: id)
+            }
+            guard !toAgent.isEmpty else {
+                review.setSending(false, id)
+                return
+            }
+            await queueAgentReview(id, target: target, staged: toAgent)
+        }
+    }
+
+    private func queueAgentReview(_ id: String, target: DiffReviewModel.PrTarget,
+                                  staged: [ReviewComment]) async {
         let review = diffReview
         let pr = target.pr
         let label = review.snapshot(id)?.label ?? "PR #\(pr.number)"
@@ -325,27 +374,24 @@ extension AppModel {
                                       feedback: formatReview(staged, baseLabel: label))
         let sent = Set(staged.map(\.id))
         let tracked = trackedPr(cwd: target.cwd, number: pr.number)
-        review.setSending(true, id)
         review.say(tracked == nil
                    ? "Tracking PR #\(pr.number) and queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…"
                    : "Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
-        Task {
-            let ok: Bool
-            if let tracked {
-                ok = await queuePrompt(sessionId: tracked.sessionId, text: prompt)
-            } else {
-                ok = await trackPrAndQueue(pr, cwd: target.cwd, prompt: prompt)
-            }
-            review.setSending(false, id)
-            guard ok else {
-                review.say("Review not sent for PR #\(pr.number). Your comments are kept.",
-                           isError: true, in: id)
-                return
-            }
-            review.removeSent(sent, from: id)
-            review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on PR #\(pr.number)'s agent",
-                       in: id)
-            if diffReviewPrId == id { closeDiffReview() }
+        let ok: Bool
+        if let tracked {
+            ok = await queuePrompt(sessionId: tracked.sessionId, text: prompt)
+        } else {
+            ok = await trackPrAndQueue(pr, cwd: target.cwd, prompt: prompt)
         }
+        review.setSending(false, id)
+        guard ok else {
+            review.say("Review not sent for PR #\(pr.number). Your comments are kept.",
+                       isError: true, in: id)
+            return
+        }
+        review.removeSent(sent, from: id)
+        review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on PR #\(pr.number)'s agent",
+                   in: id)
+        if diffReviewPrId == id { closeDiffReview() }
     }
 }

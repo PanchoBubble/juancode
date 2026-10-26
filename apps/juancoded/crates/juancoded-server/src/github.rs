@@ -47,6 +47,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/pr/comment", post(comment))
         .route("/api/pr/rerun", post(rerun))
         .route("/api/pr/resolve-thread", post(resolve_thread))
+        .route("/api/pr/submit-review", post(submit_review))
         .route("/api/pr/close", post(close_pr))
         .route("/api/repo", get(repo))
         .route("/api/pr/conversation", get(conversation))
@@ -498,6 +499,45 @@ async fn resolve_thread(
         return bad_request("threadId (the review thread's node id) required");
     };
     match gh::set_review_thread_resolved(&cwd, &thread_id, body.resolved.unwrap_or(true)).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitReviewBody {
+    pub cwd: Option<String>,
+    pub number: Option<i64>,
+    /// The review's own summary; optional, the inline comments are the point.
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub comments: Vec<gh::ReviewCommentDraft>,
+}
+
+/// Post the diff review's GitHub-bound comments as one COMMENT review.
+async fn submit_review(
+    State(_): State<CoreHandles>,
+    Json(body): Json<SubmitReviewBody>,
+) -> Response {
+    let Some(cwd) = non_empty(body.cwd) else {
+        return bad_request("cwd (absolute project path) required");
+    };
+    let Some(number) = body.number.filter(|n| *n > 0) else {
+        return bad_request("a positive PR number required");
+    };
+    if body.comments.is_empty() && body.body.trim().is_empty() {
+        return bad_request("comments or a body required");
+    }
+    if body
+        .comments
+        .iter()
+        .any(|c| c.path.is_empty() || c.line <= 0 || c.body.trim().is_empty())
+    {
+        return bad_request("every comment needs a path, a positive line and a body");
+    }
+    match gh::submit_review(&cwd, number, &body.body, &body.comments).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => gh_write_failed(e),
     }

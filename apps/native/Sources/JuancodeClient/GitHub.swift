@@ -284,6 +284,21 @@ public struct GitHubReads: Sendable {
                                        "Could not post the comment")
     }
 
+    /// Post inline comments to a PR as one COMMENT review.
+    public func submitReview(cwd: String, number: Int, body: String = "",
+                             comments: [GitHubReviewCommentDraft]) async throws {
+        let encoded = comments.map { c -> [String: Any] in
+            var o: [String: Any] = ["path": c.path, "line": c.line, "side": c.side, "body": c.body]
+            if let s = c.startLine { o["startLine"] = s }
+            if let s = c.startSide { o["startSide"] = s }
+            return o
+        }
+        let _: OkBody = try await tell("/api/pr/submit-review",
+                                       ["cwd": cwd, "number": number, "body": body,
+                                        "comments": encoded],
+                                       "Could not post the review on GitHub")
+    }
+
     /// Resolve an inline review thread, or reopen it (`resolved: false`). By the
     /// thread's GraphQL node id, the `id` the timeline's `threads` carry.
     public func resolveThread(cwd: String, threadId: String, resolved: Bool) async throws {

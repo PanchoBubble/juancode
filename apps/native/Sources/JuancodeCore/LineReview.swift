@@ -119,11 +119,19 @@ public struct ReviewComment: Sendable, Equatable, Identifiable, Codable {
     /// The commented lines, each with its `+`/`-`/space marker.
     public var excerpt: [String]
     public var text: String
+    /// `reviewLineKey` of the first commented line; nil on a comment made before ranges
+    /// were posted anywhere but the agent.
+    public var startKey: String?
+    /// Posted to GitHub as an inline review comment (`r`) rather than sent to the agent.
+    public var forGitHub: Bool?
+
+    public var isForGitHub: Bool { forGitHub == true }
 
     public init(id: String, path: String, startLabel: String, endLabel: String, endKey: String,
-                excerpt: [String], text: String) {
+                excerpt: [String], text: String, startKey: String? = nil, forGitHub: Bool = false) {
         self.id = id; self.path = path; self.startLabel = startLabel; self.endLabel = endLabel
         self.endKey = endKey; self.excerpt = excerpt; self.text = text
+        self.startKey = startKey; self.forGitHub = forGitHub ? true : nil
     }
 
     /// `path:12` or `path:10-14`.
@@ -147,7 +155,45 @@ public func makeReviewComment(path: String, rows: [ReviewRow], from: Int, to: In
         startLabel: reviewLineLabel(first), endLabel: reviewLineLabel(last),
         endKey: reviewLineKey(last),
         excerpt: picked.map { reviewMarker($0.kind) + $0.text },
-        text: text)
+        text: text,
+        startKey: reviewLineKey(first))
+}
+
+/// One comment of a GitHub review, in the shape `POST /api/pr/submit-review` takes:
+/// `side` is `RIGHT` for the new side and `LEFT` for a removed line.
+public struct GitHubReviewCommentDraft: Sendable, Equatable, Codable {
+    public var path: String
+    public var line: Int
+    public var side: String
+    public var startLine: Int?
+    public var startSide: String?
+    public var body: String
+
+    public init(path: String, line: Int, side: String, startLine: Int? = nil,
+                startSide: String? = nil, body: String) {
+        self.path = path; self.line = line; self.side = side
+        self.startLine = startLine; self.startSide = startSide; self.body = body
+    }
+}
+
+/// A staged comment as GitHub's review comment: its last line is where it hangs, a
+/// range adds where it starts. Nil when a key does not parse.
+public func githubReviewComment(_ c: ReviewComment) -> GitHubReviewCommentDraft? {
+    func side(_ key: String) -> (Int, String)? {
+        guard let n = Int(key.dropFirst()), n > 0 else { return nil }
+        switch key.first {
+        case "n": return (n, "RIGHT")
+        case "o": return (n, "LEFT")
+        default: return nil
+        }
+    }
+    guard let (line, endSide) = side(c.endKey) else { return nil }
+    var draft = GitHubReviewCommentDraft(path: c.path, line: line, side: endSide, body: c.text)
+    if let startKey = c.startKey, startKey != c.endKey, let (start, startSide) = side(startKey) {
+        draft.startLine = start
+        draft.startSide = startSide
+    }
+    return draft
 }
 
 private func reviewMarker(_ kind: DiffLine.Kind) -> String {
@@ -236,6 +282,8 @@ public enum ReviewKeyCommand: Sendable, Equatable {
     case toggleVisual
     /// `gcc` in normal mode, `gc` in visual.
     case comment
+    /// `r`: a comment posted to GitHub as an inline review comment, not to the agent.
+    case githubComment
     /// Enter (and c/i/a/o, as the plugin has it): edit the comment under the cursor,
     /// else start one.
     case activate
@@ -363,6 +411,8 @@ public struct ReviewKeyParser: Sendable {
         case "v", "V": return .toggleVisual
         case "c", "i", "a", "o": return .activate
         case "x": return .deleteComment
+        case "r": return .githubComment
+        case "s": return .send
         case "q": return .close
         case "R": return .refresh
         case "/": return .searchForward

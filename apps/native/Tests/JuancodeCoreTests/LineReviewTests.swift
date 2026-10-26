@@ -191,6 +191,26 @@ final class LineReviewTests: XCTestCase {
         XCTAssertEqual(run([.ctrl("h"), .ctrl("l")]), [.focusTree, .focusDiff])
     }
 
+    func testRCommentsOnGitHubAndSSends() {
+        XCTAssertEqual(run(chars("r")), [.githubComment])
+        XCTAssertEqual(run(chars("r"), visual: true), [.githubComment])
+        XCTAssertEqual(run(chars("s")), [.send])
+    }
+
+    func testAGitHubReviewCommentHangsOnItsLastLineAndCarriesARange() {
+        let one = ReviewComment(id: "a", path: "p", startLabel: "3", endLabel: "3", endKey: "n3",
+                                excerpt: [], text: "t", startKey: "n3", forGitHub: true)
+        XCTAssertEqual(githubReviewComment(one),
+                       GitHubReviewCommentDraft(path: "p", line: 3, side: "RIGHT", body: "t"))
+        let range = ReviewComment(id: "b", path: "p", startLabel: "5 (old)", endLabel: "9",
+                                  endKey: "n9", excerpt: [], text: "t", startKey: "o5")
+        XCTAssertEqual(githubReviewComment(range),
+                       GitHubReviewCommentDraft(path: "p", line: 9, side: "RIGHT",
+                                                startLine: 5, startSide: "LEFT", body: "t"))
+        XCTAssertTrue(one.isForGitHub)
+        XCTAssertFalse(range.isForGitHub)
+    }
+
     func testCommentIsGccInNormalAndGcInVisual() {
         XCTAssertEqual(run(chars("gc")), [], "normal mode waits for the third key")
         XCTAssertEqual(run(chars("gcc")), [.comment])
