@@ -103,6 +103,8 @@ struct DiffReviewPanel: View {
     // MARK: - Derived
 
     private var review: DiffReviewModel { model.diffReview }
+    /// Set when this reviews a pull request rather than a session.
+    private var prTarget: DiffReviewModel.PrTarget? { review.prTarget(sessionId) }
     private var snapshot: DiffReviewModel.Snapshot? { review.snapshot(sessionId) }
     private var files: [DiffFile] { snapshot?.files ?? [] }
     private var allComments: [ReviewComment] { review.comments(sessionId) }
@@ -182,17 +184,25 @@ struct DiffReviewPanel: View {
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "text.bubble").foregroundStyle(.secondary)
-            Text("Review").font(.system(size: 12, weight: .semibold))
-            Picker("", selection: Binding(
-                get: { review.base(sessionId) },
-                set: { model.loadDiffReview(sessionId, base: $0); keyToken &+= 1 }
-            )) {
-                ForEach(ReviewBase.allCases, id: \.self) { Text($0.title).tag($0) }
+            if let pr = prTarget?.pr {
+                Text("Review PR #\(pr.number)").font(.system(size: 12, weight: .semibold))
+                Text(pr.title)
+                    .font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .help(pr.title)
+            } else {
+                Text("Review").font(.system(size: 12, weight: .semibold))
+                Picker("", selection: Binding(
+                    get: { review.base(sessionId) },
+                    set: { model.loadDiffReview(sessionId, base: $0); keyToken &+= 1 }
+                )) {
+                    ForEach(ReviewBase.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("What to diff against")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .help("What to diff against")
             if let snapshot {
                 Text(snapshot.label)
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -226,7 +236,11 @@ struct DiffReviewPanel: View {
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.return, modifiers: .command)
             .disabled((count == 0 && !hasDraftText) || review.sending.contains(sessionId))
-            .help("Send every comment to the session as one review message (⌘⏎ or ␣w)")
+            .help(prTarget == nil
+                  ? "Send every comment to the session as one review message (⌘⏎ or ␣w)"
+                  : model.trackedPr(cwd: prTarget!.cwd, number: prTarget!.pr.number) != nil
+                    ? "Queue every comment on the PR's tracking session as one review (⌘⏎ or ␣w)"
+                    : "Track this PR and queue every comment on its new agent session (⌘⏎ or ␣w)")
             .clickCursor()
             Button { model.closeDiffReview() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)

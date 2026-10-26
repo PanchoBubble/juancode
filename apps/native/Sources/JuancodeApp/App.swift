@@ -466,7 +466,8 @@ struct JuancodeApp: App {
                     performShortcut(.diffReview, model: model, oracle: oracle)
                 }
                 .appShortcut(.diffReview, shortcuts)
-                .disabled(model.selection == nil && !model.showingDiffReview)
+                .disabled(model.selection == nil && !model.showingDiffReview
+                          && !(model.showingGitHub && model.github.tab == .detail))
                 // ⌃⌘C: the selected session's chain, one tab per member across
                 // projects; again to leave it.
                 Button(model.chainView != nil ? "Leave Chain" : "Open Chain") {

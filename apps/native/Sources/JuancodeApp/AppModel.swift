@@ -394,8 +394,14 @@ final class AppModel {
     /// Like them, a session switch dismisses it (`selection.didSet`); its comments
     /// live in `diffReview` and are still there when it is reopened.
     var showingDiffReview = false {
-        didSet { if showingDiffReview { showingGitHub = false; showingBeads = false } }
+        didSet {
+            if showingDiffReview { showingGitHub = false; showingBeads = false }
+            else { diffReviewPrId = nil }
+        }
     }
+    /// The PR review id (`DiffReviewModel.prReviewId`) while the panel reviews a pull
+    /// request opened from the GitHub view; nil while it reviews the session.
+    var diffReviewPrId: String?
     /// Comments, bases and loaded diffs behind the diff-review panel.
     let diffReview = DiffReviewModel()
     /// Bumped to ask the diff-review panel to take the keyboard back.
@@ -3052,6 +3058,19 @@ final class AppModel {
         else { return }
         github.select(cwd: pending.cwd, pr: pr)
         githubPendingBranchSelect = nil
+    }
+
+    /// The GitHub view's selected PR resolved back to its (folder, PR) pair from the
+    /// loaded lists — nil once the PR is no longer open (merged/closed on refresh).
+    var selectedGitHubPr: (String, PullRequest)? {
+        guard let key = github.selectedKey else { return nil }
+        for cwd in githubScopedFolders {
+            guard let r = prs(cwd), r.available else { continue }
+            if let pr = r.prs.first(where: { TrackedPr.key(cwd: cwd, number: $0.number) == key }) {
+                return (cwd, pr)
+            }
+        }
+        return nil
     }
 
     /// "Open diff" from the GitHub view: select the PR and show its detail on the

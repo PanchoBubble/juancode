@@ -3216,8 +3216,13 @@ struct DetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             // The diff review (juancode-a5j) reviews whichever session is showing and
-            // sends to it; keyed by session so a switch starts its view state afresh.
-            if model.showingDiffReview, let id = shownId, pending == nil {
+            // sends to it — or a PR opened from the GitHub view; keyed by target so a
+            // switch starts its view state afresh.
+            if model.showingDiffReview, let id = model.diffReviewPrId {
+                DiffReviewPanel(sessionId: id)
+                    .id(id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.showingDiffReview, let id = shownId, pending == nil {
                 DiffReviewPanel(sessionId: id)
                     .id(id)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

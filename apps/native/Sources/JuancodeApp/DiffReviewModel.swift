@@ -28,6 +28,14 @@ final class DiffReviewModel {
         var isError: Bool
     }
 
+    /// A pull request under review instead of a session: its diff is the PR's net
+    /// diff against the branch it merges into (`gh pr diff`), and the review goes to
+    /// the agent session tracking it.
+    struct PrTarget: Equatable {
+        var cwd: String
+        var pr: PullRequest
+    }
+
     private(set) var snapshots: [String: Snapshot] = [:]
     private(set) var errors: [String: String] = [:]
     private(set) var loading: Set<String> = []
@@ -35,6 +43,7 @@ final class DiffReviewModel {
     private(set) var comments: [String: [ReviewComment]] = [:]
     var notices: [String: Notice] = [:]
     private var bases: [String: ReviewBase] = [:]
+    private var prTargets: [String: PrTarget] = [:]
     @ObservationIgnored fileprivate var watchTokens: [String: WorktreeWatchToken] = [:]
     @ObservationIgnored fileprivate var inFlight: Set<String> = []
     /// A reload asked for while one was in flight, run when it lands.
@@ -43,6 +52,13 @@ final class DiffReviewModel {
     func base(_ id: String) -> ReviewBase { bases[id] ?? .head }
     func snapshot(_ id: String) -> Snapshot? { snapshots[id] }
     func comments(_ id: String) -> [ReviewComment] { comments[id] ?? [] }
+    func prTarget(_ id: String) -> PrTarget? { prTargets[id] }
+
+    /// The review id a PR's comments and diff live under — distinct from every
+    /// session id, and from the GitHub view's own basket key for the PR.
+    static func prReviewId(cwd: String, number: Int) -> String {
+        "pr:" + TrackedPr.key(cwd: cwd, number: number)
+    }
 
     func add(_ comment: ReviewComment, to id: String) {
         comments[id, default: []].append(comment)
@@ -61,6 +77,7 @@ final class DiffReviewModel {
         notices[id] = Notice(text: text, isError: isError)
     }
 
+    fileprivate func setPrTarget(_ target: PrTarget, for id: String) { prTargets[id] = target }
     fileprivate func setBase(_ base: ReviewBase, for id: String) { bases[id] = base }
     fileprivate func setLoading(_ on: Bool, _ id: String) {
         if on { loading.insert(id) } else { loading.remove(id) }
@@ -86,23 +103,48 @@ extension AppModel {
     /// following edits to it while open.
     func openDiffReview() {
         guard let id = selection else { return }
+        diffReviewPrId = nil
         showingDiffReview = true
         loadDiffReview(id)
         diffReviewFocusToken &+= 1
     }
 
-    /// Close the review and hand the keyboard back to the session's terminal. Staged
-    /// comments stay for next time.
-    func closeDiffReview() {
-        guard showingDiffReview else { return }
-        showingDiffReview = false
-        for id in Array(diffReview.watchTokens.keys) { stopWatchingDiffReview(id) }
-        focusTerminal()
+    /// Open the review over a pull request: the PR's diff against its base branch,
+    /// with the same keys and comments as a session's, sent to the agent tracking it.
+    func openPrDiffReview(_ pr: PullRequest, cwd: String) {
+        let id = DiffReviewModel.prReviewId(cwd: cwd, number: pr.number)
+        diffReview.setPrTarget(.init(cwd: cwd, pr: pr), for: id)
+        diffReviewPrId = id
+        showingDiffReview = true
+        loadDiffReview(id)
+        diffReviewFocusToken &+= 1
     }
 
-    func toggleDiffReview() {
-        if showingDiffReview { closeDiffReview() } else { openDiffReview() }
+    /// Close the review and hand the keyboard back to the session's terminal — or,
+    /// for a PR review, back to the GitHub view it was opened from. Staged comments
+    /// stay for next time.
+    func closeDiffReview() {
+        guard showingDiffReview else { return }
+        let fromPr = diffReviewPrId != nil
+        showingDiffReview = false
+        for id in Array(diffReview.watchTokens.keys) { stopWatchingDiffReview(id) }
+        if fromPr { showingGitHub = true } else { focusTerminal() }
     }
+
+    /// ⌘⇧D: over a PR's detail in the GitHub view it reviews that PR, anywhere else
+    /// the session the window shows.
+    func toggleDiffReview() {
+        if showingDiffReview {
+            closeDiffReview()
+        } else if showingGitHub, github.tab == .detail, let (cwd, pr) = selectedGitHubPr {
+            openPrDiffReview(pr, cwd: cwd)
+        } else {
+            openDiffReview()
+        }
+    }
+
+    /// The review the panel shows: the open PR's, else the session's.
+    var diffReviewTargetId: String? { diffReviewPrId ?? selection }
 
     // MARK: - Loading
 
@@ -126,6 +168,30 @@ extension AppModel {
         let wanted = review.base(id)
         review.inFlight.insert(id)
         review.setLoading(true, id)
+        if let target = review.prTarget(id) {
+            Task {
+                var snapshot: DiffReviewModel.Snapshot?
+                var failure: String?
+                if let reads = core.github {
+                    do {
+                        let d = try await reads.prDiff(cwd: target.cwd, number: target.pr.number)
+                        snapshot = .init(base: wanted, label: "PR #\(target.pr.number) vs its base branch",
+                                         files: d.files, git: d.git)
+                    } catch let e as GitHubError {
+                        failure = e.message
+                    } catch {
+                        failure = error.localizedDescription
+                    }
+                } else {
+                    failure = core.unavailableReason(.github) ?? "This core cannot read a PR's diff."
+                }
+                review.inFlight.remove(id)
+                review.setLoading(false, id)
+                review.store(snapshot, error: failure, for: id)
+                if review.reloadQueued.remove(id) != nil { loadDiffReview(id) }
+            }
+            return
+        }
         Task {
             await resolveAgentWorktree(id)
             var snapshot: DiffReviewModel.Snapshot?
@@ -211,6 +277,10 @@ extension AppModel {
             return
         }
         guard !review.sending.contains(id) else { return }
+        if let target = review.prTarget(id) {
+            sendPrDiffReview(id, target: target, staged: staged)
+            return
+        }
         guard let session = liveSession(id), session.isRunning else {
             review.say("Session isn't running — start it to send the review. Your comments are kept.",
                        isError: true, in: id)
@@ -236,6 +306,43 @@ extension AppModel {
                     review.say("Review not sent: \(reason). Your comments are kept.", isError: true, in: id)
                 }
             }
+        }
+    }
+
+    /// A PR review goes where the GitHub view's Diff-tab notes go: queued on the
+    /// session tracking the PR (delivered on its next idle), or — untracked — onto a
+    /// new tracking session. The comments are cleared only once the queue write is
+    /// confirmed.
+    private func sendPrDiffReview(_ id: String, target: DiffReviewModel.PrTarget,
+                                  staged: [ReviewComment]) {
+        let review = diffReview
+        let pr = target.pr
+        let label = review.snapshot(id)?.label ?? "PR #\(pr.number)"
+        let prompt = diffReviewPrompt(number: pr.number, url: pr.url,
+                                      feedback: formatReview(staged, baseLabel: label))
+        let sent = Set(staged.map(\.id))
+        let tracked = trackedPr(cwd: target.cwd, number: pr.number)
+        review.setSending(true, id)
+        review.say(tracked == nil
+                   ? "Tracking PR #\(pr.number) and queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…"
+                   : "Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
+        Task {
+            let ok: Bool
+            if let tracked {
+                ok = await queuePrompt(sessionId: tracked.sessionId, text: prompt)
+            } else {
+                ok = await trackPrAndQueue(pr, cwd: target.cwd, prompt: prompt)
+            }
+            review.setSending(false, id)
+            guard ok else {
+                review.say("Review not sent for PR #\(pr.number). Your comments are kept.",
+                           isError: true, in: id)
+                return
+            }
+            review.removeSent(sent, from: id)
+            review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on PR #\(pr.number)'s agent",
+                       in: id)
+            if diffReviewPrId == id { closeDiffReview() }
         }
     }
 }

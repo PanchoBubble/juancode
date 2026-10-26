@@ -1091,18 +1091,7 @@ struct GitHubView: View {
         }
     }
 
-    /// Resolve the selected key back to its (folder, PR) pair from the loaded
-    /// lists — nil once the PR is no longer open (merged/closed on refresh).
-    private var selectedPr: (String, PullRequest)? {
-        guard let key = model.github.selectedKey else { return nil }
-        for cwd in model.githubScopedFolders {
-            guard let r = model.prs(cwd), r.available else { continue }
-            if let pr = r.prs.first(where: { TrackedPr.key(cwd: cwd, number: $0.number) == key }) {
-                return (cwd, pr)
-            }
-        }
-        return nil
-    }
+    private var selectedPr: (String, PullRequest)? { model.selectedGitHubPr }
 }
 
 /// One PR row in the left column. Reuses the visual language of the folder
@@ -1366,6 +1355,8 @@ private struct GitHubPrActions: View {
             if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
         }
         Button("Open Diff") { model.openPrDiff(pr, cwd: cwd) }
+        Button("Review Diff") { model.openPrDiffReview(pr, cwd: cwd) }
+            .help("Review the PR's diff against its base branch in the full-width review (⌘⇧D): comment on lines, send them to the PR's agent")
         if let t = tracked {
             // `selection`'s didSet closes the GitHub view.
             Button("Go to Session") { model.selection = t.sessionId }
