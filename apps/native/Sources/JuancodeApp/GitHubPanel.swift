@@ -1740,28 +1740,27 @@ private struct GitHubPrDetail: View {
             switch tab {
             case .conversation:
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 20) {
                         notificationRows
                         descriptionDisclosure
                         checksSection
-                        Divider()
                         conversationSection
                         if let err = model.github.actionError {
-                            Text(err)
-                                .font(.system(size: 11))
+                            Label(err, systemImage: "exclamationmark.circle")
+                                .font(.system(size: 12))
                                 .foregroundStyle(.red)
                                 .textSelection(.enabled)
                         }
                     }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .frame(maxWidth: 920, alignment: .leading)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .top)
                 }
+                .background(Color.appSurface)
             case .diff:
-                // The diff tab owns its own tree/diff scroll views, so it must fill the
-                // pane rather than sit inside the conversation's outer ScrollView.
                 VStack(alignment: .leading, spacing: 0) {
                     if hasNotifications {
-                        notificationRows.padding(.horizontal, 16).padding(.top, 12)
+                        notificationRows.padding(.horizontal, 20).padding(.top, 12)
                     }
                     PrDiffTab(pr: pr, cwd: cwd)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1797,24 +1796,40 @@ private struct GitHubPrDetail: View {
     /// Conversation/Diff switcher, on an opaque background so scrolled content
     /// never bleeds under it.
     private var pinnedHead: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             header
-            HStack(spacing: 8) {
-                Picker("", selection: $tab) {
-                    ForEach(PrDetailTab.allCases, id: \.self) { Text($0.label).tag($0) }
+            HStack(spacing: 20) {
+                ForEach(PrDetailTab.allCases, id: \.self) { item in
+                    Button { tab = item } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: item == .conversation ? "bubble.left.and.bubble.right" : "doc.text")
+                            Text(item == .diff ? "Files changed" : item.label)
+                            if item == .diff, let count = pr.changedFiles {
+                                Text("\(count)").foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.system(size: 12, weight: tab == item ? .semibold : .regular))
+                        .foregroundStyle(tab == item ? Color.primary : Color.secondary)
+                        .padding(.bottom, 12)
+                        .overlay(alignment: .bottom) {
+                            if tab == item {
+                                Capsule().fill(Color.accentColor).frame(height: 2)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(tab == item ? .isSelected : [])
+                    .clickCursor()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                Spacer()
-                freshness
+                Spacer(minLength: 0)
+                freshness.padding(.bottom, 12)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 24)
+        .padding(.top, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.appSurface)
+        .background(Color.appPanel)
     }
 
     /// How old the data on screen is, plus a manual refresh.
@@ -1828,73 +1843,99 @@ private struct GitHubPrDetail: View {
     // MARK: header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("#\(pr.number)")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
-                Text(pr.title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                if pr.draft {
-                    Text("draft")
-                        .font(.system(size: 10))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.2))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                }
-                if let state = conversation?.state, !state.isEmpty {
-                    PrStateChip(state: state)
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "shippingbox")
+                Text((cwd as NSString).lastPathComponent)
+                Text("/")
+                Text("Pull request #\(pr.number)")
+                Spacer(minLength: 0)
                 if let t = tracked { TrackBadge(state: t.state) }
                 if let chain = model.chain(of: .trackedPr, ref: key) {
                     ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: key))
                 }
-                Spacer()
             }
-            HStack(spacing: 8) {
-                Text(pr.branch)
-                    .font(.system(size: 11).monospaced())
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                Text((cwd as NSString).lastPathComponent)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                if !pr.author.isEmpty {
-                    Text("by @\(pr.author)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+
+            Text(pr.title)
+                .font(.system(size: 20, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { identity; Spacer(minLength: 12); changeStats }
+                VStack(alignment: .leading, spacing: 10) { identity; changeStats }
             }
-            HStack(spacing: 10) {
-                if let counts = pr.diffCounts {
-                    DiffStatLabel(counts: counts, size: 11)
-                        .fixedSize()
-                }
-                GitHubPrActions(pr: pr, cwd: cwd)
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { actions }
+                VStack(alignment: .leading, spacing: 8) { actions }
             }
         }
     }
 
-    /// The PR's own description, as a collapsible block (expanded by default).
-    /// Only shown once the conversation has loaded and the PR actually has a body.
-    @ViewBuilder
-    private var descriptionDisclosure: some View {
-        if let body = conversation?.body,
-           !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            DisclosureGroup(isExpanded: $descriptionExpanded) {
-                CommentMarkdown(text: body)
-                    .padding(.top, 4)
-            } label: {
-                Text("Description")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .clickCursor()
+    private var identity: some View {
+        HStack(spacing: 8) {
+            if let state = conversation?.state, state == "MERGED" || state == "CLOSED" {
+                PrStateChip(state: state)
+            } else if pr.draft {
+                detailBadge("Draft", icon: "pencil", color: .secondary)
+            } else if conversation?.state == "OPEN" {
+                detailBadge("Open", icon: "arrow.triangle.pull", color: .green)
             }
-            .padding(.top, 2)
+            if !pr.author.isEmpty {
+                Text("@\(pr.author)").fontWeight(.medium)
+            }
+            Text(pr.branch)
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                .help(pr.branch)
+        }
+        .font(.system(size: 12))
+        .textSelection(.enabled)
+    }
+
+    @ViewBuilder private var changeStats: some View {
+        if let counts = pr.diffCounts {
+            DiffStatLabel(counts: counts, size: 11).fixedSize()
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        GitHubPrActions(pr: pr, cwd: cwd)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .font(.system(size: 11))
+    }
+
+    private func detailBadge(_ title: String, icon: String, color: Color) -> some View {
+        Label(title, systemImage: icon)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    @ViewBuilder private var descriptionDisclosure: some View {
+        if let conversation {
+            PrDetailCard {
+                DisclosureGroup(isExpanded: $descriptionExpanded) {
+                    if conversation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("No description provided.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .padding(.top, 10)
+                    } else {
+                        CommentMarkdown(text: conversation.body).padding(.top, 12)
+                    }
+                } label: {
+                    Label("Description", systemImage: "text.alignleft")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+            }
         }
     }
 
@@ -2044,8 +2085,8 @@ private struct PrStateChip: View {
 }
 
 /// The CI checks list: one row per check run (outcome icon, name, state,
-/// link-out), plus a shared failing-logs disclosure — `gh` fetches the failing
-/// steps for the whole PR at once, so every failing row toggles the same block.
+/// link-out), plus a shared failing-logs disclosure. The collapsed summary keeps
+/// failures visible; logs are explicitly PR-wide because gh returns them together.
 private struct GitHubChecksSection: View {
     @Environment(AppModel.self) private var model
     let pr: PullRequest
@@ -2058,38 +2099,84 @@ private struct GitHubChecksSection: View {
     private var hasFailing: Bool { runs.contains(where: \.failed) }
     private var isRerunning: Bool { model.github.rerunning.contains(key) }
 
+    @State private var expanded = false
+
+    private var failedCount: Int { runs.filter { $0.outcome == .fail }.count }
+    private var pendingCount: Int { runs.filter { $0.outcome == .pending }.count }
+    private var passedCount: Int { runs.filter { $0.outcome == .pass }.count }
+    private var skippedCount: Int { runs.filter { $0.outcome == .skipped }.count }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                Text("Checks")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                if isRerunning { ProgressView().controlSize(.mini) }
-                if hasFailing {
-                    Button("Re-run failed") {
-                        model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: true)
+        PrDetailCard {
+            DisclosureGroup(isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Divider()
+                    HStack(spacing: 10) {
+                        Text("\(runs.count) checks").foregroundStyle(.secondary)
+                        Spacer()
+                        if isRerunning { ProgressView().controlSize(.mini) }
+                        if hasFailing {
+                            Button("Re-run failed") {
+                                model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: true)
+                            }
+                            .disabled(isRerunning)
+                        }
+                        Button("Re-run all") {
+                            model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: false)
+                        }
+                        .disabled(isRerunning)
                     }
+                    .font(.system(size: 11))
                     .buttonStyle(.borderless)
-                    .font(.system(size: 10))
-                    .disabled(isRerunning)
-                    .help("gh run rerun --failed: re-run only the failed jobs")
-                    .clickCursor()
+                    ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+                        checkRow(run)
+                    }
+                    if hasFailing {
+                        Button(showLogs ? "Hide failing-step logs" : "Show failing-step logs") {
+                            showLogs.toggle()
+                            if showLogs { model.github.loadCiLogs(cwd: cwd, pr: pr, reads: model.core.github) }
+                        }
+                        .font(.system(size: 11))
+                        .buttonStyle(.borderless)
+                    }
+                    logsBlock
                 }
-                Button("Re-run all") {
-                    model.github.rerunChecks(cwd: cwd, pr: pr, failedOnly: false)
+                .padding(.top, 10)
+            } label: {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        Label("Checks", systemImage: "checkmark.circle")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer(minLength: 0)
+                        summary
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Checks").font(.system(size: 12, weight: .semibold))
+                        summary
+                    }
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10))
-                .disabled(isRerunning)
-                .help("gh run rerun: re-run every job on this PR")
-                .clickCursor()
             }
-            ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
-                checkRow(run)
-            }
-            logsBlock
         }
+        .onAppear { expanded = hasFailing }
+        .onChange(of: hasFailing) { _, failing in
+            if failing { expanded = true }
+        }
+    }
+
+    private var summary: some View {
+        HStack(spacing: 10) {
+            if failedCount > 0 { summaryCount(failedCount, "failed", .fail) }
+            if pendingCount > 0 { summaryCount(pendingCount, "pending", .pending) }
+            if passedCount > 0 { summaryCount(passedCount, "passed", .pass) }
+            if skippedCount > 0 { summaryCount(skippedCount, "skipped", .skipped) }
+        }
+        .font(.system(size: 11))
+    }
+
+    private func summaryCount(_ count: Int, _ title: String, _ outcome: PrCheckOutcome) -> some View {
+        Label("\(count) \(title)", systemImage: icon(outcome))
+            .foregroundStyle(color(outcome))
+            .fixedSize()
     }
 
     private func checkRow(_ run: PrCheckRow) -> some View {
@@ -2106,15 +2193,6 @@ private struct GitHubChecksSection: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
-            if run.failed {
-                Button(showLogs ? "Hide logs" : "Show logs") {
-                    showLogs.toggle()
-                    if showLogs { model.github.loadCiLogs(cwd: cwd, pr: pr, reads: model.core.github) }
-                }
-                .buttonStyle(.borderless)
-                .font(.system(size: 10))
-                .clickCursor()
-            }
             if !run.link.isEmpty {
                 Button {
                     if let url = URL(string: run.link) { NSWorkspace.shared.open(url) }
@@ -2181,17 +2259,48 @@ private struct GitHubConversationSection: View {
     /// `ReplyComposer` without ever collapsing it (Cancel is hidden in that mode).
     @State private var composerOpen = true
 
+    @State private var filter: PrConversationFilter = .all
+
+    private var visibleItems: [PrTimelineItem] { filter.apply(to: timeline.items) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Conversation")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            if timeline.items.isEmpty {
-                Text("No comments yet")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                .font(.system(size: 14, weight: .semibold))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(PrConversationFilter.allCases, id: \.self) { option in
+                        Button { filter = option } label: {
+                            HStack(spacing: 5) {
+                                Text(option.label)
+                                Text("\(option.count(in: timeline.items))")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.system(size: 11, weight: filter == option ? .semibold : .regular))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(filter == option ? Color.accentColor.opacity(0.12) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(filter == option ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2)))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(filter == option ? .isSelected : [])
+                        .help(option == .unresolved ? "Show unresolved review threads, including outdated threads" : "Show \(option.label.lowercased()) activity")
+                        .clickCursor()
+                    }
+                }
             }
-            ForEach(timeline.items) { item in
+            if visibleItems.isEmpty {
+                Text(filter == .all ? "No conversation yet. Start one below." :
+                        filter == .unresolved ? "No unresolved review threads in this conversation." :
+                        "No \(filter.label.lowercased()) yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 20)
+            }
+            ForEach(visibleItems) { item in
                 switch item {
                 case .review(let review, let groups, _, _):
                     ReviewEventRow(pr: pr, cwd: cwd, review: review, threadGroups: groups)
@@ -2217,17 +2326,24 @@ private struct GitHubConversationSection: View {
 /// Fill and border both sit well above the old half-opacity panel tint: against
 /// the panel's near-black background a card at 0.5/0.15 was effectively invisible,
 /// so a long thread read as one undifferentiated wall of text.
+private struct PrDetailCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) { content }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.appPanel, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.secondary.opacity(0.18)))
+    }
+}
+
 private struct ConversationCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) { content }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.appPanel)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.secondary.opacity(0.3)))
+        PrDetailCard { content }
     }
 }
 
@@ -2470,8 +2586,8 @@ private struct ReviewEventRow: View {
                     .background(chipColor.opacity(0.2))
                     .clipShape(RoundedRectangle(cornerRadius: 3))
                     .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(chipColor.opacity(0.35)))
-                if review.comments.count > 1 {
-                    Text("\(review.comments.count) comments")
+                if !threadGroups.isEmpty {
+                    Text("\(threadGroups.count) thread\(threadGroups.count == 1 ? "" : "s")")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
