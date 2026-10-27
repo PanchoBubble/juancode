@@ -80,6 +80,7 @@ struct DiffReviewPanel: View {
     @AppStorage("diffReview.treeShown") private var treeShown = true
     @AppStorage("diffReview.treeWidth") private var treeWidth: Double = 300
 
+    @State private var markdownPreview = false
     @State private var focus: Focus = .diff
     @State private var selectedPath: String?
     @State private var collapsedDirs: Set<String> = []
@@ -149,6 +150,11 @@ struct DiffReviewPanel: View {
     private var treeRows: [ReviewTreeRow] { reviewTreeRows(files, collapsed: collapsedDirs) }
     private var fileOrder: [String] { reviewFileOrder(files) }
     private var isVisual: Bool { anchor != nil }
+    private var isMarkdown: Bool {
+        guard let file, !file.binary else { return false }
+        return ["md", "markdown", "mdown", "mkd"].contains((file.path as NSString).pathExtension.lowercased())
+    }
+    private var showingMarkdown: Bool { markdownPreview && isMarkdown }
     private var isFinderOpen: Bool { prompt == .files || prompt == .text }
 
     /// What the diff highlights: the pattern being typed at `/`, else the last search.
@@ -207,12 +213,22 @@ struct DiffReviewPanel: View {
             content
                 .overlay(alignment: .top) { if isFinderOpen { finder } }
             Divider()
-            statusBar
+            if showingMarkdown {
+                Text("Preview · Switch to Diff to search or comment on lines")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+            } else {
+                statusBar
+            }
         }
         .background(Color.appSurface)
-        .background(ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
-                                     enabled: draft == nil && prompt == nil && reply == nil,
-                                     onKey: handle).frame(width: 0, height: 0))
+        .background {
+            if !showingMarkdown {
+                ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
+                                 enabled: draft == nil && prompt == nil && reply == nil,
+                                 onKey: handle).frame(width: 0, height: 0)
+            }
+        }
         .onAppear {
             if snapshot == nil { model.loadDiffReview(sessionId) }
             syncSelection()
@@ -503,7 +519,13 @@ struct DiffReviewPanel: View {
         VStack(spacing: 0) {
             if let file { fileHeader(file) }
             Divider()
-            if let rf = rendered, rf.path == file?.path {
+            if showingMarkdown, let file {
+                ReviewMarkdownPreview(file: file,
+                                      cwd: prTarget == nil && snapshot?.base != .staged && file.status != .deleted
+                                          ? model.gitCwd(of: sessionId) : nil,
+                                      core: model.core)
+                    .id(file.path)
+            } else if let rf = rendered, rf.path == file?.path {
                 diffLines(rf)
             } else {
                 Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -535,6 +557,19 @@ struct DiffReviewPanel: View {
                 .lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
             Spacer(minLength: 6)
+            if isMarkdown {
+                Picker("Markdown view", selection: $markdownPreview) {
+                    Text("Diff").tag(false)
+                    Text("Preview").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .disabled(draft != nil || reply != nil || prompt != nil)
+                .onChange(of: markdownPreview) { _, _ in
+                    anchor = nil
+                    parser.reset()
+                    keyToken &+= 1
+                }
+            }
             if let at = fileOrder.firstIndex(of: file.path) {
                 Text("\(at + 1)/\(fileOrder.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
