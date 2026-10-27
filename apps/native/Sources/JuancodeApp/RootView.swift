@@ -298,7 +298,7 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
 /// Hidden bridge that installs the window-scoped monitors that must sit ahead of the
 /// terminal in the responder chain (only an NSEvent local monitor can): the keyboard
 /// one for vim-style sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm), and the
-/// mouse one for the side buttons' back/forward session history.
+/// mouse and trackpad ones for back/forward navigation.
 private struct PaneNavInstaller: NSViewRepresentable {
     let model: AppModel
     let oracle: OracleModel
@@ -309,6 +309,7 @@ private struct PaneNavInstaller: NSViewRepresentable {
         context.coordinator.monitors = [
             installPaneNavigation(model: model, oracle: oracle, shortcuts: shortcuts, host: v),
             installBackForwardMouse(model: model, oracle: oracle, host: v),
+            installBackForwardSwipe(model: model, oracle: oracle, host: v),
         ].compactMap { $0 }
         return v
     }
