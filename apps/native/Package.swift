@@ -21,6 +21,12 @@ let package = Package(
         .executable(name: "juancode", targets: ["JuancodeApp"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/tree-sitter/swift-tree-sitter", .upToNextMinor(from: "0.25.0")),
+        // Upstream PR #342: the 0.25.0 manifest omits scanner.c when SPM evaluates
+        // it outside the grammar directory, causing undefined scanner symbols.
+        // Pin the manifest fix until it is released in a tagged version.
+        .package(url: "https://github.com/tree-sitter/tree-sitter-python",
+                 revision: "9651b37ae5ee2b9e2fa757d3c6a9a5299b90d105"),
         // SQLite persistence (juancode-u34.5). Mirrors db.ts (better-sqlite3).
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         // Embedded HTTP + WebSocket server (juancode-u34.3). Mirrors express + ws.
@@ -125,7 +131,11 @@ let package = Package(
         // of its own — moving these there would have dropped 857 lines of tests.
         .target(
             name: "JuancodeDesktop",
-            dependencies: ["JuancodeCore", "JuancodeServices"]
+            dependencies: [
+                "JuancodeCore", "JuancodeServices",
+                .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
+                .product(name: "TreeSitterPython", package: "tree-sitter-python"),
+            ]
         ),
         // The `:4280` relay (juancode-u34.3, juancode-bse5): a Hummingbird app that
         // forwards /ws verbatim to the `juancoded` daemon and answers the REST session

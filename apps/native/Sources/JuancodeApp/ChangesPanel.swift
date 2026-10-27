@@ -1356,6 +1356,7 @@ struct RenderedFileDiff: Equatable, Sendable {
     static func compute(diff: String, path: String, generation: Int) -> RenderedFileDiff {
         let hunks = parseUnifiedDiff(diff)
         let flat = hunks.flatMap(\.lines)
+        let syntax = highlightDiff(hunks, path: path)
         let pairs = Set(flat.compactMap { $0.anchor.map { "\($0.side.rawValue):\($0.line)" } })
         // Word-level changed spans per line, from each delete/insert pair in a hunk.
         var intraline: [Int: [Range<Int>]] = [:]
@@ -1371,7 +1372,7 @@ struct RenderedFileDiff: Equatable, Sendable {
             let line = flat[idx]
             var out = AttributedString(marker(for: line.kind))
             out.foregroundColor = markerColor(for: line.kind)
-            var content = VimSyntaxPalette.attributed(line.text, path: path)
+            var content = VimSyntaxPalette.attributed(line.text, tokens: syntax[idx])
             if let ranges = intraline[idx] {
                 applyIntralineHighlight(&content, ranges: ranges, kind: line.kind)
             }
@@ -1894,6 +1895,10 @@ enum VimSyntaxPalette {
         case .comment: return comment
         case .number: return number
         case .type: return type
+        case .function: return Color(red: 0.48, green: 0.72, blue: 0.98)
+        case .variable: return Color(red: 0.82, green: 0.86, blue: 0.93)
+        case .parameter: return Color(red: 0.93, green: 0.72, blue: 0.48)
+        case .property: return Color(red: 0.65, green: 0.81, blue: 0.87)
         case .plain: return plain
         }
     }
@@ -1901,11 +1906,15 @@ enum VimSyntaxPalette {
     /// Build a colored `AttributedString` for one line of code by overlaying the
     /// tokenizer's spans onto a plain base. Gaps between tokens render as `.plain`.
     static func attributed(_ text: String, path: String) -> AttributedString {
+        attributed(text, tokens: highlightLine(text, path: path))
+    }
+
+    static func attributed(_ text: String, tokens: [SyntaxToken]) -> AttributedString {
         var out = AttributedString(text)
         out.foregroundColor = plain
         guard !text.isEmpty else { return out }
         let chars = out.characters
-        for token in highlightLine(text, path: path) {
+        for token in tokens {
             // Translate the String.Index range into the AttributedString character-view
             // index space by character offset (both share the same character sequence).
             let lower = text.distance(from: text.startIndex, to: token.range.lowerBound)

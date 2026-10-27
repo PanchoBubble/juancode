@@ -80,7 +80,7 @@ struct DiffReviewPanel: View {
     @AppStorage("diffReview.treeShown") private var treeShown = true
     @AppStorage("diffReview.treeWidth") private var treeWidth: Double = 300
 
-    @State private var markdownPreview = false
+    @AppStorage("reviewMarkdownPreview") private var markdownPreview = true
     @State private var focus: Focus = .diff
     @State private var selectedPath: String?
     @State private var collapsedDirs: Set<String> = []
@@ -560,9 +560,10 @@ struct DiffReviewPanel: View {
             if isMarkdown {
                 Picker("Markdown view", selection: $markdownPreview) {
                     Text("Diff").tag(false)
-                    Text("Preview").tag(true)
+                    Text("Rendered").tag(true)
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .help("Read formatted Markdown or switch to Diff to review and comment on source lines.")
                 .disabled(draft != nil || reply != nil || prompt != nil)
                 .onChange(of: markdownPreview) { _, _ in
                     anchor = nil

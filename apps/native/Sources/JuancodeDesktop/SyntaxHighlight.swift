@@ -1,10 +1,8 @@
 import Foundation
 
-/// Pure, SwiftUI-free syntax tokenizer for the native ChangesPanel diff
-/// (juancode-idg). Splash (JohnSundell) was rejected because it is Swift-ONLY,
-/// while this repo is multi-language (TS/JS/JSON/Swift/…); a TextMate/tree-sitter
-/// grammar engine would be a heavyweight dependency for a per-line diff highlighter.
-/// Instead this is a lightweight, dependency-free single-line tokenizer covering a
+/// SwiftUI-free fallback tokenizer for the native ChangesPanel diff.
+/// Python diff sections use Tree-sitter in PythonHighlight.swift; other languages
+/// and standalone line previews use this lightweight single-line tokenizer covering a
 /// useful common subset — strings, line/block comments, numbers, and a per-language
 /// keyword set — driven by the file extension. It produces typed token ranges that
 /// the SwiftUI view maps to a warm vim-like color palette, layered on top of the
@@ -29,6 +27,10 @@ public enum SyntaxTokenKind: Sendable, Equatable {
     case comment
     case number
     case type   // capitalized identifiers / type-ish words
+    case function
+    case variable
+    case parameter
+    case property
     case plain
 }
 
