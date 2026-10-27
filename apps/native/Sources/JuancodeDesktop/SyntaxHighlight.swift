@@ -16,6 +16,8 @@ import Foundation
 ///    a comment only on lines where the opener is present; diffs rarely show whole
 ///    multi-line comment bodies and tracking cross-line state per hunk isn't worth
 ///    the complexity. Unterminated strings/comments run to end-of-line.
+///    Python triple-quoted strings likewise do not carry state across lines;
+///    f-string contents are colored as strings, without parsing interpolations.
 ///  - No semantic awareness (scopes, types vs values): keyword matching is lexical.
 ///  - Unknown extensions fall back to a generic C-like profile (strings/comments/
 ///    numbers, no keywords), which is still useful across most code.
@@ -53,6 +55,8 @@ struct LanguageProfile: Sendable {
     /// When true, an identifier starting with an uppercase letter is tokenized as a
     /// `.type` (matches the vim convention of coloring type names).
     let capitalizedAsType: Bool
+    /// Python prefixes and triple quotes; still deliberately scoped to one line.
+    var pythonStrings: Bool = false
 }
 
 /// Resolve a `LanguageProfile` from a file path's extension. Pure + case-insensitive.
@@ -74,11 +78,11 @@ func languageProfile(forPath path: String) -> LanguageProfile {
             lineComment: ext == "jsonc" ? ["//"] : [], blockCommentOpen: nil, blockCommentClose: nil,
             stringDelimiters: ["\""], stringEscapes: true,
             keywords: ["true", "false", "null"], capitalizedAsType: false)
-    case "py":
+    case "py", "pyi", "pyw":
         return LanguageProfile(
             lineComment: ["#"], blockCommentOpen: nil, blockCommentClose: nil,
             stringDelimiters: ["\"", "'"], stringEscapes: true,
-            keywords: pyKeywords, capitalizedAsType: false)
+            keywords: pyKeywords, capitalizedAsType: false, pythonStrings: true)
     case "sh", "bash", "zsh":
         return LanguageProfile(
             lineComment: ["#"], blockCommentOpen: nil, blockCommentClose: nil,
@@ -193,10 +197,24 @@ func highlightLine(_ line: String, profile: LanguageProfile) -> [SyntaxToken] {
             continue
         }
 
-        // 3. String literal.
-        if profile.stringDelimiters.contains(c) {
+        // 3. String literal. Python prefixes belong to the string token; triple
+        // quotes close only at the matching triple, not an embedded single quote.
+        var quote = i
+        if profile.pythonStrings, isIdentStart(c) {
+            var after = line.index(after: i)
+            while after < end, isIdentBody(line[after]) { after = line.index(after: after) }
+            let prefix = line[i..<after].lowercased()
+            if ["r", "u", "b", "f", "br", "rb", "fr", "rf"].contains(prefix),
+               after < end, profile.stringDelimiters.contains(line[after]) {
+                quote = after
+            }
+        }
+        if profile.stringDelimiters.contains(line[quote]) {
             let start = i
-            var j = line.index(after: i)
+            let delimiter = String(line[quote])
+            let triple = String(repeating: delimiter, count: 3)
+            let closer = profile.pythonStrings && line[quote...].hasPrefix(triple) ? triple : delimiter
+            var j = line.index(quote, offsetBy: closer.count)
             while j < end {
                 let cj = line[j]
                 if profile.stringEscapes, cj == "\\" {
@@ -204,7 +222,10 @@ func highlightLine(_ line: String, profile: LanguageProfile) -> [SyntaxToken] {
                     if j < end { j = line.index(after: j) }
                     continue
                 }
-                if cj == c { j = line.index(after: j); break }
+                if line[j...].hasPrefix(closer) {
+                    j = line.index(j, offsetBy: closer.count)
+                    break
+                }
                 j = line.index(after: j)
             }
             tokens.append(SyntaxToken(range: start..<j, kind: .string))

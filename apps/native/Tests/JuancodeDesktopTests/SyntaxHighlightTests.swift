@@ -85,6 +85,40 @@ final class SyntaxHighlightTests: XCTestCase {
         XCTAssertTrue(r.contains { $0 == (.keyword, "None") })
     }
 
+    func testPythonFileVariants() {
+        for path in ["models.py", "models.pyi", "window.pyw", "MODELS.PYI"] {
+            let r = tok("def f(): return None # note", path)
+            XCTAssertTrue(r.contains { $0 == (.keyword, "def") }, path)
+            XCTAssertTrue(r.contains { $0 == (.keyword, "None") }, path)
+            XCTAssertTrue(r.contains { $0 == (.comment, "# note") }, path)
+        }
+    }
+
+    func testPythonStringPrefixes() {
+        for prefix in ["r", "u", "b", "f", "br", "rb", "fr", "rf", "FR", "R"] {
+            let literal = prefix + "\"value # {name}\""
+            let r = tok("value = " + literal + " # comment", "f.py")
+            XCTAssertEqual(r.map(\.1), [literal, "# comment"])
+            XCTAssertEqual(r.map(\.0), [.string, .comment])
+        }
+        // A suffix of an identifier must not become a string prefix.
+        XCTAssertEqual(tok("offer\"text\"", "f.py").map(\.1), ["\"text\""])
+        // Other languages keep their existing string rules.
+        XCTAssertEqual(tok("r\"text\"", "f.ts").map(\.1), ["\"text\""])
+    }
+
+    func testPythonTripleQuotesContainQuotesAndHashes() {
+        for quote in ["\"", "'"] {
+            let delimiter = String(repeating: quote, count: 3)
+            let literal = "r" + delimiter + "a " + quote + " # still string" + delimiter
+            let r = tok(literal + " # comment", "f.py")
+            XCTAssertEqual(r.map(\.1), [literal, "# comment"])
+            XCTAssertEqual(r.map(\.0), [.string, .comment])
+            let unfinished = delimiter + "a " + quote + " # still string"
+            XCTAssertEqual(tok(unfinished, "f.py").map(\.1), [unfinished])
+        }
+    }
+
     // MARK: - Plain identifiers emit no token
 
     func testPlainIdentifierNotTokenized() {
