@@ -79,3 +79,29 @@ public enum ChainTabs {
         return new.members[min(was, new.members.count - 1)].memberRef
     }
 }
+
+/// Tabs explicitly opened during one visit to a chain. Membership alone never opens a tab.
+public struct OpenChainTabs: Equatable, Sendable {
+    public private(set) var members: [ChainMemberRef] = []
+    public private(set) var selected: ChainMemberRef?
+
+    public init() {}
+
+    public mutating func select(_ member: ChainMemberRef, in chain: Chain) {
+        guard chain.contains(member) else { return }
+        if !members.contains(member) { members.append(member) }
+        selected = member
+    }
+
+    public mutating func overview() { selected = nil }
+
+    public mutating func reconcile(with chain: Chain) {
+        members.removeAll { !chain.contains($0) }
+        if let selected, !members.contains(selected) { self.selected = nil }
+    }
+
+    public func step(in chain: Chain, by offset: Int) -> ChainMemberRef? {
+        let opened = Chain(slug: chain.slug, members: members.compactMap { chain.member($0) })
+        return ChainTabs.step(in: opened, from: selected, by: offset)
+    }
+}

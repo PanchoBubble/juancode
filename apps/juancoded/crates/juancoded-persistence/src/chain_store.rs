@@ -32,7 +32,10 @@ pub trait ChainStore: Send + Sync {
     fn chains(&self) -> Result<Vec<Chain>>;
     /// Create an empty active chain. `false` when the slug is taken, active or not: a
     /// slug is an identity, and a closed chain still owns its own.
-    fn create_chain(&self, slug: &str, created_at: i64) -> Result<bool>;
+    fn create_chain(&self, slug: &str, created_at: i64) -> Result<bool> {
+        self.create_named_chain(slug, slug, created_at)
+    }
+    fn create_named_chain(&self, slug: &str, name: &str, created_at: i64) -> Result<bool>;
     /// Mark a chain active or inactive. `closed_at` is what to record beside it (`None`
     /// on a reopen). `false` when there is no such chain.
     fn set_chain_state(
@@ -170,12 +173,14 @@ impl ChainStore for SqliteStore {
     fn chains(&self) -> Result<Vec<Chain>> {
         let conn = self.conn_for_chains();
         let mut stmt = conn.prepare(
-            "SELECT slug, state, created_at, closed_at FROM chains ORDER BY created_at ASC, slug ASC",
+            "SELECT slug, state, created_at, closed_at, id, name FROM chains ORDER BY created_at ASC, slug ASC",
         )?;
         let mut chains = stmt
             .query_map([], |row| {
                 let state: String = row.get(1)?;
                 Ok(Chain {
+                    id: row.get(4)?,
+                    name: row.get(5)?,
                     slug: row.get(0)?,
                     // A state this build does not know reads as active: a chain that
                     // vanished from the list would be worse than one shown as open.
@@ -223,11 +228,14 @@ impl ChainStore for SqliteStore {
         Ok(chains)
     }
 
-    fn create_chain(&self, slug: &str, created_at: i64) -> Result<bool> {
+    fn create_named_chain(&self, slug: &str, name: &str, created_at: i64) -> Result<bool> {
+        let id = uuid::Uuid::parse_str(slug)
+            .unwrap_or_else(|_| uuid::Uuid::new_v4())
+            .to_string();
         let inserted = self.conn_for_chains().execute(
-            "INSERT INTO chains (slug, state, created_at, closed_at) VALUES (?1, ?2, ?3, NULL) \
+            "INSERT INTO chains (slug, state, created_at, closed_at, id, name) VALUES (?1, ?2, ?3, NULL, ?4, ?5) \
              ON CONFLICT(slug) DO NOTHING",
-            params![slug, ChainState::Active.as_str(), created_at],
+            params![slug, ChainState::Active.as_str(), created_at, id, name],
         )?;
         Ok(inserted > 0)
     }

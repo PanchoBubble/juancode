@@ -133,7 +133,7 @@ private struct ChainRailRow: View {
         .onTapGesture { model.openChain(slug: chain.slug) }
         .onHover { hovering = $0 }
         .clickCursor()
-        .help(chain.isActive ? "Open chain \(chain.slug)" : "Open chain \(chain.slug) (closed)")
+        .help(chain.isActive ? "Open chain \(chain.name)" : "Open chain \(chain.name) (closed)")
         .contextMenu {
             Button("Open Chain") { model.openChain(slug: chain.slug) }
             Button("Show Details…") { model.showChainDetail(slug: chain.slug) }

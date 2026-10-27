@@ -150,7 +150,7 @@ public enum ClientMessage: Sendable {
     case subscribeChains
     /// The four chain lifecycle writes, each answered by a `chainResult` to the
     /// asker (echoing `requestId`) and by the change stream to every subscriber.
-    case createChain(slug: String, requestId: String?)
+    case createChain(slug: String, name: String? = nil, requestId: String?)
     case closeChain(slug: String, requestId: String?)
     case reopenChain(slug: String, requestId: String?)
     case deleteChain(slug: String, requestId: String?)
@@ -181,7 +181,7 @@ extension ClientMessage: Decodable {
         // Named control keys (juancode-uigs).
         case keys
         // Chains (juancode-dbo.1).
-        case slug, kind, ref, title, url
+        case slug, kind, ref, title, url, name
     }
 
     public init(from decoder: Decoder) throws {
@@ -292,6 +292,7 @@ extension ClientMessage: Decodable {
             self = .subscribeChains
         case "createChain":
             self = .createChain(slug: try c.decode(String.self, forKey: .slug),
+                                name: try c.decodeIfPresent(String.self, forKey: .name),
                                 requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
         case "closeChain":
             self = .closeChain(slug: try c.decode(String.self, forKey: .slug),

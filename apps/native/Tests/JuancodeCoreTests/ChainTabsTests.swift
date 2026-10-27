@@ -13,6 +13,29 @@ import Testing
         Chain(slug: "ship-it", members: refs.map { ChainMember(kind: $0.kind, ref: $0.ref) })
     }
 
+    @Test func tabsOpenOnDemandAndDoNotReopenOnBookChanges() {
+        let c = chain([s1, pr, bd])
+        var tabs = OpenChainTabs()
+        #expect(tabs.members.isEmpty)
+        #expect(tabs.selected == nil)
+        #expect(tabs.step(in: c, by: 1) == nil)
+        tabs.select(pr, in: c)
+        tabs.select(s1, in: c)
+        tabs.select(pr, in: c)
+        #expect(tabs.members == [pr, s1])
+        #expect(tabs.step(in: c, by: 1) == s1)
+        tabs.overview()
+        tabs.reconcile(with: chain([s1, pr, bd, lin]))
+        #expect(tabs.selected == nil)
+        #expect(tabs.members == [pr, s1])
+        tabs.select(pr, in: c)
+        tabs.reconcile(with: chain([s1, bd]))
+        #expect(tabs.selected == nil)
+        #expect(tabs.members == [s1])
+        tabs.select(lin, in: c)
+        #expect(tabs.members == [s1])
+    }
+
     @Test func aKeyRoundTripsEvenWhenTheRefHasAColon() {
         #expect(ChainMemberRef(key: pr.key) == pr)
         let odd = ChainMemberRef(kind: .linear, ref: "a:b")

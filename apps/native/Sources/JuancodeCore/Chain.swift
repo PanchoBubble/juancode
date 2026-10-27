@@ -7,7 +7,8 @@ import Foundation
 /// `chains` capability. These are the shapes it decodes into, in `JuancodeCore`
 /// because both `JuancodeServer/WireProtocol.swift` and `JuancodeClient` carry them.
 ///
-/// A chain's `slug` is its id and its display name at once, and never changes. An item
+/// A chain has a stable UUID and display name. `slug` is retained as a compatibility
+/// routing key for existing links; newly named chains use the UUID. An item
 /// is in at most one chain, so membership is answered by a lookup over the book rather
 /// than by a field on the item — which is why a session's chain is not on `SessionMeta`.
 
@@ -51,18 +52,21 @@ public struct ChainMember: Codable, Sendable, Equatable, Hashable {
 /// A chain and everything in it, members in the order they joined.
 public struct Chain: Codable, Sendable, Equatable, Identifiable {
     public var slug: String
+    public var name: String
+    public var id: String
     public var state: ChainState
     public var createdAt: Int
     /// When it was last closed; nil while active.
     public var closedAt: Int?
     public var members: [ChainMember]
 
-    public var id: String { slug }
     public var isActive: Bool { state == .active }
 
-    public init(slug: String, state: ChainState = .active, createdAt: Int = 0,
+    public init(slug: String, id: String? = nil, name: String? = nil, state: ChainState = .active, createdAt: Int = 0,
                 closedAt: Int? = nil, members: [ChainMember] = []) {
         self.slug = slug
+        self.id = id ?? slug
+        self.name = name ?? slug
         self.state = state
         self.createdAt = createdAt
         self.closedAt = closedAt
@@ -70,7 +74,18 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case slug, state, createdAt, closedAt, members
+        case slug, id, name, state, createdAt, closedAt, members
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slug = try c.decode(String.self, forKey: .slug)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? slug
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? slug
+        state = try c.decode(ChainState.self, forKey: .state)
+        createdAt = try c.decode(Int.self, forKey: .createdAt)
+        closedAt = try c.decodeIfPresent(Int.self, forKey: .closedAt)
+        members = try c.decode([ChainMember].self, forKey: .members)
     }
 
     /// `closedAt` is written as null rather than omitted while the chain is active,
@@ -78,6 +93,8 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(slug, forKey: .slug)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
         try c.encode(state, forKey: .state)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(closedAt, forKey: .closedAt)

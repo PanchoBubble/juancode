@@ -181,7 +181,7 @@ struct ChainGraphView: View {
             }
             .gesture(MagnifyGesture().onEnded { value in setZoom(zoom * value.magnification) })
             .accessibilityElement(children: .contain)
-            .accessibilityLabel("Chain graph for \(chain.slug)")
+            .accessibilityLabel("Chain graph for \(chain.name)")
             .accessibilityHint("Arrow keys move between cards, Return opens the focused card")
         }
     }

@@ -2099,8 +2099,15 @@ fn handle_client_message(
             });
         }
 
-        ClientMessage::CreateChain { slug, request_id } => {
-            let outcome = chains.map_or(Err("chain-unavailable"), |c| c.create(&slug));
+        ClientMessage::CreateChain {
+            slug,
+            name,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| match name {
+                Some(name) => c.create_named(&slug, &name),
+                None => c.create(&slug),
+            });
             outbound.push(chain_result("create", Some(slug), request_id, outcome));
         }
 
@@ -3974,6 +3981,7 @@ mod tests {
         // Before subscribing, a mutation is answered but its change is not forwarded.
         let early = wire.step(
             ClientMessage::CreateChain {
+                name: None,
                 slug: "early".into(),
                 request_id: Some("r0".into()),
             },
@@ -3987,6 +3995,7 @@ mod tests {
 
         let created = wire.step(
             ClientMessage::CreateChain {
+                name: None,
                 slug: "auth-rewrite".into(),
                 request_id: Some("r1".into()),
             },
@@ -4007,6 +4016,7 @@ mod tests {
 
         let refused = wire.step(
             ClientMessage::CreateChain {
+                name: None,
                 slug: "Auth".into(),
                 request_id: None,
             },
@@ -4316,6 +4326,7 @@ mod tests {
         wire.step(ClientMessage::SubscribeChains, &mut fanout);
         wire.step(
             ClientMessage::CreateChain {
+                name: None,
                 slug: "billing".into(),
                 request_id: None,
             },

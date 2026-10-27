@@ -9,6 +9,7 @@ import {
   chainAdd,
   chainClose,
   chainCreate,
+  chainCreateNamed,
   chainListText,
   chainRemove,
   chainShowText,
@@ -18,10 +19,7 @@ import {
 } from "./chains.ts";
 import { ok, tool, type ToolResult } from "./tool-result.ts";
 
-const slug = z
-  .string()
-  .min(1)
-  .describe("The chain's slug: lowercase letters and digits in dash-separated words");
+const slug = z.string().min(1).describe("The chain UUID (or a legacy slug)");
 
 const member = {
   kind: z
@@ -85,10 +83,14 @@ export function registerChainTools(
     {
       title: "Create a chain",
       description:
-        "Create an empty, active chain. The slug is its id and name forever: lowercase letters and digits in dash-separated words, at most 48 characters, e.g. 'auth-rewrite'. Tag work into it with chain_add.",
-      inputSchema: { slug },
+        "Create an empty active chain with a display name and generated UUID. Use name for new chains; slug is accepted for legacy callers. Use the returned ID with chain_add.",
+      inputSchema: { name: z.string().trim().min(1).max(200).optional(), slug: slug.optional() },
     },
-    answer((args) => chainCreate(deps(), args.slug)),
+    answer((args) => {
+      if (args.name) return chainCreateNamed(deps(), args.name);
+      if (args.slug) return chainCreate(deps(), args.slug);
+      throw new Error("Provide a chain name.");
+    }),
   );
 
   server.registerTool(

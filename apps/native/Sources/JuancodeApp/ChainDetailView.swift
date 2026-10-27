@@ -30,7 +30,7 @@ struct ChainDetailView: View {
             }
         }
         .frame(width: 640, height: 520)
-        .alert("Delete chain \u{201C}\(slug)\u{201D}?", isPresented: $confirmDelete) {
+        .alert("Delete chain \u{201C}\(model.chains[slug]?.name ?? slug)\u{201D}?", isPresented: $confirmDelete) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
                 Task { if await model.deleteChain(slug) { dismiss() } }
@@ -47,7 +47,7 @@ struct ChainDetailView: View {
                 confirmRemove = nil
             }
         } message: {
-            Text("\u{201C}\(confirmRemove?.title ?? "")\u{201D} leaves \u{201C}\(slug)\u{201D}. "
+            Text("\u{201C}\(confirmRemove?.title ?? "")\u{201D} leaves \u{201C}\(model.chains[slug]?.name ?? slug)\u{201D}. "
                 + "The item itself is untouched.")
         }
     }

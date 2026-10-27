@@ -5641,9 +5641,8 @@ final class AppModel {
     }
 
     private func applyChains(_ book: ChainBook) {
-        let old = chainView.flatMap { chains[$0.slug] }
         chains = book
-        reconcileChainView(old: old)
+        reconcileChainView()
         if let slug = chainDetail, chains[slug] == nil { chainDetail = nil }
     }
 
@@ -5686,31 +5685,13 @@ final class AppModel {
         await setChain(slug, for: .linear, ref: t.identifier, title: t.title, url: t.url)
     }
 
-    /// Start a chain named after the ticket ("luma-123", then "luma-123-2"… past a taken
-    /// slug) and put the ticket in it. The new slug, or nil when either write failed.
+    /// Start a UUID chain named after the ticket and put the ticket in it.
+    /// Returns the routing ID, or nil when either write failed.
     @discardableResult
     func startChain(forTicket t: LinearTicket) async -> String? {
-        guard let slug = freeChainSlug(from: t.identifier),
-              await createChain(slug), await setChain(slug, forTicket: t) else { return nil }
-        return slug
-    }
-
-    /// A slug the daemon will take, made from free text: lowercase ASCII words joined by
-    /// dashes, short enough for a "-2" style suffix, and not already a chain's.
-    func freeChainSlug(from text: String) -> String? {
-        let words = text.lowercased()
-            .split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }
-        var base = ""
-        for w in words where base.count + w.count + 1 <= 44 {
-            base += base.isEmpty ? String(w) : "-\(w)"
-        }
-        guard !base.isEmpty else { return nil }
-        var slug = base
-        var n = 2
-        while chains[slug] != nil {
-            slug = "\(base)-\(n)"
-            n += 1
-        }
+        let slug = UUID().uuidString.lowercased()
+        guard await chainWrite({ try await $0.createChain(id: slug, name: t.identifier) }),
+              await setChain(slug, forTicket: t) else { return nil }
         return slug
     }
 
@@ -5739,8 +5720,10 @@ final class AppModel {
     /// The open chain view, if any.
     struct ChainViewState: Equatable {
         let slug: String
-        /// The member tab showing; nil only while the chain has no members.
-        var selected: ChainMemberRef?
+        /// Tabs opened during this visit; no selection shows the graph.
+        var openedTabs = OpenChainTabs()
+        var selected: ChainMemberRef? { openedTabs.selected }
+        var tabs: [ChainMemberRef] { openedTabs.members }
         /// The selection when the chain was opened, restored by `exitChain()`.
         let returnTo: String?
     }
@@ -5763,7 +5746,8 @@ final class AppModel {
         showingGitHub = false
         showingBeads = false
         let returnTo = chainView?.returnTo ?? selection
-        chainView = ChainViewState(slug: slug, selected: nil, returnTo: returnTo)
+        UserDefaults.standard.set(ChainOverviewMode.graph.rawValue, forKey: ChainOverviewMode.storageKey)
+        chainView = ChainViewState(slug: slug, returnTo: returnTo)
         if let tab = ChainTabs.opening(in: chain, requested: member) {
             selectChainMember(tab)
         }
@@ -5784,10 +5768,10 @@ final class AppModel {
         if selection != back { selection = back }
     }
 
-    /// Show one member's tab. Remembered per chain for the next `openChain`.
+    /// Open and select a member tab for this visit to the chain.
     func selectChainMember(_ member: ChainMemberRef) {
-        guard let open = chainView, chains[open.slug]?.contains(member) == true else { return }
-        chainView?.selected = member
+        guard let open = chainView, let chain = chains[open.slug], chain.contains(member) else { return }
+        chainView?.openedTabs.select(member, in: chain)
         guard member.kind == .session else { return }
         if isOracleSession(member.ref) {
             revealOracle?(member.ref)
@@ -5803,13 +5787,13 @@ final class AppModel {
     /// Return from a member card or pane to the open chain's overview.
     func selectChainOverview() {
         guard chainView != nil else { return }
-        chainView?.selected = nil
+        chainView?.openedTabs.overview()
     }
 
     /// The next (`1`) or previous (`-1`) tab, wrapping.
     func stepChainTab(by offset: Int) {
         guard let open = chainView, let chain = chains[open.slug],
-              let tab = ChainTabs.step(in: chain, from: open.selected, by: offset)
+              let tab = open.openedTabs.step(in: chain, by: offset)
         else { return }
         selectChainMember(tab)
     }
@@ -5819,7 +5803,7 @@ final class AppModel {
         if chainView != nil {
             exitChain()
         } else if let id = selection, let chain = chain(forSession: id) {
-            openChain(slug: chain.slug, member: ChainMemberRef(kind: .session, ref: id))
+            openChain(slug: chain.slug)
         }
     }
 
@@ -5827,9 +5811,9 @@ final class AppModel {
     /// (a sidebar click on a member is a tab switch); anywhere else leaves the chain.
     private func followSelectionIntoChain() {
         guard !chainDrivesSelection, let open = chainView else { return }
-        if let id = selection, chains[open.slug]?.contains(ChainMemberRef(kind: .session, ref: id)) == true {
+        if let id = selection, let chain = chains[open.slug], chain.contains(ChainMemberRef(kind: .session, ref: id)) {
             let tab = ChainMemberRef(kind: .session, ref: id)
-            chainView?.selected = tab
+            chainView?.openedTabs.select(tab, in: chain)
         } else {
             chainView = nil
         }
@@ -5837,17 +5821,13 @@ final class AppModel {
 
     /// The book changed under an open chain view: leave a deleted chain, and move off
     /// a tab whose member left.
-    private func reconcileChainView(old: Chain?) {
+    private func reconcileChainView() {
         guard let open = chainView else { return }
         guard let chain = chains[open.slug] else {
             exitChain()
             return
         }
-        // nil is the overview, which remains useful as members arrive or disappear.
-        guard open.selected != nil else { return }
-        let tab = ChainTabs.reconcile(open.selected, old: old, new: chain)
-        guard tab != open.selected else { return }
-        if let tab { selectChainMember(tab) } else { chainView?.selected = nil }
+        chainView?.openedTabs.reconcile(with: chain)
     }
 
     // MARK: - Chain detail

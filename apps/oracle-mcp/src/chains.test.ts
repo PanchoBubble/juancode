@@ -129,6 +129,20 @@ describe("chain MCP tools", () => {
     expect(res).toEqual({ isError: true, text: 'No chain named "x".' });
   });
 
+  it("creates UUID chains and displays their names", async () => {
+    const deps = fakeChainDeps();
+    const call = await connect(deps);
+    const reply = await call("chain_create", { name: "Fix café login" });
+    expect(reply.isError).toBe(false);
+    const chain = deps.book()![0]!;
+    expect(chain.slug).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(chain.name).toBe("Fix café login");
+    expect(chainListText(deps.book()!, "active")).toContain("Fix café login");
+    expect(chainListText(deps.book()!, "active")).not.toContain(chain.slug);
+  });
+
   it("creates, tags, moves, untags and closes", async () => {
     const deps = fakeChainDeps({ book: BOOK, sessions: SESSIONS });
     const call = await connect(deps);

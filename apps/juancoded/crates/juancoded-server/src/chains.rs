@@ -47,8 +47,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, info, warn};
 
 use juancoded_core::chain::{
-    slug_from_text, validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, Handoff,
-    HandoffDelivery, HandoffOwner, HandoffState, MemberStatus,
+    validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, Handoff, HandoffDelivery,
+    HandoffOwner, HandoffState, MemberStatus,
 };
 use juancoded_core::model::{now_ms, SessionMeta, SessionStatus};
 use juancoded_persistence::chain_store::ChainStore;
@@ -318,6 +318,23 @@ impl Chains {
             Ok(false) => Err("chain-exists"),
             Err(e) => Err(store_failed(e)),
         })
+    }
+
+    pub fn create_named(&self, slug: &str, name: &str) -> Result<(), ChainRefusal> {
+        if uuid::Uuid::parse_str(slug).is_err() {
+            return Err("chain-id-invalid");
+        }
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            return Err("chain-name-invalid");
+        }
+        self.mutate(
+            |store| match store.create_named_chain(slug, name, now_ms()) {
+                Ok(true) => Ok(vec![slug.to_string()]),
+                Ok(false) => Err("chain-exists"),
+                Err(e) => Err(store_failed(e)),
+            },
+        )
     }
 
     /// Mark a chain inactive. Closing a closed chain is a no-op and publishes nothing.
@@ -785,25 +802,22 @@ fn watch_keys(list: &[juancoded_core::pr::TrackedPr]) -> BTreeSet<String> {
     list.iter().map(|pr| pr.id.clone()).collect()
 }
 
-/// Create a chain named after `source`'s title, or after its id when the title has no
-/// letters or digits in it, suffixing `-2`, `-3`… past any slug already taken.
+/// Create a chain with a UUID and the source session’s display title.
 fn start_chain_for(store: &dyn ChainStore, source: &SessionMeta) -> Result<String, ChainRefusal> {
-    // Room for a `-NNN` suffix, so a suffixed slug is never too long.
-    const ROOM: usize = 4;
-    let base = slug_from_text(&source.title, ROOM)
-        .or_else(|| slug_from_text(&format!("session {}", source.id), ROOM))
-        .unwrap_or_else(|| "session".to_string());
-    for n in 1..1000 {
-        let slug = if n == 1 {
-            base.clone()
-        } else {
-            format!("{base}-{n}")
-        };
-        if store.create_chain(&slug, now_ms()).map_err(store_failed)? {
-            return Ok(slug);
-        }
+    let slug = uuid::Uuid::new_v4().to_string();
+    let name = if source.title.trim().is_empty() {
+        "New chain"
+    } else {
+        &source.title
+    };
+    if store
+        .create_named_chain(&slug, name, now_ms())
+        .map_err(store_failed)?
+    {
+        Ok(slug)
+    } else {
+        Err("chain-exists")
     }
-    Err("chain-exists")
 }
 
 fn store_has(store: &dyn ChainStore, slug: &str) -> Result<bool, ChainRefusal> {
@@ -994,6 +1008,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn named_chains_keep_uuid_identity_and_allow_duplicate_display_names() {
+        let (h, _) = engine();
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let chains = Chains::new(Arc::clone(&h.sessions), store.clone());
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        chains.create_named(&a, "  Fix café login  ").unwrap();
+        chains.create_named(&b, "Fix café login").unwrap();
+        assert_eq!(chains.create_named(&a, "Other"), Err("chain-exists"));
+        assert_eq!(chains.create_named("bad", "Name"), Err("chain-id-invalid"));
+        assert_eq!(
+            chains.create_named(&uuid::Uuid::new_v4().to_string(), "  "),
+            Err("chain-name-invalid")
+        );
+        let restarted = Chains::new(Arc::clone(&h.sessions), store);
+        assert_eq!(restarted.list(), chains.list());
+        assert!(chains.list().iter().any(|c| c.id == a));
+        assert!(chains.list().iter().all(|c| c.name == "Fix café login"));
+    }
+
+    #[tokio::test]
     async fn a_create_is_validated_unique_and_published_whole() {
         let (_h, chains) = engine();
         let mut rx = chains.subscribe();
@@ -1181,9 +1216,8 @@ mod tests {
         let (h, chains) = engine();
         let oracle = session(&h);
         let title = h.sessions.meta(&oracle).unwrap().title;
-        let base = slug_from_text(&title, 4)
-            .unwrap_or_else(|| slug_from_text(&format!("session {oracle}"), 4).unwrap());
-        // The name is taken, so the new chain is suffixed rather than refused.
+        let base = "existing-chain".to_string();
+        // An unrelated existing chain cannot collide with the generated identity.
         chains.create(&base).unwrap();
         let first = session(&h);
         let second = session(&h);
@@ -1192,10 +1226,12 @@ mod tests {
         let slug = chains
             .inherit(&oracle, ChainMemberKind::Session, &first, None, None)
             .expect("a chain is started");
-        assert_eq!(slug, format!("{base}-2"));
+        assert!(uuid::Uuid::parse_str(&slug).is_ok());
         assert_eq!(slugs_of(&drain(&mut rx)), [slug.clone()]);
         let chain = chains.list().into_iter().find(|c| c.slug == slug).unwrap();
         assert_eq!(chain.state, ChainState::Active);
+        assert_eq!(chain.name, title);
+        assert_eq!(chain.id, slug);
         let ids: Vec<_> = chain.members.iter().map(|m| m.ref_id.as_str()).collect();
         assert_eq!(
             ids,

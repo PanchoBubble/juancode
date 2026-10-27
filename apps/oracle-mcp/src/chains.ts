@@ -6,6 +6,8 @@
 // command both go through here, so the two surfaces cannot describe a chain
 // differently.
 
+import { randomUUID } from "node:crypto";
+
 import {
   chains,
   closeChain,
@@ -39,7 +41,7 @@ export interface ChainDeps {
   /** Ask for the book; true once the subscription is out. */
   subscribe: () => boolean;
   book: () => Chain[] | null;
-  create: (slug: string) => Promise<ChainResult>;
+  create: (slug: string, name?: string) => Promise<ChainResult>;
   close: (slug: string) => Promise<ChainResult>;
   setMember: (member: {
     kind: ChainMemberKind;
@@ -171,7 +173,7 @@ export function chainListText(book: Chain[], filter: ChainFilter): string {
   return list
     .map((c, i) => {
       const closed = c.state === "inactive" ? " (closed)" : "";
-      return `${i + 1}. ${c.slug}${closed} · ${memberSummary(c)}`;
+      return `${i + 1}. ${c.name ?? c.slug}${closed} · ${memberSummary(c)}`;
     })
     .join("\n");
 }
@@ -213,8 +215,8 @@ export async function chainShowText(deps: ChainDeps, slug: string): Promise<stri
   }
   const head =
     chain.state === "active"
-      ? `${chain.slug} · active since ${isoDate(chain.createdAt)}`
-      : `${chain.slug} · closed ${chain.closedAt ? isoDate(chain.closedAt) : ""}`.trimEnd();
+      ? `${chain.name ?? chain.slug} · active since ${isoDate(chain.createdAt)}`
+      : `${chain.name ?? chain.slug} · closed ${chain.closedAt ? isoDate(chain.closedAt) : ""}`.trimEnd();
   const groups = membersByKind(chain).map(
     ([kind, members]) =>
       `${KIND_LABELS[kind]} (${members.length}):\n` +
@@ -230,6 +232,12 @@ function isoDate(ms: number): string {
 /** Throw a refusal as words; return quietly when the write happened. */
 function expectOk(result: ChainResult, what: string): void {
   if (!result.ok) throw new Error(`Could not ${what}: ${chainErrorText(result.error)}.`);
+}
+
+export async function chainCreateNamed(deps: ChainDeps, name: string): Promise<string> {
+  const id = randomUUID();
+  expectOk(await deps.create(id, name.trim()), `create "${name}"`);
+  return `Created chain "${name.trim()}". ID: ${id}`;
 }
 
 export async function chainCreate(deps: ChainDeps, slug: string): Promise<string> {

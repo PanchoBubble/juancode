@@ -541,7 +541,7 @@ final class WireProtocolTests: XCTestCase {
     // ── Chains (juancode-dbo.1) ──────────────────────────────────────────────────
 
     func testDecodesTheChainFrames() throws {
-        guard case let .createChain(slug, requestId) =
+        guard case let .createChain(slug, _, requestId) =
                 try decode(#"{"type":"createChain","slug":"auth-rewrite","requestId":"r"}"#)
         else { return XCTFail("expected .createChain") }
         XCTAssertEqual(slug, "auth-rewrite")

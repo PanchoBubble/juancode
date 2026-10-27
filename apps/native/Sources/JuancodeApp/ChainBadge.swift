@@ -1,18 +1,17 @@
 import SwiftUI
 import JuancodeCore
 
-/// The chain an item is in, as a pill: the slug in the chain's own color, drawn on
+/// The chain an item is in, as a pill: its name in the chain's own color, drawn on
 /// every row that can be a member (sidebar sessions, Oracles, tracked PRs, beads and
-/// Linear tickets) and on the chain view's strip. Clicking it opens the chain on the
-/// member the badge sits on.
+/// Linear tickets) and on the chain view's strip. Clicking it opens the chain's
+/// graph.
 ///
 /// The color comes from `ChainPalette`, so one chain is one color everywhere. A closed
 /// chain draws grey: it keeps its members, but is no longer what you are working on.
 struct ChainBadge: View {
     @Environment(AppModel.self) private var model
     let chain: Chain
-    /// The item this badge is drawn on, so the click lands on its tab. Nil opens the
-    /// chain on its remembered tab.
+    /// The item this badge labels. Opening the badge always shows the graph.
     var member: ChainMemberRef? = nil
     /// Just a tinted link glyph, for rows with no room for the slug.
     var compact = false
@@ -28,7 +27,7 @@ struct ChainBadge: View {
         if opens {
             Button {
                 willOpen?()
-                model.openChain(slug: chain.slug, member: member)
+                model.openChain(slug: chain.slug)
             } label: {
                 label
             }
@@ -50,7 +49,7 @@ struct ChainBadge: View {
         } else {
             HStack(spacing: size / 3) {
                 Image(systemName: "link").font(.system(size: size - 1, weight: .semibold))
-                Text(chain.slug).font(.system(size: size, weight: .semibold)).lineLimit(1)
+                Text(chain.name).font(.system(size: size, weight: .semibold)).lineLimit(1)
             }
             .padding(.horizontal, size * 0.55).padding(.vertical, size / 9)
             .background(Capsule().fill(tint.opacity(0.18)))
@@ -64,7 +63,7 @@ struct ChainBadge: View {
     }
 
     private var help: String {
-        let what = chain.isActive ? "Chain \(chain.slug)" : "Chain \(chain.slug) (closed)"
+        let what = chain.isActive ? "Chain \(chain.name)" : "Chain \(chain.name) (closed)"
         return opens ? what + " — click to open it" : what
     }
 

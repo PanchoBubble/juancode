@@ -51,6 +51,10 @@ extension RustCoreClient {
         try await chainWrite(["type": "createChain", "slug": slug])
     }
 
+    public func createChain(id: String, name: String) async throws {
+        try await chainWrite(["type": "createChain", "slug": id, "name": name])
+    }
+
     public func closeChain(_ slug: String) async throws {
         try await chainWrite(["type": "closeChain", "slug": slug])
     }

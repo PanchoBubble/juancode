@@ -326,22 +326,21 @@ private struct LinearTicketRow: View {
 
     /// Tag the ticket into an active chain, start one named after it, or untag it.
     private var chainMenu: some View {
-        Menu(chain.map { "Chain: \($0.slug)" } ?? "Add to Chain") {
+        Menu(chain.map { "Chain: \($0.name)" } ?? "Add to Chain") {
             ForEach(model.chains.active) { c in
                 Button {
                     Task { await model.setChain(c.slug, forTicket: ticket) }
                 } label: {
-                    if c.slug == chain?.slug { Label(c.slug, systemImage: "checkmark") } else { Text(c.slug) }
+                    if c.slug == chain?.slug { Label(c.name, systemImage: "checkmark") } else { Text(c.name) }
                 }
             }
             if !model.chains.active.isEmpty { Divider() }
-            Button("New Chain “\(model.freeChainSlug(from: ticket.identifier) ?? ticket.identifier)”") {
+            Button("New Chain “\(ticket.identifier)”") {
                 Task { await model.startChain(forTicket: ticket) }
             }
             if let chain {
                 Button("Open Chain") {
-                    model.openChain(slug: chain.slug,
-                                    member: ChainMemberRef(kind: .linear, ref: ticket.identifier))
+                    model.openChain(slug: chain.slug)
                 }
                 Button("Remove from Chain") { Task { await model.setChain(nil, forTicket: ticket) } }
             }

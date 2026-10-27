@@ -333,6 +333,16 @@ const MIGRATIONS: &[&str] = &[
         json TEXT NOT NULL
     );
     "#,
+    // 16: stable UUID identity and a display name; keep old routing keys so saved
+    // links and handoff references remain valid.
+    r#"
+    ALTER TABLE chains ADD COLUMN id TEXT;
+    ALTER TABLE chains ADD COLUMN name TEXT;
+    UPDATE chains SET id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+        '-4' || substr(lower(hex(randomblob(2))), 2) || '-a' || substr(lower(hex(randomblob(2))), 2) ||
+        '-' || lower(hex(randomblob(6))), name = slug;
+    CREATE UNIQUE INDEX chains_by_id ON chains(id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -356,6 +366,36 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chain_identity_migration_preserves_names_members_and_handoffs() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..15] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 15;
+            INSERT INTO chains(slug,state,created_at) VALUES('old-name','active',1);
+            INSERT INTO chain_members(kind,ref,chain_slug,added_at) VALUES('beads','issue-1','old-name',1);
+            INSERT INTO handoffs(id,chain_slug,source_kind,target_kind,summary,created_at,updated_at,state)
+            VALUES('handoff-1','old-name','human','human','Review',1,1,'pending');").unwrap();
+        migrate(&conn).unwrap();
+        let (id, name): (String, String) = conn
+            .query_row(
+                "SELECT id,name FROM chains WHERE slug='old-name'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        assert_eq!(name, "old-name");
+        migrate(&conn).unwrap();
+        let again: String = conn
+            .query_row("SELECT id FROM chains", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(id, again);
+        let links: i64 = conn.query_row("SELECT count(*) FROM chain_members m JOIN handoffs h ON h.chain_slug=m.chain_slug JOIN chains c ON c.slug=m.chain_slug", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 1);
+    }
 
     #[test]
     fn migrating_twice_is_a_no_op_and_leaves_the_version_at_the_head() {

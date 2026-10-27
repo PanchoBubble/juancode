@@ -264,6 +264,7 @@ public protocol CoreClient: AnyObject, Sendable {
     /// Create an empty active chain (wire `createChain`). Throws `ChainError` with the
     /// core's code when it refused (`chain-exists`, `chain-slug-invalid`, …).
     func createChain(_ slug: String) async throws
+    func createChain(id: String, name: String) async throws
     /// Mark a chain inactive, keeping its members (wire `closeChain`).
     func closeChain(_ slug: String) async throws
     /// Mark a chain active again (wire `reopenChain`).
@@ -419,6 +420,7 @@ public extension CoreClient {
         return {}
     }
 
+    func createChain(id: String, name: String) async throws { throw ChainError("chain-unavailable") }
     func createChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
     func closeChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }
     func reopenChain(_ slug: String) async throws { throw ChainError("chain-unavailable") }

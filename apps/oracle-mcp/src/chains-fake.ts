@@ -36,12 +36,22 @@ export function fakeChainDeps({
     supported: () => supported,
     subscribe: () => supported,
     book: () => (supported ? chains : null),
-    create: async (slug) => {
-      writes.push({ type: "createChain", slug });
+    create: async (slug, name) => {
+      writes.push({ type: "createChain", slug, ...(name === undefined ? {} : { name }) });
       if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug))
         return answer("create", slug, "chain-slug-invalid");
       if (chains.some((c) => c.slug === slug)) return answer("create", slug, "chain-exists");
-      chains = [...chains, { slug, state: "active", createdAt: 1, closedAt: null, members: [] }];
+      chains = [
+        ...chains,
+        {
+          slug,
+          ...(name === undefined ? {} : { id: slug, name }),
+          state: "active",
+          createdAt: 1,
+          closedAt: null,
+          members: [],
+        },
+      ];
       return answer("create", slug);
     },
     close: async (slug) => {

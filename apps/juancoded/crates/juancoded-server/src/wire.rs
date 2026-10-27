@@ -662,6 +662,7 @@ pub enum ClientMessage {
     /// the `chain` frames on the change stream to every subscriber.
     CreateChain {
         slug: String,
+        name: Option<String>,
         request_id: Option<String>,
     },
     /// Mark a chain inactive. Its members stay; a no-op on a closed chain.
@@ -939,6 +940,7 @@ struct RawClient {
     isolate_worktree: Option<bool>,
     #[serde(rename = "worktreeName", default)]
     worktree_name: Option<String>,
+    name: Option<String>,
     #[serde(rename = "reclaimSlot", default)]
     reclaim_slot: Option<bool>,
     #[serde(rename = "cliSessionId", default)]
@@ -1330,6 +1332,7 @@ impl ClientMessage {
             }),
             "subscribeChains" => Ok(Self::SubscribeChains),
             "createChain" => Ok(Self::CreateChain {
+                name: raw.name,
                 slug: raw.slug.ok_or("missing slug")?,
                 request_id: raw.request_id,
             }),
@@ -2687,6 +2690,8 @@ mod tests {
     fn chain_frames_carry_the_chain_whole_and_a_result_says_whether_it_happened() {
         use juancoded_core::chain::{ChainMember, ChainState};
         let chain = Chain {
+            id: "test-id".into(),
+            name: "auth-rewrite".into(),
             slug: "auth-rewrite".into(),
             state: ChainState::Inactive,
             created_at: 1,
@@ -2705,6 +2710,7 @@ mod tests {
             json!({
                 "type": "chain",
                 "chain": {
+                    "id": "test-id", "name": "auth-rewrite",
                     "slug": "auth-rewrite", "state": "inactive", "createdAt": 1, "closedAt": 2,
                     "members": [{ "kind": "tracked_pr", "ref": "/repo#7", "addedAt": 3 }],
                 },

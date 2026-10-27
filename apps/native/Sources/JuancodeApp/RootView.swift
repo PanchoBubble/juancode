@@ -1775,8 +1775,8 @@ struct SidebarView: View {
                 model.togglePinned(meta.id)
             }
             if let chain = model.chain(forSession: meta.id) {
-                Button("Open Chain \u{201C}\(chain.slug)\u{201D}") {
-                    model.openChain(slug: chain.slug, member: ChainMemberRef(kind: .session, ref: meta.id))
+                Button("Open Chain \u{201C}\(chain.name)\u{201D}") {
+                    model.openChain(slug: chain.slug)
                 }
             }
             if meta.archived {

@@ -754,7 +754,10 @@ export interface ChainMember {
 }
 
 export interface Chain {
-  /** The id and the display name at once; immutable. */
+  /** UUID and display name; optional for older daemons. */
+  id?: string;
+  name?: string;
+  /** Compatibility routing key. New named chains use their UUID. */
   slug: string;
   state: ChainState;
   createdAt: number;
@@ -831,8 +834,8 @@ export function onChains(listener: ChainsListener): void {
   chainsListeners.push(listener);
 }
 
-export function createChain(slug: string): Promise<ChainResult> {
-  return chainWrite({ type: "createChain", slug });
+export function createChain(slug: string, name?: string): Promise<ChainResult> {
+  return chainWrite({ type: "createChain", slug, ...(name === undefined ? {} : { name }) });
 }
 
 export function closeChain(slug: string): Promise<ChainResult> {

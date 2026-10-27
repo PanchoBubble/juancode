@@ -35,7 +35,7 @@ struct ChainTabStrip: View {
                 ChainBadge(chain: chain, opens: false, size: 11)
             }
             .buttonStyle(.plain)
-            .help("Show the \(chain.slug) overview")
+            .help("Show the \(chain.name) overview")
             .clickCursor()
             Button {
                 model.exitChain()
@@ -59,7 +59,7 @@ struct ChainTabStrip: View {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
-                            ForEach(chain.members, id: \.memberRef) { member in
+                            ForEach((model.chainView?.tabs ?? []).compactMap { chain.member($0) }, id: \.memberRef) { member in
                                 ChainTab(member: member, active: member.memberRef == selected,
                                          crossProject: crossProject)
                                     .id(member.memberRef)
@@ -104,7 +104,7 @@ struct ChainOverviewView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(chain.slug).font(.title2.weight(.semibold)).textSelection(.enabled)
+                    Text(chain.name).font(.title2.weight(.semibold)).textSelection(.enabled)
                     HStack(spacing: 8) {
                         Label(chain.isActive ? "Active" : "Closed", systemImage: chain.isActive ? "circle.fill" : "checkmark.circle")
                             .foregroundStyle(chain.isActive ? Color.green : Color.secondary)

@@ -1,8 +1,7 @@
 //! Chains: named, cross-project groups of related work.
 //!
-//! A chain is a tag. Its slug is its id and its display name at once (`auth-rewrite`),
-//! so there is no second identifier to keep in step with the first and nothing to
-//! rename: a slug is immutable for as long as the chain exists. What it groups are
+//! A chain has a stable UUID and a display name. The slug remains a compatibility
+//! routing key for saved links; new named chains use their UUID. What it groups are
 //! *members* — agent sessions (an Oracle is one of those, distinguished by its cwd
 //! and nothing else), tracked PRs, beads issues and Linear tickets — and an item is in
 //! at most one chain. Tagging an item that is already in a chain moves it.
@@ -202,6 +201,8 @@ impl Chain {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chain {
+    pub id: String,
+    pub name: String,
     pub slug: String,
     pub state: ChainState,
     pub created_at: i64,
@@ -375,6 +376,8 @@ mod tests {
             done: false,
         };
         let mut chain = Chain {
+            id: "test-id".into(),
+            name: "Test".into(),
             slug: "a".into(),
             state: ChainState::Active,
             created_at: 1,
