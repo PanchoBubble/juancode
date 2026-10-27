@@ -54,9 +54,9 @@ use juancoded_cordis::events::{PrNotify, PrNotifyCandidate, PrNotifyKind, PrNoti
 use juancoded_core::gh;
 use juancoded_core::model::{now_ms, ProviderId};
 use juancoded_core::pr::{
-    auto_fix_prompt, classify_pr_activity, repo_slug_from_pr_url, stalled_ci_fix_reason,
-    stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree, PrActivity, TrackEvent,
-    TrackNotification, TrackedPr, PR_SKILL_PATH,
+    auto_fix_prompt, classify_pr_activity, repo_slug_from_pr_url, stacked_base,
+    stalled_ci_fix_reason, stalled_conflict_fix_reason, track_seed_prompt, BranchWorktree,
+    PrActivity, TrackEvent, TrackNotification, TrackedPr, PR_SKILL_PATH,
 };
 use juancoded_core::worktree;
 use juancoded_persistence::SessionStore;
@@ -261,12 +261,14 @@ impl TrackedPrs {
             .as_ref()
             .map(|w| w.path.clone())
             .unwrap_or_else(|| req.cwd.clone());
+        let stacked_on = gh::pr_stacked_on(&req.cwd, req.number).await;
         let seed = track_seed_prompt(
             req.number,
             &req.title,
             &req.branch,
             &req.url,
             worktree.as_ref(),
+            stacked_on.as_deref(),
             has_pr_skill(&req.cwd),
         );
         let meta = match self.sessions.create(CreateRequest {
@@ -381,12 +383,14 @@ impl TrackedPrs {
 
         // No worktree argument: the seed's worktree paragraph tells the agent where the
         // tree it was given is, and this session was not given one.
+        let stacked_on = gh::pr_stacked_on(&req.cwd, req.number).await;
         let seed = track_seed_prompt(
             req.number,
             &req.title,
             &req.branch,
             &req.url,
             None,
+            stacked_on.as_deref(),
             has_pr_skill(&req.cwd),
         );
         let entry = TrackedPr {
@@ -743,6 +747,7 @@ impl TrackedPrs {
             number,
             &entry.branch,
             &fix_reasons,
+            stacked_base(&activity.base_branch, &activity.default_branch),
             has_pr_skill(&entry.cwd),
         );
         match self.hand_over(&entry, &prompt, session_live).await {

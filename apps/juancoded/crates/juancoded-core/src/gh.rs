@@ -70,7 +70,63 @@ pub async fn pr_activity(cwd: &str, number: i64) -> Option<PrActivity> {
     )
     .await?;
     let raw: RawActivity = serde_json::from_str(&raw).ok()?;
-    Some(parse_activity(raw))
+    let mut activity = parse_activity(raw);
+    activity.default_branch = default_branch(cwd).await;
+    Some(activity)
+}
+
+/// The branch a PR is stacked on, `None` when it merges into the repo's default branch
+/// or `gh` cannot say. Asked once when a watch starts, so the seed prompt can name the
+/// rule that applies to this PR rather than both of them.
+pub async fn pr_stacked_on(cwd: &str, number: i64) -> Option<String> {
+    let base = capture(
+        cwd,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "baseRefName",
+            "--jq",
+            ".baseRefName",
+        ],
+    )
+    .await?;
+    crate::pr::stacked_base(base.trim(), &default_branch(cwd).await).map(str::to_string)
+}
+
+/// The repo's default branch as GitHub names it, empty when `gh` cannot say. A PR whose
+/// base is any other branch is stacked on another PR, which changes how the tracker
+/// tells its agent to take in the base.
+///
+/// Cached per cwd for the life of the process like [`viewer_login`], but only an
+/// answer is cached: a `gh` that was offline once must not make every PR in that repo
+/// read as unstacked until the daemon restarts.
+pub async fn default_branch(cwd: &str) -> String {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut held = cache.lock().await;
+    if let Some(cached) = held.get(cwd) {
+        return cached.clone();
+    }
+    let name = capture(
+        cwd,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ],
+    )
+    .await
+    .map(|out| out.trim().to_string())
+    .unwrap_or_default();
+    if !name.is_empty() {
+        held.insert(cwd.to_string(), name.clone());
+    }
+    name
 }
 
 /// The login `gh` is authenticated as in `cwd`, which is the account the tracking agent
@@ -166,6 +222,8 @@ fn parse_activity(raw: RawActivity) -> PrActivity {
         checks: rollup_checks(&raw.status_check_rollup.unwrap_or_default()),
         conflicting: parse_mergeable(raw.mergeable.as_deref()),
         base_branch: raw.base_ref_name.unwrap_or_default(),
+        // Not in `gh pr view`'s JSON: filled in by `pr_activity` from `default_branch`.
+        default_branch: String::new(),
         comments: raw
             .comments
             .unwrap_or_default()

@@ -214,6 +214,9 @@ pub struct PrActivity {
     pub conflicting: Option<bool>,
     /// The branch the PR merges into, empty when gh did not say.
     pub base_branch: String,
+    /// The repo's default branch, empty when gh did not say. A PR whose base is some
+    /// other branch is stacked on another PR, see [`stacked_base`].
+    pub default_branch: String,
     /// The PR author's login, empty when GitHub reported none. Read in the same call as
     /// everything else here, and carried because "is this PR mine" is the first of
     /// GitHub Desktop's notification rules (juancode-2vlz) and a poll has nowhere else
@@ -340,7 +343,10 @@ pub fn classify_pr_activity(
     // GitHub does not run `pull_request` CI on a PR it cannot merge, so a conflict
     // usually arrives with green or empty checks and has to be its own signal.
     if !prev.conflicting && next.conflicting {
-        events.push(TrackEvent::AutoFix(conflict_reason(&activity.base_branch)));
+        events.push(TrackEvent::AutoFix(conflict_reason(
+            &activity.base_branch,
+            stacked_base(&activity.base_branch, &activity.default_branch).is_some(),
+        )));
     }
 
     // Codex normally reviews a PR before it is queued for merge. When it posts that it
@@ -400,7 +406,25 @@ pub fn stalled_conflict_fix_reason(
     Some("The PR still conflicts with its base and the session that was working it is gone".into())
 }
 
-fn conflict_reason(base_branch: &str) -> String {
+/// The base a PR is stacked on, or `None` when it merges into the repo's default
+/// branch — or when either side is unknown, because then there is nothing to say it is
+/// stacked and the seed prompt's own "check the base" rule still covers it.
+pub fn stacked_base<'a>(base_branch: &'a str, default_branch: &str) -> Option<&'a str> {
+    let default = default_branch
+        .strip_prefix("origin/")
+        .unwrap_or(default_branch);
+    (!base_branch.is_empty() && !default.is_empty() && base_branch != default)
+        .then_some(base_branch)
+}
+
+fn conflict_reason(base_branch: &str, stacked: bool) -> String {
+    if stacked {
+        return format!(
+            "Conflicts with `{base_branch}`, the PR this one is stacked on: rebase this \
+             branch onto `origin/{base_branch}` (do not merge it in), resolve the conflicts, \
+             run the tests and `git push --force-with-lease`"
+        );
+    }
     let base = if base_branch.is_empty() {
         "its base branch".to_string()
     } else {
@@ -410,6 +434,42 @@ fn conflict_reason(base_branch: &str) -> String {
         "Merge conflicts with {base}: fetch it, merge it into this branch, resolve the \
          conflicts, run the tests and push"
     )
+}
+
+/// How a branch takes in its base's new commits, which depends on whether the PR is
+/// stacked. A PR against the default branch merges the base in, so its history is
+/// never rewritten under a reviewer. A stacked PR is rebased instead: merging the parent
+/// in leaves a merge commit on every child each time the parent is pushed, and those
+/// are what get in the way when the stack is rebased onto main.
+///
+/// `stacked_on` is the parent's branch when the tracker knows it; `None` states both
+/// rules and leaves the agent to check which one this PR is.
+fn base_update_rule(number: i64, stacked_on: Option<&str>) -> String {
+    let rebase = |base: &str| {
+        format!(
+            "update it by REBASING onto the current parent, never by merging the parent in: \
+             `git fetch origin`, then `git rebase --onto origin/{base} <old-parent-commit>` \
+             (or a plain `git rebase origin/{base}` if that is cleaner), resolve, run the \
+             tests and `git push --force-with-lease`. Drop any earlier \
+             \"Merge remote-tracking branch 'origin/{base}'\" or \"Merge branch '{base}'\" \
+             commits during the rebase. Keep the PR open and keep `{base}` as its base, and \
+             never merge one stack branch into another"
+        )
+    };
+    match stacked_on {
+        Some(base) => format!(
+            "- This PR is STACKED on `{base}` (another PR's branch, not the repo's default \
+             branch). When it conflicts with `{base}` or `{base}` moves, {}.",
+            rebase(base)
+        ),
+        None => format!(
+            "- Check the PR's base first (`gh pr view {number} --json baseRefName` against \
+             `gh repo view --json defaultBranchRef`). If the base is NOT the repo's default \
+             branch, this PR is stacked on another PR: when it conflicts with its base or the \
+             base moves, {}.",
+            rebase("<base>")
+        ),
+    }
 }
 
 /// True when a comment or review body is Codex reporting it could not review the PR
@@ -460,6 +520,7 @@ pub fn track_seed_prompt(
     branch: &str,
     url: &str,
     worktree: Option<&BranchWorktree>,
+    stacked_on: Option<&str>,
     pr_skill: bool,
 ) -> String {
     let place = match worktree {
@@ -480,20 +541,29 @@ pub fn track_seed_prompt(
         },
     };
     let house = if pr_skill {
-        pr_skill_rules(branch)
+        pr_skill_rules(branch, stacked_on.is_some())
     } else {
         String::new()
+    };
+    let base_rule = base_update_rule(number, stacked_on);
+    let default_rule = if stacked_on.is_some() {
+        ""
+    } else {
+        " If its base IS the default branch, merge the base in instead (do not rebase or \
+         force-push)."
     };
     format!(
         "[juancode PR-tracker] You are now tracking pull request #{number} \"{title}\" \
          (branch `{branch}`): {url}{place}\n\n\
+         Never merge or close a PR yourself (no `gh pr merge`, no `gh pr close`), this one or any other.\n\
+         {base_rule}{default_rule}\n\n\
          I'll periodically tell you when there's new activity on this PR — new review comments, \
          a change in CI status, or merge conflicts with its base. When I do:\n\
          - If it's an obvious fix (a lint/format/type error, a clearly-correct test fix, or \
          addressing a concrete review comment), make the change, commit, and push to `{branch}`.\n\
-         - If the PR conflicts with its base, merge the base in (do not rebase or force-push), \
-         resolve the conflicts and push. If both sides changed the same logic in ways that do \
-         not obviously combine, STOP and show me the conflict instead of picking a side.\n\
+         - If the PR conflicts with its base, bring the base in by the rule above, resolve the \
+         conflicts and push. If both sides changed the same logic in ways that do not \
+         obviously combine, STOP and show me the conflict instead of picking a side.\n\
          - If it needs a real decision (ambiguous feedback, conflicting requirements, a risky \
          refactor, or a non-obvious failure), STOP and explain what you need from me instead of \
          guessing.{house}\n\n\
@@ -506,15 +576,22 @@ pub fn track_seed_prompt(
 /// of activity, and the ones that must never run here. `grind` and an `approve` loop
 /// poll CI themselves and `ship`/`merge` stop for a person, while this session runs
 /// unattended and the poller is already the loop — so every hand-off is one pass.
-fn pr_skill_rules(branch: &str) -> String {
+fn pr_skill_rules(branch: &str, stacked: bool) -> String {
+    // `/pr grind` merges the base and never force-pushes. A stacked PR takes its base by
+    // the rebase rule instead, which is the one exception to that.
+    let base = if stacked {
+        "rebase onto the parent as above rather than merging it, minimal fixes, no other \
+         force-push"
+    } else {
+        "bring the base in by the rule above, minimal fixes, no other rebase or force-push"
+    };
     format!(
         "\n\n\
          This repo ships its own `/pr` skill (`{PR_SKILL_PATH}`). Use it — through the Skill \
          tool, one subcommand at a time — rather than improvising:\n\
          - New review comments or reviews: `/pr resolve`. Address every thread, and reply to \
          each one with the commit that fixed it or the reason you are not acting on it.\n\
-         - CI failing: fix it by the `/pr grind` rules (merge the base, minimal fixes, never \
-         rebase or force-push), but make ONE pass — push to `{branch}` and stop. I am \
+         - CI failing: fix it by the `/pr grind` rules ({base}), but make ONE pass — push to `{branch}` and stop. I am \
          already watching CI and will tell you if it is still red, so do not poll checks in \
          a loop.\n\
          - Never run `/pr ship`, `/pr merge`, a full `/pr grind` or an `approve` loop from \
@@ -542,11 +619,25 @@ fn pr_skill_rules(branch: &str) -> String {
 /// With `pr_skill` it re-points at the repo's `/pr` skill as well. The seed said so
 /// once, but a long-lived tracking session compacts, and a revived one may never have
 /// read it.
-pub fn auto_fix_prompt(number: i64, branch: &str, reasons: &[String], pr_skill: bool) -> String {
+pub fn auto_fix_prompt(
+    number: i64,
+    branch: &str,
+    reasons: &[String],
+    stacked_on: Option<&str>,
+    pr_skill: bool,
+) -> String {
     let summary = if reasons.is_empty() {
         "new activity".to_string()
     } else {
         reasons.join("; ")
+    };
+    let stack = match stacked_on {
+        Some(base) => format!(
+            " This PR is stacked on `{base}`: take in `{base}` by rebasing onto \
+             `origin/{base}` and `git push --force-with-lease`, never by merging it in, and \
+             drop any earlier merge commits of `{base}`."
+        ),
+        None => String::new(),
     };
     let skill = if pr_skill {
         " Use this repo's `/pr` skill for it — `/pr resolve` for review feedback (reply to \
@@ -558,8 +649,8 @@ pub fn auto_fix_prompt(number: i64, branch: &str, reasons: &[String], pr_skill: 
     format!(
         "[juancode PR-tracker] New activity on PR #{number}: {summary}. Check the latest state \
          with `gh pr view {number}`, `gh pr checks {number}`, and `gh pr diff {number}`. If it's \
-         an obvious fix, make it, commit, and push to `{branch}`.{skill} If it needs a real \
-         decision, STOP and tell me what you need."
+         an obvious fix, make it, commit, and push to `{branch}`.{stack}{skill} Never merge or \
+         close a PR yourself. If it needs a real decision, STOP and tell me what you need."
     )
 }
 
@@ -575,6 +666,7 @@ mod tests {
             reviews: Vec::new(),
             conflicting: Some(false),
             base_branch: "main".into(),
+            default_branch: "main".into(),
             author: "octocat".into(),
         }
     }
@@ -693,6 +785,53 @@ mod tests {
         assert!(again.events.is_empty(), "{:?}", again.events);
     }
 
+    /// A PR against the default branch merges its base in; one stacked on another PR
+    /// rebases onto it, because merging the parent into every child on every parent push
+    /// is what buries a stack in merge commits.
+    #[test]
+    fn a_conflict_is_merged_against_the_default_branch_and_rebased_when_stacked() {
+        let clean = PrBaseline {
+            baselined: true,
+            ..Default::default()
+        };
+        let mut act = activity("OPEN", PrChecks::Passing);
+        act.conflicting = Some(true);
+        let reason = |act: &PrActivity| match &classify_pr_activity(&clean, act, "").events[..] {
+            [TrackEvent::AutoFix(r)] => r.clone(),
+            other => panic!("{other:?}"),
+        };
+
+        let plain = reason(&act);
+        assert!(plain.contains("merge it into this branch"), "{plain}");
+        assert!(!plain.contains("rebase"), "{plain}");
+
+        act.base_branch = "pr3".into();
+        let stacked = reason(&act);
+        assert!(stacked.contains("stacked"), "{stacked}");
+        assert!(
+            stacked.contains("rebase this branch onto `origin/pr3`"),
+            "{stacked}"
+        );
+        assert!(stacked.contains("--force-with-lease"), "{stacked}");
+        assert!(!stacked.contains("merge it into"), "{stacked}");
+
+        // A default branch read as a ref (`origin/main`) is still the default branch.
+        act.base_branch = "main".into();
+        act.default_branch = "origin/main".into();
+        assert!(reason(&act).contains("merge it into this branch"));
+    }
+
+    #[test]
+    fn a_pr_is_stacked_only_when_its_base_is_known_and_not_the_default_branch() {
+        assert_eq!(stacked_base("pr3", "main"), Some("pr3"));
+        assert_eq!(stacked_base("pr3", "origin/main"), Some("pr3"));
+        assert_eq!(stacked_base("main", "main"), None);
+        assert_eq!(stacked_base("main", "origin/main"), None);
+        assert_eq!(stacked_base("develop", "develop"), None);
+        assert_eq!(stacked_base("", "main"), None);
+        assert_eq!(stacked_base("pr3", ""), None);
+    }
+
     /// GitHub answers UNKNOWN while it recomputes after a push to the base. Reading
     /// that as clean would re-fire the conflict on the next poll.
     #[test]
@@ -793,6 +932,7 @@ mod tests {
                 path: "/w/pr-7".into(),
                 branch: Some("feature".into()),
             }),
+            None,
             false,
         );
         assert!(attached.contains("with `feature` checked out"));
@@ -807,11 +947,12 @@ mod tests {
                 path: "/w/pr-7".into(),
                 branch: None,
             }),
+            None,
             false,
         );
         assert!(detached.contains("DETACHED HEAD"));
 
-        let bare = track_seed_prompt(7, "t", "feature", "u", None, false);
+        let bare = track_seed_prompt(7, "t", "feature", "u", None, None, false);
         assert!(!bare.contains("worktree"), "{bare}");
     }
 
@@ -820,13 +961,13 @@ mod tests {
     /// path mean nothing in a repo that has neither.
     #[test]
     fn the_seed_points_at_the_repos_pr_skill_only_when_it_has_one() {
-        let plain = track_seed_prompt(7, "t", "feature", "u", None, false);
+        let plain = track_seed_prompt(7, "t", "feature", "u", None, None, false);
         assert!(!plain.contains("/pr resolve"), "{plain}");
         assert!(!plain.contains("Dagger"), "{plain}");
         assert!(!plain.contains("mergifyio"), "{plain}");
         assert!(plain.ends_with("`gh pr diff 7`."), "{plain}");
 
-        let skilled = track_seed_prompt(7, "t", "feature", "u", None, true);
+        let skilled = track_seed_prompt(7, "t", "feature", "u", None, None, true);
         assert!(skilled.contains(PR_SKILL_PATH));
         assert!(skilled.contains("`/pr resolve`"));
         assert!(skilled.contains("ONE pass"));
@@ -841,14 +982,75 @@ mod tests {
     #[test]
     fn the_fix_prompt_repeats_the_pr_skill_only_when_the_repo_has_one() {
         let reasons = vec!["CI checks are failing".to_string()];
-        let plain = auto_fix_prompt(7, "feature", &reasons, false);
+        let plain = auto_fix_prompt(7, "feature", &reasons, None, false);
         assert!(plain.contains("CI checks are failing"));
         assert!(!plain.contains("/pr"), "{plain}");
 
-        let skilled = auto_fix_prompt(7, "feature", &reasons, true);
+        let skilled = auto_fix_prompt(7, "feature", &reasons, None, true);
         assert!(skilled.contains("`/pr resolve`"));
         assert!(skilled.contains("one pass"));
         assert!(skilled.ends_with("tell me what you need."), "{skilled}");
+    }
+
+    /// The stacked rule is stated up front in the seed, so a compacted or revived
+    /// session still has it, and repeated on every fix hand-off of a stacked PR.
+    #[test]
+    fn the_prompts_tell_a_stacked_pr_to_rebase_and_never_to_merge_its_base() {
+        for skill in [false, true] {
+            let stacked = track_seed_prompt(7, "t", "child", "u", None, Some("pr3"), skill);
+            let rule = stacked.find("STACKED on `pr3`").expect(&stacked);
+            assert!(
+                rule < stacked.find("I'll periodically").unwrap(),
+                "{stacked}"
+            );
+            assert!(
+                stacked.contains("git rebase --onto origin/pr3"),
+                "{stacked}"
+            );
+            assert!(stacked.contains("git push --force-with-lease"), "{stacked}");
+            assert!(stacked.contains("Merge remote-tracking branch 'origin/pr3'"));
+            assert!(stacked.contains("keep `pr3` as its base"), "{stacked}");
+            assert!(
+                stacked.contains("Never merge or close a PR yourself"),
+                "{stacked}"
+            );
+            assert!(!stacked.contains("merge the base in"), "{stacked}");
+            assert!(!stacked.contains("rebase or force-push"), "{stacked}");
+
+            let fix = auto_fix_prompt(7, "child", &["x".into()], Some("pr3"), skill);
+            assert!(fix.contains("stacked on `pr3`"), "{fix}");
+            assert!(fix.contains("--force-with-lease"), "{fix}");
+            assert!(fix.contains("never by merging it in"), "{fix}");
+            assert!(fix.contains("Never merge or close a PR"), "{fix}");
+        }
+    }
+
+    /// Against the default branch the base is still merged in, and when the tracker
+    /// does not know the base the seed gives both rules and how to tell them apart.
+    #[test]
+    fn the_prompts_keep_merging_the_base_for_a_pr_against_the_default_branch() {
+        let seed = track_seed_prompt(7, "t", "feature", "u", None, None, true);
+        assert!(
+            seed.contains("merge the base in instead (do not rebase"),
+            "{seed}"
+        );
+        assert!(
+            seed.contains("gh repo view --json defaultBranchRef"),
+            "{seed}"
+        );
+        assert!(
+            seed.contains("If the base is NOT the repo's default branch"),
+            "{seed}"
+        );
+        assert!(seed.contains("git rebase --onto origin/<base>"), "{seed}");
+        assert!(
+            seed.contains("Never merge or close a PR yourself"),
+            "{seed}"
+        );
+
+        let fix = auto_fix_prompt(7, "feature", &["x".into()], None, false);
+        assert!(!fix.contains("stacked"), "{fix}");
+        assert!(!fix.contains("force-with-lease"), "{fix}");
     }
 
     /// The fallback half of webhook matching. Lowercased on the way out, because the

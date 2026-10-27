@@ -150,6 +150,7 @@ function seedGhFixtures(dir: string): string {
 
   write("viewer.txt", "octocat\n");
   write("repo-nwo.txt", "conformance/repo\n");
+  write("repo-default-branch.txt", "main\n");
   write("pr-list.json", [
     {
       number: 42,

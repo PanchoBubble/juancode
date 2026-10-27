@@ -52,7 +52,14 @@ case "$1 $2" in
   # prints on success, which is the whole of what the callers read.
   "pr create") serve pr-create.txt ;;
   "pr comment") serve pr-comment.txt ;;
-  "repo view") serve repo-nwo.txt ;;
+  "repo view")
+    # Two questions about the same repo: its default branch (which decides whether a
+    # tracked PR is stacked) and its `owner/name`.
+    case " $* " in
+      *" defaultBranchRef "*) serve repo-default-branch.txt ;;
+      *) serve repo-nwo.txt ;;
+    esac
+    ;;
   "run view") serve run-log.txt ;;
   "run rerun") serve run-rerun.txt ;;
   "api user") serve viewer.txt ;;
