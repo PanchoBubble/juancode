@@ -5769,6 +5769,12 @@ final class AppModel {
         }
     }
 
+    /// A sidebar click leaves the chain on the clicked session, even its current tab.
+    func selectSidebarSession(_ id: String) {
+        chainView = nil
+        selection = id
+    }
+
     /// Close the chain view and go back to the selection it was opened from (nothing,
     /// if that session is gone).
     func exitChain() {

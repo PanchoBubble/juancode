@@ -318,6 +318,8 @@ public struct ReviewKeyParser: Sendable {
     /// the status bar like vim's `showcmd`.
     public private(set) var pending = ""
 
+    private var previousWasEscape = false
+
     public init() {}
 
     private static let normalSeqs = ["gg", "gt", "gT", "gcc", "]c", "[c", "]d", "[d", "dd",
@@ -325,11 +327,16 @@ public struct ReviewKeyParser: Sendable {
     private static let visualSeqs = ["gg", "gc", "]c", "[c", "]d", "[d", " w", " n", " e",
                                      " ff", " fg", " /"]
 
-    public mutating func reset() { pending = "" }
+    public mutating func reset() {
+        pending = ""
+        previousWasEscape = false
+    }
 
     /// Feed one key; returns a command once a sequence completes. `visual` picks the
     /// sequence table (`gc` comments a selection; in normal mode it waits for `gcc`).
     public mutating func feed(_ key: ReviewKey, visual: Bool) -> ReviewKeyCommand? {
+        let closeOnEscape = previousWasEscape && key == .escape
+        previousWasEscape = key == .escape
         let digits = String(pending.prefix { $0.isNumber })
         let prefix = String(pending.dropFirst(digits.count))
         let count = Int(digits) ?? 1
@@ -347,7 +354,7 @@ public struct ReviewKeyParser: Sendable {
             case "p": return .findFiles
             default: return nil
             }
-        case .escape: pending = ""; return .escape
+        case .escape: pending = ""; return closeOnEscape ? .close : .escape
         case .enter: pending = ""; return .activate
         case .down: pending = ""; return .down(count)
         case .up: pending = ""; return .up(count)

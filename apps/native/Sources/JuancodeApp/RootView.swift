@@ -1352,17 +1352,17 @@ struct SidebarView: View {
             }
             ScrollViewReader { proxy in
             // Custom selection binding rather than a plain `$model.selection`: while
-            // the GitHub overlay is up we report no selection, so clicking ANY session
+            // a panel or chain view is up we report no selection, so clicking ANY session
             // row — including the one already selected — is a change the List reports,
             // letting us dismiss the overlay and land on that session. A per-row tap
             // gesture can't do this: attaching one to a native List row swallows the
             // click and breaks selection entirely on macOS. We never write nil back, so
             // the real selection (and its keep-alive pane) survives.
             List(selection: Binding(
-                get: { model.showingGitHub || model.showingBeads ? nil : model.selection },
+                get: { model.showingGitHub || model.showingBeads || model.chainView != nil ? nil : model.selection },
                 set: { newValue in
                     if model.showingGitHub { model.showingGitHub = false }
-                    if let newValue { model.selection = newValue }
+                    if let newValue { model.selectSidebarSession(newValue) }
                 }
             )) {
                 // Flat rows, not a Section per project: the sidebar style puts a gap
@@ -1657,7 +1657,7 @@ struct SidebarView: View {
             .pointerCursor(enabled: !external)
             .onTapGesture {
                 if !external {
-                    model.selection = meta.id
+                    model.selectSidebarSession(meta.id)
                     if model.showingGitHub { model.showingGitHub = false }
                 }
             }

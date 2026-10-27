@@ -171,6 +171,16 @@ final class LineReviewTests: XCTestCase {
 
     private func chars(_ s: String) -> [ReviewKey] { s.map { .char($0) } }
 
+    func testDoubleEscapeClosesReview() {
+        XCTAssertEqual(run([.escape, .escape]), [.escape, .close])
+        XCTAssertEqual(run([.escape, .escape], visual: true), [.escape, .close])
+        XCTAssertEqual(run([.escape, .char("j"), .escape]), [.escape, .down(1), .escape])
+        var parser = ReviewKeyParser()
+        XCTAssertEqual(parser.feed(.escape, visual: false), .escape)
+        parser.reset()
+        XCTAssertEqual(parser.feed(.escape, visual: false), .escape)
+    }
+
     func testCountsAndMotions() {
         XCTAssertEqual(run(chars("j")), [.down(1)])
         XCTAssertEqual(run(chars("12k")), [.up(12)])

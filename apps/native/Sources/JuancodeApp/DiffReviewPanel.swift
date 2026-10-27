@@ -776,7 +776,7 @@ struct DiffReviewPanel: View {
             }
             Spacer(minLength: 8)
             Text(prompt == nil
-                 ? "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q close"
+                 ? "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close"
                  : "⏎ accept · esc cancel")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
@@ -914,6 +914,10 @@ struct DiffReviewPanel: View {
             return true
         }
         guard let command = parser.feed(key, visual: isVisual && focus == .diff) else { return true }
+        if command == .close, key == .escape {
+            model.closeDiffReview()
+            return true
+        }
         switch command {
         case .findFiles:
             openPrompt(.files)
@@ -1949,6 +1953,7 @@ final class ReviewKeyCatcherView: NSView {
             super.keyDown(with: event)
             return
         }
+        if event.keyCode == 53 && event.isARepeat { return }
         guard let key = Self.reviewKey(event, control: mods.contains(.control)) else { return }
         _ = onKey?(key)
     }
