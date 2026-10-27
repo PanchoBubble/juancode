@@ -3060,8 +3060,8 @@ final class AppModel {
         githubPendingBranchSelect = nil
     }
 
-    /// The GitHub view's selected PR resolved back to its (folder, PR) pair from the
-    /// loaded lists — nil once the PR is no longer open (merged/closed on refresh).
+    /// Prefer refreshed list data, retaining the clicked row when it is absent
+    /// from the scoped lists (for example, a PR opened from the viewer queue).
     var selectedGitHubPr: (String, PullRequest)? {
         guard let key = github.selectedKey else { return nil }
         for cwd in githubScopedFolders {
@@ -3069,6 +3069,9 @@ final class AppModel {
             if let pr = r.prs.first(where: { TrackedPr.key(cwd: cwd, number: $0.number) == key }) {
                 return (cwd, pr)
             }
+        }
+        if let row = github.selectedRow, row.id == key {
+            return (row.cwd, row.pr)
         }
         return nil
     }

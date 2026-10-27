@@ -35,6 +35,9 @@ final class GitHubModel {
     var detailWantsDiff = false
     /// The selected PR's key, or nil when nothing is selected.
     var selectedKey: String?
+    /// Keep the clicked row even when it came from outside the folder list, or
+    /// that list is refreshed while its detail is open.
+    private(set) var selectedRow: PrNavRow?
     /// Fetched conversations per PR — merged into the chronology they are read in by
     /// the core, not here.
     private(set) var timelines: [String: PrTimeline] = [:]
@@ -191,6 +194,7 @@ final class GitHubModel {
 
     /// Select + prefetch without changing tabs.
     private func load(cwd: String, pr: PullRequest) {
+        selectedRow = PrNavRow(cwd: cwd, pr: pr)
         selectedKey = TrackedPr.key(cwd: cwd, number: pr.number)
         loadDetail(cwd: cwd, pr: pr)
     }
