@@ -17,24 +17,32 @@ struct PrStackBadge: View {
                 .fixedSize()
         }
         .buttonStyle(.plain)
-        .help("PR \(stack.position(of: number) ?? 1) of \(stack.prs.count) in stack — click to see the list")
-        .accessibilityLabel("Stack position \(stack.position(of: number) ?? 1) of \(stack.prs.count)")
+        .help("PR \(stack.position(of: number) ?? 1) of \(stack.size) in stack — click to see the list")
+        .accessibilityLabel("Stack position \(stack.position(of: number) ?? 1) of \(stack.size)")
         .popover(isPresented: $showing) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("PR stack").font(.headline)
-                Text("Base → tip · \(stack.prs.count) open PRs")
+                Text(stack.stackNumber.map { "PR stack #\($0)" } ?? "PR stack").font(.headline)
+                Text("Base → tip · \(stack.size) PRs")
                     .font(.caption).foregroundStyle(.secondary)
+                if stack.entries.count < stack.size {
+                    Text("Some stack members are unavailable.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(stack.prs.enumerated()), id: \.element.number) { index, pr in
+                        ForEach(stack.entries, id: \.number) { pr in
                             if let url = URL(string: pr.url) {
                                 Link(destination: url) {
                                     HStack(alignment: .top, spacing: 8) {
-                                        Text("\(index + 1)").monospacedDigit()
+                                        Text("\(pr.position)").monospacedDigit()
                                             .foregroundStyle(tint).frame(width: 24)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text("#\(pr.number) · \(pr.title)")
                                                 .lineLimit(2)
+                                            if pr.state != "OPEN" {
+                                                Text(pr.state.lowercased()).font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
                                             Text(pr.branch).font(.caption)
                                                 .foregroundStyle(.secondary)
                                         }

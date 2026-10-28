@@ -177,6 +177,33 @@ public enum PrReviewDecision: String, Codable, Sendable {
     case reviewRequired = "REVIEW_REQUIRED"
 }
 
+/// Canonical membership returned by GitHub's read-only stack API.
+public struct PrStackMetadata: Codable, Sendable, Equatable {
+    public var id: String
+    public var number: Int
+    public var size: Int
+    public var entries: [PrStackEntry]
+
+    public init(id: String, number: Int, size: Int, entries: [PrStackEntry]) {
+        self.id = id; self.number = number; self.size = size; self.entries = entries
+    }
+}
+
+public struct PrStackEntry: Codable, Sendable, Equatable {
+    public var position: Int
+    public var number: Int
+    public var title: String
+    public var url: String
+    public var branch: String
+    public var state: String
+
+    public init(position: Int, number: Int, title: String, url: String,
+                branch: String, state: String) {
+        self.position = position; self.number = number; self.title = title
+        self.url = url; self.branch = branch; self.state = state
+    }
+}
+
 public struct PullRequest: Codable, Sendable, Equatable {
     public var number: Int
     public var title: String
@@ -184,6 +211,9 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var branch: String
     /// Base branch used to identify PR stacks; absent on older daemons.
     public var baseBranch: String?
+    public var stack: PrStackMetadata?
+    /// True with nil stack means GitHub explicitly reports no stack membership.
+    public var stackKnown: Bool?
     public var isCrossRepository: Bool?
     public var draft: Bool
     public var checks: PrChecks
@@ -241,9 +271,11 @@ public struct PullRequest: Codable, Sendable, Equatable {
                 createdAt: String? = nil, reviewDecision: String? = nil,
                 reviewRequests: [String] = [], additions: Int? = nil,
                 deletions: Int? = nil, changedFiles: Int? = nil,
-                baseBranch: String? = nil, isCrossRepository: Bool? = nil) {
+                baseBranch: String? = nil, isCrossRepository: Bool? = nil,
+                stack: PrStackMetadata? = nil, stackKnown: Bool? = nil) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
         self.baseBranch = baseBranch; self.isCrossRepository = isCrossRepository
+        self.stack = stack; self.stackKnown = stackKnown
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
         self.checkCount = checkCount; self.passedCount = passedCount
         self.unresolvedComments = unresolvedComments

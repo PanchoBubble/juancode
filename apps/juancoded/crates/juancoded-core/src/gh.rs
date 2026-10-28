@@ -14,6 +14,9 @@
 //! `gh` auth is used untouched: no token injection, no shadow `HOME`, same rule as
 //! spawning the genuine agent CLIs.
 
+mod stacks;
+pub use stacks::{PrStackEntry, PrStackMetadata};
+
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -344,6 +347,10 @@ pub struct PullRequest {
     pub url: String,
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<PrStackMetadata>,
+    #[serde(default)]
+    pub stack_known: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_cross_repository: Option<bool>,
@@ -490,9 +497,9 @@ fn gh_error_reason(out: &GhOutput) -> String {
 /// A folder's open pull requests, ready to render: the list, who `gh` is logged in as,
 /// and the unresolved-thread count folded in.
 ///
-/// Three round-trips at most, and never one per folder: the list, the viewer login
-/// (cached for the process), and one repo-scoped GraphQL call for every PR's thread
-/// count. Failure is `available: false` with a reason, never an error.
+/// Reads the list, the cached viewer login and batched thread counts, then enriches
+/// it with canonical stack metadata on a separate bounded, best-effort path.
+/// A list failure is `available: false` with a reason, never an error.
 pub async fn open_prs(cwd: &str) -> PrListResult {
     let limit = GH_PR_LIST_LIMIT.to_string();
     let out = capture_full(
@@ -527,6 +534,7 @@ pub async fn open_prs(cwd: &str) -> PrListResult {
     let mut prs = parse_prs(raw);
     let counts = unresolved_thread_counts(cwd, &prs).await;
     merge_unresolved_counts(&mut prs, &counts);
+    stacks::enrich(cwd, &mut prs.iter_mut().collect::<Vec<_>>()).await;
     PrListResult {
         available: true,
         prs,
@@ -563,7 +571,9 @@ pub async fn pr_for_branch(cwd: &str, branch: &str) -> Option<PullRequest> {
     )
     .await?;
     let raw: Vec<RawPr> = serde_json::from_str(&raw).ok()?;
-    parse_prs(raw).into_iter().next()
+    let mut prs = parse_prs(raw);
+    stacks::enrich(cwd, &mut prs.iter_mut().collect::<Vec<_>>()).await;
+    prs.into_iter().next()
 }
 
 /// PRs matching a repo-scoped GitHub search — the backfill behind the PR popover.
@@ -595,9 +605,11 @@ pub async fn search_open_prs(cwd: &str, search: &str) -> Vec<PullRequest> {
     else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<RawPr>>(&raw)
+    let mut prs = serde_json::from_str::<Vec<RawPr>>(&raw)
         .map(parse_prs)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    stacks::enrich(cwd, &mut prs.iter_mut().collect::<Vec<_>>()).await;
+    prs
 }
 
 /// The search qualifiers for that backfill, or `None` when the active filters add
@@ -948,6 +960,8 @@ pub fn parse_prs(raw: Vec<RawPr>) -> Vec<PullRequest> {
                 title: p.title,
                 url: p.url,
                 branch: p.head_ref_name,
+                stack: None,
+                stack_known: false,
                 base_branch: p.base_ref_name,
                 is_cross_repository: p.is_cross_repository,
                 draft: p.is_draft,
@@ -1651,6 +1665,11 @@ pub async fn viewer_prs(cwd: &str, teams: &BTreeSet<String>) -> ViewerPrResult {
     let Some(mut rows) = parse_viewer_prs(&out.stdout) else {
         return ViewerPrResult::unavailable("Could not parse gh output");
     };
+    stacks::enrich(
+        cwd,
+        &mut rows.iter_mut().map(|row| &mut row.pr).collect::<Vec<_>>(),
+    )
+    .await;
     let viewer = viewer_login(cwd).await;
     for row in &mut rows {
         // A review request is a reason in itself: `pr_attention_reason` can only see
@@ -1807,6 +1826,8 @@ fn viewer_pull_request(raw: &RawViewerPr) -> Option<PullRequest> {
         title: raw.title.clone().unwrap_or_default(),
         url,
         branch: raw.head_ref_name.clone().unwrap_or_default(),
+        stack: None,
+        stack_known: false,
         base_branch: raw.base_ref_name.clone(),
         is_cross_repository: raw.is_cross_repository,
         draft: raw.is_draft.unwrap_or(false),

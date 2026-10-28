@@ -1,15 +1,17 @@
 import Foundation
 
-/// Connected open PRs whose base points at another PR's head in the same repository.
+/// Canonical GitHub stack membership, with branch inference when unavailable.
 /// Uses the full fetched list so UI filters cannot change the count or color.
 public struct PrStack: Equatable, Sendable {
     public let id: String
     /// Base first, then dependents; independent siblings use PR number as a tie-breaker.
-    public let prs: [PullRequest]
-    public var numbers: [Int] { prs.map(\.number) }
+    public let entries: [PrStackEntry]
+    public let size: Int
+    public let stackNumber: Int?
+    public var numbers: [Int] { entries.map(\.number) }
 
     public func position(of number: Int) -> Int? {
-        numbers.firstIndex(of: number).map { $0 + 1 }
+        entries.first { $0.number == number }?.position
     }
 
     public static func containing(_ pr: PullRequest, in prs: [PullRequest]) -> PrStack? {
@@ -20,7 +22,24 @@ public struct PrStack: Equatable, Sendable {
             return "\(host)/\(parts[1])/\(parts[2])".lowercased()
         }
         guard let repo = repository(pr.url) else { return nil }
-        let candidates = prs.filter { repository($0.url) == repo }
+        let sameRepo = prs.filter { repository($0.url) == repo }
+        // Prefer the row's own metadata. A duplicate from another view can provide
+        // it for an older row, but must not override an explicit "not stacked".
+        let authoritative = pr.stackKnown == true || pr.stack != nil ? pr
+            : sameRepo.first { $0.number == pr.number && ($0.stackKnown == true || $0.stack != nil) } ?? pr
+        if let stack = authoritative.stack {
+            let entries = stack.entries.sorted { $0.position < $1.position }
+            guard !stack.id.isEmpty, stack.size > 1,
+                  entries.contains(where: { $0.number == pr.number }),
+                  entries.allSatisfy({ $0.position > 0 && $0.position <= stack.size
+                      && repository($0.url) == repo }),
+                  Set(entries.map(\.number)).count == entries.count,
+                  Set(entries.map(\.position)).count == entries.count else { return nil }
+            return PrStack(id: stack.id, entries: entries, size: stack.size, stackNumber: stack.number)
+        }
+        if authoritative.stackKnown == true { return nil }
+        // Never pull a known unstacked PR or another explicit stack into an inferred group.
+        let candidates = sameRepo.filter { $0.stackKnown != true && $0.stack == nil }
         var members: Set<Int> = [pr.number]
         var pending = [pr]
         while let current = pending.popLast() {
@@ -56,6 +75,11 @@ public struct PrStack: Equatable, Sendable {
             ordered.append(next)
             remaining.removeValue(forKey: next.number)
         }
-        return PrStack(id: "\(repo)#\(members.min()!)", prs: ordered)
+        let entries = ordered.enumerated().map { index, pr in
+            PrStackEntry(position: index + 1, number: pr.number, title: pr.title,
+                         url: pr.url, branch: pr.branch, state: "OPEN")
+        }
+        return PrStack(id: "\(repo)#\(members.min()!)", entries: entries,
+                       size: entries.count, stackNumber: nil)
     }
 }
