@@ -3254,11 +3254,14 @@ struct SessionContainer: View {
                                      onFlip: { model.flipSessionSplit(meta.id) },
                                      onSwap: { model.swapSessionSplit(meta.id) },
                                      onClose: { model.closeSessionSplit(keeping: meta.id) })
-                } else if model.editorTabs.hasEditor(meta.id) {
+                } else if model.editorTabs.tabs(for: meta.id).count > 1 {
                     SessionTabStrip(agent: meta.provider.rawValue.capitalized,
+                                    tabs: model.editorTabs.tabs(for: meta.id),
                                     active: model.editorTabs.activeTab(for: meta.id),
                                     onSelect: { model.showSessionTab($0, for: meta.id) },
-                                    onCloseEditor: { model.closeSessionEditor(meta.id) })
+                                    onCloseEditor: { model.closeSessionEditor(meta.id) },
+                                    onCloseTerminal: { model.closeSessionTerminal($0, for: meta.id) },
+                                    onSplit: { model.splitSessionTab($0, for: meta.id, axis: $1) })
                 }
                 Spacer()
                 Text(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
@@ -3301,6 +3304,15 @@ struct SessionContainer: View {
                 }
                 .help("Repaint clean — restart the CLI and resume this conversation so the pane redraws from the transcript (fixes garbled renders; drops an in-flight reply)")
                 .clickCursor()
+                Menu {
+                    Button("New Terminal Tab") { model.openSessionTerminal(meta.id) }
+                    Button("New Terminal Side by Side") { model.openSessionTerminal(meta.id, split: .sideBySide) }
+                    Button("New Terminal Stacked") { model.openSessionTerminal(meta.id, split: .stacked) }
+                } label: {
+                    Image(systemName: "plus.rectangle")
+                }
+                .help("Add a terminal tab or split in this session")
+                .clickCursor()
                 Button {
                     model.toggleBottomTerminal()
                 } label: {
@@ -3327,7 +3339,7 @@ struct SessionContainer: View {
             GeometryReader { geo in
             let frames = splitFrames(geo.size)
             let pairFrames = pairFrames(geo.size)
-            let agentRect = pairFrames.map { pair?.first == meta.id ? $0.first : $0.second } ?? frames.agent
+            let agentRect = pairFrames.map { pair?.first == meta.id ? $0.first : $0.second } ?? tabFrame(.agent, frames: frames)
             let partnerRect = pairFrames.map { pair?.first == meta.id ? $0.second : $0.first }
             ZStack(alignment: .topLeading) {
                 // A split only narrows (or shortens) the agent and, side by side, slides
@@ -3373,6 +3385,8 @@ struct SessionContainer: View {
                     // Stacked, the agent already sits above the panel (translating the
                     // top pane would push it out of sight), so only the other layouts move.
                     .offset(y: model.bottomTerminalShown && (pair?.axis ?? splitAxis) != .stacked ? -CGFloat(bottomHeight) : 0)
+                    .opacity(agentShown ? 1 : 0)
+                    .allowsHitTesting(agentShown)
                     .padding(.leading, agentRect.minX)
                     .padding(.top, agentRect.minY)
 
@@ -3381,9 +3395,11 @@ struct SessionContainer: View {
                 // the bottom panel: the editor redraws on SIGWINCH, and translating it
                 // would hide its top rows with no scrollback to reach them.
                 editorPanes
-                    .frame(width: frames.editor.width, height: frames.editor.height)
-                    .padding(.leading, frames.editor.minX)
-                    .padding(.top, frames.editor.minY)
+                    .frame(width: tabFrame(.editor, frames: frames).width, height: tabFrame(.editor, frames: frames).height)
+                    .padding(.leading, tabFrame(.editor, frames: frames).minX)
+                    .padding(.top, tabFrame(.editor, frames: frames).minY)
+
+                sessionShellPanes(frames: frames)
 
                 // Where a file opened from the Diff rail flies to. A stand-in rather than
                 // the panes themselves, which are empty until the first editor opens.
@@ -3614,7 +3630,10 @@ struct SessionContainer: View {
                                     hidden: !visible,
                                     topHitInset: terminalTopHitInset,
                                     passive: isPartner,
-                                    onFocused: isPartner ? { [model] in model.activatePairedPane(entry.sessionId) } : nil)
+                                    onFocused: {
+                                        if isPartner { model.activatePairedPane(entry.sessionId) }
+                                        else if visible { model.editorTabs.select(.agent, for: meta.id) }
+                                    })
                             .frame(width: rect.width, height: rect.height)
                             .offset(x: rect.minX, y: rect.minY)
                             .opacity(visible ? 1 : 0)
@@ -3639,9 +3658,10 @@ struct SessionContainer: View {
             SwiftTermLive(session: session,
                           focusToken: model.terminalFocusToken,
                           resyncToken: model.terminalResyncToken,
-                          autoFocusOnAppear: !model.suppressTerminalAutoFocus,
+                          autoFocusOnAppear: agentShown && !model.suppressTerminalAutoFocus,
                           topHitInset: terminalTopHitInset,
-                          onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) })
+                          onOpenPath: { path, line in model.openEditorSession(meta.id, file: path, line: line) },
+                          onFocused: { if agentShown { model.editorTabs.select(.agent, for: meta.id) } })
                 .id(TerminalIdentity(session: session, refresh: model.terminalRefreshToken))
                 .opacity(agentShown ? 1 : 0)
                 .allowsHitTesting(agentShown)
@@ -3694,6 +3714,45 @@ struct SessionContainer: View {
                     .frame(width: frames.divider.width)
                     .padding(.top, frames.divider.midY - hit / 2)
             }
+        }
+    }
+
+    private func tabFrame(_ tab: SessionPaneTab, frames: SessionSplitFrames) -> CGRect {
+        guard let splitAxis else { return tab == .agent ? frames.agent : frames.editor }
+        let isPrimary = model.editorTabs.primaryTab(for: meta.id) == tab
+        var rect = isPrimary ? frames.agent : frames.editor
+        if splitAxis == .sideBySide && model.bottomTerminalShown {
+            // Only the agent translates above the bottom panel; shell/editor panes resize.
+            if isPrimary && tab != .agent { rect.size.height = frames.editor.height }
+            if !isPrimary && tab == .agent { rect.size.height = frames.agent.height }
+        }
+        return rect
+    }
+
+    private func sessionShellPanes(frames: SessionSplitFrames) -> some View {
+        ForEach(model.sessionTerminalPanes, id: \.pty.id) { pane in
+            let tab = SessionPaneTab.terminal(pane.pty.id)
+            let visible = pair == nil && pane.sessionId == meta.id && model.editorTabs.isShown(tab, for: meta.id)
+            let rect = tabFrame(tab, frames: frames)
+            Group {
+                if TerminalBackend.shared.useGhostty {
+                    GhosttyEphemeral(pty: pane.pty, hidden: !visible,
+                                     focusToken: model.sessionTerminalFocusTokens[pane.pty.id] ?? 0,
+                                     isEditor: false,
+                                     onFocused: { if visible { model.editorTabs.select(tab, for: meta.id) } }, onExit: {})
+                } else {
+                    SwiftTermEphemeral(pty: pane.pty, hidden: !visible,
+                                       focusToken: model.sessionTerminalFocusTokens[pane.pty.id] ?? 0,
+                                       isEditor: false,
+                                       onFocused: { if visible { model.editorTabs.select(tab, for: meta.id) } }, onExit: {})
+                }
+            }
+            .background(Color.black)
+            .frame(width: rect.width, height: rect.height)
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(visible)
+            .padding(.leading, rect.minX)
+            .padding(.top, rect.minY)
         }
     }
 
@@ -3751,7 +3810,7 @@ struct SessionContainer: View {
         }
         .help(axis != nil
               ? "Back to tabs, keeping the focused pane (⌘\\). Right-click for more."
-              : "Show the editor beside the agent (⌘\\). Right-click to stack them instead.")
+              : "Split the selected tab beside the agent (⌘\\). Right-click to stack instead.")
         .clickCursor()
         .contextMenu {
             Button("Side by Side") { model.splitEditor(meta.id, axis: .sideBySide) }
@@ -3759,7 +3818,7 @@ struct SessionContainer: View {
             if axis != nil {
                 Divider()
                 Button("Keep Only the Agent") { model.closeSplit(for: meta.id, keeping: .agent) }
-                Button("Keep Only the Editor") { model.closeSplit(for: meta.id, keeping: .editor) }
+                Button("Keep Only the Selected Tab") { model.closeSplit(for: meta.id, keeping: model.editorTabs.activeTab(for: meta.id)) }
             }
         }
     }
@@ -3778,10 +3837,12 @@ struct SessionContainer: View {
                     Group {
                         if TerminalBackend.shared.useGhostty {
                             GhosttyEphemeral(pty: pane.pty, hidden: !visible,
-                                             focusToken: model.editorFocusToken, onExit: {})
+                                             focusToken: model.editorFocusToken,
+                                             onFocused: { if visible { model.editorTabs.select(.editor, for: meta.id) } }, onExit: {})
                         } else {
                             SwiftTermEphemeral(pty: pane.pty, hidden: !visible,
-                                               focusToken: model.editorFocusToken, onExit: {})
+                                               focusToken: model.editorFocusToken,
+                                               onFocused: { if visible { model.editorTabs.select(.editor, for: meta.id) } }, onExit: {})
                         }
                     }
                     .background(Color.black)
@@ -3825,22 +3886,42 @@ struct SessionContainer: View {
     }
 }
 
-/// A session's in-place tabs, shown in its header once it has an editor: the agent
-/// and the editor, the editor closable (which kills it, like `:q` would end it).
+/// Agent, editor, and shell tabs within a session. Closing a companion stops its pty.
 private struct SessionTabStrip: View {
     let agent: String
+    let tabs: [SessionPaneTab]
     let active: SessionPaneTab
     let onSelect: (SessionPaneTab) -> Void
     let onCloseEditor: () -> Void
+    let onCloseTerminal: (String) -> Void
+    let onSplit: (SessionPaneTab, SessionSplitAxis) -> Void
 
     var body: some View {
-        HStack(spacing: 2) {
-            tab(.agent, title: agent, systemImage: "sparkles", shortcut: "⌘1")
-            tab(.editor, title: "nvim", systemImage: "chevron.left.forwardslash.chevron.right",
-                shortcut: "⌘2", closable: true)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                tab(.agent, title: agent, systemImage: "sparkles", shortcut: "⌘1")
+                if tabs.contains(.editor) {
+                    tab(.editor, title: "nvim", systemImage: "chevron.left.forwardslash.chevron.right",
+                        shortcut: "⌘2", closable: true)
+                }
+                ForEach(Array(tabs.enumerated()), id: \.offset) { index, item in
+                    if case .terminal(let id) = item {
+                        tab(item, title: "Terminal \(index - (tabs.contains(.editor) ? 1 : 0))",
+                            systemImage: "terminal", shortcut: "⌃Tab", closable: true)
+                            .contextMenu {
+                                Button("Split Side by Side with Selected Tab") { onSplit(.terminal(id), .sideBySide) }
+                                    .disabled(active == item)
+                                Button("Split Stacked with Selected Tab") { onSplit(.terminal(id), .stacked) }
+                                    .disabled(active == item)
+                            }
+                    }
+                }
+            }
+            .padding(2)
+            .background(Color.appHairline(0.06), in: RoundedRectangle(cornerRadius: 7))
         }
-        .padding(2)
-        .background(Color.appHairline(0.06), in: RoundedRectangle(cornerRadius: 7))
+        .frame(maxWidth: 420)
+        .frame(height: 26)
     }
 
     private func tab(_ which: SessionPaneTab, title: String, systemImage: String,
@@ -3855,12 +3936,14 @@ private struct SessionTabStrip: View {
             .help("Show the \(title) tab (\(shortcut), ⌃Tab to flip)")
             .clickCursor()
             if closable {
-                Button(action: onCloseEditor) {
+                Button {
+                    if case .terminal(let id) = which { onCloseTerminal(id) } else { onCloseEditor() }
+                } label: {
                     Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Close the editor (discards an unsaved buffer)")
+                .help(which == .editor ? "Close the editor (discards an unsaved buffer)" : "Close terminal and stop its shell")
                 .clickCursor()
             }
         }

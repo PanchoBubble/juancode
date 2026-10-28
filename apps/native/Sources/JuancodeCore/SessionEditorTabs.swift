@@ -1,10 +1,10 @@
 import Foundation
+import CoreGraphics
 
-/// Which of a session's in-place tabs is in front: its agent, or the editor opened
-/// beside it (the `</>` header button, ⌘E). In a split both show, and this is the
-/// one holding the keyboard.
+/// An in-place session tab. In a split, the selected tab holds keyboard focus.
 public enum SessionPaneTab: Equatable, Sendable {
     case agent, editor
+    case terminal(String)
 }
 
 /// How a split lays the agent and its editor out: side by side (agent left) or
@@ -15,10 +15,9 @@ public enum SessionSplitAxis: String, Codable, Equatable, Sendable {
     public var flipped: SessionSplitAxis { self == .sideBySide ? .stacked : .sideBySide }
 }
 
-/// The in-place editor tabs, one editor at most per session. Pure bookkeeping: the
-/// ptys live on the model, keyed by `editorId`; this only records which session owns
-/// which editor and which tab is in front, so the rules (reopen focuses, an exit
-/// drops back to the agent, a replaced editor's late exit is ignored) are testable.
+/// Session tabs and two-pane splits: one agent, at most one editor, and any number
+/// of shells. Pty ownership stays on AppModel; this pure state tracks selection,
+/// visible panes, and exit handling. The editor API retains its historical name.
 public struct SessionEditorTabs: Equatable, Sendable {
     public struct Entry: Identifiable, Equatable, Sendable {
         public let sessionId: String
@@ -28,9 +27,10 @@ public struct SessionEditorTabs: Equatable, Sendable {
 
     /// Session id → editor pty id.
     private var editors: [String: String] = [:]
-    /// Sessions whose editor tab is in front.
-    private var editorInFront: Set<String> = []
-    /// Sessions showing agent and editor at once, and how.
+    private var terminals: [String: [String]] = [:]
+    private var selected: [String: SessionPaneTab] = [:]
+    private var companions: [String: SessionPaneTab] = [:]
+    private var primary: [String: SessionPaneTab] = [:]
     private var splits: [String: SessionSplitAxis] = [:]
 
     public init() {}
@@ -39,19 +39,65 @@ public struct SessionEditorTabs: Equatable, Sendable {
 
     public func hasEditor(_ sessionId: String) -> Bool { editors[sessionId] != nil }
 
-    public func activeTab(for sessionId: String) -> SessionPaneTab {
-        editorInFront.contains(sessionId) && editors[sessionId] != nil ? .editor : .agent
+    public func terminalIds(for sessionId: String) -> [String] { terminals[sessionId] ?? [] }
+
+    public func tabs(for sessionId: String) -> [SessionPaneTab] {
+        [.agent] + (hasEditor(sessionId) ? [.editor] : []) + terminalIds(for: sessionId).map { .terminal($0) }
     }
 
-    /// How `sessionId`'s pane is split, or nil when it shows one tab at a time.
-    public func splitAxis(for sessionId: String) -> SessionSplitAxis? {
-        editors[sessionId] != nil ? splits[sessionId] : nil
-    }
+    public func activeTab(for sessionId: String) -> SessionPaneTab { selected[sessionId] ?? .agent }
+    public func primaryTab(for sessionId: String) -> SessionPaneTab { primary[sessionId] ?? .agent }
+    public func companionTab(for sessionId: String) -> SessionPaneTab { companions[sessionId] ?? .editor }
+    public func splitAxis(for sessionId: String) -> SessionSplitAxis? { splits[sessionId] }
 
-    /// Whether `tab` is on screen for `sessionId`: both are in a split, else only
-    /// the one in front.
     public func isShown(_ tab: SessionPaneTab, for sessionId: String) -> Bool {
-        splitAxis(for: sessionId) != nil || activeTab(for: sessionId) == tab
+        guard tabs(for: sessionId).contains(tab) else { return false }
+        if splits[sessionId] != nil {
+            return tab == primaryTab(for: sessionId) || tab == companionTab(for: sessionId)
+        }
+        return activeTab(for: sessionId) == tab
+    }
+
+    public mutating func openedTerminal(_ id: String, for sessionId: String) {
+        terminals[sessionId, default: []].append(id)
+        select(.terminal(id), for: sessionId)
+    }
+
+    /// Put a tab beside the currently focused tab, including two shell terminals.
+    @discardableResult
+    public mutating func splitWith(_ tab: SessionPaneTab, axis: SessionSplitAxis, for sessionId: String) -> Bool {
+        guard tabs(for: sessionId).contains(tab), tab != activeTab(for: sessionId) else { return false }
+        primary[sessionId] = activeTab(for: sessionId)
+        companions[sessionId] = tab
+        selected[sessionId] = tab
+        splits[sessionId] = axis
+        return true
+    }
+
+    @discardableResult
+    public mutating func closedTerminal(_ id: String, for sessionId: String) -> Bool {
+        guard terminalIds(for: sessionId).contains(id) else { return false }
+        terminals[sessionId]?.removeAll { $0 == id }
+        removedTab(.terminal(id), for: sessionId)
+        return true
+    }
+
+    public mutating func removeTerminals(for sessionId: String) -> [String] {
+        let ids = terminalIds(for: sessionId)
+        for id in ids { closedTerminal(id, for: sessionId) }
+        terminals[sessionId] = nil
+        return ids
+    }
+
+    private mutating func removedTab(_ tab: SessionPaneTab, for sessionId: String) {
+        if splits[sessionId] != nil && (primaryTab(for: sessionId) == tab || companionTab(for: sessionId) == tab) {
+            selected[sessionId] = primaryTab(for: sessionId) == tab ? companionTab(for: sessionId) : primaryTab(for: sessionId)
+            splits[sessionId] = nil
+        } else if activeTab(for: sessionId) == tab {
+            selected[sessionId] = .agent
+        }
+        if companions[sessionId] == tab { companions[sessionId] = nil }
+        if primary[sessionId] == tab { primary[sessionId] = nil }
     }
 
     /// Every open editor, in a stable order, so a view can keep all of them mounted
@@ -69,16 +115,23 @@ public struct SessionEditorTabs: Equatable, Sendable {
                                 split: SessionSplitAxis? = nil) -> String? {
         let replaced = editors[sessionId].flatMap { $0 == editorId ? nil : $0 }
         editors[sessionId] = editorId
-        editorInFront.insert(sessionId)
+        selected[sessionId] = .editor
+        companions[sessionId] = .editor
+        primary[sessionId] = .agent
         splits[sessionId] = split
         return replaced
     }
 
-    /// Show `sessionId`'s agent and editor at once along `axis`. Refused (false)
-    /// without an editor, since there is nothing to split with.
+    /// Split the selected companion beside the agent, or change an existing split's axis.
+    /// Refused when only the agent exists.
     @discardableResult
     public mutating func split(_ axis: SessionSplitAxis, for sessionId: String) -> Bool {
-        guard editors[sessionId] != nil else { return false }
+        guard tabs(for: sessionId).count > 1 else { return false }
+        if splits[sessionId] == nil {
+            primary[sessionId] = .agent
+            companions[sessionId] = activeTab(for: sessionId) == .agent
+                ? tabs(for: sessionId)[1] : activeTab(for: sessionId)
+        }
         splits[sessionId] = axis
         return true
     }
@@ -90,26 +143,22 @@ public struct SessionEditorTabs: Equatable, Sendable {
         select(keeping, for: sessionId)
     }
 
-    /// Bring `tab` to the front. Selecting the editor of a session that has none is
-    /// refused (returns false) so the strip never points at a missing pane.
+    /// Focus an existing tab, replacing the companion pane if it was not visible.
     @discardableResult
     public mutating func select(_ tab: SessionPaneTab, for sessionId: String) -> Bool {
-        switch tab {
-        case .agent:
-            editorInFront.remove(sessionId)
-            return true
-        case .editor:
-            guard editors[sessionId] != nil else { return false }
-            editorInFront.insert(sessionId)
-            return true
+        guard tabs(for: sessionId).contains(tab) else { return false }
+        if splits[sessionId] != nil && tab != primaryTab(for: sessionId) {
+            companions[sessionId] = tab
         }
+        selected[sessionId] = tab
+        return true
     }
 
-    /// Flip between the two tabs; a no-op without an editor. Returns the tab now in front.
     @discardableResult
     public mutating func toggle(for sessionId: String) -> SessionPaneTab {
-        let next: SessionPaneTab = activeTab(for: sessionId) == .editor ? .agent : .editor
-        select(next, for: sessionId)
+        let available = tabs(for: sessionId)
+        let index = available.firstIndex(of: activeTab(for: sessionId)) ?? 0
+        select(available[(index + 1) % available.count], for: sessionId)
         return activeTab(for: sessionId)
     }
 
@@ -119,8 +168,7 @@ public struct SessionEditorTabs: Equatable, Sendable {
     public mutating func exited(_ editorId: String) -> String? {
         guard let sessionId = editors.first(where: { $0.value == editorId })?.key else { return nil }
         editors[sessionId] = nil
-        editorInFront.remove(sessionId)
-        splits[sessionId] = nil
+        removedTab(.editor, for: sessionId)
         return sessionId
     }
 
@@ -128,7 +176,9 @@ public struct SessionEditorTabs: Equatable, Sendable {
     /// to kill, if there was one.
     @discardableResult
     public mutating func remove(session sessionId: String) -> String? {
-        editorInFront.remove(sessionId)
+        selected[sessionId] = nil
+        companions[sessionId] = nil
+        primary[sessionId] = nil
         splits[sessionId] = nil
         return editors.removeValue(forKey: sessionId)
     }

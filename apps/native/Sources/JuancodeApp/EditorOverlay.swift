@@ -140,6 +140,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     /// Every ephemeral pty runs the user's editor except the bottom shell panel,
     /// which opts out: an editor's ⌃-keys go to it, not to app shortcuts.
     var isEditor: Bool = true
+    var onFocused: (() -> Void)? = nil
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -154,11 +155,13 @@ struct SwiftTermEphemeral: NSViewRepresentable {
         // Sync the freshly spawned pty to the view's real size so the editor repaints.
         let t = tv.terminalDimensions
         pty.resize(cols: t.cols, rows: t.rows)
-        DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
+
         // The initial spawn already grabs focus above — record the token so the first
         // `updateNSView` doesn't fire a redundant re-focus.
         context.coordinator.lastFocusToken = focusToken
         let host = TerminalHostView(terminal: tv)
+        host.focusOnAppear = !hidden
+        host.onTerminalFocused = onFocused
         host.onDrop = { [pty] text in pty.write(Array(text.utf8)) }
         return host
     }
@@ -166,6 +169,7 @@ struct SwiftTermEphemeral: NSViewRepresentable {
     // SwiftUI calls this in the same transaction that flips `hidden` — before any
     // intermediate animation frame resizes the NSView — so the freeze lands first.
     func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        nsView.onTerminalFocused = onFocused
         context.coordinator.setHidden(hidden)
         // Opacity alone leaves a hidden pane in AppKit's drag routing — see
         // `GhosttyEphemeral.Coordinator.setHidden`.

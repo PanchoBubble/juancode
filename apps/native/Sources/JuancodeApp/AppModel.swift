@@ -1259,6 +1259,13 @@ final class AppModel {
     /// Move keyboard focus into the live terminal (Enter / l / ⌃L).
     func focusTerminal() {
         suppressTerminalAutoFocus = false
+        if let selection, sessionPairs.pair(for: selection) == nil {
+            switch editorTabs.activeTab(for: selection) {
+            case .editor: editorFocusToken &+= 1; return
+            case .terminal(let id): sessionTerminalFocusTokens[id, default: 0] &+= 1; return
+            case .agent: break
+            }
+        }
         terminalFocusToken &+= 1
     }
 
@@ -2290,13 +2297,71 @@ final class AppModel {
         editorTabs.entries.compactMap { e in editorPtys[e.editorId].map { (e, $0) } }
     }
 
+    /// Shells opened in the session header are owned by that session, not its folder.
+    private var sessionTerminalPtys: [String: EphemeralPty] = [:]
+    var sessionTerminalFocusTokens: [String: Int] = [:]
+
+    var sessionTerminalPanes: [(sessionId: String, pty: EphemeralPty)] {
+        sessions.flatMap { session in
+            editorTabs.terminalIds(for: session.id).compactMap { id in
+                sessionTerminalPtys[id].map { (session.id, $0) }
+            }
+        }
+    }
+
+    func openSessionTerminal(_ sessionId: String, split: SessionSplitAxis? = nil) {
+        guard let parent = core.liveSession(sessionId)?.meta
+                ?? sessions.first(where: { $0.id == sessionId }) else { return }
+        do {
+            let pty = try core.openTerminalPty(cwd: parent.effectiveCwd, cols: 80, rows: 24)
+            let previous = editorTabs.activeTab(for: sessionId)
+            leaveSessionPairForEditor(sessionId)
+            sessionTerminalPtys[pty.id] = pty
+            editorTabs.openedTerminal(pty.id, for: sessionId)
+            if let split {
+                LayoutTransitionGate.shared.begin()
+                editorTabs.select(previous, for: sessionId)
+                editorTabs.splitWith(.terminal(pty.id), axis: split, for: sessionId)
+            }
+            let id = pty.id
+            pty.onExit { [weak self] _ in
+                Task { @MainActor in self?.closeSessionTerminal(id, for: sessionId) }
+            }
+            sessionTerminalFocusTokens[pty.id, default: 0] &+= 1
+        } catch {
+            errorMessage = "Couldn't open a terminal: \(error.localizedDescription)"
+        }
+    }
+
+    func closeSessionTerminal(_ id: String, for sessionId: String) {
+        guard editorTabs.closedTerminal(id, for: sessionId) else { return }
+        LayoutTransitionGate.shared.begin()
+        sessionTerminalPtys.removeValue(forKey: id)?.kill()
+        sessionTerminalFocusTokens[id] = nil
+        if selection == sessionId { showSessionTab(editorTabs.activeTab(for: sessionId), for: sessionId) }
+    }
+
+    private func removeSessionTerminals(_ sessionId: String) {
+        for id in editorTabs.removeTerminals(for: sessionId) {
+            sessionTerminalPtys.removeValue(forKey: id)?.kill()
+            sessionTerminalFocusTokens[id] = nil
+        }
+    }
+
+    func splitSessionTab(_ tab: SessionPaneTab, for sessionId: String, axis: SessionSplitAxis) {
+        LayoutTransitionGate.shared.begin()
+        leaveSessionPairForEditor(sessionId)
+        if editorTabs.splitWith(tab, axis: axis, for: sessionId) { showSessionTab(tab, for: sessionId) }
+    }
+
     /// Bring `tab` to the front of `sessionId`'s pane and give it the keyboard.
     func showSessionTab(_ tab: SessionPaneTab, for sessionId: String) {
         guard editorTabs.select(tab, for: sessionId) else { return }
-        if tab == .editor { leaveSessionPairForEditor(sessionId) }
+        if tab != .agent { leaveSessionPairForEditor(sessionId) }
         switch tab {
         case .agent: focusTerminal()
         case .editor: editorFocusToken &+= 1
+        case .terminal(let id): sessionTerminalFocusTokens[id, default: 0] &+= 1
         }
     }
 
@@ -2304,8 +2369,8 @@ final class AppModel {
     /// when there is nothing to flip, so the key stays the pty's.
     @discardableResult
     func toggleSessionTabForSelection() -> Bool {
-        guard let sel = selection, editorTabs.hasEditor(sel) else { return false }
-        let next: SessionPaneTab = editorTabs.activeTab(for: sel) == .editor ? .agent : .editor
+        guard let sel = selection, editorTabs.tabs(for: sel).count > 1 else { return false }
+        let next = editorTabs.toggle(for: sel)
         showSessionTab(next, for: sel)
         return true
     }
@@ -2354,7 +2419,7 @@ final class AppModel {
               meta.kind != .editor else { return }
         paneLayouts.update(meta.cwd) { $0.split = true; $0.axis = axis }
         leaveSessionPairForEditor(sessionId)
-        guard editorTabs.hasEditor(sessionId) else {
+        guard editorTabs.tabs(for: sessionId).count > 1 else {
             openEditorSession(sessionId)
             return
         }
@@ -6025,6 +6090,7 @@ final class AppModel {
         stopWatchingChanges(id)
         agentWorktreeBySession.removeValue(forKey: id)
         stoppedPanes.remove(id)
+        removeSessionTerminals(id)
         if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
         sessionPairs.remove(session: id)
         if selection == id { selection = editorParent ?? neighbor }
@@ -6112,6 +6178,7 @@ final class AppModel {
             stopWatchingChanges(id)
             agentWorktreeBySession.removeValue(forKey: id)
             stoppedPanes.remove(id)
+            removeSessionTerminals(id)
             if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
             sessionPairs.remove(session: id)
             pinnedSessions.remove(id)

@@ -973,6 +973,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
     var focusToken: Int = 0
     /// See `SwiftTermEphemeral.isEditor`.
     var isEditor: Bool = true
+    var onFocused: (() -> Void)? = nil
     let onExit: @Sendable () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(pty: pty, onExit: onExit) }
@@ -983,7 +984,8 @@ struct GhosttyEphemeral: NSViewRepresentable {
         context.coordinator.attach(to: tv)
         context.coordinator.lastFocusToken = focusToken
         let host = GhosttyHostView(terminal: tv)
-        host.focusOnAppear = true
+        host.focusOnAppear = !hidden
+        host.onTerminalFocused = onFocused
         host.onDrop = { [pty] text in pty.write(Array(text.utf8)) }
         return host
     }
@@ -991,6 +993,7 @@ struct GhosttyEphemeral: NSViewRepresentable {
     // SwiftUI calls this in the same transaction that flips `hidden` — before any
     // intermediate animation frame resizes the NSView — so the freeze lands first.
     func updateNSView(_ nsView: GhosttyHostView, context: Context) {
+        nsView.onTerminalFocused = onFocused
         context.coordinator.setHidden(hidden, host: nsView)
         if focusToken != context.coordinator.lastFocusToken {
             context.coordinator.lastFocusToken = focusToken

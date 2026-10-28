@@ -588,6 +588,8 @@ final class TerminalHostView: NSView {
     /// (the bottom shell panel's height). Clicks that land there belong to whatever
     /// is drawn under the pane — see `TerminalHitClip`.
     var topHitInset: CGFloat = 0
+    var onTerminalFocused: (() -> Void)?
+    private var responderObservation: NSKeyValueObservation?
     private var didAutoFocus = false
     /// Re-applies the renderer choice (CG/Metal) when the Settings toggle flips.
     private var rendererObserver: Any?
@@ -614,6 +616,13 @@ final class TerminalHostView: NSView {
     // time the window may not yet be key, so `makeFirstResponder` could be ignored.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        responderObservation = window?.observe(\.firstResponder, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isHidden, let responder = self.window?.firstResponder as? NSView,
+                      responder.isDescendant(of: self) else { return }
+                self.onTerminalFocused?()
+            }
+        }
         // Renderer choice applies here — SwiftTerm's `setUseMetal` wants the view
         // in a window. The observer for later Settings flips lives only while
         // we're IN a window (registered on join, removed on leave) so a torn-down
@@ -873,6 +882,7 @@ struct SwiftTermLive: View {
     /// real size — mirrors GhosttyLive's `onGrid`, which this backend lacked, leaving
     /// the remembered dock grid permanently stale on SwiftTerm.
     var onGrid: ((Int, Int) -> Void)? = nil
+    var onFocused: (() -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -882,7 +892,7 @@ struct SwiftTermLive: View {
                                    autoFocusOnAppear: autoFocusOnAppear,
                                    topHitInset: topHitInset,
                                    onOpenPath: onOpenPath,
-                                   onGrid: onGrid)
+                                   onGrid: onGrid, onFocused: onFocused)
         }
     }
 }
@@ -905,6 +915,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     var topHitInset: CGFloat = 0
     var onOpenPath: ((String, Int?) -> Void)? = nil
     var onGrid: ((Int, Int) -> Void)? = nil
+    var onFocused: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session, remembersSize: remembersSize) }
 
@@ -933,6 +944,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
         context.coordinator.attach(to: tv)
         let host = TerminalHostView(terminal: tv)
         host.focusOnAppear = autoFocusOnAppear
+        host.onTerminalFocused = onFocused
         host.onDrop = { [session] text in session.write(text) }
         host.onGrid = { [onGrid] cols, rows in
             context.coordinator.gridChanged(cols: cols, rows: rows)
@@ -942,6 +954,7 @@ private struct SwiftTermRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        nsView.onTerminalFocused = onFocused
         nsView.topHitInset = topHitInset
         // Apply the authoritative SwiftUI size to the terminal. This fires whenever
         // the laid-out size changes (open, panel toggle, window/divider drag), so the

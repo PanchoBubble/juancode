@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import Testing
 @testable import JuancodeCore
 
@@ -202,5 +203,72 @@ import Testing
         #expect(laidOut.agent.width == 300)
         let clamped = SessionSplitFrames.fraction(forAgentExtent: 5000, axis: .stacked, size: size, bottomInset: 0)
         #expect(clamped == 0.8)
+    }
+}
+
+@Suite struct SessionTerminalTabsTests {
+    @Test func shellsBelongToTheirSessionAndCycleWithEditor() {
+        var tabs = SessionEditorTabs()
+        tabs.opened("editor", for: "a")
+        tabs.openedTerminal("shell1", for: "a")
+        tabs.openedTerminal("shell2", for: "a")
+        #expect(tabs.tabs(for: "b") == [.agent])
+        let result1 = tabs.toggle(for: "a")
+        #expect(result1 == .agent)
+        let result2 = tabs.toggle(for: "a")
+        #expect(result2 == .editor)
+        let result3 = tabs.toggle(for: "a")
+        #expect(result3 == .terminal("shell1"))
+        let result4 = tabs.select(.terminal("shell1"), for: "b")
+        #expect(!result4)
+    }
+
+    @Test func splitCanShowTwoShellsAndClosingEitherKeepsTheSurvivor() {
+        for closing in ["shell1", "shell2"] {
+            var tabs = SessionEditorTabs()
+            tabs.openedTerminal("shell1", for: "a")
+            tabs.openedTerminal("shell2", for: "a")
+            let result5 = tabs.splitWith(.terminal("shell1"), axis: .stacked, for: "a")
+            #expect(result5)
+            #expect(tabs.isShown(.terminal("shell1"), for: "a"))
+            #expect(tabs.isShown(.terminal("shell2"), for: "a"))
+            #expect(!tabs.isShown(.agent, for: "a"))
+            let result6 = tabs.closedTerminal(closing, for: "a")
+            #expect(result6)
+            #expect(tabs.splitAxis(for: "a") == nil)
+            #expect(tabs.activeTab(for: "a") == .terminal(closing == "shell1" ? "shell2" : "shell1"))
+            let result7 = tabs.closedTerminal(closing, for: "a")
+            #expect(!result7)
+        }
+    }
+
+    @Test func closingBackgroundEditorDoesNotDisturbShellSplit() {
+        var tabs = SessionEditorTabs()
+        tabs.opened("editor", for: "a")
+        tabs.openedTerminal("shell1", for: "a")
+        tabs.openedTerminal("shell2", for: "a")
+        tabs.splitWith(.terminal("shell1"), axis: .sideBySide, for: "a")
+        tabs.exited("editor")
+        #expect(tabs.splitAxis(for: "a") == .sideBySide)
+        #expect(tabs.activeTab(for: "a") == .terminal("shell1"))
+        let result8 = tabs.splitWith(.terminal("shell1"), axis: .stacked, for: "a")
+        #expect(!result8)
+    }
+
+    @Test func shellCanSplitWithAgentAndHideWithoutExiting() {
+        var tabs = SessionEditorTabs()
+        tabs.openedTerminal("shell", for: "a")
+        let result9 = tabs.split(.sideBySide, for: "a")
+        #expect(result9)
+        #expect(tabs.isShown(.agent, for: "a"))
+        #expect(tabs.isShown(.terminal("shell"), for: "a"))
+        tabs.unsplit(for: "a", keeping: .agent)
+        #expect(!tabs.isShown(.terminal("shell"), for: "a"))
+        #expect(tabs.terminalIds(for: "a") == ["shell"])
+        let result10 = tabs.removeTerminals(for: "a")
+        #expect(result10 == ["shell"])
+        #expect(tabs.terminalIds(for: "a").isEmpty)
+        let result11 = tabs.removeTerminals(for: "a")
+        #expect(result11.isEmpty)
     }
 }

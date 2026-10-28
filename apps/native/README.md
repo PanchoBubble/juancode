@@ -266,6 +266,7 @@ The `apps/web` panels are now ported to SwiftUI, keyed per work dir off `AppMode
 | `ChangesPanel`                | git diff with vim-like syntax highlighting + click-drag line-range inline comments + 'Review with Claude' |
 | `IssuesPanel`                 | interactive bd/beads issues per folder (grouped via `BeadsGrouping`); `workOnIssue` dispatches a session  |
 | `BottomTerminalPanel`         | per-workdir shell terminal, VS Code-style tabs + split                                                    |
+| Session header terminals     | session-owned shell tabs, resizable side-by-side or stacked splits with the agent, editor, or another shell |
 | `SearchPanel` / `StatusPanel` | FTS5 scrollback search; MCP/auth status                                                                   |
 | `EditorOverlay`               | in-app file editor modal (ephemeral pty)                                                                  |
 | `RootView`                    | tabbed right-side panel switching Changes/Issues, docks the bottom terminal                               |
@@ -553,3 +554,16 @@ to its `/ws` on `:4280` to bridge sessions to Telegram / the phone console.
 
 (`swift run juancode` does build and launch the app, but without the `.app`
 wrapper — expect hanging file pickers and a flaky Dock icon. Use `dev-app.sh`.)
+
+### Terminal tabs within a session
+
+Use the **+ rectangle** menu in the session header to open a **New Terminal Tab**
+in that session’s working directory, or choose **New Terminal Side by Side** /
+**New Terminal Stacked** to open a shell beside the selected tab. Right-click an
+existing terminal tab to split it with the selected tab. Drag the divider to resize;
+the split button returns to a single tab. **⌃Tab** cycles the session’s tabs.
+
+Tabs keep their shells running when hidden or when switching sessions. Closing a
+terminal tab stops its shell; deleting a session closes its terminal tabs. These
+shells use the daemon’s normal terminal service and inherited environment. The
+folder-shared bottom terminal panel remains available with **⌃T**.
