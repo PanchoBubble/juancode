@@ -1113,6 +1113,23 @@ struct GitHubView: View {
     private var selectedPr: (String, PullRequest)? { model.selectedGitHubPr }
 }
 
+private struct PrStackBadge: View {
+    let stack: PrStack
+
+    var body: some View {
+        let tint = ChainBadge.color(for: stack.id)
+        Label("\(stack.numbers.count)", systemImage: "link")
+            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+            .foregroundStyle(tint)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(tint.opacity(0.16), in: Capsule())
+            .fixedSize()
+            .help("Stack of \(stack.numbers.count) open PRs: " +
+                  stack.numbers.map { "#\($0)" }.joined(separator: ", "))
+            .accessibilityLabel("Stack of \(stack.numbers.count) open pull requests")
+    }
+}
+
 /// One PR row in the left column. Reuses the visual language of the folder
 /// popover's `PrRow` (CI dot, passed/total, draft badge, unresolved bubble,
 /// `TrackBadge`); tap selects, actions live in the context menu + detail pane.
@@ -1129,7 +1146,12 @@ private struct GitHubPrRow: View {
     private var key: String { TrackedPr.key(cwd: cwd, number: pr.number) }
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
     private var selected: Bool { model.github.selectedKey == key }
+    @State private var hovering = false
     @State private var confirmingClose = false
+
+    private var stack: PrStack? {
+        PrStack.containing(pr, in: (model.prs(cwd)?.prs ?? []) + model.viewerPrs.rows.map(\.pr))
+    }
 
     var body: some View {
         Button {
@@ -1148,6 +1170,11 @@ private struct GitHubPrRow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
+                    if let stack {
+                        PrStackBadge(stack: stack)
+                            .opacity(hovering ? 1 : 0)
+                            .accessibilityHidden(!hovering)
+                    }
                     if let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)
                             .fixedSize()
@@ -1208,6 +1235,7 @@ private struct GitHubPrRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
         .background(selected ? Color.accentColor.opacity(0.18) : Color.clear)
         .clickCursor()
         .contextMenu {
@@ -1258,9 +1286,14 @@ private struct ViewerPrRow: View {
     @Environment(AppModel.self) private var model
     let row: ViewerPr
     var reason: PrAttentionReason? = nil
+    @State private var hovering = false
     @State private var confirmingClose = false
 
     private var pr: PullRequest { row.pr }
+
+    private var stack: PrStack? {
+        PrStack.containing(pr, in: model.viewerPrs.rows.map(\.pr))
+    }
 
     var body: some View {
         Button { open() } label: {
@@ -1277,6 +1310,11 @@ private struct ViewerPrRow: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
+                    if let stack {
+                        PrStackBadge(stack: stack)
+                            .opacity(hovering ? 1 : 0)
+                            .accessibilityHidden(!hovering)
+                    }
                     if let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)
                             .fixedSize()
@@ -1327,6 +1365,7 @@ private struct ViewerPrRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
         .clickCursor()
         .contextMenu {
             Button("Open in Browser") { open() }

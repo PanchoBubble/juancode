@@ -182,6 +182,9 @@ public struct PullRequest: Codable, Sendable, Equatable {
     public var title: String
     public var url: String
     public var branch: String
+    /// Base branch used to identify PR stacks; absent on older daemons.
+    public var baseBranch: String?
+    public var isCrossRepository: Bool?
     public var draft: Bool
     public var checks: PrChecks
     /// Total number of CI checks (`statusCheckRollup` entries), 0 when none —
@@ -237,8 +240,10 @@ public struct PullRequest: Codable, Sendable, Equatable {
                 checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0,
                 createdAt: String? = nil, reviewDecision: String? = nil,
                 reviewRequests: [String] = [], additions: Int? = nil,
-                deletions: Int? = nil, changedFiles: Int? = nil) {
+                deletions: Int? = nil, changedFiles: Int? = nil,
+                baseBranch: String? = nil, isCrossRepository: Bool? = nil) {
         self.number = number; self.title = title; self.url = url; self.branch = branch
+        self.baseBranch = baseBranch; self.isCrossRepository = isCrossRepository
         self.draft = draft; self.checks = checks; self.author = author; self.assignees = assignees
         self.checkCount = checkCount; self.passedCount = passedCount
         self.unresolvedComments = unresolvedComments

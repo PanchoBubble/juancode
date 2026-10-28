@@ -330,7 +330,8 @@ pub const GH_PR_LIST_LIMIT: usize = 100;
 /// "assigned to me" filter, `createdAt`/`reviewDecision`/`reviewRequests` drive the age
 /// chip and the triage group, and the three size fields let a shipped PR read the way
 /// the working tree does.
-const LIST_FIELDS: &str = "number,title,url,headRefName,isDraft,statusCheckRollup,author,\
+const LIST_FIELDS: &str =
+    "number,title,url,headRefName,baseRefName,isCrossRepository,isDraft,statusCheckRollup,author,\
 assignees,createdAt,reviewDecision,reviewRequests,additions,deletions,changedFiles";
 
 /// One open pull request as a client renders it. The field names are the Swift core's,
@@ -342,6 +343,10 @@ pub struct PullRequest {
     pub title: String,
     pub url: String,
     pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_cross_repository: Option<bool>,
     pub draft: bool,
     pub checks: PrChecks,
     /// Total `statusCheckRollup` entries, 0 when there are none. Shown as
@@ -943,6 +948,8 @@ pub fn parse_prs(raw: Vec<RawPr>) -> Vec<PullRequest> {
                 title: p.title,
                 url: p.url,
                 branch: p.head_ref_name,
+                base_branch: p.base_ref_name,
+                is_cross_repository: p.is_cross_repository,
                 draft: p.is_draft,
                 checks: rollup_checks(&rollup),
                 check_count: rollup.len() as i64,
@@ -1007,6 +1014,8 @@ pub struct RawPr {
     pub url: String,
     #[serde(default)]
     pub head_ref_name: String,
+    pub base_ref_name: Option<String>,
+    pub is_cross_repository: Option<bool>,
     #[serde(default)]
     pub is_draft: bool,
     pub status_check_rollup: Option<Vec<RawCheck>>,
@@ -1587,7 +1596,7 @@ query($mine: String!, $reviews: String!, $first: Int!) {
   reviews: search(query: $reviews, type: ISSUE, first: $first) { nodes { ...prBits } }
 }
 fragment prBits on PullRequest {
-  number title url isDraft createdAt headRefName additions deletions changedFiles
+  number title url isDraft createdAt headRefName baseRefName isCrossRepository additions deletions changedFiles
   repository { nameWithOwner }
   author { login }
   assignees(first: 10) { nodes { login } }
@@ -1692,6 +1701,8 @@ struct RawViewerPr {
     is_draft: Option<bool>,
     created_at: Option<String>,
     head_ref_name: Option<String>,
+    base_ref_name: Option<String>,
+    is_cross_repository: Option<bool>,
     additions: Option<i64>,
     deletions: Option<i64>,
     changed_files: Option<i64>,
@@ -1796,6 +1807,8 @@ fn viewer_pull_request(raw: &RawViewerPr) -> Option<PullRequest> {
         title: raw.title.clone().unwrap_or_default(),
         url,
         branch: raw.head_ref_name.clone().unwrap_or_default(),
+        base_branch: raw.base_ref_name.clone(),
+        is_cross_repository: raw.is_cross_repository,
         draft: raw.is_draft.unwrap_or(false),
         checks: rollup_checks(&contexts),
         check_count: contexts.len() as i64,
@@ -2100,6 +2113,24 @@ mod list_tests {
             url: format!("https://github.com/o/r/pull/{number}"),
             head_ref_name: "b".into(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stack_metadata_survives_list_and_viewer_mapping() {
+        let json = serde_json::json!({
+            "number": 7, "url": "https://github.com/o/r/pull/7",
+            "headRefName": "second", "baseRefName": "first",
+            "isCrossRepository": false
+        });
+        let list = parse_prs(vec![serde_json::from_value(json.clone()).unwrap()]);
+        let viewer = viewer_pull_request(&serde_json::from_value(json).unwrap()).unwrap();
+        for pr in [&list[0], &viewer] {
+            assert_eq!(pr.base_branch.as_deref(), Some("first"));
+            assert_eq!(pr.is_cross_repository, Some(false));
+            let wire = serde_json::to_value(pr).unwrap();
+            assert_eq!(wire["baseBranch"], "first");
+            assert_eq!(wire["isCrossRepository"], false);
         }
     }
 
