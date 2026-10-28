@@ -4,7 +4,13 @@ import Foundation
 /// Uses the full fetched list so UI filters cannot change the count or color.
 public struct PrStack: Equatable, Sendable {
     public let id: String
-    public let numbers: [Int]
+    /// Base first, then dependents; independent siblings use PR number as a tie-breaker.
+    public let prs: [PullRequest]
+    public var numbers: [Int] { prs.map(\.number) }
+
+    public func position(of number: Int) -> Int? {
+        numbers.firstIndex(of: number).map { $0 + 1 }
+    }
 
     public static func containing(_ pr: PullRequest, in prs: [PullRequest]) -> PrStack? {
         func repository(_ url: String) -> String? {
@@ -32,7 +38,24 @@ public struct PrStack: Equatable, Sendable {
             }
         }
         guard members.count > 1 else { return nil }
-        let numbers = members.sorted()
-        return PrStack(id: "\(repo)#\(numbers[0])", numbers: numbers)
+        var remaining = Dictionary(
+            candidates.filter { members.contains($0.number) }.map { ($0.number, $0) },
+            uniquingKeysWith: { first, _ in first })
+        remaining[pr.number] = pr
+        var ordered: [PullRequest] = []
+        while !remaining.isEmpty {
+            let sorted = remaining.values.sorted { $0.number < $1.number }
+            // A PR is ready only after all of its parents. Cyclic/malformed data
+            // falls back deterministically rather than hanging the UI.
+            let next = sorted.first { child in
+                !sorted.contains { parent in
+                    parent.number != child.number && parent.isCrossRepository == false
+                        && !parent.branch.isEmpty && child.baseBranch == parent.branch
+                }
+            } ?? sorted[0]
+            ordered.append(next)
+            remaining.removeValue(forKey: next.number)
+        }
+        return PrStack(id: "\(repo)#\(members.min()!)", prs: ordered)
     }
 }

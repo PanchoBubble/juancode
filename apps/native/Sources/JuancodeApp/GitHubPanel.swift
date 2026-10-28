@@ -1130,6 +1130,7 @@ private struct GitHubPrRow: View {
     private var tracked: TrackedPr? { model.trackedPr(cwd: cwd, number: pr.number) }
     private var selected: Bool { model.github.selectedKey == key }
     @State private var hovering = false
+    @State private var showingStack = false
     @State private var confirmingClose = false
 
     private var stack: PrStack? {
@@ -1154,9 +1155,9 @@ private struct GitHubPrRow: View {
                     }
                     Spacer(minLength: 4)
                     if let stack {
-                        PrStackBadge(stack: stack)
-                            .opacity(hovering ? 1 : 0)
-                            .accessibilityHidden(!hovering)
+                        PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
+                            .opacity(hovering || showingStack ? 1 : 0)
+                            .accessibilityHidden(!hovering && !showingStack)
                     }
                     if let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)
@@ -1270,6 +1271,7 @@ private struct ViewerPrRow: View {
     let row: ViewerPr
     var reason: PrAttentionReason? = nil
     @State private var hovering = false
+    @State private var showingStack = false
     @State private var confirmingClose = false
 
     private var pr: PullRequest { row.pr }
@@ -1294,9 +1296,9 @@ private struct ViewerPrRow: View {
                     }
                     Spacer(minLength: 4)
                     if let stack {
-                        PrStackBadge(stack: stack)
-                            .opacity(hovering ? 1 : 0)
-                            .accessibilityHidden(!hovering)
+                        PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
+                            .opacity(hovering || showingStack ? 1 : 0)
+                            .accessibilityHidden(!hovering && !showingStack)
                     }
                     if let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)

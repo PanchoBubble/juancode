@@ -444,6 +444,7 @@ struct GitHubQueueBadge: View {
         let onOpen: () -> Void
         /// Whether the pointer is over the row — the two actions ride on it.
         @State private var hovering = false
+        @State private var showingStack = false
         @State private var eyeHovering = false
         @State private var confirmingClose = false
 
@@ -561,12 +562,12 @@ struct GitHubQueueBadge: View {
         /// always there because a click on a mapped row opens the GitHub view instead.
         /// Nearly row-height, with each button's whole cell clickable.
         @ViewBuilder private var actions: some View {
-            if hovering {
+            if hovering || showingStack {
                 HStack(spacing: 2) {
                     if let stack = PrStack.containing(
                         pr, in: (cwd.flatMap { model.prs($0)?.prs } ?? []) + model.viewerPrs.rows.map(\.pr)
                     ) {
-                        PrStackBadge(stack: stack)
+                        PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
                             .padding(.horizontal, 3)
                     }
                     if let cwd { checkoutActions(cwd) }
