@@ -261,7 +261,10 @@ export async function projectOverview(path: string): Promise<ProjectOverview> {
       provider: str(row.provider) ?? "agent",
       status: str(row.status) ?? "",
       cwd: str(row.cwd) ?? "",
-      updatedAt: typeof row.updatedAt === "number" ? new Date(row.updatedAt).toISOString() : str(row.updatedAt),
+      updatedAt:
+        typeof row.updatedAt === "number"
+          ? new Date(row.updatedAt).toISOString()
+          : str(row.updatedAt),
     }));
   return { project, issues, closed: toIssues(closedRows, new Set()), sessions };
 }
@@ -686,7 +689,10 @@ const ORACLE_SYSTEM =
   "`curl -sS -X POST http://127.0.0.1:4281/api/dispatch -H 'content-type: application/json' " +
   '-d \'{"project":"<abs path>","prompt":"<instruction>"}\'` (optional fields: ' +
   '"provider":"codex"|"opencode", "worktree":true, and "telegramChatId":<id> when told ' +
-  "the request came from a Telegram chat). The reply carries the real outcome — dispatchId " +
+  "the request came from a Telegram chat). Omit provider/model for automatic cost-aware routing; " +
+  'set "complexity":"simple"|"standard"|"complex" based on the actual task, especially when dispatching only a ticket id. ' +
+  'Simple means bounded chores; complex means architecture or risky changes. An explicit model pins it; "model":"default" keeps the CLI default. ' +
+  "The reply carries the real outcome — dispatchId " +
   "plus sessionId, queued, or the actual error — so report it instead of assuming success. " +
   'NEVER RE-POST A DISPATCH: `"queued":true` (or `"willStart":true`) means ACCEPTED and ' +
   "starting by itself, not failed. Posting the same work twice is how two agents ended up " +

@@ -7,7 +7,13 @@ import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
 import { DispatchConflictError, type DispatchDeps } from "./dispatch.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
-import { dispatchOriginChat, getDispatch, listDispatches } from "./dispatch-registry.ts";
+import { legacyRequestFingerprint } from "./dispatch-guard.ts";
+import {
+  dispatchOriginChat,
+  getDispatch,
+  listDispatches,
+  recordDispatch,
+} from "./dispatch-registry.ts";
 
 // `dispatch` is WS-first: a `create` with an ack over the native server's WS, and
 // only when that's unreachable a durable `dispatch.jsonl` fallback. These tests
@@ -101,6 +107,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     const frame = received[0]!;
     expect(frame.type).toBe("create");
     expect(frame.provider).toBe("codex");
+    expect(frame.model).toBe("gpt-6.1-sol");
     expect(frame.cwd).toBe("/abs/repo");
     expect(frame.initialInput).toBe("seed it");
     expect(frame.skipPermissions).toBe(true);
@@ -111,6 +118,50 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(frame.rows).toBeUndefined();
     expect(String(frame.dispatchId)).toMatch(UUID_RE);
     expect(frame).not.toHaveProperty("fromSessionId");
+  });
+
+  it("does not repeat pre-routing dispatches after an upgrade", async () => {
+    const request = { project: "/abs/repo", prompt: "Fix spelling in README.md" };
+    await recordDispatch({
+      ...request,
+      dispatchId: "old",
+      provider: "claude",
+      worktree: false,
+      telegramChatId: null,
+      outcome: "queued",
+      sessionId: null,
+      error: null,
+      at: Date.now(),
+      fingerprint: legacyRequestFingerprint(request),
+    });
+    expect((await dispatch(request)).duplicateOf).toBe("old");
+    expect(mailboxLines()).toEqual([]);
+  });
+
+  it("persists automatic routing through queuing and duplicate retries", async () => {
+    const request = { project: "/abs/repo", prompt: "Fix spelling in README.md" };
+    const first = await dispatch(request);
+    expect(first.modelSelection).toMatchObject({
+      provider: "codex",
+      model: "gpt-6-luna",
+      complexity: "simple",
+    });
+    expect(mailboxLines()[0]).toMatchObject({ provider: "codex", model: "gpt-6-luna" });
+    expect((await getDispatch(first.dispatchId))?.modelSelection).toEqual(first.modelSelection);
+    const retry = await dispatch(request);
+    expect(retry.state).toBe("duplicate");
+    expect(retry.modelSelection).toEqual(first.modelSelection);
+    expect(mailboxLines()).toHaveLength(1);
+  });
+
+  it("forwards an explicit model and omits the CLI-default override", async () => {
+    await startServer((_msg, sock) => {
+      sock.send(JSON.stringify({ type: "created", session: { id: "pinned" } }));
+    });
+    await dispatch({ project: "/abs/repo", prompt: "Fix typo", model: "opus" });
+    await dispatch({ project: "/abs/repo", prompt: "Fix typo", model: "default" });
+    expect(received[0]).toMatchObject({ provider: "claude", model: "opus" });
+    expect(received[1]).not.toHaveProperty("model");
   });
 
   it("names the dispatching session to a core that advertises chainInherit", async () => {
@@ -149,6 +200,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
       {
         project: "/abs/repo",
         prompt: "later",
+        model: "sonnet",
         provider: "claude",
         worktree: false,
         dispatchId: out.dispatchId,
@@ -191,6 +243,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(lines[0]).toEqual({
       project: "/abs/repo",
       prompt: "later",
+      model: "sonnet",
       provider: "claude",
       worktree: true,
       dispatchId: out.dispatchId,

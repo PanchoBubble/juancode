@@ -26,6 +26,29 @@ written to `dispatch-results.jsonl`, which the sidecar tails to relay failures â
 and queued-dispatch starts â€” to Telegram. `ask` requires the **native app to be
 running**. `list_issues`/`create_issue` work whenever `bd` is installed.
 
+Dispatch through MCP or `POST /api/dispatch` automatically selects a model without
+an extra LLM call. Clearly bounded chores (short spelling/formatting/rename/summary
+requests) use Codex `gpt-6-luna`; ordinary or ambiguous work uses Claude `sonnet`;
+architecture, security, migrations and concurrency hazards use Claude `opus`.
+This is a conservative prompt heuristic, not a guarantee of difficulty or savings.
+For ticket-only prompts, the orchestrator should supply `complexity` (`simple`,
+`standard`, `complex`) using the ticket's actual scope.
+
+An explicit `provider` pins the provider: Claude tiers are `haiku`/`sonnet`/`opus`,
+Codex tiers are `gpt-6-luna`/`gpt-6.1-sol`/`gpt-6-astra`. An explicit `model` wins;
+`model: "default"` preserves the CLI's configured model. A model override without
+a provider uses Claude, as before. OpenCode keeps its CLI default unless configured.
+Customize a tier for available account models with sidecar environment variables
+`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
+use `default` as the value to keep CLI configuration. No CLI environment is replaced.
+Codex model IDs follow [the official model guide](https://learn.chatgpt.com/docs/models);
+account availability can differ. Unavailable models surface the CLI's own error.
+
+The reply's `modelSelection` and dispatch registry expose provider, model, complexity,
+and routing reason. Offline dispatches persist the chosen model so replay cannot
+silently choose a different one. Direct writes to `dispatch.jsonl` bypass sidecar
+routing; use the API/MCP entry point for automatic selection.
+
 Every dispatch this sidecar creates is also recorded in `oracle-dispatches.json`
 (args + outcome + the originating Telegram chat when there is one), the native app
 persists the `dispatchId` on the session it spawns, and the `activity` broadcast

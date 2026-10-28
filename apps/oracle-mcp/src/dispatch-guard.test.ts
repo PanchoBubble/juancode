@@ -102,6 +102,11 @@ describe("requestFingerprint", () => {
     expect(requestFingerprint({ ...base, prompt: "p " })).not.toBe(requestFingerprint(base));
     expect(requestFingerprint({ ...base, provider: "codex" })).not.toBe(requestFingerprint(base));
     expect(requestFingerprint({ ...base, worktree: false })).not.toBe(requestFingerprint(base));
+    expect(requestFingerprint({ ...base, model: "opus" })).not.toBe(requestFingerprint(base));
+    expect(requestFingerprint({ ...base, complexity: "simple" })).not.toBe(
+      requestFingerprint(base),
+    );
+    expect(requestFingerprint({ ...base, provider: undefined })).not.toBe(requestFingerprint(base));
   });
 
   it("lets a caller-supplied key replace the content hash", () => {

@@ -22,6 +22,7 @@
 // Keep the mailbox line shape in lockstep with the Swift `OracleDispatch` struct
 // in apps/native — the app tails the file and decodes each line.
 
+import { selectDispatchModel, type ModelSelection, type TaskComplexity } from "./dispatch-model.ts";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -36,6 +37,7 @@ import {
 } from "./dispatch-status.ts";
 import {
   findDuplicate,
+  legacyRequestFingerprint,
   findTicketConflict,
   liveDispatches,
   requestFingerprint,
@@ -48,6 +50,8 @@ export interface DispatchRequest {
   /** The seed instruction sent to the agent once its TUI is up. */
   prompt: string;
   provider?: "claude" | "codex" | "opencode";
+  model?: string;
+  complexity?: TaskComplexity;
   /** Isolate the agent in a fresh git worktree off `project`. */
   worktree?: boolean;
   /** The Telegram chat the dispatch originated from, when it did. Recorded in the
@@ -73,6 +77,7 @@ export interface DispatchRequest {
 }
 
 export interface DispatchOutcome {
+  modelSelection?: ModelSelection;
   dispatchId: string;
   /** What happened, in one word a caller can switch on. `duplicate` means this
    *  request collapsed onto an earlier dispatch and created nothing. */
@@ -148,6 +153,7 @@ export async function appendDispatch(opts: DispatchRequest, dispatchId: string):
       project: opts.project,
       prompt: opts.prompt,
       provider: opts.provider ?? "claude",
+      ...(opts.model ? { model: opts.model } : {}),
       worktree: opts.worktree ?? false,
       dispatchId,
       ...(opts.fromSessionId ? { fromSessionId: opts.fromSessionId } : {}),
@@ -228,6 +234,7 @@ function wsCreate(
         JSON.stringify({
           type: "create",
           provider: opts.provider ?? "claude",
+          ...(opts.model ? { model: opts.model } : {}),
           cwd: opts.project,
           // No grid: a dispatch has no viewport of its own, so the app boots the
           // CLI at the desktop's real terminal size. Sending a nominal one printed
@@ -350,11 +357,20 @@ async function runDispatch(
     );
     const at = now();
 
-    const earlier = findDuplicate(statuses, fingerprint, at);
+    const earlier =
+      findDuplicate(statuses, fingerprint, at) ??
+      (!opts.model && !opts.complexity
+        ? findDuplicate(
+            statuses.filter((s) => !s.request?.modelSelection),
+            legacyRequestFingerprint(opts),
+            at,
+          )
+        : null);
     if (earlier) {
       const ageS = Math.max(0, Math.round((at - earlier.at) / 1000));
       return asDuplicate(
         {
+          modelSelection: earlier.modelSelection,
           dispatchId: earlier.dispatchId,
           state: earlier.outcome === "started" ? "started" : "queued",
           started: earlier.outcome === "started",
@@ -388,8 +404,10 @@ async function runDispatch(
     }
   }
 
+  const modelSelection = selectDispatchModel(opts);
+  opts = { ...opts, provider: modelSelection.provider, model: modelSelection.model ?? undefined };
   const dispatchId = randomUUID();
-  const provider = opts.provider ?? "claude";
+  const provider = modelSelection.provider;
   const reply = await wsCreate(opts, dispatchId, timeoutMs);
   // Every outcome lands in the durable dispatch registry (args + origin chat), so
   // dispatch-status can answer for it later and lifecycle events can route back to
@@ -405,6 +423,8 @@ async function runDispatch(
       project: opts.project,
       prompt: opts.prompt,
       provider,
+      model: modelSelection.model,
+      modelSelection,
       worktree: opts.worktree ?? false,
       telegramChatId: opts.telegramChatId ?? null,
       trigger: opts.trigger ?? null,
@@ -422,6 +442,7 @@ async function runDispatch(
     case "created":
       await record("started", reply.sessionId, null);
       return {
+        modelSelection,
         dispatchId,
         state: "started",
         started: true,
@@ -432,7 +453,7 @@ async function runDispatch(
         ticket,
         queuedReason: null,
         advice: `Running now. ${POLL_ADVICE}`,
-        message: `Started ${provider} session ${reply.sessionId} in ${opts.project}${
+        message: `Started ${provider}${modelSelection.model ? ` (${modelSelection.model})` : ""} session ${reply.sessionId} in ${opts.project}${
           opts.worktree ? " (worktree)" : ""
         }.`,
       };
@@ -454,6 +475,7 @@ async function runDispatch(
           }) — it may just be loaded.`
         : `The juancode app isn't reachable at ${nativeApiBase()} (${reply.reason}).`;
       return {
+        modelSelection,
         dispatchId,
         state: "queued",
         started: false,
@@ -465,7 +487,7 @@ async function runDispatch(
         queuedReason: reply.connected ? "no-ack" : "unreachable",
         advice: `ACCEPTED, not yet started. Do NOT post this dispatch again — re-posting is what creates a second session. ${POLL_ADVICE}`,
         message:
-          `${where} The dispatch is durably queued and starts by itself — exactly once, ` +
+          `${where} Selected ${provider}/${modelSelection.model ?? "CLI default"}. The dispatch is durably queued and starts by itself — exactly once, ` +
           `whether from the create that may still be in flight or from the mailbox (both carry ` +
           `dispatchId ${dispatchId}, and the app dedupes on it). Do not re-post it.`,
       };

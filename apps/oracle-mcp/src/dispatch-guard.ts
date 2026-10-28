@@ -11,7 +11,7 @@
 // id, so the ledger never sees the two as the same work. This module supplies the
 // two keys that do:
 //
-//   - a request **fingerprint** (project + provider + worktree + prompt, or a
+//   - a request **fingerprint** (project + provider + model + complexity + worktree + prompt, or a
 //     caller-supplied idempotency key): a blind retry of the same POST collapses
 //     onto the first dispatch instead of creating a second session.
 //   - the **bd ticket id**, read out of the prompt: at most one live session per
@@ -58,22 +58,42 @@ export function ticketIdsInPrompt(prompt: string): string[] {
 }
 
 /** The fields a fingerprint is taken over — the whole of what the native app is
- *  asked to do. Two requests agreeing on all four ARE the same dispatch. */
+ *  asked to do. Routing inputs are included; resolved defaults are not. */
 export interface FingerprintInput {
   project: string;
   prompt: string;
   provider?: string;
+  model?: string | null;
+  complexity?: string;
   worktree?: boolean;
   /** A caller-supplied key. When set it replaces the content hash outright, so a
    *  caller can retry with an edited prompt and still be deduped. */
   idempotencyKey?: string | null;
 }
 
+/** Pre-routing fingerprints remain useful during the ten-minute upgrade window. */
+export function legacyRequestFingerprint(req: FingerprintInput): string {
+  if (req.idempotencyKey) return `key:${req.idempotencyKey}`;
+  return `req:${createHash("sha256")
+    .update(
+      [req.project, req.provider ?? "claude", req.worktree ? "1" : "0", req.prompt].join("\u0000"),
+    )
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 export function requestFingerprint(req: FingerprintInput): string {
   if (req.idempotencyKey) return `key:${req.idempotencyKey}`;
   const digest = createHash("sha256")
     .update(
-      [req.project, req.provider ?? "claude", req.worktree ? "1" : "0", req.prompt].join("\u0000"),
+      [
+        req.project,
+        req.provider ?? "auto",
+        req.worktree ? "1" : "0",
+        req.prompt,
+        req.model?.trim() || "auto",
+        req.complexity ?? "auto",
+      ].join("\u0000"),
     )
     .digest("hex");
   return `req:${digest.slice(0, 32)}`;

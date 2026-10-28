@@ -10,6 +10,7 @@
 // `JUANCODE_ORACLE_DIR`, tolerant of a missing/corrupt file, capped so it can't
 // grow without bound.
 
+import type { ModelSelection } from "./dispatch-model.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { oracleDir } from "./oracle.ts";
@@ -43,6 +44,8 @@ export interface DispatchRecord {
   project: string;
   prompt: string;
   provider: string;
+  model?: string | null;
+  modelSelection?: ModelSelection;
   worktree: boolean;
   /** The Telegram chat the dispatch originated from, or null (MCP/console). */
   telegramChatId: number | null;

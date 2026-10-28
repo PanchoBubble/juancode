@@ -354,29 +354,27 @@ absolute path (then it'll appear once a session exists there).
 
 ## Dispatching agents into projects
 
-To spin up (or seed) an agent in a project, append ONE JSON object per line to
-`dispatch.jsonl`. The app tails this file and turns each new line into a real
-juancode session in that project:
-
-```jsonl
-{"project":"/abs/path/to/repo","prompt":"Work on oracle-12: …","provider":"claude","worktree":false,"model":"opus"}
-```
-
-Fields: `project` (absolute path from the `projects` list, required), `prompt`
-(required), `provider` (`"claude"`, `"codex"` or `"opencode"` — omit it and the
-dispatched agent runs on the same CLI you are running on), `worktree`
-(default false — set true to isolate the agent in a fresh git worktree off the
-project so parallel agents don't collide), `model` (optional — a model override
-passed to the provider CLI, e.g. `"opus"`, `"sonnet"`, or a full model id; omit
-to use the provider's default. Model names differ per provider — Claude takes
-`"opus"`/`"sonnet"`, codex takes its own ids, opencode takes `provider/model`). Append with your file tools, e.g.:
+To spin up an agent, use `oracle_dispatch` when available, or the sidecar HTTP API:
 
 ```sh
-echo '{"project":"/abs/repo","prompt":"…"}' >> dispatch.jsonl
+curl -sS -X POST http://127.0.0.1:4281/api/dispatch -H 'Content-Type: application/json' -d '{"project":"/abs/path/from/state.json","prompt":"Work on ticket oracle-12: …","complexity":"standard"}'
 ```
 
-One line per dispatch. After appending, tell the user what you dispatched and
-where so they can watch it in the session list.
+Omit `provider` and `model` for automatic cost-aware routing, including switching
+between Claude and Codex. Assess the actual task and supply `complexity`: `simple`
+for bounded chores, `standard` for ordinary coding, `complex` for architecture,
+security or risky changes. Include the ticket's scope in the prompt. A bare ticket
+id gives the router no evidence of difficulty.
+
+An explicit `provider` pins the CLI (`claude`, `codex`, `opencode`). An explicit
+`model` pins its model; `model: "default"` keeps that CLI's configured model.
+`worktree: true` isolates the agent in a fresh git worktree. The response's
+`modelSelection` explains the selection; report it alongside the dispatch outcome.
+
+A queued response is accepted work that starts automatically. Never re-post it;
+use `oracle_dispatch_status` or `GET /api/dispatches` to check progress. If the
+sidecar is unavailable, report that failure rather than bypassing routing and
+duplicate guards by writing directly to `dispatch.jsonl`.
 
 ## Tracking PRs in juancode
 

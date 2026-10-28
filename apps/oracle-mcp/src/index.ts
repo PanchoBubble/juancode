@@ -150,7 +150,24 @@ function buildServer(): McpServer {
       inputSchema: {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
-        provider: z.enum(["claude", "codex", "opencode"]).optional().describe("Default: claude"),
+        provider: z
+          .enum(["claude", "codex", "opencode"])
+          .optional()
+          .describe("Optional provider pin; omitted, routing may choose Claude or Codex by task"),
+        model: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            "Model override; auto (default) routes by task, default preserves the CLI model",
+          ),
+        complexity: z
+          .enum(["simple", "standard", "complex"])
+          .optional()
+          .describe(
+            "Task difficulty: simple for bounded chores, standard for ordinary coding, complex for architecture or risky changes. Inferred from prompt when omitted.",
+          ),
         worktree: z
           .boolean()
           .optional()
@@ -734,12 +751,24 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       idempotencyKey,
       force,
       fromSessionId,
+      model,
+      complexity,
     } = req.body ?? {};
     if (typeof project !== "string" || typeof prompt !== "string" || !project || !prompt) {
       res.status(400).send("project and prompt are required");
       return;
     }
+    if (
+      (model !== undefined && (typeof model !== "string" || !model.trim())) ||
+      (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
+      (provider !== undefined && !["claude", "codex", "opencode"].includes(provider))
+    ) {
+      res.status(400).send("Invalid provider, model, or complexity");
+      return;
+    }
     const outcome = await dispatch({
+      model,
+      complexity,
       project,
       prompt,
       provider,
