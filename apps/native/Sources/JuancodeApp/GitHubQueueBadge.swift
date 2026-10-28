@@ -563,6 +563,12 @@ struct GitHubQueueBadge: View {
         @ViewBuilder private var actions: some View {
             if hovering {
                 HStack(spacing: 2) {
+                    if let stack = PrStack.containing(
+                        pr, in: (cwd.flatMap { model.prs($0)?.prs } ?? []) + model.viewerPrs.rows.map(\.pr)
+                    ) {
+                        PrStackBadge(stack: stack)
+                            .padding(.horizontal, 3)
+                    }
                     if let cwd { checkoutActions(cwd) }
                     HoverCellButton(symbol: "arrow.up.right.square", help: "Open on GitHub") {
                         if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
