@@ -100,7 +100,7 @@ or run `bd ready` and offer the top items. Never guess an id.
 
    **Never re-post a dispatch.** Re-posting a queued one is exactly how `juancode-h1an`
    ended up with two agents racing on the same worktree removals. Keep the
-   `dispatchId` and poll step 6 instead.
+   `dispatchId` and wait on it (see Notes) instead.
 
    The Oracle dispatches with permissions skipped, which is what makes the session
    autonomous. `worktree:true` isolates it, so it never collides with this session or
@@ -173,7 +173,11 @@ the PR. If "commit only", stop after a local branch commit and don't push.
 ## Notes
 
 - One ticket per dispatch (keeps the dispatched session's context tight).
-- Dispatch is fire-and-forget: it does NOT notify this session on exit. Poll
-  `/api/dispatches` or observe it on Telegram.
+- Dispatch is fire-and-forget: it does NOT notify this session on its own. To hear
+  back, run `curl -s 'http://127.0.0.1:4281/api/dispatches/<dispatchId>/wait?timeout=3600'`
+  as a background command (`run_in_background: true`). It returns once the agent asks
+  for input, goes idle after working, exits, or fails to start — `outcome` says which —
+  and the harness wakes you then. Do not poll `/api/dispatches` in a sleep loop: every
+  check is a full turn over your context. Or observe it on Telegram.
 - Several tickets at once: cap at 4 concurrent (a live session is ~300MB and ~6% of a
   core) and give each one a non-overlapping file lane.

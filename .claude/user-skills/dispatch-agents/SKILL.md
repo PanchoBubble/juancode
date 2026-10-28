@@ -79,7 +79,7 @@ dispatched CLI inherits the user's environment untouched.
    - `ok:false` / other 4xx/5xx → real failure; report the error.
 
    **Never re-post a dispatch** to "retry" a queued one — that is how two agents end
-   up racing on the same worktree. Poll instead.
+   up racing on the same worktree. Wait on it instead (below).
 
 5. **Report** the dispatch id and session id (or "queued"), one line per dispatch.
    Do NOT also do the work yourself.
@@ -87,6 +87,10 @@ dispatched CLI inherits the user's environment untouched.
    Follow-up:
 
    ```bash
+   # Run in the background (run_in_background: true); returns when the agent asks for
+   # input, settles idle, exits or fails to start, and the harness wakes you. Never poll
+   # in a sleep loop: each check is a full turn over your context.
+   curl -s 'http://127.0.0.1:4281/api/dispatches/<dispatchId>/wait?timeout=3600'
    curl -s 'http://127.0.0.1:4281/api/dispatches?limit=10'
    curl -s -X POST http://127.0.0.1:4281/api/observe \
      -H 'content-type: application/json' -d '{"sessionId":"<id>"}'   # Telegram pings

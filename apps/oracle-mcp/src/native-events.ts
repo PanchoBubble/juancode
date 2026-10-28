@@ -187,9 +187,14 @@ function emitStuckEvent(ev: SessionStuckEvent): void {
   }
 }
 
-/** Subscribe to native session activity events. Listener errors are isolated. */
-export function onSessionEvent(listener: SessionEventListener): void {
+/** Subscribe to native session activity events. Listener errors are isolated.
+ *  Returns the unsubscribe. */
+export function onSessionEvent(listener: SessionEventListener): () => void {
   sessionEventListeners.push(listener);
+  return () => {
+    const i = sessionEventListeners.indexOf(listener);
+    if (i >= 0) sessionEventListeners.splice(i, 1);
+  };
 }
 
 /** The last live state each session reported, warmed by the connect-time snapshot. */

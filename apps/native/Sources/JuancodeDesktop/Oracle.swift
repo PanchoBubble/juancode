@@ -102,7 +102,7 @@ public struct OracleProject: Codable, Sendable, Equatable {
     }
 }
 
-/// One live (or recently-exited) session, as written into `state.json` for the
+/// One live session, as written into `state.json` for the
 /// Oracle agent to read with its own tools.
 public struct OracleSessionSnapshot: Codable, Sendable, Equatable {
     public var id: String

@@ -53,6 +53,7 @@ import {
 import { dispatch, DispatchConflictError } from "./dispatch.ts";
 import { resolveDispatchOrigin } from "./dispatch-origin.ts";
 import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
+import { waitForDispatch } from "./dispatch-wait.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
   observeSessionForOracle,
@@ -72,6 +73,8 @@ import {
   heavyQueue,
   heavySetPriority,
   heavySetSlots,
+  onSessionEvent,
+  sessionActivity,
   startActivityListener,
   subscribeHeavyQueue,
   supportsHeavyQueue,
@@ -815,6 +818,29 @@ app.get("/api/dispatches", async (req: Request, res: Response) => {
     const limit = Number(req.query.limit);
     const all = await listDispatchStatuses(Number.isInteger(limit) && limit > 0 ? limit : 50);
     res.json(req.query.trigger === "1" ? all.filter((d) => d.request?.trigger) : all);
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
+// Block until a dispatched agent stops (asks for input, settles idle, exits) or its
+// start fails, up to `?timeout=` seconds (default 600, max 3600). Meant to be run in
+// the background by the dispatching session, which is then woken once instead of
+// polling /api/dispatches turn after turn.
+app.get("/api/dispatches/:id/wait", async (req: Request, res: Response) => {
+  try {
+    const seconds = Number(req.query.timeout);
+    const timeoutMs = (Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 3600) : 600) * 1000;
+    const id = String(req.params.id);
+    const gone = new AbortController();
+    res.on("close", () => gone.abort());
+    const result = await waitForDispatch(id, timeoutMs, {
+      getStatus: (d) => getDispatchStatus(d),
+      activity: sessionActivity,
+      subscribe: onSessionEvent,
+      signal: gone.signal,
+    });
+    if (!res.writableEnded && !gone.signal.aborted) res.json(result);
   } catch (e) {
     sendErr(res, e);
   }

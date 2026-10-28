@@ -24,6 +24,8 @@ export interface DispatchSessionState {
   provider: string;
   status: string;
   dispatchId: string | null;
+  /** Epoch ms; absent when the native app did not report it. */
+  createdAt?: number;
 }
 
 export interface DispatchStatus {
@@ -54,6 +56,7 @@ export function parseSessionStates(raw: unknown): DispatchSessionState[] {
       provider: typeof r.provider === "string" ? r.provider : "?",
       status: typeof r.status === "string" ? r.status : "unknown",
       dispatchId: typeof r.dispatchId === "string" ? r.dispatchId : null,
+      ...(typeof r.createdAt === "number" ? { createdAt: r.createdAt } : {}),
     });
   }
   return out;

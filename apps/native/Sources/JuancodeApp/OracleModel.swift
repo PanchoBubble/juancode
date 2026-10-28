@@ -629,9 +629,12 @@ final class OracleModel {
         for a in asks { receiveAsk(a.text) }
     }
 
-    /// Write the current session/workdir snapshot for the agent to read.
+    /// Write the current session/workdir snapshot for the agent to read. Only live
+    /// sessions: the Oracle reads this whole file into context at the start of every
+    /// conversation, and the exited ones were most of its size. What became of a past
+    /// dispatch is answered by `/api/dispatches`.
     private func writeState() {
-        let snaps = app.sessions.map { meta in
+        let snaps = app.sessions.filter { app.isLive($0.id) }.map { meta in
             OracleSessionSnapshot(
                 id: meta.id, title: meta.title, cwd: meta.cwd,
                 provider: meta.provider.rawValue, status: meta.status.rawValue,

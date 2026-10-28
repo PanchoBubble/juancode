@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { touchChatSession, upsertChatSession } from "./chat-store.ts";
 import { keyBytesFor, unknownKey, unknownKeyMessage } from "./keys.ts";
+import { assessResume } from "./oracle-rotation.ts";
 
 /** `~/.juancode/oracle` (the Oracle control dir), overridable to match the Swift
  *  `JUANCODE_ORACLE_DIR` so both sides point at the same tree in tests. */
@@ -633,12 +634,13 @@ export async function oracleChat(
   sessionId?: string | null,
   origin?: ChatOrigin,
 ): Promise<ChatReply> {
-  const resume = sessionId && sessionId.length > 0 ? sessionId : null;
+  const turn = await planTurn(text, sessionId);
+  const resume = turn.resume;
   const extraSystem = originSystemPrompt(origin);
-  let result = await runClaude(text, resume, extraSystem);
+  let result = await runClaude(turn.text, resume, extraSystem);
   // A stale/unknown resume id makes claude exit with "No conversation found" — start
   // a fresh conversation rather than surfacing that as the Oracle's answer.
-  if (result.processError && resume) result = await runClaude(text, null, extraSystem);
+  if (result.processError && resume) result = await runClaude(turn.text, null, extraSystem);
   const reply = result.reply;
   await persistChatSession(resume, text, reply.sessionId);
   return reply;
@@ -655,6 +657,32 @@ export function originSystemPrompt(origin?: ChatOrigin): string {
     `"telegramChatId": ${origin.telegramChatId} in the JSON body so the dispatched ` +
     `agent's lifecycle pings (needs input / finished) route back to this chat.`
   );
+}
+
+/** The prompt and resume id a turn actually runs with: a resume that would rebuild a
+ *  large expired cache becomes a fresh session opening with a short carry-over. */
+async function planTurn(
+  text: string,
+  sessionId: string | null | undefined,
+): Promise<{ text: string; resume: string | null }> {
+  const resume = sessionId && sessionId.length > 0 ? sessionId : null;
+  if (!resume) return { text, resume };
+  const decision = await assessResume(oracleDir(), resume);
+  if (decision.action === "resume") return { text, resume };
+  console.error(`oracle: starting fresh instead of resuming ${resume} (${decision.reason})`);
+  return { text: decision.carry + text, resume: null };
+}
+
+/** The headless Oracle orchestrates rather than codes, so it runs Sonnet at high
+ *  effort. JUANCODE_ORACLE_MODEL / JUANCODE_ORACLE_EFFORT override either half;
+ *  "default" leaves that one to the CLI. */
+export function oracleModelArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const model = env.JUANCODE_ORACLE_MODEL?.trim() || "sonnet";
+  const effort = env.JUANCODE_ORACLE_EFFORT?.trim() || "high";
+  return [
+    ...(model === "default" ? [] : ["--model", model]),
+    ...(effort === "default" ? [] : ["--effort", effort]),
+  ];
 }
 
 /** Record a finished turn's session so the console can list + continue it. Continuing
@@ -733,6 +761,7 @@ async function runClaude(
     extraSystem ? `${ORACLE_SYSTEM}\n${extraSystem}` : ORACLE_SYSTEM,
   ];
   if (resume) args.push("--resume", resume);
+  args.push(...oracleModelArgs());
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
@@ -899,6 +928,7 @@ async function runClaudeStream(
     ORACLE_SYSTEM,
   ];
   if (resume) args.push("--resume", resume);
+  args.push(...oracleModelArgs());
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
@@ -977,12 +1007,13 @@ export async function oracleChatStream(
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<ChatStreamDone> {
-  const resume = sessionId && sessionId.length > 0 ? sessionId : null;
-  let res = await runClaudeStream(text, resume, onDelta, signal);
+  const turn = await planTurn(text, sessionId);
+  const resume = turn.resume;
+  let res = await runClaudeStream(turn.text, resume, onDelta, signal);
   // Stale/unknown resume id → claude exits non-zero with nothing streamed; retry fresh
   // (but only when nothing was shown, so we never double up a visible reply).
   if (res.processError && resume && !res.emittedAny && !signal?.aborted) {
-    res = await runClaudeStream(text, null, onDelta, signal);
+    res = await runClaudeStream(turn.text, null, onDelta, signal);
   }
   if (res.processError && !res.emittedAny) {
     // Nothing usable came back — surface the failure as the reply body.

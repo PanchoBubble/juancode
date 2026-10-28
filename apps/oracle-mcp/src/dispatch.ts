@@ -143,7 +143,8 @@ const CREATE_ACK_TIMEOUT_MS = 15_000;
 const GUARD_LOOKBACK = 100;
 
 const POLL_ADVICE =
-  "Poll GET /api/dispatches (or oracle_dispatch_status) with this dispatchId instead of posting again.";
+  "Track this dispatchId instead of posting again: GET /api/dispatches/<dispatchId>/wait " +
+  "(run in the background; returns when the agent stops) or oracle_dispatch_status.";
 
 /** Append one dispatch line for the native app to tail and spawn an agent from.
  *  The offline fallback — shape MUST match Swift `OracleDispatch`. */
