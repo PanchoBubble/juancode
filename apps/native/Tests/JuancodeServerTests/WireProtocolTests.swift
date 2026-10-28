@@ -571,6 +571,26 @@ final class WireProtocolTests: XCTestCase {
         }
     }
 
+    /// The two frames the sidecar's session handoff sends (juancode-u5q), in the
+    /// shapes `native-events.ts` writes them.
+    func testDecodesTheHandoffFrames() throws {
+        guard case let .sleepSession(id) = try decode(#"{"type":"sleepSession","sessionId":"s-1"}"#)
+        else { return XCTFail("expected .sleepSession") }
+        XCTAssertEqual(id, "s-1")
+
+        guard case let .createHandoff(handoff, requestId) = try decode(#"""
+            {"type":"createHandoff","requestId":"handoff-1","handoff":{"id":"h1","chainSlug":"c",
+             "source":{"kind":"session","sessionId":"old"},
+             "target":{"kind":"session","sessionId":"new"},"summary":"the note"}}
+            """#)
+        else { return XCTFail("expected .createHandoff") }
+        XCTAssertEqual(requestId, "handoff-1")
+        XCTAssertEqual(handoff.source, .session("old"))
+        XCTAssertEqual(handoff.target, .session("new"))
+        XCTAssertEqual(handoff.summary, "the note")
+        XCTAssertEqual(handoff.state, .pending)
+    }
+
     func testEncodesAChainWholeAndAResultThatSaysWhetherItHappened() throws {
         let chain = Chain(slug: "auth-rewrite", createdAt: 1, members: [
             ChainMember(kind: .linear, ref: "ENG-1", title: "Rotate keys", addedAt: 2),

@@ -8,6 +8,7 @@
 // `AppModel.autoCloseIdleMinutes`, which drives the reaper's window live. Surfaced
 // via the standard ⌘, window.
 
+import JuancodeCore
 import SwiftUI
 
 struct SessionSettingsView: View {
@@ -23,6 +24,12 @@ struct SessionSettingsView: View {
     /// doesn't lose the chosen amount (juancode-qoc).
     @State private var budget = 20.0
     private var budgetEnabled: Bool { model.costBudgetUsd > 0 }
+
+    /// The context size, in tokens, past which a session's badge suggests a handoff
+    /// (juancode-u5q); 0 turns it off. `handoffDraft` keeps the chosen line across a
+    /// toggle off and on, like `budget`.
+    @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
+    @State private var handoffDraft = ContextPressure.defaultHandoffTokens
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -80,6 +87,25 @@ struct SessionSettingsView: View {
 
                 Divider().padding(.vertical, 4)
 
+                // Handoff line (juancode-u5q): past it the usage badge turns purple and
+                // its tooltip suggests handing off — every turn re-reads the context.
+                Toggle("Suggest a handoff past a context size", isOn: Binding(
+                    get: { handoffTokens > 0 },
+                    set: { handoffTokens = $0 ? handoffDraft : 0 }))
+
+                HStack(spacing: 8) {
+                    Text("Suggest at")
+                    Stepper(value: $handoffDraft, in: 50_000...1_000_000, step: 25_000) {
+                        Text("\(SessionUsageFormat.tokens(handoffDraft)) tokens").monospacedDigit()
+                    }
+                    .fixedSize()
+                    .onChange(of: handoffDraft) { _, t in if handoffTokens > 0 { handoffTokens = t } }
+                }
+                .disabled(handoffTokens == 0)
+                .foregroundStyle(handoffTokens > 0 ? .primary : .secondary)
+
+                Divider().padding(.vertical, 4)
+
                 // App-wide worktree default. A project whose "+" popover switch was
                 // flipped keeps its own answer; every other project follows this one.
                 VStack(alignment: .leading, spacing: 4) {
@@ -124,10 +150,11 @@ struct SessionSettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 520, height: 620)
         .onAppear {
             if enabled { minutes = model.autoCloseIdleMinutes }
             if budgetEnabled { budget = model.costBudgetUsd }
+            if handoffTokens > 0 { handoffDraft = handoffTokens }
         }
     }
 }

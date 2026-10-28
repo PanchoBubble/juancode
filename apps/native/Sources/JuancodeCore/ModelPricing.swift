@@ -81,11 +81,15 @@ public enum ModelPricing {
     }
 }
 
-/// How close a session is to filling its context window (juancode-lncw). Only a
+/// How close a session is to filling its context window (juancode-lncw), and whether
+/// it has grown past the point where handing off is cheaper (juancode-u5q). Only a
 /// display/alert classification — nothing here compacts, trims or steers anything.
 public enum ContextPressure: Sendable, Equatable {
-    /// Unknown window, or comfortably below the warn line.
+    /// Unknown window, or comfortably below every line.
     case ok
+    /// Past the absolute handoff line, though not near the window: every turn re-reads
+    /// that many tokens, so a fresh session seeded with a short note is cheaper.
+    case handoff
     /// Past `warnFraction` but not yet at the wall.
     case warn
     /// At/over `criticalFraction` — the next turn is likely to hit auto-compaction.
@@ -94,11 +98,25 @@ public enum ContextPressure: Sendable, Equatable {
     /// The default context warn line, also the sidecar's alert default.
     public static let warnFraction = 0.8
     public static let criticalFraction = 0.95
+    /// The default handoff line in tokens, also the sidecar's `DEFAULT_HANDOFF_TOKENS`.
+    /// Absolute rather than a window fraction: 0.8 of a 1M window is 800k, far past
+    /// where cache reads dominate the spend. 0 disables it.
+    public static let defaultHandoffTokens = 250_000
 
     public static func of(_ fraction: Double?) -> ContextPressure {
         guard let fraction else { return .ok }
         if fraction >= criticalFraction { return .critical }
         if fraction >= warnFraction { return .warn }
+        return .ok
+    }
+
+    /// The window classification, with the handoff line under it: a session near its
+    /// window says so first, since compaction is the nearer problem.
+    public static func of(fraction: Double?, tokens: Int?,
+                          handoffTokens: Int = defaultHandoffTokens) -> ContextPressure {
+        let window = of(fraction)
+        if window != .ok { return window }
+        if handoffTokens > 0, let tokens, tokens >= handoffTokens { return .handoff }
         return .ok
     }
 }

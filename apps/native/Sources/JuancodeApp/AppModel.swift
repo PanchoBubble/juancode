@@ -456,6 +456,9 @@ final class AppModel {
     /// runs a headless `claude -p` turn and previews a settings patch to confirm.
     var showingSettingsAI = false
     var errorMessage: String?
+    /// Sessions whose handoff to a fresh session is under way (juancode-u5q) — see
+    /// `SessionHandoff.swift`. The row menu reads it to offer the action once.
+    var handoffsInFlight: Set<String> = []
     /// A create waiting on "delete this session to free its worktree slot?".
     var pendingReclaim: PendingReclaim?
     struct PendingReclaim: Identifiable {

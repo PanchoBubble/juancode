@@ -1792,6 +1792,18 @@ struct SidebarView: View {
                 Button("Sleep Idle in This Project") {
                     model.sleepIdleSessions(inProject: meta.cwd)
                 }
+                // Ask for a short note, start a fresh session in the same checkout
+                // seeded with it, and sleep this one — the cheap way past a context
+                // that is re-read in full every turn (juancode-u5q).
+                if meta.kind == .agent {
+                    let handingOff = model.handoffsInFlight.contains(meta.id)
+                    Button(handingOff ? "Handing Off…" : "Hand Off to Fresh Session") {
+                        model.handOffSession(meta.id)
+                    }
+                    .disabled(handingOff)
+                    .help("Queue a request for a short handoff note, start a fresh session "
+                        + "here with it as the first prompt, and put this one to sleep")
+                }
             }
             // The log is shared JSONL — grep the session id to follow one row's
             // spawn/seed/activity/exit trail.
@@ -2586,6 +2598,8 @@ struct TrackBadge: View {
 
 struct SessionRow: View {
     let meta: SessionMeta
+    /// The handoff line the usage tooltip is read against (juancode-u5q).
+    @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
     var programStatus: ProgramStatusFeed? = nil
     /// Filter text to mark in the title (case-insensitive), nil for none.
     var titleHighlight: String? = nil
@@ -2946,6 +2960,7 @@ struct SessionRow: View {
             lines.append("context \(pct)% — "
                 + "\(SessionUsageFormat.tokens(ctx)) of \(SessionUsageFormat.tokens(win))")
         }
+        if let hint = SessionHandoff.hint(u, handoffTokens: handoffTokens) { lines.append(hint) }
         return lines.joined(separator: "\n")
     }
 
@@ -3190,6 +3205,7 @@ private enum SidePanelTab: String, CaseIterable {
 func pressureTint(_ pressure: ContextPressure) -> Color {
     switch pressure {
     case .ok: return .secondary
+    case .handoff: return .purple
     case .warn: return .orange
     case .critical: return .red
     }
@@ -3198,6 +3214,8 @@ func pressureTint(_ pressure: ContextPressure) -> Color {
 struct SessionContainer: View {
     @Environment(AppModel.self) private var model
     let meta: SessionMeta
+    /// The handoff line the usage badge is tinted against (juancode-u5q).
+    @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
     /// Active right-panel tab, remembered app-wide.
     @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.files.rawValue
     /// Whether the right-side panel is shown. Toggled from the header CTA.
@@ -3271,8 +3289,11 @@ struct SessionContainer: View {
                 if let label = meta.usage?.badgeLabel {
                     Text(label)
                         .font(.caption.monospacedDigit())
-                        .foregroundStyle(pressureTint(meta.usage?.contextPressure ?? .ok))
-                        .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : ""))
+                        .foregroundStyle(pressureTint(
+                            meta.usage?.contextPressure(handoffTokens: handoffTokens) ?? .ok))
+                        .help("Token usage" + (meta.usage?.costUsd != nil ? " · estimated cost" : "")
+                            + (SessionHandoff.hint(meta.usage, handoffTokens: handoffTokens)
+                                .map { "\n" + $0 } ?? ""))
                 }
                 // When this session's branch has an open PR, offer a one-click jump
                 // into the in-app PR view (scoped + deep-linked to that PR).

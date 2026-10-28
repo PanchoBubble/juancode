@@ -88,7 +88,14 @@ public struct SessionUsage: Codable, Sendable, Equatable {
         return Int((f * 100).rounded())
     }
 
-    public var contextPressure: ContextPressure { ContextPressure.of(contextFraction) }
+    public var contextPressure: ContextPressure { contextPressure() }
+
+    /// `contextPressure` against a handoff line other than the default (the setting).
+    public func contextPressure(
+        handoffTokens: Int = ContextPressure.defaultHandoffTokens) -> ContextPressure {
+        ContextPressure.of(fraction: contextFraction, tokens: contextTokens,
+                           handoffTokens: handoffTokens)
+    }
 }
 
 public struct SessionMeta: Codable, Sendable, Equatable {

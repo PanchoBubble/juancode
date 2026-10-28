@@ -83,6 +83,28 @@ final class SessionUsageFormatTests: XCTestCase {
         XCTAssertEqual(withContext(190_000, 200_000).contextPressure, .critical)
     }
 
+    // MARK: - handoff line (juancode-u5q)
+
+    func testHandoffLineIsAbsoluteTokensNotAWindowFraction() {
+        // 250k of a 1M window is only 25% full, and already worth handing off.
+        XCTAssertEqual(withContext(249_999, 1_000_000).contextPressure, .ok)
+        XCTAssertEqual(withContext(250_000, 1_000_000).contextPressure, .handoff)
+        XCTAssertEqual(withContext(600_000, 1_000_000).contextPressure, .handoff)
+        // The window's own lines still win once they are reached.
+        XCTAssertEqual(withContext(800_000, 1_000_000).contextPressure, .warn)
+        XCTAssertEqual(withContext(950_000, 1_000_000).contextPressure, .critical)
+        // An unknown window still knows the token count.
+        XCTAssertEqual(withContext(300_000, nil).contextPressure, .handoff)
+    }
+
+    func testHandoffLineFollowsTheSettingAndZeroDisablesIt() {
+        let u = withContext(180_000, 1_000_000)
+        XCTAssertEqual(u.contextPressure, .ok)
+        XCTAssertEqual(u.contextPressure(handoffTokens: 150_000), .handoff)
+        XCTAssertEqual(withContext(400_000, 1_000_000).contextPressure(handoffTokens: 0), .ok)
+        XCTAssertEqual(ContextPressure.of(fraction: nil, tokens: nil), .ok)
+    }
+
     func testBadgeLabelAppendsContextWhenKnown() {
         XCTAssertEqual(withContext(160_000, 200_000).badgeLabel, "12k tok · $0.42 · ctx 80%")
         XCTAssertEqual(withContext(nil, nil).badgeLabel, "12k tok · $0.42")

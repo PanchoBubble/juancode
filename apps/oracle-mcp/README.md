@@ -8,15 +8,16 @@ Oracle from your phone.
 The pty/agent work always stays on the Mac (the CLAUDE.md prime directive). This
 sidecar only **relays intent and reads state**:
 
-| Tool                     | What it does                                        | Mechanism                                                                                                                                      |
-| ------------------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `oracle_list_issues`     | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle`                                                                                                    |
-| `oracle_create_issue`    | Create a global tracker item                        | `bd create`                                                                                                                                    |
-| `oracle_dispatch`        | Spawn/seed an agent in a project                    | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down                                                                      |
-| `oracle_dispatch_status` | What happened to a dispatch                         | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions`                                                              |
-| `oracle_list_sessions`   | List live + persisted sessions                      | `GET` the native app's `/api/sessions`                                                                                                         |
-| `oracle_session_screen`  | What a session's pane shows right now               | `GET /api/sessions/:id/screen` — the RENDERED grid, not the byte log; falls back to `/scrollback` for a reaped pty or a core without the route |
-| `oracle_ask`             | Ask the live Oracle agent                           | append `ask.jsonl` (native app tails it)                                                                                                       |
+| Tool                     | What it does                                        | Mechanism                                                                                                                                                                                      |
+| ------------------------ | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oracle_list_issues`     | List the Oracle's global `bd` items (ready-flagged) | `bd --sandbox list` in `~/.juancode/oracle`                                                                                                                                                    |
+| `oracle_create_issue`    | Create a global tracker item                        | `bd create`                                                                                                                                                                                    |
+| `oracle_dispatch`        | Spawn/seed an agent in a project                    | WS `create` with ack; falls back to `dispatch.jsonl` when the app is down                                                                                                                      |
+| `oracle_dispatch_status` | What happened to a dispatch                         | merges `oracle-dispatches.json` + `dispatch-results.jsonl` + live `/api/sessions`                                                                                                              |
+| `oracle_list_sessions`   | List live + persisted sessions                      | `GET` the native app's `/api/sessions`                                                                                                                                                         |
+| `oracle_session_screen`  | What a session's pane shows right now               | `GET /api/sessions/:id/screen` — the RENDERED grid, not the byte log; falls back to `/scrollback` for a reaped pty or a core without the route                                                 |
+| `oracle_ask`             | Ask the live Oracle agent                           | append `ask.jsonl` (native app tails it)                                                                                                                                                       |
+| `oracle_session_handoff` | Hand a long session off to a fresh one              | `session-handoff.ts`: queue the note request, read the reply's note, WS `create` the successor, `createHandoff`, `sleepSession`. Also `POST /api/sessions/:id/handoff` (the native row action) |
 
 `dispatch` is WS-first: with the app up you get a real ack (the session id, or the
 real error for a bad path/provider); with the app down the dispatch is durably
@@ -155,6 +156,7 @@ Environment variables (all optional):
 | `JUANCODE_GH_WEBHOOK_SECRET`     | _(unset)_               | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below.                           |
 | `JUANCODE_CONTEXT_ALERT_PERCENT` | `80`                    | Context-pressure line (percent of the model's window) that pings observing Telegram chats. `0` disables it. See "Cost + context alerts".                             |
 | `JUANCODE_SESSION_SPEND_CAP_USD` | _(unset)_               | Estimated spend on one session that pings observing chats, in USD. Unset/`0` ⇒ no spend alerts.                                                                      |
+| `JUANCODE_HANDOFF_ALERT_TOKENS`  | `250000`                | Context size in tokens past which observing chats are told a handoff would be cheaper. `0` disables it. See "Session handoff".                                       |
 
 ### Cost + context alerts (juancode-lncw)
 
@@ -173,6 +175,24 @@ an estimate only grows.
 
 Nothing here steers a session: no compaction, no pause, no cap enforcement. It exists
 so a wall is visible before you hit it.
+
+### Session handoff (juancode-u5q)
+
+Cache reads dominate spend: a session at 400k context re-reads all of it every turn.
+A second latch fires once when a session's context passes `JUANCODE_HANDOFF_ALERT_TOKENS`
+(absolute tokens, default 250k — the Swift badge turns purple at the same line, set in
+Settings › Sessions) and suggests a handoff. Nothing hands off on its own.
+
+A handoff (`oracle_session_handoff`, or the session row's "Hand Off to Fresh Session",
+which calls `POST /api/sessions/:id/handoff`) runs `session-handoff.ts` once for both:
+it queues a one-line request for a ≤60-line note between `<<<HANDOFF>>>` and
+`<<<END HANDOFF>>>` (through the queue, so it never types over a draft), waits for the
+session to settle, and takes the note from the reply. No note, a question back, or a
+timeout refuses and changes nothing. Otherwise it spawns the successor in the same
+checkout with the same provider, model and permission mode and the note as its first
+prompt, records the handoff in the daemon's chain handoff history (making a chain for
+the old session if it has none), and puts the old session to sleep — dormant and
+resumable. Nothing is written to the repo or the worktree.
 
 ### Telegram bridge (juancode-c6y)
 

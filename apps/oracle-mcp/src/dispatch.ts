@@ -162,7 +162,7 @@ export async function appendDispatch(opts: DispatchRequest, dispatchId: string):
   await appendFile(dispatchFile(), line, "utf8");
 }
 
-type WsCreateReply =
+export type WsCreateReply =
   | { kind: "created"; sessionId: string }
   /** The server answered with a real error — do NOT queue, surface it. */
   | { kind: "rejected"; message: string }
@@ -173,10 +173,15 @@ type WsCreateReply =
 
 /** One `create` round-trip over a short-lived WS to the native server. Resolves
  *  (never rejects): connectivity problems come back as `unreachable` so the caller
- *  can queue, while a server-sent `error` is a genuine rejection. */
-function wsCreate(
-  opts: DispatchRequest,
-  dispatchId: string,
+ *  can queue, while a server-sent `error` is a genuine rejection.
+ *
+ *  `frame` builds the create. With `awaitHandshake` it is built from this socket's
+ *  `serverInfo` capabilities and sent once they arrive; otherwise it goes out on open
+ *  with no capabilities to read. Shared with the session handoff (session-handoff.ts),
+ *  whose successor is an ordinary create. */
+export function wsCreate(
+  frame: (capabilities: string[] | null) => Record<string, unknown>,
+  awaitHandshake: boolean,
   timeoutMs: number,
 ): Promise<WsCreateReply> {
   return new Promise((resolve) => {
@@ -227,33 +232,17 @@ function wsCreate(
         connected,
       }),
     );
-    // Without a source the create goes out on open, as it always has. With one it
-    // waits for this socket's `serverInfo`, whose capabilities say whether the core
-    // knows the field; the ack timeout above still bounds a core that never greets.
-    const sendCreate = (inherit: boolean) =>
-      sock.send(
-        JSON.stringify({
-          type: "create",
-          provider: opts.provider ?? "claude",
-          ...(opts.model ? { model: opts.model } : {}),
-          cwd: opts.project,
-          // No grid: a dispatch has no viewport of its own, so the app boots the
-          // CLI at the desktop's real terminal size. Sending a nominal one printed
-          // the entire first turn at that width, and no later resize can rewrap
-          // what's already in the scrollback.
-          initialInput: opts.prompt,
-          skipPermissions: true,
-          isolateWorktree: opts.worktree ?? false,
-          dispatchId,
-          ...(inherit ? { fromSessionId: opts.fromSessionId } : {}),
-        }),
-      );
+    // Without a handshake to wait for the create goes out on open, as it always has.
+    // With one it waits for this socket's `serverInfo`; the ack timeout above still
+    // bounds a core that never greets.
+    const sendCreate = (capabilities: string[] | null) =>
+      sock.send(JSON.stringify(frame(capabilities)));
     let sent = false;
     sock.on("open", () => {
       connected = true;
-      if (!opts.fromSessionId) {
+      if (!awaitHandshake) {
         sent = true;
-        sendCreate(false);
+        sendCreate(null);
       }
     });
     sock.on("message", (data) => {
@@ -261,7 +250,7 @@ function wsCreate(
         const capabilities = serverInfoCapabilities(data.toString());
         if (capabilities === null) return;
         sent = true;
-        sendCreate(capabilities.includes("chainInherit"));
+        sendCreate(capabilities);
         return;
       }
       let msg: Record<string, unknown>;
@@ -284,6 +273,31 @@ function wsCreate(
       }
     });
   });
+}
+
+/** The `create` a dispatch sends. A source session is only named to a core that
+ *  advertises `chainInherit`, which is why a dispatch with one waits for the handshake. */
+function dispatchCreateFrame(
+  opts: DispatchRequest,
+  dispatchId: string,
+  capabilities: string[] | null,
+): Record<string, unknown> {
+  const inherit = !!opts.fromSessionId && !!capabilities?.includes("chainInherit");
+  return {
+    type: "create",
+    provider: opts.provider ?? "claude",
+    ...(opts.model ? { model: opts.model } : {}),
+    cwd: opts.project,
+    // No grid: a dispatch has no viewport of its own, so the app boots the
+    // CLI at the desktop's real terminal size. Sending a nominal one printed
+    // the entire first turn at that width, and no later resize can rewrap
+    // what's already in the scrollback.
+    initialInput: opts.prompt,
+    skipPermissions: true,
+    isolateWorktree: opts.worktree ?? false,
+    dispatchId,
+    ...(inherit ? { fromSessionId: opts.fromSessionId } : {}),
+  };
 }
 
 /** In-flight dispatches by fingerprint. The registry record is only written after
@@ -409,7 +423,11 @@ async function runDispatch(
   opts = { ...opts, provider: modelSelection.provider, model: modelSelection.model ?? undefined };
   const dispatchId = randomUUID();
   const provider = modelSelection.provider;
-  const reply = await wsCreate(opts, dispatchId, timeoutMs);
+  const reply = await wsCreate(
+    (capabilities) => dispatchCreateFrame(opts, dispatchId, capabilities),
+    !!opts.fromSessionId,
+    timeoutMs,
+  );
   // Every outcome lands in the durable dispatch registry (args + origin chat), so
   // dispatch-status can answer for it later and lifecycle events can route back to
   // the originating Telegram chat. Best-effort: a registry write failure must not

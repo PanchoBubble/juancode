@@ -887,6 +887,86 @@ function chainWrite(frame: Record<string, unknown>): Promise<ChainResult> {
   });
 }
 
+// ── Chain handoffs + sleeping one session (juancode-u5q) ─────────────────────────
+// A handoff is the daemon's record of responsibility passing from one owner to another
+// inside a chain (`createHandoff`, capability `chainHandoffs`), answered by a
+// `handoffResult` correlated on its requestId. `sleepSession` (capability
+// `sessionSleep`) has no reply: its effect is the `sessionMeta` with `dormant: true`.
+
+export type HandoffOwner = { kind: "human" } | { kind: "session"; sessionId: string };
+
+/** A handoff as the session handoff writes it; the daemon stamps the rest. */
+export interface HandoffInput {
+  id: string;
+  chainSlug: string;
+  source: HandoffOwner;
+  target: HandoffOwner;
+  beadsIssue?: string;
+  summary: string;
+}
+
+/** The answer to one handoff write. `error` is the daemon's code
+ *  (`handoff-invalid`, `chain-not-found`, `handoff-session-not-found`, ...), or this
+ *  module's `handoff-unavailable` / `handoff-timeout` / `handoff-connection-lost`. */
+export interface HandoffResult {
+  ok: boolean;
+  op: string;
+  id?: string;
+  error?: string;
+}
+
+const handoffWrites = new Map<string, (result: HandoffResult) => void>();
+let nextHandoffRequest = 1;
+
+export function supportsHandoffs(): boolean {
+  return nativeCapabilities.includes("chainHandoffs");
+}
+
+export function supportsSessionSleep(): boolean {
+  return nativeCapabilities.includes("sessionSleep");
+}
+
+/** Record a handoff. Silence is a failure, never a success. */
+export function createHandoff(handoff: HandoffInput): Promise<HandoffResult> {
+  if (!supportsHandoffs() || ws?.readyState !== WebSocket.OPEN) {
+    return Promise.resolve({ ok: false, op: "create", error: "handoff-unavailable" });
+  }
+  const requestId = `handoff-${nextHandoffRequest++}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      handoffWrites.delete(requestId);
+      resolve({ ok: false, op: "create", error: "handoff-timeout" });
+    }, CHAIN_WRITE_TIMEOUT_MS);
+    handoffWrites.set(requestId, (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    });
+    sendToNative({ type: "createHandoff", handoff, requestId });
+  });
+}
+
+/** Put one session to sleep: its pty ends, its row stays, dormant and resumable.
+ *  False when the endpoint cannot, so the caller can say so instead of claiming it. */
+export function sleepSession(sessionId: string): boolean {
+  if (!supportsSessionSleep() || ws?.readyState !== WebSocket.OPEN) return false;
+  sendToNative({ type: "sleepSession", sessionId });
+  return true;
+}
+
+function settleHandoffWrite(msg: Record<string, unknown>): void {
+  if (typeof msg.requestId !== "string") return;
+  const settle = handoffWrites.get(msg.requestId);
+  if (!settle) return;
+  handoffWrites.delete(msg.requestId);
+  const result: HandoffResult = {
+    ok: msg.ok === true,
+    op: typeof msg.op === "string" ? msg.op : "",
+  };
+  if (typeof msg.id === "string") result.id = msg.id;
+  if (typeof msg.error === "string") result.error = msg.error;
+  settle(result);
+}
+
 function parseChainMember(raw: unknown): ChainMember | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
@@ -1043,6 +1123,10 @@ function connect(): void {
     for (const settle of chainWrites.values()) {
       settle({ ok: false, op: "", error: "chain-connection-lost" });
     }
+    for (const settle of handoffWrites.values()) {
+      settle({ ok: false, op: "create", error: "handoff-connection-lost" });
+    }
+    handoffWrites.clear();
     chainWrites.clear();
     scheduleReconnect();
   });
@@ -1079,6 +1163,10 @@ function handleMessage(raw: string): void {
   }
   if (msg.type === "chainResult") {
     settleChainWrite(msg);
+    return;
+  }
+  if (msg.type === "handoffResult") {
+    settleHandoffWrite(msg);
     return;
   }
   if (msg.type === "chains" || msg.type === "chain" || msg.type === "chainRemoved") {

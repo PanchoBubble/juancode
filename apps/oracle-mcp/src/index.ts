@@ -83,6 +83,7 @@ import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { watchChains } from "./chains.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { registerChainTools } from "./chain-tools.ts";
+import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
 import { fail, ok, tool } from "./tool-result.ts";
 import { notifyOracleText, startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
@@ -310,6 +311,40 @@ function buildServer(): McpServer {
       try {
         await deleteSession(args.id);
         return ok(`Deleted session ${args.id}.`);
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "oracle_session_handoff",
+    {
+      title: "Hand a session off to a fresh one",
+      description:
+        "Replace a long-context session with a fresh one so its context stops being re-read every turn. Queues a request for a short handoff note (never typed over a draft), waits for the reply, spawns a successor in the same checkout with the same provider, model and permission mode whose first prompt is the note, records the handoff in the session's chain, and puts the old session to sleep (resumable, not killed). Refuses, changing nothing, when the session is not running, waits for input, or replies without a note. Only on a human's request — never on your own initiative. Blocks until done (up to timeoutSeconds).",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .describe(
+            "The session to hand off: its id or a unique prefix (from oracle_list_sessions)",
+          ),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .positive()
+          .max(3600)
+          .optional()
+          .describe("How long to wait for the note (default 900)"),
+      },
+    },
+    async (args) => {
+      try {
+        const outcome = await handOffSession(args.sessionId, undefined, {
+          ...(args.timeoutSeconds ? { timeoutMs: args.timeoutSeconds * 1000 } : {}),
+        });
+        return ok(handoffSummary(outcome));
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -680,6 +715,31 @@ app.post("/api/sessions/delete", async (req: Request, res: Response) => {
   }
 });
 
+// Hand a session off to a fresh one (juancode-u5q): the native row action's way in,
+// and the same function the oracle_session_handoff tool runs. Blocks until the note is
+// in and the successor is up, or the handoff refuses — a refusal is a 409 whose
+// `error` is the sentence to show, since the caller asked for something reasonable.
+app.post("/api/sessions/:id/handoff", async (req: Request, res: Response) => {
+  try {
+    const seconds = Number((req.body ?? {}).timeoutSeconds);
+    const gone = new AbortController();
+    res.on("close", () => gone.abort());
+    const outcome = await handOffSession(String(req.params.id), undefined, {
+      ...(Number.isFinite(seconds) && seconds > 0
+        ? { timeoutMs: Math.min(seconds, 3600) * 1000 }
+        : {}),
+      signal: gone.signal,
+    });
+    if (!res.writableEnded) res.json({ ok: true, ...outcome });
+  } catch (e) {
+    if (e instanceof HandoffRefused) {
+      if (!res.writableEnded) res.status(409).json({ ok: false, error: e.message });
+      return;
+    }
+    sendErr(res, e);
+  }
+});
+
 // ── Heavy queue ──────────────────────────────────────────────────────────────
 // The phone's view of the global `heavy` slot queue. The core owns the registry and
 // pushes the whole queue, so the first GET subscribes and later ones read the frame
@@ -830,7 +890,8 @@ app.get("/api/dispatches", async (req: Request, res: Response) => {
 app.get("/api/dispatches/:id/wait", async (req: Request, res: Response) => {
   try {
     const seconds = Number(req.query.timeout);
-    const timeoutMs = (Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 3600) : 600) * 1000;
+    const timeoutMs =
+      (Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 3600) : 600) * 1000;
     const id = String(req.params.id);
     const gone = new AbortController();
     res.on("close", () => gone.abort());

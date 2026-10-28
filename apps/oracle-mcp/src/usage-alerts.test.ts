@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CONTEXT_FRACTION,
+  DEFAULT_HANDOFF_TOKENS,
   readUsageAlertThresholds,
   REARM_MARGIN,
   UsageAlertLatch,
@@ -51,7 +52,7 @@ describe("readUsageAlertThresholds", () => {
 });
 
 describe("UsageAlertLatch — context", () => {
-  const thresholds = { contextFraction: 0.8, spendCapUsd: 0 };
+  const thresholds = { contextFraction: 0.8, spendCapUsd: 0, handoffTokens: 0 };
 
   it("fires once on the crossing, not on every reading in the band", () => {
     const latch = new UsageAlertLatch(thresholds);
@@ -80,7 +81,7 @@ describe("UsageAlertLatch — context", () => {
 
   it("stays silent when the window is unknown or context alerts are off", () => {
     expect(new UsageAlertLatch(thresholds).consider(sample(undefined))).toBeNull();
-    const off = new UsageAlertLatch({ contextFraction: 0, spendCapUsd: 0 });
+    const off = new UsageAlertLatch({ contextFraction: 0, spendCapUsd: 0, handoffTokens: 0 });
     expect(off.consider(sample(0.99))).toBeNull();
   });
 
@@ -99,8 +100,81 @@ describe("UsageAlertLatch — context", () => {
   });
 });
 
+describe("UsageAlertLatch — handoff", () => {
+  const thresholds = { contextFraction: 0.8, spendCapUsd: 0, handoffTokens: 250_000 };
+
+  /** A reading of `tokens` in a 1M window, where 250k is only 25% full. */
+  function tokens(n: number): SessionUsageSample {
+    return {
+      sessionId: "s1",
+      totalTokens: n,
+      contextTokens: n,
+      contextWindow: 1_000_000,
+      contextFraction: n / 1_000_000,
+    };
+  }
+
+  it("fires once on crossing the absolute line, long before the window fraction", () => {
+    const latch = new UsageAlertLatch(thresholds);
+    expect(latch.consider(tokens(249_999))).toBeNull();
+    const alert = latch.consider(tokens(260_000));
+    expect(alert?.kind).toBe("handoff");
+    expect(alert?.contextTokens).toBe(260_000);
+    expect(alert?.handoffTokens).toBe(250_000);
+    expect(latch.consider(tokens(400_000))).toBeNull();
+  });
+
+  it("re-arms only once the context falls clear of the line", () => {
+    const latch = new UsageAlertLatch(thresholds);
+    expect(latch.consider(tokens(255_000))).not.toBeNull();
+    expect(latch.consider(tokens(245_000))).toBeNull();
+    expect(latch.consider(tokens(255_000))).toBeNull();
+    expect(latch.consider(tokens(50_000))).toBeNull();
+    expect(latch.consider(tokens(255_000))?.kind).toBe("handoff");
+  });
+
+  it("is independent of the context latch: both fire, context first", () => {
+    const latch = new UsageAlertLatch(thresholds);
+    const big = tokens(850_000);
+    expect(latch.consider(big)?.kind).toBe("context");
+    expect(latch.consider(big)?.kind).toBe("handoff");
+    expect(latch.consider(big)).toBeNull();
+  });
+
+  it("stays silent when off or when the context size is unknown", () => {
+    const off = new UsageAlertLatch({ ...thresholds, handoffTokens: 0 });
+    expect(off.consider(tokens(300_000))).toBeNull();
+    expect(
+      new UsageAlertLatch(thresholds).consider({ sessionId: "s1", totalTokens: 900_000 }),
+    ).toBeNull();
+  });
+
+  it("reads its line from the environment, 0 disabling and junk falling back", () => {
+    expect(readUsageAlertThresholds({}).handoffTokens).toBe(DEFAULT_HANDOFF_TOKENS);
+    expect(
+      readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "180000" }).handoffTokens,
+    ).toBe(180_000);
+    expect(readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "0" }).handoffTokens).toBe(0);
+    expect(readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "lots" }).handoffTokens).toBe(
+      DEFAULT_HANDOFF_TOKENS,
+    );
+  });
+
+  it("suggests a handoff in the Telegram line", () => {
+    const line = usageAlertLine({
+      sessionId: "s1",
+      kind: "handoff",
+      contextTokens: 262_000,
+      handoffTokens: 250_000,
+    });
+    expect(line).toContain("262,000 tokens");
+    expect(line).toContain("250,000 handoff line");
+    expect(line).toContain("handing off");
+  });
+});
+
 describe("UsageAlertLatch — spend", () => {
-  const thresholds = { contextFraction: 0, spendCapUsd: 10 };
+  const thresholds = { contextFraction: 0, spendCapUsd: 10, handoffTokens: 0 };
 
   it("fires once when the estimate passes the cap", () => {
     const latch = new UsageAlertLatch(thresholds);
@@ -115,13 +189,15 @@ describe("UsageAlertLatch — spend", () => {
 
   it("stays silent with no cap set, or with no cost estimate", () => {
     expect(
-      new UsageAlertLatch({ contextFraction: 0, spendCapUsd: 0 }).consider(sample(undefined, 99)),
+      new UsageAlertLatch({ contextFraction: 0, spendCapUsd: 0, handoffTokens: 0 }).consider(
+        sample(undefined, 99),
+      ),
     ).toBeNull();
     expect(new UsageAlertLatch(thresholds).consider(sample(undefined))).toBeNull();
   });
 
   it("reports context first when one reading trips both, then spend", () => {
-    const latch = new UsageAlertLatch({ contextFraction: 0.8, spendCapUsd: 10 });
+    const latch = new UsageAlertLatch({ contextFraction: 0.8, spendCapUsd: 10, handoffTokens: 0 });
     const reading = sample(0.9, 12);
     expect(latch.consider(reading)?.kind).toBe("context");
     expect(latch.consider(reading)?.kind).toBe("spend");

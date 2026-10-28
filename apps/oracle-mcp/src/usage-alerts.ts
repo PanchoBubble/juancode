@@ -24,11 +24,20 @@ export const DEFAULT_CONTEXT_FRACTION = 0.8;
  *  the band and ping on every re-entry. */
 export const REARM_MARGIN = 0.05;
 
+/** Default handoff line in absolute tokens (juancode-u5q), mirroring
+ *  `ContextPressure.defaultHandoffTokens` in the Swift core. A window fraction is the
+ *  wrong unit for cost: 0.8 of a 1M window is 800k, far past the point where re-reading
+ *  the conversation every turn dominates the spend. Past this line a handoff to a fresh
+ *  session seeded with a short note is the cheaper way on. */
+export const DEFAULT_HANDOFF_TOKENS = 250_000;
+
 export interface UsageAlertThresholds {
   /** Context fraction that trips an alert; 0 disables context alerts. */
   contextFraction: number;
   /** Estimated spend (USD) on ONE session that trips an alert; 0 disables. */
   spendCapUsd: number;
+  /** Context size in tokens that suggests a handoff; 0 disables. */
+  handoffTokens: number;
 }
 
 /** Read the thresholds from the environment.
@@ -36,7 +45,8 @@ export interface UsageAlertThresholds {
  *  `JUANCODE_CONTEXT_ALERT_PERCENT` is a percentage (80 → 0.8) because that is how
  *  it reads in the message; 0 turns context alerts off. `JUANCODE_SESSION_SPEND_CAP_USD`
  *  is off unless set — a spend cap is a personal number, so there is no sensible
- *  default to impose. Both fall back to the default on anything unparseable rather
+ *  default to impose. `JUANCODE_HANDOFF_ALERT_TOKENS` is the handoff line in tokens;
+ *  0 turns it off. All fall back to the default on anything unparseable rather
  *  than throwing at startup. */
 export function readUsageAlertThresholds(
   env: NodeJS.ProcessEnv = process.env,
@@ -52,10 +62,15 @@ export function readUsageAlertThresholds(
   const cap = rawCap === "" ? NaN : Number(rawCap);
   const spendCapUsd = Number.isFinite(cap) && cap > 0 ? cap : 0;
 
-  return { contextFraction, spendCapUsd };
+  const rawHandoff = (env.JUANCODE_HANDOFF_ALERT_TOKENS ?? "").trim();
+  const handoff = rawHandoff === "" ? NaN : Number(rawHandoff);
+  const handoffTokens =
+    Number.isInteger(handoff) && handoff >= 0 ? handoff : DEFAULT_HANDOFF_TOKENS;
+
+  return { contextFraction, spendCapUsd, handoffTokens };
 }
 
-export type UsageAlertKind = "context" | "spend";
+export type UsageAlertKind = "context" | "handoff" | "spend";
 
 export interface UsageAlert {
   sessionId: string;
@@ -67,20 +82,23 @@ export interface UsageAlert {
   /** Estimated spend to date — always set for a "spend" alert. */
   spentUsd?: number;
   capUsd?: number;
+  /** The handoff line it crossed — always set for a "handoff" alert. */
+  handoffTokens?: number;
   dispatchId?: string;
 }
 
 /** Per-session record of which bands we have already alerted on. */
 interface LatchState {
   context: boolean;
+  handoff: boolean;
   spend: boolean;
 }
 
 /**
  * Edge detector over the usage stream: one alert per crossing.
  *
- * Context re-arms — a compaction genuinely drops the conversation back down, and
- * refilling the window afterwards is worth hearing about a second time. Spend does
+ * Context and handoff re-arm — a compaction (or a handoff) genuinely drops the
+ * conversation back down, and refilling it afterwards is worth hearing about again. Spend does
  * not: an estimate only ever grows, so a cap is crossed exactly once per session.
  */
 export class UsageAlertLatch {
@@ -90,16 +108,44 @@ export class UsageAlertLatch {
 
   /** Fold one reading in and return the alert it crossed into, or null.
    *
-   *  Context is checked before spend so a session that trips both on the same
-   *  reading reports the one with a deadline attached; the spend latch stays armed
-   *  and fires on the next reading. */
+   *  Context is checked first so a session that trips several on the same reading
+   *  reports the one with a deadline attached; the other latches stay armed and fire
+   *  on the next readings. */
   consider(sample: SessionUsageSample): UsageAlert | null {
-    const latch = this.state.get(sample.sessionId) ?? { context: false, spend: false };
+    const latch = this.state.get(sample.sessionId) ?? {
+      context: false,
+      handoff: false,
+      spend: false,
+    };
     this.state.set(sample.sessionId, latch);
 
-    const contextAlert = this.considerContext(sample, latch);
-    if (contextAlert) return contextAlert;
-    return this.considerSpend(sample, latch);
+    return (
+      this.considerContext(sample, latch) ??
+      this.considerHandoff(sample, latch) ??
+      this.considerSpend(sample, latch)
+    );
+  }
+
+  private considerHandoff(sample: SessionUsageSample, latch: LatchState): UsageAlert | null {
+    const line = this.thresholds.handoffTokens;
+    if (line <= 0) return null;
+    const tokens = sample.contextTokens;
+    if (tokens === undefined) return null;
+
+    if (tokens < line * (1 - REARM_MARGIN)) latch.handoff = false;
+    if (tokens < line || latch.handoff) return null;
+    latch.handoff = true;
+
+    const alert: UsageAlert = {
+      sessionId: sample.sessionId,
+      kind: "handoff",
+      contextTokens: tokens,
+      handoffTokens: line,
+    };
+    if (sample.contextWindow !== undefined) alert.contextWindow = sample.contextWindow;
+    if (sample.costUsd !== undefined) alert.spentUsd = sample.costUsd;
+    if (sample.dispatchId) alert.dispatchId = sample.dispatchId;
+    return alert;
   }
 
   private considerContext(sample: SessionUsageSample, latch: LatchState): UsageAlert | null {
@@ -151,6 +197,15 @@ export class UsageAlertLatch {
 /** The alert as one line of Telegram text, without the session header
  *  `telegram.ts` puts in front of it. */
 export function usageAlertLine(alert: UsageAlert): string {
+  if (alert.kind === "handoff") {
+    const spend = alert.spentUsd !== undefined ? ` · est. spend $${alert.spentUsd.toFixed(2)}` : "";
+    return (
+      `🔁 context ${(alert.contextTokens ?? 0).toLocaleString("en-US")} tokens — past the ` +
+      `${(alert.handoffTokens ?? 0).toLocaleString("en-US")} handoff line, and every turn ` +
+      `re-reads all of it${spend}. Consider handing off to a fresh session ` +
+      `(ask the Oracle to hand it off).`
+    );
+  }
   if (alert.kind === "spend") {
     return `💸 est. spend $${(alert.spentUsd ?? 0).toFixed(2)} — past your $${(
       alert.capUsd ?? 0

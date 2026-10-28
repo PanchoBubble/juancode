@@ -1077,7 +1077,7 @@ describe("notifyUsageSample", () => {
 
   it("warns an observer chat once per context crossing", async () => {
     const deps = makeDeps({ observers: observers([100]) });
-    const state = newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 });
+    const state = newBridgeState({ contextFraction: 0.8, spendCapUsd: 0, handoffTokens: 0 });
 
     await notifyUsageSample(reading(0.5), deps, state);
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
@@ -1105,14 +1105,14 @@ describe("notifyUsageSample", () => {
     await notifyUsageSample(
       { ...reading(0.95), dispatchId: "d1" },
       deps,
-      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 }),
+      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0, handoffTokens: 0 }),
     );
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
   it("warns on a spend cap crossing too", async () => {
     const deps = makeDeps({ observers: observers([100]) });
-    const state = newBridgeState({ contextFraction: 0, spendCapUsd: 5 });
+    const state = newBridgeState({ contextFraction: 0, spendCapUsd: 5, handoffTokens: 0 });
     await notifyUsageSample(reading(0.1, 4), deps, state);
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
     await notifyUsageSample(reading(0.1, 6), deps, state);
@@ -1126,7 +1126,7 @@ describe("notifyUsageSample", () => {
     await notifyUsageSample(
       reading(0.99),
       deps,
-      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0 }),
+      newBridgeState({ contextFraction: 0.8, spendCapUsd: 0, handoffTokens: 0 }),
     );
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
   });

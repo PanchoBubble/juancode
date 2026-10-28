@@ -158,6 +158,15 @@ public enum ClientMessage: Sendable {
     /// chain when `slug` is nil.
     case setChainMember(kind: ChainMemberKind, ref: String, slug: String?, title: String?,
                         url: String?, requestId: String?)
+    // ── Session handoff (juancode-u5q) ───────────────────────────────────────────
+    /// Put one session to sleep: its pty ends, its row stays `dormant` and resumable.
+    /// No reply of its own — the effect is the `sessionMeta` with `dormant: true`.
+    /// Gated by `sessionSleep`.
+    case sleepSession(sessionId: String)
+    /// Record a chain handoff (capability `chainHandoffs`), answered by a
+    /// `handoffResult` echoing `requestId`. The sidecar's session handoff writes one
+    /// per handoff: old session → successor, the note as `summary`.
+    case createHandoff(handoff: ChainHandoff, requestId: String?)
     /// A well-formed message whose `type` this server doesn't implement — e.g. a
     /// newer client feature, or a TS-only message the embedded server doesn't
     /// support (`subscribeStructured`, `steerMessage`, …). Decoding degrades to
@@ -182,6 +191,8 @@ extension ClientMessage: Decodable {
         case keys
         // Chains (juancode-dbo.1).
         case slug, kind, ref, title, url, name
+        // Chain handoffs (juancode-u5q).
+        case handoff
     }
 
     public init(from decoder: Decoder) throws {
@@ -313,6 +324,11 @@ extension ClientMessage: Decodable {
                                    title: try c.decodeIfPresent(String.self, forKey: .title),
                                    url: try c.decodeIfPresent(String.self, forKey: .url),
                                    requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "sleepSession":
+            self = .sleepSession(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case "createHandoff":
+            self = .createHandoff(handoff: try c.decode(ChainHandoff.self, forKey: .handoff),
+                                  requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
         default:
             // Degrade gracefully: a well-formed frame with an unrecognised `type`
             // is tolerated (a newer/other-server feature), not a decode error. Only
