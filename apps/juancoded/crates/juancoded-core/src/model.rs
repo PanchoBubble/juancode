@@ -133,6 +133,15 @@ pub struct SessionMeta {
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatch_id: Option<String>,
+    /// The preset name the session was created with (`create.preset`), so a handoff
+    /// successor can be started with the same instruction set. The name only: the body
+    /// is read from the preset directory at spawn time and is not recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// The model the session was created pinned to (`create.model`). What the CLI is
+    /// running NOW can differ (a `/model` switch), which only its transcript knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_model: Option<String>,
     /// The branch this session was on when a full pool reclaimed its tree. Its
     /// conversation and commits outlived the slot, so a reactivate checks this branch
     /// out into a fresh slot and resumes there. Daemon-only, like `title_is_manual`:
@@ -169,6 +178,8 @@ impl SessionMeta {
             kind: SessionKind::Agent,
             parent_session_id: None,
             dispatch_id: None,
+            preset: None,
+            pinned_model: None,
             parked_branch: None,
         }
     }
@@ -228,6 +239,8 @@ mod tests {
         assert_eq!(json["kind"], "agent");
         assert!(json.get("exitCode").is_none());
         assert!(json.get("cliSessionId").is_none());
+        assert!(json.get("preset").is_none());
+        assert!(json.get("pinnedModel").is_none());
         // Daemon-only. A client cannot act on the pin, and a field it would have to
         // ignore is a field the other core would have to invent something to put in.
         assert!(json.get("titleIsManual").is_none());

@@ -39,6 +39,8 @@ function world(opts: {
   book?: Chain[];
   supported?: boolean;
   createFails?: boolean;
+  /** What the transcript says the last turn ran on; `null` for a transcript that is silent. */
+  transcriptModel?: string | null;
 }) {
   let state: State = opts.state ?? "idle";
   const messages: SessionMessage[] = [
@@ -69,7 +71,8 @@ function world(opts: {
       return () => listeners.splice(listeners.indexOf(l), 1);
     },
     messages: async () => [...messages],
-    model: async () => "claude-opus-5-5",
+    model: async () =>
+      opts.transcriptModel === null ? undefined : (opts.transcriptModel ?? "claude-opus-5-5"),
     queue: async (_id, text) => {
       queued.push(text);
       // The queue delivers on idle; the agent works, then settles.
@@ -253,6 +256,41 @@ describe("handOffSession", () => {
   });
 });
 
+describe("handOffSession preset and pinned model", () => {
+  it("starts the successor with the preset the old session was created with", async () => {
+    const w = world({ source: { ...SOURCE, preset: "review" } });
+    await handOffSession("old", w.deps);
+    expect(w.creates[0]).toMatchObject({ preset: "review", model: "claude-opus-5-5" });
+  });
+
+  it("sends no preset for a session that had none", async () => {
+    const w = world({});
+    await handOffSession("old", w.deps);
+    expect(w.creates[0]).not.toHaveProperty("preset");
+  });
+
+  it("falls back to the pinned model when the transcript names none", async () => {
+    const w = world({
+      source: { ...SOURCE, pinnedModel: "opus[1m]" },
+      transcriptModel: null,
+    });
+    await handOffSession("old", w.deps);
+    expect(w.creates[0]).toMatchObject({ model: "opus[1m]" });
+  });
+
+  it("prefers the transcript's model over the pin, since a /model switch moves off it", async () => {
+    const w = world({ source: { ...SOURCE, pinnedModel: "opus" }, transcriptModel: "sonnet" });
+    await handOffSession("old", w.deps);
+    expect(w.creates[0]).toMatchObject({ model: "sonnet" });
+  });
+
+  it("sends no model when neither the transcript nor the row has one", async () => {
+    const w = world({ transcriptModel: null });
+    await handOffSession("old", w.deps);
+    expect(w.creates[0]).not.toHaveProperty("model");
+  });
+});
+
 describe("parseHandoffSources", () => {
   it("reads the fields a handoff needs off /api/sessions rows", () => {
     const [row] = parseHandoffSources([
@@ -279,5 +317,15 @@ describe("parseHandoffSources", () => {
       kind: "agent",
       contextWindow: 1_000_000,
     });
+  });
+
+  it("reads the preset and the pinned model off the row, and ignores empty ones", () => {
+    const rows = parseHandoffSources([
+      { id: "s1", cwd: "/r", preset: "review", pinnedModel: "opus[1m]" },
+      { id: "s2", cwd: "/r", preset: "", pinnedModel: "" },
+    ]);
+    expect(rows[0]).toMatchObject({ preset: "review", pinnedModel: "opus[1m]" });
+    expect(rows[1]).not.toHaveProperty("preset");
+    expect(rows[1]).not.toHaveProperty("pinnedModel");
   });
 });

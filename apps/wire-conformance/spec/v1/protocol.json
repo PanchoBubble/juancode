@@ -760,7 +760,9 @@
       "dormant",
       "kind",
       "parentSessionId",
-      "dispatchId"
+      "dispatchId",
+      "preset",
+      "pinnedModel"
     ]
   },
   "rules": [

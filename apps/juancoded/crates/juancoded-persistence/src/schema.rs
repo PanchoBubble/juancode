@@ -343,6 +343,13 @@ const MIGRATIONS: &[&str] = &[
         '-' || lower(hex(randomblob(6))), name = slug;
     CREATE UNIQUE INDEX chains_by_id ON chains(id);
     "#,
+    // 17: what a session was spawned with, so a handoff successor can inherit it. Both
+    // NULL for every row that predates the column, which reads as "none", the same as a
+    // session created without either.
+    r#"
+    ALTER TABLE sessions ADD COLUMN preset TEXT;
+    ALTER TABLE sessions ADD COLUMN pinned_model TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

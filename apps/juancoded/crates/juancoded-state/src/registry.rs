@@ -677,9 +677,10 @@ impl SessionRegistry {
                 ring.bytes = bytes;
                 ring.saved_grid = saved_grid;
             }
-            // Neither the model nor the preset survives a restart, which is what
-            // the Swift core's revive does too: both are per-spawn knobs, and the
-            // session store never carried either one.
+            // A revive does not re-apply the model or the preset, which is what the
+            // Swift core's revive does too: both are per-spawn knobs, and a resume
+            // carries the conversation's own model. The row still records what the
+            // session was created with (`meta.preset` / `meta.pinned_model`).
             let opts = SpawnOptions {
                 skip_permissions: meta.skip_permissions,
                 model: None,
@@ -971,6 +972,10 @@ impl SessionRegistry {
             meta.cli_session_id = Some(id.clone());
         }
         meta.dispatch_id = req.dispatch_id.clone();
+        // The names, as the client sent them (an empty string already reads as none
+        // above), so a handoff successor can be started the same way.
+        meta.preset = req.preset.clone().filter(|p| !p.is_empty());
+        meta.pinned_model = req.model.clone().filter(|m| !m.is_empty());
 
         let live = Arc::new(LiveSession {
             usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),

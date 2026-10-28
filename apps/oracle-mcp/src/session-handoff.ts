@@ -9,8 +9,8 @@
 //   2. When the session settles after that prompt, read its reply from the daemon's
 //      transcript and take the note from between the explicit markers. No note, no
 //      handoff: the session is left exactly as it was.
-//   3. Spawn the successor in the same checkout, provider, model and permission mode,
-//      with the note itself as its first prompt — no file to read, so no extra turn.
+//   3. Spawn the successor in the same checkout, provider, model, preset and permission
+//      mode, with the note itself as its first prompt — no file to read, so no extra turn.
 //   4. Record the handoff in the daemon's chain handoff history (old session → new,
 //      summary = the note), putting the old session in a chain first if it has none.
 //      Nothing is written to the repo or the worktree, and the note outlives a sweep.
@@ -100,6 +100,11 @@ export interface HandoffSource {
   status: string;
   kind?: string;
   contextWindow?: number;
+  /** The preset it was created with; the successor is started with the same one. */
+  preset?: string;
+  /** The model it was created pinned to. The transcript's model wins when it names one,
+   *  since a `/model` switch moves the session off its pin. */
+  pinnedModel?: string;
 }
 
 export interface HandoffDeps {
@@ -196,7 +201,8 @@ async function runHandoff(
   const newId = deps.newId ?? randomUUID;
   const chainSlug = await chainFor(source, deps, newId);
 
-  const model = await deps.model(source.id).catch(() => undefined);
+  const transcriptModel = await deps.model(source.id).catch(() => undefined);
+  const model = transcriptModel ? withLongContext(transcriptModel, source) : source.pinnedModel;
   const reply = await deps.create({
     type: "create",
     provider: source.provider,
@@ -205,7 +211,8 @@ async function runHandoff(
     cwd: source.worktreePath ?? source.cwd,
     initialInput: successorPrompt(note, source),
     skipPermissions: source.skipPermissions,
-    ...(model ? { model: pinnedModel(model, source) } : {}),
+    ...(model ? { model } : {}),
+    ...(source.preset ? { preset: source.preset } : {}),
   });
   if (reply.kind !== "created") {
     const why = reply.kind === "rejected" ? reply.message : reply.reason;
@@ -361,7 +368,7 @@ async function chainFor(
 
 /** The transcript names the model without the long-context marker the CLI was started
  *  with, so a session that was running a 1M window says so explicitly again. */
-function pinnedModel(model: string, source: HandoffSource): string {
+function withLongContext(model: string, source: HandoffSource): string {
   const long = (source.contextWindow ?? 0) >= 1_000_000;
   if (source.provider === "claude" && long && !/\[1m\]/i.test(model)) return `${model}[1m]`;
   return model;
@@ -393,6 +400,8 @@ export function parseHandoffSources(raw: unknown): HandoffSource[] {
       status: typeof r.status === "string" ? r.status : "unknown",
       ...(typeof r.kind === "string" ? { kind: r.kind } : {}),
       ...(typeof usage.contextWindow === "number" ? { contextWindow: usage.contextWindow } : {}),
+      ...(typeof r.preset === "string" && r.preset ? { preset: r.preset } : {}),
+      ...(typeof r.pinnedModel === "string" && r.pinnedModel ? { pinnedModel: r.pinnedModel } : {}),
     });
   }
   return out;

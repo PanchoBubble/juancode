@@ -59,6 +59,10 @@ export interface Workspace {
 function seedIdentity(git: (...args: string[]) => unknown): void {
   git("config", "user.name", "conformance");
   git("config", "user.email", "conformance@localhost");
+  // A global `commit.gpgsign=true` whose key this process cannot reach (an agent sandbox,
+  // CI) would fail every fixture commit, the core's own included, so switch signing off here.
+  git("config", "commit.gpgsign", "false");
+  git("config", "tag.gpgsign", "false");
 }
 
 export function makeWorkspace(): Workspace {

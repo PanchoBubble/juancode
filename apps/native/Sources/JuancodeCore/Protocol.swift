@@ -141,6 +141,13 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// correlate lifecycle events back to the dispatch (and its originating
     /// Telegram chat) for the whole life of the session, not just the create ack.
     public var dispatchId: String?
+    /// The preset name this session was created with, so a handoff successor can be
+    /// started with the same instruction set. Set by the daemon from `create.preset`;
+    /// this app only relays it. Nil for sessions created without one.
+    public var preset: String?
+    /// The model this session was created pinned to (`create.model`). What the CLI is
+    /// running now can differ after a `/model` switch; only its transcript knows that.
+    public var pinnedModel: String?
 
     /// The directory an agent is actually working in: its juancode-owned worktree
     /// when isolated, otherwise its cwd. An "open editor" action roots the editor
@@ -164,7 +171,9 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         dormant: Bool = false,
         kind: SessionKind = .agent,
         parentSessionId: String? = nil,
-        dispatchId: String? = nil
+        dispatchId: String? = nil,
+        preset: String? = nil,
+        pinnedModel: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -183,6 +192,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.kind = kind
         self.parentSessionId = parentSessionId
         self.dispatchId = dispatchId
+        self.preset = preset
+        self.pinnedModel = pinnedModel
     }
 
     // Custom decode so payloads predating `archived` (older db rows / wire
@@ -206,6 +217,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         kind = try c.decodeIfPresent(SessionKind.self, forKey: .kind) ?? .agent
         parentSessionId = try c.decodeIfPresent(String.self, forKey: .parentSessionId)
         dispatchId = try c.decodeIfPresent(String.self, forKey: .dispatchId)
+        preset = try c.decodeIfPresent(String.self, forKey: .preset)
+        pinnedModel = try c.decodeIfPresent(String.self, forKey: .pinnedModel)
     }
 }
 
