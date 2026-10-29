@@ -1811,8 +1811,8 @@ final class AppModel {
         next[cwd] = ids
         let valid = Set((sessions + externalSessions).map(\.id))
         sessionOrder = prunedSessionOrder(next, keeping: valid)
-        let livePins = pinnedSessions.intersection(valid)
-        if livePins != pinnedSessions { pinnedSessions = livePins }
+        // A reconnect or discovery refresh can leave this snapshot incomplete.
+        // Only explicit deletion removes pins, so absent sessions keep their pin.
     }
 
     /// Custom dev ports the user saved in the Kill Port utility, added on top of the
@@ -5970,6 +5970,7 @@ final class AppModel {
         removeSessionTerminals(id)
         if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
         sessionPairs.remove(session: id)
+        pinnedSessions.remove(id)
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
         navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))

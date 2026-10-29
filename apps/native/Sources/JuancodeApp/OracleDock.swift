@@ -365,7 +365,7 @@ struct OracleGlobalRail: View {
     }
 
     /// Number before filtering so an Oracle keeps its spawn-order number.
-    /// Sessions stay newest-first as their activity changes.
+    /// Pins lead the rail; sessions within each band stay newest-first.
     private func entries() -> [Entry] {
         let all = sessions
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -377,6 +377,8 @@ struct OracleGlobalRail: View {
             return Entry(meta: meta, number: number,
                          live: model.isLive(meta.id), activity: model.activity(meta.id),
                          pinned: model.isPinned(meta.id))
+        }.sorted {
+            sessionPinnedPrecedes($0.meta, $1.meta, pinned: model.pinnedSessions)
         }
     }
 

@@ -50,3 +50,11 @@ public func sessionCreationPrecedes(_ a: SessionMeta, _ b: SessionMeta) -> Bool 
     if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
     return a.id < b.id
 }
+
+/// Pins lead the list; each band keeps the same stable creation order.
+public func sessionPinnedPrecedes(_ a: SessionMeta, _ b: SessionMeta, pinned: Set<String>) -> Bool {
+    let aPinned = pinned.contains(a.id)
+    let bPinned = pinned.contains(b.id)
+    if aPinned != bPinned { return aPinned }
+    return sessionCreationPrecedes(a, b)
+}

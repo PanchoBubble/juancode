@@ -995,7 +995,7 @@ struct SidebarView: View {
         // Projects the user removed from the sidebar drop out here — the folder and
         // its rows, not the sessions themselves (restorable from the footer below).
         let groups = byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions -> FolderGroup in
-            let ordered = sessions.sorted(by: sessionCreationPrecedes)
+            let ordered = sessions.sorted { sessionPinnedPrecedes($0, $1, pinned: model.pinnedSessions) }
             return FolderGroup(
                 cwd: cwd,
                 name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,
