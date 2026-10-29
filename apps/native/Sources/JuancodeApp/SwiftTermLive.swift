@@ -471,8 +471,7 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         }
         if model.showingGitHub, keyCode == 53,
            mods.intersection([.command, .shift, .control, .option]).isEmpty {
-            if model.github.tab == .detail { model.github.backToList() }
-            else { model.showingGitHub = false }
+            model.showingGitHub = false
             return true
         }
         // The GitHub overlay covers the window, so it owns plain-key nav while it's up

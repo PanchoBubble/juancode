@@ -9,9 +9,8 @@
 // The popover is the queue, not a shortcut to it: the four filters are the four
 // questions (everything, the ones I wrote, the ones I owe a review, the ones that
 // actually want something today), a row opens the PR where it lives, a hovered row
-// offers the two things you do to a PR without reading it first (hand it to a watching
-// agent, or open a fresh session on it), and the full view is one click at the bottom
-// for the rest — diff, threads, per-comment send-to-agent.
+// offers tracking and agent actions. Selecting a row opens its detail — diff,
+// threads, checks and per-comment send-to-agent.
 
 import SwiftUI
 import AppKit
@@ -196,8 +195,6 @@ struct GitHubQueueBadge: View {
                     // with a 40-PR queue runs off the screen.
                     .frame(maxHeight: listMaxHeight ?? .infinity)
                 }
-                Divider().padding(.vertical, 2)
-                footer
             }
             .padding(.bottom, 6)
         }
@@ -316,25 +313,6 @@ struct GitHubQueueBadge: View {
             }
         }
 
-        private var footer: some View {
-            Button {
-                showing = false
-                model.openViewerPrQueue()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "rectangle.expand.vertical").font(.system(size: 10))
-                    Text("Open the full view").font(.system(size: 11, weight: .medium))
-                    Spacer(minLength: 0)
-                    Text("⇧⌘G").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-                .padding(.horizontal, 10).padding(.vertical, 5)
-            }
-            .buttonStyle(.plain)
-            .clickCursor()
-            .help("The GitHub view: diff, threads, checks and send-to-agent")
-        }
-
         /// The queue under the active chip, most urgent first (see `viewerPrRows`).
         private var rows: [ViewerPr] {
             let all = sorted(viewerPrRows(queue, slice: slice))
@@ -435,6 +413,9 @@ struct GitHubQueueBadge: View {
         private func open(_ row: ViewerPr) {
             showing = false
             if let cwd = model.folder(forRepo: row.repo) {
+                model.github.navOrder = rows.compactMap { item in
+                    model.folder(forRepo: item.repo).map { GitHubModel.PrNavRow(cwd: $0, pr: item.pr) }
+                }
                 model.github.select(cwd: cwd, pr: row.pr)
                 model.openGitHub(scope: cwd)
             } else if let url = URL(string: row.pr.url) {
@@ -460,6 +441,7 @@ struct GitHubQueueBadge: View {
         @State private var showingStack = false
         @State private var eyeHovering = false
         @State private var confirmingClose = false
+        @State private var availableWidth: CGFloat = 0
 
         private var pr: PullRequest { row.pr }
         /// Both actions need a working tree — the watching agent and the fresh
@@ -485,6 +467,17 @@ struct GitHubQueueBadge: View {
         /// PR identity, stack position and tracking share the facts line. The
         /// status stripe leaves the title aligned with the row's leading edge.
         private var rowContent: some View {
+            rowLayout(countsOnTop: availableWidth >= 440)
+            .padding(.horizontal, 8).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
+            .overlay(alignment: .leading) {
+                Rectangle().fill(pr.checks.color).frame(width: 2)
+            }
+        }
+
+        private func rowLayout(countsOnTop: Bool) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
@@ -508,6 +501,7 @@ struct GitHubQueueBadge: View {
                             .padding(.trailing, 4)
                     }
                     reviewIcon
+                    reviewAssignmentIcons
                     if pr.draft {
                         Text("draft")
                             .font(.system(size: 9))
@@ -516,6 +510,9 @@ struct GitHubQueueBadge: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
+                    if countsOnTop, let counts = pr.diffCounts {
+                        DiffStatLabel(counts: counts).fixedSize()
+                    }
                     if hovering {
                         actions
                     } else if let age = prAgeLabel(pr.createdAt) {
@@ -527,19 +524,39 @@ struct GitHubQueueBadge: View {
                 HStack(spacing: 6) {
                     Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
                     Spacer(minLength: 0)
-                    if let counts = pr.diffCounts {
+                    if !countsOnTop, let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)
                             .fixedSize()
                     }
                 }
             }
-            .padding(.trailing, 8)
-            .padding(.leading, 8).padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .overlay(alignment: .leading) {
-                Rectangle().fill(pr.checks.color).frame(width: 2)
+        }
+
+        private var reviewAssignedToMe: Bool {
+            let viewer = model.viewerPrs.viewer
+            return row.reason == .reviewRequested || (!viewer.isEmpty && pr.reviewRequests.contains {
+                $0.caseInsensitiveCompare(viewer) == .orderedSame
+            })
+        }
+
+        private var reviewAssignmentIcons: some View {
+            HStack(spacing: 4) {
+                let assigned = !pr.reviewRequests.isEmpty || reviewAssignedToMe
+                Image(systemName: assigned ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(assigned ? Color.secondary : Color.orange)
+                    .help(assigned
+                        ? "Review assigned" + (pr.reviewRequests.isEmpty ? "" : ": " + pr.reviewRequests.joined(separator: ", "))
+                        : "No reviewer assigned")
+                    .accessibilityLabel(assigned ? "Review assigned" : "No reviewer assigned")
+                if reviewAssignedToMe {
+                    Image(systemName: "hand.raised.fill")
+                        .foregroundStyle(Color.accentColor)
+                        .help("Your review is requested")
+                        .accessibilityLabel("Your review is requested")
+                }
             }
+            .font(.system(size: 10))
+            .fixedSize()
         }
 
         /// The review verdict as a bare glyph — the GitHub view's chip without its

@@ -377,11 +377,9 @@ func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
     if model.showingFindBar { model.closeFindBar(); return true }
     if model.editing != nil { model.editing = nil; return true }
     if model.showingDiffReview { model.closeDiffReview(); return true }
-    // The GitHub overlay has two levels: back out of the PR detail to the list
-    // before closing the overlay itself.
+    // PR lists live in the rail; dismiss the detail overlay directly.
     if model.showingGitHub {
-        if model.github.tab == .detail { model.github.backToList() }
-        else { model.showingGitHub = false }
+        model.showingGitHub = false
         return true
     }
     if model.showingBeads { model.beadsBack(); return true }

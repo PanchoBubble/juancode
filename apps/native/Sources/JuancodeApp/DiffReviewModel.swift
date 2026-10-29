@@ -142,7 +142,7 @@ extension AppModel {
     func toggleDiffReview() {
         if showingDiffReview {
             closeDiffReview()
-        } else if showingGitHub, github.tab == .detail, let (cwd, pr) = selectedGitHubPr {
+        } else if showingGitHub, let (cwd, pr) = selectedGitHubPr {
             openPrDiffReview(pr, cwd: cwd)
         } else {
             openDiffReview()

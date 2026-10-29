@@ -467,7 +467,7 @@ struct JuancodeApp: App {
                 }
                 .appShortcut(.diffReview, shortcuts)
                 .disabled(model.selection == nil && !model.showingDiffReview
-                          && !(model.showingGitHub && model.github.tab == .detail))
+                          && !(model.showingGitHub))
                 // ⌃⌘C: the selected session's chain, one tab per member across
                 // projects; again to leave it.
                 Button(model.chainView != nil ? "Leave Chain" : "Open Chain") {
@@ -524,7 +524,7 @@ struct JuancodeApp: App {
                     performShortcut(.globalIssues, model: model, oracle: oracle)
                 }
                 .appShortcut(.globalIssues, shortcuts)
-                // ⌘⇧G toggles the GitHub view — all open PRs per project, tracked-PR
+                // ⌘⇧G reveals the PR queue in the right rail, with tracked-PR
                 // loops (juancode-2t6).
                 Button("GitHub") {
                     performShortcut(.githubView, model: model, oracle: oracle)

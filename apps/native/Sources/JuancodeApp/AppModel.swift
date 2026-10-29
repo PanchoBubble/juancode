@@ -2724,24 +2724,21 @@ final class AppModel {
     func openGitHub(scope: String? = nil) {
         githubScope = scope
         showingGitHub = true
-        github.refresh(model: self)
+        if let scope { loadPrs(scope) }
     }
 
-    /// The global GitHub button/shortcut: the viewer queue. It is one GitHub search
-    /// for every repo, where the all-folders list is three `gh` calls per project and
-    /// ran into GitHub's rate limit and 504s.
-    func toggleGitHubView() {
-        if showingGitHub && githubScope == nil { showingGitHub = false }
-        else { openViewerPrQueue() }
-    }
+    /// The global GitHub shortcut reveals the sole PR list in the right rail.
+    func toggleGitHubView() { openViewerPrQueue() }
 
-    /// The GitHub badge's "open the full view": the view on the viewer queue (your
-    /// PRs and the reviews you owe, across every repo), unscoped, and a refresh if
-    /// the queue has gone stale.
     func openViewerPrQueue() {
-        github.tab = .mine
-        githubScope = nil
-        showingGitHub = true
+        showingGitHub = false
+        let defaults = UserDefaults.standard
+        let next = RightRailPrefs.setting(RightRailPanel.prs.rawValue, open: true,
+            collapsedRaw: defaults.string(forKey: RightRailPrefs.collapsedKey) ?? "",
+            hiddenRaw: defaults.string(forKey: RightRailPrefs.hiddenKey) ?? "")
+        defaults.set(true, forKey: "oracle.sessionRail.shown")
+        defaults.set(next.collapsed, forKey: RightRailPrefs.collapsedKey)
+        defaults.set(next.hidden, forKey: RightRailPrefs.hiddenKey)
         refreshViewerPrs()
     }
 
