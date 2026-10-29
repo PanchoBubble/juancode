@@ -30,6 +30,16 @@ struct PrStackTests {
         #expect(stack == PrStack.containing(rows[0], in: rows))
     }
 
+    @Test func listGroupsStacksInCurrentSortOrderAndOrdersByPosition() {
+        let rows = [pr(5, "base", "main"), pr(90, "middle", "base"),
+                    pr(12, "tip", "middle"), pr(70, "unrelated", "main"),
+                    pr(100, "newest", "main")]
+        #expect(groupPrStacks(rows.sorted { $0.number > $1.number }, in: rows).map(\.number) == [100, 5, 90, 12, 70])
+        let filtered = rows.filter { $0.number != 5 }
+        #expect(groupPrStacks(filtered.sorted { $0.number > $1.number }, in: rows).map(\.number) == [100, 90, 12, 70])
+        #expect(groupPrStacks([], in: rows).isEmpty)
+    }
+
     @Test func branchingStacksKeepParentsBeforeChildren() {
         let rows = [pr(90, "base", "main"), pr(12, "left", "base"), pr(5, "right", "base")]
         let stack = PrStack.containing(rows[2], in: rows + rows)

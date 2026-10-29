@@ -367,7 +367,8 @@ struct GitHubQueueBadge: View {
 
         /// The rows by repo, each repo placed where its most urgent PR would sit, so
         /// grouping never buries the one that's on fire under a quieter repo. Inside a
-        /// repo the tracked PRs lead, each half keeping its urgency order.
+        /// repo tracked PRs lead in urgency mode, then stacks stay together in
+        /// dependency order regardless of the selected sort.
         private var groups: [(repo: String, rows: [ViewerPr])] {
             var order: [String] = []
             var byRepo: [String: [ViewerPr]] = [:]
@@ -377,9 +378,20 @@ struct GitHubQueueBadge: View {
             }
             return order.map { repo in
                 let all = byRepo[repo] ?? []
-                guard sort == .urgency, let cwd = model.folder(forRepo: repo) else { return (repo, all) }
-                let isTracked = { (r: ViewerPr) in model.trackedPr(cwd: cwd, number: r.pr.number) != nil }
-                return (repo, all.filter(isTracked) + all.filter { !isTracked($0) })
+                let cwd = model.folder(forRepo: repo)
+                let prioritized: [ViewerPr]
+                if sort == .urgency, let cwd {
+                    let isTracked = { (r: ViewerPr) in model.trackedPr(cwd: cwd, number: r.pr.number) != nil }
+                    prioritized = all.filter(isTracked) + all.filter { !isTracked($0) }
+                } else {
+                    prioritized = all
+                }
+                let byURL = Dictionary(prioritized.map { ($0.pr.url, $0) },
+                                       uniquingKeysWith: { first, _ in first })
+                let context = (cwd.flatMap { model.prs($0)?.prs } ?? []) + queue.rows.map(\.pr)
+                let ordered = groupPrStacks(prioritized.map(\.pr), in: context)
+                    .compactMap { byURL[$0.url] }
+                return (repo, ordered)
             }
         }
 
@@ -470,71 +482,64 @@ struct GitHubQueueBadge: View {
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
         }
 
-        /// Facts on the first line, title on the second, with a leading column for
-        /// the checks dot and, under it, the watching eye. Checks are status only —
-        /// the dot, plus a red corner count of the checks not passing when it's red;
-        /// the fraction lives in the GitHub view. The attention reason is not drawn —
-        /// the orange comment count and red dot already say it — but stays in the
-        /// hover text.
-        ///
-        /// The actions swap in for the age, inline at the end of the facts line.
-        /// That is safe here where it wasn't in a one-line row: the title has a line
-        /// of its own, so nothing the facts line does can re-truncate it.
+        /// PR identity, stack position and tracking share the facts line. The
+        /// status stripe leaves the title aligned with the row's leading edge.
         private var rowContent: some View {
-            HStack(alignment: .top, spacing: 6) {
-                VStack(spacing: 4) {
-                    Circle().fill(pr.checks.color).frame(width: 9, height: 9)
-                        .cornerCount(pr.checks == .failing ? pr.checkCount - pr.passedCount : 0,
-                                     color: .red)
-                        .frame(height: Self.factsHeight)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
+                    Text(verbatim: "#\(pr.number)")
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    // Always shown, not a hover action: being one of a stack is a
+                    // fact about the PR, like its number.
+                    if let stack {
+                        PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
+                    }
                     if let t = tracked { trackEye(t) }
                     if let t = tracked, let chain = model.chain(of: .trackedPr, ref: t.id) {
                         ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: t.id),
                                    compact: true, willOpen: dismiss)
                     }
-                }
-                .frame(width: Self.leadColumn)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
-                        Text(verbatim: "#\(pr.number)")
-                            .font(.system(size: 11, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                        // Always shown, not a hover action: being one of a stack is a
-                        // fact about the PR, like its number.
-                        if let stack {
-                            PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
-                        }
-                        if pr.unresolvedComments > 0 {
-                            Image(systemName: "bubble.left.fill").font(.system(size: 10))
-                                .foregroundStyle(.orange)
-                                .cornerCount(pr.unresolvedComments, color: .orange)
-                                .padding(.trailing, 4)
-                        }
-                        reviewIcon
-                        if pr.draft {
-                            Text("draft")
-                                .font(.system(size: 9))
-                                .padding(.horizontal, 4).padding(.vertical, 1)
-                                .background(Color.secondary.opacity(0.2))
-                                .clipShape(RoundedRectangle(cornerRadius: 3))
-                        }
-                        Spacer(minLength: 4)
-                        if hovering {
-                            actions
-                        } else if let age = prAgeLabel(pr.createdAt) {
-                            Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
+                    if pr.unresolvedComments > 0 {
+                        Image(systemName: "bubble.left.fill").font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .cornerCount(pr.unresolvedComments, color: .orange)
+                            .padding(.trailing, 4)
                     }
-                    .frame(height: Self.factsHeight)
-                    Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                    reviewIcon
+                    if pr.draft {
+                        Text("draft")
+                            .font(.system(size: 9))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.2))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                    Spacer(minLength: 4)
+                    if hovering {
+                        actions
+                    } else if let age = prAgeLabel(pr.createdAt) {
+                        Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .padding(.trailing, 8)
+                .frame(height: Self.factsHeight)
+                HStack(spacing: 6) {
+                    Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 0)
+                    if let counts = pr.diffCounts {
+                        DiffStatLabel(counts: counts)
+                            .fixedSize()
+                    }
+                }
             }
-            .padding(.leading, 6).padding(.vertical, 9)
+            .padding(.trailing, 8)
+            .padding(.leading, 8).padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
+            .overlay(alignment: .leading) {
+                Rectangle().fill(pr.checks.color).frame(width: 2)
+            }
         }
 
         /// The review verdict as a bare glyph — the GitHub view's chip without its
@@ -566,10 +571,8 @@ struct GitHubQueueBadge: View {
         /// The facts line's height: tall enough for the 22pt action cells, so the
         /// row doesn't grow when the pointer enters it.
         private static let factsHeight: CGFloat = 22
-        private static let leadColumn: CGFloat = 22
 
-        /// The watching agent's eye: a chip filling the lead column, so it's a real
-        /// target rather than a 9pt glyph. Jumps to the tracking session.
+        /// A separate eye button on the facts line opens the tracking session.
         private func trackEye(_ t: TrackedPr) -> some View {
             let badge = TrackBadge(state: t.state,
                                    waiting: model.activity(t.sessionId) == .waitingInput,
@@ -579,7 +582,7 @@ struct GitHubQueueBadge: View {
                 model.openTrackingSession(t)
             } label: {
                 badge
-                    .frame(width: Self.leadColumn, height: 18)
+                    .frame(width: 22, height: 18)
                     .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(badge.compactColor.opacity(eyeHovering ? 0.28 : 0.14)))
                     .contentShape(Rectangle())

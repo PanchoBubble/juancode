@@ -83,3 +83,31 @@ public struct PrStack: Equatable, Sendable {
                        size: entries.count, stackNumber: nil)
     }
 }
+
+/// Keep stacks together, base first, at their first visible member's place in the
+/// current sort order. Resolve membership against the full list so filtering preserves positions.
+public func groupPrStacks(_ prs: [PullRequest], in all: [PullRequest]) -> [PullRequest] {
+    let stacks = Dictionary(prs.compactMap { pr in
+        PrStack.containing(pr, in: all).map { (pr.url, $0) }
+    }, uniquingKeysWith: { first, _ in first })
+    var emitted = Set<String>()
+    var result: [PullRequest] = []
+    for pr in prs {
+        guard !emitted.contains(pr.url) else { continue }
+        let members: [PullRequest]
+        if let stack = stacks[pr.url] {
+            members = prs.filter { stacks[$0.url]?.id == stack.id }
+                .sorted {
+                    let left = stack.position(of: $0.number) ?? Int.max
+                    let right = stack.position(of: $1.number) ?? Int.max
+                    return left == right ? $0.number < $1.number : left < right
+                }
+        } else {
+            members = [pr]
+        }
+        for member in members where emitted.insert(member.url).inserted {
+            result.append(member)
+        }
+    }
+    return result
+}
