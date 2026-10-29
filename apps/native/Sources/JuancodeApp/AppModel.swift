@@ -41,10 +41,6 @@ private let sessionOrderKey = "juancode.sessionOrder"
 /// (a plist-safe [String] of session ids).
 private let pinnedSessionsKey = "juancode.pinnedSessions"
 
-/// UserDefaults key for the auto-slept sessions the user dismissed from their
-/// project's folded preview (a plist-safe [String] of session ids).
-private let dismissedSessionsKey = "juancode.dismissedSessions"
-
 /// UserDefaults key for the per-project "new sessions land on a fresh worktree"
 /// toggle: project cwd → Bool (a plist-safe [String: Bool]).
 private let worktreeByProjectKey = "juancode.worktreeByProject"
@@ -648,67 +644,6 @@ final class AppModel {
     /// Whether `id` is a still-unrevived crash orphan (drives the sidebar sort).
     func isCrashOrphan(_ id: String) -> Bool { pendingCrashOrphans.contains(id) }
 
-    /// Whether `id` is asleep in the one sense worth its own glyph: the reaper put it
-    /// down while it was idle, this run, and it hasn't been woken since.
-    ///
-    /// `meta.dormant` alone is too broad — a graceful quit flags every open session
-    /// with it so the next boot keeps those rows surfaced. Those rows aren't "asleep",
-    /// they're being restored: the launch sweep resumes each one, so they read grey →
-    /// spinner → live within seconds, and a moon there would just be a flicker that
-    /// says the wrong thing. Excluding the boot orphans leaves the moon meaning
-    /// exactly one thing: auto-slept to free memory, open it to carry on.
-    ///
-    /// Takes the meta, not an id: the sidebar asks this of every row on every
-    /// render, and an id lookup scanning `sessions` made that quadratic.
-    func isAsleep(_ meta: SessionMeta) -> Bool {
-        guard meta.dormant, !isLive(meta.id), !isCrashOrphan(meta.id),
-              !lapsedSleeps.contains(meta.id) else { return false }
-        return true
-    }
-
-    /// Whether `id` is asleep *and* still resting in place: the moon glyph, the
-    /// unsunk slot in the sidebar order, and the exemption from the folder's "Load
-    /// more". That treatment says "we closed this, not you — it's still open work",
-    /// so it ends the moment either of those stops being true:
-    ///
-    /// - the user waved the row off (wheel click / the hover chevron): they closed it,
-    ///   so it reads like anything else they closed — grey dot, sunk, foldable. The
-    ///   dismissal itself stays undoable from the same chip, which is why the raw
-    ///   `isAsleep` fact (what gates that affordance) is a separate question;
-    /// - a day has passed since it was slept (`SleepLapse`): a moon still burning on
-    ///   yesterday's session crowds out the ones that really are open.
-    func isResting(_ meta: SessionMeta) -> Bool { isAsleep(meta) && !isDismissed(meta.id) }
-
-    /// Auto-slept sessions whose day has run out (`SleepLapse`) — they render and sort
-    /// as plain exited rows from here on. Recomputed on the coarse health tick rather
-    /// than derived per-read, so a view reading `isAsleep` observes the flip instead of
-    /// waiting for some unrelated state change to redraw it.
-    private(set) var lapsedSleeps: Set<String> = []
-
-    /// Re-evaluate which sleeping rows have outlived the window. Publishes (and
-    /// re-sweeps the order projection) only when the set actually moves, so the common
-    /// tick costs one pass over `sessions` and changes nothing.
-    func refreshLapsedSleeps() {
-        let window = Config.sleepLapseWindowMs
-        guard window > 0 else {
-            if !lapsedSleeps.isEmpty { lapsedSleeps = []; syncSidebarOrder() }
-            return
-        }
-        let now = nowMs()
-        var next: Set<String> = []
-        for meta in sessions where meta.dormant {
-            // `updatedAt` is stamped by `markDormant` and by the exit row it precedes,
-            // so for a session nothing has touched since it was slept it *is* the
-            // moment we closed it.
-            if SleepLapse.lapsed(sleptAtMs: meta.updatedAt, nowMs: now, windowMs: window) {
-                next.insert(meta.id)
-            }
-        }
-        guard next != lapsedSleeps else { return }
-        lapsedSleeps = next
-        syncSidebarOrder()
-    }
-
     /// Live-output subscription cancels for restored panes awaiting their first live
     /// byte — the auto-dismiss hook for the `.resuming` banner.
     private var restoreOutputCancels: [String: () -> Void] = [:]
@@ -919,10 +854,6 @@ final class AppModel {
         // and the sidebar would draw the session twice.
         dropOwnedExternals()
         rebuildWorkAtRiskSessionIndex()
-        // A relaunch is the usual way a day passes with the app closed: the rows that
-        // slept yesterday have to come back grey, not wearing a moon until the first
-        // health tick.
-        refreshLapsedSleeps()
         // Liveness just changed for someone (this is the create/exit/adopt path), which
         // is exactly what the sidebar's sink/bubble order keys off.
         syncSidebarOrder()
@@ -1130,20 +1061,12 @@ final class AppModel {
     /// (`refresh`), activity edges, unread/unseen clears, and external discovery.
     private func syncSidebarOrder() {
         let live = Set(core.liveSessions().map(\.id))
-        // Auto-slept rows rest where they were rather than sinking into the dead
-        // pile — they're "open but closed" (see `restingAttention`). Unless the user
-        // dismissed one (that's them closing it) or it has been asleep a full day
-        // (`SleepLapse`): either way it sinks like any exited row.
-        let dormantIds = Set(sessions.filter(\.dormant).map(\.id))
-            .subtracting(dismissedSessions)
-            .subtracting(lapsedSleeps)
         var next: [String: SessionAttention] = [:]
         next.reserveCapacity(sessions.count + externalSessions.count)
         func project(_ id: String) {
             next[id] = sidebarOrderAttention(live: live.contains(id), activity: activities[id],
                                              unseenDone: unseenCompletions.contains(id),
-                                             crashOrphan: pendingCrashOrphans.contains(id),
-                                             dormant: dormantIds.contains(id))
+                                             crashOrphan: pendingCrashOrphans.contains(id))
         }
         for meta in sessions { project(meta.id) }
         for meta in externalSessions where next[meta.id] == nil { project(meta.id) }
@@ -1819,44 +1742,6 @@ final class AppModel {
         }
     }
 
-    /// Sleeping sessions the user has explicitly waved off. A session the reaper
-    /// (or the Sleep action) closed while idle stays surfaced — resting in place and
-    /// never folded behind "Load more" — because *we* closed it, not the user. This
-    /// set is them saying "done with that one": it sinks with the exited rows again
-    /// and the fold may swallow it. Persisted; cleared when the session is woken, so
-    /// the next sleep starts over.
-    var dismissedSessions: Set<String> = Set(
-        (UserDefaults.standard.array(forKey: dismissedSessionsKey) as? [String]) ?? []
-    ) {
-        didSet { UserDefaults.standard.set(Array(dismissedSessions), forKey: dismissedSessionsKey) }
-    }
-
-    func isDismissed(_ id: String) -> Bool { dismissedSessions.contains(id) }
-
-    /// Dismiss/undismiss one sleeping session — the row's hover chevron and its wheel
-    /// click. Animated so the row slides down into (or back out of) the fold, and the
-    /// order projection is re-swept because dismissing drops the row's rest-in-place
-    /// exemption (see `syncSidebarOrder`).
-    func toggleDismissed(_ id: String) {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-            if dismissedSessions.contains(id) {
-                dismissedSessions.remove(id)
-            } else {
-                dismissedSessions.insert(id)
-            }
-            syncSidebarOrder()
-        }
-    }
-
-    /// Forget `id`'s dismissal, so waking a session leaves it surfaced again the next
-    /// time it goes to sleep. No-op (and no re-sweep) when it wasn't dismissed, which
-    /// is the common case.
-    func clearDismissal(_ id: String) {
-        guard dismissedSessions.contains(id) else { return }
-        dismissedSessions.remove(id)
-        syncSidebarOrder()
-    }
-
     /// Per-project default for the folder "+" button: when a project's cwd is
     /// mapped to `true`, a new session started from its header lands on a fresh
     /// git worktree instead of the project checkout. Keyed by project cwd, same
@@ -1928,8 +1813,6 @@ final class AppModel {
         sessionOrder = prunedSessionOrder(next, keeping: valid)
         let livePins = pinnedSessions.intersection(valid)
         if livePins != pinnedSessions { pinnedSessions = livePins }
-        let liveDismissals = dismissedSessions.intersection(valid)
-        if liveDismissals != dismissedSessions { dismissedSessions = liveDismissals }
     }
 
     /// Custom dev ports the user saved in the Kill Port utility, added on top of the
@@ -4005,9 +3888,6 @@ final class AppModel {
         // Reopening a killed pane resumes it, so its stopped card has served its
         // purpose — drop the flag now so the revived pty renders, not the card.
         stoppedPanes.remove(id)
-        // Waking it also retires any dismissal: the row is back in play, so when it
-        // next falls asleep it earns its place in the preview again.
-        clearDismissal(id)
         // Drive a per-row spinner while the (async, up to ~5s) resume is in flight, so
         // clicking an exited session gives immediate "working on it" feedback.
         activatingSessions.insert(id)
@@ -4598,9 +4478,6 @@ final class AppModel {
     /// the next tick.
     func runHealthCheckOnce() {
         let now = nowMs()
-        // Cheap enough to ride along here rather than run its own timer — the lapse is
-        // a once-a-day edge, and 30s late on it is invisible.
-        refreshLapsedSleeps()
         // Cheap re-assert of the reaper's never-sleep set (a no-op unless it moved):
         // the 30s tick is well inside the sweep interval, so even a change path that
         // forgets to push can't lose the open pane or the active Oracle.
@@ -6185,7 +6062,6 @@ final class AppModel {
             if let editorId = editorTabs.remove(session: id) { editorPtys.removeValue(forKey: editorId)?.kill() }
             sessionPairs.remove(session: id)
             pinnedSessions.remove(id)
-            dismissedSessions.remove(id)
             if selection == id {
                 selection = editorParent.flatMap { idSet.contains($0) ? nil : $0 } ?? fallback
             }

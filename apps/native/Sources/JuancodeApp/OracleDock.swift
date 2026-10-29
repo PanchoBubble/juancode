@@ -570,7 +570,6 @@ struct OracleGlobalRail: View {
             activity: entry.activity,
             unread: model.unreadSessions.contains(meta.id),
             unseenDone: model.unseenCompletions.contains(meta.id),
-            asleep: model.isResting(meta),
             pinned: entry.pinned,
             chain: model.chain(forSession: meta.id),
             onTogglePin: { model.togglePinned(meta.id) },
@@ -621,9 +620,6 @@ private struct OracleRailRow: View {
     let unread: Bool
     /// It finished a turn while you were looking elsewhere — green check until viewed.
     let unseenDone: Bool
-    /// Auto-slept while idle and still resting (`AppModel.isResting`) — purple moon, and
-    /// the card only steps back instead of fading like an exited one.
-    let asleep: Bool
     /// Pinned to the top of the rail — a pin ornament at rest, and the hover chip's
     /// pin flips to "unpin".
     let pinned: Bool
@@ -646,7 +642,7 @@ private struct OracleRailRow: View {
             // pulses, one waiting on a reply shows the amber "?", one that finished
             // while you were elsewhere keeps a green check until you look.
             SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                              unread: unread, dormant: asleep)
+                              unread: unread)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(placeholder ? "Oracle \(number)" : meta.title)
@@ -684,10 +680,7 @@ private struct OracleRailRow: View {
         }
         .overlay(RoundedRectangle(cornerRadius: 7)
             .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1))
-        // A resting Oracle dims as a whole so live ones carry the eye — but one that
-        // is merely asleep (purple moon, resumable) only steps back a little; it is
-        // work still in play, not history.
-        .opacity(live ? 1 : (asleep ? 0.85 : 0.62))
+        .opacity(live ? 1 : 0.62)
         .padding(.horizontal, 6).padding(.vertical, 1.5)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)

@@ -1227,22 +1227,14 @@ struct SidebarView: View {
         }
     }
 
-    /// The rows a folder shows while folded: the first `folderPreviewCount`, plus any
-    /// live session sorting below them, plus any session we auto-slept that the user
-    /// hasn't dismissed. Live rows usually float to the top, but a manual drag order
-    /// can park dead ones in the preview slots — and an active session must never be
-    /// hidden behind "Load more", least of all one that just auto-started. The
-    /// sleeping ones stay for a different reason: the reaper closed them, not the
-    /// user, so the fold only takes them once the user waves them off — or once
-    /// they've been asleep a full day (`AppModel.isResting`, `foldedPreviewKeeps`).
+    /// Fold closed sessions beyond the preview; always keep live sessions visible.
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
         let s = pairedOrder(group.sessions)
         guard !filterActive, s.count > folderPreviewCount else { return s }
         return s.enumerated()
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
-                                   live: model.isLive($0.element.id) || model.sessionPair(for: $0.element.id) != nil,
-                                   sleepingUndismissed: model.isResting($0.element))
+                                   live: model.isLive($0.element.id) || model.sessionPair(for: $0.element.id) != nil)
             }
             .map(\.element)
     }
@@ -1999,23 +1991,10 @@ private struct SessionRowHost: View {
                    } ?? "",
                    tiltRuntime: external ? nil : model.tiltRuntime,
                    selected: selected,
-                   activating: model.isActivating(meta.id),
-                   asleep: model.isResting(meta),
-                   dismissed: !external && model.isDismissed(meta.id),
-                   onToggleDismissed: external || !model.isAsleep(meta)
-                       ? nil : { model.toggleDismissed(meta.id) })
-            // Wheel button, browser-tab style — what it closes depends on the row:
-            // a live one has its agent stopped (deliberately the menu's "Kill Agent"
-            // and not the ✕'s delete, so a stray click costs a resume, never the
-            // session, its scrollback or its worktree); a sleeping one, which we
-            // closed rather than the user, is dismissed into the fold. Inert on an
-            // external row, and on a dead one — nothing left to close.
-            .onMiddleClick(enabled: !external && (model.isLive(meta.id) || model.isAsleep(meta))) {
-                if model.isLive(meta.id) {
-                    model.killSession(meta.id)
-                } else {
-                    model.toggleDismissed(meta.id)
-                }
+                   activating: model.isActivating(meta.id))
+            // Wheel click stops the agent; its session remains available to resume.
+            .onMiddleClick(enabled: !external && model.isLive(meta.id)) {
+                model.killSession(meta.id)
             }
     }
 }
@@ -2669,18 +2648,6 @@ struct SessionRow: View {
     /// The session's exited pane is being resumed right now (juancode click-to-open
     /// feedback) — swaps the status glyph for a spinner until the pty is back.
     var activating: Bool = false
-    /// Auto-slept while idle and still resting (`AppModel.isResting`): purple moon,
-    /// and the row holds its place instead of sinking like an exited one. False once
-    /// the user dismisses it or it has slept a day — then it's a grey dot like any
-    /// other closed session.
-    var asleep: Bool = false
-    /// The user dismissed this sleeping row (`AppModel.isDismissed`) — it sinks and
-    /// the fold may hide it. Drives the hover chip's glyph, which then offers the
-    /// undo ("keep surfaced") rather than the dismiss.
-    var dismissed: Bool = false
-    /// Dismiss/restore this sleeping row — the hover chip's chevron, also on a wheel
-    /// click. Nil for rows that aren't asleep (there's nothing to keep surfaced).
-    var onToggleDismissed: (() -> Void)? = nil
 
     @State private var hovering = false
 
@@ -2755,20 +2722,11 @@ struct SessionRow: View {
             Spacer(minLength: 6)
             trailingOrnament
         }
-        // A sleeping (reaped) row reads as resting, not failed — the purple moon
-        // carries the "why", so the row only steps back a little. It used to fade to
-        // 0.55, which made work you still consider open look discarded.
-        .opacity(sleeping ? 0.85 : 1)
         .padding(.vertical, 3)
         // Floated, not laid out: see `hoverActions`.
         .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
     }
-
-    /// The reaper put this session to sleep, it hasn't been revived, and it is still
-    /// being offered as open work. Not the same as `meta.dormant` — see
-    /// `AppModel.isResting`.
-    private var sleeping: Bool { !live && asleep }
 
     /// A Tilt stack is running from this row's checkout.
     private var stackRunning: Bool { tiltRuntime.map { !$0.inCheckout(meta.cwd).isEmpty } ?? false }
@@ -2811,24 +2769,19 @@ struct SessionRow: View {
     }
 
     /// Hover-revealed row actions for own sessions — the shared `RowHoverActions` chip
-    /// (▶, pin, dismiss and the ellipsis menu, whose Delete confirms first), floated over the
+    /// (▶, pin and the ellipsis menu, whose Delete confirms first), floated over the
     /// row's trailing edge.
     @ViewBuilder
     private var hoverActions: some View {
         if !external, hovering,
            menuContent != nil || onTogglePin != nil
-               || onToggleDismissed != nil || onRun != nil {
+               || onRun != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
                             onRun: onRun,
                             runHelp: runHelp,
                             onTogglePin: onTogglePin,
-                            pinned: pinned,
-                            onToggleDismissed: onToggleDismissed,
-                            dismissed: dismissed,
-                            dismissHelp: dismissed
-                                ? "Keep this sleeping session surfaced in the list"
-                                : "Dismiss — let this sleeping session fold away (wheel click)")
+                            pinned: pinned)
         }
     }
 
@@ -2984,7 +2937,7 @@ struct SessionRow: View {
     /// Status glyph in the leading slot — the shared agent-state vocabulary.
     private var statusIndicator: some View {
         SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                          unread: unread, activating: activating, dormant: sleeping)
+                          unread: unread, activating: activating)
     }
 }
 
@@ -2992,10 +2945,7 @@ struct SessionRow: View {
 /// list answers "who's working / who needs me / who finished" at a glance:
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
 /// green check (only until the session is viewed), live-but-idle = blue dot,
-/// actually exited = quiet grey dot, asleep (auto-slept by the reaper, resumable
-/// and still resting in place) = purple moon, teal while the unread dot is up so
-/// the two don't merge. Three tiers, deliberately: open,
-/// open-but-closed, and finished.
+/// exited = quiet grey dot.
 /// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
 /// the two surfaces never drift into different vocabularies.
 struct SessionStateGlyph: View {
@@ -3005,14 +2955,10 @@ struct SessionStateGlyph: View {
     var unread: Bool = false
     /// The session is being resumed right now — show a spinner in the glyph slot.
     var activating: Bool = false
-    /// The reaper put this session to sleep (`meta.dormant`) — render a moon, not
-    /// the exited grey dot, so intentional sleep never reads as a crash.
-    var dormant: Bool = false
-
-    private enum Glyph { case working, waiting, doneUnseen, dot, sleeping }
+    private enum Glyph { case working, waiting, doneUnseen, dot }
 
     private var glyph: Glyph {
-        guard live else { return dormant ? .sleeping : .dot }
+        guard live else { return .dot }
         switch activity {
         case .busy: return .working
         case .waitingInput: return .waiting
@@ -3050,22 +2996,6 @@ struct SessionStateGlyph: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.green)
                     .help("Finished since you last looked — click to view")
-            case .sleeping:
-                // A status colour, not a dimmer grey: "asleep on purpose, one click
-                // from live" has to be legible against BOTH the live dots and the
-                // faint grey of a session that actually exited. Purple is the only
-                // slot left in the vocabulary (orange working, amber waiting, green
-                // done-unseen, blue live-idle, grey exited).
-                //
-                // Except when the unread dot is up: purple against that saturated red
-                // is two dark tones touching, and the moon's shape stops reading. Teal
-                // is red's complement, so the pair separates at a glance — and it only
-                // appears while the dot is there, so "purple = asleep" stays the resting
-                // colour you learn.
-                Image(systemName: "moon.zzz.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(unread ? Color.teal : Color.purple)
-                    .help("Asleep — auto-slept while idle to free memory. Open it to pick up where you left off.")
             case .dot:
                 Circle().fill(sessionDotColor(live: live, activity: activity))
                     .frame(width: 8, height: 8)

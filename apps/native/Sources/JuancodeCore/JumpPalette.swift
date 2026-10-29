@@ -96,22 +96,11 @@ public func sinkDownPrecedes(_ a: SinkSortKey, _ b: SinkSortKey) -> Bool {
     return a.id < b.id
 }
 
-/// Resting attention for the sidebar sort: a session that is *asleep rather than
-/// finished* rests like an idle live session instead of sinking with old dead
-/// ones. Two kinds qualify:
-///
-/// - a crash orphan (still "running" when the previous process died, not yet
-///   revived this run) — otherwise a crash/relaunch buries yesterday's active work
-///   under manually-placed rows and behind the folder's "Load more";
-/// - a session the reaper auto-slept while idle (`meta.dormant`) — it is one click
-///   from live and its conversation is intact, so sinking it into the dead pile
-///   hides work you still consider open. "Open but closed", not exited.
-///
-/// Glyphs are untouched; this only affects ordering.
+/// Keep crash orphans surfaced while they await restoration.
 public func restingAttention(
-    _ attention: SessionAttention, crashOrphan: Bool, dormant: Bool = false
+    _ attention: SessionAttention, crashOrphan: Bool
 ) -> SessionAttention {
-    ((crashOrphan || dormant) && attention == .exited) ? .idle : attention
+    (crashOrphan && attention == .exited) ? .idle : attention
 }
 
 /// The sidebar's *order* bucket for one session: `restingAttention` with `.working`
@@ -126,12 +115,11 @@ public func restingAttention(
 /// finished turn can't either. Row glyphs keep reading the real activity, so the
 /// green check still appears — the row just doesn't move to show it.
 public func sidebarOrderAttention(
-    live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool,
-    dormant: Bool = false
+    live: Bool, activity: SessionActivity?, unseenDone: Bool, crashOrphan: Bool
 ) -> SessionAttention {
     let resting = restingAttention(
         sessionAttention(live: live, activity: activity, unseenDone: unseenDone),
-        crashOrphan: crashOrphan, dormant: dormant)
+        crashOrphan: crashOrphan)
     return (resting == .working || resting == .doneUnseen) ? .idle : resting
 }
 
@@ -152,23 +140,11 @@ public func dedupedSessionIds<T>(_ metas: [T], id: (T) -> String) -> [T] {
 }
 
 /// Whether a folded folder keeps showing the row at `index` instead of hiding it
-/// behind "Load more".
-///
-/// The fold is a preview of the first `limit` rows, but two kinds of row must never
-/// disappear into it:
-///
-/// - a live session, wherever it sorts — a manual drag order can park dead rows in
-///   the preview slots, and an active agent (least of all one that just auto-started)
-///   has to stay visible;
-/// - a session that was slept while idle and not yet dismissed — the reaper closed
-///   it, the user didn't, and it is one click from live with its conversation intact.
-///   Folding it away on the app's own initiative loses work the user still considers
-///   open. It leaves only when they say so (the row's dismiss chip or a wheel click),
-///   which is also what lets it sink in the resting order.
+/// behind "Load more". Live sessions always remain visible.
 public func foldedPreviewKeeps(
-    index: Int, limit: Int, live: Bool, sleepingUndismissed: Bool
+    index: Int, limit: Int, live: Bool
 ) -> Bool {
-    index < limit || live || sleepingUndismissed
+    index < limit || live
 }
 
 /// One session's inputs for the sidebar's "manual order + attention bubbling"
@@ -343,26 +319,4 @@ public func jumpResults(_ candidates: [JumpCandidate], query: String) -> [JumpCa
         return smartSortPrecedes(a.0.key, b.0.key)
     }
     .map(\.0)
-}
-
-/// When an auto-slept row stops counting as "open but closed".
-///
-/// Sleeping is a promise that the session is one click from live and still yours to
-/// pick up — which is why the moon holds its slot in the resting order and never
-/// folds behind "Load more". That promise has a shelf life. A session you haven't
-/// touched since yesterday isn't open work you forgot to close; it's history, and
-/// keeping a purple moon on it crowds the rows that *are* open out of the preview.
-///
-/// So the exemption expires: after the window the row reverts to an ordinary exited
-/// one — grey dot, sinks with the dead, foldable — without anything being deleted or
-/// made harder to resume.
-public enum SleepLapse {
-    /// A day, the interval after which "I left it sleeping" reads as "I left it".
-    public static let defaultWindowMs = 24 * 60 * 60 * 1000
-
-    /// Whether a row slept at `sleptAtMs` has outlived the window. A window ≤ 0
-    /// disables the lapse entirely (sleeping rows stay surfaced forever).
-    public static func lapsed(sleptAtMs: Int, nowMs: Int, windowMs: Int = defaultWindowMs) -> Bool {
-        windowMs > 0 && nowMs - sleptAtMs >= windowMs
-    }
 }

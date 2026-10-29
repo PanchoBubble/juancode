@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Hover-revealed trailing actions for a list row — ▶, pin, dismiss and an ellipsis
+/// Hover-revealed trailing actions for a list row — ▶, pin and an ellipsis
 /// menu (the row's context-menu items, Delete included, made discoverable without a
 /// right-click).
 ///
@@ -27,12 +27,6 @@ struct RowHoverActions: View {
     var onTogglePin: (() -> Void)? = nil
     /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
     var pinned: Bool = false
-    /// Dismiss/restore this row — folds a sleeping session away (or brings it back);
-    /// nil hides the chevron.
-    var onToggleDismissed: (() -> Void)? = nil
-    /// Whether the row is currently dismissed — flips the chevron to the undo.
-    var dismissed: Bool = false
-    var dismissHelp: String = ""
     var glyphSize: CGFloat = 12
 
     private let corner: CGFloat = 7
@@ -57,17 +51,6 @@ struct RowHoverActions: View {
                 }
                 .buttonStyle(.plain)
                 .help(pinned ? "Unpin — let this session sort normally" : "Pin to top of this project")
-                .clickCursor()
-            }
-            if let onToggleDismissed {
-                Button(action: onToggleDismissed) {
-                    // Same chevron the fold's own "Load more" button wears, pointed the
-                    // way the row is about to travel: down into the fold, or back up
-                    // out of it.
-                    tile(dismissed ? "chevron.up" : "chevron.down", size: glyphSize - 3)
-                }
-                .buttonStyle(.plain)
-                .help(dismissHelp)
                 .clickCursor()
             }
             if let menuContent {

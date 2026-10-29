@@ -433,78 +433,12 @@ import Testing
                                       unseenDone: true, crashOrphan: false) == .idle)
     }
 
-    @Test func autoSleptRestsInPlaceInsteadOfSinking() {
-        // "Open but closed": the reaper freed its RAM, the conversation is intact and
-        // one click brings it back, so it must not sink into the dead pile where a
-        // folder's "Load more" hides it.
-        #expect(restingAttention(.exited, crashOrphan: false, dormant: true) == .idle)
-        #expect(restingAttention(.exited, crashOrphan: false, dormant: false) == .exited)
+    @Test func closedSessionsSinkAndFoldImmediately() {
         #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
-                                      crashOrphan: false, dormant: true) == .idle)
-        // A genuinely exited session still sinks — grey means finished.
-        #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
-                                      crashOrphan: false, dormant: false) == .exited)
-
-        // Ordering: an auto-slept row outranks both a manually placed dead row and a
-        // plain dead one, exactly like a crash orphan.
-        let asleep = ManualSortKey(
-            key: SessionSortKey(attention: restingAttention(.exited, crashOrphan: false,
-                                                           dormant: true),
-                                updatedAt: 10, createdAt: 10),
-            manualIndex: nil, id: "asleep")
-        let placed = ManualSortKey(
-            key: SessionSortKey(attention: .exited, updatedAt: 99, createdAt: 99),
-            manualIndex: 0, id: "placed")
-        #expect(manualRestingPrecedes(asleep, placed))
-        #expect(!manualRestingPrecedes(placed, asleep))
-    }
-
-    @Test func sleepingRowLapsesAfterADay() {
-        let day = SleepLapse.defaultWindowMs
-        let slept = 1_700_000_000_000
-        // Fresh sleep, and all the way to the last minute of the window: still open work.
-        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept))
-        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + day - 60_000))
-        // On the hour it turns over, and stays turned over.
-        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + day))
-        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 9 * day))
-        // A clock that went backwards (NTP step, timezone-free ms arithmetic) must not
-        // lapse a row that was slept "in the future".
-        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept - day))
-        // A zero/negative window is the opt-out: nothing ever lapses.
-        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 99 * day, windowMs: 0))
-        // And a short window (the env override exists so the lapse is watchable) works
-        // on the same edge.
-        #expect(SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 60_000, windowMs: 60_000))
-        #expect(!SleepLapse.lapsed(sleptAtMs: slept, nowMs: slept + 59_999, windowMs: 60_000))
-    }
-
-    @Test func lapsedSleepSinksAndFoldsLikeAnyExitedRow() {
-        // The app passes `dormant: false` / `sleepingUndismissed: false` once a row has
-        // lapsed (AppModel.isResting), so it lands back in the plain-exited rules.
-        #expect(sidebarOrderAttention(live: false, activity: nil, unseenDone: false,
-                                      crashOrphan: false, dormant: false) == .exited)
-        #expect(!foldedPreviewKeeps(index: 7, limit: 5, live: false,
-                                    sleepingUndismissed: false))
-    }
-
-    @Test func foldKeepsLiveAndUndismissedSleepingRows() {
-        let limit = 5
-        // Inside the preview window: everything shows, whatever its state.
-        #expect(foldedPreviewKeeps(index: 0, limit: limit, live: false,
-                                   sleepingUndismissed: false))
-        // Past it, a dead row folds away…
-        #expect(!foldedPreviewKeeps(index: 7, limit: limit, live: false,
-                                    sleepingUndismissed: false))
-        // …but a live one never does…
-        #expect(foldedPreviewKeeps(index: 7, limit: limit, live: true,
-                                   sleepingUndismissed: false))
-        // …and neither does one we auto-slept while the user still had it open.
-        #expect(foldedPreviewKeeps(index: 7, limit: limit, live: false,
-                                   sleepingUndismissed: true))
-        // Once they dismiss it, the fold takes it like any other closed row.
-        #expect(!foldedPreviewKeeps(index: 7, limit: limit, live: false,
-                                    sleepingUndismissed: false))
+                                      crashOrphan: false) == .exited)
+        #expect(foldedPreviewKeeps(index: 0, limit: 5, live: false))
+        #expect(!foldedPreviewKeeps(index: 7, limit: 5, live: false))
+        #expect(foldedPreviewKeeps(index: 7, limit: 5, live: true))
     }
 
     @Test func sidebarOrderKeepsTheBucketsThatMoveRows() {
