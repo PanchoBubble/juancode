@@ -511,6 +511,7 @@ struct GitHubQueueBadge: View {
                                 .cornerCount(pr.unresolvedComments, color: .orange)
                                 .padding(.trailing, 4)
                         }
+                        reviewIcon
                         if pr.draft {
                             Text("draft")
                                 .font(.system(size: 9))
@@ -534,6 +535,24 @@ struct GitHubQueueBadge: View {
             .padding(.leading, 6).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
+        }
+
+        /// The review verdict as a bare glyph — the GitHub view's chip without its
+        /// word, same symbols and colours. "Review required" draws nothing: it's every
+        /// open PR's default on a repo that requires review, so it would say nothing.
+        @ViewBuilder private var reviewIcon: some View {
+            switch pr.reviewDecisionKind {
+            case .approved:
+                Image(systemName: "checkmark.seal.fill").font(.system(size: 10))
+                    .foregroundStyle(.green)
+                    .help("Approved")
+            case .changesRequested:
+                Image(systemName: "arrow.uturn.backward").font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .help("Changes requested")
+            case .reviewRequired, .none:
+                EmptyView()
+            }
         }
 
         /// The stack this PR sits in, looked up among its checkout's PRs and the
