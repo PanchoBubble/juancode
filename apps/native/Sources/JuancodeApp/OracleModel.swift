@@ -613,10 +613,11 @@ final class OracleModel {
                 continue
             }
             // Spawn in the background: a dispatch must never pull you off what you're on.
+            // Legacy mailbox lines need an id too, so the daemon gives them a chain.
             let s = await app.create(provider: d.resolvedProvider(default: oracleProvider), cwd: d.project,
                                      skipPermissions: true, isolateWorktree: d.worktree ?? false,
                                      initialInput: d.prompt, select: false, model: d.model,
-                                     dispatchId: d.dispatchId)
+                                     dispatchId: d.dispatchId ?? UUID().uuidString)
             recordDispatchOutcome(d, sessionId: s?.id,
                                   error: s == nil ? (app.errorMessage ?? "failed to start the session") : nil)
         }

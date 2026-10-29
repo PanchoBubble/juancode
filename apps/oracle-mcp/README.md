@@ -423,7 +423,8 @@ when it is in none. The shared MCP endpoint does not know which session is calli
 Code `$CLAUDE_CODE_SESSION_ID`, matched against `cliSessionId`, or a juancode id or
 prefix), else the one running Oracle session in the control dir that is busy — an
 Oracle making a tool call is mid-turn. Anything else (several busy, none, the headless
-phone chat dispatching) sends no source and the session starts unchained. The field goes
+phone chat dispatching) sends no source; the daemon creates a chain named after the
+dispatched session instead. Every dispatch gets a chain, including queued replay. The field goes
 on the wire only once that socket's `serverInfo` advertises `chainInherit`, and rides the
 `dispatch.jsonl` line for the queued path. `POST /api/dispatch` resolves a given
 `fromSessionId` the same way and infers nothing; the dispatch-ticket skill passes its own

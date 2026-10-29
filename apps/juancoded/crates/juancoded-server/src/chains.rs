@@ -456,6 +456,45 @@ impl Chains {
         Ok(())
     }
 
+    /// Give a dispatch a chain even when its source is absent or no longer known.
+    /// Prefer inheritance, and never move a session that already belongs to a chain.
+    pub fn chain_dispatch(&self, session_id: &str, from_session: Option<&str>) {
+        if let Some(from) = from_session {
+            self.inherit(from, ChainMemberKind::Session, session_id, None, None);
+        }
+        let Some(session) = self.sessions.meta(session_id) else {
+            return;
+        };
+        let outcome = self.mutate(|store| {
+            let book = store.chains().map_err(store_failed)?;
+            if book.iter().any(|chain| {
+                chain.members.iter().any(|member| {
+                    member.kind == ChainMemberKind::Session && member.ref_id == session_id
+                })
+            }) {
+                return Ok(Vec::new());
+            }
+            let slug = start_chain_for(store, &session)?;
+            store
+                .set_member(
+                    &slug,
+                    &ChainMember {
+                        kind: ChainMemberKind::Session,
+                        ref_id: session_id.to_string(),
+                        title: None,
+                        url: None,
+                        added_at: now_ms(),
+                        done: false,
+                    },
+                )
+                .map_err(store_failed)?;
+            Ok(vec![slug])
+        });
+        if let Err(code) = outcome {
+            warn!(session = %session_id, code, "could not create a dispatch chain");
+        }
+    }
+
     /// Put a just-created item in whatever chain `from_session` is in: the session an
     /// Oracle dispatched joins the Oracle's chain, and a PR tracked from a chained
     /// session joins that session's chain. Returns the slug it joined.

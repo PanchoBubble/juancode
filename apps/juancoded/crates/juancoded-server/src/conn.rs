@@ -1094,8 +1094,10 @@ fn handle_client_message(
                     let id = meta.id.clone();
                     // Before `created` goes out, so the chain frame the asker is sent
                     // behind it already lists the session it was just told about.
-                    if let (Some(from), Some(chains)) = (from_session_id.as_deref(), chains) {
-                        chains.inherit(from, ChainMemberKind::Session, &id, None, None);
+                    if let Some(chains) = chains {
+                        if meta.dispatch_id.is_some() || from_session_id.is_some() {
+                            chains.chain_dispatch(&id, from_session_id.as_deref());
+                        }
                     }
                     attached.insert(id.clone());
                     outbound.push(ServerMessage::Created {
@@ -4178,6 +4180,70 @@ mod tests {
         );
 
         for id in [oracle, child, plain, loner, orphan] {
+            let _ = wire.sessions().kill(&id);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatches_without_a_known_source_get_their_own_chain() {
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        wire.step(ClientMessage::SubscribeChains, &mut fanout);
+        let mut ids = Vec::new();
+        for from in [None, Some("missing-source".to_string())] {
+            let sent = wire.step(
+                ClientMessage::Create {
+                    provider: "claude".into(),
+                    cwd: "/tmp".into(),
+                    cols: None,
+                    rows: None,
+                    initial_input: None,
+                    skip_permissions: None,
+                    model: None,
+                    preset: None,
+                    isolate_worktree: None,
+                    worktree_name: None,
+                    reclaim_slot: None,
+                    dispatch_id: Some(uuid::Uuid::new_v4().to_string()),
+                    from_session_id: from,
+                },
+                &mut fanout,
+            );
+            let (created_at, session) = sent
+                .iter()
+                .enumerate()
+                .find_map(|(i, frame)| match frame {
+                    ServerMessage::Created { session } => Some((i, session)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no created in {sent:?}"));
+            ids.push(session.id.clone());
+            let chains = chain_book(&wire);
+            let slug = chains
+                .chain_of(ChainMemberKind::Session, &session.id)
+                .expect("every dispatch gets a chain");
+            let chain_at = sent
+                .iter()
+                .position(|frame| {
+                    matches!(frame, ServerMessage::Chain { chain }
+                    if chain.slug == slug && chain.members.len() == 1
+                    && chain.members[0].ref_id == session.id
+                    && chain.name == session.title)
+                })
+                .expect("publish a named chain holding the dispatched session");
+            assert!(created_at < chain_at);
+            chains.chain_dispatch(&session.id, None);
+            assert_eq!(
+                chains.chain_of(ChainMemberKind::Session, &session.id),
+                Some(slug)
+            );
+        }
+        assert_eq!(
+            chain_book(&wire).list().len(),
+            2,
+            "independent dispatches get separate chains"
+        );
+        for id in ids {
             let _ = wire.sessions().kill(&id);
         }
     }
