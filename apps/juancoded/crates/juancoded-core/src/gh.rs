@@ -187,7 +187,7 @@ pub fn rollup_checks(checks: &[RawCheck]) -> PrChecks {
         return PrChecks::None;
     }
     let mut pending = false;
-    for c in checks {
+    for c in latest_checks(checks) {
         let conclusion = c.conclusion.as_deref().unwrap_or_default().to_uppercase();
         let state = c.state.as_deref().unwrap_or_default().to_uppercase();
         let status = c.status.as_deref().unwrap_or_default().to_uppercase();
@@ -273,6 +273,56 @@ pub struct RawCheck {
     pub status: Option<String>,
     pub conclusion: Option<String>,
     pub state: Option<String>,
+    pub name: Option<String>,
+    pub context: Option<String>,
+    pub started_at: Option<String>,
+    pub created_at: Option<String>,
+    // gh pr view/list flatten the workflow name; GraphQL nests it.
+    pub workflow_name: Option<String>,
+    pub check_suite: Option<RawCheckSuite>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawCheckSuite {
+    pub workflow_run: Option<RawCheckWorkflowRun>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawCheckWorkflowRun {
+    pub event: Option<String>,
+    pub workflow: Option<RawCheckWorkflow>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawCheckWorkflow {
+    pub name: Option<String>,
+}
+
+/// Match gh pr checks: the newest attempt wins within a name/workflow/event.
+/// Anonymous entries stay independent so incomplete data cannot hide a failure.
+fn latest_checks(checks: &[RawCheck]) -> Vec<&RawCheck> {
+    let mut sorted: Vec<_> = checks.iter().collect();
+    sorted.sort_by_key(|c| std::cmp::Reverse(c.started_at.as_ref().or(c.created_at.as_ref())));
+    let mut seen = BTreeSet::new();
+    sorted.retain(|c| {
+        let key = if let Some(context) = c.context.as_deref().filter(|v| !v.is_empty()) {
+            Some(("status", context, "", ""))
+        } else if let Some(name) = c.name.as_deref().filter(|v| !v.is_empty()) {
+            let run = c.check_suite.as_ref().and_then(|s| s.workflow_run.as_ref());
+            let workflow = run
+                .and_then(|r| r.workflow.as_ref())
+                .and_then(|w| w.name.as_deref())
+                .or(c.workflow_name.as_deref())
+                .unwrap_or_default();
+            let event = run.and_then(|r| r.event.as_deref()).unwrap_or_default();
+            Some(("check", name, workflow, event))
+        } else {
+            None
+        };
+        key.is_none_or(|key| seen.insert(key))
+    });
+    sorted
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,7 +1016,7 @@ pub fn parse_prs(raw: Vec<RawPr>) -> Vec<PullRequest> {
                 is_cross_repository: p.is_cross_repository,
                 draft: p.is_draft,
                 checks: rollup_checks(&rollup),
-                check_count: rollup.len() as i64,
+                check_count: latest_checks(&rollup).len() as i64,
                 passed_count: count_passed_checks(&rollup),
                 unresolved_comments: 0,
                 author: p.author.and_then(|a| a.login).unwrap_or_default(),
@@ -998,7 +1048,7 @@ pub fn parse_prs(raw: Vec<RawPr>) -> Vec<PullRequest> {
 /// rolled-up colour beside them.
 pub fn count_passed_checks(checks: &[RawCheck]) -> i64 {
     let mut passed = 0;
-    for c in checks {
+    for c in latest_checks(checks) {
         let conclusion = c.conclusion.as_deref().unwrap_or_default().to_uppercase();
         let state = c.state.as_deref().unwrap_or_default().to_uppercase();
         let status = c.status.as_deref().unwrap_or_default().to_uppercase();
@@ -1625,8 +1675,11 @@ fragment prBits on PullRequest {
         statusCheckRollup {
           contexts(first: 100) {
             nodes {
-              ... on CheckRun { status conclusion }
-              ... on StatusContext { state }
+              ... on CheckRun {
+                name status conclusion startedAt
+                checkSuite { workflowRun { event workflow { name } } }
+              }
+              ... on StatusContext { context state createdAt }
             }
           }
         }
@@ -1832,7 +1885,7 @@ fn viewer_pull_request(raw: &RawViewerPr) -> Option<PullRequest> {
         is_cross_repository: raw.is_cross_repository,
         draft: raw.is_draft.unwrap_or(false),
         checks: rollup_checks(&contexts),
-        check_count: contexts.len() as i64,
+        check_count: latest_checks(&contexts).len() as i64,
         passed_count: count_passed_checks(&contexts),
         unresolved_comments: unresolved,
         author: raw
@@ -2029,7 +2082,92 @@ mod tests {
             status: status.map(str::to_string),
             conclusion: conclusion.map(str::to_string),
             state: state.map(str::to_string),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn superseded_attempts_do_not_affect_status_or_counts() {
+        // The queue's GraphQL shape: PR #24359 had cancelled Penguin attempts
+        // followed by successful replacements on the same head commit.
+        let contexts = serde_json::json!([
+            {"name":"suggest", "status":"COMPLETED", "conclusion":"CANCELLED",
+             "startedAt":"2026-10-29T15:42:03Z",
+             "checkSuite":{"workflowRun":{"event":"pull_request","workflow":{"name":"Penguin"}}}},
+            {"name":"suggest", "status":"COMPLETED", "conclusion":"SUCCESS",
+             "startedAt":"2026-10-29T15:42:07Z",
+             "checkSuite":{"workflowRun":{"event":"pull_request","workflow":{"name":"Penguin"}}}}
+        ]);
+        let queue = serde_json::json!({"data": {
+            "mine": {"nodes": [{
+                "number": 24359,
+                "url": "https://github.com/example/repo/pull/24359",
+                "rollup": {"nodes": [{"commit": {"statusCheckRollup": {
+                    "contexts": {"nodes": contexts.clone()}
+                }}}]}
+            }]},
+            "reviews": {"nodes": []}
+        }});
+        let rows = parse_viewer_prs(&queue.to_string()).unwrap();
+        assert_eq!(rows[0].pr.checks, PrChecks::Passing);
+        assert_eq!((rows[0].pr.passed_count, rows[0].pr.check_count), (1, 1));
+        let mut checks: Vec<RawCheck> = serde_json::from_value(contexts).unwrap();
+        for _ in 0..2 {
+            let out = parse_prs(vec![RawPr {
+                status_check_rollup: Some(checks.clone()),
+                ..Default::default()
+            }]);
+            assert_eq!(out[0].checks, PrChecks::Passing);
+            assert_eq!((out[0].passed_count, out[0].check_count), (1, 1));
+            checks.reverse(); // API order must not determine the winner.
+        }
+
+        checks[0].conclusion = Some("FAILURE".into());
+        assert_eq!(rollup_checks(&checks), PrChecks::Passing);
+        checks[1].conclusion = Some("FAILURE".into());
+        assert_eq!(rollup_checks(&checks), PrChecks::Failing);
+        checks[1].conclusion = None;
+        checks[1].status = Some("IN_PROGRESS".into());
+        assert_eq!(rollup_checks(&checks), PrChecks::Pending);
+        assert_eq!(count_passed_checks(&checks), 0);
+        checks[1].status = Some("COMPLETED".into());
+        checks[1].conclusion = Some("CANCELLED".into());
+        assert_eq!(rollup_checks(&checks), PrChecks::Failing);
+    }
+
+    #[test]
+    fn same_name_in_different_workflows_or_events_remains_independent() {
+        let checks: Vec<RawCheck> = serde_json::from_value(serde_json::json!([
+            {"name":"test", "status":"COMPLETED", "conclusion":"FAILURE",
+             "startedAt":"2026-10-29T15:42:03Z",
+             "checkSuite":{"workflowRun":{"event":"push","workflow":{"name":"CI"}}}},
+            {"name":"test", "status":"COMPLETED", "conclusion":"SUCCESS",
+             "startedAt":"2026-10-29T15:42:07Z",
+             "checkSuite":{"workflowRun":{"event":"pull_request","workflow":{"name":"CI"}}}},
+            {"name":"test", "status":"COMPLETED", "conclusion":"SUCCESS",
+             "startedAt":"2026-10-29T15:42:08Z",
+             "checkSuite":{"workflowRun":{"event":"push","workflow":{"name":"Other"}}}}
+        ]))
+        .unwrap();
+        assert_eq!(latest_checks(&checks).len(), 3);
+        assert_eq!(rollup_checks(&checks), PrChecks::Failing);
+        assert_eq!(count_passed_checks(&checks), 2);
+    }
+
+    #[test]
+    fn flattened_cli_checks_and_commit_statuses_use_latest_attempt() {
+        let checks: Vec<RawCheck> = serde_json::from_value(serde_json::json!([
+            {"name":"test", "workflowName":"CI", "status":"COMPLETED",
+             "conclusion":"FAILURE", "startedAt":"2026-10-29T15:42:03Z"},
+            {"name":"test", "workflowName":"CI", "status":"COMPLETED",
+             "conclusion":"SUCCESS", "startedAt":"2026-10-29T15:42:07Z"},
+            {"context":"external", "state":"ERROR", "createdAt":"2026-10-29T15:42:03Z"},
+            {"context":"external", "state":"SUCCESS", "createdAt":"2026-10-29T15:42:07Z"}
+        ]))
+        .unwrap();
+        assert_eq!(rollup_checks(&checks), PrChecks::Passing);
+        assert_eq!(latest_checks(&checks).len(), 2);
+        assert_eq!(count_passed_checks(&checks), 2);
     }
 
     #[test]
