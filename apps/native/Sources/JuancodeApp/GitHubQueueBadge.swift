@@ -431,8 +431,9 @@ struct GitHubQueueBadge: View {
         }
     }
 
-    /// One PR in the queue, under its repo's header: number, tracked eye, checks,
-    /// open threads and age on one line, the title (full text on hover) under it.
+    /// One PR in the queue, under its repo's header: number, stack link, open
+    /// threads and age (or, on hover, the actions) on one line, the title (full
+    /// text on hover) under it, and the checks dot and tracked eye in a lead column.
     private struct QueueRow: View {
         @Environment(AppModel.self) private var model
         let row: ViewerPr
@@ -442,7 +443,7 @@ struct GitHubQueueBadge: View {
         /// Agent spawn in the background and leave it open.
         let dismiss: () -> Void
         let onOpen: () -> Void
-        /// Whether the pointer is over the row — the two actions ride on it.
+        /// Whether the pointer is over the row — the actions take the age's place.
         @State private var hovering = false
         @State private var showingStack = false
         @State private var eyeHovering = false
@@ -464,24 +465,28 @@ struct GitHubQueueBadge: View {
                 .modifier(SelectableRowBackground(selected: false))
                 .pointerCursor()
                 .help(helpText)
-                // Floated, not inline: inline buttons take their width from the title,
-                // so every title re-truncates the instant the pointer enters the row
-                // (the lesson `RowHoverActions` is built around).
-                .overlay(alignment: .trailing) { actions }
                 .onHover { hovering = $0 }
                 .contextMenu { menu }
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
         }
 
         /// Facts on the first line, title on the second, with a leading column for
-        /// the checks dot and, under it, the watching eye. The attention reason is
-        /// not drawn — the orange comment count and red checks already say it — but
-        /// stays in the hover text.
+        /// the checks dot and, under it, the watching eye. Checks are status only —
+        /// the dot, plus a red corner count of the checks not passing when it's red;
+        /// the fraction lives in the GitHub view. The attention reason is not drawn —
+        /// the orange comment count and red dot already say it — but stays in the
+        /// hover text.
+        ///
+        /// The actions swap in for the age, inline at the end of the facts line.
+        /// That is safe here where it wasn't in a one-line row: the title has a line
+        /// of its own, so nothing the facts line does can re-truncate it.
         private var rowContent: some View {
             HStack(alignment: .top, spacing: 6) {
                 VStack(spacing: 4) {
-                    Circle().fill(pr.checks.color).frame(width: 7, height: 7)
-                        .frame(height: 14)
+                    Circle().fill(pr.checks.color).frame(width: 9, height: 9)
+                        .cornerCount(pr.checks == .failing ? pr.checkCount - pr.passedCount : 0,
+                                     color: .red)
+                        .frame(height: Self.factsHeight)
                     if let t = tracked { trackEye(t) }
                     if let t = tracked, let chain = model.chain(of: .trackedPr, ref: t.id) {
                         ChainBadge(chain: chain, member: ChainMemberRef(kind: .trackedPr, ref: t.id),
@@ -495,17 +500,16 @@ struct GitHubQueueBadge: View {
                         Text(verbatim: "#\(pr.number)")
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.secondary)
-                        HStack(spacing: 3) {
-                            Image(systemName: pr.checks.icon).font(.system(size: 9))
-                            Text(pr.checksText).font(.system(size: 10).monospacedDigit())
+                        // Always shown, not a hover action: being one of a stack is a
+                        // fact about the PR, like its number.
+                        if let stack {
+                            PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
                         }
-                        .foregroundStyle(pr.checks.color)
                         if pr.unresolvedComments > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "bubble.left.fill").font(.system(size: 8))
-                                Text(verbatim: "\(pr.unresolvedComments)").font(.system(size: 10))
-                            }
-                            .foregroundStyle(.orange)
+                            Image(systemName: "bubble.left.fill").font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                                .cornerCount(pr.unresolvedComments, color: .orange)
+                                .padding(.trailing, 4)
                         }
                         if pr.draft {
                             Text("draft")
@@ -515,21 +519,34 @@ struct GitHubQueueBadge: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                         }
                         Spacer(minLength: 4)
-                        if let age = prAgeLabel(pr.createdAt) {
+                        if hovering {
+                            actions
+                        } else if let age = prAgeLabel(pr.createdAt) {
                             Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    .frame(height: 14)
+                    .frame(height: Self.factsHeight)
                     Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
                 }
-                .padding(.trailing, 10)
+                .padding(.trailing, 8)
             }
-            .padding(.leading, 6).padding(.vertical, 6)
+            .padding(.leading, 6).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
 
+        /// The stack this PR sits in, looked up among its checkout's PRs and the
+        /// queue's own rows.
+        private var stack: PrStack? {
+            PrStack.containing(
+                pr, in: (cwd.flatMap { model.prs($0)?.prs } ?? []) + model.viewerPrs.rows.map(\.pr)
+            )
+        }
+
+        /// The facts line's height: tall enough for the 22pt action cells, so the
+        /// row doesn't grow when the pointer enters it.
+        private static let factsHeight: CGFloat = 22
         private static let leadColumn: CGFloat = 22
 
         /// The watching agent's eye: a chip filling the lead column, so it's a real
@@ -555,31 +572,18 @@ struct GitHubQueueBadge: View {
             .disabled(model.isTrackPending(t))
         }
 
-        /// Track, Agent, Review and GitHub, on hover. Track hands the PR to an agent that keeps
-        /// watching it, Agent opens one session on it right now, Review opens its diff in
-        /// the full-width review; all three need a checkout,
-        /// so a repo juancode has never opened gets only the GitHub button. That one is
-        /// always there because a click on a mapped row opens the GitHub view instead.
-        /// Nearly row-height, with each button's whole cell clickable.
-        @ViewBuilder private var actions: some View {
-            if hovering || showingStack {
-                HStack(spacing: 2) {
-                    if let stack = PrStack.containing(
-                        pr, in: (cwd.flatMap { model.prs($0)?.prs } ?? []) + model.viewerPrs.rows.map(\.pr)
-                    ) {
-                        PrStackBadge(stack: stack, number: pr.number, showing: $showingStack)
-                            .padding(.horizontal, 3)
-                    }
-                    if let cwd { checkoutActions(cwd) }
-                    HoverCellButton(symbol: "arrow.up.right.square", help: "Open on GitHub") {
-                        if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
-                    }
+        /// Track, Agent, Review and GitHub, at the end of the facts line on hover.
+        /// Track hands the PR to an agent that keeps watching it, Agent opens one
+        /// session on it right now, Review opens its diff in the full-width review;
+        /// all three need a checkout, so a repo juancode has never opened gets only
+        /// the GitHub button. That one is always there because a click on a mapped
+        /// row opens the GitHub view instead.
+        private var actions: some View {
+            HStack(spacing: 1) {
+                if let cwd { checkoutActions(cwd) }
+                HoverCellButton(symbol: "arrow.up.right.square", help: "Open on GitHub") {
+                    if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
                 }
-                .padding(3)
-                .frame(maxHeight: .infinity)
-                .background(pill)
-                .padding(.vertical, 3)
-                .padding(.trailing, 6)
             }
         }
 
@@ -605,17 +609,6 @@ struct GitHubQueueBadge: View {
                 dismiss()
                 model.openPrDiffReview(pr, cwd: cwd)
             }
-        }
-
-        /// The same frosted pill the sidebar's hover actions wear (`RowHoverActions`),
-        /// so a floating control reads the same wherever it appears.
-        private var pill: some View {
-            let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
-            return shape
-                .fill(.ultraThickMaterial)
-                .overlay(shape.fill(Color.appHairline(0.10)))
-                .overlay(shape.strokeBorder(Color.appHairline(0.22), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.45), radius: 5, y: 1)
         }
 
         /// The same actions without the hover, for a pointer that never rests: the
@@ -848,7 +841,8 @@ struct GitHubQueueBadge: View {
     }
 }
 
-/// A hover-pill action whose whole cell, not just its glyph, takes the click.
+/// A queue row's inline hover action: a borderless 22pt square whose whole cell,
+/// not just its glyph, takes the click, with a faint fill under the pointer.
 private struct HoverCellButton: View {
     let symbol: String
     let help: String
@@ -859,10 +853,9 @@ private struct HoverCellButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 30)
-                .frame(maxHeight: .infinity)
+                .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
                 .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color.appHairline(hovering && isEnabled ? 0.18 : 0)))
