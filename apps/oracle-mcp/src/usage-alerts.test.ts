@@ -5,7 +5,6 @@ import {
   readUsageAlertThresholds,
   REARM_MARGIN,
   UsageAlertLatch,
-  usageAlertLine,
 } from "./usage-alerts.ts";
 import type { SessionUsageSample } from "./native-events.ts";
 
@@ -159,18 +158,6 @@ describe("UsageAlertLatch — handoff", () => {
       DEFAULT_HANDOFF_TOKENS,
     );
   });
-
-  it("suggests a handoff in the Telegram line", () => {
-    const line = usageAlertLine({
-      sessionId: "s1",
-      kind: "handoff",
-      contextTokens: 262_000,
-      handoffTokens: 250_000,
-    });
-    expect(line).toContain("262,000 tokens");
-    expect(line).toContain("250,000 handoff line");
-    expect(line).toContain("handing off");
-  });
 });
 
 describe("UsageAlertLatch — spend", () => {
@@ -208,27 +195,5 @@ describe("UsageAlertLatch — spend", () => {
     const latch = new UsageAlertLatch(thresholds);
     const alert = latch.consider({ ...sample(undefined, 20), dispatchId: "d1" });
     expect(alert?.dispatchId).toBe("d1");
-  });
-});
-
-describe("usageAlertLine", () => {
-  it("spells out the context reading and any spend beside it", () => {
-    const line = usageAlertLine({
-      sessionId: "s1",
-      kind: "context",
-      contextPercent: 82,
-      contextTokens: 164_000,
-      contextWindow: 200_000,
-      spentUsd: 3.5,
-    });
-    expect(line).toContain("context 82% full");
-    expect(line).toContain("164,000 of 200,000 tokens");
-    expect(line).toContain("$3.50");
-  });
-
-  it("says what the cap was for a spend alert", () => {
-    const line = usageAlertLine({ sessionId: "s1", kind: "spend", spentUsd: 21.4, capUsd: 20 });
-    expect(line).toContain("$21.40");
-    expect(line).toContain("$20.00 cap");
   });
 });

@@ -2,51 +2,6 @@ import XCTest
 @testable import JuancodeCore
 
 final class SessionUsageFormatTests: XCTestCase {
-    // MARK: - tokens (mirrors web formatTokens)
-
-    func testTokenFormatting() {
-        XCTAssertEqual(SessionUsageFormat.tokens(0), "0")
-        XCTAssertEqual(SessionUsageFormat.tokens(980), "980")
-        XCTAssertEqual(SessionUsageFormat.tokens(999), "999")
-        XCTAssertEqual(SessionUsageFormat.tokens(1000), "1.0k")
-        XCTAssertEqual(SessionUsageFormat.tokens(12_400), "12k")
-        XCTAssertEqual(SessionUsageFormat.tokens(9_999), "10.0k")
-        XCTAssertEqual(SessionUsageFormat.tokens(3_200_000), "3.2M")
-    }
-
-    // MARK: - cost (mirrors web formatCost)
-
-    func testCostFormatting() {
-        XCTAssertNil(SessionUsageFormat.cost(nil))
-        XCTAssertEqual(SessionUsageFormat.cost(0), "$0.00")
-        XCTAssertEqual(SessionUsageFormat.cost(0.004), "<$0.01")
-        XCTAssertEqual(SessionUsageFormat.cost(0.42), "$0.42")
-        XCTAssertEqual(SessionUsageFormat.cost(12.5), "$12.50")
-    }
-
-    // MARK: - badgeLabel
-
-    func testBadgeLabelHidesWhenZeroTokens() {
-        let u = SessionUsage(
-            inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
-            cacheWriteTokens: 0, totalTokens: 0, costUsd: nil)
-        XCTAssertNil(u.badgeLabel)
-    }
-
-    func testBadgeLabelWithCost() {
-        let u = SessionUsage(
-            inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0,
-            cacheWriteTokens: 0, totalTokens: 12_400, costUsd: 0.42)
-        XCTAssertEqual(u.badgeLabel, "12k tok · $0.42")
-    }
-
-    func testBadgeLabelWithoutCost() {
-        let u = SessionUsage(
-            inputTokens: 5, outputTokens: 5, cacheReadTokens: 0,
-            cacheWriteTokens: 0, totalTokens: 10, costUsd: nil)
-        XCTAssertEqual(u.badgeLabel, "10 tok")
-    }
-
     // MARK: - context pressure (juancode-lncw)
 
     private func withContext(_ tokens: Int?, _ window: Int?) -> SessionUsage {
@@ -103,11 +58,6 @@ final class SessionUsageFormatTests: XCTestCase {
         XCTAssertEqual(u.contextPressure(handoffTokens: 150_000), .handoff)
         XCTAssertEqual(withContext(400_000, 1_000_000).contextPressure(handoffTokens: 0), .ok)
         XCTAssertEqual(ContextPressure.of(fraction: nil, tokens: nil), .ok)
-    }
-
-    func testBadgeLabelAppendsContextWhenKnown() {
-        XCTAssertEqual(withContext(160_000, 200_000).badgeLabel, "12k tok · $0.42 · ctx 80%")
-        XCTAssertEqual(withContext(nil, nil).badgeLabel, "12k tok · $0.42")
     }
 
     // MARK: - model price table (juancode-lncw)

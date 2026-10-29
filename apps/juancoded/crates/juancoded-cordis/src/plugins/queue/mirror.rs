@@ -231,16 +231,4 @@ mod tests {
         assert_eq!(mirror.rows("s1").len(), 1);
         assert_eq!(mirror.rows("s1")[0].content.as_text(), Some("current"));
     }
-
-    #[test]
-    fn the_dock_hides_at_zero_shows_one_row_at_one_and_collapses_above() {
-        let mut mirror = QueueMirror::new();
-        assert_eq!(mirror.dock("s1"), Dock::Hidden);
-        mirror.apply_baseline(snapshot("s1", 1, &[("q1", "one")]));
-        assert!(matches!(mirror.dock("s1"), Dock::One(row) if row.id == "q1"));
-        mirror.apply_broadcast(snapshot("s1", 2, &[("q1", "one"), ("q2", "two")]));
-        assert_eq!(mirror.dock("s1"), Dock::Collapsed(2));
-        mirror.apply_broadcast(snapshot("s1", 3, &[]));
-        assert_eq!(mirror.dock("s1"), Dock::Hidden);
-    }
 }

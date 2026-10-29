@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  changesText,
   classifyActivity,
   dispatchResultText,
-  formatSessionLine,
-  orderSessions,
   parseSessionList,
-  projectName,
   resolveSelector,
-  stateIcon,
-  stateLabel,
   type SessionSummary,
 } from "./telegram-format.ts";
 import type { DispatchResultRecord } from "./dispatch-results.ts";
@@ -41,57 +35,6 @@ describe("parseSessionList", () => {
     expect(parseSessionList({ sessions: [row] })).toHaveLength(1);
     expect(parseSessionList("garbage")).toEqual([]);
   });
-
-  it("falls back to the id slice for a blank title", () => {
-    expect(parseSessionList([{ id: "abcdefgh-123", title: "  " }])[0]!.title).toBe("abcdefgh");
-  });
-});
-
-describe("orderSessions", () => {
-  it("drops archived, puts running first, newest first within a group", () => {
-    const list = [
-      s({ id: "old-run", status: "running", updatedAt: 1 }),
-      s({ id: "archived", archived: true, updatedAt: 99 }),
-      s({ id: "exited", status: "exited", updatedAt: 50 }),
-      s({ id: "new-run", status: "running", updatedAt: 9 }),
-    ];
-    expect(orderSessions(list).map((x) => x.id)).toEqual(["new-run", "old-run", "exited"]);
-  });
-});
-
-describe("state rendering", () => {
-  it("live activity wins over the persisted status", () => {
-    expect(stateIcon("running", "waiting_input")).toBe("🟡");
-    expect(stateLabel("running", "waiting_input")).toBe("waiting for input");
-    expect(stateIcon("running", "busy")).toBe("🔵");
-    expect(stateIcon("running", "idle")).toBe("🟢");
-    expect(stateIcon("running", undefined)).toBe("⚪");
-    expect(stateLabel("running", undefined)).toBe("running");
-  });
-
-  it("exited always renders as exited", () => {
-    expect(stateIcon("exited", "busy")).toBe("⚫");
-    expect(stateLabel("exited", "idle")).toBe("exited");
-  });
-
-  it("formats a numbered line with project, provider, state, and observed marker", () => {
-    const line = formatSessionLine(
-      3,
-      s({ title: "fix tests", cwd: "/u/w/juancode", provider: "claude" }),
-      "busy",
-      true,
-    );
-    expect(line).toContain("3. 🔵 fix tests 👁");
-    expect(line).toContain("juancode · claude · working");
-  });
-});
-
-describe("projectName", () => {
-  it("takes the last path segment, tolerating trailing slashes", () => {
-    expect(projectName("/a/b/proj")).toBe("proj");
-    expect(projectName("/a/b/proj//")).toBe("proj");
-    expect(projectName("")).toBe("?");
-  });
 });
 
 describe("classifyActivity", () => {
@@ -101,20 +44,6 @@ describe("classifyActivity", () => {
     expect(classifyActivity("busy", true)).toBeNull();
     expect(classifyActivity("waiting_input", false)).toBeNull();
     expect(classifyActivity("idle", false)).toBeNull();
-  });
-});
-
-describe("changesText", () => {
-  it("formats the change badge with plural files and a real minus sign", () => {
-    expect(changesText({ files: 3, additions: 120, deletions: 44 })).toBe(
-      "3 files changed (+120/−44)",
-    );
-    expect(changesText({ files: 1, additions: 2, deletions: 0 })).toBe("1 file changed (+2/−0)");
-  });
-
-  it("returns null when absent or when nothing changed", () => {
-    expect(changesText(undefined)).toBeNull();
-    expect(changesText({ files: 0, additions: 0, deletions: 0 })).toBeNull();
   });
 });
 

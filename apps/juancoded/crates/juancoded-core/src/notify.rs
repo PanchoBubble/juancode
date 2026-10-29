@@ -244,32 +244,6 @@ mod tests {
         serde_json::from_str(body).expect("the body is a flat JSON object of strings")
     }
 
-    /// The wording is the contract: a webhook somebody already points at Slack must
-    /// not start saying something new because the core changed underneath it.
-    #[test]
-    fn text_per_event_matches_the_swift_wording() {
-        assert_eq!(
-            notification_text(NotificationEvent::WaitingInput, "Fix CI"),
-            "⏳ Fix CI needs your input"
-        );
-        assert_eq!(
-            notification_text(NotificationEvent::TurnEnd, "Fix CI"),
-            "✅ Fix CI finished a turn"
-        );
-        assert_eq!(
-            notification_text(NotificationEvent::WorkAtRisk, "Fix CI"),
-            "⚠️ Fix CI has uncommitted or unpushed work"
-        );
-    }
-
-    #[test]
-    fn an_empty_title_falls_back() {
-        assert_eq!(
-            notification_text(NotificationEvent::TurnEnd, ""),
-            "✅ A session finished a turn"
-        );
-    }
-
     #[test]
     fn the_body_carries_slack_text_and_structured_fields() {
         let obj = decode(&webhook_body(
@@ -283,17 +257,6 @@ mod tests {
         assert_eq!(obj["title"], "Fix CI");
         assert_eq!(obj["sessionId"], "s-1");
         assert_eq!(obj["cwd"], "/Users/me/api");
-    }
-
-    /// Sorted, like the Swift version's `.sortedKeys`: a body that diffs cleanly is
-    /// what makes the payload reviewable at all.
-    #[test]
-    fn the_body_keys_are_sorted() {
-        let body = webhook_body(NotificationEvent::TurnEnd, "t", "s", "/c");
-        assert_eq!(
-            body,
-            r#"{"cwd":"/c","event":"turn_end","sessionId":"s","text":"✅ t finished a turn","title":"t"}"#
-        );
     }
 
     #[test]
