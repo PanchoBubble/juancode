@@ -23,7 +23,7 @@ struct RowHoverActions: View {
     /// Run the project's run command in this row's checkout; nil hides the ▶.
     var onRun: (() -> Void)? = nil
     var runHelp: String = ""
-    /// Pin/unpin this row (sticks it to the top of its group); nil hides the pin.
+    /// Pin/unpin this row; nil hides the pin.
     var onTogglePin: (() -> Void)? = nil
     /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
     var pinned: Bool = false
@@ -50,7 +50,7 @@ struct RowHoverActions: View {
                     tile(pinned ? "pin.slash.fill" : "pin", size: glyphSize - 3, accent: pinned)
                 }
                 .buttonStyle(.plain)
-                .help(pinned ? "Unpin — let this session sort normally" : "Pin to top of this project")
+                .help(pinned ? "Unpin this session" : "Pin this session")
                 .clickCursor()
             }
             if let menuContent {

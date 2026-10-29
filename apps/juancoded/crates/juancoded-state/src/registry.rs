@@ -729,6 +729,20 @@ impl SessionRegistry {
             self.start_pump(id.clone(), live, epoch, handle);
             info!(session = id, "adopted a live pty across a re-exec");
         }
+        // Retry missing Codex identities after restart or upgrade. Even an exited
+        // session can now have the rollout a previous discovery window missed.
+        let missing: Vec<_> = self
+            .lock_sessions()
+            .iter()
+            .filter_map(|(id, live)| {
+                let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
+                (meta.provider == ProviderId::Codex && meta.cli_session_id.is_none())
+                    .then(|| (id.clone(), Arc::clone(live), meta.created_at))
+            })
+            .collect();
+        for (id, live, since_ms) in missing {
+            self.start_id_discovery(&id, &live, ProviderId::Codex, since_ms);
+        }
         debug!(
             sessions = self.lock_sessions().len(),
             "rehydrated from the store"
@@ -1017,7 +1031,7 @@ impl SessionRegistry {
         };
         match self.spawn_into(&id, &live, plan) {
             Ok(()) => {
-                self.start_id_discovery(&id, &live, req.provider);
+                self.start_id_discovery(&id, &live, req.provider, meta.created_at);
                 // The claim the spawn was made under is public from the start, so a
                 // second viewer never has to infer who is driving.
                 self.broadcast_grid(&id, Some(req.owner), req.cols, req.rows);
@@ -1825,7 +1839,13 @@ impl SessionRegistry {
     /// A client hears about the id as it lands, over the meta edge, rather than only
     /// on its next `attach`: for these two providers a session's resumability is a
     /// fact that appears after the row a client already has.
-    fn start_id_discovery(&self, id: &str, live: &Arc<LiveSession>, provider: ProviderId) {
+    fn start_id_discovery(
+        &self,
+        id: &str,
+        live: &Arc<LiveSession>,
+        provider: ProviderId,
+        since_ms: i64,
+    ) {
         let source = Providers::spec(provider).id_source;
         if source == IdSource::Pinned {
             return;
@@ -1840,16 +1860,14 @@ impl SessionRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .effective_cwd()
             .to_string();
-        let since_ms = now_ms();
+        let epoch = live.epoch.load(Ordering::SeqCst);
         let (registry, live, id) = (self.clone(), Arc::clone(live), id.to_string());
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + timeout;
             loop {
                 {
                     let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
-                    // An id we already have is the session's identity, and a session
-                    // that has ended is not going to write one.
-                    if meta.cli_session_id.is_some() || meta.status != SessionStatus::Running {
+                    if meta.cli_session_id.is_some() || live.epoch.load(Ordering::SeqCst) != epoch {
                         return;
                     }
                 }
@@ -1862,11 +1880,17 @@ impl SessionRegistry {
                         .await
                         .unwrap_or(None)
                 };
+                if live.epoch.load(Ordering::SeqCst) != epoch {
+                    return;
+                }
                 if let Some(cli_session_id) = pass {
                     registry.adopt_discovered_id(&id, &live, cli_session_id);
                     return;
                 }
-                if tokio::time::Instant::now() >= deadline {
+                if live.meta.lock().unwrap_or_else(|e| e.into_inner()).status
+                    != SessionStatus::Running
+                    || tokio::time::Instant::now() >= deadline
+                {
                     debug!(session = id, ?source, "no conversation id ever appeared");
                     return;
                 }
@@ -1988,6 +2012,7 @@ impl SessionRegistry {
             cols,
             rows,
         } = revival;
+        let since_ms = now_ms();
         let opts = live.opts.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (program, args) = self.program_for(provider, &start_id, &opts, resume.as_deref())?;
         // Retire whatever pty the session is still holding, or the spawn below
@@ -2027,7 +2052,7 @@ impl SessionRegistry {
         // id is once again something to go and find. This is the permission-mode flip
         // on a codex/opencode session whose id had not landed yet.
         if resume.is_none() {
-            self.start_id_discovery(id, live, provider);
+            self.start_id_discovery(id, live, provider, since_ms);
         }
         let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.inner

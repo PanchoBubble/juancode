@@ -995,22 +995,7 @@ struct SidebarView: View {
         // Projects the user removed from the sidebar drop out here — the folder and
         // its rows, not the sessions themselves (restorable from the footer below).
         let groups = byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions -> FolderGroup in
-            // Within a project: only sessions waiting on a reply bubble to the top;
-            // the rest hold the user's drag order, with unplaced ones resting where
-            // the stable sort puts them (live newest-first, dead sinking —
-            // juancode-05u). A finished turn no longer moves a row, it just glyphs.
-            // Bubbling is temporary: the persisted order is untouched, so an
-            // answered session falls back to its manual slot.
-            let slots = manualSlots(cwd)
-            // Decorate-sort-undecorate: `manualSortKey` reads live state per session
-            // (isLive, activity, unseenCompletions, isCrashOrphan), and computing it
-            // inside the comparator ran it O(n log n) times per body eval — measured as
-            // the single hottest thing in the app once the persistence and git storms
-            // were gone. Now it's exactly once per session.
-            let ordered = sessions
-                .map { (meta: $0, key: manualSortKey($0, slots: slots)) }
-                .sorted { manualWithBubblePrecedes($0.key, $1.key) }
-                .map(\.meta)
+            let ordered = sessions.sorted(by: sessionCreationPrecedes)
             return FolderGroup(
                 cwd: cwd,
                 name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,
@@ -1109,42 +1094,6 @@ struct SidebarView: View {
         return acc
     }
 
-    /// The user's manual slot per session id for one project (empty when the
-    /// user never dragged in that folder).
-    private func manualSlots(_ cwd: String) -> [String: Int] {
-        let order = model.sessionOrder[cwd] ?? []
-        return Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
-    }
-
-    /// One session's *order* bucket, read from the model's narrow projection
-    /// (`sidebarOrderAttention`) rather than derived here from live activity,
-    /// liveness and the done-unseen set.
-    ///
-    /// That indirection is the point: deriving it inline made this whole view depend
-    /// on `activities`, so every busy↔idle flip on the typing path re-grouped all
-    /// ~550 sessions. The projection already folds in `restingAttention` (crash
-    /// orphans rest instead of sinking) and collapses `.working` into `.idle`, which
-    /// no ordering rule distinguishes. Row glyphs still read the real activity —
-    /// see `SessionRowHost` (juancode-2n0).
-    private func attention(_ meta: SessionMeta) -> SessionAttention {
-        model.orderAttention(meta.id)
-    }
-
-    /// The manual-order sort inputs for one session: its order bucket (bubbling +
-    /// dead-sink), timestamps, and its slot in the user's persisted drag order.
-    ///
-    /// `updatedAt` carries the model's launch snapshot, not `meta.updatedAt`: it is
-    /// what `manualRestingPrecedes` orders a tier by, and the live column moves on
-    /// every scrollback flush of every running session.
-    private func manualSortKey(_ meta: SessionMeta, slots: [String: Int]) -> ManualSortKey {
-        ManualSortKey(
-            key: SessionSortKey(attention: attention(meta),
-                                updatedAt: model.restingRecency(meta), createdAt: meta.createdAt),
-            manualIndex: slots[meta.id],
-            id: meta.id,
-            pinned: model.isPinned(meta.id))
-    }
-
     /// Collapse any folder we haven't seen before, so projects are minimized by
     /// default. Already-seen folders keep whatever expand/collapse state the user set.
     ///
@@ -1197,61 +1146,17 @@ struct SidebarView: View {
         }
     }
 
-    /// Persist a new manual order for `group` after a drag. `displayedAfterMove`
-    /// is the on-screen order with the move already applied; the persisted order
-    /// derives from the resting order instead, so rows that were only bubbled up
-    /// by attention keep their manual slot rather than being captured at the top.
-    private func persistSessionOrder(_ group: FolderGroup, displayedAfterMove: [String], moved id: String) {
-        let slots = manualSlots(group.cwd)
-        let resting = group.sessions
-            .sorted {
-                manualRestingPrecedes(manualSortKey($0, slots: slots),
-                                      manualSortKey($1, slots: slots))
-            }
-            .map(\.id)
-        // Pinned rows are hoisted the same way bubbled ones are, so they're excluded
-        // from the predecessor search too — a drop just under a pinned row means
-        // "top of the resting order", not "after the pinned session".
-        let bubbled = Set(group.sessions
-            .filter { attentionBubblesAboveManualOrder(attention($0)) || model.isPinned($0.id) }
-            .map(\.id))
-        let order = manualOrderAfterMove(
-            displayed: displayedAfterMove, resting: resting, bubbled: bubbled, moved: id)
-        // Deferred one main-actor turn: .onMove fires from inside the backing
-        // NSTableView's drag handling, and this mutation restructures the list
-        // mid-update — same reentrancy class as collapseNewFolders above.
-        Task { @MainActor in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                model.setSessionOrder(order, forProject: group.cwd)
-            }
-        }
-    }
-
     /// Fold closed sessions beyond the preview; always keep live sessions visible.
     private func previewSessions(_ group: FolderGroup) -> [SessionMeta] {
-        let s = pairedOrder(group.sessions)
+        let s = group.sessions
         guard !filterActive, s.count > folderPreviewCount else { return s }
         return s.enumerated()
             .filter {
                 foldedPreviewKeeps(index: $0.offset, limit: folderPreviewCount,
-                                   live: model.isLive($0.element.id) || model.sessionPair(for: $0.element.id) != nil)
+                                   live: model.isLive($0.element.id) || model.isPinned($0.element.id)
+                                       || model.sessionPair(for: $0.element.id) != nil)
             }
             .map(\.element)
-    }
-
-    /// Scroll-box drop handler: place `dragged` just before `target`, the same
-    /// gesture as the project headers. Returns false (drop rejected) for ids not
-    /// in this group — cross-project drags don't reorder anything.
-    @discardableResult
-    private func reorderSessions(in group: FolderGroup, moving dragged: String, onto target: String) -> Bool {
-        guard dragged != target else { return false }
-        var displayed = group.sessions.map(\.id)
-        guard let from = displayed.firstIndex(of: dragged) else { return false }
-        displayed.remove(at: from)
-        guard let to = displayed.firstIndex(of: target) else { return false }
-        displayed.insert(dragged, at: to)
-        persistSessionOrder(group, displayedAfterMove: displayed, moved: dragged)
-        return true
     }
 
     /// Selectable session IDs in on-screen order (folders flattened, collapsed folders
@@ -1261,7 +1166,7 @@ struct SidebarView: View {
         var ids: [String] = []
         for group in groups where !isCollapsed(group.cwd) {
             let shown = expandedFolders.contains(group.cwd)
-                ? pairedOrder(group.sessions) : previewSessions(group)
+                ? group.sessions : previewSessions(group)
             for meta in shown where !model.isExternal(meta.id) { ids.append(meta.id) }
         }
         return ids
@@ -1434,17 +1339,7 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .modifier(FloatingScrollIndicator())
-            // Slide rows to their new slot when a session dies and sinks, instead
-            // of snapping (juancode-05u).
-            //
-            // Keyed on STRUCTURE, not order. Attention bubbling reorders rows on every
-            // tool call, so keying on the ordered id lists meant an activity tick
-            // animated the entire List for 0.28s — and SwiftUI re-evaluates the animating
-            // subtree every frame, so `makeGroups()` and every `FolderHeader` ran ~17
-            // times per tick instead of once. Measured as ~46% of the main thread inside
-            // NSAnimationContext/CA::Transaction::commit, which is what made typing feel
-            // laggy (juancode-2n0). A death still animates: liveness changes, which is
-            // the sink this exists for. A pure reorder now snaps.
+            // Animate structural changes while creation order stays fixed.
             .animation(.easeInOut(duration: 0.28), value: structureKey(groups))
             .focused($listFocused)
             // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
@@ -1539,19 +1434,14 @@ struct SidebarView: View {
         }
     }
 
-    private func pairedOrder(_ sessions: [SessionMeta]) -> [SessionMeta] {
-        let byID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
-        return model.sessionPairs.sidebarOrder(sessions.map(\.id)).compactMap { byID[$0] }
-    }
-
     /// A folder's session rows: all of them if ≤ the preview cap; otherwise a preview
     /// with a "Load more" affordance, and once expanded a fixed-height box that scrolls
     /// internally so the sidebar doesn't grow. The preview always carries every active
     /// (live) session, wherever it sorts — see `previewSessions`.
     @ViewBuilder
     private func sessionList(_ group: FolderGroup, dividerFirst: Bool) -> some View {
-        let sessions = pairedOrder(group.sessions)
-        let shown = pairedOrder(previewSessions(group))
+        let sessions = group.sessions
+        let shown = previewSessions(group)
         if shown.count == sessions.count {
             ForEach(Array(sessions.enumerated()), id: \.element.id) { index, meta in
                 nativeRow(meta, in: group, divider: dividerFirst || index > 0)
@@ -1588,10 +1478,10 @@ struct SidebarView: View {
 
     /// All of a folder's sessions inside a height-capped, internally scrolling box.
     /// Taps set selection by hand; the shared drag modifier handles splits and
-    /// top-edge drops for reordering, just like ordinary rows.
+    /// session drops for splitting, just like ordinary rows.
     @ViewBuilder
     private func scrollBox(_ group: FolderGroup, dividerFirst: Bool) -> some View {
-        let sessions = pairedOrder(group.sessions)
+        let sessions = group.sessions
         let cwd = group.cwd
         VStack(spacing: 0) {
             ContainedScroll(maxHeight: CGFloat(folderScrollMaxHeight)) {
@@ -1619,8 +1509,7 @@ struct SidebarView: View {
     private func nativeRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
         sessionRow(meta, external: external)
-            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model,
-                                         reorder: { reorderSessions(in: group, moving: $0, onto: meta.id) }))
+            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
                                        selected: external ? nil : model.selection == meta.id))
             .modifier(SidebarListRow())
@@ -1643,8 +1532,7 @@ struct SidebarView: View {
     private func scrollRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
         sessionRow(meta, external: external)
-            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model,
-                                         reorder: { reorderSessions(in: group, moving: $0, onto: meta.id) }))
+            .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
                                        selected: external ? nil : model.selection == meta.id))
             .pointerCursor(enabled: !external)
@@ -1764,7 +1652,7 @@ struct SidebarView: View {
             if meta.kind != .editor {
                 Button("Open in Editor") { model.openEditorSession(meta.id) }
             }
-            Button(model.isPinned(meta.id) ? "Unpin" : "Pin to Top") {
+            Button(model.isPinned(meta.id) ? "Unpin" : "Pin") {
                 model.togglePinned(meta.id)
             }
             if let chain = model.chain(forSession: meta.id) {
@@ -2632,7 +2520,7 @@ struct SessionRow: View {
     /// as an ellipsis on the trailing edge, replacing the old pencil (Open in Editor
     /// lives inside it, still on ⌘E too). Nil for external rows.
     var menuContent: (() -> AnyView)? = nil
-    /// The user pinned this session to the top of its project — shows a pin ornament
+    /// The user pinned this session — shows a pin ornament
     /// at rest and a filled pin in the hover chip.
     var pinned: Bool = false
     /// Pin/unpin this session — the hover chip's pin. Nil for external rows.
@@ -2743,7 +2631,7 @@ struct SessionRow: View {
             Image(systemName: "pin.fill")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
-                .help("Pinned to the top of this project")
+                .help("Pinned session")
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
         }
         // At-risk warning only on worktree rows: an isolated worktree's uncommitted

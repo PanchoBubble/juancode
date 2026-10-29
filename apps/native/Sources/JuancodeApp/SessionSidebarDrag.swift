@@ -7,7 +7,6 @@ struct SessionSidebarDrag: ViewModifier {
     let meta: SessionMeta
     let enabled: Bool
     let model: AppModel
-    let reorder: (String) -> Bool
     @State private var targeted = false
 
     @ViewBuilder
@@ -23,11 +22,11 @@ struct SessionSidebarDrag: ViewModifier {
                 .dropDestination(for: String.self) { items, location in
                     guard let id = items.first, id != meta.id,
                           model.sessions.contains(where: { $0.id == id && $0.kind != .editor }) else { return false }
-                    if location.y < 7 || !TerminalBackend.shared.useGhostty { return reorder(id) }
+                    guard TerminalBackend.shared.useGhostty else { return false }
                     model.splitSession(meta.id, with: id, zone: .trailing)
                     return true
                 } isTargeted: { targeted = $0 }
-                .help("Drag onto a session to split; drop on its top edge to reorder.")
+                .help("Drag onto a session to split.")
                 .overlay {
                     if targeted && TerminalBackend.shared.useGhostty {
                         RoundedRectangle(cornerRadius: 5)

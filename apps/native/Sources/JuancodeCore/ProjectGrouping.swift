@@ -43,3 +43,10 @@ public func launchArchiveOverflow(
     }
     return overflow
 }
+
+/// Shared by Oracles and Projects: newest creation first, independent of provider,
+/// activity, pinning, or last update. IDs break ties for simultaneous spawns.
+public func sessionCreationPrecedes(_ a: SessionMeta, _ b: SessionMeta) -> Bool {
+    if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+    return a.id < b.id
+}

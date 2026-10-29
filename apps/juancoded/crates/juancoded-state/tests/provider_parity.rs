@@ -407,3 +407,45 @@ async fn flipping_bypass_on_opencode_re_spawns_with_the_overlay() {
         "the second spawn's dump should be added to the history, not replace it"
     );
 }
+
+#[tokio::test]
+async fn a_restart_recovers_a_codex_identity_missed_before_exit() {
+    use juancoded_core::SessionMeta;
+    let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::in_memory().unwrap());
+    let mut meta = SessionMeta::new(
+        "missed".into(),
+        ProviderId::Codex,
+        "/tmp/missed".into(),
+        "History".into(),
+        1_000,
+        false,
+    );
+    meta.status = SessionStatus::Exited;
+    store.upsert(&meta).unwrap();
+    let config = RegistryConfig {
+        discover_id: Some(Arc::new(|source, cwd, since_ms| {
+            assert_eq!(source, IdSource::CodexRollout);
+            assert_eq!(cwd, "/tmp/missed");
+            assert_eq!(since_ms, 1_000, "recovery must use original creation time");
+            Some("recovered-conversation".into())
+        })),
+        ..Default::default()
+    };
+    let registry = SessionRegistry::new(
+        Arc::new(PtyHost::new(1_024)),
+        Arc::new(VtTerminals::new(200)),
+        Arc::clone(&store),
+        Bus::new(),
+        config,
+    );
+    let learned = wait_until(5, || registry.meta("missed").and_then(|m| m.cli_session_id)).await;
+    assert_eq!(learned, "recovered-conversation");
+    assert_eq!(
+        registry.meta("missed").unwrap().status,
+        SessionStatus::Exited
+    );
+    assert_eq!(
+        store.all().unwrap()[0].cli_session_id.as_deref(),
+        Some("recovered-conversation")
+    );
+}

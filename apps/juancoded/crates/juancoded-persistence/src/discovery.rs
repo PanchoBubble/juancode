@@ -25,14 +25,14 @@ const CLOCK_SKEW_GRACE_MS: i64 = 2_000;
 
 /// How long to keep looking, per source, and how often.
 ///
-/// Codex writes its rollout file while it boots, so half a minute is generous.
+/// Codex can defer persisting its rollout until the first turn, minutes after boot.
 /// opencode writes its `session` row when the FIRST message is sent, which can be
 /// minutes after spawn, so its window matches the one past which a cwd match stops
 /// being trustworthy anyway. Each pass is one indexed lookup, so waiting is cheap.
 pub fn window(source: IdSource) -> (Duration, Duration) {
     let timeout = match source {
         IdSource::Pinned => Duration::ZERO,
-        IdSource::CodexRollout => Duration::from_secs(30),
+        IdSource::CodexRollout => Duration::from_secs(15 * 60),
         IdSource::OpencodeDb => Duration::from_secs(15 * 60),
     };
     (timeout, Duration::from_millis(1_500))
@@ -69,10 +69,9 @@ pub fn codex_root() -> PathBuf {
     PathBuf::from(home).join(".codex/sessions")
 }
 
-/// The newest rollout for `cwd` written at or after `since_ms`, by its own header.
-///
-/// Matching on cwd as well as time is what keeps a concurrent Codex in another
-/// project from being handed to this session.
+/// Match the rollout's immutable conversation timestamp to the spawn, never its
+/// mtime: an older conversation in the same directory may still be receiving writes.
+/// The file can land minutes later, but its header still records when Codex started.
 pub fn codex_scan_once(cwd: &str, since_ms: i64, root: &Path) -> Option<String> {
     let dirs = directory_variants(cwd);
     let floor = since_ms - CLOCK_SKEW_GRACE_MS;
@@ -81,15 +80,17 @@ pub fn codex_scan_once(cwd: &str, since_ms: i64, root: &Path) -> Option<String> 
         if mtime_ms < floor {
             continue;
         }
-        if best
-            .as_ref()
-            .is_some_and(|(_, best_ms)| mtime_ms <= *best_ms)
-        {
-            continue;
-        }
-        if let Some((id, header_cwd)) = codex_header(&path) {
-            if dirs.iter().any(|d| d == &header_cwd) {
-                best = Some((id, mtime_ms));
+        if let Some((id, header_cwd, started_ms)) = codex_header(&path) {
+            // Bound the startup interval so a later session cannot be adopted while
+            // this one's rollout is still buffered. Prefer the closest start.
+            let distance = (started_ms - since_ms).abs();
+            if started_ms < floor || started_ms > since_ms + 30_000 {
+                continue;
+            }
+            if dirs.iter().any(|d| d == &header_cwd)
+                && best.as_ref().is_none_or(|(_, d)| distance < *d)
+            {
+                best = Some((id, distance));
             }
         }
     }
@@ -130,7 +131,7 @@ fn rollout_files(root: &Path) -> Vec<(PathBuf, i64)> {
 }
 
 /// The id and cwd out of a rollout's first line, which is its `session_meta`.
-fn codex_header(path: &Path) -> Option<(String, String)> {
+fn codex_header(path: &Path) -> Option<(String, String, i64)> {
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
     // The header is the first line, and a rollout grows without bound, so read one
@@ -144,7 +145,8 @@ fn codex_header(path: &Path) -> Option<(String, String)> {
     let payload = value.get("payload")?;
     let id = payload.get("id")?.as_str()?.to_string();
     let cwd = payload.get("cwd")?.as_str()?.to_string();
-    Some((id, cwd))
+    let started_ms = juancoded_transcripts::time::epoch_ms(payload.get("timestamp")?.as_str()?)?;
+    Some((id, cwd, started_ms))
 }
 
 // MARK: - opencode
@@ -259,19 +261,12 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\"}}}}\n\
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\",\"timestamp\":\"2026-10-29T11:00:00.000Z\"}}}}\n\
                  {{\"type\":\"turn\",\"payload\":{{}}}}\n"
             ),
         )
         .expect("write rollout");
         path
-    }
-
-    fn now_ms() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_millis() as i64
     }
 
     #[test]
@@ -291,7 +286,7 @@ mod tests {
             "id-elsewhere",
             "/tmp/somebody-else",
         );
-        let since = now_ms() - 60_000;
+        let since = juancoded_transcripts::time::epoch_ms("2026-10-29T11:00:00.000Z").unwrap();
 
         assert_eq!(
             codex_scan_once("/tmp/mine", since, &root).as_deref(),
@@ -313,9 +308,41 @@ mod tests {
             "/tmp/mine",
         );
         // The file was written now, so a spawn well in the future cannot own it.
-        let since = now_ms() + 600_000;
+        let since = juancoded_transcripts::time::epoch_ms("2026-10-29T11:10:00.000Z").unwrap();
         assert_eq!(codex_scan_once("/tmp/mine", since, &root), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn delayed_rollout_matches_start_time_instead_of_recent_writes_to_other_sessions() {
+        let root = scratch("codex-delayed");
+        let own = write_rollout(&root, "2026/10/29", "rollout-own.jsonl", "own", "/tmp/mine");
+        let other = write_rollout(
+            &root,
+            "2026/10/29",
+            "rollout-other.jsonl",
+            "other",
+            "/tmp/mine",
+        );
+        let since = juancoded_transcripts::time::epoch_ms("2026-10-29T11:00:00.000Z").unwrap();
+        // A previous conversation is being modified now, after our file appeared.
+        let body = std::fs::read_to_string(&other)
+            .unwrap()
+            .replace("11:00:00", "10:59:00");
+        std::fs::write(&other, body).unwrap();
+        assert_eq!(
+            codex_scan_once("/tmp/mine", since, &root).as_deref(),
+            Some("own")
+        );
+        std::fs::remove_file(&own).unwrap();
+        assert_eq!(codex_scan_once("/tmp/mine", since, &root), None);
+        // A later session must not be mistaken for a buffered rollout either.
+        let body = std::fs::read_to_string(&other)
+            .unwrap()
+            .replace("10:59:00", "11:04:00");
+        std::fs::write(&other, body).unwrap();
+        assert_eq!(codex_scan_once("/tmp/mine", since, &root), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -372,8 +399,7 @@ mod tests {
     fn a_pinned_provider_has_nothing_to_discover() {
         assert_eq!(scan_once(IdSource::Pinned, "/tmp", 0), None);
         assert_eq!(window(IdSource::Pinned).0, Duration::ZERO);
-        // And opencode waits far longer than codex, because its row lands on the
-        // first message rather than at boot.
-        assert!(window(IdSource::OpencodeDb).0 > window(IdSource::CodexRollout).0);
+        // Both providers may defer their first durable write until a turn.
+        assert!(window(IdSource::CodexRollout).0 >= Duration::from_secs(15 * 60));
     }
 }

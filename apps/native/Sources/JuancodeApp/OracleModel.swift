@@ -149,7 +149,7 @@ final class OracleModel {
     var oracleSessions: [SessionMeta] {
         app.sessions
             .filter { $0.cwd == controlDir && !$0.archived }
-            .sorted { $0.createdAt > $1.createdAt }
+            .sorted(by: sessionCreationPrecedes)
     }
 
     /// The provider the Oracle in play is running on — the active chat's, else the

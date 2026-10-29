@@ -358,49 +358,25 @@ struct OracleGlobalRail: View {
         let number: Int
         let live: Bool
         let activity: SessionActivity?
-        /// The user pinned this Oracle — it sorts above every tier and is never
+        /// The user pinned this Oracle — it is never
         /// folded away with the idle ones.
         let pinned: Bool
         var id: String { meta.id }
     }
 
-    /// Every Oracle paired with its stable spawn-order number (oldest = 1), filtered
-    /// by `query` and ordered "who needs me first": pinned, then waiting for a reply,
-    /// then working, then live-idle, then stopped — recency breaking ties within each
-    /// tier. Numbering happens BEFORE filtering so "Oracle 12" keeps its number no
-    /// matter what the filter hides.
+    /// Number before filtering so an Oracle keeps its spawn-order number.
+    /// Sessions stay newest-first as their activity changes.
     private func entries() -> [Entry] {
         let all = sessions
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let matched = all.enumerated().compactMap { idx, meta -> (Int, Entry)? in
+        return all.enumerated().compactMap { idx, meta in
             let number = all.count - idx
             guard q.isEmpty
                 || meta.title.lowercased().contains(q)
                 || "oracle \(number)".contains(q) else { return nil }
-            return (idx, Entry(meta: meta, number: number,
-                               live: model.isLive(meta.id), activity: model.activity(meta.id),
-                               pinned: model.isPinned(meta.id)))
-        }
-        // Decorated with the source index because `sorted` isn't stable: without it,
-        // same-tier rows would shuffle between body evals as activity flips.
-        return matched
-            .sorted { a, b in
-                let (ra, rb) = (rank(a.1), rank(b.1))
-                return ra == rb ? a.0 < b.0 : ra < rb
-            }
-            .map(\.1)
-    }
-
-    /// Attention tier — lower sorts first. Pinning outranks the whole ladder, same
-    /// as it does in the sidebar: an Oracle you parked on purpose shouldn't be pushed
-    /// down by another one asking a question.
-    private func rank(_ e: Entry) -> Int {
-        if e.pinned { return -1 }
-        guard e.live else { return 3 }
-        switch e.activity {
-        case .waitingInput: return 0
-        case .busy: return 1
-        default: return 2
+            return Entry(meta: meta, number: number,
+                         live: model.isLive(meta.id), activity: model.activity(meta.id),
+                         pinned: model.isPinned(meta.id))
         }
     }
 
@@ -620,7 +596,7 @@ private struct OracleRailRow: View {
     let unread: Bool
     /// It finished a turn while you were looking elsewhere — green check until viewed.
     let unseenDone: Bool
-    /// Pinned to the top of the rail — a pin ornament at rest, and the hover chip's
+    /// Pinned — kept visible in the rail — a pin ornament at rest, and the hover chip's
     /// pin flips to "unpin".
     let pinned: Bool
     /// The chain this Oracle is in, if any — a badge under the subtitle.
@@ -662,7 +638,7 @@ private struct OracleRailRow: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .padding(.top, 3)
-                    .help("Pinned to the top of the rail")
+                    .help("Pinned — kept visible in the rail")
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
@@ -722,7 +698,7 @@ private struct OracleRailRow: View {
 
     @ViewBuilder private var menuItems: some View {
         Button("Rename…", action: onRename)
-        Button(pinned ? "Unpin" : "Pin to Top", action: onTogglePin)
+        Button(pinned ? "Unpin" : "Pin", action: onTogglePin)
         if let onKill {
             // Stop a stuck/looping Oracle without discarding its conversation —
             // it stays in the rail and can be resumed by selecting it.
