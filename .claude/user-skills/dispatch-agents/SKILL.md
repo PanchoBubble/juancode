@@ -84,7 +84,15 @@ dispatched CLI inherits the user's environment untouched.
 5. **Report** the dispatch id and session id (or "queued"), one line per dispatch.
    Do NOT also do the work yourself.
 
-   Follow-up:
+   When the response contains `subscriptionId`, status and recent assistant output
+   are queued into your session automatically on completion, questions, exit or
+   failure. End your turn and wait for the notification; no background command is
+   needed. The parent id supplied to dispatch establishes this subscription before
+   the child starts. Use `oracle_session_subscribe` for other sessions, and
+   `oracle_session_unsubscribe` to stop following one.
+
+   Follow-up only when the response has no `subscriptionId` (for example a caller
+   outside a juancode session):
 
    ```bash
    # Run in the background (run_in_background: true); returns when the agent asks for

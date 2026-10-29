@@ -166,6 +166,36 @@ function emitUsageSample(sample: SessionUsageSample): void {
   }
 }
 
+type LifecycleListener = (event: {
+  sessionId: string;
+  dispatchId?: string;
+  state: "exited";
+  notify: boolean;
+}) => void;
+const lifecycleListeners = new Set<LifecycleListener>();
+export function onSessionExit(listener: LifecycleListener): () => void {
+  lifecycleListeners.add(listener);
+  return () => {
+    lifecycleListeners.delete(listener);
+  };
+}
+const connectionListeners = new Set<() => void>();
+export function onNativeConnection(listener: () => void): () => void {
+  connectionListeners.add(listener);
+  return () => {
+    connectionListeners.delete(listener);
+  };
+}
+function emitExit(sessionId: string, dispatchId?: string): void {
+  for (const listener of lifecycleListeners) {
+    try {
+      listener({ sessionId, ...(dispatchId ? { dispatchId } : {}), state: "exited", notify: true });
+    } catch (e) {
+      console.warn("session exit listener failed:", e);
+    }
+  }
+}
+
 type SessionEventListener = (ev: SessionActivityEvent) => void;
 const sessionEventListeners: SessionEventListener[] = [];
 
@@ -1086,6 +1116,13 @@ function connect(): void {
 
   sock.on("open", () => {
     reconnectMs = 1000;
+    for (const listener of connectionListeners) {
+      try {
+        listener();
+      } catch (e) {
+        console.warn("connection listener failed:", e);
+      }
+    }
     // Re-assert screen subscriptions: the server replies to each with a fresh
     // full snapshot, so viewers render the correct screen after a reconnect.
     for (const sessionId of screenListeners.keys()) {
@@ -1204,7 +1241,15 @@ function handleMessage(raw: string): void {
     if (ev) emitStuckEvent(ev);
     return;
   }
+  if (msg.type === "exit" && typeof msg.sessionId === "string") {
+    emitExit(msg.sessionId);
+    return;
+  }
   if (msg.type === "sessionMeta") {
+    const meta = msg.session as Record<string, unknown> | undefined;
+    if (meta && typeof meta.id === "string" && meta.status === "exited") {
+      emitExit(meta.id, typeof meta.dispatchId === "string" ? meta.dispatchId : undefined);
+    }
     const sample = parseUsageSample(msg);
     if (sample) emitUsageSample(sample);
     return;

@@ -173,11 +173,15 @@ the PR. If "commit only", stop after a local branch commit and don't push.
 ## Notes
 
 - One ticket per dispatch (keeps the dispatched session's context tight).
-- Dispatch is fire-and-forget: it does NOT notify this session on its own. To hear
-  back, run `curl -s 'http://127.0.0.1:4281/api/dispatches/<dispatchId>/wait?timeout=3600'`
-  as a background command (`run_in_background: true`). It returns once the agent asks
-  for input, goes idle after working, exits, or fails to start — `outcome` says which —
-  and the harness wakes you then. Do not poll `/api/dispatches` in a sleep loop: every
-  check is a full turn over your context. Or observe it on Telegram.
+- With a parent `fromSessionId`, dispatch returns a `subscriptionId`. Completion,
+  questions, exits and failures arrive automatically in the parent's persisted
+  message queue, with a bounded assistant-output excerpt. End your turn and wait
+  for that notification; do not poll or launch a background wait. Subscriptions
+  survive sidecar restarts. Manage them with `oracle_session_subscriptions` and
+  `oracle_session_unsubscribe`.
+- If no parent could be identified and there is no `subscriptionId`, use
+  `curl -s 'http://127.0.0.1:4281/api/dispatches/<dispatchId>/wait?timeout=3600'`
+  as a background command (`run_in_background: true`), or observe on Telegram.
+  Never poll `/api/dispatches` in a sleep loop.
 - Several tickets at once: cap at 4 concurrent (a live session is ~300MB and ~6% of a
   core) and give each one a non-overlapping file lane.

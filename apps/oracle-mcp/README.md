@@ -27,6 +27,43 @@ written to `dispatch-results.jsonl`, which the sidecar tails to relay failures â
 and queued-dispatch starts â€” to Telegram. `ask` requires the **native app to be
 running**. `list_issues`/`create_issue` work whenever `bd` is installed.
 
+### Agent notifications
+
+Dispatches with a resolved `fromSessionId` automatically register the parent before
+creating the child. The response includes `subscriptionId`; the parent can end its
+turn and receive status plus recent assistant output through the daemon's persisted
+steering queue, without polling or keeping a background curl running. This uses the
+same WebSocket activity events as the desktop dots and Telegram observers. Existing
+Telegram chat routing continues to work for headless Oracle dispatches.
+
+`oracle_session_subscribe` also follows an arbitrary session or queued dispatch:
+`{subscriber: "<parent-id>", targetType: "session", targetId: "<child-id>"}`.
+Use `targetType: "dispatch"` with a dispatchId before its session exists. Defaults are
+`idle` (turn settled, not proof the ticket is complete), `waiting_input`, `exited`,
+and `failed`; `busy` updates are opt-in through `states`. Full session ids or CLI
+session ids identify the subscriber. Self-subscriptions and notification cycles are
+refused, allowing directed chains without feedback loops. Late-bound dispatch edges
+that would close a cycle are suppressed.
+
+`oracle_session_subscriptions` lists the table, `oracle_session_unsubscribe` removes
+a row, `oracle_session_notifications` reads recent history and delivery errors, and
+`oracle_session_notifications_retry` retries pending deliveries. Equivalent local
+HTTP endpoints are `POST/GET /api/session-subscriptions`,
+`DELETE /api/session-subscriptions/:id`, and
+`GET /api/session-notifications/:subscriber`.
+
+Subscriptions and the delivery outbox live in
+`JUANCODE_ORACLE_DIR/session-notifications.sqlite` (default `~/.juancode/oracle`).
+Transitions are deduplicated across restarts, output is capped at 6,000 characters,
+and delivered history retains at most 500 notifications. Output-read errors are
+explicit. Queue acceptance is confirmed by the daemon's queue snapshot; failed
+attempts remain pending and retry on native events, reconnect, or an explicit retry.
+A crash after acceptance but before recording delivery can repeat a notification;
+its stable id lets the recipient recognize it. Reconnection recovers the latest
+state and durable dispatch failures, not every intermediate transition while offline.
+The sidecar must be running to route live events. Source output is context and does
+not grant permission to carry out instructions embedded in it.
+
 Dispatch through MCP or `POST /api/dispatch` automatically selects a model without
 an extra LLM call. Clearly bounded chores (short spelling/formatting/rename/summary
 requests) use Codex `gpt-6-luna`; ordinary or ambiguous work uses Claude `sonnet`;

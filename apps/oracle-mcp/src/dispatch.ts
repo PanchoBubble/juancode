@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { nativeApiBase, nativeWsUrl, oracleDir, serverInfoCapabilities } from "./oracle.ts";
+import { sessionNotifications } from "./session-notifications.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
 import { recordDispatch, type TriggerOrigin } from "./dispatch-registry.ts";
 import {
@@ -101,6 +102,8 @@ export interface DispatchOutcome {
   queuedReason: "unreachable" | "no-ack" | null;
   /** What a caller that only reads JSON should do next. */
   advice: string;
+  /** Persistent notification subscription, when a parent session was supplied. */
+  subscriptionId?: string;
   /** Human-readable summary for the MCP tool / console / Telegram. */
   message: string;
 }
@@ -308,12 +311,27 @@ const inFlight = new Map<string, Promise<DispatchOutcome>>();
 /** The outcome for a request that collapsed onto `first` instead of creating a
  *  second session. Deliberately carries `first`'s dispatchId: a caller that tracks
  *  the id it got back then tracks the dispatch that actually exists. */
-function asDuplicate(first: DispatchOutcome, why: string): DispatchOutcome {
+async function asDuplicate(
+  first: DispatchOutcome,
+  why: string,
+  subscriber?: string | null,
+): Promise<DispatchOutcome> {
+  const subscription = subscriber
+    ? await sessionNotifications().subscribe({
+        subscriber,
+        targetType: "dispatch",
+        targetId: first.dispatchId,
+        sourceSessionId: first.sessionId,
+      })
+    : null;
   return {
     ...first,
     state: "duplicate",
+    subscriptionId: subscription?.id,
     duplicateOf: first.dispatchId,
-    advice: `No second session was created. ${POLL_ADVICE}`,
+    advice: subscriber
+      ? "Subscribed: status and output will be queued into your session automatically; no polling is needed."
+      : `No second session was created. ${POLL_ADVICE}`,
     message: `Not dispatched again — ${why}. ${
       first.sessionId
         ? `It is session ${first.sessionId} (dispatch ${first.dispatchId}).`
@@ -339,7 +357,11 @@ export async function dispatch(
   const fingerprint = requestFingerprint(opts);
   const pending = inFlight.get(fingerprint);
   if (pending) {
-    return asDuplicate(await pending, "an identical dispatch was already in flight");
+    return asDuplicate(
+      await pending,
+      "an identical dispatch was already in flight",
+      opts.fromSessionId,
+    );
   }
   const run = runDispatch(opts, timeoutMs, deps, fingerprint);
   inFlight.set(fingerprint, run);
@@ -399,6 +421,7 @@ async function runDispatch(
           message: "",
         },
         `the same dispatch was posted ${ageS}s ago`,
+        opts.fromSessionId,
       );
     }
 
@@ -423,6 +446,17 @@ async function runDispatch(
   opts = { ...opts, provider: modelSelection.provider, model: modelSelection.model ?? undefined };
   const dispatchId = randomUUID();
   const provider = modelSelection.provider;
+  // Register before create: a fast child may finish before its create ack.
+  const subscription = opts.fromSessionId
+    ? await sessionNotifications().subscribe({
+        subscriber: opts.fromSessionId,
+        targetType: "dispatch",
+        targetId: dispatchId,
+      })
+    : null;
+  const followUpAdvice = opts.fromSessionId
+    ? "Subscribed: status and output will be queued into your session automatically; no polling is needed."
+    : POLL_ADVICE;
   const reply = await wsCreate(
     (capabilities) => dispatchCreateFrame(opts, dispatchId, capabilities),
     !!opts.fromSessionId,
@@ -463,6 +497,7 @@ async function runDispatch(
       return {
         modelSelection,
         dispatchId,
+        subscriptionId: subscription?.id,
         state: "started",
         started: true,
         queued: false,
@@ -471,13 +506,21 @@ async function runDispatch(
         sessionId: reply.sessionId,
         ticket,
         queuedReason: null,
-        advice: `Running now. ${POLL_ADVICE}`,
+        advice: `Running now. ${followUpAdvice}`,
         message: `Started ${provider}${modelSelection.model ? ` (${modelSelection.model})` : ""} session ${reply.sessionId} in ${opts.project}${
           opts.worktree ? " (worktree)" : ""
         }.`,
       };
     case "rejected":
       await record("rejected", null, reply.message);
+      if (opts.fromSessionId)
+        await sessionNotifications().publish({
+          sessionId: "",
+          dispatchId,
+          state: "failed",
+          notify: true,
+          error: reply.message,
+        });
       throw new Error(reply.message);
     case "unreachable": {
       await appendDispatch(opts, dispatchId);
@@ -496,6 +539,7 @@ async function runDispatch(
       return {
         modelSelection,
         dispatchId,
+        subscriptionId: subscription?.id,
         state: "queued",
         started: false,
         queued: true,
@@ -504,7 +548,7 @@ async function runDispatch(
         sessionId: null,
         ticket,
         queuedReason: reply.connected ? "no-ack" : "unreachable",
-        advice: `ACCEPTED, not yet started. Do NOT post this dispatch again — re-posting is what creates a second session. ${POLL_ADVICE}`,
+        advice: `ACCEPTED, not yet started. Do NOT post this dispatch again — re-posting is what creates a second session. ${followUpAdvice}`,
         message:
           `${where} Selected ${provider}/${modelSelection.model ?? "CLI default"}. The dispatch is durably queued and starts by itself — exactly once, ` +
           `whether from the create that may still be in flight or from the mailbox (both carry ` +

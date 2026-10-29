@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
 import { DispatchConflictError, type DispatchDeps } from "./dispatch.ts";
+import { sessionNotifications } from "./session-notifications.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
 import { legacyRequestFingerprint } from "./dispatch-guard.ts";
 import {
@@ -176,6 +177,15 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(out.sessionId).toBe("s-1");
     expect(received).toHaveLength(1);
     expect(received[0]!.fromSessionId).toBe("oracle-1");
+    expect(out.subscriptionId).toBeTruthy();
+    expect(out.advice).toContain("no polling");
+    expect(await sessionNotifications().list("oracle-1")).toEqual([
+      expect.objectContaining({
+        id: out.subscriptionId,
+        targetType: "dispatch",
+        targetId: out.dispatchId,
+      }),
+    ]);
   });
 
   it("leaves the source off for a core without chainInherit, and still dispatches", async () => {

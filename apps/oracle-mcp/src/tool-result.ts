@@ -14,10 +14,12 @@ export const fail = (message: string): ToolResult => ({
 
 /** Wrap a tool body so any thrown error becomes a clean `isError` result the model
  *  can read, rather than a transport-level failure. */
-export function tool(run: () => Promise<ToolResult>): () => Promise<ToolResult> {
-  return async () => {
+export function tool<Args extends unknown[]>(
+  run: (...args: Args) => Promise<ToolResult>,
+): (...args: Args) => Promise<ToolResult> {
+  return async (...args: Args) => {
     try {
-      return await run();
+      return await run(...args);
     } catch (e) {
       return fail(e instanceof Error ? e.message : String(e));
     }

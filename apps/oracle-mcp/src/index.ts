@@ -52,7 +52,7 @@ import {
 } from "./session-reads.ts";
 import { dispatch, DispatchConflictError } from "./dispatch.ts";
 import { resolveDispatchOrigin } from "./dispatch-origin.ts";
-import { getDispatchStatus, listDispatchStatuses } from "./dispatch-status.ts";
+import { getDispatchStatus, listDispatchStatuses, parseSessionStates } from "./dispatch-status.ts";
 import { waitForDispatch } from "./dispatch-wait.ts";
 import { listChatSessions, removeChatSession } from "./chat-store.ts";
 import {
@@ -81,6 +81,14 @@ import {
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { watchChains } from "./chains.ts";
+import {
+  registerNotificationTools,
+  notificationSubscriber,
+  subscribeToSessionNotifications,
+} from "./notification-tools.ts";
+import { sessionNotifications, NOTIFICATION_STATES } from "./session-notifications.ts";
+import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
+import { onSessionExit, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { registerChainTools } from "./chain-tools.ts";
 import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
@@ -101,6 +109,7 @@ function safeUploadName(raw: string): string {
 /** A fresh MCP server per request (stateless mode) with the Oracle tools bound. */
 function buildServer(): McpServer {
   const server = new McpServer({ name: "juancode-oracle", version: "0.1.0" });
+  registerNotificationTools(server);
 
   server.registerTool(
     "oracle_list_issues",
@@ -200,7 +209,10 @@ function buildServer(): McpServer {
       try {
         const fromSessionId = await resolveDispatchOrigin(args.fromSessionId);
         const outcome = await dispatch({ ...args, fromSessionId });
-        return ok(`${outcome.message} ${outcome.advice} (dispatchId: ${outcome.dispatchId})`);
+        return ok(
+          `${outcome.message} ${outcome.advice} (dispatchId: ${outcome.dispatchId})` +
+            (outcome.subscriptionId ? ` (subscriptionId: ${outcome.subscriptionId})` : ""),
+        );
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
@@ -870,6 +882,55 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
   }
 });
 
+// Durable subscriptions are also available to CLI skills over local HTTP.
+const subscriptionInput = z.object({
+  subscriber: z.string().min(1),
+  targetType: z.enum(["session", "dispatch"]),
+  targetId: z.string().min(1),
+  states: z.array(z.enum(NOTIFICATION_STATES)).min(1).optional(),
+});
+app.post("/api/session-subscriptions", async (req: Request, res: Response) => {
+  const parsed = subscriptionInput.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  try {
+    res.json(await subscribeToSessionNotifications(parsed.data));
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+app.get("/api/session-subscriptions", async (req: Request, res: Response) => {
+  try {
+    const subscriber =
+      typeof req.query.subscriber === "string"
+        ? await notificationSubscriber(req.query.subscriber)
+        : undefined;
+    res.json(await sessionNotifications().list(subscriber));
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+app.delete("/api/session-subscriptions/:id", async (req: Request, res: Response) => {
+  try {
+    res.json({ removed: await sessionNotifications().unsubscribe(String(req.params.id)) });
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+app.get("/api/session-notifications/:subscriber", async (req: Request, res: Response) => {
+  try {
+    res.json(
+      await sessionNotifications().inbox(
+        await notificationSubscriber(String(req.params.subscriber)),
+      ),
+    );
+  } catch (e) {
+    sendErr(res, e);
+  }
+});
+
 // Recent dispatches with their durable outcomes + current session state, newest
 // first — the console/Oracle's answer to "what happened to my dispatches".
 // `?trigger=1` narrows it to the ones a cron schedule or GitHub label started.
@@ -1258,6 +1319,53 @@ app.listen(port, host, () => {
   console.log(`oracle-mcp listening on http://${host}:${port}/mcp`);
   // Watch the native backend over WS and fan session activity out to subscribers
   // (the Telegram bridge). Owns the single long-lived client socket.
+  const notifications = sessionNotifications();
+  const report = (error: unknown) => console.warn("session notifications:", error);
+  onSessionEvent((event) => {
+    void notifications.publish(event).catch(report);
+  });
+  onSessionExit((event) => {
+    void notifications.publish(event).catch(report);
+  });
+  const recover = async () => {
+    // A dispatch can fail while the sidecar is down; replay durable outcomes.
+    for (const result of await readDispatchResults()) {
+      if (!result.ok && result.dispatchId)
+        await notifications.publish({
+          sessionId: result.sessionId ?? "",
+          dispatchId: result.dispatchId,
+          state: "failed",
+          notify: true,
+          error: result.error ?? "Dispatch failed",
+        });
+    }
+    // The one reconnect snapshot also covers processes that exited offline.
+    for (const session of parseSessionStates(await listSessions())) {
+      if (session.status === "exited")
+        await notifications.publish({
+          sessionId: session.id,
+          ...(session.dispatchId ? { dispatchId: session.dispatchId } : {}),
+          state: "exited",
+          notify: true,
+        });
+    }
+    await notifications.retry();
+  };
+  onNativeConnection(() => {
+    void recover().catch(report);
+  });
+  startDispatchResultsWatcher((result) => {
+    if (!result.ok && result.dispatchId)
+      void notifications
+        .publish({
+          sessionId: result.sessionId ?? "",
+          dispatchId: result.dispatchId,
+          state: "failed",
+          notify: true,
+          error: result.error ?? "Dispatch failed",
+        })
+        .catch(report);
+  });
   startActivityListener();
   // Have the chain book in hand before the first chain_* tool or /chains asks.
   watchChains();

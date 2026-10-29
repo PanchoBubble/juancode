@@ -20,6 +20,8 @@ import {
   onHeavyQueue,
   onPauseState,
   onSessionEvent,
+  onSessionExit,
+  onNativeConnection,
   onSessionScreen,
   parseHeavyQueue,
   parsePauseState,
@@ -153,6 +155,7 @@ describe("screen stream over the shared native WS", () => {
   const prev = process.env.JUANCODE_API;
 
   beforeEach(async () => {
+    server = null;
     received = [];
     wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     wss.on("connection", (sock) => {
@@ -165,6 +168,7 @@ describe("screen stream over the shared native WS", () => {
 
   afterEach(async () => {
     stopActivityListener();
+    for (const client of wss.clients) client.terminate();
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     if (prev === undefined) delete process.env.JUANCODE_API;
     else process.env.JUANCODE_API = prev;
@@ -175,6 +179,45 @@ describe("screen stream over the shared native WS", () => {
     while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
     expect(cond()).toBe(true);
   };
+
+  it("fans out exit metadata and connection recovery signals with removable listeners", async () => {
+    server = null;
+    const exits: { sessionId: string; dispatchId?: string }[] = [];
+    let connections = 0;
+    const offExit = onSessionExit((event) => exits.push(event));
+    const offConnection = onNativeConnection(() => {
+      connections++;
+    });
+    try {
+      startActivityListener();
+      await until(() => connections === 1 && server !== null);
+      server!.send(
+        JSON.stringify({
+          type: "sessionMeta",
+          session: { id: "child", status: "exited", dispatchId: "dispatch-1" },
+        }),
+      );
+      server!.send(JSON.stringify({ type: "exit", sessionId: "child", exitCode: 0 }));
+      await until(() => exits.length === 2);
+      expect(exits).toEqual([
+        { sessionId: "child", dispatchId: "dispatch-1", state: "exited", notify: true },
+        { sessionId: "child", state: "exited", notify: true },
+      ]);
+      offExit();
+      const activity: SessionActivityEvent[] = [];
+      const offActivity = onSessionEvent((event) => activity.push(event));
+      server!.send(JSON.stringify({ type: "exit", sessionId: "child" }));
+      server!.send(
+        JSON.stringify({ type: "activity", sessionId: "child", state: "idle", notify: false }),
+      );
+      await until(() => activity.length === 1);
+      offActivity();
+      expect(exits).toHaveLength(2);
+    } finally {
+      offExit();
+      offConnection();
+    }
+  });
 
   it("subscribes, receives frames, and keeps activity fan-out intact", async () => {
     const activity: SessionActivityEvent[] = [];
