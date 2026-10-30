@@ -917,12 +917,25 @@ pub async fn graphql(
     strings: &[(&str, &str)],
     numbers: &[(&str, i64)],
 ) -> Option<String> {
-    let mut args: Vec<String> = vec![
-        "api".into(),
-        "graphql".into(),
-        "-f".into(),
-        format!("query={query}"),
-    ];
+    graphql_on(cwd, None, query, strings, numbers).await
+}
+
+/// [`graphql`] against an explicit host, for a PR named by URL whose host no checkout
+/// supplies.
+pub async fn graphql_on(
+    cwd: &str,
+    hostname: Option<&str>,
+    query: &str,
+    strings: &[(&str, &str)],
+    numbers: &[(&str, i64)],
+) -> Option<String> {
+    let mut args: Vec<String> = vec!["api".into(), "graphql".into()];
+    if let Some(hostname) = hostname {
+        args.push("--hostname".into());
+        args.push(hostname.into());
+    }
+    args.push("-f".into());
+    args.push(format!("query={query}"));
     for (k, v) in strings {
         args.push("-f".into());
         args.push(format!("{k}={v}"));
@@ -1229,6 +1242,15 @@ pub async fn pr_check_runs(cwd: &str, number: i64) -> Vec<PrCheckRun> {
     parse_check_runs(&out.stdout)
 }
 
+/// The same checks read for a PR whose URL, not a local checkout, names its repository.
+pub async fn pr_check_runs_url(reference: &PrUrl) -> Vec<PrCheckRun> {
+    let args = reference.command_args("checks");
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    args.extend(["--json", "name,state,bucket,link"]);
+    let out = capture_full(&PrUrl::scratch_cwd(), &args).await;
+    parse_check_runs(&out.stdout)
+}
+
 /// Cap on captured CI-log text, so one pathological run cannot fill a panel or a
 /// prompt. The tail is kept, because that is where a failure surfaces.
 const MAX_LOG_CHARS: usize = 20_000;
@@ -1308,6 +1330,14 @@ pub async fn comment_on_pr(cwd: &str, number: i64, body: &str) -> Result<(), GhE
         .map(|_| ())
 }
 
+/// Post a top-level comment on a URL-addressed PR, without consulting a checkout.
+pub async fn comment_on_pr_url(reference: &PrUrl, body: &str) -> Result<(), GhError> {
+    let args = reference.command_args("comment");
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    args.extend(["--body", body]);
+    gh_write(&PrUrl::scratch_cwd(), &args).await.map(|_| ())
+}
+
 /// Reply to an inline review-thread comment. `comment_id` is the REST id of the
 /// comment being replied to, which GitHub requires to be a *top-level* review comment:
 /// replying to a reply is a 422, which is why a thread's reply target is always its
@@ -1325,6 +1355,30 @@ pub async fn reply_to_review_comment(
             "api",
             "--method",
             "POST",
+            &path,
+            "-f",
+            &format!("body={body}"),
+        ],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Reply through an explicit repository path and host, so no checkout supplies either.
+pub async fn reply_to_review_comment_url(
+    reference: &PrUrl,
+    comment_id: i64,
+    body: &str,
+) -> Result<(), GhError> {
+    let path = reference.api_path(&format!("comments/{comment_id}/replies"));
+    gh_write(
+        &PrUrl::scratch_cwd(),
+        &[
+            "api",
+            "--method",
+            "POST",
+            "--hostname",
+            &reference.host,
             &path,
             "-f",
             &format!("body={body}"),
@@ -1411,6 +1465,33 @@ pub async fn submit_review(
     body: &str,
     comments: &[ReviewCommentDraft],
 ) -> Result<(), GhError> {
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews");
+    submit_review_path(cwd, &path, None, body, comments).await
+}
+
+/// Submit a URL-addressed review with both the repository path and API host explicit.
+pub async fn submit_review_url(
+    reference: &PrUrl,
+    body: &str,
+    comments: &[ReviewCommentDraft],
+) -> Result<(), GhError> {
+    submit_review_path(
+        &PrUrl::scratch_cwd(),
+        &reference.api_path("reviews"),
+        Some(&reference.host),
+        body,
+        comments,
+    )
+    .await
+}
+
+async fn submit_review_path(
+    cwd: &str,
+    path: &str,
+    hostname: Option<&str>,
+    body: &str,
+    comments: &[ReviewCommentDraft],
+) -> Result<(), GhError> {
     let payload = review_payload(body, comments);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1422,9 +1503,13 @@ pub async fn submit_review(
     ));
     std::fs::write(&file, payload.to_string())
         .map_err(|e| GhError(format!("could not stage the review: {e}")))?;
-    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews");
     let input = file.to_string_lossy().into_owned();
-    let result = gh_write(cwd, &["api", "--method", "POST", &path, "--input", &input]).await;
+    let mut args = vec!["api", "--method", "POST"];
+    if let Some(hostname) = hostname {
+        args.extend(["--hostname", hostname]);
+    }
+    args.extend([path, "--input", &input]);
+    let result = gh_write(cwd, &args).await;
     let _ = std::fs::remove_file(&file);
     result.map(|_| ())
 }
@@ -1438,6 +1523,18 @@ pub async fn set_review_thread_resolved(
     let args = resolve_thread_args(thread_id, resolved);
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     gh_write(cwd, &borrowed).await.map(|_| ())
+}
+
+/// Resolve (or reopen) a thread of a URL-addressed PR: the host is named, no checkout is.
+pub async fn set_review_thread_resolved_url(
+    reference: &PrUrl,
+    thread_id: &str,
+    resolved: bool,
+) -> Result<(), GhError> {
+    let mut args = resolve_thread_args(thread_id, resolved);
+    args.splice(2..2, ["--hostname".to_string(), reference.host.clone()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    gh_write(&PrUrl::scratch_cwd(), &borrowed).await.map(|_| ())
 }
 
 /// Re-run a PR's CI. `failed_only` passes `--failed`, which is GitHub's "re-run failed
@@ -1475,6 +1572,66 @@ pub async fn rerun_checks(cwd: &str, number: i64, failed_only: bool) -> Result<(
     Ok(())
 }
 
+/// A pull request named by its URL rather than by whichever checkout gh happens to run in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrUrl {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: i64,
+}
+
+impl PrUrl {
+    pub fn parse(url: &str) -> Option<Self> {
+        let rest = url
+            .trim()
+            .strip_prefix("https://")
+            .or_else(|| url.trim().strip_prefix("http://"))?;
+        let rest = rest.split(['?', '#']).next()?;
+        let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+        let [host, owner, repo, "pull", number, ..] = parts.as_slice() else {
+            return None;
+        };
+        if host.is_empty()
+            || host.contains('@')
+            || owner.is_empty()
+            || repo.is_empty()
+            || matches!(*owner, "." | "..")
+            || matches!(*repo, "." | "..")
+        {
+            return None;
+        }
+        let number = number.parse::<i64>().ok().filter(|n| *n > 0)?;
+        Some(Self {
+            host: (*host).into(),
+            owner: (*owner).into(),
+            repo: (*repo).into(),
+            number,
+        })
+    }
+
+    fn command_args(&self, verb: &str) -> Vec<String> {
+        vec![
+            "pr".into(),
+            verb.into(),
+            self.number.to_string(),
+            "--repo".into(),
+            format!("{}/{}/{}", self.host, self.owner, self.repo),
+        ]
+    }
+
+    fn api_path(&self, endpoint: &str) -> String {
+        format!(
+            "repos/{}/{}/pulls/{}/{endpoint}",
+            self.owner, self.repo, self.number
+        )
+    }
+
+    pub fn scratch_cwd() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+}
+
 /// The `gh` arguments that close the PR at `url` and delete its head branch on GitHub,
 /// or None when `url` is not a PR url.
 ///
@@ -1483,25 +1640,9 @@ pub async fn rerun_checks(cwd: &str, number: i64, failed_only: bool) -> Result<(
 /// a closed PR would yank an agent's worktree out from under it. With it, only the
 /// remote branch goes.
 pub fn close_pr_args(url: &str) -> Option<Vec<String>> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
-    let [host, owner, repo, "pull", number, ..] = parts.as_slice() else {
-        return None;
-    };
-    if host.is_empty() || owner.is_empty() || repo.is_empty() {
-        return None;
-    }
-    number.parse::<u64>().ok().filter(|n| *n > 0)?;
-    Some(vec![
-        "pr".into(),
-        "close".into(),
-        (*number).into(),
-        "--repo".into(),
-        format!("{host}/{owner}/{repo}"),
-        "--delete-branch".into(),
-    ])
+    let mut args = PrUrl::parse(url)?.command_args("close");
+    args.push("--delete-branch".into());
+    Some(args)
 }
 
 /// Close a PR and delete its branch on GitHub. Always user-initiated, behind a
@@ -1578,6 +1719,24 @@ fn existing_pr_url(s: &str) -> Option<String> {
     first_url(&s[at + "already exists".len()..])
 }
 
+/// Resolve a PR's real metadata from its URL, including closed and merged PRs.
+pub async fn pr_by_url(reference: &PrUrl) -> Result<PullRequest, GhError> {
+    let args = reference.command_args("view");
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    args.extend(["--json", LIST_FIELDS]);
+    let out = capture_full(&PrUrl::scratch_cwd(), &args).await;
+    if !out.ok {
+        return Err(GhError(gh_error_reason(&out)));
+    }
+    let raw: RawPr = serde_json::from_str(&out.stdout)
+        .map_err(|_| GhError("Could not parse gh output".into()))?;
+    let pr = parse_prs(vec![raw]).remove(0);
+    if pr.number != reference.number {
+        return Err(GhError("GitHub resolved a different pull request".into()));
+    }
+    Ok(pr)
+}
+
 /// Per-PR-diff cap, the same 300 the working tree uses.
 const MAX_PR_FILES: usize = 300;
 
@@ -1590,6 +1749,18 @@ const MAX_PR_FILES: usize = 300;
 /// the PR's net diff.
 pub async fn pr_diff(cwd: &str, number: i64) -> Result<DiffResult, GhError> {
     let out = capture_full(cwd, &["pr", "diff", &number.to_string()]).await;
+    parse_pr_diff(out)
+}
+
+/// Read a URL-addressed PR's diff in a scratch directory with its repository explicit.
+pub async fn pr_diff_url(reference: &PrUrl) -> Result<DiffResult, GhError> {
+    let args = reference.command_args("diff");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = capture_full(&PrUrl::scratch_cwd(), &args).await;
+    parse_pr_diff(out)
+}
+
+fn parse_pr_diff(out: GhOutput) -> Result<DiffResult, GhError> {
     if !out.ok {
         return Err(GhError(gh_error_reason(&out)));
     }
@@ -2120,6 +2291,27 @@ mod tests {
             None
         );
         assert_eq!(close_pr_args("42"), None);
+    }
+
+    #[test]
+    fn url_pr_commands_name_the_repo_instead_of_using_the_checkout() {
+        let reference = PrUrl::parse(
+            " https://github.com/acme/widgets/pull/42/files?diff=unified#discussion_r1 ",
+        )
+        .unwrap();
+        assert_eq!(reference.number, 42);
+        assert_eq!(
+            reference.command_args("diff"),
+            ["pr", "diff", "42", "--repo", "github.com/acme/widgets"]
+        );
+        assert_eq!(
+            reference.api_path("reviews"),
+            "repos/acme/widgets/pulls/42/reviews"
+        );
+        assert!(PrUrl::parse("https://github.com/acme/widgets/issues/42").is_none());
+        assert!(PrUrl::parse("https://github.com/acme/widgets/pull/0").is_none());
+        assert!(PrUrl::parse("github.com/acme/widgets/pull/42").is_none());
+        assert!(PrUrl::parse("https://user@github.com/acme/widgets/pull/42").is_none());
     }
 
     pub(super) fn check(

@@ -207,6 +207,23 @@ pub async fn pr_conversation(cwd: &str, number: i64, pr_url: &str) -> Option<PrC
     parse_pr_conversation(&raw)
 }
 
+/// The same read for a PR named by URL: owner, name and host come from the reference,
+/// so no checkout (and no github.com assumption) is involved.
+pub async fn pr_conversation_url(reference: &crate::gh::PrUrl) -> Option<PrConversation> {
+    let raw = crate::gh::graphql_on(
+        &crate::gh::PrUrl::scratch_cwd(),
+        Some(&reference.host),
+        &conversation_query(),
+        &[
+            ("owner", reference.owner.as_str()),
+            ("name", reference.repo.as_str()),
+        ],
+        &[("number", reference.number)],
+    )
+    .await?;
+    parse_pr_conversation(&raw)
+}
+
 /// Map the GraphQL response onto the wire shape.
 ///
 /// Field-tolerant on purpose: a missing `databaseId`, `line` or date becomes absent, a

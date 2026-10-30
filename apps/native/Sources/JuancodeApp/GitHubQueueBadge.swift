@@ -211,6 +211,7 @@ struct GitHubQueueBadge: View {
                     Text(relativeTime(Int(at.timeIntervalSince1970 * 1000)))
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
+                ReviewPrButton()
                 TrackedPrsButton(dismiss: { showing = false })
                 Button { model.refreshViewerPrs(force: true) } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 10))
@@ -689,6 +690,24 @@ struct GitHubQueueBadge: View {
 
     /// Beside refresh: how many PRs have a watching agent, and the list of them
     /// behind a click — a row jumps to its agent's session, the eye stops the watch.
+    /// "Review PR": opens the URL sheet.
+    private struct ReviewPrButton: View {
+        @State private var showing = false
+
+        var body: some View {
+            Button { showing = true } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "link.badge.plus").font(.system(size: 10))
+                    Text("Review PR").font(.system(size: 10))
+                }
+            }
+            .buttonStyle(.borderless)
+            .help("Review PR… — open any GitHub pull request from its URL")
+            .clickCursor()
+            .sheet(isPresented: $showing) { ReviewPrSheet() }
+        }
+    }
+
     private struct TrackedPrsButton: View {
         @Environment(AppModel.self) private var model
         let dismiss: () -> Void

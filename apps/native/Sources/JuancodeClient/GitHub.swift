@@ -183,21 +183,19 @@ public struct GitHubReads: Sendable {
     /// lines. An empty log is an answer — a green PR has no failing build — so nil
     /// means the read itself failed.
     public func actionsLog(cwd: String, number: Int) async -> ActionsLog? {
-        await get("/api/pr/actions-log", [("cwd", cwd), ("number", String(number))])
+        await get("/api/pr/actions-log", prQuery(cwd: cwd, number: number))
     }
 
     /// A PR's conversation, already merged into the chronology it is read in, with each
     /// review carrying the threads it started. The owner/name is lifted from `prUrl` on
     /// the far side, which is what saves a `gh repo view` per read.
     public func timeline(cwd: String, number: Int, prUrl: String) async -> PrTimeline? {
-        await get("/api/pr/timeline",
-                  [("cwd", cwd), ("number", String(number)), ("url", prUrl)])
+        await get("/api/pr/timeline", prQuery(cwd: cwd, number: number, url: prUrl))
     }
 
     /// A PR's CI checks, each with the outcome its row draws already decided.
     public func checks(cwd: String, number: Int) async -> [PrCheckRow]? {
-        let body: ChecksBody? = await get("/api/pr/checks",
-                                          [("cwd", cwd), ("number", String(number))])
+        let body: ChecksBody? = await get("/api/pr/checks", prQuery(cwd: cwd, number: number))
         return body?.checks
     }
 
@@ -259,8 +257,14 @@ public struct GitHubReads: Sendable {
     /// An open PR's net diff, in the same per-file shape the working tree answers
     /// with. Throws rather than answering nil: the panel draws the reason.
     public func prDiff(cwd: String, number: Int) async throws -> DiffResult {
-        try await ask("/api/pr/diff", [("cwd", cwd), ("number", String(number))],
+        try await ask("/api/pr/diff", prQuery(cwd: cwd, number: number),
                       "Could not read the diff for PR #\(number)")
+    }
+
+    /// A PR's own metadata, resolved from its URL alone — open, closed or merged, in a
+    /// repo with no checkout here. Throws so the "Review PR" sheet can say why.
+    public func pr(at address: PrAddress) async throws -> PullRequest {
+        try await ask("/api/pr", [("url", address.url)], "Could not open \(address.url)")
     }
 
     // MARK: - the writes
@@ -278,7 +282,8 @@ public struct GitHubReads: Sendable {
     /// to; absent posts a top-level comment. One call and not two, because the
     /// composer is one box whose target is whether a thread is open under it.
     public func comment(cwd: String, number: Int, body: String, replyTo: Int? = nil) async throws {
-        var payload: [String: Any] = ["cwd": cwd, "number": number, "body": body]
+        var payload = prPayload(cwd: cwd, number: number)
+        payload["body"] = body
         if let replyTo { payload["replyTo"] = replyTo }
         let _: OkBody = try await tell("/api/pr/comment", payload,
                                        "Could not post the comment")
@@ -293,23 +298,28 @@ public struct GitHubReads: Sendable {
             if let s = c.startSide { o["startSide"] = s }
             return o
         }
-        let _: OkBody = try await tell("/api/pr/submit-review",
-                                       ["cwd": cwd, "number": number, "body": body,
-                                        "comments": encoded],
+        var payload = prPayload(cwd: cwd, number: number)
+        payload["body"] = body
+        payload["comments"] = encoded
+        let _: OkBody = try await tell("/api/pr/submit-review", payload,
                                        "Could not post the review on GitHub")
     }
 
     /// Resolve an inline review thread, or reopen it (`resolved: false`). By the
     /// thread's GraphQL node id, the `id` the timeline's `threads` carry.
     public func resolveThread(cwd: String, threadId: String, resolved: Bool) async throws {
-        let _: OkBody = try await tell("/api/pr/resolve-thread",
-                                       ["cwd": cwd, "threadId": threadId, "resolved": resolved],
+        var payload: [String: Any] = ["threadId": threadId, "resolved": resolved]
+        if let address = PrAddress(cwd: cwd) { payload["url"] = address.url } else { payload["cwd"] = cwd }
+        let _: OkBody = try await tell("/api/pr/resolve-thread", payload,
                                        resolved ? "Could not resolve the thread"
                                                 : "Could not reopen the thread")
     }
 
     /// Re-run a PR's CI, or only its failed jobs.
     public func rerunChecks(cwd: String, number: Int, failedOnly: Bool) async throws {
+        guard !PrAddress.isRemote(cwd: cwd) else {
+            throw GitHubError("Re-running checks needs a local checkout of this repository.")
+        }
         let _: OkBody = try await tell("/api/pr/rerun",
                                        ["cwd": cwd, "number": number, "failedOnly": failedOnly],
                                        "Could not re-run the checks")
@@ -323,6 +333,21 @@ public struct GitHubReads: Sendable {
     }
 
     private struct OkBody: Decodable { let ok: Bool }
+
+    /// How a request names its PR: the checkout and number, or — for a PR with no
+    /// checkout (`PrAddress.cwd`) — its URL alone, which the core reads and writes
+    /// through with the repository explicit.
+    private func prQuery(cwd: String, number: Int, url: String? = nil) -> [(String, String)] {
+        if let address = PrAddress(cwd: cwd) { return [("url", address.url)] }
+        var query = [("cwd", cwd), ("number", String(number))]
+        if let url { query.append(("url", url)) }
+        return query
+    }
+
+    private func prPayload(cwd: String, number: Int) -> [String: Any] {
+        if let address = PrAddress(cwd: cwd) { return ["url": address.url] }
+        return ["cwd": cwd, "number": number]
+    }
 
     /// A read whose failure the caller shows rather than swallows. The thrown message
     /// is the core's own sentence when it sent one — which is `gh`'s words for what

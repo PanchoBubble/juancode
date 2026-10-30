@@ -131,7 +131,10 @@ extension AppModel {
     /// stay for next time.
     func closeDiffReview() {
         guard showingDiffReview else { return }
-        let fromPr = diffReviewPrId != nil
+        // A PR reviewed by URL was not opened from the GitHub view, so there is no
+        // detail there to go back to.
+        let fromPr = diffReviewPrId.flatMap { diffReview.prTarget($0) }
+            .map { !PrAddress.isRemote(cwd: $0.cwd) } ?? false
         showingDiffReview = false
         for id in Array(diffReview.watchTokens.keys) { stopWatchingDiffReview(id) }
         if fromPr { showingGitHub = true } else { focusTerminal() }
@@ -147,6 +150,11 @@ extension AppModel {
         } else {
             openDiffReview()
         }
+    }
+
+    /// The tracked PR at `url`, whichever checkout tracks it.
+    func trackedPr(url: String) -> TrackedPr? {
+        tracked.values.first { $0.url.caseInsensitiveCompare(url) == .orderedSame }
     }
 
     /// The review the panel shows: the open PR's, else the session's.
@@ -373,7 +381,16 @@ extension AppModel {
         let prompt = diffReviewPrompt(number: pr.number, url: pr.url,
                                       feedback: formatReview(staged, baseLabel: label))
         let sent = Set(staged.map(\.id))
-        let tracked = trackedPr(cwd: target.cwd, number: pr.number)
+        // A PR reviewed by URL has no checkout to start a tracking session in, so only
+        // an agent already tracking it (from whichever checkout) can take the comments.
+        let remote = PrAddress.isRemote(cwd: target.cwd)
+        let tracked = remote ? trackedPr(url: pr.url) : trackedPr(cwd: target.cwd, number: pr.number)
+        if remote, tracked == nil {
+            review.setSending(false, id)
+            review.say("No agent tracks PR #\(pr.number). Stage comments with r to post them on GitHub — "
+                       + "your comments are kept.", isError: true, in: id)
+            return
+        }
         review.say(tracked == nil
                    ? "Tracking PR #\(pr.number) and queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…"
                    : "Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)

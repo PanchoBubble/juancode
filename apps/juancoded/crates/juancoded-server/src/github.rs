@@ -42,6 +42,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/prs/search", get(search_prs))
         .route("/api/prs/viewer", get(viewer_prs))
         .route("/api/pr/for-branch", get(pr_for_branch))
+        .route("/api/pr", get(pr_by_url))
         .route("/api/pr/diff", get(pr_diff))
         .route("/api/pr/create", post(create_pr))
         .route("/api/pr/comment", post(comment))
@@ -156,29 +157,71 @@ pub struct PrParams {
     pub url: Option<String>,
 }
 
+/// Where a PR read or write runs: in a checkout (`cwd` + number, the listed-PR flow),
+/// or, when the caller names no checkout, by the PR's own URL (`reference`).
+struct PrLocation {
+    cwd: String,
+    number: i64,
+    url: Option<String>,
+    reference: Option<gh::PrUrl>,
+}
+
+fn pr_location(
+    cwd: Option<String>,
+    number: Option<i64>,
+    url: Option<String>,
+) -> Result<PrLocation, Response> {
+    if number.is_some_and(|n| n <= 0) {
+        return Err(bad_request("a positive PR number required"));
+    }
+    let url = non_empty(url);
+    if let Some(cwd) = non_empty(cwd) {
+        return Ok(PrLocation {
+            cwd,
+            number: number.ok_or_else(|| bad_request("a positive PR number required"))?,
+            url,
+            reference: None,
+        });
+    }
+    let Some(url) = url else {
+        return Err(bad_request("cwd (absolute project path) required"));
+    };
+    let reference = gh::PrUrl::parse(&url)
+        .ok_or_else(|| bad_request("url must be a GitHub pull request url"))?;
+    if number.is_some_and(|n| n != reference.number) {
+        return Err(bad_request(
+            "url and PR number name different pull requests",
+        ));
+    }
+    Ok(PrLocation {
+        cwd: gh::PrUrl::scratch_cwd(),
+        number: reference.number,
+        url: Some(url),
+        reference: Some(reference),
+    })
+}
+
 impl PrParams {
-    fn parts(&self) -> Result<(String, i64), Response> {
-        let cwd = non_empty(self.cwd.clone())
-            .ok_or_else(|| bad_request("cwd (absolute project path) required"))?;
-        let number = self
-            .number
-            .filter(|n| *n > 0)
-            .ok_or_else(|| bad_request("a positive PR number required"))?;
-        Ok((cwd, number))
+    fn parts(&self) -> Result<PrLocation, Response> {
+        pr_location(self.cwd.clone(), self.number, self.url.clone())
     }
 }
 
 async fn conversation(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
-    let (cwd, number) = match params.parts() {
+    let location = match params.parts() {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    let Some(url) = non_empty(params.url.clone()) else {
+    let Some(url) = location.url else {
         return bad_request("url (the PR's github.com url) required");
     };
-    match gh_convo::pr_conversation(&cwd, number, &url).await {
+    let conversation = match &location.reference {
+        Some(reference) => gh_convo::pr_conversation_url(reference).await,
+        None => gh_convo::pr_conversation(&location.cwd, location.number, &url).await,
+    };
+    match conversation {
         Some(conversation) => Json(conversation).into_response(),
-        None => unreachable_pr(number),
+        None => unreachable_pr(location.number),
     }
 }
 
@@ -199,15 +242,19 @@ pub struct TimelineBody {
 }
 
 async fn timeline(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
-    let (cwd, number) = match params.parts() {
+    let location = match params.parts() {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    let Some(url) = non_empty(params.url.clone()) else {
+    let Some(url) = location.url else {
         return bad_request("url (the PR's github.com url) required");
     };
-    let Some(conversation) = gh_convo::pr_conversation(&cwd, number, &url).await else {
-        return unreachable_pr(number);
+    let conversation = match &location.reference {
+        Some(reference) => gh_convo::pr_conversation_url(reference).await,
+        None => gh_convo::pr_conversation(&location.cwd, location.number, &url).await,
+    };
+    let Some(conversation) = conversation else {
+        return unreachable_pr(location.number);
     };
     Json(timeline_of(&conversation)).into_response()
 }
@@ -237,12 +284,15 @@ pub struct ChecksBody {
 }
 
 async fn checks(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
-    let (cwd, number) = match params.parts() {
+    let location = match params.parts() {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    let checks = gh::pr_check_runs(&cwd, number)
-        .await
+    let runs = match &location.reference {
+        Some(reference) => gh::pr_check_runs_url(reference).await,
+        None => gh::pr_check_runs(&location.cwd, location.number).await,
+    };
+    let checks = runs
         .into_iter()
         .map(|run| CheckRow {
             outcome: pr_timeline::check_outcome(&run),
@@ -258,11 +308,15 @@ async fn checks(Query(params): Query<PrParams>, State(_): State<CoreHandles>) ->
 /// an answer rather than a failure. `sections: []` is what a client draws "CI is not
 /// red" from.
 async fn actions_log(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
-    let (cwd, number) = match params.parts() {
+    let location = match params.parts() {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    let raw = gh::failed_check_logs(&cwd, number, 5).await;
+    // A PR addressed by URL has no checkout to run `gh run view` in; no log is an answer.
+    let raw = match location.reference {
+        Some(_) => String::new(),
+        None => gh::failed_check_logs(&location.cwd, location.number, 5).await,
+    };
     Json(parse_actions_log(&raw)).into_response()
 }
 
@@ -358,13 +412,31 @@ async fn repo(Query(params): Query<CwdParams>, State(_): State<CoreHandles>) -> 
     .into_response()
 }
 
-/// An open PR's net diff, in the same per-file shape `/api/git/diff` answers with.
+/// Resolve a URL to the PR's actual metadata before opening a review.
+async fn pr_by_url(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
+    let Some(url) = non_empty(params.url) else {
+        return bad_request("url (the PR's GitHub url) required");
+    };
+    let Some(reference) = gh::PrUrl::parse(&url) else {
+        return bad_request("url must be a GitHub pull request url");
+    };
+    match gh::pr_by_url(&reference).await {
+        Ok(pr) => Json(pr).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+/// A PR's net diff, in the same per-file shape `/api/git/diff` answers with.
 async fn pr_diff(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -> Response {
-    let (cwd, number) = match params.parts() {
+    let location = match params.parts() {
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    match gh::pr_diff(&cwd, number).await {
+    let result = match &location.reference {
+        Some(reference) => gh::pr_diff_url(reference).await,
+        None => gh::pr_diff(&location.cwd, location.number).await,
+    };
+    match result {
         Ok(diff) => Json(diff).into_response(),
         Err(e) => gh_write_failed(e),
     }
@@ -427,6 +499,8 @@ async fn create_pr(State(_): State<CoreHandles>, Json(body): Json<CreatePrBody>)
 pub struct PrCommentBody {
     pub cwd: Option<String>,
     pub number: Option<i64>,
+    /// The PR's url, which stands in for `cwd` + `number` when the PR has no checkout.
+    pub url: Option<String>,
     pub body: Option<String>,
     /// The REST id of the review comment being replied to. Absent posts a top-level
     /// comment instead. One route and not two, because the composer is one box whose
@@ -435,18 +509,20 @@ pub struct PrCommentBody {
 }
 
 async fn comment(State(_): State<CoreHandles>, Json(body): Json<PrCommentBody>) -> Response {
-    let Some(cwd) = non_empty(body.cwd) else {
-        return bad_request("cwd (absolute project path) required");
-    };
-    let Some(number) = body.number.filter(|n| *n > 0) else {
-        return bad_request("a positive PR number required");
+    let location = match pr_location(body.cwd, body.number, body.url) {
+        Ok(location) => location,
+        Err(response) => return response,
     };
     let Some(text) = non_empty(body.body) else {
         return bad_request("body required");
     };
-    let result = match body.reply_to {
-        Some(id) => gh::reply_to_review_comment(&cwd, number, id, &text).await,
-        None => gh::comment_on_pr(&cwd, number, &text).await,
+    let result = match (&location.reference, body.reply_to) {
+        (Some(reference), Some(id)) => gh::reply_to_review_comment_url(reference, id, &text).await,
+        (Some(reference), None) => gh::comment_on_pr_url(reference, &text).await,
+        (None, Some(id)) => {
+            gh::reply_to_review_comment(&location.cwd, location.number, id, &text).await
+        }
+        (None, None) => gh::comment_on_pr(&location.cwd, location.number, &text).await,
     };
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -481,6 +557,8 @@ async fn rerun(State(_): State<CoreHandles>, Json(body): Json<RerunBody>) -> Res
 #[serde(rename_all = "camelCase")]
 pub struct ResolveThreadBody {
     pub cwd: Option<String>,
+    /// The PR's url, naming the host when the PR has no checkout to run `gh` in.
+    pub url: Option<String>,
     /// The thread's GraphQL node id, as the timeline's `threads` carry it.
     pub thread_id: Option<String>,
     /// False reopens a resolved thread. Defaults to resolving, the common case.
@@ -492,13 +570,21 @@ async fn resolve_thread(
     State(_): State<CoreHandles>,
     Json(body): Json<ResolveThreadBody>,
 ) -> Response {
-    let Some(cwd) = non_empty(body.cwd) else {
-        return bad_request("cwd (absolute project path) required");
-    };
     let Some(thread_id) = non_empty(body.thread_id) else {
         return bad_request("threadId (the review thread's node id) required");
     };
-    match gh::set_review_thread_resolved(&cwd, &thread_id, body.resolved.unwrap_or(true)).await {
+    let resolved = body.resolved.unwrap_or(true);
+    let result = match (non_empty(body.cwd), non_empty(body.url)) {
+        (Some(cwd), _) => gh::set_review_thread_resolved(&cwd, &thread_id, resolved).await,
+        (None, Some(url)) => {
+            let Some(reference) = gh::PrUrl::parse(&url) else {
+                return bad_request("url must be a GitHub pull request url");
+            };
+            gh::set_review_thread_resolved_url(&reference, &thread_id, resolved).await
+        }
+        (None, None) => return bad_request("cwd (absolute project path) required"),
+    };
+    match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => gh_write_failed(e),
     }
@@ -509,6 +595,8 @@ async fn resolve_thread(
 pub struct SubmitReviewBody {
     pub cwd: Option<String>,
     pub number: Option<i64>,
+    /// The PR's url, which stands in for `cwd` + `number` when the PR has no checkout.
+    pub url: Option<String>,
     /// The review's own summary; optional, the inline comments are the point.
     #[serde(default)]
     pub body: String,
@@ -521,11 +609,9 @@ async fn submit_review(
     State(_): State<CoreHandles>,
     Json(body): Json<SubmitReviewBody>,
 ) -> Response {
-    let Some(cwd) = non_empty(body.cwd) else {
-        return bad_request("cwd (absolute project path) required");
-    };
-    let Some(number) = body.number.filter(|n| *n > 0) else {
-        return bad_request("a positive PR number required");
+    let location = match pr_location(body.cwd, body.number, body.url) {
+        Ok(location) => location,
+        Err(response) => return response,
     };
     if body.comments.is_empty() && body.body.trim().is_empty() {
         return bad_request("comments or a body required");
@@ -537,7 +623,11 @@ async fn submit_review(
     {
         return bad_request("every comment needs a path, a positive line and a body");
     }
-    match gh::submit_review(&cwd, number, &body.body, &body.comments).await {
+    let result = match &location.reference {
+        Some(reference) => gh::submit_review_url(reference, &body.body, &body.comments).await,
+        None => gh::submit_review(&location.cwd, location.number, &body.body, &body.comments).await,
+    };
+    match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => gh_write_failed(e),
     }
@@ -797,4 +887,44 @@ fn store_error(e: anyhow::Error) -> Response {
         Json(serde_json::json!({ "error": e.to_string() })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod pr_location_tests {
+    use super::*;
+
+    const URL: &str = "https://github.com/acme/widgets/pull/42";
+
+    fn some(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    #[test]
+    fn a_checkout_keeps_the_listed_pr_flow_even_when_the_url_is_sent() {
+        let location = pr_location(some("/work/widgets"), Some(42), some(URL)).unwrap();
+        assert_eq!(location.cwd, "/work/widgets");
+        assert!(location.reference.is_none());
+    }
+
+    #[test]
+    fn no_checkout_addresses_the_pr_by_url() {
+        let location = pr_location(None, None, some(URL)).unwrap();
+        assert_eq!(location.number, 42);
+        assert_eq!(location.reference.unwrap().repo, "widgets");
+        assert!(pr_location(some(" "), Some(42), some(URL)).unwrap().reference.is_some());
+    }
+
+    #[test]
+    fn unusable_locations_are_bad_requests() {
+        for (cwd, number, url) in [
+            (None, None, None),
+            (None, Some(42), None),
+            (some("/work"), None, None),
+            (None, None, some("https://github.com/acme/widgets/issues/42")),
+            (None, Some(7), some(URL)),
+            (some("/work"), Some(0), None),
+        ] {
+            assert!(pr_location(cwd.clone(), number, url.clone()).is_err(), "{cwd:?} {number:?} {url:?}");
+        }
+    }
 }

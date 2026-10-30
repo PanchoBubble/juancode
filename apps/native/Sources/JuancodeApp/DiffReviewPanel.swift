@@ -44,6 +44,11 @@ struct DiffReviewPanel: View {
         var text = ""
     }
 
+    private struct GlobalCommentDraft: Equatable {
+        var serial: Int
+        var text = ""
+    }
+
     /// A comment being written: over rows `from...to`, or replacing comment `editId`.
     private struct Draft: Equatable {
         /// Distinct per opened editor, so the editor knows to take the keyboard again.
@@ -119,6 +124,9 @@ struct DiffReviewPanel: View {
     @State private var replySerial = 0
     /// Threads with a reply or a resolve on its way to GitHub.
     @State private var threadBusy: Set<String> = []
+    @State private var globalCommentDraft: GlobalCommentDraft?
+    @State private var globalCommentSerial = 0
+    @State private var postingGlobalComment = false
 
     private let rowHeight: CGFloat = 18
     private let dragSpace = "diff-review-lines"
@@ -136,6 +144,19 @@ struct DiffReviewPanel: View {
         guard let path = selectedPath else { return [] }
         return allComments.filter { $0.path == path }
     }
+    private var prTimelineKey: String? {
+        prTarget.map { TrackedPr.key(cwd: $0.cwd, number: $0.pr.number) }
+    }
+    private var prTimeline: PrTimeline? {
+        prTimelineKey.flatMap { model.github.timelines[$0] }
+    }
+    private var globalComments: [PrGlobalComment] { prGlobalComments(prTimeline) }
+    private var globalCommentsLoading: Bool {
+        prTimelineKey.map { model.github.loading.contains($0) } ?? false
+    }
+    private var isShowingGlobalComments: Bool {
+        prTarget != nil && selectedPath == prGlobalCommentsPath
+    }
     /// The PR's inline threads, when this reviews a PR and they are shown.
     private var prThreads: [PrReviewThread] {
         guard showThreads, let t = prTarget else { return [] }
@@ -148,7 +169,13 @@ struct DiffReviewPanel: View {
     }
     private func thread(_ id: String) -> PrReviewThread? { prThreads.first { $0.id == id } }
     private var treeRows: [ReviewTreeRow] { reviewTreeRows(files, collapsed: collapsedDirs) }
-    private var fileOrder: [String] { reviewFileOrder(files) }
+    private var treeRowIDs: [String] {
+        (prTarget == nil ? [] : [prGlobalCommentsPath]) + treeRows.map(\.id)
+    }
+    private var realFileOrder: [String] { reviewFileOrder(files) }
+    private var fileOrder: [String] {
+        reviewSelectionOrder(realFileOrder, includePrComments: prTarget != nil)
+    }
     private var isVisual: Bool { anchor != nil }
     private var isMarkdown: Bool {
         guard let file, !file.binary else { return false }
@@ -225,7 +252,8 @@ struct DiffReviewPanel: View {
         .background {
             if !showingMarkdown {
                 ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
-                                 enabled: draft == nil && prompt == nil && reply == nil,
+                                 enabled: draft == nil && prompt == nil && reply == nil
+                                     && globalCommentDraft == nil,
                                  onKey: handle).frame(width: 0, height: 0)
             }
         }
@@ -234,7 +262,9 @@ struct DiffReviewPanel: View {
             syncSelection()
         }
         .onChange(of: snapshot) { _, _ in syncSelection() }
-        .onChange(of: draft == nil && prompt == nil && reply == nil) { _, closed in if closed { keyToken &+= 1 } }
+        .onChange(of: draft == nil && prompt == nil && reply == nil && globalCommentDraft == nil) { _, closed in
+            if closed { keyToken &+= 1 }
+        }
         .onChange(of: promptText) { _, _ in promptTextChanged() }
         .perfTrackBody()
     }
@@ -412,7 +442,7 @@ struct DiffReviewPanel: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if snapshot?.git == false {
             centered("Not a git repository — nothing to review.")
-        } else if files.isEmpty {
+        } else if files.isEmpty, prTarget == nil {
             centered("No changes (\(snapshot?.label ?? "")).")
         } else {
             HStack(spacing: 0) {
@@ -439,6 +469,9 @@ struct DiffReviewPanel: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if prTarget != nil {
+                        globalCommentsTreeRow.id(prGlobalCommentsPath)
+                    }
                     ForEach(treeRows) { row in
                         treeRow(row).id(row.id)
                     }
@@ -453,6 +486,36 @@ struct DiffReviewPanel: View {
         .overlay(alignment: .top) {
             if focus == .tree { Rectangle().fill(Color.accentColor).frame(height: 2) }
         }
+    }
+
+    private var globalCommentsTreeRow: some View {
+        let isSelected = isShowingGlobalComments
+        let isCursor = focus == .tree && treeCursor == prGlobalCommentsPath
+        return HStack(spacing: 5) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 10)
+            Text("Comments").font(.system(size: 11.5))
+            Spacer(minLength: 4)
+            if globalCommentsLoading, prTimeline == nil {
+                ProgressView().controlSize(.mini)
+            } else if !globalComments.isEmpty {
+                Text("\(globalComments.count)").font(.system(size: 9.5)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(isSelected ? Color.appSelection : Color.clear)
+        .overlay(alignment: .leading) {
+            if isCursor { Rectangle().fill(Color.accentColor).frame(width: 2) }
+        }
+        .background(isCursor ? Color.appHairline(0.06) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            treeCursor = prGlobalCommentsPath
+            openGlobalComments()
+            keyToken &+= 1
+        }
+        .help("PR-wide issue comments and review summaries")
+        .clickCursor()
     }
 
     private func treeRow(_ row: ReviewTreeRow) -> some View {
@@ -516,35 +579,135 @@ struct DiffReviewPanel: View {
 
     @ViewBuilder
     private var diffPane: some View {
-        VStack(spacing: 0) {
-            if let file { fileHeader(file) }
-            Divider()
-            if showingMarkdown, let file {
-                ReviewMarkdownPreview(file: file,
-                                      cwd: prTarget == nil && snapshot?.base != .staged && file.status != .deleted
-                                          ? model.gitCwd(of: sessionId) : nil,
-                                      core: model.core)
-                    .id(file.path)
-            } else if let rf = rendered, rf.path == file?.path {
-                diffLines(rf)
-            } else {
-                Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if isShowingGlobalComments {
+            globalCommentsPane
+        } else {
+            VStack(spacing: 0) {
+                if let file { fileHeader(file) }
+                Divider()
+                if showingMarkdown, let file {
+                    ReviewMarkdownPreview(file: file,
+                                          cwd: prTarget == nil && snapshot?.base != .staged && file.status != .deleted
+                                              ? model.gitCwd(of: sessionId) : nil,
+                                          core: model.core)
+                        .id(file.path)
+                } else if let rf = rendered, rf.path == file?.path {
+                    diffLines(rf)
+                } else {
+                    Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            // Parse + highlight off-main, once per file content.
+            .task(id: file.map { "\($0.path)\u{0}\($0.diff)" }) {
+                guard let file else { rendered = nil; return }
+                let previous = rendered
+                let generation = (previous?.generation ?? 0) &+ 1
+                let out = await Task.detached(priority: .userInitiated) {
+                    RenderedReviewFile.compute(file, generation: generation)
+                }.value
+                guard !Task.isCancelled else { return }
+                rendered = out
+                frames.reset()
+                restoreCursor(after: previous, in: out)
             }
         }
-        // Parse + highlight off-main, once per file content.
-        .task(id: file.map { "\($0.path)\u{0}\($0.diff)" }) {
-            guard let file else { rendered = nil; return }
-            let previous = rendered
-            let generation = (previous?.generation ?? 0) &+ 1
-            let out = await Task.detached(priority: .userInitiated) {
-                RenderedReviewFile.compute(file, generation: generation)
-            }.value
-            guard !Task.isCancelled else { return }
-            rendered = out
-            frames.reset()
-            restoreCursor(after: previous, in: out)
+    }
+
+    private var globalCommentsPane: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "text.bubble").foregroundStyle(.secondary)
+                Text("PR-wide comments").font(.system(size: 12, weight: .semibold))
+                if prTimeline != nil {
+                    Text("\(globalComments.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 8)
+                if globalCommentsLoading { ProgressView().controlSize(.mini) }
+                Button { model.loadDiffReview(sessionId) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh PR comments")
+                .clickCursor()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Color.appBand)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if prTimeline == nil {
+                        VStack(spacing: 8) {
+                            if globalCommentsLoading { ProgressView().controlSize(.small) }
+                            Text(globalCommentsLoading ? "Loading PR comments…" : "PR comments are not loaded.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                            if !globalCommentsLoading {
+                                Button("Retry") { model.loadDiffReview(sessionId) }
+                                    .controlSize(.small).clickCursor()
+                            }
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 60)
+                    } else if globalComments.isEmpty {
+                        VStack(spacing: 6) {
+                            Text("No PR-wide comments yet.").font(.system(size: 12))
+                            Text("Issue comments and non-empty review summaries appear here.")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 60)
+                    } else {
+                        ForEach(globalComments) { comment in
+                            PrGlobalCommentBox(comment: comment)
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 900, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Divider()
+            if let d = globalCommentDraft {
+                globalCommentEditor(d)
+            } else {
+                Button { openGlobalCommentDraft() } label: {
+                    Label("Add a PR comment", systemImage: "plus.bubble")
+                }
+                .controlSize(.small)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.appPanel)
+                .clickCursor()
+            }
         }
+    }
+
+    private func globalCommentEditor(_ d: GlobalCommentDraft) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Comment on this pull request").font(.system(size: 10)).foregroundStyle(.secondary)
+            ReviewDraftEditor(
+                text: Binding(get: { globalCommentDraft?.text ?? "" },
+                              set: { globalCommentDraft?.text = $0 }),
+                focusToken: d.serial,
+                onSubmit: submitGlobalComment,
+                onSend: submitGlobalComment,
+                onCancel: { globalCommentDraft = nil })
+                .frame(height: 72)
+                .background(Color.appSurface)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accentColor.opacity(0.6)))
+            HStack(spacing: 8) {
+                Button("Comment") { submitGlobalComment() }
+                    .controlSize(.small)
+                    .disabled(postingGlobalComment
+                              || d.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .clickCursor()
+                Button("Cancel") { globalCommentDraft = nil }
+                    .controlSize(.small).disabled(postingGlobalComment).clickCursor()
+                if postingGlobalComment { ProgressView().controlSize(.mini) }
+                Text("⏎ post · ⇧⏎ newline · esc cancel")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(10)
+        .background(Color.appPanel)
     }
 
     private func fileHeader(_ file: DiffFile) -> some View {
@@ -571,8 +734,8 @@ struct DiffReviewPanel: View {
                     keyToken &+= 1
                 }
             }
-            if let at = fileOrder.firstIndex(of: file.path) {
-                Text("\(at + 1)/\(fileOrder.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+            if let at = realFileOrder.firstIndex(of: file.path) {
+                Text("\(at + 1)/\(realFileOrder.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
             Text("+\(file.additions)").font(.system(size: 10)).foregroundStyle(VimSyntaxPalette.diffAdd)
             Text("−\(file.deletions)").font(.system(size: 10)).foregroundStyle(VimSyntaxPalette.diffRemove)
@@ -776,9 +939,11 @@ struct DiffReviewPanel: View {
                 }
             }
             Spacer(minLength: 8)
-            Text(prompt == nil
-                 ? "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close"
-                 : "⏎ accept · esc cancel")
+            Text(prompt != nil
+                 ? "⏎ accept · esc cancel"
+                 : isShowingGlobalComments
+                    ? "⏎ / gcc add PR comment · gt/gT file · R refresh · ␣n tree · q / esc esc close"
+                    : "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
         }
@@ -787,7 +952,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeName: String {
-        if draft != nil || reply != nil { return "INSERT" }
+        if draft != nil || reply != nil || globalCommentDraft != nil { return "INSERT" }
         if case .search = prompt { return "SEARCH" }
         if prompt != nil { return "FIND" }
         if focus == .tree { return "TREE" }
@@ -795,7 +960,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeColor: Color {
-        if draft != nil || reply != nil { return .green }
+        if draft != nil || reply != nil || globalCommentDraft != nil { return .green }
         if prompt != nil { return .purple }
         if focus == .tree { return .blue }
         return isVisual ? .orange : .secondary
@@ -803,17 +968,17 @@ struct DiffReviewPanel: View {
 
     // MARK: - Selection sync
 
-    /// Keep the selected file valid as the diff reloads; default to the first file in
-    /// tree order.
+    /// Keep the selection valid as the diff reloads; default to the first real file.
     private func syncSelection() {
         let order = fileOrder
         if selectedPath == nil || !order.contains(selectedPath!) {
-            selectedPath = order.first
+            selectedPath = reviewInitialSelection(realFileOrder, includePrComments: prTarget != nil)
             cursor = nil
             anchor = nil
             draft = nil
+            globalCommentDraft = nil
         }
-        if treeCursor == nil || !treeRows.contains(where: { $0.id == treeCursor }) {
+        if treeCursor == nil || !treeRowIDs.contains(treeCursor!) {
             treeCursor = selectedPath
         }
     }
@@ -854,8 +1019,21 @@ struct DiffReviewPanel: View {
             cursor = nil
             anchor = nil
             draft = nil
+            globalCommentDraft = nil
         }
         treeCursor = path
+        focus = .diff
+    }
+
+    private func openGlobalComments() {
+        guard prTarget != nil else { return }
+        selectedPath = prGlobalCommentsPath
+        treeCursor = prGlobalCommentsPath
+        cursor = nil
+        anchor = nil
+        draft = nil
+        reply = nil
+        pendingJump = nil
         focus = .diff
     }
 
@@ -914,6 +1092,10 @@ struct DiffReviewPanel: View {
             if key == .escape { cancelReply() }
             return true
         }
+        guard globalCommentDraft == nil else {
+            if key == .escape { globalCommentDraft = nil }
+            return true
+        }
         guard let command = parser.feed(key, visual: isVisual && focus == .diff) else { return true }
         if command == .close, key == .escape {
             model.closeDiffReview()
@@ -950,6 +1132,16 @@ struct DiffReviewPanel: View {
     }
 
     private func diffCommand(_ command: ReviewKeyCommand) {
+        if isShowingGlobalComments {
+            switch command {
+            case .nextFile(let n): stepFile(n)
+            case .prevFile(let n): stepFile(-n)
+            case .comment, .githubComment, .activate: openGlobalCommentDraft()
+            case .close: model.closeDiffReview()
+            default: break
+            }
+            return
+        }
         let list = items
         guard !list.isEmpty else {
             if case .close = command { model.closeDiffReview() }
@@ -1025,28 +1217,39 @@ struct DiffReviewPanel: View {
 
     private func treeCommand(_ command: ReviewKeyCommand) {
         let rows = treeRows
-        guard !rows.isEmpty else { return }
-        let at = rows.firstIndex { $0.id == treeCursor } ?? 0
-        let row = rows[at]
+        let ids = treeRowIDs
+        guard !ids.isEmpty else { return }
+        let at = ids.firstIndex(of: treeCursor ?? "") ?? 0
+        let id = ids[at]
+        let row = rows.first { $0.id == id }
         switch command {
-        case .down(let n): treeCursor = rows[min(rows.count - 1, at + n)].id
-        case .up(let n): treeCursor = rows[max(0, at - n)].id
-        case .halfPageDown: treeCursor = rows[min(rows.count - 1, at + 10)].id
-        case .halfPageUp: treeCursor = rows[max(0, at - 10)].id
-        case .top: treeCursor = rows[0].id
-        case .bottom: treeCursor = rows[rows.count - 1].id
+        case .down(let n): treeCursor = ids[min(ids.count - 1, at + n)]
+        case .up(let n): treeCursor = ids[max(0, at - n)]
+        case .halfPageDown: treeCursor = ids[min(ids.count - 1, at + 10)]
+        case .halfPageUp: treeCursor = ids[max(0, at - 10)]
+        case .top: treeCursor = ids[0]
+        case .bottom: treeCursor = ids[ids.count - 1]
         case .activate, .comment:
-            if row.isDirectory { toggleDir(row.id) } else if let p = row.file?.path { openFile(p) }
+            if id == prGlobalCommentsPath {
+                openGlobalComments()
+            } else if let row {
+                if row.isDirectory { toggleDir(row.id) } else if let p = row.file?.path { openFile(p) }
+            }
         case .right:
-            if row.isDirectory {
-                if row.isCollapsed { toggleDir(row.id) } else { treeCursor = rows[min(rows.count - 1, at + 1)].id }
-            } else if let p = row.file?.path {
-                selectedPath = p
+            if id == prGlobalCommentsPath {
+                selectedPath = prGlobalCommentsPath
+            } else if let row {
+                if row.isDirectory {
+                    if row.isCollapsed { toggleDir(row.id) } else { treeCursor = ids[min(ids.count - 1, at + 1)] }
+                } else if let p = row.file?.path {
+                    selectedPath = p
+                }
             }
         case .left:
+            guard let row, let rowAt = rows.firstIndex(where: { $0.id == row.id }) else { return }
             if row.isDirectory, !row.isCollapsed {
                 toggleDir(row.id)
-            } else if let parent = rows[..<at].last(where: { $0.isDirectory && $0.depth < row.depth }) {
+            } else if let parent = rows[..<rowAt].last(where: { $0.isDirectory && $0.depth < row.depth }) {
                 treeCursor = parent.id
             }
         case .nextFile(let n): stepFile(n); treeCursor = selectedPath
@@ -1349,6 +1552,33 @@ struct DiffReviewPanel: View {
     }
 
     // MARK: - Comments
+
+    private func openGlobalCommentDraft() {
+        guard prTarget != nil, !postingGlobalComment else { return }
+        if globalCommentDraft == nil {
+            globalCommentSerial &+= 1
+            globalCommentDraft = GlobalCommentDraft(serial: globalCommentSerial)
+        }
+        parser.reset()
+    }
+
+    private func submitGlobalComment() {
+        guard let d = globalCommentDraft, let target = prTarget, !postingGlobalComment else { return }
+        let body = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        postingGlobalComment = true
+        Task {
+            let error = await model.github.postReply(cwd: target.cwd, pr: target.pr,
+                                                     replyTargetId: nil, body: body)
+            postingGlobalComment = false
+            if let error {
+                review.say("Comment not posted: \(error). Your text is kept.", isError: true, in: sessionId)
+            } else {
+                if globalCommentDraft?.serial == d.serial { globalCommentDraft = nil }
+                review.say("Comment posted on GitHub", in: sessionId)
+            }
+        }
+    }
 
     private func openDraft(toGitHub: Bool = false) {
         // On a GitHub thread, "comment here" means reply to it.
@@ -1755,6 +1985,55 @@ private struct ReviewCommentBox: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onEdit)
         .onTapGesture(perform: onSelect)
+    }
+}
+
+private struct PrGlobalCommentBox: View {
+    let comment: PrGlobalComment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 10)).foregroundStyle(.purple)
+                Text("@\(comment.author)").font(.system(size: 11, weight: .semibold))
+                if let kindLabel {
+                    Text(kindLabel)
+                        .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+                if let at = comment.createdAt {
+                    Text(relativeTime(at)).font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 4)
+                if let url = URL(string: comment.url) {
+                    Button { NSWorkspace.shared.open(url) } label: {
+                        Image(systemName: "arrow.up.right.square").font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Open on github.com")
+                    .clickCursor()
+                }
+            }
+            CommentMarkdown(text: comment.body)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appHairline(0.15)))
+    }
+
+    private var icon: String {
+        switch comment.kind {
+        case .comment: return "text.bubble.fill"
+        case .review: return "arrow.triangle.pull"
+        }
+    }
+
+    private var kindLabel: String? {
+        guard case .review(let state) = comment.kind else { return nil }
+        let label = state.replacingOccurrences(of: "_", with: " ").lowercased()
+        return label.isEmpty ? "review" : label
     }
 }
 
