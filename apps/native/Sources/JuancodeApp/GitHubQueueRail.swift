@@ -13,6 +13,15 @@ import JuancodeClient
 enum RightRailPanel: String, CaseIterable, Identifiable {
     case oracle, prs, diff, chains, tickets
     var id: String { rawValue }
+    var focusTarget: PanelFocusTarget? {
+        switch self {
+        case .oracle: .oracles
+        case .prs: .prs
+        case .chains: .chains
+        case .tickets: .linearTickets
+        case .diff: nil
+        }
+    }
     var title: String {
         switch self {
         case .oracle: "Oracles"
@@ -176,6 +185,7 @@ struct RightRailPanels: View {
                     // becoming the filler resizes rather than being rebuilt.
                     let h = sized[panel]
                     content(panel)
+                        .modifier(RailPanelNavigation(panel: panel))
                         .frame(maxWidth: .infinity, minHeight: h ?? 0, maxHeight: h ?? .infinity,
                                alignment: .top)
                         .clipped()
@@ -1253,4 +1263,12 @@ private struct RailOverflowReporter: ViewModifier {
 
 extension View {
     func reportsRailOverflow() -> some View { modifier(RailOverflowReporter()) }
+}
+
+private struct RailPanelNavigation: ViewModifier {
+    let panel: RightRailPanel
+    func body(content: Content) -> some View {
+        if let target = panel.focusTarget { content.panelNavigation(target) }
+        else { content }
+    }
 }

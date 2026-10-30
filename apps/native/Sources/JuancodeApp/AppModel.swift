@@ -291,23 +291,11 @@ final class AppModel {
     /// terminal keeps its exact height instead of being squeezed (and reflowed).
     weak var hostWindow: NSWindow?
 
-    // MARK: Keyboard navigation (juancode-vgm)
-    //
-    // Vim-style sidebar nav + ⌃H/⌃L pane focus, driven by a window-scoped NSEvent
-    // monitor (see `installPaneNavigation`). The monitor pre-empts the terminal's
-    // first responder, so these all work even while a session is focused.
-
-    /// Whether vim sidebar nav (j/k/g/G, ⌃H/⌃L pane focus) is armed. Off by default so
-    /// those keys stay the pty's / the list's; a double tap of ⌃ toggles it, and a dot
-    /// beside the Tools button shows it is on (juancode-v2d).
-    var vimNavActive = false
-
-    /// Double-tap-⌃ toggle. Turning it on lands the keyboard on the sidebar, the
-    /// only place the motions do anything besides ⌃H.
-    func toggleVimNav() {
-        vimNavActive.toggle()
-        if vimNavActive { focusSidebar() }
-    }
+    // MARK: Keyboard navigation
+    // Explicit panel requests transfer first responder to a panel-local key host.
+    let panelNavigation = PanelNavigation()
+    @ObservationIgnored var consumedPanelFocusSerial: Int?
+    var panelNavigationActive: Bool { panelNavigation.target != nil }
 
     /// Session IDs in the order they appear in the sidebar, top-to-bottom (folders
     /// flattened, externals excluded). Published by `SidebarView`; drives j/k.
@@ -1179,16 +1167,15 @@ final class AppModel {
     }
 
     /// Reveal a panel and ask it for the keyboard (⌘⇧S / P / L / C / O). The sessions
-    /// sidebar takes focus here directly; a rail panel is opened and claims the
-    /// keyboard itself by consuming `panelFocusRequest`.
+    /// and rails claim the keyboard through the shared panel host.
     func requestPanelFocus(_ target: PanelFocusTarget) {
         switch target.railPanel {
         case nil:
             projectsSidebarVisible = true
-            focusSidebar()
         case .prs?: openViewerPrQueue()
         case let panel?: setRailPanelShown(panel, true)
         }
+        suppressTerminalAutoFocus = true
         panelFocusRequest = PanelFocusRequest(target: target, serial: (panelFocusRequest?.serial ?? 0) &+ 1)
     }
 
@@ -1201,6 +1188,8 @@ final class AppModel {
 
     /// Move keyboard focus into the live terminal (Enter / l / ⌃L).
     func focusTerminal() {
+        consumedPanelFocusSerial = panelFocusRequest?.serial
+        panelNavigation.end()
         suppressTerminalAutoFocus = false
         if let selection, sessionPairs.pair(for: selection) == nil {
             switch editorTabs.activeTab(for: selection) {

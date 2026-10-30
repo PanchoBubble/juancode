@@ -494,64 +494,9 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
             default: break // every other key stays the responder chain's
             }
         }
-        // Everything below is vim nav, which only runs while armed (⌃ ⌃, juancode-v2d).
-        guard model.vimNavActive else { return false }
-        let fr = window.firstResponder
-        let ctrl = mods.contains(.control)
-
-        // Terminal pane: only ⌃H escapes to the sidebar; all else (incl. ⌃L) is the pty's.
-        // Matches both SwiftTerm and Ghostty surfaces via the shared marker.
-        if fr is JuancodeTerminalResponder {
-            // Back in the pty by any route (incl. a mouse click) — clear the nav guard so
-            // a later row click auto-focuses its terminal again. Guarded to avoid churn.
-            if model.suppressTerminalAutoFocus { model.suppressTerminalAutoFocus = false }
-            guard ctrl, keyCode == 4 else { return false } // ⌃H
-            // Inside an editor pane (nvim), ⌃H/J/K/L are vim window moves — let ⌃H reach
-            // the pty instead of stealing it for sidebar focus (⌃J/K/L already pass through).
-            if editorHasFocus(fr, model: model) { return false }
-            window.makeFirstResponder(nil)
-            model.focusSidebar()
-            return true
-        }
-        // Editing the filter / rename field — leave typing untouched.
-        if fr is NSTextView { return false }
-
-        // Sidebar pane.
-        if ctrl, keyCode == 37 { model.focusTerminal(); model.flashFocusRim(); return true } // ⌃L → terminal
-        // Let modified keys through so app-level shortcuts keep working.
-        if !mods.intersection([.command, .control, .option]).isEmpty { return false }
-        switch keyCode {
-        case 38, 125: model.moveSelection(by: 1); return true   // j / ↓
-        case 40, 126: model.moveSelection(by: -1); return true  // k / ↑
-        case 36, 76, 37: model.focusTerminal(); model.flashFocusRim(); return true // ⏎ / enter / l → open (juancode-vz1)
-        case 5: mods.contains(.shift) ? model.selectLast() : model.selectFirst(); return true // g / G
-        case 53: return false                                   // Esc passes through
-        default: return true                                    // swallow; don't leak to the pty
-        }
+        return false
     }
-    // ⌃ ⌃ arms/disarms vim nav. A flagsChanged monitor is the only way to see a
-    // bare modifier; keyDowns feed it too, so a ⌃-chord in between never counts.
-    var doubleTap = ModifierDoubleTap()
-    let ctrlTapped: @MainActor (NSEvent) -> Void = { [weak host] event in
-        let held = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        let fired = doubleTap.flagsChanged(onlyTarget: held == .control, none: held.isEmpty,
-                                           at: event.timestamp)
-        guard fired, let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
-        else { return }
-        let fr = window.firstResponder
-        if !model.vimNavActive {
-            window.makeFirstResponder(nil) // off the terminal, so the sidebar can take it
-        } else if !(fr is JuancodeTerminalResponder), !(fr is NSTextView) {
-            model.focusTerminal() // disarming from the sidebar: back to typing
-        }
-        model.toggleVimNav()
-    }
-    return NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-        if event.type == .flagsChanged {
-            MainActor.assumeIsolated { ctrlTapped(event) }
-            return event
-        }
-        MainActor.assumeIsolated { doubleTap.keyDown() }
+    return NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
         if MainActor.assumeIsolated({ routeAppShortcut(event) }) { return nil }
         let keyCode = event.keyCode
         let mods = event.modifierFlags

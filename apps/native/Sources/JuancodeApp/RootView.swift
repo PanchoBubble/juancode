@@ -37,7 +37,7 @@ struct RootView: View {
                     AttentionButton()
                     NotificationsBell()
                     ToolsMenu()
-                    VimNavDot()
+                    PanelNavigationDot()
                 }
             }
             // No toolbar material — the top strip stays the window's black (dark
@@ -545,19 +545,19 @@ private struct NotificationsBell: View {
     }
 }
 
-/// Beside Tools: a dot while vim sidebar nav is armed (⌃ ⌃ toggles, juancode-v2d).
+/// Beside Tools: a dot while an explicitly focused panel owns navigation.
 /// Its own view so only it re-renders when the flag flips (see `RootView`).
-private struct VimNavDot: View {
+private struct PanelNavigationDot: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         Circle()
-            .fill(model.vimNavActive ? Color.accentColor : Color.clear)
+            .fill(model.panelNavigationActive ? Color.accentColor : Color.clear)
             .frame(width: 7, height: 7)
-            .help(model.vimNavActive
-                  ? "Vim nav on — j/k/g/G in the sidebar, ⌃H/⌃L between panes. ⌃ ⌃ to turn off"
-                  : "Vim nav off — ⌃ ⌃ to turn on")
-            .animation(.easeOut(duration: 0.15), value: model.vimNavActive)
+            .help(model.panelNavigationActive
+                  ? "Panel navigation — arrows browse, Enter activates, Escape returns"
+                  : "Focus a panel with Command-Shift-S/P/L/C/O")
+            .animation(.easeOut(duration: 0.15), value: model.panelNavigationActive)
     }
 }
 
@@ -682,6 +682,7 @@ private struct SidebarColumn: View {
         // `.environment` goes after `.toolbar`: toolbar items are hosted outside the
         // view they hang off, so an environment applied below `.toolbar` never reaches them.
         SidebarView()
+            .panelNavigation(.sessions)
             .toolbar {
                 ToolbarItem { CollapseAllProjectsButton() }
                 // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP

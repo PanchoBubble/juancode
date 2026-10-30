@@ -194,6 +194,7 @@ let package = Package(
             ],
             resources: [.process("Resources")]
         ),
+        .testTarget(name: "JuancodeAppTests", dependencies: ["JuancodeApp"]),
         .testTarget(
             name: "JuancodeCoreTests",
             dependencies: ["JuancodeCore", .product(name: "SwiftTerm", package: "SwiftTerm")]
