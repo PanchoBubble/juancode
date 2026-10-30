@@ -2590,9 +2590,10 @@ struct SessionRow: View {
     var body: some View {
         // firstTextBaseline so the provider icon and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             if meta.kind == .agent {
-                ProviderIcon(provider: meta.provider)
+                ProviderIcon(provider: meta.provider, tint: statusRailColor,
+                             working: live && activity == .busy && !activating)
                     .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             } else {
                 Color.clear
@@ -2644,6 +2645,7 @@ struct SessionRow: View {
             Spacer(minLength: 6)
             trailingOrnament
         }
+        .padding(.leading, 4)
         .padding(.vertical, 3)
         .overlay(alignment: .leading) {
             Rectangle()
