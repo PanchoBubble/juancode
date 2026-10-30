@@ -45,6 +45,23 @@ session ids identify the subscriber. Self-subscriptions and notification cycles 
 refused, allowing directed chains without feedback loops. Late-bound dispatch edges
 that would close a cycle are suppressed.
 
+Choose what a listener receives with `mode`:
+
+- `all`: every actionable state transition, including `busy`.
+- `done`: `idle`, `exited`, or `failed`. An idle event means the turn settled;
+  it does not prove the task is complete.
+- `includes`: only events whose latest assistant response contains
+  `responseIncludes` (case-insensitive literal text). Requires a nonempty phrase;
+  specifying the phrase alone selects this mode. User and tool text never match.
+
+For example, subscribe with
+`{subscriber: "<parent-id>", targetType: "session", targetId: "<child-id>", mode: "done"}`
+or replace `mode` with `"includes"` and add `responseIncludes: "ready for review"`.
+Optional `states` further restricts any mode. Repeating a subscription for the same
+subscriber and target updates its filters. Filters survive restarts. Omitting both
+filter fields preserves the existing completion/input defaults. Matching happens on
+the latest response within the last 12 transcript messages, before the delivery cap.
+
 `oracle_session_subscriptions` lists the table, `oracle_session_unsubscribe` removes
 a row, `oracle_session_notifications` reads recent history and delivery errors, and
 `oracle_session_notifications_retry` retries pending deliveries. Equivalent local

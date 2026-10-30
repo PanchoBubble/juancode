@@ -6,11 +6,31 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { oracleDir } from "./oracle.ts";
-import { fetchMessages } from "./session-reads.ts";
+import { fetchMessages, type SessionMessage } from "./session-reads.ts";
 import { deliverSessionNotification } from "./notification-delivery.ts";
 
 export const NOTIFICATION_STATES = ["busy", "idle", "waiting_input", "exited", "failed"] as const;
 export type NotificationState = (typeof NOTIFICATION_STATES)[number];
+export const NOTIFICATION_MODES = ["all", "done", "includes"] as const;
+export type NotificationMode = (typeof NOTIFICATION_MODES)[number];
+export interface NotificationFilter {
+  mode?: NotificationMode;
+  responseIncludes?: string;
+  states?: NotificationState[];
+}
+
+/** Match only the latest response, never a phrase from an earlier turn. */
+export function latestAssistantResponse(messages: SessionMessage[]): string {
+  const current = messages.slice(messages.findLastIndex((m) => m.role === "user") + 1);
+  const latest = current.findLast((m) => m.role === "assistant");
+  if (!latest) return "";
+  if (latest.turn !== undefined)
+    return current
+      .filter((m) => m.role === "assistant" && m.turn === latest.turn)
+      .map((m) => m.text)
+      .join("\n\n");
+  return latest.text;
+}
 export interface NotificationEvent {
   sessionId: string;
   dispatchId?: string;
@@ -25,6 +45,8 @@ export interface SessionSubscription {
   targetId: string;
   sourceSessionId: string | null;
   states: NotificationState[];
+  mode: NotificationMode;
+  responseIncludes: string | null;
   lastState: NotificationState | null;
 }
 export interface SessionNotification {
@@ -66,6 +88,11 @@ export class SessionNotifications {
         body TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0
       );
     `);
+    const columns = this.db.prepare("PRAGMA table_info(subscriptions)").all();
+    if (!columns.some((c) => c.name === "mode"))
+      this.db.exec("ALTER TABLE subscriptions ADD COLUMN mode TEXT NOT NULL DEFAULT 'all'");
+    if (!columns.some((c) => c.name === "response_includes"))
+      this.db.exec("ALTER TABLE subscriptions ADD COLUMN response_includes TEXT");
   }
   // Serialize asynchronous output reads, subscription changes and delivery so a
   // rapid busy/idle pair cannot reorder or lose transitions.
@@ -85,6 +112,8 @@ export class SessionNotifications {
         targetId: String(r.target_id),
         sourceSessionId: r.source_session_id as string | null,
         states: JSON.parse(String(r.states)) as NotificationState[],
+        mode: r.mode as NotificationMode,
+        responseIncludes: r.response_includes as string | null,
         lastState: r.last_state as NotificationState | null,
       }));
   }
@@ -98,20 +127,29 @@ export class SessionNotifications {
     };
     return visit(source);
   }
-  subscribe(input: {
-    subscriber: string;
-    targetType: "session" | "dispatch";
-    targetId: string;
-    sourceSessionId?: string | null;
-    states?: NotificationState[];
-  }): Promise<SessionSubscription> {
+  subscribe(
+    input: NotificationFilter & {
+      subscriber: string;
+      targetType: "session" | "dispatch";
+      targetId: string;
+      sourceSessionId?: string | null;
+    },
+  ): Promise<SessionSubscription> {
     return this.serial(() => {
       const { subscriber, targetType, targetId } = input;
       const source = targetType === "session" ? targetId : (input.sourceSessionId ?? null);
-      const states = input.states ?? ["idle", "waiting_input", "exited", "failed"];
+      const mode = input.mode ?? (input.responseIncludes !== undefined ? "includes" : "all");
+      const responseIncludes = input.responseIncludes?.trim() ?? null;
+      const states =
+        input.states ??
+        (input.mode === "all"
+          ? [...NOTIFICATION_STATES]
+          : ["idle", "waiting_input", "exited", "failed"]);
       if (
         !subscriber.trim() ||
         !targetId.trim() ||
+        !NOTIFICATION_MODES.includes(mode) ||
+        (mode === "includes" ? !responseIncludes : responseIncludes !== null) ||
         !states.length ||
         states.some((s) => !NOTIFICATION_STATES.includes(s))
       )
@@ -121,9 +159,10 @@ export class SessionNotifications {
       this.db
         .prepare(
           `INSERT INTO subscriptions
-        (id, subscriber, target_type, target_id, source_session_id, states)
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(subscriber, target_type, target_id)
-        DO UPDATE SET states=excluded.states, source_session_id=COALESCE(excluded.source_session_id, subscriptions.source_session_id)`,
+        (id, subscriber, target_type, target_id, source_session_id, states, mode, response_includes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(subscriber, target_type, target_id)
+        DO UPDATE SET states=excluded.states, mode=excluded.mode, response_includes=excluded.response_includes,
+        source_session_id=COALESCE(excluded.source_session_id, subscriptions.source_session_id)`,
         )
         .run(
           randomUUID(),
@@ -132,6 +171,8 @@ export class SessionNotifications {
           targetId,
           source,
           JSON.stringify([...new Set(states)]),
+          mode,
+          responseIncludes,
         );
       return this.rows().find(
         (r) =>
@@ -175,7 +216,12 @@ export class SessionNotifications {
           event.notify ||
           event.state === "busy" ||
           (row.lastState === "busy" && event.state === "idle");
-        if (!actionable || !row.states.includes(event.state)) {
+        if (
+          !actionable ||
+          !row.states.includes(event.state) ||
+          (row.mode === "done" && !["idle", "exited", "failed"].includes(event.state)) ||
+          (row.mode === "includes" && event.state === "busy")
+        ) {
           this.db
             .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
             .run(event.state, row.id);
@@ -189,6 +235,15 @@ export class SessionNotifications {
                   outputError = String(e);
                   return "";
                 });
+        }
+        if (
+          row.mode === "includes" &&
+          (outputError || !output.toLowerCase().includes(row.responseIncludes!.toLowerCase()))
+        ) {
+          this.db
+            .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
+            .run(event.state, row.id);
+          continue;
         }
         const notification: SessionNotification = {
           id: randomUUID(),
@@ -273,11 +328,7 @@ export function sessionNotifications(): SessionNotifications {
   const existing = instances.get(path);
   if (existing) return existing;
   const instance = new SessionNotifications(join(oracleDir(), "session-notifications.sqlite"), {
-    output: async (id) =>
-      (await fetchMessages(id, 12)).messages
-        .filter((m) => m.role === "assistant")
-        .map((m) => m.text)
-        .join("\n\n"),
+    output: async (id) => latestAssistantResponse((await fetchMessages(id, 12)).messages),
     deliver: deliverSessionNotification,
   });
   instances.set(path, instance);

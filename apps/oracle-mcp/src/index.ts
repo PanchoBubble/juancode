@@ -85,8 +85,9 @@ import {
   registerNotificationTools,
   notificationSubscriber,
   subscribeToSessionNotifications,
+  notificationFilterSchema,
 } from "./notification-tools.ts";
-import { sessionNotifications, NOTIFICATION_STATES } from "./session-notifications.ts";
+import { sessionNotifications } from "./session-notifications.ts";
 import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
 import { onSessionExit, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
@@ -889,7 +890,7 @@ const subscriptionInput = z.object({
   subscriber: z.string().min(1),
   targetType: z.enum(["session", "dispatch"]),
   targetId: z.string().min(1),
-  states: z.array(z.enum(NOTIFICATION_STATES)).min(1).optional(),
+  ...notificationFilterSchema,
 });
 app.post("/api/session-subscriptions", async (req: Request, res: Response) => {
   const parsed = subscriptionInput.safeParse(req.body);

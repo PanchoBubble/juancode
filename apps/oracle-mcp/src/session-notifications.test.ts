@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionNotifications, type NotificationEvent } from "./session-notifications.ts";
+import { DatabaseSync } from "node:sqlite";
+import {
+  latestAssistantResponse,
+  SessionNotifications,
+  type NotificationEvent,
+} from "./session-notifications.ts";
 
 const stores: SessionNotifications[] = [];
 const dirs: string[] = [];
@@ -25,6 +30,155 @@ const event = (state: NotificationEvent["state"], notify = true): NotificationEv
 });
 
 describe("durable session notifications", () => {
+  it("supports all transitions or completion only, intersected with explicit states", async () => {
+    const { store } = make();
+    for (const mode of ["all", "done"] as const)
+      await store.subscribe({ subscriber: mode, targetType: "session", targetId: "child", mode });
+    await store.subscribe({
+      subscriber: "exit",
+      targetType: "session",
+      targetId: "child",
+      mode: "done",
+      states: ["exited"],
+    });
+    await store.publish(event("idle", false));
+    await store.publish(event("busy", false));
+    await store.publish(event("waiting_input"));
+    await store.publish(event("busy"));
+    await store.publish(event("idle", false));
+    await store.publish(event("exited"));
+    await store.publish(event("failed"));
+    expect((await store.inbox("all")).map((n) => n.state)).toEqual([
+      "failed",
+      "exited",
+      "idle",
+      "busy",
+      "waiting_input",
+      "busy",
+    ]);
+    expect((await store.inbox("done")).map((n) => n.state)).toEqual(["failed", "exited", "idle"]);
+    expect((await store.inbox("exit")).map((n) => n.state)).toEqual(["exited"]);
+  });
+
+  it("filters each listener by literal case-insensitive response text before truncation", async () => {
+    const { store, output } = make();
+    await store.subscribe({
+      subscriber: "match",
+      targetType: "session",
+      targetId: "child",
+      mode: "includes",
+      responseIncludes: "ready [yes]",
+    });
+    await store.subscribe({
+      subscriber: "other",
+      targetType: "session",
+      targetId: "child",
+      responseIncludes: "ship it",
+    });
+    output.mockResolvedValue("Not ready yet");
+    await store.publish(event("idle"));
+    await store.publish(event("busy"));
+    output.mockResolvedValue("READY [yes] " + "x".repeat(7000));
+    await store.publish(event("waiting_input"));
+    await store.publish(event("waiting_input"));
+    expect(await store.inbox("other")).toEqual([]);
+    expect(await store.inbox("match")).toHaveLength(1);
+    expect(output).toHaveBeenCalledTimes(2);
+    await store.publish(event("busy"));
+    output.mockRejectedValue(new Error("unavailable"));
+    await store.publish(event("idle"));
+    expect(await store.inbox("match")).toHaveLength(1);
+  });
+
+  it("persists filters and updates a subscription without changing its identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "notification-filter-"));
+    dirs.push(dir);
+    const path = join(dir, "notifications.sqlite");
+    const first = make(path);
+    const row = await first.store.subscribe({
+      subscriber: "parent",
+      targetType: "dispatch",
+      targetId: "dispatch-1",
+      mode: "done",
+    });
+    const updated = await first.store.subscribe({
+      subscriber: "parent",
+      targetType: "dispatch",
+      targetId: "dispatch-1",
+      responseIncludes: " final answer ",
+    });
+    expect(updated).toMatchObject({
+      id: row.id,
+      mode: "includes",
+      responseIncludes: "final answer",
+    });
+    await first.store.close();
+    stores.splice(stores.indexOf(first.store), 1);
+    const second = make(path);
+    expect(await second.store.list()).toEqual([updated]);
+    await second.store.publish(event("idle"));
+    expect(second.deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates existing subscriptions without changing their states or dedupe", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "notification-migration-"));
+    dirs.push(dir);
+    const path = join(dir, "notifications.sqlite");
+    const db = new DatabaseSync(path);
+    db.exec(`CREATE TABLE subscriptions (
+      id TEXT PRIMARY KEY, subscriber TEXT NOT NULL, target_type TEXT NOT NULL,
+      target_id TEXT NOT NULL, source_session_id TEXT, states TEXT NOT NULL,
+      last_state TEXT, UNIQUE(subscriber, target_type, target_id));
+      INSERT INTO subscriptions VALUES ('legacy', 'parent', 'session', 'child', 'child', '["idle"]', 'idle');`);
+    db.close();
+    const { store, deliver } = make(path);
+    expect((await store.list())[0]).toMatchObject({
+      id: "legacy",
+      mode: "all",
+      responseIncludes: null,
+      states: ["idle"],
+      lastState: "idle",
+    });
+    await store.publish(event("idle"));
+    expect(deliver).not.toHaveBeenCalled();
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects missing phrases and contradictory filters", async () => {
+    const { store } = make();
+    for (const filter of [
+      { mode: "includes" as const },
+      { responseIncludes: "  " },
+      { mode: "done" as const, responseIncludes: "ready" },
+    ])
+      await expect(
+        store.subscribe({
+          subscriber: "parent",
+          targetType: "session",
+          targetId: "child",
+          ...filter,
+        }),
+      ).rejects.toThrow("Invalid subscription");
+  });
+
+  it("reads the latest assistant turn and excludes earlier responses and user text", () => {
+    const messages = [
+      { seq: 1, role: "assistant" as const, text: "old match", turn: "old" },
+      { seq: 2, role: "user" as const, text: "user match", turn: "new" },
+      { seq: 3, role: "assistant" as const, text: "new part", turn: "new" },
+      { seq: 4, role: "toolResult" as const, text: "tool match", turn: "new" },
+      { seq: 5, role: "assistant" as const, text: "new answer", turn: "new" },
+    ];
+    expect(latestAssistantResponse(messages)).toBe("new part\n\nnew answer");
+    expect(latestAssistantResponse(messages.slice(0, 2))).toBe("");
+    expect(latestAssistantResponse(messages.map((m) => ({ ...m, turn: undefined })))).toBe(
+      "new answer",
+    );
+    expect(latestAssistantResponse([])).toBe("");
+  });
+
   it("ignores initial snapshots, delivers questions and completion with output, dedupes repeated events", async () => {
     const { store, deliver, output } = make();
     const row = await store.subscribe({
