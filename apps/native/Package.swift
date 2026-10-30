@@ -39,7 +39,11 @@ let package = Package(
         // glyphs on CoreText's shaped advances instead of the terminal's cell grid, so
         // rows drifted left of the cursor as you typed (~3 cells by column 80).
         // Upstream 13732b7 fixed it, first released in 1.14.0.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.15.0"),
+        // The view integration uses the v2 API (including terminalDimensions),
+        // introduced in the 1.99 releases; 1.15 cannot compile these call sites.
+        // Pin until the 1.99.2 PowerlineRenderer array-concatenation compile
+        // regression on Swift 6.2.3 is fixed upstream.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.99.1"),
         // GhosttyKit (libghostty): GPU-rendered alternative live surface, selectable
         // in Settings → Terminal. Host-driven via InMemoryTerminalSession so we keep
         // owning the pty/byte stream.
