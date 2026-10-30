@@ -191,7 +191,8 @@ let package = Package(
                 // A/B comparison. See GhosttyLive.swift.
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
-            ]
+            ],
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "JuancodeCoreTests",

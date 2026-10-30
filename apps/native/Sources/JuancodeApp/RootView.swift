@@ -2591,8 +2591,14 @@ struct SessionRow: View {
         // firstTextBaseline so the status dot and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            statusIndicator
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                statusIndicator
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+                if meta.kind == .agent {
+                    ProviderIcon(provider: meta.provider)
+                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
+                }
+            }
             VStack(alignment: .leading, spacing: 2) {
                 highlightedTitle.lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))

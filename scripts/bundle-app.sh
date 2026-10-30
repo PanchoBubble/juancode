@@ -26,11 +26,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/juancode"
-# SwiftPM resource bundles resolve relative to the executable (@loader_path), so they
-# travel next to the binary rather than in Contents/Resources.
+# Dependency resource bundles travel next to the binary. The main target's bundle
+# goes in Contents/Resources, where the packaged app looks it up.
 for b in "$BUILD"/*.bundle; do
   [[ -e $b ]] && cp -R "$b" "$APP/Contents/MacOS/" || true
 done
+cp -R "$BUILD/Juancode_JuancodeApp.bundle" "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
