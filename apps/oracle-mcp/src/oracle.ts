@@ -709,7 +709,7 @@ function deriveTitle(text: string): string {
 /** Injected so the headless turn embodies Oracle (claude's default system prompt
  *  otherwise dominates and it answers as generic Claude Code). Mirrors the role the
  *  GUI Oracle gets from its seed prompt + AGENTS.md, plus phone-screen brevity. */
-const ORACLE_SYSTEM =
+export const ORACLE_SYSTEM =
   "You are Oracle, the global orchestrator for this machine (see ./AGENTS.md). " +
   "Operate at the GLOBAL level across every project: manage the global bd tracker " +
   "(prefix oracle-), read ./state.json to see running sessions, and dispatch agents " +

@@ -242,6 +242,19 @@ Transport is long-poll `getUpdates` (no webhook), so it works behind the existin
 `/start`) resets it. Replies are chunked to Telegram's 4096-char limit. Only users in
 `ALLOWED_USER_IDS` are answered; everyone else is silently ignored.
 
+#### Provider fallback (juancode-c8m)
+
+Telegram turns try **Claude → GPT → Kimi**. A turn that Claude cannot answer (CLI
+failure, error result such as a usage limit, or an empty reply) is re-sent to
+`codex exec --json …` and then `kimi -p … --output-format stream-json`, both with the
+inherited environment and from the Oracle control dir. The reply says which provider
+answered. Each provider resumes **its own** conversation for the chat (`codex exec
+resume <thread>`, `kimi -S <session>`); the ids live next to the Claude id in
+`oracle-telegram-sessions.json` and `/new` clears them all. A fallback answer leaves the
+chat's Claude binding untouched, so turns a fallback answered are not in Claude's thread.
+Override binaries with `JUANCODE_CODEX_BIN` / `JUANCODE_KIMI_BIN`. The browser console
+stays Claude-only.
+
 #### Replies and pings
 
 Every session-scoped bot message (a needs-input or finish ping, a stuck advisory, a

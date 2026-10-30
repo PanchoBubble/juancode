@@ -27,6 +27,7 @@
 // is the allowlist of Telegram user ids permitted to talk to it (anyone else is
 // ignored). Replies are chunked to Telegram's 4096-char per-message limit.
 
+import { telegramChat } from "./telegram-chat.ts";
 import { clearTelegramSession, getTelegramSession, setTelegramSession } from "./telegram-store.ts";
 import {
   listObserved,
@@ -64,7 +65,6 @@ import { resolveObserverChatIds } from "./observer-trigger.ts";
 import {
   deliverReply,
   listSessions,
-  oracleChat,
   queueMessages,
   sendKeys,
   type ChatReply,
@@ -396,7 +396,7 @@ export interface TelegramDeps {
 /** The real collaborators, wired to the shared Oracle backend + durable stores. */
 function defaultDeps(token: string): TelegramDeps {
   return {
-    chat: (text, sessionId, chatId) => oracleChat(text, sessionId, { telegramChatId: chatId }),
+    chat: telegramChat,
     getSession: getTelegramSession,
     setSession: setTelegramSession,
     clearSession: clearTelegramSession,

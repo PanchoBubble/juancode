@@ -10,13 +10,18 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { FallbackProvider } from "./chat-fallback.ts";
 import { oracleDir } from "./oracle.ts";
 
 /** One Telegram chat's binding to a headless Oracle conversation. `chatId` is the
  *  Telegram chat id; `sessionId` is the `claude` session id used with `--resume`. */
 export interface TelegramSession {
   chatId: number;
+  /** The Claude id; "" until Claude has answered once (a chat can start on a fallback). */
   sessionId: string;
+  /** The fallback providers' own conversation ids (juancode-c8m). Ids are not portable
+   *  between CLIs, so each provider resumes its own thread. */
+  fallbackSessions?: Partial<Record<FallbackProvider, string>>;
   updatedAt: number;
 }
 
@@ -32,7 +37,6 @@ function isTelegramSession(v: unknown): v is TelegramSession {
   return (
     typeof r.chatId === "number" &&
     typeof r.sessionId === "string" &&
-    r.sessionId.length > 0 &&
     typeof r.updatedAt === "number"
   );
 }
@@ -66,7 +70,43 @@ export async function listTelegramChatIds(): Promise<number[]> {
  *  conversation — the bridge then starts one and records the id it gets back). */
 export async function getTelegramSession(chatId: number): Promise<string | null> {
   const found = (await readStore()).find((s) => s.chatId === chatId);
-  return found ? found.sessionId : null;
+  return found?.sessionId || null;
+}
+
+/** The id a fallback provider answered this chat with, or null (fresh thread there). */
+export async function getFallbackSession(
+  chatId: number,
+  provider: FallbackProvider,
+): Promise<string | null> {
+  const found = (await readStore()).find((s) => s.chatId === chatId);
+  const id = found?.fallbackSessions?.[provider];
+  return typeof id === "string" && id ? id : null;
+}
+
+/** Bind a Telegram chat to a fallback provider's conversation id. Leaves the Claude id
+ *  and the other providers' ids alone; a chat first answered by a fallback gets a record
+ *  with an empty Claude id. */
+export async function setFallbackSession(
+  chatId: number,
+  provider: FallbackProvider,
+  sessionId: string,
+  now = Date.now(),
+): Promise<void> {
+  if (!sessionId) throw new Error("sessionId is required");
+  const sessions = await readStore();
+  const existing = sessions.find((s) => s.chatId === chatId);
+  if (existing) {
+    existing.fallbackSessions = { ...existing.fallbackSessions, [provider]: sessionId };
+    existing.updatedAt = now;
+  } else {
+    sessions.push({
+      chatId,
+      sessionId: "",
+      fallbackSessions: { [provider]: sessionId },
+      updatedAt: now,
+    });
+  }
+  await writeStore(sessions);
 }
 
 /** Bind (or rebind) a Telegram chat to a `claude` session id, bumping `updatedAt`. */
@@ -88,7 +128,7 @@ export async function setTelegramSession(
 }
 
 /** Forget a Telegram chat's binding (the `/new` command), so the next message starts
- *  a fresh Oracle conversation. No-op if the chat had no binding. */
+ *  a fresh Oracle conversation on every provider. No-op if the chat had no binding. */
 export async function clearTelegramSession(chatId: number): Promise<void> {
   const sessions = await readStore();
   const next = sessions.filter((s) => s.chatId !== chatId);
