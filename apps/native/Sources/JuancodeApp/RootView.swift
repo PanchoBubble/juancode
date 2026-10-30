@@ -2734,7 +2734,7 @@ struct SessionRow: View {
         }
         .buttonStyle(.plain)
         .clickCursor()
-        .help("Changed since you last looked — click to review (⌘⇧C)")
+        .help("Changed since you last looked — click to review (⌥⌘C)")
     }
 
     private func prCapsule(_ t: TrackedPr) -> some View {

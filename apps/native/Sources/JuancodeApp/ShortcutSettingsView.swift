@@ -83,13 +83,26 @@ private struct ShortcutRow: View {
 
     private var binding: KeyBinding { shortcuts.binding(for: action) }
     private var conflicts: [ShortcutAction] { shortcuts.conflicts(for: action) }
+    private var fixedConflicts: [FixedShortcut] { shortcuts.fixedConflicts(for: action) }
+
+    /// What a clash means for this row: whether pressing the chord still runs it.
+    private var conflictText: String? {
+        if let fixed = fixedConflicts.first {
+            return "Same keys as “\(fixed.title)”"
+        }
+        guard let other = conflicts.first else { return nil }
+        if shortcuts.isShadowed(action), let owner = shortcuts.owner(of: binding) {
+            return "Inactive — “\(owner.title)” uses \(binding.display)"
+        }
+        return "Also bound to “\(other.title)” — this one runs"
+    }
 
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(action.title)
-                if let first = conflicts.first {
-                    Label("Conflicts with “\(first.title)”", systemImage: "exclamationmark.triangle.fill")
+                if let conflictText {
+                    Label(conflictText, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 } else if !binding.isBound {

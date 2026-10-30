@@ -317,6 +317,9 @@ final class AppModel {
     var terminalFocusToken = 0
     /// Bumped to request the sidebar list grab focus (⌃H). Drives a `@FocusState`.
     var sidebarFocusToken = 0
+    /// The latest ⌘⇧ panel-focus request (juancode-2wp), nil until the first one.
+    /// The target panel's view watches it and takes the keyboard when it changes.
+    private(set) var panelFocusRequest: PanelFocusRequest?
     /// Bumped to request the sidebar's "Filter sessions…" field grab focus (⌃F).
     /// Drives a `@FocusState` in `SidebarView`.
     var sessionSearchFocusToken = 0
@@ -326,7 +329,7 @@ final class AppModel {
     var changesKeyboardActive = false
     /// A one-shot request for the Changes diff pane to grab keyboard focus, carrying
     /// the session it targets (juancode-qce.3). Only the explicit "open changes" paths
-    /// (⌘⇧C, the review badge/banner) set it; a plain panel re-appear (e.g. switching
+    /// (⌥⌘C, the review badge/banner) set it; a plain panel re-appear (e.g. switching
     /// sessions with the panel open) does NOT, so the diff pane never steals focus from
     /// the terminal on a session switch. The panel consumes and clears it.
     var changesFocusRequest: String?
@@ -1175,6 +1178,20 @@ final class AppModel {
         sidebarFocusToken &+= 1
     }
 
+    /// Reveal a panel and ask it for the keyboard (⌘⇧S / P / L / C / O). The sessions
+    /// sidebar takes focus here directly; a rail panel is opened and claims the
+    /// keyboard itself by consuming `panelFocusRequest`.
+    func requestPanelFocus(_ target: PanelFocusTarget) {
+        switch target.railPanel {
+        case nil:
+            projectsSidebarVisible = true
+            focusSidebar()
+        case .prs?: openViewerPrQueue()
+        case let panel?: setRailPanelShown(panel, true)
+        }
+        panelFocusRequest = PanelFocusRequest(target: target, serial: (panelFocusRequest?.serial ?? 0) &+ 1)
+    }
+
     /// Move keyboard focus to the sidebar's session filter field (⌃F), so you can
     /// start typing a find query without reaching for the mouse.
     func focusSessionSearch() {
@@ -1412,9 +1429,13 @@ final class AppModel {
     }
 
     /// Showing Diff also un-hides it if the user hid it in the rail's edit mode.
-    func setRailDiffShown(_ shown: Bool) {
+    func setRailDiffShown(_ shown: Bool) { setRailPanelShown(.diff, shown) }
+
+    /// Open (or collapse) one rail panel. Showing it also shows the rail and un-hides
+    /// the panel if the user hid it in the rail's edit mode.
+    func setRailPanelShown(_ panel: RightRailPanel, _ shown: Bool) {
         let d = UserDefaults.standard
-        let next = RightRailPrefs.setting(RightRailPanel.diff.rawValue, open: shown,
+        let next = RightRailPrefs.setting(panel.rawValue, open: shown,
                                           collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
                                           hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
         if shown { d.set(true, forKey: "oracle.sessionRail.shown") }
@@ -2740,13 +2761,7 @@ final class AppModel {
 
     func openViewerPrQueue() {
         showingGitHub = false
-        let defaults = UserDefaults.standard
-        let next = RightRailPrefs.setting(RightRailPanel.prs.rawValue, open: true,
-            collapsedRaw: defaults.string(forKey: RightRailPrefs.collapsedKey) ?? "",
-            hiddenRaw: defaults.string(forKey: RightRailPrefs.hiddenKey) ?? "")
-        defaults.set(true, forKey: "oracle.sessionRail.shown")
-        defaults.set(next.collapsed, forKey: RightRailPrefs.collapsedKey)
-        defaults.set(next.hidden, forKey: RightRailPrefs.hiddenKey)
+        setRailPanelShown(.prs, true)
         refreshViewerPrs()
     }
 
@@ -4755,7 +4770,7 @@ final class AppModel {
     /// the panel talks about work you can't see, and the badge is most often clicked on
     /// a row that isn't the current selection. `selection`'s didSet also dismisses the
     /// GitHub overlay, so the diff is actually on screen. Already-selected sessions
-    /// (the ⌘⇧C shortcut, the in-pane banner) just get the panel toggled open.
+    /// (the ⌥⌘C shortcut, the in-pane banner) just get the panel toggled open.
     func openChanges(for id: String) {
         if selection != id, sessions.contains(where: { $0.id == id }) { selection = id }
         setRailDiffShown(true)

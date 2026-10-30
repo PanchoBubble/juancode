@@ -598,7 +598,7 @@ struct ChangesPanel: View {
                 .focused($paneFocused)
                 .focusEffectDisabled()
                 .onKeyPress { handleKey($0, proxy: proxy) }
-                // Only take keyboard focus on an EXPLICIT open (⌘⇧C / the review
+                // Only take keyboard focus on an EXPLICIT open (⌥⌘C / the review
                 // badge), never on a plain appear — so switching sessions with the
                 // panel open leaves the terminal typable (qce.2 focus papercut).
                 .onAppear { consumeFocusRequest() }

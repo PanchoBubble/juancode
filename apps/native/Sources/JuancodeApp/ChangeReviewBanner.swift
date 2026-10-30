@@ -3,7 +3,7 @@ import SwiftUI
 
 /// An unobtrusive "review the agent's changes" nudge floated over the bottom of a
 /// session's terminal once the agent settles a turn with unreviewed changes in a
-/// dirty tree. Clicking it (or the sidebar badge, or ⌘⇧C) opens the Changes panel on
+/// dirty tree. Clicking it (or the sidebar badge, or ⌥⌘C) opens the Changes panel on
 /// the working tree. It floats as an overlay so it never reflows the pty grid — the
 /// terminal render stays intact.
 struct ChangeReviewBanner: View {
@@ -30,6 +30,6 @@ struct ChangeReviewBanner: View {
         }
         .buttonStyle(.plain)
         .clickCursor()
-        .help("The agent finished with changes — click to review (⌘⇧C)")
+        .help("The agent finished with changes — click to review (⌥⌘C)")
     }
 }

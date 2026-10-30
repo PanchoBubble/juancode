@@ -424,6 +424,16 @@ struct JuancodeApp: App {
                 .appShortcut(.sessionTemplates, shortcuts)
             }
             CommandGroup(after: .toolbar) {
+                // ⌘⇧ + a panel's letter reveals that panel and gives it the keyboard
+                // (juancode-2wp): Sessions, PRs, Linear Tickets, Chains, Oracles.
+                ForEach(ShortcutAction.panelFocusActions) { action in
+                    Button(action.title) {
+                        performShortcut(action, model: model, oracle: oracle)
+                    }
+                    .appShortcut(action, shortcuts)
+                }
+                Divider()
+                // ⌥⌘P shows the performance HUD (⌘⇧P is Focus PRs).
                 Button("Toggle Performance HUD") {
                     performShortcut(.togglePerfHud, model: model, oracle: oracle)
                 }
@@ -454,7 +464,7 @@ struct JuancodeApp: App {
                     performShortcut(.toggleProjects, model: model, oracle: oracle)
                 }
                 .appShortcut(.toggleProjects, shortcuts)
-                // ⌘⇧C jumps straight to the selected session's working-tree diff and
+                // ⌥⌘C jumps straight to the selected session's working-tree diff and
                 // clears its review badge.
                 Button("Open Changes for Current Session") {
                     performShortcut(.openChangesForCurrentSession, model: model, oracle: oracle)

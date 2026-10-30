@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The performance HUD (⌘⇧P). A small, click-through readout pinned in a corner,
+/// The performance HUD (⌥⌘P). A small, click-through readout pinned in a corner,
 /// rendered only when `PerfMonitor.shared.visible`. See `PerfMonitor` for what each
 /// number means; orange = a value worth worrying about.
 struct PerfOverlay: View {
@@ -10,7 +10,7 @@ struct PerfOverlay: View {
     var body: some View {
         if perf.visible {
             VStack(alignment: .leading, spacing: 2) {
-                Text("PERF · ⌘⇧P").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                Text("PERF · ⌥⌘P").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
                 row("CPU", String(format: "%.0f%%", perf.cpuPercent), warn: perf.cpuPercent > 90)
                 row("Mem", String(format: "%.0f MB", perf.memoryMB))
                 row("Worst frame", String(format: "%.0f ms", perf.worstFrameMs), warn: perf.worstFrameMs > 32)

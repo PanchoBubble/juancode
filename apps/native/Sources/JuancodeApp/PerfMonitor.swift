@@ -6,7 +6,7 @@ import Darwin
 ///
 /// Everything is gated on `visible`: when the HUD is hidden there are no timers and
 /// the per-feed/per-body hooks short-circuit on a single atomic-flag check, so the
-/// monitor costs nothing in normal use. Toggle with ⌘⇧P.
+/// monitor costs nothing in normal use. Toggle with ⌥⌘P.
 ///
 /// What it measures:
 /// - **CPU / memory** of this process (mach task/thread info), sampled each second.

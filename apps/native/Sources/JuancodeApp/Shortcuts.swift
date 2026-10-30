@@ -10,6 +10,7 @@ import Foundation
 import Observation
 import SwiftUI
 import AppKit
+import JuancodeDesktop
 
 /// One rebindable app command. The raw value is the stable persistence key, so
 /// don't rename cases without a migration.
@@ -48,6 +49,11 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case toggleChain
     case nextChainTab
     case previousChainTab
+    case focusSessionsPanel
+    case focusPrsPanel
+    case focusLinearTicketsPanel
+    case focusChainsPanel
+    case focusOraclesPanel
 
     var id: String { rawValue }
 
@@ -68,7 +74,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .openEditor: return "Open Editor for Session"
         case .splitEditor: return "Split Editor Beside Agent"
         case .togglePin: return "Pin Session to Top"
-        case .oracle: return "Oracle (chat)"
+        case .oracle: return "Oracle"
         case .globalIssues: return "Oracle Tickets"
         case .focusSessionSearch: return "Find Sessions"
         case .refreshTerminal: return "Refresh Terminal"
@@ -88,6 +94,11 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleChain: return "Open / Leave Chain"
         case .nextChainTab: return "Next Chain Tab"
         case .previousChainTab: return "Previous Chain Tab"
+        case .focusSessionsPanel: return "Focus Sessions"
+        case .focusPrsPanel: return "Focus PRs"
+        case .focusLinearTicketsPanel: return "Focus Linear Tickets"
+        case .focusChainsPanel: return "Focus Chains"
+        case .focusOraclesPanel: return "Focus Oracles"
         }
     }
 
@@ -103,7 +114,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .quickOpen: return KeyBinding(key: "p", command: true)
         case .promptTemplates: return KeyBinding(key: "k", command: true, shift: true)
         case .sessionTemplates: return KeyBinding(key: "l", command: true)
-        case .togglePerfHud: return KeyBinding(key: "p", command: true, shift: true)
+        // ⌥⌘P: ⌘⇧P went to Focus PRs (juancode-2wp).
+        case .togglePerfHud: return KeyBinding(key: "p", command: true, option: true)
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
         case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
@@ -121,9 +133,10 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .focusSessionSearch: return KeyBinding(key: "f", control: true)
         case .refreshTerminal: return KeyBinding(key: "z", control: true)
         case .toggleChanges: return KeyBinding(key: "c", command: true)
-        // ⌘⇧C jumps straight to the working-tree diff (and clears the review badge),
-        // vs ⌘C which just toggles the panel's visibility.
-        case .openChangesForCurrentSession: return KeyBinding(key: "c", command: true, shift: true)
+        // ⌥⌘C jumps straight to the working-tree diff (and clears the review badge),
+        // vs ⌘C which just toggles the panel's visibility. It was ⌘⇧C until that
+        // went to Focus Chains (juancode-2wp).
+        case .openChangesForCurrentSession: return KeyBinding(key: "c", command: true, option: true)
         // ⌘⇧E shows/hides the file-tree sidebar (the Files side-panel tab) — the
         // explorer convention, next to ⌘E which opens the editor session.
         case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
@@ -152,8 +165,55 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleChain: return KeyBinding(key: "c", command: true, control: true)
         case .nextChainTab: return KeyBinding(key: "]", command: true, control: true)
         case .previousChainTab: return KeyBinding(key: "[", command: true, control: true)
+        // ⌘⇧ + a panel's letter reveals that panel and asks it for the keyboard
+        // (juancode-2wp). One simultaneous chord, not a modifier-only leader.
+        case .focusSessionsPanel: return KeyBinding(key: "s", command: true, shift: true)
+        case .focusPrsPanel: return KeyBinding(key: "p", command: true, shift: true)
+        case .focusLinearTicketsPanel: return KeyBinding(key: "l", command: true, shift: true)
+        case .focusChainsPanel: return KeyBinding(key: "c", command: true, shift: true)
+        case .focusOraclesPanel: return KeyBinding(key: "o", command: true, shift: true)
         }
     }
+
+    /// Factory bindings a later layout moved, keyed by the schema version that moved
+    /// them. A persisted binding still equal to its old default is migrated to the new
+    /// one exactly once, when the stored schema is older; see `Shortcuts.load`.
+    static let displacedDefaults: [(schema: Int, action: ShortcutAction, old: KeyBinding)] = [
+        (2, .togglePerfHud, KeyBinding(key: "p", command: true, shift: true)),
+        (2, .openChangesForCurrentSession, KeyBinding(key: "c", command: true, shift: true)),
+    ]
+
+    /// The ⌘⇧ panel shortcuts, in menu order.
+    static let panelFocusActions: [ShortcutAction] = [
+        .focusSessionsPanel, .focusPrsPanel, .focusLinearTicketsPanel, .focusChainsPanel, .focusOraclesPanel,
+    ]
+
+    /// The panel this action focuses, if it is one of the ⌘⇧ panel shortcuts.
+    var panelFocusTarget: PanelFocusTarget? {
+        switch self {
+        case .focusSessionsPanel: .sessions
+        case .focusPrsPanel: .prs
+        case .focusLinearTicketsPanel: .linearTickets
+        case .focusChainsPanel: .chains
+        case .focusOraclesPanel: .oracles
+        default: nil
+        }
+    }
+}
+
+/// Keys the app handles itself, outside the rebindable table, in the window key
+/// monitor (`installPaneNavigation`). Listed so Settings can flag a binding that
+/// collides with one — ⌃E wins over any binding; the rest lose to it.
+struct FixedShortcut {
+    let binding: KeyBinding
+    let title: String
+
+    static let all: [FixedShortcut] = [
+        FixedShortcut(binding: KeyBinding(key: "e", control: true), title: "Open Editor (built-in)"),
+        FixedShortcut(binding: KeyBinding(key: "1", command: true), title: "Agent Tab (built-in)"),
+        FixedShortcut(binding: KeyBinding(key: "2", command: true), title: "Editor Tab (built-in)"),
+        FixedShortcut(binding: KeyBinding(key: "n", control: true), title: "New Oracle in Dock (built-in)"),
+    ]
 }
 
 /// A key + modifier-flag combination. `key` is a single lowercase character or a
@@ -229,6 +289,9 @@ struct KeyBinding: Codable, Equatable, Sendable {
 @Observable
 final class Shortcuts {
     private let defaultsKey = "juancode.shortcuts.v1"
+    /// Which factory layout the persisted bindings were last migrated to.
+    private let schemaKey = "juancode.shortcuts.schema"
+    static let currentSchema = 2
     private(set) var bindings: [String: KeyBinding] = [:]
 
     init() { load() }
@@ -264,17 +327,61 @@ final class Shortcuts {
         return ShortcutAction.allCases.filter { $0 != action && binding(for: $0) == b }
     }
 
+    /// Built-in keys this action's binding collides with.
+    func fixedConflicts(for action: ShortcutAction) -> [FixedShortcut] {
+        let b = binding(for: action)
+        guard b.isBound else { return [] }
+        return FixedShortcut.all.filter { $0.binding == b }
+    }
+
+    /// The action that fires for a chord several actions share: one the user bound
+    /// on purpose beats a factory default, so a new default never steals a custom
+    /// chord. Both the menu and the window key monitor go through this, so a
+    /// shared chord fires exactly one action.
+    func owner(of binding: KeyBinding) -> ShortcutAction? {
+        guard binding.isBound else { return nil }
+        let key = ShortcutTable.owner(
+            of: binding, order: ShortcutAction.allCases.map(\.rawValue),
+            effective: { self.bindings[$0] ?? ShortcutAction(rawValue: $0)!.defaultBinding },
+            isCustom: { !self.isDefault(ShortcutAction(rawValue: $0)!) })
+        return key.flatMap(ShortcutAction.init(rawValue:))
+    }
+
+    /// True when another action owns this action's chord, so pressing it won't run
+    /// this one.
+    func isShadowed(_ action: ShortcutAction) -> Bool {
+        let b = binding(for: action)
+        return b.isBound && owner(of: b) != action
+    }
+
     /// The bound action whose key+modifiers match this key-down event, if any.
     /// Reads live bindings, so it tracks Settings edits without a rebuild.
     func action(matching event: NSEvent) -> ShortcutAction? {
-        ShortcutAction.allCases.first { binding(for: $0).matches(event) }
+        guard let hit = ShortcutAction.allCases.first(where: { binding(for: $0).matches(event) })
+        else { return nil }
+        return owner(of: binding(for: hit))
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+        let defaults = UserDefaults.standard
+        let schema = defaults.integer(forKey: schemaKey)
+        defer { if schema < Self.currentSchema { defaults.set(Self.currentSchema, forKey: schemaKey) } }
+        guard let data = defaults.data(forKey: defaultsKey),
               let decoded = try? JSONDecoder().decode([String: KeyBinding].self, from: data)
         else { return }
         bindings = decoded
+        guard schema < Self.currentSchema else { return }
+        // A stored binding still equal to a default this layout moved is a leftover
+        // ("Reset All" persists every default), not a choice: let it follow the move.
+        var displaced: [String: KeyBinding] = [:]
+        for entry in ShortcutAction.displacedDefaults where entry.schema > schema {
+            displaced[entry.action.rawValue] = entry.old
+        }
+        let migrated = ShortcutTable.migrateDisplacedDefaults(bindings, displaced: displaced)
+        if migrated != bindings {
+            bindings = migrated
+            save()
+        }
     }
 
     private func save() {
@@ -287,9 +394,13 @@ final class Shortcuts {
 extension View {
     /// Apply a (possibly rebound) shortcut to a command button. Reading the live
     /// binding here keeps the menu key-equivalent in sync with the Settings edit.
+    /// A chord another action owns is left off this item, so the menu never holds
+    /// two items with one key equivalent (AppKit would pick one arbitrarily).
     func appShortcut(_ action: ShortcutAction, _ shortcuts: Shortcuts) -> some View {
         let b = shortcuts.binding(for: action)
-        return keyboardShortcut(b.keyEquivalent, modifiers: b.modifiers)
+        let shortcut = shortcuts.isShadowed(action)
+            ? nil : KeyboardShortcut(b.keyEquivalent, modifiers: b.modifiers)
+        return keyboardShortcut(shortcut)
     }
 }
 
@@ -347,6 +458,9 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .toggleChain: model.toggleChainForSelection()
     case .nextChainTab: model.stepChainTab(by: 1)
     case .previousChainTab: model.stepChainTab(by: -1)
+    case .focusSessionsPanel, .focusPrsPanel, .focusLinearTicketsPanel,
+         .focusChainsPanel, .focusOraclesPanel:
+        if let target = action.panelFocusTarget { model.requestPanelFocus(target) }
     }
 }
 
