@@ -442,6 +442,7 @@ struct GitHubQueueBadge: View {
         @State private var showingStack = false
         @State private var eyeHovering = false
         @State private var confirmingClose = false
+        @State private var showingAgentPrompt = false
         @State private var availableWidth: CGFloat = 0
 
         private var pr: PullRequest { row.pr }
@@ -463,6 +464,9 @@ struct GitHubQueueBadge: View {
                 .onHover { hovering = $0 }
                 .contextMenu { menu }
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
+                .sheet(isPresented: $showingAgentPrompt) {
+                    if let cwd { PrAgentPromptSheet(pr: pr, cwd: cwd) }
+                }
         }
 
         /// PR identity, stack position and tracking share the facts line. The
@@ -613,11 +617,11 @@ struct GitHubQueueBadge: View {
         }
 
         /// Track, Agent, Review and GitHub, at the end of the facts line on hover.
-        /// Track hands the PR to an agent that keeps watching it, Agent opens one
-        /// session on it right now, Review opens its diff in the full-width review;
-        /// all three need a checkout, so a repo juancode has never opened gets only
-        /// the GitHub button. That one is always there because a click on a mapped
-        /// row opens the GitHub view instead.
+        /// Track hands the PR to an agent that keeps watching it, Agent asks for a
+        /// prompt and agent before opening a session, Review opens the full-width
+        /// diff; all three need a checkout, so a repo juancode has never opened gets
+        /// only the GitHub button. That one is always there because a click on a
+        /// mapped row opens the GitHub view instead.
         private var actions: some View {
             HStack(spacing: 1) {
                 if let cwd { checkoutActions(cwd) }
@@ -641,8 +645,8 @@ struct GitHubQueueBadge: View {
                 .disabled(!model.supports(.trackedPrs))
             }
             HoverCellButton(symbol: "terminal",
-                            help: "Agent: a fresh session on this PR, seeded with its details") {
-                model.workOnPr(pr, cwd: cwd)
+                            help: "Agent: send the PR link and your prompt to a fresh agent session") {
+                showingAgentPrompt = true
             }
             HoverCellButton(symbol: "text.bubble",
                             help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
