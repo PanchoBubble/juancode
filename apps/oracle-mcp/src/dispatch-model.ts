@@ -1,6 +1,6 @@
 // Local routing: no classifier API call and no changes to the CLI's environment.
 export type TaskComplexity = "simple" | "standard" | "complex";
-export type DispatchProvider = "claude" | "codex" | "opencode";
+export type DispatchProvider = "claude" | "codex" | "opencode" | "kimi";
 export interface ModelSelection {
   provider: DispatchProvider;
   model: string | null;
@@ -20,6 +20,20 @@ const MODELS = {
   claude: { simple: "haiku", standard: "sonnet", complex: "opus" },
   codex: { simple: "gpt-6-luna", standard: "gpt-6.1-sol", complex: "gpt-6-astra" },
 };
+
+/** The models of the CLIs we don't pin per complexity. Just as opencode — which has
+ * so many models a fixed routing table would be wrong — kimi's aliases are opaque
+ * and change too fast to pin here, so a dispatch to kimi runs the CLI's own default
+ * unless an explicit model (or a `JUANCODE_DISPATCH_KIMI_*_MODEL` knob) was given.
+ * Everything is configurable through env, so the table's opinion is a starting
+ * point, not a mandate. */
+function routingModel(
+  provider: DispatchProvider,
+  complexity: TaskComplexity,
+): string | null {
+  if (provider === "opencode" || provider === "kimi") return null;
+  return MODELS[provider][complexity];
+}
 
 /** Only clearly bounded chores get the small model. Unknown/ticket-only requests
  * stay standard; risky signals take precedence over words like "typo" or "docs".
@@ -65,14 +79,13 @@ export function selectDispatchModel(
   }
   const configured =
     env[`JUANCODE_DISPATCH_${provider.toUpperCase()}_${complexity.toUpperCase()}_MODEL`]?.trim();
+  const routed = routingModel(provider, complexity);
   const model =
-    configured === "default"
-      ? null
-      : configured || (provider === "opencode" ? null : MODELS[provider][complexity]);
+    configured === "default" ? null : configured || routed;
   return {
     provider,
     model,
     complexity,
-    reason: `${request.complexity ? "Caller-rated" : "Heuristic"} ${complexity} task${configured ? "; configured model" : provider === "opencode" ? "; CLI default (no routing model configured)" : ""}`,
+    reason: `${request.complexity ? "Caller-rated" : "Heuristic"} ${complexity} task${configured ? "; configured model" : routed ? "" : "; CLI default (model left to the CLI)"}`,
   };
 }

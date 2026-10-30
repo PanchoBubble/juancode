@@ -53,6 +53,20 @@ describe("dispatch model routing", () => {
       ).model,
     ).toBe("local/small");
   });
+  it("does not invent a kimi provider/model either", () => {
+    // Same shape as opencode: kimi's model aliases are opaque and move too fast to
+    // pin per complexity, so a dispatch to kimi runs the CLI's own default unless a
+    // knob says otherwise.
+    const routed = selectDispatchModel({ prompt: "Fix typo", provider: "kimi" }, {});
+    expect(routed.model).toBeNull();
+    expect(routed.reason).toContain("CLI default");
+    expect(
+      selectDispatchModel(
+        { prompt: "Fix typo", provider: "kimi" },
+        { JUANCODE_DISPATCH_KIMI_COMPLEX_MODEL: "kimi-latest" },
+      ).model,
+    ).toBe("kimi-latest");
+  });
   it("allows account-specific tier mappings and CLI default", () => {
     expect(
       selectDispatchModel(

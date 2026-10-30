@@ -75,9 +75,10 @@ For ticket-only prompts, the orchestrator should supply `complexity` (`simple`,
 An explicit `provider` pins the provider: Claude tiers are `haiku`/`sonnet`/`opus`,
 Codex tiers are `gpt-6-luna`/`gpt-6.1-sol`/`gpt-6-astra`. An explicit `model` wins;
 `model: "default"` preserves the CLI's configured model. A model override without
-a provider uses Claude, as before. OpenCode keeps its CLI default unless configured.
-Customize a tier for available account models with sidecar environment variables
-`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
+a provider uses Claude, as before. OpenCode keeps its CLI default unless configured;
+so does kimi (its model aliases move too fast to pin per tier). Customize a tier
+for available account models with sidecar environment variables
+`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE|KIMI>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
 use `default` as the value to keep CLI configuration. No CLI environment is replaced.
 Codex model IDs follow [the official model guide](https://learn.chatgpt.com/docs/models);
 account availability can differ. Unavailable models surface the CLI's own error.

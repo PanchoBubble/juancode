@@ -716,7 +716,7 @@ export const ORACLE_SYSTEM =
   "into projects through the sidecar: " +
   "`curl -sS -X POST http://127.0.0.1:4281/api/dispatch -H 'content-type: application/json' " +
   '-d \'{"project":"<abs path>","prompt":"<instruction>"}\'` (optional fields: ' +
-  '"provider":"codex"|"opencode", "worktree":true, and "telegramChatId":<id> when told ' +
+  '"provider":"codex"|"opencode"|"kimi", "worktree":true, and "telegramChatId":<id> when told ' +
   "the request came from a Telegram chat). Omit provider/model for automatic cost-aware routing; " +
   'set "complexity":"simple"|"standard"|"complex" based on the actual task, especially when dispatching only a ticket id. ' +
   'Simple means bounded chores; complex means architecture or risky changes. An explicit model pins it; "model":"default" keeps the CLI default. ' +

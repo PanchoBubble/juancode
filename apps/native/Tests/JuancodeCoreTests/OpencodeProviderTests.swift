@@ -3,8 +3,8 @@ import Testing
 
 @testable import JuancodeCore
 
-/// opencode's launch contract: how its argv is built, how bypass reaches it (an env
-/// var, not a flag), and that an uninstallable CLI is reported rather than spawned.
+/// opencode's launch contract: how its argv is built, how bypass reaches it (its own
+/// `--auto` flag), and that an uninstallable CLI is reported rather than spawned.
 @Suite struct OpencodeProviderTests {
     private let spec = Providers.spec(for: .opencode)
 
@@ -13,7 +13,7 @@ import Testing
         #expect(ProviderId(rawValue: "opencode") == .opencode)
         #expect(spec.id == .opencode)
         #expect(Providers.all[.opencode] != nil)
-        // The TUI reads bracketed paste, like the other two.
+        // The TUI reads bracketed paste, like the others.
         #expect(spec.bracketedPaste)
     }
 
@@ -37,23 +37,24 @@ import Testing
         #expect(spec.startArgs("id", SpawnOptions(model: "")) == [])
     }
 
-    @Test func bypassRidesOnTheEnvironmentBecauseTheTuiHasNoFlag() {
-        // Without bypass: no overlay at all, so the child inherits `environ` verbatim.
-        #expect(spec.spawnEnv(SpawnOptions()).isEmpty)
-        #expect(spec.startArgs("id", SpawnOptions(skipPermissions: true)) == [])
-
-        let overlay = spec.spawnEnv(SpawnOptions(skipPermissions: true))
-        #expect(overlay.count == 1)
-        let json = overlay["OPENCODE_PERMISSION"] ?? ""
-        let parsed = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String]
-        #expect(parsed?["edit"] == "allow")
-        #expect(parsed?["bash"] == "allow")
+    @Test func bypassRidesOnItsOwnFlagNotTheEnvironment() {
+        // opencode's documented `--auto` ("auto-approve permissions that are not
+        // explicitly denied") is how a bypass reaches it; the env-var indirection an
+        // earlier revision used is gone, so the environment overlay is empty both
+        // ways and the child inherits `environ` verbatim.
+        #expect(spec.startArgs("id", SpawnOptions(skipPermissions: true)) == ["--auto"])
+        #expect(spec.resumeArgs("ses_abc", SpawnOptions(skipPermissions: true))
+            == ["--session", "ses_abc", "--auto"])
+        // And without the opt-in none of it is asked for, nor `-y`'s ask-when-needed.
+        #expect(spec.startArgs("id", SpawnOptions()) == [])
+        #expect(spec.resumeArgs("ses_abc", SpawnOptions()) == ["--session", "ses_abc"])
     }
 
-    @Test func theOtherProvidersOverlayNothing() {
-        for id in [ProviderId.claude, .codex] {
+    @Test func noProviderOverlaysTheEnvironmentAnyMore() {
+        for id in ProviderId.allCases {
             #expect(Providers.spec(for: id).spawnEnv(SpawnOptions()).isEmpty)
-            #expect(Providers.spec(for: id).spawnEnv(SpawnOptions(skipPermissions: true)).isEmpty)
+            #expect(Providers.spec(for: id)
+                .spawnEnv(SpawnOptions(skipPermissions: true)).isEmpty)
         }
     }
 
@@ -61,6 +62,8 @@ import Testing
         // opencode installs to ~/.opencode/bin, which no login shell guarantees is on
         // PATH — a Finder-launched app has to find it without one.
         #expect(wellKnownBinDirs.contains("\(NSHomeDirectory())/.opencode/bin"))
+        // kimi's own installer does the same thing under ~/.kimi-code/bin.
+        #expect(wellKnownBinDirs.contains("\(NSHomeDirectory())/.kimi-code/bin"))
     }
 
     @Test func anUnfindableCliLocatesAsNilButStillResolvesToItsBareName() {

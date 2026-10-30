@@ -1,16 +1,16 @@
 //! Post-spawn discovery of a provider's own conversation id.
 //!
 //! Claude takes the id we give it (`--session-id`), so a Claude session is resumable
-//! the moment it starts. Codex and opencode have no such flag: they mint their own id
-//! and write it into their own state, and the only way to learn it is to go and read
-//! that state. This lives beside the store code because that is what it is: reading
-//! somebody else's store, and one of the two is another tool's SQLite.
+//! the moment it starts. Codex, opencode and kimi have no such flag: they mint their
+//! own id and write it into their own state, and the only way to learn it is to go and
+//! read that state. This lives beside the store code because that is what it is:
+//! reading somebody else's store — and one of the three is another tool's SQLite.
 //!
-//! Both readers are strictly read-only and both are pure lookups: one pass answers
-//! `Some` or `None`, and the caller decides how long to keep asking. Neither creates a
-//! file, and the opencode reader opens the database read-only so a live opencode
-//! holding the WAL is never disturbed. We are a reader of its data, never a second
-//! writer.
+//! All readers are strictly read-only and all are pure lookups: one pass answers
+//! `Some` or `None`, and the caller decides how long to keep asking. Neither creates
+//! a file, and the opencode reader opens the database read-only so a live opencode
+//! holding the WAL is never disturbed. We are a reader of other tools' data, never a
+//! second writer.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,9 +34,7 @@ pub fn window(source: IdSource) -> (Duration, Duration) {
         IdSource::Pinned => Duration::ZERO,
         IdSource::CodexRollout => Duration::from_secs(15 * 60),
         IdSource::OpencodeDb => Duration::from_secs(15 * 60),
-        // Reading kimi's `session_index.jsonl` is juancode-qbu's; until it lands there
-        // is nothing to wait for.
-        IdSource::KimiIndex => Duration::ZERO,
+        IdSource::KimiIndex => Duration::from_secs(15 * 60),
     };
     (timeout, Duration::from_millis(1_500))
 }
@@ -48,7 +46,7 @@ pub fn scan_once(source: IdSource, cwd: &str, since_ms: i64) -> Option<String> {
         IdSource::Pinned => None,
         IdSource::CodexRollout => codex_scan_once(cwd, since_ms, &codex_root()),
         IdSource::OpencodeDb => opencode_scan_once(cwd, since_ms, &opencode_db_path()),
-        IdSource::KimiIndex => None,
+        IdSource::KimiIndex => kimi_scan_once(cwd, since_ms, &kimi_home()),
     }
 }
 
@@ -243,6 +241,237 @@ pub fn opencode_scan_once(cwd: &str, since_ms: i64, db: &Path) -> Option<String>
         .ok()
 }
 
+// MARK: - kimi
+
+/// kimi's data home: `$KIMI_CODE_HOME`, else `~/.kimi-code` — the root kimi's own
+/// docs give for config, sessions and the session index alike.
+pub fn kimi_home() -> PathBuf {
+    match std::env::var("KIMI_CODE_HOME") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".kimi-code"),
+    }
+}
+
+/// One `{sessionId, sessionDir, workDir}` mirror line. The index carries no
+/// timestamps — the clock lives in the session's own `state.json` — so the line is
+/// a directory hint and a cwd claim, nothing more.
+struct KimiIndexLine {
+    session_id: String,
+    session_dir: String,
+    work_dir: String,
+}
+
+/// The fields discovery needs out of a session's `state.json`.
+struct KimiState {
+    cwd: Option<String>,
+    /// `createdAt` in epoch millis, 0 when absent or unparseable — kimi's own
+    /// reader takes a number or an ISO string and reports garbage as 0, and a 0
+    /// can never fall inside a real spawn window.
+    created_ms: i64,
+    archived: bool,
+    /// A child session (kimi's own subagent) names its parent in `custom`; only
+    /// conversations that stand on their own are candidates.
+    child: bool,
+}
+
+impl KimiState {
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let str_field = |meta: &serde_json::Value, key: &str| -> Option<String> {
+            meta.get(key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let cwd = str_field(value, "cwd")
+            .or_else(|| str_field(value, "workDir"))
+            .or_else(|| {
+                value
+                    .get("custom")
+                    .filter(|c| c.is_object())
+                    .and_then(|c| str_field(c, "cwd"))
+            });
+        Some(KimiState {
+            cwd,
+            created_ms: match value.get("createdAt") {
+                Some(serde_json::Value::Number(n)) => n
+                    .as_i64()
+                    .or_else(|| n.as_f64().map(|f| f as i64))
+                    .unwrap_or(0),
+                Some(serde_json::Value::String(s)) => {
+                    juancoded_transcripts::time::epoch_ms(s).unwrap_or(0)
+                }
+                _ => 0,
+            },
+            archived: value.get("archived").and_then(|v| v.as_bool()) == Some(true),
+            child: value
+                .get("custom")
+                .filter(|c| c.is_object())
+                .and_then(|c| str_field(c, "parent_session_id"))
+                .is_some(),
+        })
+    }
+}
+
+/// Read a session's `state.json` out of its directory relative to kimi's home, in
+/// either layout kimi ships (`<dir>/state.json`, legacy `<dir>/session-meta/state.json`).
+fn kimi_state(root: &Path, session_dir: &str) -> Option<KimiState> {
+    let state_in = |paths: &[PathBuf]| -> Option<KimiState> {
+        paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .find_map(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| KimiState::from_json(&value))
+    };
+    let dir = if Path::new(session_dir).is_absolute() {
+        PathBuf::from(session_dir)
+    } else {
+        root.join(session_dir)
+    };
+    state_in(&[dir.join("state.json"), dir.join("session-meta").join("state.json")])
+}
+
+fn kimi_index_lines(root: &Path) -> Vec<KimiIndexLine> {
+    use std::io::{BufRead, BufReader};
+    let Ok(file) = std::fs::File::open(root.join("session_index.jsonl")) else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(|line| line.ok())
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            Some(KimiIndexLine {
+                session_id: value.get("sessionId")?.as_str()?.to_string(),
+                session_dir: value.get("sessionDir")?.as_str()?.to_string(),
+                work_dir: value.get("workDir")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The newest top-level, un-archived kimi conversation kimi recorded in `cwd` at or
+/// after `since_ms`.
+///
+/// The index is consulted first because it answers in one read, but it is a mirror:
+/// kimi's own reconcile can lag a startup by a little, so a miss falls back to
+/// walking the session tree, stat-gated so only state files written since the spawn
+/// are opened. Either way the decision is the session's own `createdAt` versus the
+/// spawn clock, never an mtime alone.
+/// The newest top-level, un-archived kimi conversation kimi recorded in `cwd` at or
+/// after `since_ms`.
+///
+/// The index is consulted first because it answers in one read, but it is a mirror:
+/// kimi's own reconcile can lag a startup by a little, so a miss falls back to
+/// walking the session tree, stat-gated so only state files written since the spawn
+/// are opened. Either way the decision is the session's own `createdAt` versus the
+/// spawn clock, never an mtime alone.
+pub fn kimi_scan_once(cwd: &str, since_ms: i64, root: &Path) -> Option<String> {
+    let dirs = directory_variants(cwd);
+    let floor = since_ms - CLOCK_SKEW_GRACE_MS;
+    let ceiling = since_ms + 30_000;
+    // (id, |createdAt - spawn|) for every conversation in the window.
+    let mut candidates: Vec<(String, i64)> = Vec::new();
+
+    for line in kimi_index_lines(root) {
+        if !dirs.iter().any(|d| *d == line.work_dir) {
+            continue;
+        }
+        let Some(state) = kimi_state(root, &line.session_dir) else {
+            continue;
+        };
+        if state.archived || state.child {
+            continue;
+        }
+        if state.created_ms >= floor && state.created_ms <= ceiling {
+            candidates.push((line.session_id, (state.created_ms - since_ms).abs()));
+        }
+    }
+    if candidates.is_empty() {
+        for found in kimi_session_files(root) {
+            if found.mtime_ms < floor {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&found.path) else {
+                continue;
+            };
+            let Some(state) = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .as_ref()
+                .and_then(KimiState::from_json)
+            else {
+                continue;
+            };
+            if state.archived || state.child {
+                continue;
+            }
+            if !state.cwd.is_some_and(|c| dirs.iter().any(|d| *d == c)) {
+                continue;
+            }
+            if state.created_ms >= floor && state.created_ms <= ceiling {
+                // The id is the folder's name, confirmed live by the state file's
+                // cwd and created clock.
+                candidates.push((found.session_id, (state.created_ms - since_ms).abs()));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(id, _)| id)
+}
+
+/// A `sessions/<workdirKey>/<id>/` whose state file exists, ready to be read.
+#[derive(Debug)]
+struct KimiSessionFile {
+    path: PathBuf,
+    /// The `<id>` folder's name — kimi's convention for where it keeps a
+    /// conversation, not a field inside `state.json`.
+    session_id: String,
+    /// mtime of the state file, epoch millis, so the walk can skip everything
+    /// older than the spawn without reading a file.
+    mtime_ms: i64,
+}
+
+fn kimi_session_files(root: &Path) -> Vec<KimiSessionFile> {
+    let sessions = root.join("sessions");
+    let Ok(workspaces) = std::fs::read_dir(&sessions) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for workspace in workspaces.flatten().filter(|w| w.path().is_dir()) {
+        let Ok(ids) = std::fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        for id_dir in ids.flatten().filter(|s| s.path().is_dir()) {
+            let dir = workspace.path().join(id_dir.file_name());
+            // Either of the two layouts kimi ships or has shipped.
+            let Some(state_path) = [
+                dir.join("state.json"),
+                dir.join("session-meta").join("state.json"),
+            ]
+            .into_iter()
+            .find(|p| p.exists())
+            else {
+                continue;
+            };
+            let Ok(mtime) = state_path.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            let Ok(since_epoch) = mtime.duration_since(std::time::UNIX_EPOCH) else {
+                continue;
+            };
+            found.push(KimiSessionFile {
+                path: state_path,
+                session_id: id_dir.file_name().to_string_lossy().to_string(),
+                mtime_ms: since_epoch.as_millis() as i64,
+            });
+        }
+    }
+    found
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,7 +632,129 @@ mod tests {
     fn a_pinned_provider_has_nothing_to_discover() {
         assert_eq!(scan_once(IdSource::Pinned, "/tmp", 0), None);
         assert_eq!(window(IdSource::Pinned).0, Duration::ZERO);
-        // Both providers may defer their first durable write until a turn.
+        // All three unpinned providers may defer their first durable write until a
+        // turn, so each gets the same generous window.
         assert!(window(IdSource::CodexRollout).0 >= Duration::from_secs(15 * 60));
+        assert!(window(IdSource::KimiIndex).0 >= Duration::from_secs(15 * 60));
+    }
+
+    // MARK: kimi fixtures
+
+    /// A kimi home with one session's mirror line and state file in place. Sessions
+    /// live under a workdir-key folder that decodes to nothing we can match on, so
+    /// the tests use arbitrary key names — as kimi does.
+    fn kimi_fixture(label: &str) -> PathBuf {
+        let root = scratch(label);
+        std::fs::create_dir_all(root.join("sessions/ws-key/ses_kimi"))
+            .expect("session dir");
+        std::fs::create_dir_all(root.join("sessions/other/ses_elsewhere"))
+            .expect("other session dir");
+        let index = concat!(
+            r#"{"sessionId":"ses_kimi","sessionDir":"sessions/ws-key/ses_kimi","workDir":"/tmp/mine"}"#,
+            "\n",
+            r#"{"sessionId":"ses_elsewhere","sessionDir":"sessions/other/ses_elsewhere","workDir":"/tmp/somebody-else"}"#,
+            "\n",
+        );
+        std::fs::write(root.join("session_index.jsonl"), index).expect("index");
+        std::fs::write(
+            root.join("sessions/ws-key/ses_kimi/state.json"),
+            r#"{"title":"Our session","createdAt":2000,"updatedAt":2000,"cwd":"/tmp/mine","custom":{}}"#,
+        )
+        .expect("state");
+        std::fs::write(
+            root.join("sessions/other/ses_elsewhere/state.json"),
+            r#"{"createdAt":1500,"cwd":"/tmp/somebody-else"}"#,
+        )
+        .expect("other state");
+        root
+    }
+
+    #[test]
+    fn a_kimi_index_line_answers_when_the_state_file_confirms_the_cwd_and_clock() {
+        let root = kimi_fixture("kimi-index");
+        // Inside the spawn window, closer to the spawn clock than the other
+        // workspace's session.
+        assert_eq!(
+            kimi_scan_once("/tmp/mine", 2_000, &root).as_deref(),
+            Some("ses_kimi")
+        );
+        // A different directory is not ours, however recent it is.
+        assert_eq!(kimi_scan_once("/tmp/nobody", 2_000, &root), None);
+        // Before the spawn floor is somebody else's conversation.
+        assert_eq!(kimi_scan_once("/tmp/mine", 8_000, &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_lagging_kimi_mirror_falls_back_to_the_session_tree() {
+        let root = kimi_fixture("kimi-fallback");
+        // A mirror that has not caught up with the fresh session yet.
+        std::fs::write(root.join("session_index.jsonl"), "").expect("empty index");
+        // The state file's mtime is "now", well past the spawn, so the prefilter
+        // lets it through and the state's own createdAt answers.
+        assert_eq!(
+            kimi_scan_once("/tmp/mine", 2_000, &root).as_deref(),
+            Some("ses_kimi")
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_kimi_child_session_is_not_a_conversation_to_adopt() {
+        let root = kimi_fixture("kimi-child");
+        // The mirror is missing, so the walk sees only the files; even through it,
+        // a subagent's session must never be mistaken for the session's own.
+        std::fs::write(root.join("session_index.jsonl"), "").expect("empty index");
+        std::fs::write(
+            root.join("sessions/ws-key/ses_kimi/state.json"),
+            concat!(
+                r#"{"createdAt":2000,"cwd":"/tmp/mine","custom":{"parent_session_id":"ses_parent","child_session_kind":"child"}}"#,
+                "\n"
+            ),
+        )
+        .expect("child state");
+        assert_eq!(kimi_scan_once("/tmp/mine", 2_000, &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_archived_kimi_session_stays_out_of_the_answer() {
+        let root = kimi_fixture("kimi-archived");
+        let body = std::fs::read_to_string(root.join("sessions/ws-key/ses_kimi/state.json"))
+            .unwrap()
+            .replace("2000", "2000,\"archived\":true");
+        std::fs::write(root.join("sessions/ws-key/ses_kimi/state.json"), body).unwrap();
+        assert_eq!(kimi_scan_once("/tmp/mine", 2_000, &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_kimi_home_is_no_answer_rather_than_an_error() {
+        assert_eq!(
+            kimi_scan_once("/tmp", 0, Path::new("/nope/no/kimi/here")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_kimi_state_may_hide_an_iso_created_clock_or_bear_no_cwd_at_all() {
+        // ISO strings and the legacy session-meta layout both parse.
+        let root = scratch("kimi-iso");
+        std::fs::create_dir_all(root.join("sessions/k/ses_1/s")).expect("dir");
+        std::fs::write(
+            root.join("session_index.jsonl"),
+            r#"{"sessionId":"ses_1","sessionDir":"sessions/k/ses_1","workDir":"/tmp/mine"}"#,
+        )
+        .expect("index");
+        std::fs::write(
+            root.join("sessions/k/ses_1/state.json"),
+            r#"{"createdAt":"1970-01-01T00:00:02.000Z"}"#, // no cwd — index still owns the claim
+        )
+        .expect("iso state");
+        assert_eq!(
+            kimi_scan_once("/tmp/mine", 2_000, &root).as_deref(),
+            Some("ses_1")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -42,9 +42,9 @@ public struct SessionEnvironment: Sendable {
     public var messageQueue: MessageQueue
     public var scrollbackLimit: Int
     /// Discover a CLI session id post-spawn, for the providers that can't have one
-    /// pinned (Codex, opencode). Defaults to the real Codex scanner — opencode's lives
-    /// in JuancodeServices, so the live environment injects the full version; tests
-    /// override it. `(provider, cwd, sinceMs) -> id?`.
+    /// pinned (Codex, opencode, kimi — each mints its own id in its own store).
+    /// Defaults to the real scanners, one per store; tests override it.
+    /// `(provider, cwd, sinceMs) -> id?`.
     public var discoverCliSessionId: @Sendable (
         _ provider: ProviderId, _ cwd: String, _ sinceMs: Int
     ) async -> String?
@@ -81,8 +81,16 @@ public struct SessionEnvironment: Sendable {
         scrollbackLimit: Int = 256 * 1024,
         discoverCliSessionId: @escaping @Sendable (ProviderId, String, Int) async -> String? = {
             provider, cwd, sinceMs in
-            guard provider == .codex else { return nil }
-            return await CodexSessionDiscovery.capture(cwd: cwd, sinceMs: sinceMs)
+            switch provider {
+            case .codex:
+                return await CodexSessionDiscovery.capture(cwd: cwd, sinceMs: sinceMs)
+            case .opencode:
+                return await OpencodeStore.capture(cwd: cwd, sinceMs: sinceMs)
+            case .kimi:
+                return await KimiStore.capture(cwd: cwd, sinceMs: sinceMs)
+            case .claude:
+                return nil  // pins the id at spawn; there is nothing to discover
+            }
         },
         deriveTitle: @escaping @Sendable (ProviderId, String) async -> String? = { _, _ in nil },
         deriveUsage: @escaping @Sendable (ProviderId, String) async -> SessionUsage? = { _, _ in nil },

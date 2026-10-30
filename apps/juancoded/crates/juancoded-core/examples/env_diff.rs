@@ -9,12 +9,16 @@
 //! cargo run --example env_diff -p juancoded-core
 //! ```
 //!
-//! An overlay can be added as `KEY=VALUE` arguments, which is how opencode's opt-in
-//! bypass is inspected:
+//! An overlay can be added as `KEY=VALUE` arguments, which is how an entry a spec
+//! chooses to set would be inspected:
 //!
 //! ```sh
-//! cargo run --example env_diff -p juancoded-core -- OPENCODE_PERMISSION='{"edit":"allow"}'
+//! cargo run --example env_diff -p juancoded-core -- SOME_KEY='{"edit":"allow"}'
 //! ```
+//!
+//! Every provider expresses its permission mode through a CLI flag, so no real spec
+//! sets one today — the mechanism is here because the directive is easiest to keep
+//! when it has nowhere else to hide.
 
 use std::collections::HashMap;
 
@@ -32,7 +36,7 @@ fn main() {
     let announced = env_overlay.keys().cloned().collect::<Vec<_>>();
 
     // What we would actually spawn, resolved the way a login shell resolves it.
-    for provider in ["claude", "codex", "opencode"] {
+    for provider in ["claude", "codex", "opencode", "kimi"] {
         match resolve_provider_bin(provider) {
             Some(path) => println!("RESOLVED {provider} -> {path}"),
             None => println!("RESOLVED {provider} -> (nothing found)"),

@@ -1,7 +1,7 @@
 //! Per-spawn instruction sets — a port of `JuancodeCore/PresetStore.swift`.
 //!
-//! The three CLIs expose nothing in common here, so one preset name means three
-//! mechanisms and each provider needs a different half of it:
+//! The CLIs expose nothing in common here, so one preset name means one mechanism
+//! per provider, each provider getting a different half of it:
 //!
 //! - claude takes the **body**, through `--append-system-prompt`. It is the only true
 //!   append, and the only one where juancode supplies the prose.
@@ -9,8 +9,10 @@
 //!   `$CODEX_HOME/<name>.config.toml` — a file the user wrote.
 //! - opencode takes the **name**, through `--agent <name>`, naming an agent the user
 //!   defined in their own config.
+//! - kimi takes the **name** too, through its same `--agent <name>` — on START only,
+//!   because kimi does not allow `--agent` to combine with `--session` on a resume.
 //!
-//! That asymmetry is what keeps this inside the prime directive: for the two CLIs that
+//! That asymmetry is what keeps this inside the prime directive: for the CLIs that
 //! own the concept we select what the user already configured, and we never author a
 //! CLI's config. Only claude, which has no such concept, gets prose from us — through
 //! a flag built for exactly that.
@@ -26,7 +28,7 @@ pub struct Preset {
     /// The name the client asked for, already validated by [`PresetStore`].
     pub name: String,
     /// The prose behind the name. `Some` only for the provider that needs it
-    /// (claude); the other two are selecting a definition the user owns, so there is
+    /// (claude); the others are selecting a definition the user owns, so there is
     /// nothing for us to read.
     pub body: Option<String>,
 }
@@ -222,6 +224,7 @@ mod tests {
         assert!(preset_needs_body(ProviderId::Claude));
         assert!(!preset_needs_body(ProviderId::Codex));
         assert!(!preset_needs_body(ProviderId::Opencode));
+        assert!(!preset_needs_body(ProviderId::Kimi));
     }
 
     #[test]

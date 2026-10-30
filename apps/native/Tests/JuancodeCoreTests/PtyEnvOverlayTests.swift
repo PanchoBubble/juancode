@@ -47,8 +47,8 @@ import Testing
     }
 
     @Test func anOverlayEntryReachesTheChild() async {
-        let out = await run(["sh", "-c", "printf %s \"$OPENCODE_PERMISSION\""],
-                           envOverrides: ["OPENCODE_PERMISSION": #"{"edit":"allow"}"#])
+        let out = await run(["sh", "-c", "printf %s \"$JUANCODE_TEST_OVERLAY\""],
+                           envOverrides: ["JUANCODE_TEST_OVERLAY": #"{"edit":"allow"}"#])
         #expect(out.contains(#"{"edit":"allow"}"#))
     }
 
@@ -61,7 +61,7 @@ import Testing
     }
 
     @Test func withNoOverlayTheChildIsNotGivenTheVariable() async {
-        let out = await run(["sh", "-c", "printf %s \"[$OPENCODE_PERMISSION]\""],
+        let out = await run(["sh", "-c", "printf %s \"[$JUANCODE_TEST_OVERLAY]\""],
                            envOverrides: [:])
         #expect(out.contains("[]"))
     }

@@ -1,8 +1,9 @@
 import Foundation
 
 /// A CLI conversation found on disk that juancode didn't create — e.g. a claude,
-/// codex or opencode session you started in your terminal. Surfaced (opt-in) in the sidebar so
-/// you can resume it inside juancode. `id` is the CLI's own resumable session id.
+/// codex, opencode or kimi session you started in your terminal. Surfaced (opt-in)
+/// in the sidebar so you can resume it inside juancode. `id` is the CLI's own
+/// resumable session id.
 public struct ExternalSession: Sendable, Equatable, Identifiable {
     public let id: String
     public let provider: ProviderId
@@ -59,6 +60,22 @@ public func discoverExternalSessions(
             resolved: ExternalSession(
                 id: row.id, provider: .opencode, cwd: row.directory,
                 title: title ?? (folder.isEmpty ? row.directory : folder),
+                lastActiveMs: row.updatedMs)))
+    }
+    // kimi keeps conversations in its own session store, so its candidates come
+    // back resolved the same way opencode's do; `KimiStore.session` already
+    // applies the `lastPrompt` fallback that a title-less row would otherwise
+    // surface as a folder name.
+    for row in KimiStore.recentSessions(
+        limit: limit + excluding.count, home: roots.kimiHome ?? KIMI_HOME
+    ) {
+        if excluding.contains(row.id) { continue }
+        let folder = (row.directory as NSString).lastPathComponent
+        candidates.append(Candidate(
+            path: "", provider: .kimi, mtime: row.updatedMs, claudeId: nil,
+            resolved: ExternalSession(
+                id: row.id, provider: .kimi, cwd: row.directory,
+                title: tidy(row.title ?? "") ?? (folder.isEmpty ? row.directory : folder),
                 lastActiveMs: row.updatedMs)))
     }
     candidates.sort { $0.mtime > $1.mtime }

@@ -4,8 +4,9 @@
 //! `portable-pty` rather than raw `forkpty` (which the Swift core uses) so ConPTY
 //! comes for free on Windows later. Env fidelity is preserved by construction:
 //! `CommandBuilder::new` seeds from `std::env::vars_os()`, so the child sees our
-//! whole environment. The only entries we add are a provider's `spawn_env` overlay
-//! (opencode bypass only) — never a shadow HOME/CODEX_HOME, never TERM.
+//! whole environment. The only entries we add are what a spec's `spawn_env` overlay
+//! names — empty for every provider, each CLI having a flag of its own — never a
+//! shadow HOME/CODEX_HOME, never TERM.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -934,8 +935,10 @@ mod tests {
         }
     }
 
-    /// The one sanctioned exception, held to exactly one entry: opencode's opt-in
-    /// bypass, which that CLI exposes only as an env var.
+    /// The overlay mechanism itself, held to exactly what it names and nothing
+    /// else: no provider spec sets an entry today (every CLI has a flag for its
+    /// permission mode), but the mechanism is kept and tested here so a future
+    /// setter — and the directive — can be checked against a real spawn.
     #[test]
     fn an_env_overlay_adds_only_what_it_names_and_changes_nothing_else() {
         let mut s = spec("/usr/bin/env", &[]);

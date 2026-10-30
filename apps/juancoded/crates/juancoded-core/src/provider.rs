@@ -1,9 +1,9 @@
 //! Provider specs and binary resolution — a port of `JuancodeCore/Providers.swift`.
 //!
 //! The prime directive lives here. The only args we pass are a session-id pin
-//! (where the CLI supports one) and an opt-in skip-permissions flag; the only env
-//! entry we ever add is opencode's bypass, which that CLI exposes *only* as an env
-//! var. Everything else the child sees is inherited `environ`, verbatim.
+//! (where the CLI supports one) and an opt-in skip-permissions flag — every CLI here
+//! has a flag for that, so the env overlay is always empty and the child inherits
+//! `environ` verbatim.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,15 +23,15 @@ pub struct SpawnOptions {
     /// differ per CLI; we forward whatever was asked for and let it validate.
     pub model: Option<String>,
     /// A per-spawn instruction set, already resolved by `PresetStore`. `None` = none.
-    /// One name, three mechanisms — see [`Preset`] for why each provider takes a
-    /// different half of it.
+    /// One name, one mechanism per provider — see [`Preset`] for why each provider
+    /// takes a different half of it.
     pub preset: Option<Preset>,
 }
 
 /// Where a provider's resumable conversation id comes from.
 ///
 /// Only Claude lets us name it, so only Claude is resumable the moment it starts.
-/// The other two write theirs into their own state and we go and read it, which is
+/// The others write theirs into their own state and we go and read it, which is
 /// why the variants name the file rather than just saying "later".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdSource {
@@ -92,7 +92,7 @@ fn model_args(model: &Option<String>) -> Vec<String> {
     }
 }
 
-/// claude's `--append-system-prompt <body>`: the one true append of the three, and
+/// claude's `--append-system-prompt <body>`: the one true append of the four, and
 /// the only mechanism where juancode supplies the prose. Empty when no preset, or when
 /// a body somehow did not resolve — `PresetStore::resolve` refuses for claude before we
 /// ever get here, so the `None` branch is belt, not a silent drop.
@@ -145,9 +145,10 @@ pub const CLAUDE: ProviderSpec = ProviderSpec {
         a.extend(claude_preset_args(&opts.preset));
         a
     },
-    // The preset rides on resume too: all three mechanisms are per-invocation flags,
-    // not state the conversation carries, so a resumed session without it would
-    // quietly lose its instruction set halfway through.
+    // The preset rides on resume too: the mechanisms are per-invocation flags, so
+    // a resumed session without it would quietly lose its instruction set halfway
+    // through. (kimi's `--agent` can't combine with `--session`, so its resume is
+    // the one exception — see KIMI.)
     resume_args: |cli_session_id, opts| {
         let mut a = vec!["--resume".to_string(), cli_session_id.to_string()];
         a.extend(claude_perm_args(opts.skip_permissions));
@@ -196,30 +197,35 @@ pub const OPENCODE: ProviderSpec = ProviderSpec {
     // to pin a new one — so a fresh session starts clean and the id is read out of
     // opencode's own database.
     start_args: |_, opts| {
-        let mut a = model_args(&opts.model);
+        let mut a = opencode_perm_args(opts.skip_permissions);
+        a.extend(model_args(&opts.model));
         a.extend(opencode_preset_args(&opts.preset));
         a
     },
     resume_args: |cli_session_id, opts| {
         let mut a = vec!["--session".to_string(), cli_session_id.to_string()];
+        a.extend(opencode_perm_args(opts.skip_permissions));
         a.extend(model_args(&opts.model));
         a.extend(opencode_preset_args(&opts.preset));
         a
     },
-    // opencode's TUI has no skip-permissions flag (only `opencode run` does), so
-    // bypass rides on the env var its config layer reads. Set ONLY when the session
-    // opted in; otherwise the overlay is empty and the environment is untouched.
-    spawn_env: |opts| {
-        let mut env = HashMap::new();
-        if opts.skip_permissions {
-            env.insert(
-                "OPENCODE_PERMISSION".to_string(),
-                r#"{"edit":"allow","bash":"allow","webfetch":"allow"}"#.to_string(),
-            );
-        }
-        env
-    },
+    // opencode's documented auto-approve flag is `--auto` (top level and on `run`).
+    // An earlier attempt pinned permissions to the env var this CLI's config layer
+    // reads — the one sanctioned env entry in this file — but the flag made that
+    // indirection unnecessary: `spawn_env` is no_env for every provider now.
+    spawn_env: no_env,
 };
+
+/// opencode's `--auto` ("auto-approve permissions that are not explicitly denied").
+/// This is the CLI's own spelling of the mode the session asked for; there is no
+/// `--dangerously-skip-permissions` on opencode, that flag is Claude's alone.
+fn opencode_perm_args(skip: bool) -> Vec<String> {
+    if skip {
+        vec!["--auto".into()]
+    } else {
+        vec![]
+    }
+}
 
 /// kimi's `--auto`, its "Never Ask mode": everything runs and is decided
 /// automatically, only plans in plan mode wait for review. Stronger than `-y/--yolo`
@@ -282,7 +288,7 @@ impl Providers {
     }
 }
 
-/// The env var that says where a provider's CLI lives, for the three that have one.
+/// The env var that says where a provider's CLI lives, for the ones that have one.
 fn bin_override_key(provider: &str) -> Option<&'static str> {
     match provider {
         "claude" => Some("JUANCODE_CLAUDE_BIN"),
@@ -676,9 +682,9 @@ mod tests {
     }
 
     #[test]
-    fn one_preset_name_becomes_three_different_mechanisms() {
-        // The body is claude's alone; the other two get the name, because they are
-        // selecting a definition the user already wrote.
+    fn one_preset_name_becomes_three_different_flag_shapes() {
+        // The body is claude's alone; the other three get the name, because they are
+        // each selecting a definition the user already wrote.
         let opts = SpawnOptions {
             preset: Some(Preset {
                 name: "review".into(),
@@ -703,12 +709,18 @@ mod tests {
             (OPENCODE.start_args)("abc", &opts),
             vec!["--agent".to_string(), "review".to_string()]
         );
+        assert_eq!(
+            (KIMI.start_args)("abc", &opts),
+            vec!["--agent".to_string(), "review".to_string()]
+        );
     }
 
     #[test]
-    fn a_preset_rides_on_resume_too() {
-        // All three mechanisms are per-invocation flags, so a resume without them is
-        // a session that quietly lost its instruction set halfway through.
+    fn a_preset_rides_on_resume_too_where_the_cli_allows_it() {
+        // These mechanisms are per-invocation flags, so a resume without them is
+        // a session that quietly lost its instruction set halfway through. The
+        // exception is kimi, whose `--agent` cannot combine with `--session` — so
+        // for that one the resume drops the preset rather than an invalid argv.
         let opts = SpawnOptions {
             preset: Some(Preset {
                 name: "review".into(),
@@ -743,20 +755,76 @@ mod tests {
                 "review".to_string()
             ]
         );
+        assert_eq!(
+            (KIMI.resume_args)("sid", &opts),
+            vec!["--session".to_string(), "sid".to_string()]
+        );
     }
 
     #[test]
-    fn no_preset_means_no_flag_on_any_of_the_three() {
+    fn no_preset_means_no_flag_on_any_of_the_four() {
         let plain = SpawnOptions::default();
         for args in [
             (CLAUDE.start_args)("abc", &plain),
             (CODEX.start_args)("abc", &plain),
             (OPENCODE.start_args)("abc", &plain),
+            (KIMI.start_args)("abc", &plain),
             (CLAUDE.resume_args)("sid", &plain),
             (CODEX.resume_args)("sid", &plain),
             (OPENCODE.resume_args)("sid", &plain),
+            (KIMI.resume_args)("sid", &plain),
         ] {
             for flag in ["--append-system-prompt", "--profile", "--agent"] {
+                assert!(!args.iter().any(|a| a == flag), "{args:?} carries {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_and_kimi_auto_approve_through_their_own_flags() {
+        // Every CLI here has a real flag for the mode; the env indirection opencode
+        // once needed is gone (`--auto` exists since juancode-qbu's predecessor).
+        let bypass = SpawnOptions {
+            skip_permissions: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            (OPENCODE.start_args)("abc", &bypass),
+            vec!["--auto".to_string()]
+        );
+        assert_eq!(
+            (KIMI.start_args)("abc", &bypass),
+            vec!["--auto".to_string()]
+        );
+        // On resume too: opencode keeps `--agent` there, kimi keeps only mode+model.
+        assert_eq!(
+            (OPENCODE.resume_args)("sid", &bypass),
+            vec![
+                "--session".to_string(),
+                "sid".to_string(),
+                "--auto".to_string()
+            ]
+        );
+        assert_eq!(
+            (KIMI.resume_args)("sid", &bypass),
+            vec![
+                "--session".to_string(),
+                "sid".to_string(),
+                "--auto".to_string()
+            ]
+        );
+
+        // And without the opt-in none of it is asked for, the other providers
+        // included. kimi's Ask-When-Needed `-y` is deliberately NOT what we send:
+        // a session that asked to skip prompts wants Never Ask.
+        let plain = SpawnOptions::default();
+        for args in [
+            (OPENCODE.start_args)("abc", &plain),
+            (KIMI.start_args)("abc", &plain),
+            (OPENCODE.resume_args)("sid", &plain),
+            (KIMI.resume_args)("sid", &plain),
+        ] {
+            for flag in ["--auto", "--yolo", "-y"] {
                 assert!(!args.iter().any(|a| a == flag), "{args:?} carries {flag}");
             }
         }
@@ -772,22 +840,20 @@ mod tests {
     }
 
     #[test]
-    fn only_opencode_bypass_overlays_the_environment() {
-        let plain = SpawnOptions::default();
-        assert!((CLAUDE.spawn_env)(&plain).is_empty());
-        assert!((CODEX.spawn_env)(&plain).is_empty());
-        assert!((OPENCODE.spawn_env)(&plain).is_empty());
-
-        let bypass = SpawnOptions {
-            skip_permissions: true,
-            ..Default::default()
-        };
-        // Still nothing for the two CLIs that have a flag — the directive holds.
-        assert!((CLAUDE.spawn_env)(&bypass).is_empty());
-        assert!((CODEX.spawn_env)(&bypass).is_empty());
-        let env = (OPENCODE.spawn_env)(&bypass);
-        assert_eq!(env.len(), 1);
-        assert!(env.contains_key("OPENCODE_PERMISSION"));
+    fn no_provider_overlays_the_environment_any_more() {
+        // Every CLI here expresses skip-permissions through its own flag, so
+        // `spawn_env` is the empty overlay for all of them and the child inherits
+        // `environ` verbatim. opencode's OPENCODE_PERMISSION entry is gone: `--auto`
+        // is the documented flag and the indirection was only ever a workaround.
+        for provider in [&CLAUDE, &CODEX, &OPENCODE, &KIMI] {
+            let plain = SpawnOptions::default();
+            let bypass = SpawnOptions {
+                skip_permissions: true,
+                ..Default::default()
+            };
+            assert!((provider.spawn_env)(&plain).is_empty());
+            assert!((provider.spawn_env)(&bypass).is_empty());
+        }
     }
 
     #[test]
@@ -840,6 +906,7 @@ mod tests {
             ("claude", "JUANCODE_CLAUDE_BIN"),
             ("codex", "JUANCODE_CODEX_BIN"),
             ("opencode", "JUANCODE_OPENCODE_BIN"),
+            ("kimi", "JUANCODE_KIMI_BIN"),
         ] {
             assert_eq!(bin_override_key(provider), Some(key));
         }
@@ -853,7 +920,9 @@ mod tests {
         assert!(CLAUDE.pins_session_id());
         assert!(!CODEX.pins_session_id());
         assert!(!OPENCODE.pins_session_id());
+        assert!(!KIMI.pins_session_id());
         assert_eq!(CODEX.id_source, IdSource::CodexRollout);
         assert_eq!(OPENCODE.id_source, IdSource::OpencodeDb);
+        assert_eq!(KIMI.id_source, IdSource::KimiIndex);
     }
 }

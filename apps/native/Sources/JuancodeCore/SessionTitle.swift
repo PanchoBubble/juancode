@@ -9,6 +9,8 @@ import Foundation
 ///     payload in its rollout file (the user's opening prompt).
 ///   - opencode stores a generated title on the session row of its own SQLite
 ///     database, which `OpencodeStore` reads directly.
+///   - kimi stores `title` (falling back to `lastPrompt`, its own display's
+///     fallback) in the session's `state.json`, which `KimiStore` reads.
 ///
 /// Returns nil when nothing is available yet (e.g. before the first turn), in
 /// which case the caller keeps the existing placeholder title.
@@ -19,6 +21,9 @@ public let CLAUDE_PROJECTS: String =
 public let CODEX_SESSIONS: String =
     (FileManager.default.homeDirectoryForCurrentUser.path as NSString)
     .appendingPathComponent(".codex/sessions")
+public let KIMI_HOME: String =
+    (FileManager.default.homeDirectoryForCurrentUser.path as NSString)
+    .appendingPathComponent(".kimi-code")
 
 private let MAX_TITLE_LEN = 80
 
@@ -29,11 +34,15 @@ public struct TitleRoots {
     /// opencode's database file rather than a transcript directory (it has no
     /// per-session files); nil uses `OpencodeStore.defaultPath`.
     public var opencodeDb: String?
+    /// kimi's data home (`$KIMI_CODE_HOME`, else `~/.kimi-code`); it has no
+    /// per-session transcript files either.
+    public var kimiHome: String?
     public init(claudeProjects: String? = nil, codexSessions: String? = nil,
-                opencodeDb: String? = nil) {
+                opencodeDb: String? = nil, kimiHome: String? = nil) {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
         self.opencodeDb = opencodeDb
+        self.kimiHome = kimiHome
     }
 }
 
@@ -237,5 +246,9 @@ public func deriveSessionTitle(
         // opencode keeps its own generated title on the session row — no transcript
         // scan, no caching needed (see OpencodeStore).
         return OpencodeStore.title(cliSessionId, db: roots.opencodeDb ?? OpencodeStore.defaultPath)
+    case .kimi:
+        // kimi keeps `title`/`lastPrompt` in the session's `state.json` — no
+        // transcript scan either (see KimiStore).
+        return KimiStore.title(cliSessionId, home: roots.kimiHome ?? KIMI_HOME)
     }
 }

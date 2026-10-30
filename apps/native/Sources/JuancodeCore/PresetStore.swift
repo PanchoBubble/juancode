@@ -2,8 +2,8 @@ import Foundation
 
 /// A per-spawn instruction set, resolved before any argv is built.
 ///
-/// The three CLIs expose nothing in common here, so one preset name means three
-/// mechanisms and each provider needs a different half of this:
+/// The CLIs expose nothing in common here, so one preset name means one mechanism
+/// per provider, each provider getting a different half of this:
 ///
 /// - claude takes the **body**, through `--append-system-prompt`. It is the only true
 ///   append, and the only one where juancode supplies the prose.
@@ -11,9 +11,11 @@ import Foundation
 ///   `$CODEX_HOME/<name>.config.toml` — a file the user wrote.
 /// - opencode takes the **name**, through `--agent <name>`, naming an agent the user
 ///   defined in their own config.
+/// - kimi takes the **name** too, through its same `--agent <name>` — on START only,
+///   because kimi does not allow `--agent` to combine with `--session` on a resume.
 ///
 /// That asymmetry is deliberate and is what keeps this inside the prime directive: for
-/// the two CLIs that own the concept we select what the user already configured, and we
+/// the CLIs that own the concept we select what the user already configured, and we
 /// never author a CLI's config. Only claude, which has no such concept, gets prose from
 /// us — through a flag built for exactly that.
 ///
@@ -21,10 +23,10 @@ import Foundation
 public struct Preset: Sendable, Equatable {
     /// The name the client asked for, already validated by `PresetStore`.
     public let name: String
-    /// The prose behind the name. Non-nil only for the provider that needs it
-    /// (claude); the other two are selecting a definition the user owns, so there is
-    /// nothing for us to read.
-    public let body: String?
+/// The prose behind the name. Non-nil only for the provider that needs it
+/// (claude); the others are selecting a definition the user owns, so there is
+/// nothing for us to read.
+public let body: String?
 
     public init(name: String, body: String?) {
         self.name = name
@@ -122,11 +124,11 @@ public enum PresetStore {
 
 extension ProviderId {
     /// Whether this provider's mechanism needs the preset's prose rather than its name.
-    /// True only for claude: codex and opencode select a definition the user owns.
+    /// True only for claude: the others select a definition the user owns.
     var presetNeedsBody: Bool {
         switch self {
         case .claude: return true
-        case .codex, .opencode: return false
+        case .codex, .opencode, .kimi: return false
         }
     }
 }

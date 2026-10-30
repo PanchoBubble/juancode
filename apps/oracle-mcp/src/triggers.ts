@@ -33,7 +33,7 @@ import { cronError } from "./cron.ts";
 import { oracleDir } from "./oracle.ts";
 import type { TriggerOrigin } from "./dispatch-registry.ts";
 
-export type TriggerProvider = "claude" | "codex" | "opencode";
+export type TriggerProvider = "claude" | "codex" | "opencode" | "kimi";
 
 /** One cron-scheduled dispatch. Either `prompt` or `ticket` must be set. */
 export interface ScheduleConfig {
@@ -117,7 +117,7 @@ function str(v: unknown): string | undefined {
 }
 
 function provider(v: unknown): TriggerProvider | undefined {
-  return v === "claude" || v === "codex" || v === "opencode" ? v : undefined;
+  return v === "claude" || v === "codex" || v === "opencode" || v === "kimi" ? v : undefined;
 }
 
 function chatId(v: unknown): number | null {

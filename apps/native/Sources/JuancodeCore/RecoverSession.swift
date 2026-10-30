@@ -2,10 +2,12 @@ import Foundation
 
 /// Recover the resumable CLI session id for an *old* session that was created
 /// before we started capturing it (Claude) or whose post-spawn discovery never
-/// landed (Codex). Both CLIs persist a transcript per conversation that records
-/// the working directory it ran in, so we match on `cwd` and pick the transcript
-/// whose start time is closest to when our session was created — the same
-/// cwd-plus-time heuristic `codexSession.ts` uses for live Codex discovery.
+/// landed (Codex). Each CLI persists its conversation somewhere that records the
+/// working directory it ran in and when it began — a JSONL transcript for claude
+/// and codex, opencode's own SQLite, kimi's session store — so we match on `cwd`
+/// and pick the conversation whose start time is closest to when our session was
+/// created — the same cwd-plus-time heuristic `codexSession.ts` uses for live
+/// Codex discovery.
 ///
 /// A transcript can't predate our spawn, and a match more than a few minutes off
 /// is almost certainly a *different* conversation in the same folder, so we bound
@@ -22,6 +24,8 @@ private let RECOVER_CLAUDE_PROJECTS = FileManager.default.homeDirectoryForCurren
     .appendingPathComponent(".claude/projects").path
 private let RECOVER_CODEX_SESSIONS = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".codex/sessions").path
+private let RECOVER_KIMI_HOME = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".kimi-code").path
 
 /// A transcript can't start before we spawned it; allow small clock skew.
 private let GRACE_BEFORE_MS = 5_000
@@ -35,12 +39,16 @@ public struct RecoverRoots {
     /// opencode's database file (it records conversations in SQLite, not per-session
     /// transcripts); nil uses `OpencodeStore.defaultPath`.
     public var opencodeDb: String?
+    /// kimi's data home (it records conversations under `sessions/<key>/<id>/` plus
+    /// a mirror index, not per-session transcripts); nil uses `KimiStore.home`.
+    public var kimiHome: String?
 
     public init(claudeProjects: String? = nil, codexSessions: String? = nil,
-                opencodeDb: String? = nil) {
+                opencodeDb: String? = nil, kimiHome: String? = nil) {
         self.claudeProjects = claudeProjects
         self.codexSessions = codexSessions
         self.opencodeDb = opencodeDb
+        self.kimiHome = kimiHome
     }
 }
 
@@ -195,6 +203,14 @@ private func opencodeCandidates(_ db: String, _ cwd: String) -> [Candidate] {
         .map { Candidate(id: $0.id, startMs: $0.createdMs) }
 }
 
+/// Every kimi conversation recorded for `cwd`, same shape as opencode's: the store
+/// (mirror index + each session's `state.json`) already carries the id, directory
+/// and creation clock, so its rows are the candidates too.
+private func kimiCandidates(_ homeDir: String, _ cwd: String) -> [Candidate] {
+    KimiStore.sessions(directory: cwd, home: homeDir)
+        .map { Candidate(id: $0.id, startMs: $0.createdMs) }
+}
+
 /// Pick the candidate that began nearest to (and not well before) `createdAtMs`.
 private func chooseNearest(_ cands: [Candidate], _ createdAtMs: Int, _ exclude: Set<String>) -> String? {
     var best: (id: String, gap: Int)?
@@ -226,6 +242,8 @@ public func recoverCliSessionId(
         cands = codexCandidates(roots.codexSessions ?? RECOVER_CODEX_SESSIONS, cwd)
     case .opencode:
         cands = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
+    case .kimi:
+        cands = kimiCandidates(roots.kimiHome ?? RECOVER_KIMI_HOME, cwd)
     }
     return chooseNearest(cands, createdAtMs, excludeIds)
 }
@@ -253,10 +271,11 @@ public func claudeConversationExists(
 /// reads each transcript's content to derive a display title for the global
 /// "discover" list; this one is a cheap, cwd-scoped, header-only lookup.
 public struct ResumableCliSession: Sendable, Equatable {
-    /// The CLI that owns this conversation (`claude`, `codex` or `opencode`).
+    /// The CLI that owns this conversation (`claude`, `codex`, `opencode` or
+    /// `kimi`).
     public let provider: ProviderId
-    /// The id to resume with (`claude --resume <id>`, a Codex rollout id, or the id
-    /// `opencode --session <id>` takes).
+    /// The id to resume with (`claude --resume <id>`, a Codex rollout id, the id
+    /// `opencode --session <id>` takes, or the id `kimi --session <id>` takes).
     public let cliSessionId: String
     /// When the conversation began, ms since epoch.
     public let startMs: Int
@@ -268,13 +287,13 @@ public struct ResumableCliSession: Sendable, Equatable {
     }
 }
 
-/// List every resumable CLI conversation (Claude + Codex + opencode) that ran in
-/// `cwd`, newest first. Reuses the same header parsing as `recoverCliSessionId`
-/// (Claude: basename = id, cwd+timestamp on the first matching line; Codex:
-/// `session_meta` payload id+cwd) but applies no time window and no exclusion —
-/// it surfaces *all* candidates so the caller can offer them for adoption. Dedupe
-/// against already-adopted ids (`store.usedCliSessionIds()`) at the call site,
-/// not here.
+/// List every resumable CLI conversation (Claude + Codex + opencode + kimi) that
+/// ran in `cwd`, newest first. Reuses the same header parsing as
+/// `recoverCliSessionId` (Claude: basename = id, cwd+timestamp on the first
+/// matching line; Codex: `session_meta` payload id+cwd) but applies no time window
+/// and no exclusion — it surfaces *all* candidates so the caller can offer them for
+/// adoption. Dedupe against already-adopted ids (`store.usedCliSessionIds()`) at
+/// the call site, not here.
 public func listExternalSessions(
     cwd: String,
     roots: RecoverRoots = RecoverRoots()
@@ -285,7 +304,9 @@ public func listExternalSessions(
         .map { ResumableCliSession(provider: .codex, cliSessionId: $0.id, startMs: $0.startMs) }
     let opencode = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
         .map { ResumableCliSession(provider: .opencode, cliSessionId: $0.id, startMs: $0.startMs) }
-    return (claude + codex + opencode).sorted { $0.startMs > $1.startMs }
+    let kimi = kimiCandidates(roots.kimiHome ?? RECOVER_KIMI_HOME, cwd)
+        .map { ResumableCliSession(provider: .kimi, cliSessionId: $0.id, startMs: $0.startMs) }
+    return (claude + codex + opencode + kimi).sorted { $0.startMs > $1.startMs }
 }
 
 /// Whether reviving `meta` must skip `--resume` and boot fresh instead: pinned-id

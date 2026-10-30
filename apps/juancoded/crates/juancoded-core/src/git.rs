@@ -918,6 +918,10 @@ pub(crate) mod tests {
 
     pub(crate) fn run(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
+            // Hermetic fixtures: a global `commit.gpgsign` would sign these test
+            // commits with a key this process does not have (juancode gate fix).
+            .arg("-c")
+            .arg("commit.gpgsign=false")
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "test")

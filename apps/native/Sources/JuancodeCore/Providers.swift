@@ -1,12 +1,15 @@
 import Foundation
 
-/// Mirrors `apps/server/src/providers.ts` + `resolveBin.ts`.
+/// Mirrors `apps/server/src/providers.ts` + `resolveBin.ts`, and `provider.rs` in
+/// the daemon's Rust core.
 ///
 /// The prime directive: launch the genuine CLIs with their native config
 /// UNTOUCHED. We never inject a shadow HOME/CODEX_HOME or override mcpServers, so
-/// `~/.claude.json`, connectors, `~/.codex/config.toml` and project `.mcp.json`
-/// load identically to running `claude`/`codex` yourself. The only args we pass
-/// are a session-id pin (where supported) and an opt-in skip-permissions flag.
+/// `~/.claude.json`, connectors, `~/.codex/config.toml`, kimi's `~/.kimi-code` and
+/// project `.mcp.json` load identically to running the CLI yourself. The only args
+/// we pass are a session-id pin (where supported) and an opt-in skip-permissions
+/// flag — each CLI has its own spelling of that flag, so no env entry is ever set
+/// for it.
 
 /// Per-session knobs that influence the spawned CLI's argv.
 public struct SpawnOptions: Sendable, Equatable {
@@ -17,8 +20,8 @@ public struct SpawnOptions: Sendable, Equatable {
     /// (note the two CLIs accept different model names).
     public var model: String?
     /// A per-spawn instruction set, already resolved by `PresetStore`. nil = none.
-    /// One name, three mechanisms — see `Preset` for why each provider takes a
-    /// different half of it.
+    /// One name, one flag per provider — see `Preset` for why each provider takes
+    /// a different half of it.
     public var preset: Preset?
     public init(skipPermissions: Bool = false, model: String? = nil, preset: Preset? = nil) {
         self.skipPermissions = skipPermissions
@@ -43,10 +46,10 @@ public struct ProviderSpec: Sendable {
     public let startArgs: @Sendable (_ juancodeId: String, _ opts: SpawnOptions) -> [String]
     public let resumeArgs: @Sendable (_ cliSessionId: String, _ opts: SpawnOptions) -> [String]
     /// Environment entries to overlay on the inherited environment for this spawn,
-    /// for a knob a CLI exposes ONLY as an env var (opencode's bypass). Empty for
-    /// every provider that has a flag — the prime directive still holds: we never
-    /// inject a shadow HOME/CODEX_HOME/config path, and an empty overlay means the
-    /// child inherits `environ` verbatim.
+    /// for a knob a CLI exposes ONLY as an env var. Empty for every provider —
+    /// each has a flag for its permission mode — the prime directive still holds:
+    /// we never inject a shadow HOME/CODEX_HOME/config path, and an empty overlay
+    /// means the child inherits `environ` verbatim.
     public let spawnEnv: @Sendable (_ opts: SpawnOptions) -> [String: String]
 
     public init(id: ProviderId,
@@ -90,7 +93,16 @@ public enum Providers {
         return ["--model", model]
     }
 
-    /// claude's `--append-system-prompt <body>`: the one true append of the three, and
+    /// opencode's `--auto` ("auto-approve permissions that are not explicitly
+    /// denied", top level and on `run`). An earlier revision pinned opencode's
+    /// permissions to the env var its config layer reads — the one sanctioned env
+    /// entry — but `--auto` made the indirection unnecessary, so the flag is used
+    /// like every other provider's.
+    static func opencodePermArgs(_ skip: Bool) -> [String] {
+        skip ? ["--auto"] : []
+    }
+
+    /// claude's `--append-system-prompt <body>`: the one true append of the four, and
     /// the only mechanism where juancode supplies the prose. Empty when no preset, or
     /// when a body somehow did not resolve — `PresetStore.resolve` throws for claude
     /// before we ever get here, so the nil branch is belt, not a silent drop.
@@ -175,31 +187,73 @@ public enum Providers {
         // to pin a new one — so a fresh session starts clean and we read the id it
         // created out of opencode's own database (see `OpencodeStore`).
         startArgs: { _, opts in
-            opencodeModelArgs(opts.model) + opencodePresetArgs(opts.preset)
-        },
-        resumeArgs: { cliSessionId, opts in
-            ["--session", cliSessionId]
+            opencodePermArgs(opts.skipPermissions)
                 + opencodeModelArgs(opts.model)
                 + opencodePresetArgs(opts.preset)
         },
-        // opencode's TUI has no `--dangerously-skip-permissions` (only `opencode run`
-        // does), so bypass rides on the env var its config layer reads. Set ONLY when
-        // the session opted in; otherwise the overlay is empty and the child inherits
-        // the environment untouched.
-        spawnEnv: { opts in
-            guard opts.skipPermissions else { return [:] }
-            return ["OPENCODE_PERMISSION": #"{"edit":"allow","bash":"allow","webfetch":"allow"}"#]
+        resumeArgs: { cliSessionId, opts in
+            ["--session", cliSessionId]
+                + opencodePermArgs(opts.skipPermissions)
+                + opencodeModelArgs(opts.model)
+                + opencodePresetArgs(opts.preset)
         }
     )
 
+    /// kimi's `--auto`, its "Never Ask mode": everything runs and is decided
+    /// automatically, only plans in plan mode wait for review. Stronger than
+    /// `-y/--yolo` ("Ask When Needed", which still asks about risky actions) — the
+    /// mode a session that opted out of prompts wants is this one.
+    static func kimiPermArgs(_ skip: Bool) -> [String] {
+        skip ? ["--auto"] : []
+    }
+
+    /// kimi's `--agent <name>`, naming an agent defined in the user's own config —
+    /// the select-not-append mechanism, like opencode's same flag. Only used on
+    /// START: kimi's help forbids combining `--agent` with `--session`/`--continue`.
+    static func kimiPresetArgs(_ preset: Preset?) -> [String] {
+        guard let name = preset?.name, !name.isEmpty else { return [] }
+        return ["--agent", name]
+    }
+
+    public static let kimi = ProviderSpec(
+        id: .kimi,
+        label: "Kimi Code",
+        pinsSessionId: false,
+        // kimi, like codex and opencode, mints its own session id: `--session` on
+        // start RESUMES rather than names, so a fresh session starts clean and the
+        // id is read out of kimi's own session store once it writes one (see
+        // `KimiStore`).
+        startArgs: { _, opts in
+            kimiPermArgs(opts.skipPermissions)
+                + kimiModelArgs(opts.model)
+                + kimiPresetArgs(opts.preset)
+        },
+        // `-S <id>` is kimi's resume. The preset does NOT ride on this one: kimi's
+        // `--agent` cannot combine with `--session`, and the session's mode and
+        // model still can, so only the preset is dropped.
+        resumeArgs: { cliSessionId, opts in
+            ["--session", cliSessionId]
+                + kimiPermArgs(opts.skipPermissions)
+                + kimiModelArgs(opts.model)
+        }
+    )
+
+    /// kimi takes `-m <model>` like the others; model names are kimi's aliases
+    /// (e.g. "kimi-k2"), forwarded as given and validated by the CLI.
+    static func kimiModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
     public static let all: [ProviderId: ProviderSpec] =
-        [.claude: claude, .codex: codex, .opencode: opencode]
+        [.claude: claude, .codex: codex, .opencode: opencode, .kimi: kimi]
 
     public static func spec(for id: ProviderId) -> ProviderSpec {
         switch id {
         case .claude: return claude
         case .codex: return codex
         case .opencode: return opencode
+        case .kimi: return kimi
         }
     }
 }
@@ -337,6 +391,7 @@ let wellKnownBinDirs: [String] = {
         "\(home)/.bun/bin", "\(home)/.cargo/bin", "\(home)/go/bin",
         "\(home)/.volta/bin", "\(home)/.npm-global/bin",
         "\(home)/.opencode/bin",                    // opencode's own installer
+        "\(home)/.kimi-code/bin",                   // kimi's own installer
 
         "/opt/local/bin",                           // MacPorts
     ]
@@ -422,7 +477,7 @@ public func resolveEditorCommand(_ raw: String = editorCommandString()) -> (exec
 }
 
 /// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` /
-/// `JUANCODE_OPENCODE_BIN`.
+/// `JUANCODE_OPENCODE_BIN` / `JUANCODE_KIMI_BIN`.
 public struct DefaultBinaryResolver: BinaryResolver {
     public init() {}
 
@@ -433,6 +488,7 @@ public struct DefaultBinaryResolver: BinaryResolver {
         case .claude: return ("claude", env["JUANCODE_CLAUDE_BIN"])
         case .codex: return ("codex", env["JUANCODE_CODEX_BIN"])
         case .opencode: return ("opencode", env["JUANCODE_OPENCODE_BIN"])
+        case .kimi: return ("kimi", env["JUANCODE_KIMI_BIN"])
         }
     }
 

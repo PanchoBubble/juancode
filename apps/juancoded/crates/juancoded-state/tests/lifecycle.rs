@@ -393,6 +393,10 @@ fn seed_repo(harness: &Harness, name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
+            // Hermetic fixtures: a global `commit.gpgsign` would sign these test
+            // commits with a key this process does not have (juancode gate fix).
+            .arg("-c")
+            .arg("commit.gpgsign=false")
             .args(args)
             .current_dir(&repo)
             .env("GIT_AUTHOR_NAME", "test")
@@ -533,6 +537,10 @@ async fn a_settled_turn_over_a_dirty_worktree_carries_the_change_rollup() {
     std::fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
+            // Hermetic fixtures: a global `commit.gpgsign` would sign these test
+            // commits with a key this process does not have (juancode gate fix).
+            .arg("-c")
+            .arg("commit.gpgsign=false")
             .args(args)
             .current_dir(&repo)
             .env("GIT_AUTHOR_NAME", "test")

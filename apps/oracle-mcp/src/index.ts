@@ -164,9 +164,11 @@ function buildServer(): McpServer {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
         provider: z
-          .enum(["claude", "codex", "opencode"])
+          .enum(["claude", "codex", "opencode", "kimi"])
           .optional()
-          .describe("Optional provider pin; omitted, routing may choose Claude or Codex by task"),
+          .describe(
+            "Optional provider pin; omitted, routing may choose Claude or Codex by task",
+          ),
         model: z
           .string()
           .trim()
@@ -836,7 +838,7 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
     if (
       (model !== undefined && (typeof model !== "string" || !model.trim())) ||
       (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
-      (provider !== undefined && !["claude", "codex", "opencode"].includes(provider))
+      (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider))
     ) {
       res.status(400).send("Invalid provider, model, or complexity");
       return;

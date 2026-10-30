@@ -92,6 +92,10 @@ mod tests {
 
     fn run(cwd: &std::path::Path, args: &[&str]) {
         let status = Command::new("git")
+            // Hermetic fixtures: a global `commit.gpgsign` would sign these test
+            // commits with a key this process does not have (juancode gate fix).
+            .arg("-c")
+            .arg("commit.gpgsign=false")
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "test")

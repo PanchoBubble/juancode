@@ -349,6 +349,11 @@ private func getProviderStatus(_ id: ProviderId, resolver: BinaryResolver) async
             let r = try await ProcessRunner.run(command, ["mcp", "list"],
                                                 timeout: listTimeoutSec, maxBytes: statusMaxBuffer)
             mcpServers = parseOpencodeList(r.stdout)
+        } else if id == .kimi {
+            // kimi has no `mcp` subcommand yet — nothing per-provider to gather.
+            // Empty with no error, so the panel shows an absent section rather
+            // than a broken CLI.
+            mcpServers = []
         } else {
             let r = try await ProcessRunner.run(command, ["mcp", "list"],
                                                 timeout: listTimeoutSec, maxBytes: statusMaxBuffer)

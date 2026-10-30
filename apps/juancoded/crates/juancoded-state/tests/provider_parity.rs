@@ -1,9 +1,9 @@
 //! Provider parity: what differs per CLI, and what must not.
 //!
-//! The three providers differ in exactly three ways, and each one is asserted here:
+//! The four providers differ in exactly three ways, and each one is asserted here:
 //! how their conversation id becomes known, how a permission mode is expressed, and
 //! whether that mode touches the environment at all. Everything else about a spawn is
-//! the same for all three, which is the property the whole daemon exists to keep.
+//! the same for all four, which is the property the whole daemon exists to keep.
 //!
 //! These build a registry by hand rather than booting the tree, because the seam being
 //! tested is the one the tree fills in: the id scanner. A fake scanner answers at once
@@ -77,8 +77,10 @@ const ECHO_LOOP: &str =
     "stty -echo 2>/dev/null; while IFS= read -r line; do printf '%s\r\n' \"$line\"; done";
 
 /// The stand-in for the tests that assert on the child's own environment: dump it,
-/// then stay alive, because a permission flip can only restart a live session.
-const ENV_THEN_WAIT: &str = "/usr/bin/env; read ignored";
+/// mark the dump's end, then stay alive, because a permission flip can only restart
+/// a live session. The marker is what makes "the dump is complete" knowable without
+/// waiting for an exit that does not come.
+const ENV_THEN_WAIT: &str = "/usr/bin/env; echo DUMP_END; read ignored";
 
 fn request(provider: ProviderId, cwd: &str) -> CreateRequest {
     CreateRequest {
@@ -282,76 +284,93 @@ async fn a_conversation_id_discovered_after_the_spawn_is_broadcast_not_only_stor
     }
 }
 
-/// Every provider's child gets OUR environment, entry for entry, and the permission
-/// mode reaches each CLI the way that CLI expresses it: a flag for the two that have
-/// one, and for opencode the single sanctioned env entry, set only for a session that
-/// asked for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kimi_session_is_asked_about_kimis_own_session_index() {
+    let rig = rig("/bin/sh", &["-c", ECHO_LOOP], Some("kses_abc123"));
+    let meta = rig
+        .registry
+        .create(request(ProviderId::Kimi, "/tmp"))
+        .expect("create");
+    assert!(
+        meta.cli_session_id.is_none(),
+        "kimi has no flag to pin an id, so at spawn there is nothing to resume"
+    );
+    let learned = wait_until(5, || {
+        rig.registry
+            .meta(&meta.id)
+            .and_then(|m| m.cli_session_id.clone())
+    })
+    .await;
+    assert_eq!(learned, "kses_abc123");
+    let asked = rig.asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert!(
+        asked
+            .iter()
+            .all(|(source, _)| *source == IdSource::KimiIndex),
+        "kimi's id is in its own session store, nowhere else: {asked:?}"
+    );
+}
+
+/// Every provider's child gets OUR environment, entry for entry, and every
+/// permission mode rides on a CLI flag the child's argv already carries — no env
+/// entry is ever added for a mode, so with or without the opt-in the diff is empty.
 ///
 /// `/usr/bin/env` stands in for the CLI, so what lands in the session's scrollback is
 /// the child's own environment and the diff is against what the child really saw. This
 /// is the ticket's "identical env to a plain terminal", measured through the registry
 /// rather than argued from the spawn code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_provider_inherits_our_environment_and_only_opencode_bypass_adds_to_it() {
-    for (provider, skip, overlay) in [
-        (ProviderId::Opencode, true, vec!["OPENCODE_PERMISSION"]),
-        (ProviderId::Opencode, false, vec![]),
-        (ProviderId::Claude, true, vec![]),
-        (ProviderId::Claude, false, vec![]),
-        (ProviderId::Codex, true, vec![]),
-        (ProviderId::Codex, false, vec![]),
+async fn every_provider_inherits_our_environment_untouched_by_the_permission_mode() {
+    for provider in [
+        ProviderId::Opencode,
+        ProviderId::Claude,
+        ProviderId::Codex,
+        ProviderId::Kimi,
     ] {
-        let rig = rig("/usr/bin/env", &[], None);
-        let mut req = request(provider, "/tmp");
-        req.skip_permissions = skip;
-        let meta = rig.registry.create(req).expect("create");
-        // The dump is complete when the child is gone, not when `PATH=` shows up.
-        // `/usr/bin/env` prints its environment and exits, and the pty reader
-        // publishes every byte it read before it publishes the exit, so an exited
-        // session's scrollback holds the whole environment. Waiting for a substring
-        // waits for something that appears mid-write, and on a loaded machine the
-        // rest of the dump is still in flight when it lands.
-        let dump = wait_until(10, || {
-            let exited = rig
-                .registry
-                .meta(&meta.id)
-                .is_some_and(|m| m.status == SessionStatus::Exited);
-            exited.then(|| rig.registry.scrollback(&meta.id)).flatten()
-        })
-        .await;
-        let child = parse_env(&dump);
-        assert!(
-            child.contains_key("PATH"),
-            "{provider:?}: the child never dumped its environment at all"
-        );
-        let case = format!("{provider:?} with skip_permissions={skip}");
-
-        for key in &overlay {
-            assert!(
-                child.contains_key(*key),
-                "{case}: the overlay entry {key} never reached the child"
-            );
-        }
-        let added: Vec<&String> = child
-            .iter()
-            .filter(|(k, v)| {
-                !overlay.contains(&k.as_str()) && std::env::var(k).is_err() && !undiffable(k, v)
+        for skip in [true, false] {
+            let rig = rig("/usr/bin/env", &[], None);
+            let mut req = request(provider, "/tmp");
+            req.skip_permissions = skip;
+            let meta = rig.registry.create(req).expect("create");
+            // The dump is complete when the child is gone, not when `PATH=` shows up.
+            // `/usr/bin/env` prints its environment and exits, and the pty reader
+            // publishes every byte it read before it publishes the exit, so an exited
+            // session's scrollback holds the whole environment. Waiting for a substring
+            // waits for something that appears mid-write, and on a loaded machine the
+            // rest of the dump is still in flight when it lands.
+            let dump = wait_until(10, || {
+                let exited = rig
+                    .registry
+                    .meta(&meta.id)
+                    .is_some_and(|m| m.status == SessionStatus::Exited);
+                exited.then(|| rig.registry.scrollback(&meta.id)).flatten()
             })
-            .map(|(k, _)| k)
-            .collect();
-        assert!(
-            added.is_empty(),
-            "{case}: the child was given entries we never had: {added:?}"
-        );
-        for (key, value) in std::env::vars() {
-            if undiffable(&key, &value) {
-                continue;
-            }
-            assert_eq!(
-                child.get(&key),
-                Some(&value),
-                "{case}: {key} did not survive the spawn intact"
+            .await;
+            let child = parse_env(&dump);
+            let case = format!("{provider:?} with skip_permissions={skip}");
+            assert!(
+                child.contains_key("PATH"),
+                "{case}: the child never dumped its environment at all"
             );
+            let added: Vec<&String> = child
+                .iter()
+                .filter(|(k, v)| std::env::var(k).is_err() && !undiffable(k, v))
+                .map(|(k, _)| k)
+                .collect();
+            assert!(
+                added.is_empty(),
+                "{case}: the child was given entries we never had: {added:?}"
+            );
+            for (key, value) in std::env::vars() {
+                if undiffable(&key, &value) {
+                    continue;
+                }
+                assert_eq!(
+                    child.get(&key),
+                    Some(&value),
+                    "{case}: {key} did not survive the spawn intact"
+                );
+            }
         }
     }
 }
@@ -372,10 +391,14 @@ fn undiffable(key: &str, value: &str) -> bool {
     key.starts_with("DYLD_") || key.contains('\n') || value.contains('\n')
 }
 
-/// Flipping the mode restarts the CLI, and the restart is what carries the new mode:
-/// for opencode that means the overlay appears on the second spawn and not the first.
+/// Flipping the mode restarts the CLI, and the restart is what carries the new
+/// mode: the second spawn sees the mode through its argv (`--auto` for opencode),
+/// never through the environment. The two dumps' environments are diffed against
+/// each other rather than checked for one key's absence, because an `OPENCODE_
+/// PERMISSION` left over in the ambient environment is the child's birthright and
+/// a diff leaves it alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flipping_bypass_on_opencode_re_spawns_with_the_overlay() {
+async fn flipping_bypass_on_opencode_re_spawns_the_cli_in_its_own_new_mode() {
     let rig = rig("/bin/sh", &["-c", ENV_THEN_WAIT], None);
     let meta = rig
         .registry
@@ -384,10 +407,18 @@ async fn flipping_bypass_on_opencode_re_spawns_with_the_overlay() {
     let before = wait_until(10, || {
         rig.registry
             .scrollback(&meta.id)
-            .filter(|s| s.contains("PATH="))
+            .filter(|s| s.contains("DUMP_END"))
     })
     .await;
-    assert!(!before.contains("OPENCODE_PERMISSION="));
+    assert_eq!(
+        before
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| l.starts_with("PATH="))
+            .count(),
+        1,
+        "exactly one spawn so far"
+    );
 
     let attached = rig
         .registry
@@ -399,12 +430,24 @@ async fn flipping_bypass_on_opencode_re_spawns_with_the_overlay() {
     let after = wait_until(10, || {
         rig.registry
             .scrollback(&meta.id)
-            .filter(|s| s.contains("OPENCODE_PERMISSION="))
+            .filter(|s| s.matches("DUMP_END").count() >= 2)
     })
     .await;
     assert!(
         after.len() > before.len(),
         "the second spawn's dump should be added to the history, not replace it"
+    );
+    // Scrollback only ever grows, so the second dump is the tail past the first.
+    let first = parse_env(&before);
+    let second = parse_env(&after[before.len()..]);
+    let changed: Vec<&String> = second
+        .iter()
+        .filter(|(k, v)| first.get(*k) != Some(v))
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "the permission flip must reach the CLI as a flag, not as environment: {changed:?}"
     );
 }
 

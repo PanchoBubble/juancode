@@ -57,11 +57,11 @@ import Testing
         }
     }
 
-    @Test func codexAndOpencodeNeedNoBodyOnDisk() throws {
+    @Test func theNamePickingProvidersNeedNoBodyOnDisk() throws {
         try withPresetDir { _ in
             // Their mechanisms select a definition the USER wrote (`--profile`,
             // `--agent`), so there is nothing for us to read and no file to require.
-            for provider in [ProviderId.codex, .opencode] {
+            for provider in [ProviderId.codex, .opencode, .kimi] {
                 let preset = try PresetStore.resolve(name: "lazy", for: provider)
                 #expect(preset.name == "lazy")
                 #expect(preset.body == nil)
@@ -85,7 +85,7 @@ import Testing
 
     @Test func aBadNameIsRefusedForEveryProvider() throws {
         try withPresetDir { _ in
-            for provider in [ProviderId.claude, .codex, .opencode] {
+            for provider in [ProviderId.claude, .codex, .opencode, .kimi] {
                 #expect(throws: PresetError.self) {
                     try PresetStore.resolve(name: "../escape", for: provider)
                 }
@@ -114,11 +114,16 @@ import Testing
             == ["--profile", "lazy"])
         #expect(Providers.opencode.startArgs("sid", SpawnOptions(preset: namePreset))
             == ["--agent", "lazy"])
+        #expect(Providers.kimi.startArgs("sid", SpawnOptions(preset: namePreset))
+            == ["--agent", "lazy"])
     }
 
-    @Test func theMechanismRidesOnResumeToo() {
-        // All three are per-invocation flags, not state the conversation carries, so a
+    @Test func theMechanismRidesOnResumeTooWhereTheCliAllowsIt() {
+        // These are per-invocation flags, not state the conversation carries, so a
         // resume without them would quietly drop the instruction set mid-session.
+        // kimi's `--agent` is the one exception — it cannot combine with
+        // `--session`, so for kimi the resume drops the preset rather than send an
+        // argv the CLI would refuse.
         let claudeArgs = Providers.claude.resumeArgs(
             "cli-id", SpawnOptions(preset: Preset(name: "lazy", body: "be lazy")))
         #expect(claudeArgs.contains("--append-system-prompt"))
@@ -126,6 +131,7 @@ import Testing
         let name = Preset(name: "lazy", body: nil)
         #expect(Providers.codex.resumeArgs("cli-id", SpawnOptions(preset: name)).contains("--profile"))
         #expect(Providers.opencode.resumeArgs("cli-id", SpawnOptions(preset: name)).contains("--agent"))
+        #expect(!Providers.kimi.resumeArgs("cli-id", SpawnOptions(preset: name)).contains("--agent"))
     }
 
     @Test func noPresetMeansNoFlagAnywhere() {
@@ -134,9 +140,11 @@ import Testing
         for args in [Providers.claude.startArgs("sid", opts),
                      Providers.codex.startArgs("sid", opts),
                      Providers.opencode.startArgs("sid", opts),
+                     Providers.kimi.startArgs("sid", opts),
                      Providers.claude.resumeArgs("cli", opts),
                      Providers.codex.resumeArgs("cli", opts),
-                     Providers.opencode.resumeArgs("cli", opts)] {
+                     Providers.opencode.resumeArgs("cli", opts),
+                     Providers.kimi.resumeArgs("cli", opts)] {
             #expect(!args.contains("--append-system-prompt"))
             #expect(!args.contains("--profile"))
             #expect(!args.contains("--agent"))
