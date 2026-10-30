@@ -34,6 +34,9 @@ pub fn window(source: IdSource) -> (Duration, Duration) {
         IdSource::Pinned => Duration::ZERO,
         IdSource::CodexRollout => Duration::from_secs(15 * 60),
         IdSource::OpencodeDb => Duration::from_secs(15 * 60),
+        // Reading kimi's `session_index.jsonl` is juancode-qbu's; until it lands there
+        // is nothing to wait for.
+        IdSource::KimiIndex => Duration::ZERO,
     };
     (timeout, Duration::from_millis(1_500))
 }
@@ -45,6 +48,7 @@ pub fn scan_once(source: IdSource, cwd: &str, since_ms: i64) -> Option<String> {
         IdSource::Pinned => None,
         IdSource::CodexRollout => codex_scan_once(cwd, since_ms, &codex_root()),
         IdSource::OpencodeDb => opencode_scan_once(cwd, since_ms, &opencode_db_path()),
+        IdSource::KimiIndex => None,
     }
 }
 

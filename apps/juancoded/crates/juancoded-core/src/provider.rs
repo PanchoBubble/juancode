@@ -43,6 +43,10 @@ pub enum IdSource {
     /// opencode writes a `session` row into its own SQLite, on the first message and
     /// not at spawn, so this one can be minutes away.
     OpencodeDb,
+    /// kimi records every conversation in `$KIMI_CODE_HOME/sessions/<workdirKey>/<id>/`
+    /// and mirrors `{sessionId, sessionDir, workDir}` lines into its own
+    /// `session_index.jsonl`, which is what we read.
+    KimiIndex,
 }
 
 /// Pure description of how to launch/resume a provider. No binary resolution here
@@ -217,6 +221,54 @@ pub const OPENCODE: ProviderSpec = ProviderSpec {
     },
 };
 
+/// kimi's `--auto`, its "Never Ask mode": everything runs and is decided
+/// automatically, only plans in plan mode wait for review. Stronger than `-y/--yolo`
+/// ("Ask When Needed"), which still asks about risky actions — the mode a session
+/// that opted out of prompts wants is this one.
+fn kimi_perm_args(skip: bool) -> Vec<String> {
+    if skip {
+        vec!["--auto".into()]
+    } else {
+        vec![]
+    }
+}
+
+pub const KIMI: ProviderSpec = ProviderSpec {
+    id: ProviderId::Kimi,
+    label: "Kimi Code",
+    id_source: IdSource::KimiIndex,
+    bracketed_paste: true,
+    // kimi, like codex and opencode, mints its own session id: `--session` on start
+    // RESUMES rather than names, so a fresh session starts clean and the id is read
+    // out of kimi's own session store once it writes one.
+    start_args: |_, opts| {
+        let mut a = kimi_perm_args(opts.skip_permissions);
+        a.extend(model_args(&opts.model));
+        a.extend(kimi_preset_args_start(opts.preset.as_ref()));
+        a
+    },
+    // `-S <id>` is kimi's resume. The preset does NOT ride on this one: kimi's help
+    // says `--agent` cannot combine with `--session`/`--continue`, and the session's
+    // mode/model still can, so only the preset is dropped.
+    resume_args: |cli_session_id, opts| {
+        let mut a = vec!["--session".to_string(), cli_session_id.to_string()];
+        a.extend(kimi_perm_args(opts.skip_permissions));
+        a.extend(model_args(&opts.model));
+        a
+    },
+    spawn_env: no_env,
+};
+
+/// kimi's `--agent <name>`, naming an agent defined in the user's own config — the
+/// select-not-append mechanism, like opencode's same flag. Only used on START: see
+/// the resume note on [`KIMI`].
+fn kimi_preset_args_start(preset: Option<&Preset>) -> Vec<String> {
+    match preset.map(|p| p.name.as_str()) {
+        Some(name) if !name.is_empty() => vec!["--agent".to_string(), name.to_string()],
+        _ => vec![],
+    }
+}
+
 pub struct Providers;
 
 impl Providers {
@@ -225,6 +277,7 @@ impl Providers {
             ProviderId::Claude => &CLAUDE,
             ProviderId::Codex => &CODEX,
             ProviderId::Opencode => &OPENCODE,
+            ProviderId::Kimi => &KIMI,
         }
     }
 }
@@ -235,6 +288,7 @@ fn bin_override_key(provider: &str) -> Option<&'static str> {
         "claude" => Some("JUANCODE_CLAUDE_BIN"),
         "codex" => Some("JUANCODE_CODEX_BIN"),
         "opencode" => Some("JUANCODE_OPENCODE_BIN"),
+        "kimi" => Some("JUANCODE_KIMI_BIN"),
         _ => None,
     }
 }
@@ -334,6 +388,7 @@ fn well_known_bin_dirs() -> Vec<String> {
         format!("{home}/.volta/bin"),
         format!("{home}/.npm-global/bin"),
         format!("{home}/.opencode/bin"),
+        format!("{home}/.kimi-code/bin"),
         "/opt/local/bin".into(),
     ]
 }

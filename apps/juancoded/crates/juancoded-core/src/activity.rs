@@ -69,7 +69,7 @@ use std::sync::Arc;
 
 use juancoded_transcripts::TranscriptEvent;
 
-use crate::model::SessionActivity;
+use crate::model::{ProviderId, SessionActivity};
 
 /// Where the one duration the detector measures itself comes from.
 ///
@@ -200,6 +200,9 @@ pub struct ActivityDetector {
     /// When a record last showed the agent alive; the anchor the hold cap is measured
     /// from.
     last_transcript_ms: Option<u64>,
+    /// Whose screen this reads. Only decides which working-footer wordings count: a
+    /// provider's spinner is not evidence of work on any other provider's screen.
+    provider: Option<ProviderId>,
 }
 
 impl Default for ActivityDetector {
@@ -213,6 +216,15 @@ impl ActivityDetector {
         Self::with_clock(Arc::new(MonotonicClock))
     }
 
+    /// A detector for one session's provider. [`ActivityDetector::new`] reads only the
+    /// `esc … interrupt` footer claude, codex and opencode share; kimi paints no such
+    /// footer, so its own spinner frames count too (see [`kimi_working`]).
+    pub fn for_provider(provider: ProviderId) -> Self {
+        let mut det = Self::new();
+        det.provider = Some(provider);
+        det
+    }
+
     pub fn with_clock(clock: Arc<dyn ActivityClock>) -> Self {
         Self {
             state: SessionActivity::Idle,
@@ -223,6 +235,7 @@ impl ActivityDetector {
             pending_tool_calls: HashSet::new(),
             open_tool_calls: HashSet::new(),
             last_transcript_ms: None,
+            provider: None,
         }
     }
 
@@ -271,7 +284,7 @@ impl ActivityDetector {
             };
         }
 
-        let could_be_footer = contains(&scan, INTERRUPT_GATE);
+        let could_be_footer = self.could_be_footer(&scan);
         let could_be_prompt = self.state == SessionActivity::WaitingInput
             || PROMPT_GATE.iter().any(|t| contains(&scan, t.as_bytes()));
         if !could_be_footer && !could_be_prompt {
@@ -282,7 +295,7 @@ impl ActivityDetector {
         }
 
         let screen = screen();
-        if could_be_footer && working_footer(&collapse(&screen.full)) {
+        if could_be_footer && self.working(&screen) {
             let transition = self.transition(SessionActivity::Busy, false);
             return Step {
                 transition,
@@ -375,7 +388,7 @@ impl ActivityDetector {
         }
         let prompt = self.match_prompt(screen);
         if self.state == SessionActivity::Busy {
-            if !demote_stale_footer && working_footer(&collapse(&screen.full)) {
+            if !demote_stale_footer && self.working(screen) {
                 return Step::nothing(); // still working
             }
             if prompt.is_some() {
@@ -460,6 +473,20 @@ impl ActivityDetector {
         })
     }
 
+    /// Whether `scan` holds a byte that could be part of a working footer, which is
+    /// all it takes to be worth re-reading the screen.
+    fn could_be_footer(&self, scan: &[u8]) -> bool {
+        contains(scan, INTERRUPT_GATE)
+            || (self.provider == Some(ProviderId::Kimi)
+                && KIMI_GATES.iter().any(|gate| contains(scan, gate)))
+    }
+
+    /// Whether the settled screen shows the agent mid-turn.
+    fn working(&self, screen: &ScreenText) -> bool {
+        working_footer(&collapse(&screen.full))
+            || (self.provider == Some(ProviderId::Kimi) && kimi_working(&collapse(&screen.bottom)))
+    }
+
     fn match_prompt(&mut self, screen: &ScreenText) -> Option<&'static str> {
         let full = collapse(&screen.full);
         let bottom = collapse(&screen.bottom);
@@ -480,6 +507,10 @@ impl ActivityDetector {
 const PROMPT_GATE: &[&str] = &["?", "❯", "y/n", "trust", "continue", "esc to cancel"];
 /// The working footer's one stable word, gating entry into busy.
 const INTERRUPT_GATE: &[u8] = b"interrupt";
+/// What a kimi spinner frame is made of, as raw bytes, gating the same re-read:
+/// the verb of `⠙ Working…` / `⠹ thinking…`, and the first three bytes of any moon
+/// phase emoji (`🌑`..`🌘`, all `F0 9F 8C ..`).
+const KIMI_GATES: &[&[u8]] = &[b"orking", b"hinking", &[0xF0, 0x9F, 0x8C]];
 /// One byte short of the longest gate token, which is all it takes to catch a token
 /// split across two pty reads.
 const CARRY_BYTES: usize = 14;
@@ -615,6 +646,35 @@ fn working_footer(screen: &str) -> bool {
     false
 }
 
+/// kimi's working frames, which it paints on a line of its own just above the input
+/// box and never alongside `esc to interrupt`:
+///
+/// * `⠙ Working… · Tip: …` and `⠹ thinking…` — a braille spinner and a verb, while the
+///   model is streaming or reasoning;
+/// * `🌖 · Tip: …` — a moon-phase spinner with no verb, while a tool runs.
+///
+/// Anchored at the start of a line, so a transcript quoting those words never reads
+/// as work, and read off the bottom band for the same reason.
+fn kimi_working(bottom: &str) -> bool {
+    bottom.lines().any(|line| {
+        let mut chars = line.trim_start().chars();
+        let Some(glyph) = chars.next() else {
+            return false;
+        };
+        match glyph {
+            '\u{2800}'..='\u{28FF}' => {
+                let rest = chars.as_str().trim_start().to_lowercase();
+                ["working", "thinking"].iter().any(|verb| {
+                    rest.strip_prefix(verb)
+                        .is_some_and(|tail| tail.starts_with('…') || tail.starts_with("..."))
+                })
+            }
+            '\u{1F311}'..='\u{1F318}' => true,
+            _ => false,
+        }
+    })
+}
+
 /// Collapse runs of intra-line whitespace. The grid renders a cursor-positioned
 /// footer segment as the real column gap (many spaces); collapsing restores a
 /// compact line so the distance-bounded matches above land as intended.
@@ -711,6 +771,130 @@ mod tests {
                 notify: true,
                 ended_turn: true
             })
+        );
+    }
+
+    // kimi paints no `esc to interrupt`. These frames are what its TUI really draws
+    // (captured from a live session): a spinner line just above the input box, then
+    // the box and a status line that itself contains the word "thinking".
+    const KIMI_BOX: &str = "\
+ ╭──────────────────────────────╮\n\
+ │ >                            │\n\
+ ╰──────────────────────────────╯\n\
+ Never Ask  K3.1 Pro thinking: high  …/workdir/personal/juancode  main [+1569 -338]\n\
+ context: 26% (64k/256k)";
+
+    fn kimi_screen(spinner: &str) -> ScreenText {
+        let screen = format!("some earlier output\n\n{spinner}\n{KIMI_BOX}");
+        ScreenText::new(screen.clone(), screen)
+    }
+
+    fn kimi_idle() -> ScreenText {
+        kimi_screen("")
+    }
+
+    #[test]
+    fn a_kimi_spinner_frame_enters_busy_and_its_erasure_ends_the_turn() {
+        for frame in [
+            "  ⠙ Working… · Tip: /init: generate AGENTS.md",
+            " ⠹ thinking…",
+            " 🌖 · Tip: /goal next to queue follow-up work while the current goal keeps running",
+        ] {
+            let mut det = ActivityDetector::for_provider(ProviderId::Kimi);
+            let step = det.on_output(frame.as_bytes(), || kimi_screen(frame));
+            assert_eq!(
+                step.transition,
+                Some(Transition {
+                    state: SessionActivity::Busy,
+                    notify: false,
+                    ended_turn: false
+                }),
+                "{frame:?}"
+            );
+            let armed = step.armed.expect("busy must arm a settle");
+
+            // Still painted at the settle: still working, nothing to broadcast.
+            let still = det.settle(armed.generation, false, &kimi_screen(frame));
+            assert_eq!(still.transition, None, "{frame:?}");
+            assert_eq!(det.state(), SessionActivity::Busy);
+
+            // The spinner is gone and only the idle box is left: the turn is over.
+            let done = det.settle(armed.generation, false, &kimi_idle());
+            assert_eq!(
+                done.transition,
+                Some(Transition {
+                    state: SessionActivity::Idle,
+                    notify: true,
+                    ended_turn: true
+                }),
+                "{frame:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kimis_idle_screen_never_opens_a_turn_even_though_its_status_line_says_thinking() {
+        let mut det = ActivityDetector::for_provider(ProviderId::Kimi);
+        // The status line arrives in the same repaint as a keystroke echo.
+        let step = det.on_output(b"K3.1 Pro thinking: high", kimi_idle);
+        assert_eq!(step.transition, None);
+        assert_eq!(det.state(), SessionActivity::Idle);
+    }
+
+    #[test]
+    fn a_kimi_spinner_split_across_two_reads_is_still_seen() {
+        let frame = "  ⠙ Working… · Tip: /tasks";
+        let mut det = ActivityDetector::for_provider(ProviderId::Kimi);
+        let first = det.on_output(b"  \xe2\xa0\x99 Wor", || kimi_screen(frame));
+        assert_eq!(first.transition, None);
+        let second = det.on_output("king… · Tip: /tasks".as_bytes(), || kimi_screen(frame));
+        assert_eq!(
+            second.transition.map(|t| t.state),
+            Some(SessionActivity::Busy)
+        );
+    }
+
+    #[test]
+    fn kimi_words_in_the_transcript_do_not_read_as_work() {
+        let mut det = ActivityDetector::for_provider(ProviderId::Kimi);
+        // Quoted mid-line, e.g. an agent discussing the spinner it is reading.
+        let quoted = kimi_screen("● the log shows ⠙ Working… and 🌖 · Tip: on every frame");
+        assert_eq!(
+            det.on_output("Working…".as_bytes(), || quoted).transition,
+            None
+        );
+
+        // A frame that has scrolled out of the bottom band is history, not the spinner.
+        let scrolled = ScreenText::new("  ⠙ Working… · Tip: /init", KIMI_BOX);
+        assert_eq!(
+            det.on_output("Working…".as_bytes(), || scrolled).transition,
+            None
+        );
+        assert_eq!(det.state(), SessionActivity::Idle);
+    }
+
+    #[test]
+    fn kimis_frames_mean_nothing_on_another_providers_screen() {
+        // A braille spinner is whatever a tool the agent ran happens to print.
+        let frame = "  ⠙ Working… · Tip: /init";
+        let mut det = ActivityDetector::new();
+        let step = det.on_output(frame.as_bytes(), || kimi_screen(frame));
+        assert_eq!(step.transition, None);
+        assert_eq!(det.state(), SessionActivity::Idle);
+
+        let mut claude = ActivityDetector::for_provider(ProviderId::Claude);
+        let step = claude.on_output(frame.as_bytes(), || kimi_screen(frame));
+        assert_eq!(step.transition, None);
+        assert_eq!(claude.state(), SessionActivity::Idle);
+    }
+
+    #[test]
+    fn a_kimi_detector_still_reads_the_shared_interrupt_footer() {
+        let mut det = ActivityDetector::for_provider(ProviderId::Kimi);
+        let step = det.on_output(b"working... esc to interrupt\r\n", footer);
+        assert_eq!(
+            step.transition.map(|t| t.state),
+            Some(SessionActivity::Busy)
         );
     }
 
@@ -836,7 +1020,8 @@ mod tests {
     fn a_window_that_lands_mid_character_does_not_panic() {
         // A markdown table the agent printed: "descriptions" carries an "esc", and
         // 40 bytes on lands inside a box-drawing bar.
-        let table = "\u{2502} \u{2264} 700px \u{2502} descriptions hidden, icon 32px, title 14px \u{2502}";
+        let table =
+            "\u{2502} \u{2264} 700px \u{2502} descriptions hidden, icon 32px, title 14px \u{2502}";
         assert!(!working_footer(table));
         assert!(!near_question(table, "want", 40));
         assert!(working_footer(

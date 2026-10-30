@@ -127,12 +127,26 @@ impl Harness {
     /// screen assertion has already read the first, which shows up much later as a
     /// replay that holds everything twice.
     pub async fn create(&self, cwd: &str, cols: u16, rows: u16, owner: u64) -> String {
+        self.create_as(ProviderId::Claude, cwd, cols, rows, owner)
+            .await
+    }
+
+    /// [`Harness::create`] for a session of a given provider: the stand-in is the same
+    /// shell loop either way, so this is how a test drives one provider's detector.
+    pub async fn create_as(
+        &self,
+        provider: ProviderId,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        owner: u64,
+    ) -> String {
         // Subscribed before the spawn, or the marker can be gone before we listen.
         let mut rx = self.sessions.subscribe();
         let id = self
             .sessions
             .create(CreateRequest {
-                provider: ProviderId::Claude,
+                provider,
                 cwd: cwd.into(),
                 cols,
                 rows,

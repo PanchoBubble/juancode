@@ -185,11 +185,11 @@ impl PresetStore {
 }
 
 /// Whether this provider's mechanism needs the preset's prose rather than its name.
-/// True only for claude: codex and opencode select a definition the user owns.
+/// True only for claude: the others select a definition the user owns.
 pub fn preset_needs_body(provider: ProviderId) -> bool {
     match provider {
         ProviderId::Claude => true,
-        ProviderId::Codex | ProviderId::Opencode => false,
+        ProviderId::Codex | ProviderId::Opencode | ProviderId::Kimi => false,
     }
 }
 

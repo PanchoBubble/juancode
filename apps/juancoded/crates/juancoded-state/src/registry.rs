@@ -687,13 +687,14 @@ impl SessionRegistry {
                 preset: None,
             };
             let id = meta.id.clone();
+            let provider = meta.provider;
             let live = Arc::new(LiveSession {
                 usage: Mutex::new(UsageFold::resuming(meta.usage.as_ref())),
                 meta: Mutex::new(meta),
                 pty: Mutex::new(handle.clone()),
                 scrollback: Mutex::new(ring),
                 grid: Mutex::new(GridState::new(cols, rows_)),
-                activity: Mutex::new(ActivityDetector::new()),
+                activity: Mutex::new(ActivityDetector::for_provider(provider)),
                 program_status: Mutex::new(Vec::new()),
                 program_status_gate: Mutex::new(()),
                 opts: Mutex::new(opts),
@@ -997,7 +998,7 @@ impl SessionRegistry {
             pty: Mutex::new(None),
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
-            activity: Mutex::new(ActivityDetector::new()),
+            activity: Mutex::new(ActivityDetector::for_provider(meta.provider)),
             program_status: Mutex::new(Vec::new()),
             program_status_gate: Mutex::new(()),
             opts: Mutex::new(opts),
@@ -1104,7 +1105,7 @@ impl SessionRegistry {
             pty: Mutex::new(None),
             scrollback: Mutex::new(Ring::new(self.inner.config.scrollback_cap)),
             grid: Mutex::new(GridState::new(req.cols, req.rows)),
-            activity: Mutex::new(ActivityDetector::new()),
+            activity: Mutex::new(ActivityDetector::for_provider(meta.provider)),
             program_status: Mutex::new(Vec::new()),
             program_status_gate: Mutex::new(()),
             opts: Mutex::new(opts),
