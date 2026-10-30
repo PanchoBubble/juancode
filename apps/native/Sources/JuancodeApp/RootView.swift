@@ -117,7 +117,7 @@ private struct WindowContent: View {
             DispatchGraphPanel()
         }
         .sheet(isPresented: $model.showingNewSession) {
-            NewSessionView()
+            NewSessionSheet()
         }
         .sheet(isPresented: $model.showingPromptPalette) {
             PromptPaletteView()
@@ -4154,6 +4154,15 @@ struct NewSessionView: View {
     @State private var agentCount = 1
     @State private var creating = false
     @State private var showingDirPicker = false
+
+    init() {}
+
+    /// Open the full form pre-filled — the provider chooser's "More options…" hands
+    /// over the agent and folder it had picked.
+    init(provider: ProviderId, cwd: String) {
+        _provider = State(initialValue: provider)
+        _cwd = State(initialValue: cwd)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

@@ -2052,21 +2052,29 @@ final class AppModel {
     /// keystroke. Falls back to the New Session sheet when nothing is selected (no
     /// context to clone from).
     func quickNewSession() {
-        guard let sel = selection,
-              let meta = (sessions + externalSessions).first(where: { $0.id == sel }) else {
+        guard let target = newSessionTarget() else {
             showingNewSession = true
             return
         }
-        // The worktree default is keyed by project root (the sidebar toggle writes
-        // `group.cwd`), while `meta.cwd` is where the pty runs — the worktree dir for an
-        // isolated session. Resolve the root before looking the flag up, else ⌘N off a
-        // worktree session misses it and lands in that checkout. Cutting the new worktree
-        // also has to start from the main checkout: the core cuts it off git's
-        // `--show-toplevel`, which from inside a worktree would nest a
-        // `<repo>-worktrees/<name>-worktrees/…` sibling.
-        let root = repoRoot(forSession: meta)
-        let worktree = worktreeDefault(forProject: root)
-        createInFolder(provider: meta.provider, cwd: worktree ? root : meta.cwd, isolateWorktree: worktree)
+        createInFolder(provider: target.provider, cwd: target.cwd, isolateWorktree: target.isolateWorktree)
+    }
+
+    /// Where a new session cloning the selection lands: its agent (or `provider`)
+    /// in its project, honoring the project's worktree default. nil with nothing
+    /// selected. Shared by ⌘N and the ⌘⇧N provider chooser.
+    ///
+    /// The worktree default is keyed by project root (the sidebar toggle writes
+    /// `group.cwd`), while `meta.cwd` is where the pty runs — the worktree dir for an
+    /// isolated session — so the root is resolved before the flag is looked up, else
+    /// a clone off a worktree session misses it and lands in that checkout.
+    func newSessionTarget(provider: ProviderId? = nil) -> NewSessionTarget? {
+        guard let sel = selection,
+              let meta = (sessions + externalSessions).first(where: { $0.id == sel }) else {
+            return nil
+        }
+        return .cloning(provider: provider ?? meta.provider, sessionCwd: meta.cwd,
+                        repoRoot: repoRoot(forSession: meta),
+                        worktreeDefault: { worktreeDefault(forProject: $0) })
     }
 
     /// Create alongside the selected agent, leaving it visible during the spawn.
