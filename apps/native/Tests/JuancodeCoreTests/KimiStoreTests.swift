@@ -31,13 +31,14 @@ import Testing
     }
 
     private func writeIndex(_ home: String, _ lines: [String]) {
+        mkdir(home)
         fm.createFile(
             atPath: (home as NSString).appendingPathComponent("session_index.jsonl"),
             contents: Data(lines.joined(separator: "\n").utf8))
     }
 
     private func indexLine(_ id: String, _ sessionDir: String, _ workDir: String) -> String {
-        #"{\"sessionId\":\"\#(id)\",\"sessionDir\":\"\#(sessionDir)\",\"workDir\":\"\#(workDir)\"}"#
+        #"{"sessionId":"\#(id)","sessionDir":"\#(sessionDir)","workDir":"\#(workDir)"}"#
     }
 
     @Test func anIndexLineAnswersWhenTheStateFileConfirmsTheCwdAndClock() {
@@ -132,8 +133,8 @@ import Testing
             indexLine("ses_early", "sessions/k/ses_early", "/tmp/mine"),
             indexLine("ses_late", "sessions/k/ses_late", "/tmp/mine"),
         ])
-        writeState(home, "sessions/k/ses_early", #"{"createdAt":1_000,"cwd":"/tmp/mine"}"#)
-        writeState(home, "sessions/k/ses_late", #"{"createdAt":5_500,"cwd":"/tmp/mine"}"#)
+        writeState(home, "sessions/k/ses_early", #"{"createdAt":1000,"cwd":"/tmp/mine"}"#)
+        writeState(home, "sessions/k/ses_late", #"{"createdAt":5500,"cwd":"/tmp/mine"}"#)
 
         #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 5_000, home: home) == "ses_late")
         #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 2_000, home: home) == "ses_early")

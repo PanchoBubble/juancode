@@ -62,7 +62,7 @@ describe("dispatch model routing", () => {
     expect(routed.reason).toContain("CLI default");
     expect(
       selectDispatchModel(
-        { prompt: "Fix typo", provider: "kimi" },
+        { prompt: "Fix typo", provider: "kimi", complexity: "complex" },
         { JUANCODE_DISPATCH_KIMI_COMPLEX_MODEL: "kimi-latest" },
       ).model,
     ).toBe("kimi-latest");
