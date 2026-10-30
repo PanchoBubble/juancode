@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import JuancodeCore
 import JuancodeClient
+import JuancodeDesktop
 
 /// State behind the full-width diff-review panel (juancode-a5j), per session: which
 /// base it diffs against, the diff it last loaded, the comments staged on it, and the
@@ -40,10 +41,50 @@ final class DiffReviewModel {
     private(set) var errors: [String: String] = [:]
     private(set) var loading: Set<String> = []
     private(set) var sending: Set<String> = []
-    private(set) var comments: [String: [ReviewComment]] = [:]
+    private(set) var comments: [String: [ReviewComment]] = [:] {
+        didSet { persistDrafts() }
+    }
     var notices: [String: Notice] = [:]
-    private var bases: [String: ReviewBase] = [:]
-    private var prTargets: [String: PrTarget] = [:]
+    private var bases: [String: ReviewBase] = [:] { didSet { persistDrafts() } }
+    private var prTargets: [String: PrTarget] = [:] { didSet { persistDrafts() } }
+    /// Explicit recipients are per PR and survive closing the panel with its notes.
+    private(set) var agentSessionIds: [String: String] = [:] { didSet { persistDrafts() } }
+    private let draftStore = ReviewDraftStore()
+    private var canPersistDrafts = true
+    private(set) var persistenceError: String?
+
+    init() {
+        do {
+            let saved = try draftStore.load()
+            comments = saved.mapValues(\.comments)
+            bases = saved.mapValues(\.base)
+            agentSessionIds = saved.compactMapValues(\.agentSessionId)
+            prTargets = saved.compactMapValues { draft in
+                guard let cwd = draft.cwd, let pr = draft.pr else { return nil }
+                return PrTarget(cwd: cwd, pr: pr)
+            }
+        } catch {
+            canPersistDrafts = false // Preserve unreadable saved work for recovery.
+            persistenceError = "Saved reviews could not be loaded: \(error.localizedDescription)"
+        }
+    }
+
+    var wipIds: [String] { comments.keys.filter { !comments($0).isEmpty }.sorted() }
+
+    private func persistDrafts() {
+        guard canPersistDrafts else { return }
+        let saved = Dictionary(uniqueKeysWithValues: wipIds.map { id in
+            (id, SavedReviewDraft(comments: comments(id), base: base(id),
+                                  cwd: prTargets[id]?.cwd, pr: prTargets[id]?.pr,
+                                  agentSessionId: agentSessionIds[id]))
+        })
+        do {
+            try draftStore.save(saved)
+            persistenceError = nil
+        } catch {
+            persistenceError = "Review notes could not be saved: \(error.localizedDescription)"
+        }
+    }
     @ObservationIgnored fileprivate var watchTokens: [String: WorktreeWatchToken] = [:]
     @ObservationIgnored fileprivate var inFlight: Set<String> = []
     /// A reload asked for while one was in flight, run when it lands.
@@ -53,6 +94,11 @@ final class DiffReviewModel {
     func snapshot(_ id: String) -> Snapshot? { snapshots[id] }
     func comments(_ id: String) -> [ReviewComment] { comments[id] ?? [] }
     func prTarget(_ id: String) -> PrTarget? { prTargets[id] }
+
+    func chooseAgent(_ sessionId: String?, for id: String) {
+        agentSessionIds[id] = sessionId
+        notices[id] = nil
+    }
 
     /// The review id a PR's comments and diff live under — distinct from every
     /// session id, and from the GitHub view's own basket key for the PR.
@@ -159,6 +205,31 @@ extension AppModel {
 
     /// The review the panel shows: the open PR's, else the session's.
     var diffReviewTargetId: String? { diffReviewPrId ?? selection }
+
+    var diffReviewAgentSessions: [SessionMeta] {
+        sessions.filter { $0.kind == .agent && !$0.archived && !isExternal($0.id) }
+    }
+
+    func reopenDiffReview(_ id: String) {
+        if let target = diffReview.prTarget(id) {
+            openPrDiffReview(target.pr, cwd: target.cwd)
+        } else if sessions.contains(where: { $0.id == id }) {
+            selectSidebarSession(id)
+            openDiffReview()
+        } else {
+            errorMessage = "This review's session is no longer available. Its notes are still saved."
+        }
+    }
+
+    func prReviewDelivery(_ id: String) -> PrReviewDelivery {
+        guard let target = diffReview.prTarget(id) else { return .chooseSession }
+        // Keep an invalid explicit choice visible rather than silently rerouting its notes.
+        let tracked = PrAddress.isRemote(cwd: target.cwd)
+            ? trackedPr(url: target.pr.url)
+            : trackedPr(cwd: target.cwd, number: target.pr.number)
+        return .resolve(cwd: target.cwd, chosenSessionId: diffReview.agentSessionIds[id],
+                        trackedSessionId: tracked?.sessionId)
+    }
 
     // MARK: - Loading
 
@@ -326,10 +397,9 @@ extension AppModel {
         }
     }
 
-    /// A PR review goes where the GitHub view's Diff-tab notes go: queued on the
-    /// session tracking the PR (delivered on its next idle), or — untracked — onto a
-    /// new tracking session. The comments are cleared only once the queue write is
-    /// confirmed.
+    /// A PR review is queued on the explicitly chosen agent, the PR's tracker, or
+    /// a new tracker when a local checkout is available. Comments are cleared only
+    /// once the queue write is confirmed.
     ///
     /// Comments staged with `r` go to GitHub instead, first, as one COMMENT review; the
     /// rest then go to the agent. A GitHub failure stops there with everything kept.
@@ -381,24 +451,30 @@ extension AppModel {
         let prompt = diffReviewPrompt(number: pr.number, url: pr.url,
                                       feedback: formatReview(staged, baseLabel: label))
         let sent = Set(staged.map(\.id))
-        // A PR reviewed by URL has no checkout to start a tracking session in, so only
-        // an agent already tracking it (from whichever checkout) can take the comments.
-        let remote = PrAddress.isRemote(cwd: target.cwd)
-        let tracked = remote ? trackedPr(url: pr.url) : trackedPr(cwd: target.cwd, number: pr.number)
-        if remote, tracked == nil {
+        let delivery = prReviewDelivery(id)
+        if delivery == .chooseSession {
             review.setSending(false, id)
-            review.say("No agent tracks PR #\(pr.number). Stage comments with r to post them on GitHub — "
-                       + "your comments are kept.", isError: true, in: id)
+            review.say("Choose an agent session from the Agent menu, then send again. Your comments are kept.",
+                       isError: true, in: id)
             return
         }
-        review.say(tracked == nil
+        review.say(delivery == .trackLocal
                    ? "Tracking PR #\(pr.number) and queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…"
                    : "Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
         let ok: Bool
-        if let tracked {
-            ok = await queuePrompt(sessionId: tracked.sessionId, text: prompt)
-        } else {
+        switch delivery {
+        case .session(let sessionId):
+            guard diffReviewAgentSessions.contains(where: { $0.id == sessionId }) else {
+                review.setSending(false, id)
+                review.say("That agent session is unavailable. Choose another from the Agent menu. Your comments are kept.",
+                           isError: true, in: id)
+                return
+            }
+            ok = await queuePrompt(sessionId: sessionId, text: prompt)
+        case .trackLocal:
             ok = await trackPrAndQueue(pr, cwd: target.cwd, prompt: prompt)
+        case .chooseSession:
+            return
         }
         review.setSending(false, id)
         guard ok else {
@@ -407,7 +483,7 @@ extension AppModel {
             return
         }
         review.removeSent(sent, from: id)
-        review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on PR #\(pr.number)'s agent",
+        review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on the agent session",
                    in: id)
         if diffReviewPrId == id { closeDiffReview() }
     }

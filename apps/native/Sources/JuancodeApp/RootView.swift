@@ -719,6 +719,7 @@ private struct NewSessionToolbarButton: View {
 }
 
 struct SidebarView: View {
+    @State private var wipReviewsExpanded = true
     @Environment(AppModel.self) private var model
     @Environment(SidebarToolbarBridge.self) private var toolbarBridge
 
@@ -1231,6 +1232,33 @@ struct SidebarView: View {
                               lineWidth: filtering ? 1.5 : 1))
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
+            if !model.diffReview.wipIds.isEmpty {
+                DisclosureGroup("WIP reviews (\(model.diffReview.wipIds.count))", isExpanded: $wipReviewsExpanded) {
+                    ForEach(model.diffReview.wipIds, id: \.self) { id in
+                        Button { model.reopenDiffReview(id) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "square.and.pencil")
+                                Text(model.diffReview.prTarget(id).map { "PR #\($0.pr.number) · \($0.pr.title)" }
+                                     ?? model.sessions.first(where: { $0.id == id })?.title ?? "Session review")
+                                    .lineLimit(1).truncationMode(.middle)
+                                Spacer(minLength: 0)
+                                Text("\(model.diffReview.comments(id).count)").foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.vertical, 4)
+                        .clickCursor()
+                    }
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+            }
+            if let error = model.diffReview.persistenceError {
+                Text(error).font(.system(size: 10)).foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+            }
             if filtering {
                 HStack(spacing: 6) {
                     Text("Showing \(filteredVisibleCount(groups)) of \(unfilteredVisibleCount)"

@@ -261,6 +261,7 @@ struct DiffReviewPanel: View {
             if snapshot == nil { model.loadDiffReview(sessionId) }
             syncSelection()
         }
+        .onDisappear { saveDraft() }
         .onChange(of: snapshot) { _, _ in syncSelection() }
         .onChange(of: draft == nil && prompt == nil && reply == nil && globalCommentDraft == nil) { _, closed in
             if closed { keyToken &+= 1 }
@@ -299,6 +300,7 @@ struct DiffReviewPanel: View {
             }
             if review.loading.contains(sessionId) { ProgressView().controlSize(.small) }
             Spacer(minLength: 8)
+            if prTarget != nil { agentMenu }
             if !files.isEmpty {
                 let adds = files.reduce(0) { $0 + $1.additions }
                 let dels = files.reduce(0) { $0 + $1.deletions }
@@ -341,7 +343,7 @@ struct DiffReviewPanel: View {
             .disabled((count == 0 && !hasDraftText) || review.sending.contains(sessionId))
             .help(prTarget == nil
                   ? "Send every comment to the session as one review message (s or ␣w)"
-                  : "Post the r comments on GitHub as one review, and queue the rest on the PR's agent (s or ␣w)")
+                  : "Post the r comments on GitHub as one review, and queue the rest on the chosen agent session (s or ␣w)")
             .clickCursor()
             Button { model.closeDiffReview() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
@@ -351,6 +353,43 @@ struct DiffReviewPanel: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(Color.appPanel)
+    }
+
+    private var agentMenu: some View {
+        Menu {
+            Button("Use PR tracking session (automatic)") {
+                review.chooseAgent(nil, for: sessionId)
+                keyToken &+= 1
+            }
+            Divider()
+            if model.diffReviewAgentSessions.isEmpty {
+                Text("Start an agent session to send it review notes")
+            }
+            ForEach(model.diffReviewAgentSessions, id: \.id) { session in
+                Button {
+                    review.chooseAgent(session.id, for: sessionId)
+                    keyToken &+= 1
+                } label: {
+                    Text("\(session.title) · \(session.provider.rawValue) · \(session.cwd)")
+                }
+            }
+        } label: {
+            Text(agentMenuTitle).lineLimit(1).truncationMode(.middle).frame(maxWidth: 180)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(review.sending.contains(sessionId))
+        .help("Choose the agent session that receives your review notes")
+    }
+
+    private var agentMenuTitle: String {
+        switch model.prReviewDelivery(sessionId) {
+        case .session(let id):
+            let title = model.diffReviewAgentSessions.first { $0.id == id }?.title ?? "Unavailable session"
+            return "Agent: \(title)"
+        case .trackLocal: return "Agent: Track & send"
+        case .chooseSession: return "Agent: Choose session…"
+        }
     }
 
     private func sendLabel(count: Int, toGitHub: Int) -> String {
