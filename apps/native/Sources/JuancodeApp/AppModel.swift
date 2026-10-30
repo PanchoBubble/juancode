@@ -161,9 +161,9 @@ final class AppModel {
             // landing path routes through this setter (juancode-2t6).
             showingGitHub = false
             showingBeads = false
-            // The diff review belongs to the session it was opened on; switching
-            // sessions closes it rather than carrying it over to the next one.
-            if selection != oldValue { showingDiffReview = false }
+            // Any session navigation dismisses the review, including selecting the
+            // session already underneath a PR review.
+            showingDiffReview = false
             // Remember the pane for the next launch to land on. A click-rate plist
             // write, and only when it actually changed.
             if let sel = selection, sel != oldValue, pendingCreate(sel) == nil {
@@ -5697,8 +5697,10 @@ final class AppModel {
 
     /// A sidebar click leaves the chain on the clicked session, even its current tab.
     func selectSidebarSession(_ id: String) {
+        let wasReviewing = showingDiffReview
         chainView = nil
         selection = id
+        if wasReviewing { focusTerminal() }
     }
 
     /// Close the chain view and go back to the selection it was opened from (nothing,

@@ -1257,7 +1257,7 @@ struct SidebarView: View {
             // click and breaks selection entirely on macOS. We never write nil back, so
             // the real selection (and its keep-alive pane) survives.
             List(selection: Binding(
-                get: { model.showingGitHub || model.showingBeads || model.chainView != nil ? nil : model.selection },
+                get: { model.showingGitHub || model.showingBeads || model.showingDiffReview || model.chainView != nil ? nil : model.selection },
                 set: { newValue in
                     if model.showingGitHub { model.showingGitHub = false }
                     if let newValue { model.selectSidebarSession(newValue) }
