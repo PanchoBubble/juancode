@@ -381,11 +381,12 @@ pub const GH_PR_LIST_LIMIT: usize = 100;
 
 /// The `gh pr list --json` fields the wire shape is built from. `assignees` powers the
 /// "assigned to me" filter, `createdAt`/`reviewDecision`/`reviewRequests` drive the age
-/// chip and the triage group, and the three size fields let a shipped PR read the way
-/// the working tree does.
+/// chip and the triage group, `latestReviews` preserves reviewers after GitHub clears
+/// their requests, and the three size fields let a shipped PR read the way the working
+/// tree does.
 const LIST_FIELDS: &str =
     "number,title,url,headRefName,baseRefName,isCrossRepository,isDraft,statusCheckRollup,author,\
-assignees,createdAt,reviewDecision,reviewRequests,additions,deletions,changedFiles";
+assignees,createdAt,reviewDecision,reviewRequests,latestReviews,additions,deletions,changedFiles";
 
 /// One open pull request as a client renders it. The field names are the Swift core's,
 /// because the phone console and the desktop decode the same JSON off both cores.
@@ -432,6 +433,9 @@ pub struct PullRequest {
     /// Logins (users) and slugs (teams) with a review requested on this PR.
     #[serde(default)]
     pub review_requests: Vec<String>,
+    /// Logins that submitted a review, retained after GitHub clears their requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additions: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1034,6 +1038,12 @@ pub fn parse_prs(raw: Vec<RawPr>) -> Vec<PullRequest> {
                     .into_iter()
                     .filter_map(|r| r.handle())
                     .collect(),
+                reviewers: p
+                    .latest_reviews
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|r| r.author.and_then(|a| a.login))
+                    .collect(),
                 additions: p.additions,
                 deletions: p.deletions,
                 changed_files: p.changed_files,
@@ -1088,6 +1098,7 @@ pub struct RawPr {
     pub created_at: Option<String>,
     pub review_decision: Option<String>,
     pub review_requests: Option<Vec<RawReviewRequest>>,
+    pub latest_reviews: Option<Vec<RawReviewer>>,
     pub additions: Option<i64>,
     pub deletions: Option<i64>,
     pub changed_files: Option<i64>,
@@ -1096,6 +1107,11 @@ pub struct RawPr {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawListAuthor {
     pub login: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawReviewer {
+    author: Option<RawListAuthor>,
 }
 
 /// One entry of gh's `reviewRequests`: a user carries `login`, a team carries `slug`
@@ -1365,9 +1381,16 @@ pub fn review_payload(body: &str, comments: &[ReviewCommentDraft]) -> serde_json
             let mut o = serde_json::json!({
                 "path": c.path, "line": c.line, "side": c.side, "body": c.body,
             });
-            if let Some(start) = c.start_line.filter(|s| *s != c.line || c.start_side.is_some()) {
+            if let Some(start) = c
+                .start_line
+                .filter(|s| *s != c.line || c.start_side.is_some())
+            {
                 o["start_line"] = start.into();
-                o["start_side"] = c.start_side.clone().unwrap_or_else(|| c.side.clone()).into();
+                o["start_side"] = c
+                    .start_side
+                    .clone()
+                    .unwrap_or_else(|| c.side.clone())
+                    .into();
             }
             o
         })
@@ -1668,6 +1691,7 @@ fragment prBits on PullRequest {
   reviewRequests(first: 10) {
     nodes { requestedReviewer { ... on User { login } ... on Team { slug } } }
   }
+  latestReviews(first: 10) { nodes { author { login } } }
   reviewThreads(first: 100) { nodes { isResolved } }
   rollup: commits(last: 1) {
     nodes {
@@ -1783,6 +1807,7 @@ struct RawViewerPr {
     assignees: Option<RawViewerLogins>,
     review_decision: Option<String>,
     review_requests: Option<RawViewerRequests>,
+    latest_reviews: Option<RawViewerReviews>,
     review_threads: Option<RawViewerThreads>,
     rollup: Option<RawViewerRollup>,
 }
@@ -1796,6 +1821,11 @@ struct RawViewerRepo {
 #[derive(Debug, Deserialize)]
 struct RawViewerLogins {
     nodes: Option<Vec<RawListAuthor>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawViewerReviews {
+    nodes: Option<Vec<RawReviewer>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1912,6 +1942,16 @@ fn viewer_pull_request(raw: &RawViewerPr) -> Option<PullRequest> {
                             .clone()
                             .and_then(RawReviewRequest::handle)
                     })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        reviewers: raw
+            .latest_reviews
+            .as_ref()
+            .and_then(|r| r.nodes.as_ref())
+            .map(|n| {
+                n.iter()
+                    .filter_map(|r| r.author.as_ref().and_then(|a| a.login.clone()))
                     .collect()
             })
             .unwrap_or_default(),
@@ -2067,9 +2107,18 @@ mod tests {
             close_pr_args("https://ghe.corp/acme/widgets/pull/7/files").unwrap()[4],
             "ghe.corp/acme/widgets"
         );
-        assert_eq!(close_pr_args("https://github.com/acme/widgets/issues/42"), None);
-        assert_eq!(close_pr_args("https://github.com/acme/widgets/pull/x"), None);
-        assert_eq!(close_pr_args("https://github.com/acme/widgets/pull/0"), None);
+        assert_eq!(
+            close_pr_args("https://github.com/acme/widgets/issues/42"),
+            None
+        );
+        assert_eq!(
+            close_pr_args("https://github.com/acme/widgets/pull/x"),
+            None
+        );
+        assert_eq!(
+            close_pr_args("https://github.com/acme/widgets/pull/0"),
+            None
+        );
         assert_eq!(close_pr_args("42"), None);
     }
 
@@ -2379,6 +2428,23 @@ mod list_tests {
             "a decision this core does not know is not a demand for changes"
         );
         assert_eq!(out[0].review_requests, vec!["hubber", "platform"]);
+    }
+
+    #[test]
+    fn submitted_reviewers_survive_after_their_requests_clear() {
+        let out = parse_prs(vec![RawPr {
+            review_decision: Some("APPROVED".into()),
+            review_requests: Some(vec![]),
+            latest_reviews: Some(vec![
+                RawReviewer {
+                    author: Some(author("hubber")),
+                },
+                RawReviewer::default(),
+            ]),
+            ..raw(9)
+        }]);
+        assert!(out[0].review_requests.is_empty());
+        assert_eq!(out[0].reviewers, vec!["hubber"]);
     }
 
     #[test]
@@ -2874,6 +2940,7 @@ mod viewer_tests {
                  "repository":{{"nameWithOwner":"{repo}"}},"author":{{"login":"{author}"}},
                  "assignees":{{"nodes":[]}},"reviewDecision":null,
                  "reviewRequests":{{"nodes":[{{"requestedReviewer":{{"login":"octocat"}}}}]}},
+                 "latestReviews":{{"nodes":[{{"author":{{"login":"hubber"}}}}]}},
                  "reviewThreads":{{"nodes":[{{"isResolved":false}},{{"isResolved":true}}]}},
                  "rollup":{{"nodes":[{{"commit":{{"statusCheckRollup":{{"contexts":{{"nodes":[
                    {{"status":"COMPLETED","conclusion":"SUCCESS"}},
@@ -2894,6 +2961,7 @@ mod viewer_tests {
         assert_eq!(row.pr.passed_count, 1);
         assert_eq!(row.pr.unresolved_comments, 1);
         assert_eq!(row.pr.review_requests, vec!["octocat".to_string()]);
+        assert_eq!(row.pr.reviewers, vec!["hubber".to_string()]);
         assert_eq!(row.pr.changed_files, Some(3));
     }
 

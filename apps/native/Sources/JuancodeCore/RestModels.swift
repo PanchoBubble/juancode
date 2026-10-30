@@ -244,6 +244,15 @@ public struct PullRequest: Codable, Sendable, Equatable {
     /// Logins (users) and slugs (teams) with a review requested on this PR — powers
     /// "your review is requested" triage.
     public var reviewRequests: [String]
+    /// Logins that submitted a review. GitHub clears reviewRequests after they do;
+    /// optional so lists from older daemons still decode.
+    public var reviewers: [String]?
+    /// Pending and submitted reviewers, without duplicates, for assignment display.
+    public var assignedReviewers: [String] {
+        reviewRequests + (reviewers ?? []).filter { reviewer in
+            !reviewRequests.contains { $0.caseInsensitiveCompare(reviewer) == .orderedSame }
+        }
+    }
     /// Size of the PR's diff against its base, as gh reports it. Optional so a frame
     /// from a client that predates these fields still decodes (the `trackPr` path
     /// carries a whole `PullRequest` over the wire). Read `diffCounts`.
@@ -269,7 +278,7 @@ public struct PullRequest: Codable, Sendable, Equatable {
                 draft: Bool, checks: PrChecks, author: String, assignees: [String] = [],
                 checkCount: Int = 0, passedCount: Int = 0, unresolvedComments: Int = 0,
                 createdAt: String? = nil, reviewDecision: String? = nil,
-                reviewRequests: [String] = [], additions: Int? = nil,
+                reviewRequests: [String] = [], reviewers: [String] = [], additions: Int? = nil,
                 deletions: Int? = nil, changedFiles: Int? = nil,
                 baseBranch: String? = nil, isCrossRepository: Bool? = nil,
                 stack: PrStackMetadata? = nil, stackKnown: Bool? = nil) {
@@ -280,7 +289,7 @@ public struct PullRequest: Codable, Sendable, Equatable {
         self.checkCount = checkCount; self.passedCount = passedCount
         self.unresolvedComments = unresolvedComments
         self.createdAt = createdAt; self.reviewDecision = reviewDecision
-        self.reviewRequests = reviewRequests
+        self.reviewRequests = reviewRequests; self.reviewers = reviewers
         self.additions = additions; self.deletions = deletions
         self.changedFiles = changedFiles
     }

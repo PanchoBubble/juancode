@@ -541,11 +541,11 @@ struct GitHubQueueBadge: View {
 
         private var reviewAssignmentIcons: some View {
             HStack(spacing: 4) {
-                let assigned = !pr.reviewRequests.isEmpty || reviewAssignedToMe
+                let assigned = !pr.assignedReviewers.isEmpty || reviewAssignedToMe
                 Image(systemName: assigned ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
                     .foregroundStyle(assigned ? Color.secondary : Color.orange)
                     .help(assigned
-                        ? "Review assigned" + (pr.reviewRequests.isEmpty ? "" : ": " + pr.reviewRequests.joined(separator: ", "))
+                        ? "Review assigned" + (pr.assignedReviewers.isEmpty ? "" : ": " + pr.assignedReviewers.joined(separator: ", "))
                         : "No reviewer assigned")
                     .accessibilityLabel(assigned ? "Review assigned" : "No reviewer assigned")
                 if reviewAssignedToMe {

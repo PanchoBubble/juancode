@@ -8,13 +8,13 @@ import XCTest
 
 private func pr(_ n: Int, author: String = "octocat", assignees: [String] = [],
                 checks: PrChecks = .passing, unresolved: Int = 0, draft: Bool = false,
-                decision: String? = nil, requests: [String] = [],
+                decision: String? = nil, requests: [String] = [], reviewers: [String] = [],
                 title: String = "", branch: String = "b",
                 url: String = "u") -> PullRequest {
     PullRequest(number: n, title: title.isEmpty ? "t\(n)" : title, url: url, branch: branch,
                 draft: draft, checks: checks, author: author, assignees: assignees,
                 unresolvedComments: unresolved, reviewDecision: decision,
-                reviewRequests: requests)
+                reviewRequests: requests, reviewers: reviewers)
 }
 
 final class PrAgeLabelTests: XCTestCase {
@@ -59,6 +59,14 @@ final class RepoSlugTests: XCTestCase {
 }
 
 final class PrListShapingTests: XCTestCase {
+    func testSubmittedReviewersSurviveAfterTheirRequestsClear() {
+        let approved = pr(42, decision: "APPROVED", reviewers: ["Hubber", "octocat"])
+        XCTAssertEqual(approved.assignedReviewers, ["Hubber", "octocat"])
+
+        let stillPending = pr(43, requests: ["hubber"], reviewers: ["Hubber", "octocat"])
+        XCTAssertEqual(stillPending.assignedReviewers, ["hubber", "octocat"])
+    }
+
     func testPrBackfillQueryBuildsScopedQualifiers() {
         XCTAssertEqual(prBackfillQuery(mine: true, assigned: false, query: "", viewer: "octocat"),
                        "state:open author:octocat")
@@ -241,12 +249,13 @@ final class ViewerPrQueueTests: XCTestCase {
            "pr":{"number":7,"title":"t","url":"u","branch":"b","draft":false,
                  "checks":"passing","checkCount":0,"passedCount":0,
                  "unresolvedComments":0,"author":"hubber","assignees":[],
-                 "reviewRequests":[]}}]}
+                 "reviewRequests":[],"reviewers":["octocat"]}}]}
         """
         let decoded = try JSONDecoder().decode(ViewerPrResult.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.reviewing.count, 1)
         XCTAssertEqual(decoded.rows.first?.id, "o/a#7")
         XCTAssertEqual(decoded.rows.first?.attention, .reviewRequested)
+        XCTAssertEqual(decoded.rows.first?.pr.assignedReviewers, ["octocat"])
         XCTAssertEqual(viewerPrsNeedingYou(decoded), 1)
     }
 }
