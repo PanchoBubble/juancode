@@ -2588,16 +2588,16 @@ struct SessionRow: View {
     }
 
     var body: some View {
-        // firstTextBaseline so the status dot and any trailing ornament sit on the
+        // firstTextBaseline so the provider icon and any trailing ornament sit on the
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                statusIndicator
+            if meta.kind == .agent {
+                ProviderIcon(provider: meta.provider)
                     .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
-                if meta.kind == .agent {
-                    ProviderIcon(provider: meta.provider)
-                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
-                }
+            } else {
+                Color.clear
+                    .frame(width: 12, height: 12)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             }
             VStack(alignment: .leading, spacing: 2) {
                 highlightedTitle.lineLimit(1)
@@ -2645,6 +2645,14 @@ struct SessionRow: View {
             trailingOrnament
         }
         .padding(.vertical, 3)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(statusRailColor)
+                .frame(width: 2)
+                .offset(x: -4)
+                .help(statusRailHelp)
+                .accessibilityLabel(statusRailHelp)
+        }
         // Floated, not laid out: see `hoverActions`.
         .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
@@ -2856,10 +2864,31 @@ struct SessionRow: View {
         }
     }
 
-    /// Status glyph in the leading slot — the shared agent-state vocabulary.
-    private var statusIndicator: some View {
-        SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                          unread: unread, activating: activating)
+    private var showsDone: Bool {
+        live && activity != .busy && activity != .waitingInput && unseenDone
+    }
+
+    private var statusRailColor: Color {
+        if activating { return .accentColor }
+        if showsDone { return .green }
+        if unread { return .red }
+        return sessionDotColor(live: live, activity: activity)
+    }
+
+    private var statusRailHelp: String {
+        if activating { return "Resuming session…" }
+        if showsDone { return "Finished since you last looked — click to view" }
+        let status: String
+        if !live {
+            status = "Session has exited"
+        } else {
+            switch activity {
+            case .busy: status = "Agent is working"
+            case .waitingInput: status = "Waiting for your reply"
+            case .idle, .none: status = "Agent is running"
+            }
+        }
+        return unread ? "\(status) — unread" : status
     }
 }
 
@@ -2868,8 +2897,8 @@ struct SessionRow: View {
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
 /// green check (only until the session is viewed), live-but-idle = blue dot,
 /// exited = quiet grey dot.
-/// Shared by the sidebar `SessionRow` and the ⌘K jump palette (juancode-dr0) so
-/// the two surfaces never drift into different vocabularies.
+/// Shared by the Oracle dock and the ⌘K jump palette (juancode-dr0) so the two
+/// surfaces never drift into different vocabularies.
 struct SessionStateGlyph: View {
     let live: Bool
     let activity: SessionActivity?

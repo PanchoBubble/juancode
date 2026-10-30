@@ -70,6 +70,7 @@ cp "$BIN" "$APP/Contents/MacOS/juancode.new"
 mv -f "$APP/Contents/MacOS/juancode.new" "$APP/Contents/MacOS/juancode"
 # App icon (regenerate with: swift scripts/make-icon.swift).
 [ -f "$NATIVE/AppIcon.icns" ] && cp -f "$NATIVE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp -R "$NATIVE/.build/$CONFIG/Juancode_JuancodeApp.bundle" "$APP/Contents/Resources/"
 
 # The source identity of this bundle, so the app can notice later that the checkout
 # has moved past it (juancode-b06m). Tolerated failing: an unstamped bundle just makes
