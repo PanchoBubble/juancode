@@ -1760,6 +1760,109 @@ pub async fn pr_diff_url(reference: &PrUrl) -> Result<DiffResult, GhError> {
     parse_pr_diff(out)
 }
 
+#[derive(Debug, Serialize)]
+pub struct PrFileContent {
+    pub text: String,
+    pub diff: String,
+}
+
+/// Read the PR head's blob, including for forks and URL-only reviews. Never use
+/// the local checkout: it may belong to an entirely different branch.
+pub async fn pr_file(
+    cwd: &str,
+    number: i64,
+    reference: Option<&PrUrl>,
+    path: &str,
+) -> Result<PrFileContent, GhError> {
+    if path.is_empty() || path.starts_with('/') || path.split('/').any(|p| p == "..") {
+        return Err(GhError("a repository-relative file path required".into()));
+    }
+    let nwo = match reference {
+        Some(r) => format!("{}/{}", r.owner, r.repo),
+        None => repo_nwo(cwd)
+            .await
+            .ok_or_else(|| GhError("Could not resolve repository".into()))?,
+    };
+    let (owner, name) = nwo
+        .split_once('/')
+        .ok_or_else(|| GhError("Invalid repository".into()))?;
+    let host = reference.map(|r| r.host.as_str());
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid headRepository { name owner { login } } } } }";
+    let raw = graphql_on(
+        cwd,
+        host,
+        query,
+        &[("owner", owner), ("name", name)],
+        &[("number", number)],
+    )
+    .await
+    .ok_or_else(|| GhError("Could not resolve PR head".into()))?;
+    let data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| GhError(e.to_string()))?;
+    let pr = &data["data"]["repository"]["pullRequest"];
+    let sha = pr["headRefOid"]
+        .as_str()
+        .ok_or_else(|| GhError("PR head is unavailable".into()))?;
+    let head_owner = pr["headRepository"]["owner"]["login"]
+        .as_str()
+        .unwrap_or(owner);
+    let head_name = pr["headRepository"]["name"].as_str().unwrap_or(name);
+    let diff = match reference {
+        Some(r) => pr_diff_url(r).await?,
+        None => pr_diff(cwd, number).await?,
+    };
+    let file = diff
+        .files
+        .into_iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| GhError("File is no longer in this PR diff; refresh the review".into()))?;
+    let refreshed = graphql_on(
+        cwd,
+        host,
+        query,
+        &[("owner", owner), ("name", name)],
+        &[("number", number)],
+    )
+    .await
+    .ok_or_else(|| GhError("Could not verify PR head".into()))?;
+    let refreshed: serde_json::Value =
+        serde_json::from_str(&refreshed).map_err(|e| GhError(e.to_string()))?;
+    if refreshed["data"]["repository"]["pullRequest"]["headRefOid"].as_str() != Some(sha) {
+        return Err(GhError(
+            "PR changed while loading context; refresh the review".into(),
+        ));
+    }
+    let expression = format!("{sha}:{path}");
+    let query = "query($owner: String!, $name: String!, $expression: String!) { repository(owner: $owner, name: $name) { object(expression: $expression) { ... on Blob { text isBinary } } } }";
+    let raw = graphql_on(
+        cwd,
+        host,
+        query,
+        &[
+            ("owner", head_owner),
+            ("name", head_name),
+            ("expression", &expression),
+        ],
+        &[],
+    )
+    .await
+    .ok_or_else(|| GhError("Could not read PR file".into()))?;
+    let data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| GhError(e.to_string()))?;
+    let blob = &data["data"]["repository"]["object"];
+    if blob["isBinary"].as_bool() == Some(true) {
+        return Err(GhError(
+            "Full context is unavailable for binary files".into(),
+        ));
+    }
+    let text = blob["text"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| GhError("PR file is unavailable or too large".into()))?;
+    Ok(PrFileContent {
+        text,
+        diff: file.diff,
+    })
+}
+
 fn parse_pr_diff(out: GhOutput) -> Result<DiffResult, GhError> {
     if !out.ok {
         return Err(GhError(gh_error_reason(&out)));

@@ -273,6 +273,8 @@ public func reviewFileOrder(_ files: [DiffFile]) -> [String] {
 public enum ReviewKeyCommand: Sendable, Equatable {
     case down(Int), up(Int)
     case left, right
+    case columns(Int)
+    case wordForward(Int), wordBackward(Int), wordEnd(Int), lineStart, lineEnd
     /// `gg`, or `<n>gg` / `<n>G` to a line number.
     case top, bottom, goToLine(Int)
     case halfPageDown, halfPageUp
@@ -358,8 +360,8 @@ public struct ReviewKeyParser: Sendable {
         case .enter: pending = ""; return .activate
         case .down: pending = ""; return .down(count)
         case .up: pending = ""; return .up(count)
-        case .left: pending = ""; return .left
-        case .right: pending = ""; return .right
+        case .left: pending = ""; return count == 1 ? .left : .columns(-count)
+        case .right: pending = ""; return count == 1 ? .right : .columns(count)
         case .pageDown: pending = ""; return .halfPageDown
         case .pageUp: pending = ""; return .halfPageUp
         case .home: pending = ""; return .top
@@ -410,8 +412,13 @@ public struct ReviewKeyParser: Sendable {
         switch c {
         case "j": return .down(count)
         case "k": return .up(count)
-        case "h": return .left
-        case "l": return .right
+        case "h": return count == 1 ? .left : .columns(-count)
+        case "l": return count == 1 ? .right : .columns(count)
+        case "w": return .wordForward(count)
+        case "b": return .wordBackward(count)
+        case "e": return .wordEnd(count)
+        case "0": return .lineStart
+        case "$": return .lineEnd
         case "G": return hasCount ? .goToLine(count) : .bottom
         case "}": return .nextHunk(count)
         case "{": return .prevHunk(count)

@@ -90,6 +90,9 @@ struct DiffReviewPanel: View {
     @State private var selectedPath: String?
     @State private var collapsedDirs: Set<String> = []
     @State private var treeCursor: String?
+    @State private var cursorColumn = 0
+    @State private var fullContext = false
+    @State private var contextLoading = false
     @State private var cursor: Item?
     /// The other end of a visual selection; non-nil means visual mode.
     @State private var anchor: Item?
@@ -637,14 +640,41 @@ struct DiffReviewPanel: View {
                 }
             }
             // Parse + highlight off-main, once per file content.
-            .task(id: file.map { "\($0.path)\u{0}\($0.diff)" }) {
+            .task(id: file.map { "\($0.path)\u{0}\($0.diff)\u{0}\(fullContext)\u{0}\(snapshot?.base.rawValue ?? "")" }) {
                 guard let file else { rendered = nil; return }
                 let previous = rendered
                 let generation = (previous?.generation ?? 0) &+ 1
+                contextLoading = fullContext
+                var expandedRows: [ReviewRow]?
+                if fullContext {
+                    do {
+                        let source: String
+                        if file.status == .deleted {
+                            source = ""
+                        } else if let target = prTarget, let reads = model.core.github {
+                            source = try await reads.prFile(cwd: target.cwd, number: target.pr.number, file: file)
+                        } else if prTarget == nil, snapshot?.base != .staged,
+                                  let cwd = model.gitCwd(of: sessionId) {
+                            source = try await model.core.readFile(cwd: cwd, path: file.path)
+                        } else {
+                            throw ReviewContextError.mismatch
+                        }
+                        expandedRows = try reviewExpandedRows(for: file, source: source)
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        contextLoading = false
+                        fullContext = false
+                        review.say(error.localizedDescription, isError: true, in: sessionId)
+                        return
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                let rows = expandedRows
                 let out = await Task.detached(priority: .userInitiated) {
-                    RenderedReviewFile.compute(file, generation: generation)
+                    RenderedReviewFile.compute(file, generation: generation, expandedRows: rows)
                 }.value
                 guard !Task.isCancelled else { return }
+                contextLoading = false
                 rendered = out
                 frames.reset()
                 restoreCursor(after: previous, in: out)
@@ -774,6 +804,22 @@ struct DiffReviewPanel: View {
                 .lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
             Spacer(minLength: 6)
+            if !showingMarkdown {
+                if contextLoading { ProgressView().controlSize(.mini) }
+                Button {
+                    anchor = nil
+                    fullContext.toggle()
+                    keyToken &+= 1
+                } label: {
+                    Label(fullContext ? "Changes only" : "Full context",
+                          systemImage: fullContext ? "arrow.up.and.down.righttriangle.up.righttriangle.down" : "arrow.up.and.down")
+                }
+                .controlSize(.small)
+                .disabled(contextLoading || file.binary || file.truncated || (prTarget == nil && snapshot?.base == .staged)
+                          || draft != nil || reply != nil)
+                .help("Show or hide unchanged code between diff hunks. PR context comes from the PR head.")
+                .clickCursor()
+            }
             if isMarkdown {
                 Picker("Markdown view", selection: $markdownPreview) {
                     Text("Diff").tag(false)
@@ -815,6 +861,7 @@ struct DiffReviewPanel: View {
                             ReviewRowView(
                                 generation: rf.generation, index: i, row: row, text: rf.text[i],
                                 isCursor: cursor == item && focus == .diff,
+                                column: cursorColumn,
                                 isSelected: selected.contains(i),
                                 hasComment: row.line.map { commentedKeys.contains(reviewLineKey($0)) } ?? false,
                                 highlight: pattern.flatMap { reviewRowMatches(row, pattern: $0) ? $0 : nil })
@@ -997,7 +1044,7 @@ struct DiffReviewPanel: View {
                  ? "⏎ accept · esc cancel"
                  : isShowingGlobalComments
                     ? "⏎ / gcc add PR comment · gt/gT file · R refresh · ␣n tree · q / esc esc close"
-                    : "gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close")
+                    : "h/l move · w/b/e word · 0/$ line · gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
         }
@@ -1070,6 +1117,7 @@ struct DiffReviewPanel: View {
     private func openFile(_ path: String) {
         if path != selectedPath {
             selectedPath = path
+            cursorColumn = 0
             cursor = nil
             anchor = nil
             draft = nil
@@ -1263,7 +1311,12 @@ struct DiffReviewPanel: View {
             anchor = nil
         case .close:
             model.closeDiffReview()
-        case .left, .right, .send, .toggleTree, .focusTree, .focusDiff, .refresh,
+        case .left, .right, .columns, .wordForward, .wordBackward, .wordEnd, .lineStart, .lineEnd:
+            if case .row(let i)? = cursor, let rf = rendered, rf.rows.indices.contains(i),
+               let line = rf.rows[i].line {
+                cursorColumn = reviewColumn(in: line.text, from: cursorColumn, command: command)
+            }
+        case .send, .toggleTree, .focusTree, .focusDiff, .refresh,
              .findFiles, .findText, .searchForward, .searchBackward, .searchNext, .searchPrev:
             break
         }
@@ -1635,6 +1688,7 @@ struct DiffReviewPanel: View {
     }
 
     private func openDraft(toGitHub: Bool = false) {
+        guard !contextLoading else { return }
         // On a GitHub thread, "comment here" means reply to it.
         if anchor == nil, case .thread(let id)? = cursor {
             openReply(id)
@@ -1658,6 +1712,16 @@ struct DiffReviewPanel: View {
         }
         // The editor goes under the last CODE line of the range, where the comment
         // will render once saved.
+        if toGitHub, fullContext, let file {
+            let originalKeys = Set(reviewRows(for: file).compactMap { $0.line.map(reviewLineKey) })
+            guard (lo...hi).allSatisfy({ i in
+                rf.rows[i].line.map { originalKeys.contains(reviewLineKey($0)) } ?? true
+            }) else {
+                review.say("GitHub comments must be on lines in the PR diff. Use gcc to comment for the agent on expanded context.",
+                           isError: true, in: sessionId)
+                return
+            }
+        }
         let last = (lo...hi).last { rf.rows[$0].line != nil } ?? hi
         draftSerial &+= 1
         draft = Draft(serial: draftSerial, from: lo, to: last, editId: nil, text: "", toGitHub: toGitHub)
@@ -1665,7 +1729,7 @@ struct DiffReviewPanel: View {
     }
 
     private func beginEdit(_ c: ReviewComment) {
-        guard let rf = rendered else { return }
+        guard !contextLoading, let rf = rendered else { return }
         let at = reviewRowIndex(forKey: c.endKey, in: rf.rows) ?? 0
         draftSerial &+= 1
         draft = Draft(serial: draftSerial, from: at, to: at, editId: c.id, text: c.text,
@@ -1829,7 +1893,7 @@ struct RenderedReviewFile: Equatable, Sendable {
     static func == (a: Self, b: Self) -> Bool { a.generation == b.generation }
 
     /// Pure — safe to run in `Task.detached`.
-    static func compute(_ file: DiffFile, generation: Int) -> RenderedReviewFile {
+    static func compute(_ file: DiffFile, generation: Int, expandedRows: [ReviewRow]? = nil) -> RenderedReviewFile {
         let rows = reviewRows(for: file)
         // `RenderedFileDiff` already has the Changes panel's highlighting (syntax,
         // marker tint, word-level intraline); its lines are ours in the same order.
@@ -1849,6 +1913,23 @@ struct RenderedReviewFile: Equatable, Sendable {
                 }
                 return s
             }
+        }
+        if let expandedRows {
+            let byKey = Dictionary(rows.enumerated().compactMap { i, row in
+                row.line.map { (reviewLineKey($0), text[i]) }
+            }, uniquingKeysWith: { first, _ in first })
+            let expandedText = expandedRows.map { row -> AttributedString in
+                switch row {
+                case .line(let line):
+                    if let known = byKey[reviewLineKey(line)], String(known.characters) == line.text {
+                        return known
+                    }
+                    return VimSyntaxPalette.attributed(line.text, tokens: highlightLine(line.text, path: file.path))
+                case .hunk(let header): return AttributedString(header)
+                case .note(let note): return AttributedString(note)
+                }
+            }
+            return RenderedReviewFile(generation: generation, path: file.path, rows: expandedRows, text: expandedText)
         }
         return RenderedReviewFile(generation: generation, path: file.path, rows: rows, text: text)
     }
@@ -1885,6 +1966,7 @@ private struct ReviewRowView: View, Equatable {
     let row: ReviewRow
     let text: AttributedString
     let isCursor: Bool
+    let column: Int
     let isSelected: Bool
     let hasComment: Bool
     /// The search pattern this row matches, highlighted in its text; nil when none.
@@ -1898,6 +1980,7 @@ private struct ReviewRowView: View, Equatable {
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.generation == b.generation && a.index == b.index && a.isCursor == b.isCursor
             && a.isSelected == b.isSelected && a.hasComment == b.hasComment && a.highlight == b.highlight
+            && (!a.isCursor || a.column == b.column)
     }
 
     var body: some View {
@@ -1928,8 +2011,7 @@ private struct ReviewRowView: View, Equatable {
                     .font(.system(size: 12.5, design: .monospaced))
                     .foregroundStyle(markerColor(line.kind))
                     .frame(width: 14, alignment: .leading)
-                Text(highlight.map { reviewHighlighted(text, reviewSmartcaseRanges($0, in: String(text.characters)),
-                                                       background: Self.matchColor) } ?? text)
+                Text(codeText)
                     .font(.system(size: 12.5, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1947,6 +2029,17 @@ private struct ReviewRowView: View, Equatable {
         }
         .overlay(isSelected ? Color.accentColor.opacity(0.20) : Color.clear)
         .overlay(isCursor ? Color.appHairline(0.07) : Color.clear)
+    }
+
+    private var codeText: AttributedString {
+        var code = highlight.map {
+            reviewHighlighted(text, reviewSmartcaseRanges($0, in: String(text.characters)), background: Self.matchColor)
+        } ?? text
+        if isCursor, !code.characters.isEmpty {
+            let at = min(max(0, column), code.characters.count - 1)
+            code = reviewHighlighted(code, [at..<(at + 1)], foreground: Color.appSurface, background: .accentColor)
+        }
+        return code
     }
 
     private func number(_ n: Int?) -> some View {

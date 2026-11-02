@@ -261,6 +261,16 @@ public struct GitHubReads: Sendable {
                       "Could not read the diff for PR #\(number)")
     }
 
+    /// Full source at the PR head, fetched from GitHub rather than the checkout.
+    public func prFile(cwd: String, number: Int, file: DiffFile) async throws -> String {
+        struct Body: Decodable { let text: String; let diff: String }
+        let body: Body = try await ask("/api/pr/file",
+                                      prQuery(cwd: cwd, number: number) + [("path", file.path)],
+                                      "Could not load full PR context")
+        guard body.diff == file.diff else { throw ReviewContextError.mismatch }
+        return body.text
+    }
+
     /// A PR's own metadata, resolved from its URL alone — open, closed or merged, in a
     /// repo with no checkout here. Throws so the "Review PR" sheet can say why.
     public func pr(at address: PrAddress) async throws -> PullRequest {

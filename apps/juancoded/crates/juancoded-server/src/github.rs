@@ -44,6 +44,7 @@ pub fn routes() -> Router<CoreHandles> {
         .route("/api/pr/for-branch", get(pr_for_branch))
         .route("/api/pr", get(pr_by_url))
         .route("/api/pr/diff", get(pr_diff))
+        .route("/api/pr/file", get(pr_file))
         .route("/api/pr/create", post(create_pr))
         .route("/api/pr/comment", post(comment))
         .route("/api/pr/rerun", post(rerun))
@@ -438,6 +439,31 @@ async fn pr_diff(Query(params): Query<PrParams>, State(_): State<CoreHandles>) -
     };
     match result {
         Ok(diff) => Json(diff).into_response(),
+        Err(e) => gh_write_failed(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PrFileParams {
+    #[serde(flatten)]
+    pr: PrParams,
+    path: String,
+}
+
+async fn pr_file(Query(params): Query<PrFileParams>, State(_): State<CoreHandles>) -> Response {
+    let location = match params.pr.parts() {
+        Ok(parts) => parts,
+        Err(response) => return response,
+    };
+    match gh::pr_file(
+        &location.cwd,
+        location.number,
+        location.reference.as_ref(),
+        &params.path,
+    )
+    .await
+    {
+        Ok(content) => Json(content).into_response(),
         Err(e) => gh_write_failed(e),
     }
 }
