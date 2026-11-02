@@ -250,5 +250,9 @@ public func deriveSessionTitle(
         // kimi keeps `title`/`lastPrompt` in the session's `state.json` — no
         // transcript scan either (see KimiStore).
         return KimiStore.title(cliSessionId, home: roots.kimiHome ?? KIMI_HOME)
+    case .copilot:
+        // No title reader for copilot's own session store yet; the session keeps the
+        // title juancode gave it.
+        return nil
     }
 }

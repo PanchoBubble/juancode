@@ -51,6 +51,7 @@ import {
   UnservedRead,
 } from "./session-reads.ts";
 import { dispatch, DispatchConflictError } from "./dispatch.ts";
+import { DISPATCH_PROVIDERS, isDispatchProvider } from "./dispatch-model.ts";
 import { resolveDispatchOrigin } from "./dispatch-origin.ts";
 import { getDispatchStatus, listDispatchStatuses, parseSessionStates } from "./dispatch-status.ts";
 import { waitForDispatch } from "./dispatch-wait.ts";
@@ -165,7 +166,7 @@ function buildServer(): McpServer {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
         provider: z
-          .enum(["claude", "codex", "opencode", "kimi"])
+          .enum(DISPATCH_PROVIDERS)
           .optional()
           .describe(
             "Optional provider pin; omitted, routing may choose Claude or Codex by task",
@@ -839,7 +840,7 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
     if (
       (model !== undefined && (typeof model !== "string" || !model.trim())) ||
       (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
-      (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider))
+      (provider !== undefined && !isDispatchProvider(provider))
     ) {
       res.status(400).send("Invalid provider, model, or complexity");
       return;

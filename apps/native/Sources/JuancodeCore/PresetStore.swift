@@ -128,7 +128,7 @@ extension ProviderId {
     var presetNeedsBody: Bool {
         switch self {
         case .claude: return true
-        case .codex, .opencode, .kimi: return false
+        case .codex, .opencode, .kimi, .copilot: return false
         }
     }
 }

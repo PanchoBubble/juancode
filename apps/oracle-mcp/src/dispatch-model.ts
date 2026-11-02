@@ -1,6 +1,14 @@
 // Local routing: no classifier API call and no changes to the CLI's environment.
 export type TaskComplexity = "simple" | "standard" | "complex";
-export type DispatchProvider = "claude" | "codex" | "opencode" | "kimi";
+/** Every CLI a dispatch can name. The one list: the dispatch endpoint, the MCP tool
+ * schema and the cron triggers all validate against it, so adding a provider is a
+ * one-line change here rather than a hunt for each copy. */
+export const DISPATCH_PROVIDERS = ["claude", "codex", "opencode", "kimi", "copilot"] as const;
+export type DispatchProvider = (typeof DISPATCH_PROVIDERS)[number];
+
+export function isDispatchProvider(value: unknown): value is DispatchProvider {
+  return (DISPATCH_PROVIDERS as readonly unknown[]).includes(value);
+}
 export interface ModelSelection {
   provider: DispatchProvider;
   model: string | null;
@@ -25,13 +33,14 @@ const MODELS = {
  * so many models a fixed routing table would be wrong — kimi's aliases are opaque
  * and change too fast to pin here, so a dispatch to kimi runs the CLI's own default
  * unless an explicit model (or a `JUANCODE_DISPATCH_KIMI_*_MODEL` knob) was given.
+ * copilot's catalog depends on the account's plan and policy, so the same goes for it.
  * Everything is configurable through env, so the table's opinion is a starting
  * point, not a mandate. */
 function routingModel(
   provider: DispatchProvider,
   complexity: TaskComplexity,
 ): string | null {
-  if (provider === "opencode" || provider === "kimi") return null;
+  if (provider !== "claude" && provider !== "codex") return null;
   return MODELS[provider][complexity];
 }
 

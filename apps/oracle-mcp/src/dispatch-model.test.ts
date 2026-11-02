@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectDispatchModel } from "./dispatch-model.ts";
+import { isDispatchProvider, selectDispatchModel } from "./dispatch-model.ts";
 
 const select = (prompt: string) => selectDispatchModel({ prompt }, {});
 describe("dispatch model routing", () => {
@@ -66,6 +66,30 @@ describe("dispatch model routing", () => {
         { JUANCODE_DISPATCH_KIMI_COMPLEX_MODEL: "kimi-latest" },
       ).model,
     ).toBe("kimi-latest");
+  });
+  it("does not invent a copilot provider/model either", () => {
+    // copilot's model catalog depends on the account, so a dispatch to it runs the
+    // CLI's own default unless an explicit model or a knob says otherwise.
+    const routed = selectDispatchModel({ prompt: "Fix typo", provider: "copilot" }, {});
+    expect(routed).toMatchObject({ provider: "copilot", model: null });
+    expect(routed.reason).toContain("CLI default");
+    expect(
+      selectDispatchModel(
+        { prompt: "Fix typo", provider: "copilot", complexity: "complex" },
+        { JUANCODE_DISPATCH_COPILOT_COMPLEX_MODEL: "gpt-5" },
+      ).model,
+    ).toBe("gpt-5");
+    expect(
+      selectDispatchModel({ prompt: "Fix typo", provider: "copilot", model: "gpt-5" }, {}).model,
+    ).toBe("gpt-5");
+  });
+  it("accepts every provider the dispatch endpoint advertises, and nothing else", () => {
+    for (const provider of ["claude", "codex", "opencode", "kimi", "copilot"]) {
+      expect(isDispatchProvider(provider)).toBe(true);
+    }
+    for (const bogus of ["gemini", "Copilot", "", undefined, 3]) {
+      expect(isDispatchProvider(bogus)).toBe(false);
+    }
   });
   it("allows account-specific tier mappings and CLI default", () => {
     expect(

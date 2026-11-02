@@ -245,8 +245,51 @@ public enum Providers {
         return ["--model", model]
     }
 
+    /// copilot's `--allow-all` ("Enable all permissions": `--allow-all-tools`,
+    /// `--allow-all-paths` and `--allow-all-urls` in one). Its own spelling of the
+    /// opt-in the session asked for; `--yolo` is the same flag under another name.
+    static func copilotPermArgs(_ skip: Bool) -> [String] {
+        skip ? ["--allow-all"] : []
+    }
+
+    /// copilot's `--agent <name>`, naming a custom agent defined in the user's own
+    /// config — the select-not-append mechanism, like opencode's same flag. It
+    /// combines with `--resume`, so the preset rides on both start and resume.
+    static func copilotPresetArgs(_ preset: Preset?) -> [String] {
+        guard let name = preset?.name, !name.isEmpty else { return [] }
+        return ["--agent", name]
+    }
+
+    /// copilot takes `--model <name>` like the others; names are copilot's own
+    /// (e.g. "gpt-5"), forwarded as given and validated by the CLI.
+    static func copilotModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
+    public static let copilot = ProviderSpec(
+        id: .copilot,
+        label: "GitHub Copilot",
+        pinsSessionId: true,
+        // `--session-id <uuid>` sets the UUID of a NEW session, like claude's: the CLI
+        // adopts ours, so the session is resumable at spawn and there is nothing to
+        // discover. `--resume <id>` then revives that exact conversation.
+        startArgs: { juancodeId, opts in
+            ["--session-id", juancodeId]
+                + copilotPermArgs(opts.skipPermissions)
+                + copilotModelArgs(opts.model)
+                + copilotPresetArgs(opts.preset)
+        },
+        resumeArgs: { cliSessionId, opts in
+            ["--resume", cliSessionId]
+                + copilotPermArgs(opts.skipPermissions)
+                + copilotModelArgs(opts.model)
+                + copilotPresetArgs(opts.preset)
+        }
+    )
+
     public static let all: [ProviderId: ProviderSpec] =
-        [.claude: claude, .codex: codex, .opencode: opencode, .kimi: kimi]
+        [.claude: claude, .codex: codex, .opencode: opencode, .kimi: kimi, .copilot: copilot]
 
     public static func spec(for id: ProviderId) -> ProviderSpec {
         switch id {
@@ -254,6 +297,7 @@ public enum Providers {
         case .codex: return codex
         case .opencode: return opencode
         case .kimi: return kimi
+        case .copilot: return copilot
         }
     }
 }
@@ -477,7 +521,7 @@ public func resolveEditorCommand(_ raw: String = editorCommandString()) -> (exec
 }
 
 /// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` /
-/// `JUANCODE_OPENCODE_BIN` / `JUANCODE_KIMI_BIN`.
+/// `JUANCODE_OPENCODE_BIN` / `JUANCODE_KIMI_BIN` / `JUANCODE_COPILOT_BIN`.
 public struct DefaultBinaryResolver: BinaryResolver {
     public init() {}
 
@@ -489,6 +533,7 @@ public struct DefaultBinaryResolver: BinaryResolver {
         case .codex: return ("codex", env["JUANCODE_CODEX_BIN"])
         case .opencode: return ("opencode", env["JUANCODE_OPENCODE_BIN"])
         case .kimi: return ("kimi", env["JUANCODE_KIMI_BIN"])
+        case .copilot: return ("copilot", env["JUANCODE_COPILOT_BIN"])
         }
     }
 

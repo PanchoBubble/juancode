@@ -9,6 +9,7 @@ public enum ProviderId: String, Codable, Sendable, CaseIterable {
     case codex
     case opencode
     case kimi
+    case copilot
 }
 
 /// Inferred live activity of a running session. Derived from the pty stream

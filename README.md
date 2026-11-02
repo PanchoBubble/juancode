@@ -2,11 +2,11 @@
 
 > One code with Juancode
 
-A native macOS app for running the **real** Claude Code, Codex and opencode CLIs —
+A native macOS app for running the **real** Claude Code, Codex, opencode and GitHub Copilot CLIs —
 with all your MCP servers, auth, and slash commands intact — plus a Telegram/phone
 sidecar so you can fire a task from your desk and steer it from your phone.
 
-It spawns the genuine `claude` / `codex` / `opencode` binaries in a pseudo-terminal. Nothing
+It spawns the genuine `claude` / `codex` / `opencode` / `copilot` binaries in a pseudo-terminal. Nothing
 about your CLI config is intercepted or rewritten, so MCPs that work in your
 terminal work here too (unlike heavier harnesses that re-plumb MCP and drop your
 servers).
@@ -30,7 +30,7 @@ servers).
 - macOS with Xcode 16+ / Swift 6 (for the native app)
 - A Rust toolchain via [rustup](https://rustup.rs) (for the `juancoded` core)
 - Node ≥ 22 (pinned in `.nvmrc`) + [pnpm](https://pnpm.io) — for the sidecar
-- `claude`, `codex` and/or `opencode` installed and authenticated on your PATH
+- `claude`, `codex`, `opencode` and/or `copilot` (`npm i -g @github/copilot`) installed and authenticated on your PATH
 
 ## Quick start
 
@@ -112,6 +112,7 @@ it. See [apps/oracle-mcp/README.md](./apps/oracle-mcp/README.md) for the details
 | `JUANCODE_CLAUDE_BIN`           | `claude`                | Path to the Claude CLI                                |
 | `JUANCODE_CODEX_BIN`            | `codex`                 | Path to the Codex CLI                                 |
 | `JUANCODE_OPENCODE_BIN`         | `opencode`              | Path to the opencode CLI                              |
+| `JUANCODE_COPILOT_BIN`          | `copilot`               | Path to the GitHub Copilot CLI                        |
 | `JUANCODE_OPENCODE_DB`          | _(auto)_                | opencode's SQLite db (titles, usage, resume ids)      |
 | `TELEGRAM_BOT_TOKEN`            | _(unset)_               | Enables the Telegram bridge                           |
 

@@ -191,7 +191,7 @@ impl PresetStore {
 pub fn preset_needs_body(provider: ProviderId) -> bool {
     match provider {
         ProviderId::Claude => true,
-        ProviderId::Codex | ProviderId::Opencode | ProviderId::Kimi => false,
+        ProviderId::Codex | ProviderId::Opencode | ProviderId::Kimi | ProviderId::Copilot => false,
     }
 }
 
@@ -225,6 +225,7 @@ mod tests {
         assert!(!preset_needs_body(ProviderId::Codex));
         assert!(!preset_needs_body(ProviderId::Opencode));
         assert!(!preset_needs_body(ProviderId::Kimi));
+        assert!(!preset_needs_body(ProviderId::Copilot));
     }
 
     #[test]

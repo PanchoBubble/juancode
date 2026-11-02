@@ -25,7 +25,7 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     public var project: String
     /// The seed instruction sent to the agent once its TUI is up.
     public var prompt: String
-    /// `"claude"` (default), `"codex"` or `"opencode"`.
+    /// `"claude"` (default), `"codex"`, `"opencode"`, `"kimi"` or `"copilot"`.
     public var provider: String?
     /// Isolate the dispatched agent in a fresh git worktree off `project`.
     public var worktree: Bool?
@@ -366,7 +366,7 @@ for bounded chores, `standard` for ordinary coding, `complex` for architecture,
 security or risky changes. Include the ticket's scope in the prompt. A bare ticket
 id gives the router no evidence of difficulty.
 
-An explicit `provider` pins the CLI (`claude`, `codex`, `opencode`). An explicit
+An explicit `provider` pins the CLI (`claude`, `codex`, `opencode`, `kimi`, `copilot`). An explicit
 `model` pins its model; `model: "default"` keeps that CLI's configured model.
 `worktree: true` isolates the agent in a fresh git worktree. The response's
 `modelSelection` explains the selection; report it alongside the dispatch outcome.

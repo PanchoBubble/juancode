@@ -1,9 +1,9 @@
 //! Provider parity: what differs per CLI, and what must not.
 //!
-//! The four providers differ in exactly three ways, and each one is asserted here:
+//! The providers differ in exactly three ways, and each one is asserted here:
 //! how their conversation id becomes known, how a permission mode is expressed, and
 //! whether that mode touches the environment at all. Everything else about a spawn is
-//! the same for all four, which is the property the whole daemon exists to keep.
+//! the same for all of them, which is the property the whole daemon exists to keep.
 //!
 //! These build a registry by hand rather than booting the tree, because the seam being
 //! tested is the one the tree fills in: the id scanner. A fake scanner answers at once
@@ -177,33 +177,36 @@ async fn an_opencode_session_is_asked_about_opencodes_own_database() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_claude_session_is_never_asked_because_we_named_its_conversation() {
-    let rig = rig("/bin/sh", &["-c", ECHO_LOOP], Some("should-never-be-used"));
-    let meta = rig
-        .registry
-        .create(request(ProviderId::Claude, "/tmp"))
-        .expect("create");
-    assert_eq!(
-        meta.cli_session_id.as_deref(),
-        Some(meta.id.as_str()),
-        "claude takes our id, so it is resumable at once"
-    );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        rig.asked
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty(),
-        "nothing to discover, so nothing was read off the disk"
-    );
-    // And the id we pinned is still the id.
-    assert_eq!(
-        rig.registry
-            .meta(&meta.id)
-            .and_then(|m| m.cli_session_id.clone())
-            .as_deref(),
-        Some(meta.id.as_str())
-    );
+async fn a_pinned_session_is_never_asked_because_we_named_its_conversation() {
+    // claude and copilot both take `--session-id <ours>`.
+    for provider in [ProviderId::Claude, ProviderId::Copilot] {
+        let rig = rig("/bin/sh", &["-c", ECHO_LOOP], Some("should-never-be-used"));
+        let meta = rig
+            .registry
+            .create(request(provider, "/tmp"))
+            .expect("create");
+        assert_eq!(
+            meta.cli_session_id.as_deref(),
+            Some(meta.id.as_str()),
+            "claude and copilot take our id, so they are resumable at once"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            rig.asked
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "nothing to discover, so nothing was read off the disk"
+        );
+        // And the id we pinned is still the id.
+        assert_eq!(
+            rig.registry
+                .meta(&meta.id)
+                .and_then(|m| m.cli_session_id.clone())
+                .as_deref(),
+            Some(meta.id.as_str())
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -367,6 +370,7 @@ async fn every_provider_inherits_our_environment_untouched_by_the_permission_mod
         ProviderId::Claude,
         ProviderId::Codex,
         ProviderId::Kimi,
+        ProviderId::Copilot,
     ] {
         for skip in [true, false] {
             let rig = rig("/usr/bin/env", &[], None);

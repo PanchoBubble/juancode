@@ -298,7 +298,7 @@ struct OracleRailAccessory: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Start another Oracle on claude, codex or opencode")
+        .help("Start another Oracle on claude, codex, opencode, kimi or copilot")
         .clickCursor()
     }
 }

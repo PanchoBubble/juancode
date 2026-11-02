@@ -2,8 +2,8 @@
 
 ## What juancode is
 
-A **native macOS harness** for running the real `claude` (Claude Code), `codex` and
-`opencode` CLIs, with a Node **Telegram/phone sidecar** for remote steering. Unlike
+A **native macOS harness** for running the real `claude` (Claude Code), `codex`,
+`opencode` and `copilot` (GitHub Copilot) CLIs, with a Node **Telegram/phone sidecar** for remote steering. Unlike
 t3code, it does **not** reimplement the agents or their MCP plumbing — it spawns the
 genuine CLI binaries in a pseudo-terminal with the user's environment inherited
 untouched. That means user-scope MCP servers (`~/.claude.json`), account connectors,
@@ -117,8 +117,9 @@ and push as part of finishing.
 
 - Native app: `cd apps/native && swift run juancode-app` (embedded server on `:4280`).
 - Sidecar: `pnpm dev:oracle` (or `pnpm dev` for every `apps/*` Node package).
-- Requires `claude`, `codex` and/or `opencode` on PATH and authenticated. Override binary
-  paths with `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN` if needed.
+- Requires `claude`, `codex`, `opencode` and/or `copilot` on PATH and authenticated. Override
+  binary paths with `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` / `JUANCODE_OPENCODE_BIN` /
+  `JUANCODE_COPILOT_BIN` if needed.
 
 ## Worktree hygiene
 

@@ -44,6 +44,7 @@ One name, three mechanisms, because the CLIs share nothing here:
 | claude   | `--append-system-prompt <body>` | Appends the body of `<name>.md`. The only true append, and the only one where juancode supplies the prose. |
 | codex    | `--profile <name>` | Layers `$CODEX_HOME/<name>.config.toml`, a file the **user** wrote. |
 | opencode | `--agent <name>` | Selects an agent the **user** defined. Note this *replaces* the prompt rather than appending. |
+| copilot  | `--agent <name>` | Selects a custom agent the **user** defined (`.github/agents`, `~/.copilot/agents`). Rides on resume too. |
 
 That asymmetry is what keeps presets inside the prime directive: for the two CLIs
 that own the concept we select what the user already configured, and we never author
