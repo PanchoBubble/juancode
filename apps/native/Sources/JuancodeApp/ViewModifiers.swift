@@ -222,6 +222,20 @@ enum PanelAutoSize {
 
 // MARK: - Resize handle (juancode-n9y)
 
+/// A shared, wide grip for rail headers and their resize boundaries.
+struct DragGripDots: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(0..<3) { _ in
+                Circle().frame(width: 3, height: 3)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// A draggable splitter with a genuinely usable hit area and clear hover feedback —
 /// the thin 1pt dividers were nearly impossible to grab. The visible line is thin
 /// at rest and thickens + brightens to the accent colour while hovered or dragged,
@@ -244,6 +258,9 @@ struct DragResizeHandle: View {
     /// every intermediate width, so a live drag garbles it; committing once on release
     /// yields a single clean repaint instead.
     var previewOnly: Bool = false
+    /// The rail places its grip just inside the following header. Draw it here
+    /// too because this handle owns the pointer over that header's top edge.
+    var showsRailGrip: Bool = false
 
     /// Width/height of the invisible grab zone.
     private let hit: CGFloat = 14
@@ -275,6 +292,13 @@ struct DragResizeHandle: View {
         }
         .frame(width: axis == .vertical ? hit : nil,
                height: axis == .horizontal ? hit : nil)
+        .overlay {
+            if showsRailGrip && active {
+                DragGripDots()
+                    .offset(y: 4.5)
+                    .allowsHitTesting(false)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { h in
             hovering = h

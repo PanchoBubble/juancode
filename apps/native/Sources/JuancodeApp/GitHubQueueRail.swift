@@ -200,7 +200,8 @@ struct RightRailPanels: View {
                                                  value: heightBinding(panel, shown: h),
                                                  min: Self.minPanel,
                                                  max: max(Self.minPanel, contentSpace - Self.minPanel),
-                                                 invert: false)
+                                                 invert: false,
+                                                 showsRailGrip: true)
                                     .offset(y: 7)
                             }
                         }
@@ -294,12 +295,7 @@ struct RightRailPanels: View {
         .overlay(alignment: .top) {
             // Keep the grip centered within the header's upper inset: even a
             // narrow rail has room here without covering titles or live counts.
-            HStack(spacing: 3) {
-                ForEach(0..<3) { _ in
-                    Circle().frame(width: 2.5, height: 2.5)
-                }
-            }
-            .foregroundStyle(.secondary)
+            DragGripDots()
             .padding(.top, 3)
             .opacity(hoveredHeader == panel ? 1 : 0)
             .allowsHitTesting(false)
