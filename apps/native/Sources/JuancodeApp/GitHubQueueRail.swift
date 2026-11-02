@@ -99,6 +99,7 @@ struct RightRailPanels: View {
     /// Here for the same reason, and so the hourly refresh outlives a collapse.
     @State private var ticketsStore = LinearTicketsStore()
     @State private var dropTarget: RightRailPanel?
+    @State private var hoveredHeader: RightRailPanel?
     /// Mirrors `collapsedRaw`: an `@AppStorage` write does not reliably carry the
     /// `withAnimation` transaction, so layout reads this instead.
     @State private var collapsedState: Set<RightRailPanel>?
@@ -290,6 +291,24 @@ struct RightRailPanels: View {
             }
         }
         .overlay(alignment: .bottom) { Divider() }
+        .overlay(alignment: .top) {
+            // Keep the grip centered within the header's upper inset: even a
+            // narrow rail has room here without covering titles or live counts.
+            HStack(spacing: 3) {
+                ForEach(0..<3) { _ in
+                    Circle().frame(width: 2.5, height: 2.5)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .padding(.top, 3)
+            .opacity(hoveredHeader == panel ? 1 : 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        .onHover { hovering in
+            if hovering { hoveredHeader = panel }
+            else if hoveredHeader == panel { hoveredHeader = nil }
+        }
         .draggable(panel.rawValue) {
             Text(panel.title)
                 .font(.system(size: 12, weight: .semibold))
