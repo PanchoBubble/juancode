@@ -532,7 +532,7 @@ struct DiffReviewPanel: View {
         return HStack(spacing: 5) {
             Image(systemName: "text.bubble")
                 .font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 10)
-            Text("Comments").font(.system(size: 11.5))
+            Text("Description & comments").font(.system(size: 11.5))
             Spacer(minLength: 4)
             if globalCommentsLoading, prTimeline == nil {
                 ProgressView().controlSize(.mini)
@@ -552,7 +552,7 @@ struct DiffReviewPanel: View {
             openGlobalComments()
             keyToken &+= 1
         }
-        .help("PR-wide issue comments and review summaries")
+        .help("PR description, issue comments and review summaries")
         .clickCursor()
     }
 
@@ -656,7 +656,7 @@ struct DiffReviewPanel: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "text.bubble").foregroundStyle(.secondary)
-                Text("PR-wide comments").font(.system(size: 12, weight: .semibold))
+                Text("PR description & comments").font(.system(size: 12, weight: .semibold))
                 if prTimeline != nil {
                     Text("\(globalComments.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
@@ -666,7 +666,7 @@ struct DiffReviewPanel: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
-                .help("Refresh PR comments")
+                .help("Refresh PR description and comments")
                 .clickCursor()
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
@@ -674,10 +674,26 @@ struct DiffReviewPanel: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    if let timeline = prTimeline {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Description", systemImage: "text.alignleft")
+                                .font(.system(size: 12, weight: .semibold))
+                            if timeline.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("No description provided.")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                            } else {
+                                CommentMarkdown(text: timeline.body)
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appHairline(0.15)))
+                    }
                     if prTimeline == nil {
                         VStack(spacing: 8) {
                             if globalCommentsLoading { ProgressView().controlSize(.small) }
-                            Text(globalCommentsLoading ? "Loading PR comments…" : "PR comments are not loaded.")
+                            Text(globalCommentsLoading ? "Loading PR description and comments…" : "PR description and comments are not loaded.")
                                 .font(.system(size: 12)).foregroundStyle(.secondary)
                             if !globalCommentsLoading {
                                 Button("Retry") { model.loadDiffReview(sessionId) }
