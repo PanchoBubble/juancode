@@ -1540,7 +1540,8 @@ struct SidebarView: View {
         sessionRow(meta, external: external)
             .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
-                                       selected: external ? nil : model.selection == meta.id))
+                                       selected: external ? nil : model.selection == meta.id,
+                                       session: meta))
             .modifier(SidebarListRow())
             .pointerCursor(enabled: !external)
             .tag(meta.id)
@@ -1563,7 +1564,8 @@ struct SidebarView: View {
         sessionRow(meta, external: external)
             .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
-                                       selected: external ? nil : model.selection == meta.id))
+                                       selected: external ? nil : model.selection == meta.id,
+                                       session: meta))
             .pointerCursor(enabled: !external)
             .onTapGesture {
                 if !external {
@@ -1787,9 +1789,12 @@ private struct SidebarRowChrome: ViewModifier {
     static let trailing: CGFloat = 16
     static let vertical: CGFloat = 6
 
+    @Environment(AppModel.self) private var model
+
     let divider: Bool
     /// Nil for a row that can't be selected: no hover or selection fill.
     let selected: Bool?
+    var session: SessionMeta? = nil
 
     func body(content: Content) -> some View {
         let row = content
@@ -1800,6 +1805,23 @@ private struct SidebarRowChrome: ViewModifier {
             .contentShape(Rectangle())
         Group {
             if let selected { row.modifier(SelectableRowBackground(selected: selected)) } else { row }
+        }
+        .overlay(alignment: .leading) {
+            if let session {
+                let live = model.isLive(session.id)
+                let activity = model.activityBox(session.id)?.activity
+                let unread = model.unreadSessions.contains(session.id)
+                let unseenDone = model.unseenCompletions.contains(session.id)
+                let activating = model.isActivating(session.id)
+                Rectangle()
+                    .fill(SessionRow.statusColor(live: live, activity: activity, unread: unread,
+                                                 unseenDone: unseenDone, activating: activating))
+                    .frame(width: 2)
+                    .help(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
+                                                unseenDone: unseenDone, activating: activating))
+                    .accessibilityLabel(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
+                                                              unseenDone: unseenDone, activating: activating))
+            }
         }
         .overlay(alignment: .top) {
             if divider {
@@ -2648,14 +2670,6 @@ struct SessionRow: View {
         }
         .padding(.leading, 4)
         .padding(.vertical, 3)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(statusRailColor)
-                .frame(width: 2)
-                .offset(x: -(4 + SidebarRowChrome.leading))
-                .help(statusRailHelp)
-                .accessibilityLabel(statusRailHelp)
-        }
         // Floated, not laid out: see `hoverActions`.
         .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
@@ -2867,20 +2881,25 @@ struct SessionRow: View {
         }
     }
 
-    private var showsDone: Bool {
-        live && activity != .busy && activity != .waitingInput && unseenDone
+    private var statusRailColor: Color {
+        Self.statusColor(live: live, activity: activity, unread: unread,
+                         unseenDone: unseenDone, activating: activating)
     }
 
-    private var statusRailColor: Color {
+    fileprivate static func statusColor(live: Bool, activity: SessionActivity?, unread: Bool,
+                                        unseenDone: Bool, activating: Bool) -> Color {
         if activating { return .accentColor }
-        if showsDone { return .green }
+        if showsDone(live: live, activity: activity, unseenDone: unseenDone) { return .green }
         if unread { return .red }
         return sessionDotColor(live: live, activity: activity)
     }
 
-    private var statusRailHelp: String {
+    fileprivate static func statusHelp(live: Bool, activity: SessionActivity?, unread: Bool,
+                                       unseenDone: Bool, activating: Bool) -> String {
         if activating { return "Resuming session…" }
-        if showsDone { return "Finished since you last looked — click to view" }
+        if showsDone(live: live, activity: activity, unseenDone: unseenDone) {
+            return "Finished since you last looked — click to view"
+        }
         let status: String
         if !live {
             status = "Session has exited"
@@ -2892,6 +2911,10 @@ struct SessionRow: View {
             }
         }
         return unread ? "\(status) — unread" : status
+    }
+
+    private static func showsDone(live: Bool, activity: SessionActivity?, unseenDone: Bool) -> Bool {
+        live && activity != .busy && activity != .waitingInput && unseenDone
     }
 }
 
