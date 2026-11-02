@@ -21,6 +21,7 @@ struct ProviderIcon: View {
 
     private var label: String { Providers.spec(for: provider).label }
     private var image: NSImage? { Self.iconsBundle.image(forResource: provider.rawValue) }
+    private var animatesWork: Bool { working && !reduceMotion && scenePhase == .active }
 
     var body: some View {
         if let image {
@@ -31,12 +32,15 @@ struct ProviderIcon: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
                 .foregroundStyle(tint)
-                .phaseAnimator(working && !reduceMotion && scenePhase == .active ? [false, true] : [false]) { icon, glowing in
+                .phaseAnimator(animatesWork ? [false, true] : [false]) { icon, glowing in
                     icon
-                        .scaleEffect(glowing ? 1.08 : 1)
-                        .shadow(color: tint.opacity(glowing ? 0.65 : 0), radius: glowing ? 3 : 0)
+                        // Brightness makes the pulse legible even at the sidebar's
+                        // 12pt size; keep the resting icon fully visible when idle.
+                        .opacity(animatesWork && !glowing ? 0.5 : 1)
+                        .scaleEffect(glowing ? 1.12 : 1)
+                        .shadow(color: tint.opacity(glowing ? 0.8 : 0), radius: glowing ? 4 : 0)
                 } animation: { _ in
-                    .easeInOut(duration: 1.2)
+                    .easeInOut(duration: 0.9)
                 }
                 .help(label)
                 .accessibilityLabel(label)
