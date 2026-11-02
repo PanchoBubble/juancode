@@ -1783,7 +1783,7 @@ struct SidebarView: View {
 /// Padding, divider and selection shared by every sidebar session row, in the List
 /// and in a folder's scroll box alike, so expanding a folder moves nothing.
 private struct SidebarRowChrome: ViewModifier {
-    static let leading: CGFloat = 14
+    static let leading: CGFloat = 6
     static let trailing: CGFloat = 16
     static let vertical: CGFloat = 6
 
@@ -2652,7 +2652,7 @@ struct SessionRow: View {
             Rectangle()
                 .fill(statusRailColor)
                 .frame(width: 2)
-                .offset(x: -4)
+                .offset(x: -(4 + SidebarRowChrome.leading))
                 .help(statusRailHelp)
                 .accessibilityLabel(statusRailHelp)
         }

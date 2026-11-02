@@ -54,8 +54,8 @@ extension View {
     }
 }
 
-/// Selection + hover background for a row: a full-width, square fill with an accent
-/// bar on the leading edge when selected, a faint fill on hover otherwise.
+/// Selection + hover background for a row: a full-width, square fill when selected,
+/// a faint fill on hover otherwise.
 struct SelectableRowBackground: ViewModifier {
     let selected: Bool
     @State private var hovering = false
@@ -65,9 +65,6 @@ struct SelectableRowBackground: ViewModifier {
             .background(
                 Rectangle()
                     .fill(selected ? Color.appSelection : Color.primary.opacity(hovering ? 0.06 : 0))
-                    .overlay(alignment: .leading) {
-                        if selected { Rectangle().fill(Color.accentColor).frame(width: 2) }
-                    }
                     .allowsHitTesting(false)
             )
             .onHover { hovering = $0 }
