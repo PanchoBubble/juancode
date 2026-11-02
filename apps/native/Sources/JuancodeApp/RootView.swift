@@ -19,22 +19,20 @@ import JuancodeServices
 struct RootView: View {
     var body: some View {
         WindowContent()
-            // Global command bar (juancode-6sw): Oracle, global Issues, Tracked PRs
-            // and Worktrees live in the window toolbar — reachable from any session.
             .toolbar {
+                ToolbarItem(placement: .navigation) { SessionBackButton() }
                 ToolbarItemGroup(placement: .primaryAction) {
                     // Three items, and each one owns a whole family: how much is
-                    // running (with the list, a kill for each, the global pause and
-                    // the core's health behind a click), what wants your attention,
+                    // running (with the list, a kill for each and the global pause),
+                    // what wants your attention,
                     // and the utilities. The GitHub queue lives under the Oracles in
                     // the right rail. Everything else moved —
-                    // Keep Awake / Recurring Tasks / Worktrees / Kill Port / MCP
+                    // Keep Awake / Recurring Tasks / Kill Port / MCP
                     // status / AI settings into Tools; Open in Editor into the
                     // session-row hover menu; Tracked Issues into the sidebar;
                     // Appearance into the ⌘, Settings window. The Oracle has the
                     // right-edge rail and ⌃Space, so it does not need a slot here too.
                     RunningSessionsBadge()
-                    AttentionButton()
                     NotificationsBell()
                     ToolsMenu()
                     PanelNavigationDot()
@@ -561,16 +559,10 @@ private struct PanelNavigationDot: View {
     }
 }
 
-/// Top-bar "Tools" popover (juancode-v4ep): the utilities that used to be their own
-/// toolbar buttons — Keep Awake, Recurring Tasks, Worktrees, Kill Port, Auth & MCP
-/// status, and the AI-settings prompt. The wrench icon turns orange when a worktree
-/// holds at-risk work, so the old worktree warning stays visible at a glance without
-/// opening the popover.
+/// Top-bar utilities popover.
 private struct ToolsMenu: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
-
-    private var atRisk: Bool { !model.workAtRiskList.isEmpty }
 
     var body: some View {
         Button {
@@ -578,10 +570,7 @@ private struct ToolsMenu: View {
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
-        .foregroundStyle(atRisk ? Color.orange : Color.primary)
-        .help(atRisk
-              ? "\(model.workAtRiskList.count) folder(s) with uncommitted or unpushed work"
-              : "Tools — keep awake, recurring tasks, worktrees, kill port, MCP status, settings")
+        .help("Tools — keep awake, recurring tasks, kill port, MCP status, settings")
         .clickCursor()
         // The Heavy Queue row's count is pushed by the core, so the menu holds a watch
         // for as long as it can draw one rather than asking for a snapshot on open.
@@ -603,12 +592,6 @@ private struct ToolsMenu: View {
                 toolButton("repeat", "Recurring Tasks",
                            trailing: model.recurringTasks.isEmpty ? nil : "\(model.recurringTasks.count)") {
                     model.showingRecurringTasks = true
-                }
-                toolButton(atRisk ? "externaldrive.badge.exclamationmark" : "externaldrive.badge.minus",
-                           "Worktrees", tint: atRisk ? Color.orange : nil,
-                           trailing: atRisk ? "\(model.workAtRiskList.count)" : nil) {
-                    model.showingWorktrees = true
-                    model.loadWorktrees()
                 }
                 toolButton("checklist", "Beads") {
                     model.openBeads()
@@ -684,38 +667,73 @@ private struct SidebarColumn: View {
         SidebarView()
             .panelNavigation(.sessions)
             .toolbar {
-                ToolbarItem { CollapseAllProjectsButton() }
-                // Transcript search (magnifier), Kill Port (powerplug) and Auth & MCP
-                // status (shield) moved off the sidebar: the filter field above covers
-                // in-list finding, and Kill Port + MCP status now live in the top-bar
-                // Tools popover (juancode-tciz / juancode-v4ep).
-                ToolbarItem { NewSessionToolbarButton() }
+                ToolbarItem { SidebarActionsMenu() }
             }
             .navigationTitle("juancode")
             .environment(bridge)
     }
 }
 
-private struct CollapseAllProjectsButton: View {
-    @Environment(SidebarToolbarBridge.self) private var bridge
+private struct SessionBackButton: View {
+    @Environment(AppModel.self) private var model
+    @Environment(OracleModel.self) private var oracle
+    @Environment(Shortcuts.self) private var shortcuts
 
     var body: some View {
-        Button { bridge.toggleAllRequests += 1 } label: {
-            Image(systemName: bridge.anyExpanded
-                  ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+        Button { performShortcut(.navigateBack, model: model, oracle: oracle) } label: {
+            Label("Back", systemImage: "chevron.left")
         }
-        .help(bridge.anyExpanded ? "Collapse all projects" : "Expand all projects")
+        .disabled(!model.canGoBack && !model.showingFindBar && model.editing == nil
+                  && !model.showingDiffReview && !model.showingGitHub && !model.showingBeads
+                  && !oracle.expanded && model.chainView == nil)
+        .help("Back (\(shortcuts.binding(for: .navigateBack).display))")
         .clickCursor()
     }
 }
 
-private struct NewSessionToolbarButton: View {
+private struct SidebarActionsMenu: View {
     @Environment(AppModel.self) private var model
+    @Environment(SidebarToolbarBridge.self) private var bridge
+    @State private var showing = false
 
     var body: some View {
-        Button { model.showingNewSession = true } label: { Image(systemName: "plus") }
-            .help("New session")
-            .clickCursor()
+        Button { showing = true } label: {
+            Label("Project actions", systemImage: "ellipsis")
+        }
+        .help("Project actions")
+        .clickCursor()
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                action("New Project / Session…", systemImage: "plus") {
+                    model.showingNewSession = true
+                }
+                action(bridge.anyExpanded ? "Collapse All Projects" : "Expand All Projects",
+                       systemImage: bridge.anyExpanded
+                           ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
+                    bridge.toggleAllRequests += 1
+                }
+                action("Search Sessions", systemImage: "magnifyingglass") {
+                    model.focusSessionSearch()
+                }
+            }
+            .padding(6)
+            .frame(width: 230)
+        }
+    }
+
+    private func action(_ title: String, systemImage: String, perform: @escaping () -> Void) -> some View {
+        Button {
+            showing = false
+            perform()
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 12))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickCursor()
     }
 }
 
@@ -777,7 +795,8 @@ struct SidebarView: View {
     @State private var confirmingClose: SessionMeta?
     /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
     @FocusState private var listFocused: Bool
-    /// Whether the "Filter sessions…" field holds focus, so ⌃F can jump to it.
+    /// Search stays hidden until requested from the menu or with ⌘F.
+    @State private var showingSearch = false
     @FocusState private var searchFocused: Bool
 
     /// How many archived sessions exist (for the toggle label / visibility).
@@ -1184,55 +1203,45 @@ struct SidebarView: View {
         let visibleIDs = visibleOrderedIDs(from: groups)
         return VStack(spacing: 0) {
             let filtering = !query.trimmingCharacters(in: .whitespaces).isEmpty || !facets.isEmpty
-            HStack(spacing: 6) {
-                facetMenu(counts: content.facetCounts, active: filtering)
-                TextField(searchBodies ? "Filter sessions + bodies…" : "Filter sessions…", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .focused($searchFocused)
-                    // ⌃F (via `focusSessionSearch`) jumps focus straight to the filter.
-                    .onChange(of: model.sessionSearchFocusToken) { _, _ in searchFocused = true }
-                    // Esc clears an active filter (only while the field is focused).
-                    .onKeyPress(.escape) {
-                        guard filtering else { return .ignored }
+            if showingSearch {
+                HStack(spacing: 6) {
+                    facetMenu(counts: content.facetCounts, active: filtering)
+                    TextField(searchBodies ? "Filter sessions + bodies…" : "Filter sessions…", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .focused($searchFocused)
+                        .onAppear { searchFocused = true }
+                        // Esc clears the filter and closes search.
+                        .onKeyPress(.escape) {
+                            clearFilters()
+                            showingSearch = false
+                            model.focusTerminal()
+                            return .handled
+                        }
+                    bodyToggle
+                    Button {
                         clearFilters()
-                        return .handled
-                    }
-                bodyToggle
-                if filtering {
-                    Button { clearFilters() } label: {
+                        showingSearch = false
+                        model.focusTerminal()
+                    } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                     .clickCursor()
-                    .help("Clear filter (Esc)")
+                    .help("Close search (Esc)")
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6)
+                    .fill(filtering ? Color.accentColor.opacity(0.12) : Color.clear))
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(filtering ? Color.accentColor : Color.secondary.opacity(0.25),
+                                  lineWidth: filtering ? 1.5 : 1))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .task(id: BodySearchKey(query: query, on: searchBodies)) {
-                let q = query.trimmingCharacters(in: .whitespaces)
-                guard searchBodies, q.count >= 2 else {
-                    bodyHits = [:]; searchingBodies = false; return
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                guard !Task.isCancelled else { return }
-                searchingBodies = true
-                let hits = await model.searchSessionBodies(q)
-                guard !Task.isCancelled else { return }
-                searchingBodies = false
-                bodyHits = Dictionary(hits.map { ($0.meta.id, $0.snippet) },
-                                      uniquingKeysWith: { first, _ in first })
-            }
-            .background(RoundedRectangle(cornerRadius: 6)
-                .fill(filtering ? Color.accentColor.opacity(0.12) : Color.clear))
-            .overlay(RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(filtering ? Color.accentColor : Color.secondary.opacity(0.25),
-                              lineWidth: filtering ? 1.5 : 1))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
             if !model.diffReview.wipIds.isEmpty {
                 DisclosureGroup("WIP reviews (\(model.diffReview.wipIds.count))", isExpanded: $wipReviewsExpanded) {
                     ForEach(model.diffReview.wipIds, id: \.self) { id in
@@ -1355,14 +1364,6 @@ struct SidebarView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                if model.externalHasMore {
-                    Button { model.loadMoreExternalSessions() } label: {
-                        Label("Load more terminal sessions", systemImage: "ellipsis.circle")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.borderless)
-                    .clickCursor()
-                }
                 trackedIssuesSection
             }
             .listStyle(.sidebar)
@@ -1421,6 +1422,24 @@ struct SidebarView: View {
         }
         .background(Color.appSurface)
         .onAppear { model.loadExternalSessions(); model.navOrder = visibleIDs }
+        .task(id: BodySearchKey(query: query, on: searchBodies)) {
+            let q = query.trimmingCharacters(in: .whitespaces)
+            guard searchBodies, q.count >= 2 else {
+                bodyHits = [:]; searchingBodies = false; return
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            searchingBodies = true
+            let hits = await model.searchSessionBodies(q)
+            guard !Task.isCancelled else { return }
+            searchingBodies = false
+            bodyHits = Dictionary(hits.map { ($0.meta.id, $0.snippet) },
+                                  uniquingKeysWith: { first, _ in first })
+        }
+        .onChange(of: model.sessionSearchFocusToken) { _, _ in
+            showingSearch = true
+            searchFocused = true
+        }
         .onChange(of: groups.contains { !collapsedFolders.contains($0.cwd) }, initial: true) { _, any in
             toolbarBridge.anyExpanded = any
         }

@@ -540,18 +540,18 @@ struct JuancodeApp: App {
                     performShortcut(.githubView, model: model, oracle: oracle)
                 }
                 .appShortcut(.githubView, shortcuts)
-                // ⌘⇧B: every project's bd tracker, as boards.
+                // Every project's bd tracker, as boards.
                 Button("Beads") {
                     performShortcut(.beadsView, model: model, oracle: oracle)
                 }
                 .appShortcut(.beadsView, shortcuts)
-                // ⌃F drops focus into the sidebar's "Filter sessions…" field from
+                // ⌘F reveals and focuses the sidebar's "Filter sessions…" field from
                 // anywhere so you can start a find without reaching for the mouse.
                 Button("Find Sessions") {
                     performShortcut(.focusSessionSearch, model: model, oracle: oracle)
                 }
                 .appShortcut(.focusSessionSearch, shortcuts)
-                // ⌘F opens the in-pane find bar over the visible terminal — search
+                // ⌥⌘F opens the in-pane find bar over the visible terminal — search
                 // that session's scrollback (juancode-972).
                 Button("Find in Terminal") {
                     performShortcut(.findInTerminal, model: model, oracle: oracle)

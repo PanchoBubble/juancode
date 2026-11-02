@@ -130,7 +130,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .togglePin: return KeyBinding(key: "p", shift: true, control: true)
         case .oracle: return KeyBinding(key: "space", control: true)
         case .globalIssues: return KeyBinding(key: "i", command: true, shift: true)
-        case .focusSessionSearch: return KeyBinding(key: "f", control: true)
+        case .focusSessionSearch: return KeyBinding(key: "f", command: true)
         case .refreshTerminal: return KeyBinding(key: "z", control: true)
         case .toggleChanges: return KeyBinding(key: "c", command: true)
         // ⌥⌘C jumps straight to the working-tree diff (and clears the review badge),
@@ -142,20 +142,18 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
         // ⌘⇧G toggles the GitHub view — all open PRs per project (juancode-2t6).
         case .githubView: return KeyBinding(key: "g", command: true, shift: true)
-        case .beadsView: return KeyBinding(key: "b", command: true, shift: true)
+        case .beadsView: return KeyBinding(key: "")
         case .toggleProjects: return KeyBinding(key: "s", control: true)
-        // ⌘F opens the in-pane find bar over the visible terminal (juancode-972);
-        // ⌃F (focusSessionSearch) stays the sidebar session filter.
-        case .findInTerminal: return KeyBinding(key: "f", command: true)
+        // ⌘F reveals sidebar search; ⌥⌘F finds text in the current terminal.
+        case .findInTerminal: return KeyBinding(key: "f", command: true, option: true)
         // Terminal font zoom (juancode-fry). ⌘= is the rebindable primary (the
         // key you can press without shift); ⌘+ (⌘⇧=) is handled as a fixed alias
         // in the window key monitor, the macOS convention for "zoom in".
         case .terminalZoomIn: return KeyBinding(key: "=", command: true)
         case .terminalZoomOut: return KeyBinding(key: "-", command: true)
         case .terminalZoomReset: return KeyBinding(key: "0", command: true)
-        // ⌘[ / ⌘] mirror the mouse's side buttons: step back and forward through the
-        // sessions you've viewed. Back closes an open overlay first, if any.
-        case .navigateBack: return KeyBinding(key: "[", command: true)
+        // ⇧⌘B goes back through viewed sessions, closing an open overlay first.
+        case .navigateBack: return KeyBinding(key: "b", command: true, shift: true)
         case .navigateForward: return KeyBinding(key: "]", command: true)
         // ⌘⇧D opens the full-width diff review over the session (juancode-a5j).
         case .diffReview: return KeyBinding(key: "d", command: true, shift: true)
@@ -179,6 +177,10 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     /// them. A persisted binding still equal to its old default is migrated to the new
     /// one exactly once, when the stored schema is older; see `Shortcuts.load`.
     static let displacedDefaults: [(schema: Int, action: ShortcutAction, old: KeyBinding)] = [
+        (3, .focusSessionSearch, KeyBinding(key: "f", control: true)),
+        (3, .findInTerminal, KeyBinding(key: "f", command: true)),
+        (3, .beadsView, KeyBinding(key: "b", command: true, shift: true)),
+        (3, .navigateBack, KeyBinding(key: "[", command: true)),
         (2, .togglePerfHud, KeyBinding(key: "p", command: true, shift: true)),
         (2, .openChangesForCurrentSession, KeyBinding(key: "c", command: true, shift: true)),
     ]
@@ -291,7 +293,7 @@ final class Shortcuts {
     private let defaultsKey = "juancode.shortcuts.v1"
     /// Which factory layout the persisted bindings were last migrated to.
     private let schemaKey = "juancode.shortcuts.schema"
-    static let currentSchema = 2
+    static let currentSchema = 3
     private(set) var bindings: [String: KeyBinding] = [:]
 
     init() { load() }

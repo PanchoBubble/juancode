@@ -8,9 +8,8 @@
 //
 // It stands where the core pill used to (juancode). The pill was a permanent
 // answer to a question asked about once a week — which core produced this window —
-// so the count took the slot and the core moved into this popover's footer, where
-// it still turns red/yellow the moment the daemon goes down or stale. Settings →
-// Core keeps the full story.
+// so the count took the slot. Its colour still shows daemon health;
+// Settings → Core keeps the full story.
 
 import SwiftUI
 import JuancodeClient
@@ -108,8 +107,6 @@ struct RunningSessionsBadge: View {
                         row(meta)
                     }
                 }
-                Divider().padding(.vertical, 4)
-                coreFooter
             }
             .frame(width: 300)
             .padding(.bottom, 6)
@@ -228,32 +225,6 @@ struct RunningSessionsBadge: View {
             .clickCursor()
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
-    }
-
-    /// Where the core pill went: the core, plus whatever is wrong with it.
-    private var coreFooter: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            CoreBadgeLabel(selection: model.coreSelection,
-                           connectionDown: model.coreConnectionDown)
-            if let down = model.coreConnectionDown {
-                Text("Connection down: \(down). Sessions keep running in the daemon; "
-                    + "the app is retrying.")
-                    .font(.caption).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // Beside the session list itself: whether these rows are still here after
-            // Cmd-Q is a fact about the list, not a footnote about the core.
-            if let persistence = model.coreSelection.sessionPersistence {
-                DaemonPersistenceRow(note: persistence)
-            }
-            ForEach(model.coreSelection.daemonWarnings) { warning in
-                BuildWarningRow(warning)
-            }
-            Text("Settings → Core has the database path, wire version and capabilities.")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, 10)
     }
 
     private func glyph(_ activity: SessionActivity?) -> String {

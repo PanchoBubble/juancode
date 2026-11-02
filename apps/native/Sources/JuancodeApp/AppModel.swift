@@ -133,7 +133,7 @@ final class AppModel {
             // A chain view follows a sidebar click onto one of its sessions, and closes
             // on a click anywhere else.
             if selection != oldValue { followSelectionIntoChain() }
-            // Remember where we came from so the mouse's back button (⌘[) can return.
+            // Remember where we came from so the mouse's back button (⇧⌘B) can return.
             // Every navigation path lands here, so this one hook covers the jump
             // palette, notifications, search hits and plain sidebar clicks alike.
             if !navigatingHistory { navHistory.record(leaving: oldValue) }
@@ -308,7 +308,7 @@ final class AppModel {
     /// The latest ⌘⇧ panel-focus request (juancode-2wp), nil until the first one.
     /// The target panel's view watches it and takes the keyboard when it changes.
     private(set) var panelFocusRequest: PanelFocusRequest?
-    /// Bumped to request the sidebar's "Filter sessions…" field grab focus (⌃F).
+    /// Bumped to request the sidebar's "Filter sessions…" field grab focus (⌘F).
     /// Drives a `@FocusState` in `SidebarView`.
     var sessionSearchFocusToken = 0
     /// True while the Changes panel's diff pane owns the keyboard (j/k/n/p/space/v).
@@ -1122,7 +1122,7 @@ final class AppModel {
     func selectFirst() { if let f = navOrder.first { selection = f } }
     func selectLast() { if let l = navOrder.last { selection = l } }
 
-    /// Viewed-session history for the mouse's back/forward buttons (and ⌘[ / ⌘]).
+    /// Viewed-session history for the mouse's back/forward buttons (and ⇧⌘B / ⌘]).
     /// Fed from `selection.didSet`; `navigatingHistory` keeps our own moves out of
     /// it so back and forward don't overwrite each other.
     private var navHistory = NavHistory()
@@ -1179,9 +1179,10 @@ final class AppModel {
         panelFocusRequest = PanelFocusRequest(target: target, serial: (panelFocusRequest?.serial ?? 0) &+ 1)
     }
 
-    /// Move keyboard focus to the sidebar's session filter field (⌃F), so you can
+    /// Move keyboard focus to the sidebar's session filter field (⌘F), so you can
     /// start typing a find query without reaching for the mouse.
     func focusSessionSearch() {
+        projectsSidebarVisible = true
         suppressTerminalAutoFocus = true
         sessionSearchFocusToken &+= 1
     }
