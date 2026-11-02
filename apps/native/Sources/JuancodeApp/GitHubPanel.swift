@@ -295,36 +295,29 @@ final class GitHubModel {
 
     /// Compose the diff-review basket staged for this PR (line notes added in the
     /// Diff tab, keyed by the PR key so they survive tab/PR switches) into one
-    /// feedback prompt and route it to the agent — queued on the tracking session
-    /// when tracked, else tracked-and-queued. Clears the basket on a successful
-    /// hand-off and flashes a confirmation on the bar.
+    /// feedback prompt and queue it on the PR's existing tracking session. An
+    /// untracked PR must be tracked explicitly or reviewed with a chosen agent.
+    /// Clears the basket on a successful hand-off and flashes a confirmation.
     func sendDiffReview(appModel: AppModel, cwd: String, pr: PullRequest) {
         let key = TrackedPr.key(cwd: cwd, number: pr.number)
         let staged = appModel.comments(key)
         let feedback = composeReviewFeedback(staged)
         guard !feedback.isEmpty else { return }
+        guard let t = appModel.trackedPr(cwd: cwd, number: pr.number) else {
+            actionError = "PR #\(pr.number) isn't tracked — track it explicitly or use Review Diff to choose an agent. Your notes are still staged."
+            return
+        }
         let prompt = diffReviewPrompt(number: pr.number, url: pr.url, feedback: feedback)
-        // The basket is discarded only after the hand-off is confirmed, on both
-        // branches. Discarding it first is how staged review notes used to disappear
-        // into a queue write that never happened (juancode-rzl7).
-        if let t = appModel.trackedPr(cwd: cwd, number: pr.number) {
-            Task {
-                guard await appModel.queuePrompt(sessionId: t.sessionId, text: prompt) else {
-                    actionError = "Review not sent for PR #\(pr.number) — your notes are still staged."
-                    return
-                }
-                appModel.discardComments(key)
-                flashQueued(key)
+        // The basket is discarded only after the hand-off is confirmed. Discarding it
+        // first is how staged review notes used to disappear into a queue write that
+        // never happened (juancode-rzl7).
+        Task {
+            guard await appModel.queuePrompt(sessionId: t.sessionId, text: prompt) else {
+                actionError = "Review not sent for PR #\(pr.number) — your notes are still staged."
+                return
             }
-        } else {
-            Task {
-                if await appModel.trackPrAndQueue(pr, cwd: cwd, prompt: prompt) {
-                    appModel.discardComments(key)
-                    flashQueued(key)
-                } else {
-                    actionError = "Review not sent for PR #\(pr.number) — your notes are still staged."
-                }
-            }
+            appModel.discardComments(key)
+            flashQueued(key)
         }
     }
 
@@ -701,8 +694,8 @@ private struct PrDiffTab: View {
     }
 
     /// The staged-notes bar: a count, Discard, and Send to agent (queues the whole
-    /// batch on the tracking session, or tracks-and-queues an untracked PR). Shown
-    /// only while notes are staged; flashes a confirmation briefly after a hand-off.
+    /// batch on the existing tracking session). Shown only while notes are staged;
+    /// flashes a confirmation briefly after a hand-off.
     @ViewBuilder
     private var reviewBar: some View {
         let staged = model.comments(key)
@@ -728,7 +721,7 @@ private struct PrDiffTab: View {
                 .keyboardShortcut(.defaultAction)
                 .help(model.trackedPr(cwd: cwd, number: pr.number) != nil
                       ? "Queue these notes on the PR's tracking session (delivered on its next idle)"
-                      : "Track this PR and queue these notes on its new agent session")
+                      : "Track the PR explicitly or use Review Diff to choose an agent")
                 .clickCursor()
             }
             .padding(.top, 4)

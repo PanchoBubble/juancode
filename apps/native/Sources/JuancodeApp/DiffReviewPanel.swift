@@ -357,7 +357,7 @@ struct DiffReviewPanel: View {
 
     private var agentMenu: some View {
         Menu {
-            Button("Use PR tracking session (automatic)") {
+            Button("Use PR tracking session") {
                 review.chooseAgent(nil, for: sessionId)
                 keyToken &+= 1
             }
@@ -387,7 +387,6 @@ struct DiffReviewPanel: View {
         case .session(let id):
             let title = model.diffReviewAgentSessions.first { $0.id == id }?.title ?? "Unavailable session"
             return "Agent: \(title)"
-        case .trackLocal: return "Agent: Track & send"
         case .chooseSession: return "Agent: Choose session…"
         }
     }

@@ -227,7 +227,7 @@ extension AppModel {
         let tracked = PrAddress.isRemote(cwd: target.cwd)
             ? trackedPr(url: target.pr.url)
             : trackedPr(cwd: target.cwd, number: target.pr.number)
-        return .resolve(cwd: target.cwd, chosenSessionId: diffReview.agentSessionIds[id],
+        return .resolve(chosenSessionId: diffReview.agentSessionIds[id],
                         trackedSessionId: tracked?.sessionId)
     }
 
@@ -397,9 +397,9 @@ extension AppModel {
         }
     }
 
-    /// A PR review is queued on the explicitly chosen agent, the PR's tracker, or
-    /// a new tracker when a local checkout is available. Comments are cleared only
-    /// once the queue write is confirmed.
+    /// A PR review is queued on the explicitly chosen agent or the PR's existing
+    /// tracker. An untracked PR needs an explicit recipient; sending comments does
+    /// not start tracking. Comments are cleared only once the queue write is confirmed.
     ///
     /// Comments staged with `r` go to GitHub instead, first, as one COMMENT review; the
     /// rest then go to the agent. A GitHub failure stops there with everything kept.
@@ -458,9 +458,7 @@ extension AppModel {
                        isError: true, in: id)
             return
         }
-        review.say(delivery == .trackLocal
-                   ? "Tracking PR #\(pr.number) and queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…"
-                   : "Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
+        review.say("Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
         let ok: Bool
         switch delivery {
         case .session(let sessionId):
@@ -471,8 +469,6 @@ extension AppModel {
                 return
             }
             ok = await queuePrompt(sessionId: sessionId, text: prompt)
-        case .trackLocal:
-            ok = await trackPrAndQueue(pr, cwd: target.cwd, prompt: prompt)
         case .chooseSession:
             return
         }
