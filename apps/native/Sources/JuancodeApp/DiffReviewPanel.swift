@@ -100,6 +100,7 @@ struct DiffReviewPanel: View {
     @State private var draftSerial = 0
     @State private var parser = ReviewKeyParser()
     @State private var rendered: RenderedReviewFile?
+    @State private var markdownBlocks: [ReviewMarkdownBlock] = []
     @State private var viewportHeight: CGFloat = 600
     /// Center the next cursor scroll (⌃D/⌃U, gg/G, file and hunk jumps).
     @State private var centerNextScroll = false
@@ -243,22 +244,14 @@ struct DiffReviewPanel: View {
             content
                 .overlay(alignment: .top) { if isFinderOpen { finder } }
             Divider()
-            if showingMarkdown {
-                Text("Preview · Switch to Diff to search or comment on lines")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-            } else {
-                statusBar
-            }
+            statusBar
         }
         .background(Color.appSurface)
         .background {
-            if !showingMarkdown {
-                ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
-                                 enabled: draft == nil && prompt == nil && reply == nil
-                                     && globalCommentDraft == nil,
-                                 onKey: handle).frame(width: 0, height: 0)
-            }
+            ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
+                             enabled: draft == nil && prompt == nil && reply == nil
+                                 && globalCommentDraft == nil,
+                             onKey: handle).frame(width: 0, height: 0)
         }
         .onAppear {
             if snapshot == nil { model.loadDiffReview(sessionId) }
@@ -626,13 +619,7 @@ struct DiffReviewPanel: View {
             VStack(spacing: 0) {
                 if let file { fileHeader(file) }
                 Divider()
-                if showingMarkdown, let file {
-                    ReviewMarkdownPreview(file: file,
-                                          cwd: prTarget == nil && snapshot?.base != .staged && file.status != .deleted
-                                              ? model.gitCwd(of: sessionId) : nil,
-                                          core: model.core)
-                        .id(file.path)
-                } else if let rf = rendered, rf.path == file?.path {
+                if let rf = rendered, rf.path == file?.path {
                     diffLines(rf)
                 } else {
                     Text("Rendering…").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -671,13 +658,17 @@ struct DiffReviewPanel: View {
                 guard !Task.isCancelled else { return }
                 let rows = expandedRows
                 let out = await Task.detached(priority: .userInitiated) {
-                    RenderedReviewFile.compute(file, generation: generation, expandedRows: rows)
+                    let rendered = RenderedReviewFile.compute(file, generation: generation, expandedRows: rows)
+                    let isMarkdown = ["md", "markdown", "mdown", "mkd"].contains((file.path as NSString).pathExtension.lowercased())
+                    let blocks = isMarkdown ? ReviewMarkdownBlock.blocks(in: rendered.rows, deleted: file.status == .deleted) : []
+                    return (rendered, blocks)
                 }.value
                 guard !Task.isCancelled else { return }
                 contextLoading = false
-                rendered = out
+                rendered = out.0
+                markdownBlocks = out.1
                 frames.reset()
-                restoreCursor(after: previous, in: out)
+                restoreCursor(after: previous, in: out.0)
             }
         }
     }
@@ -804,7 +795,7 @@ struct DiffReviewPanel: View {
                 .lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
             Spacer(minLength: 6)
-            if !showingMarkdown {
+            Group {
                 if contextLoading { ProgressView().controlSize(.mini) }
                 Button {
                     anchor = nil
@@ -826,7 +817,7 @@ struct DiffReviewPanel: View {
                     Text("Rendered").tag(true)
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
-                .help("Read formatted Markdown or switch to Diff to review and comment on source lines.")
+                .help("Review source lines or formatted Markdown with the same Vim keys. Rendered mode keeps removed lines visible as source.")
                 .disabled(draft != nil || reply != nil || prompt != nil)
                 .onChange(of: markdownPreview) { _, _ in
                     anchor = nil
@@ -851,6 +842,12 @@ struct DiffReviewPanel: View {
         let byId = Dictionary(fileComments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let commentedKeys = Set(fileComments.map(\.endKey))
         let pattern = highlightPattern
+        let blocks = showingMarkdown ? markdownBlocks : []
+        let blocksByStart = Dictionary(uniqueKeysWithValues: blocks.map { ($0.rows.lowerBound, $0) })
+        let formattedRows = Set(blocks.flatMap { Array($0.rows) }.filter {
+            guard let line = rf.rows[$0].line else { return false }
+            return file?.status == .deleted ? line.kind != .insert : line.kind != .delete
+        })
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -858,19 +855,29 @@ struct DiffReviewPanel: View {
                         switch item {
                         case .row(let i):
                             let row = rf.rows[i]
-                            ReviewRowView(
-                                generation: rf.generation, index: i, row: row, text: rf.text[i],
-                                isCursor: cursor == item && focus == .diff,
-                                column: cursorColumn,
-                                isSelected: selected.contains(i),
-                                hasComment: row.line.map { commentedKeys.contains(reviewLineKey($0)) } ?? false,
-                                highlight: pattern.flatMap { reviewRowMatches(row, pattern: $0) ? $0 : nil })
-                                .equatable()
-                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(dragSpace)) }
-                                    action: { frames.set(i, $0) }
-                                .contentShape(Rectangle())
-                                .onTapGesture { click(row: i) }
-                                .id(item)
+                            VStack(alignment: .leading, spacing: 0) {
+                                if let block = blocksByStart[i] {
+                                    let active = block.rows.contains { selected.contains($0) || (cursor == .row($0) && focus == .diff) }
+                                    ReviewMarkdownBlockView(block: block, selected: active)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { click(row: i) }
+                                }
+                                if !formattedRows.contains(i) || cursor == item || selected.contains(i) {
+                                    ReviewRowView(
+                                        generation: rf.generation, index: i, row: row, text: rf.text[i],
+                                        isCursor: cursor == item && focus == .diff,
+                                        column: cursorColumn,
+                                        isSelected: selected.contains(i),
+                                        hasComment: row.line.map { commentedKeys.contains(reviewLineKey($0)) } ?? false,
+                                        highlight: pattern.flatMap { reviewRowMatches(row, pattern: $0) ? $0 : nil })
+                                        .equatable()
+                                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(dragSpace)) }
+                                            action: { frames.set(i, $0) }
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { click(row: i) }
+                                }
+                            }
+                            .id(item)
                         case .draft:
                             if let d = draft { draftEditor(d).id(item) }
                         case .thread(let id):
@@ -904,10 +911,15 @@ struct DiffReviewPanel: View {
                         }
                     }
                 }
+                .padding(.horizontal, showingMarkdown ? 28 : 0)
+                .padding(.top, showingMarkdown ? 16 : 0)
+                .frame(maxWidth: showingMarkdown ? 1000 : .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.bottom, 40)
                 .coordinateSpace(name: dragSpace)
-                .simultaneousGesture(dragSelect)
+                .simultaneousGesture(showingMarkdown ? nil : dragSelect)
             }
+            .background(Color.appSurface)
             // A fresh scroll position per file: gt lands at the top of the next one.
             .id(rf.path)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }

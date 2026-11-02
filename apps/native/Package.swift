@@ -21,6 +21,7 @@ let package = Package(
         .executable(name: "juancode", targets: ["JuancodeApp"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-cmark", from: "0.4.0"),
         .package(url: "https://github.com/tree-sitter/swift-tree-sitter", .upToNextMinor(from: "0.25.0")),
         // Upstream PR #342: the 0.25.0 manifest omits scanner.c when SPM evaluates
         // it outside the grammar directory, causing undefined scanner symbols.
@@ -195,6 +196,8 @@ let package = Package(
                 // A/B comparison. See GhosttyLive.swift.
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "cmark-gfm", package: "swift-cmark"),
+                .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
             ],
             resources: [.process("Resources")]
         ),

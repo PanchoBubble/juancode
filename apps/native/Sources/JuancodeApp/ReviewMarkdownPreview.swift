@@ -1,91 +1,86 @@
 import SwiftUI
 import MarkdownUI
 import JuancodeCore
-import JuancodeClient
+import cmark_gfm
+import cmark_gfm_extensions
 
-/// Full working-tree document when available; otherwise render each diff hunk
-/// independently so omitted lines cannot accidentally join paragraphs or fences.
-struct ReviewMarkdownPreview: View {
-    let file: DiffFile
-    let cwd: String?
-    let core: any CoreClient
+/// A rendered block retains its original review row indices. Never infer source
+/// positions from the rendered text: Markdown removes delimiters and joins lines.
+struct ReviewMarkdownBlock: Equatable, Sendable {
+    let rows: ClosedRange<Int>
+    let markdown: String
 
-    @State private var document: String?
-    @State private var loading = false
-    @State private var failure: String?
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                if loading {
-                    ProgressView("Loading Markdown…")
-                } else if let document {
-                    Text("Working-tree document").font(.caption).foregroundStyle(.secondary)
-                    if document.isEmpty {
-                        Text("This file is empty.").foregroundStyle(.secondary)
-                    } else {
-                        markdown(document)
-                    }
-                } else {
-                    Text(file.status == .deleted
-                         ? "Deleted document · changed sections only"
-                         : "Changed sections only · after changes")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("Unchanged sections are omitted. Formatting that starts outside a section may be incomplete.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let failure {
-                        Text("Could not load the full document: \(failure)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    let hunks = parseUnifiedDiff(file.diff)
-                    if hunks.isEmpty {
-                        Text("No Markdown content in this diff.").foregroundStyle(.secondary)
-                    }
-                    ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(hunk.header).font(.caption.monospaced()).foregroundStyle(.secondary)
-                            let text = hunk.lines.filter {
-                                file.status == .deleted ? $0.kind != .insert : $0.kind != .delete
-                            }.map(\.text).joined(separator: "\n")
-                            if text.isEmpty {
-                                Text("This section is empty after the change.").foregroundStyle(.secondary)
-                            } else {
-                                markdown(text)
-                            }
-                        }
-                        Divider()
-                    }
-                    if file.truncated {
-                        Text("The diff was truncated; this preview is incomplete.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(28)
-            .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
+    static func blocks(in rows: [ReviewRow], deleted: Bool) -> [ReviewMarkdownBlock] {
+        var result: [ReviewMarkdownBlock] = []
+        var run: [Int] = []
+        func flush() {
+            guard !run.isEmpty else { return }
+            let text = run.compactMap { rows[$0].line?.text }.joined(separator: "\n")
+            result += parse(text, sourceRows: run)
+            run.removeAll(keepingCapacity: true)
         }
-        .task(id: "\(cwd ?? "")\u{0}\(file.path)\u{0}\(file.diff)") {
-            document = nil
-            failure = nil
-            loading = cwd != nil
-            guard let cwd else { return }
-            do {
-                let text = try await core.readFile(cwd: cwd, path: file.path)
-                guard !Task.isCancelled else { return }
-                document = text
-            } catch {
-                guard !Task.isCancelled else { return }
-                failure = error.localizedDescription
+        for (index, row) in rows.enumerated() {
+            guard let line = row.line else {
+                flush()
+                continue
             }
-            loading = false
+            if deleted ? line.kind != .insert : line.kind != .delete {
+                run.append(index)
+            }
         }
+        flush()
+        return result
     }
 
-    private func markdown(_ text: String) -> some View {
-        Markdown(text)
-            .markdownTheme(.gitHub)
+    private static func parse(_ source: String, sourceRows: [Int]) -> [ReviewMarkdownBlock] {
+        cmark_gfm_core_extensions_ensure_registered()
+        guard let parser = cmark_parser_new(CMARK_OPT_DEFAULT) else { return [] }
+        defer { cmark_parser_free(parser) }
+        for name in ["autolink", "strikethrough", "tagfilter", "tasklist", "table"] {
+            if let ext = cmark_find_syntax_extension(name) {
+                cmark_parser_attach_syntax_extension(parser, ext)
+            }
+        }
+        cmark_parser_feed(parser, source, source.utf8.count)
+        guard let document = cmark_parser_finish(parser) else { return [] }
+        defer { cmark_node_free(document) }
+        var result: [ReviewMarkdownBlock] = []
+        var child = cmark_node_first_child(document)
+        while let node = child {
+            let start = Int(cmark_node_get_start_line(node)) - 1
+            let end = Int(cmark_node_get_end_line(node)) - 1
+            if start >= 0, end >= start, end < sourceRows.count,
+               let normalized = cmark_render_commonmark(node, CMARK_OPT_DEFAULT, 0) {
+                // Rendering the parsed node resolves reference links using the
+                // whole run, including definitions appearing later in the hunk.
+                defer { free(normalized) }
+                result.append(Self(rows: sourceRows[start]...sourceRows[end],
+                                   markdown: String(cString: normalized)))
+            }
+            child = cmark_node_next(node)
+        }
+        return result
+    }
+}
+
+struct ReviewMarkdownBlockView: View {
+    let block: ReviewMarkdownBlock
+    let selected: Bool
+
+    var body: some View {
+        Markdown(block.markdown)
+            .markdownTheme(.gitHub.text {
+                ForegroundColor(.primary)
+                BackgroundColor(nil)
+                FontSize(16)
+            })
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(selected ? Color.accentColor.opacity(0.10) : Color.clear)
+            .overlay(alignment: .leading) {
+                if selected { Rectangle().fill(Color.accentColor).frame(width: 2) }
+            }
     }
 }
