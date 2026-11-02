@@ -138,8 +138,19 @@ import Testing
 
         #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 5_000, home: home) == "ses_late")
         #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 2_000, home: home) == "ses_early")
-        // Past the 30s ceiling a fresh session in the dir is not ours.
+        // Before the spawn floor, an older session in the dir is not ours.
         #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 60_000, home: home) == nil)
+    }
+
+    @Test func discoveryAcceptsAConversationCreatedOnTheFirstTurn() {
+        let home = makeHome()
+        writeIndex(home, [indexLine("ses_kimi", "sessions/k/ses_kimi", "/tmp/mine")])
+        writeState(home, "sessions/k/ses_kimi", #"{"createdAt":97000,"cwd":"/tmp/mine"}"#)
+
+        #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 2_000, home: home) == "ses_kimi")
+
+        writeState(home, "sessions/k/ses_kimi", #"{"createdAt":902001,"cwd":"/tmp/mine"}"#)
+        #expect(KimiStore.scanOnce(cwd: "/tmp/mine", sinceMs: 2_000, home: home) == nil)
     }
 
     @Test func recentSessionsOrdersAcrossDirectoriesNewestTouchedFirst() {

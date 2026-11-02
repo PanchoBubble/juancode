@@ -730,19 +730,23 @@ impl SessionRegistry {
             self.start_pump(id.clone(), live, epoch, handle);
             info!(session = id, "adopted a live pty across a re-exec");
         }
-        // Retry missing Codex identities after restart or upgrade. Even an exited
-        // session can now have the rollout a previous discovery window missed.
+        // Retry missing discovered identities after restart or upgrade. Even an
+        // exited session can now have the state a previous discovery window missed.
         let missing: Vec<_> = self
             .lock_sessions()
             .iter()
             .filter_map(|(id, live)| {
                 let meta = live.meta.lock().unwrap_or_else(|e| e.into_inner());
-                (meta.provider == ProviderId::Codex && meta.cli_session_id.is_none())
-                    .then(|| (id.clone(), Arc::clone(live), meta.created_at))
+                if Providers::spec(meta.provider).id_source == IdSource::Pinned
+                    || meta.cli_session_id.is_some()
+                {
+                    return None;
+                }
+                Some((id.clone(), Arc::clone(live), meta.provider, meta.created_at))
             })
             .collect();
-        for (id, live, since_ms) in missing {
-            self.start_id_discovery(&id, &live, ProviderId::Codex, since_ms);
+        for (id, live, provider, since_ms) in missing {
+            self.start_id_discovery(&id, &live, provider, since_ms);
         }
         debug!(
             sessions = self.lock_sessions().len(),
@@ -1832,13 +1836,13 @@ impl SessionRegistry {
 
     /// Learn a CLI's own conversation id once it writes one down.
     ///
-    /// Claude took our id at spawn, so there is nothing to look for. Codex writes a
-    /// rollout file while it boots and opencode a `session` row on its first message,
-    /// so for those two the session starts unresumable and becomes resumable later,
-    /// which is why this is a task and not a step.
+    /// Claude took our id at spawn, so there is nothing to look for. Codex, opencode
+    /// and kimi can write their state only when the first turn starts, so those
+    /// sessions start unresumable and become resumable later, which is why this is a
+    /// task and not a step.
     ///
     /// A client hears about the id as it lands, over the meta edge, rather than only
-    /// on its next `attach`: for these two providers a session's resumability is a
+    /// on its next `attach`: for these providers a session's resumability is a
     /// fact that appears after the row a client already has.
     fn start_id_discovery(
         &self,

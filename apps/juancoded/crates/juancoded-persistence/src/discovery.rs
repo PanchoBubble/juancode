@@ -368,7 +368,9 @@ fn kimi_index_lines(root: &Path) -> Vec<KimiIndexLine> {
 pub fn kimi_scan_once(cwd: &str, since_ms: i64, root: &Path) -> Option<String> {
     let dirs = directory_variants(cwd);
     let floor = since_ms - CLOCK_SKEW_GRACE_MS;
-    let ceiling = since_ms + 30_000;
+    // Kimi can create its state on the first turn, not at process boot. Use the
+    // same 15-minute trust window as the polling loop and orphan recovery.
+    let ceiling = since_ms + 15 * 60_000;
     // (id, |createdAt - spawn|) for every conversation in the window.
     let mut candidates: Vec<(String, i64)> = Vec::new();
 
@@ -682,6 +684,30 @@ mod tests {
         assert_eq!(kimi_scan_once("/tmp/nobody", 2_000, &root), None);
         // Before the spawn floor is somebody else's conversation.
         assert_eq!(kimi_scan_once("/tmp/mine", 8_000, &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_kimi_conversation_created_on_the_first_turn_still_matches_the_spawn() {
+        let root = kimi_fixture("kimi-first-turn");
+        // The observed failure: juancode spawned 95 seconds before kimi created
+        // its conversation. The poller was still active, but the scan rejected it.
+        std::fs::write(
+            root.join("sessions/ws-key/ses_kimi/state.json"),
+            r#"{"createdAt":97000,"cwd":"/tmp/mine"}"#,
+        )
+        .expect("delayed state");
+        assert_eq!(
+            kimi_scan_once("/tmp/mine", 2_000, &root).as_deref(),
+            Some("ses_kimi")
+        );
+
+        std::fs::write(
+            root.join("sessions/ws-key/ses_kimi/state.json"),
+            r#"{"createdAt":902001,"cwd":"/tmp/mine"}"#,
+        )
+        .expect("later state");
+        assert_eq!(kimi_scan_once("/tmp/mine", 2_000, &root), None);
         std::fs::remove_dir_all(&root).ok();
     }
 

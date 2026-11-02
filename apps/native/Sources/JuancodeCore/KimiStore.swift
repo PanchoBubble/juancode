@@ -249,7 +249,8 @@ public enum KimiStore {
     /// own creation time lands in the spawn window, and closest to it, is ours.
     static func scanOnce(cwd: String, sinceMs: Int, home: String = KimiStore.home) -> String? {
         let floor = sinceMs - 2_000           // same clock-skew grace as Codex
-        let ceiling = sinceMs + 30_000        // later sessions in the dir are not ours
+        // Kimi can create its state on the first turn, not at process boot.
+        let ceiling = sinceMs + captureTimeoutMs
         let dirs = OpencodeStore.directoryVariants(cwd)
 
         var candidates: [(id: String, gap: Int)] = []

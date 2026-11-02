@@ -311,6 +311,47 @@ async fn a_kimi_session_is_asked_about_kimis_own_session_index() {
     );
 }
 
+#[tokio::test]
+async fn a_restart_retries_a_missing_kimi_conversation_id() {
+    use juancoded_core::SessionMeta;
+    let store: Arc<dyn SessionStore> = Arc::new(SqliteStore::in_memory().unwrap());
+    let mut meta = SessionMeta::new(
+        "missed-kimi".into(),
+        ProviderId::Kimi,
+        "/tmp/missed".into(),
+        "History".into(),
+        1_000,
+        false,
+    );
+    meta.status = SessionStatus::Exited;
+    store.upsert(&meta).unwrap();
+    let config = RegistryConfig {
+        discover_id: Some(Arc::new(|source, cwd, since_ms| {
+            assert_eq!(source, IdSource::KimiIndex);
+            assert_eq!(cwd, "/tmp/missed");
+            assert_eq!(since_ms, 1_000);
+            Some("kses_found_after_restart".into())
+        })),
+        ..Default::default()
+    };
+    let registry = SessionRegistry::new(
+        Arc::new(PtyHost::new(1_024)),
+        Arc::new(VtTerminals::new(200)),
+        Arc::clone(&store),
+        Bus::new(),
+        config,
+    );
+    let learned = wait_until(5, || {
+        registry.meta("missed-kimi").and_then(|m| m.cli_session_id)
+    })
+    .await;
+    assert_eq!(learned, "kses_found_after_restart");
+    assert_eq!(
+        store.all().unwrap()[0].cli_session_id.as_deref(),
+        Some("kses_found_after_restart")
+    );
+}
+
 /// Every provider's child gets OUR environment, entry for entry, and every
 /// permission mode rides on a CLI flag the child's argv already carries — no env
 /// entry is ever added for a mode, so with or without the opt-in the diff is empty.
