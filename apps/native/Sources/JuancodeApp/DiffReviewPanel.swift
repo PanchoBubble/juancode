@@ -249,8 +249,8 @@ struct DiffReviewPanel: View {
         .background(Color.appSurface)
         .background {
             ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
-                             enabled: draft == nil && prompt == nil && reply == nil
-                                 && globalCommentDraft == nil,
+                             enabled: !model.oracleDockExpanded && draft == nil && prompt == nil
+                                 && reply == nil && globalCommentDraft == nil,
                              onKey: handle).frame(width: 0, height: 0)
         }
         .onAppear {
@@ -2346,7 +2346,7 @@ private extension View {
 struct ReviewKeyCatcher: NSViewRepresentable {
     /// A change takes first responder.
     let token: Int
-    /// False while the comment editor has the keyboard: don't take it back.
+    /// False while an editor or the Oracle overlay owns the keyboard.
     let enabled: Bool
     let onKey: (ReviewKey) -> Bool
 
@@ -2358,16 +2358,23 @@ struct ReviewKeyCatcher: NSViewRepresentable {
 
     func updateNSView(_ view: ReviewKeyCatcherView, context: Context) {
         view.onKey = onKey
-        guard enabled, context.coordinator.token != token else { return }
+        view.enabled = enabled
+        guard enabled else {
+            // Reopening the review must restore focus even if its token is unchanged.
+            context.coordinator.token = nil
+            return
+        }
+        guard context.coordinator.token != token else { return }
         context.coordinator.token = token
         DispatchQueue.main.async { [weak view] in
-            guard let view, let window = view.window else { return }
+            guard let view, view.enabled, let window = view.window else { return }
             window.makeFirstResponder(view)
         }
     }
 }
 
 final class ReviewKeyCatcherView: NSView {
+    var enabled = true
     var onKey: ((ReviewKey) -> Bool)?
 
     /// Catchers currently in a window — at most one per window, since the panel is.
@@ -2375,7 +2382,7 @@ final class ReviewKeyCatcherView: NSView {
 
     /// The open review panel's catcher in `window`, if it has one.
     static func mounted(in window: NSWindow) -> ReviewKeyCatcherView? {
-        all.allObjects.first { $0.window === window }
+        all.allObjects.first { $0.window === window && $0.enabled }
     }
 
     override func viewDidMoveToWindow() {
@@ -2383,9 +2390,10 @@ final class ReviewKeyCatcherView: NSView {
         if window != nil { Self.all.add(self) } else { Self.all.remove(self) }
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { enabled }
 
     override func keyDown(with event: NSEvent) {
+        guard enabled else { super.keyDown(with: event); return }
         let mods = event.modifierFlags.intersection([.command, .control, .option])
         // ⌘/⌥ combos are the menus' and the system's.
         guard !mods.contains(.command), !mods.contains(.option) else {

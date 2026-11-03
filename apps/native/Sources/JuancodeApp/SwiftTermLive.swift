@@ -441,6 +441,9 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
         else { return false }
+        // Oracle sits above the review and the other detail panels. Their fallback
+        // handlers must not redirect keys away from its terminal.
+        guard !oracle.expanded else { return false }
         // While the Changes panel holds the keyboard, let its own `.onKeyPress` see
         // every plain key — don't pre-empt j/k/n/p as sidebar nav.
         if model.changesKeyboardActive { return false }
