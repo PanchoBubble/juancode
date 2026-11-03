@@ -624,13 +624,22 @@ struct GitHubQueueBadge: View {
 
         private var reviewAssignmentIcons: some View {
             HStack(spacing: 4) {
-                let assigned = !pr.assignedReviewers.isEmpty || reviewAssignedToMe
-                Image(systemName: assigned ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
-                    .foregroundStyle(assigned ? Color.secondary : Color.orange)
-                    .help(assigned
-                        ? "Review assigned" + (pr.assignedReviewers.isEmpty ? "" : ": " + pr.assignedReviewers.joined(separator: ", "))
-                        : "No reviewer assigned")
-                    .accessibilityLabel(assigned ? "Review assigned" : "No reviewer assigned")
+                let reviewers = pr.assignedReviewers
+                let assigned = !reviewers.isEmpty || reviewAssignedToMe
+                let assignmentLabel = assigned
+                    ? "Review assigned" + (reviewers.isEmpty ? "" : ": " + reviewers.joined(separator: ", "))
+                    : "No reviewer assigned"
+                HStack(spacing: 2) {
+                    Image(systemName: assigned ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+                    if reviewers.count > 1 {
+                        Text(verbatim: "\(reviewers.count)")
+                            .monospacedDigit()
+                    }
+                }
+                .foregroundStyle(assigned ? Color.secondary : Color.orange)
+                .help(assignmentLabel)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(assignmentLabel)
                 if reviewAssignedToMe {
                     Image(systemName: "hand.raised.fill")
                         .foregroundStyle(Color.accentColor)
