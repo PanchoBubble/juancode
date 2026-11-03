@@ -46,6 +46,14 @@ final class BeadsBoardModel {
         Task { closedByCwd[cwd] = await getBeadsRecentlyClosed(cwd) }
     }
 
+    /// Permanently deletes the Done column's issues, then reloads it. False when bd refused.
+    func clearClosed(_ cwd: String) async -> Bool {
+        let ids = closed(cwd).map(\.id)
+        let ok = await deleteBeadsIssues(cwd, ids: ids)
+        closedByCwd[cwd] = await getBeadsRecentlyClosed(cwd)
+        return ok
+    }
+
     private func key(_ cwd: String, _ id: String) -> String { cwd + "\u{0}" + id }
     func detail(_ cwd: String, _ id: String) -> BeadsIssueDetail? { details[key(cwd, id)] }
     func isMissing(_ cwd: String, _ id: String) -> Bool { missing.contains(key(cwd, id)) }
@@ -56,14 +64,6 @@ final class BeadsBoardModel {
             if let d = await getBeadsDetail(cwd, id: id) { details[k] = d; missing.remove(k) }
             else if details[k] == nil { missing.insert(k) }
         }
-    /// Permanently deletes the Done column's issues, then reloads it. False when bd refused.
-    func clearClosed(_ cwd: String) async -> Bool {
-        let ids = closed(cwd).map(\.id)
-        let ok = await deleteBeadsIssues(cwd, ids: ids)
-        closedByCwd[cwd] = await getBeadsRecentlyClosed(cwd)
-        return ok
-    }
-
     }
 }
 
@@ -92,6 +92,11 @@ extension AppModel {
         beadsTrackers.filter { beads($0)?.available == true }
     }
 
+    /// Open tickets across every loaded tracker: the Beads button's badge.
+    var openBeadsCount: Int {
+        beadsProjects.reduce(0) { $0 + (beads($1)?.issues.filter { !$0.isClosed }.count ?? 0) }
+    }
+
     func loadAllBeads() {
         for cwd in beadsTrackers where beads(cwd) == nil { loadBeads(cwd) }
     }
@@ -104,11 +109,6 @@ extension AppModel {
 
     /// Sessions with a live pty in `cwd` or any of its worktrees.
     func liveSessions(inProject cwd: String) -> [SessionMeta] {
-    /// Open tickets across every loaded tracker: the Beads button's badge.
-    var openBeadsCount: Int {
-        beadsProjects.reduce(0) { $0 + (beads($1)?.issues.filter { !$0.isClosed }.count ?? 0) }
-    }
-
         sessions.filter { !$0.archived && isLive($0.id) && repoRoot(forSession: $0) == cwd }
     }
 }
@@ -460,6 +460,10 @@ private struct BeadsProjectView: View {
 private struct BeadsColumnView: View {
     let cwd: String
     let column: BeadsBoardColumn
+    var clearable = false
+    @Environment(AppModel.self) private var model
+    @State private var confirmClear = false
+    @State private var clearFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -469,13 +473,16 @@ private struct BeadsColumnView: View {
                     .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer()
                 Text("\(column.issues.count)").font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                if clearable && !column.issues.isEmpty {
+                    Button { confirmClear = true } label: {
+                        Image(systemName: "trash").font(.system(size: 10.5))
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Clear done tickets").clickCursor()
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
             ScrollView {
-    var clearable = false
-    @Environment(AppModel.self) private var model
-    @State private var confirmClear = false
-    @State private var clearFailed = false
                 LazyVStack(spacing: 6) {
                     if column.issues.isEmpty {
                         Text("Nothing here").font(.system(size: 11)).foregroundStyle(.tertiary)
@@ -485,15 +492,19 @@ private struct BeadsColumnView: View {
                         BeadsCard(cwd: cwd, issue: issue)
                     }
                 }
-                if clearable && !column.issues.isEmpty {
-                    Button { confirmClear = true } label: {
-                        Image(systemName: "trash").font(.system(size: 10.5))
-                    }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-                    .help("Clear done tickets").clickCursor()
-                }
                 .padding(.horizontal, 6).padding(.bottom, 8)
             }
+        }
+        .confirmationDialog("Delete \(column.issues.count) done ticket\(column.issues.count == 1 ? "" : "s")?",
+                            isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                Task { clearFailed = await !model.beadsBoard.clearClosed(cwd) }
+            }
+        } message: {
+            Text("They are removed from this project's tracker for good. This can't be undone.")
+        }
+        .alert("Couldn't clear done tickets", isPresented: $clearFailed) {} message: {
+            Text("bd refused the delete. The tickets are untouched.")
         }
         .frame(width: 270)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -507,17 +518,6 @@ private struct BeadsCard: View {
     let cwd: String
     let issue: BeadsIssue
     @State private var hover = false
-        .confirmationDialog("Delete \(column.issues.count) done ticket\(column.issues.count == 1 ? "" : "s")?",
-                            isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                Task { clearFailed = await !model.beadsBoard.clearClosed(cwd) }
-            }
-        } message: {
-            Text("They are removed from this project's tracker for good. This can't be undone.")
-        }
-        .alert("Couldn't clear done tickets", isPresented: $clearFailed) {} message: {
-            Text("bd refused the delete. The tickets are untouched.")
-        }
 
     var body: some View {
         Button { model.beadsBoard.ticket = issue.id } label: {
