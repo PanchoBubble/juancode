@@ -1,25 +1,71 @@
 import SwiftUI
 
-/// Keep the provider icon and status rail on the same busy-state animation.
-/// Animate only their paint, so terminal and row geometry remain stable.
+/// A rotating arc makes work visible around even a small provider logo.
 struct AgentWorkPulse: ViewModifier {
+    let working: Bool
+    let tint: Color
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            AgentWorkMotion(working: working) { phase in
+                if let phase {
+                    Circle().trim(from: 0.1, to: 0.85)
+                        .stroke(AngularGradient(colors: [tint.opacity(0.15), tint, .white], center: .center),
+                                style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .rotationEffect(.degrees(phase * 360))
+                        .padding(-3)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+/// A bright comet repeatedly sweeps down the rail; the dim track keeps the
+/// activity color readable between passes. Neither animation changes row layout.
+struct AgentWorkRail: View {
+    let working: Bool
+    let tint: Color
+
+    var body: some View {
+        AgentWorkMotion(working: working) { phase in
+            Rectangle().fill(tint.opacity(phase == nil ? 1 : 0.3))
+                .overlay {
+                    if let phase {
+                        GeometryReader { geometry in
+                            let length = max(18, geometry.size.height * 0.55)
+                            Rectangle()
+                                .fill(LinearGradient(colors: [.clear, tint, .white, tint, .clear],
+                                                     startPoint: .top, endPoint: .bottom))
+                                .frame(height: length)
+                                .offset(y: phase * (geometry.size.height + length) - length)
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
+                }
+                .clipped()
+        }
+    }
+}
+
+/// Drive motion with time rather than implicit animation transactions from the
+/// surrounding List. Idle, inactive and Reduce Motion rows schedule no frames.
+private struct AgentWorkMotion<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
 
     let working: Bool
-    let tint: Color
-    var scale: CGFloat = 1
+    @ViewBuilder var content: (Double?) -> Content
 
-    private var animates: Bool { working && !reduceMotion && scenePhase == .active }
-
-    func body(content: Content) -> some View {
-        content.phaseAnimator(animates ? [false, true] : [false]) { indicator, glowing in
-            indicator
-                .opacity(animates && !glowing ? 0.4 : 1)
-                .scaleEffect(glowing ? scale : 1)
-                .shadow(color: tint.opacity(glowing ? 0.8 : 0), radius: glowing ? 4 : 0)
-        } animation: { _ in
-            .easeInOut(duration: 0.9)
+    var body: some View {
+        if working && !reduceMotion && scenePhase == .active {
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                content(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2)
+            }
+        } else {
+            content(nil)
         }
     }
 }

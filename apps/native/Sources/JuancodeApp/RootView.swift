@@ -1852,14 +1852,11 @@ private struct SidebarRowChrome: ViewModifier {
                 let unread = model.unreadSessions.contains(session.id)
                 let unseenDone = model.unseenCompletions.contains(session.id)
                 let activating = model.isActivating(session.id)
-                Rectangle()
-                    .fill(SessionRow.statusColor(live: live, activity: activity, unread: unread,
+                AgentWorkRail(
+                    working: session.kind == .agent && live && activity == .busy && !activating,
+                    tint: SessionRow.statusColor(live: live, activity: activity, unread: unread,
                                                  unseenDone: unseenDone, activating: activating))
-                    .frame(width: 2)
-                    .modifier(AgentWorkPulse(
-                        working: session.kind == .agent && live && activity == .busy && !activating,
-                        tint: SessionRow.statusColor(live: live, activity: activity, unread: unread,
-                                                     unseenDone: unseenDone, activating: activating)))
+                    .frame(width: 3)
                     .help(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
                                                 unseenDone: unseenDone, activating: activating))
                     .accessibilityLabel(SessionRow.statusHelp(live: live, activity: activity, unread: unread,

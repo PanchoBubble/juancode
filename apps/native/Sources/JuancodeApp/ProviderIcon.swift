@@ -28,7 +28,7 @@ struct ProviderIcon: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
                 .foregroundStyle(tint)
-                .modifier(AgentWorkPulse(working: working, tint: tint, scale: 1.12))
+                .modifier(AgentWorkPulse(working: working, tint: tint))
                 .help(label)
                 .accessibilityLabel(label)
         }
