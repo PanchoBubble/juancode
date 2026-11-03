@@ -489,6 +489,13 @@ struct GitHubQueueBadge: View {
                     Text(verbatim: "#\(pr.number)")
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
+                    if let base = pr.baseBranch, !base.isEmpty, base != "main" {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .help("Targets \(base) instead of main")
+                            .accessibilityLabel("Targets branch \(base) instead of main")
+                    }
                     // Always shown, not a hover action: being one of a stack is a
                     // fact about the PR, like its number.
                     if let stack {
