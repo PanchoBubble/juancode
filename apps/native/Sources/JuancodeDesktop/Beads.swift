@@ -164,6 +164,17 @@ public func getBeadsRecentlyClosed(_ cwd: String, limit: Int = 20) async -> [Bea
     return beadsIssues(raw, ready: [], blocked: [])
 }
 
+/// Permanently delete issues (`bd delete <ids> --force`): the Done column's Clear.
+/// Returns whether bd accepted it. Never throws.
+public func deleteBeadsIssues(_ cwd: String, ids: [String]) async -> Bool {
+    guard !ids.isEmpty else { return true }
+    // Not `bdJson`: success is the exit code, and delete's stdout needn't be JSON.
+    let result = try? await ProcessRunner.capture(
+        bdBin(), ["--sandbox", "delete"] + ids + ["--force"],
+        cwd: cwd, timeout: beadsTimeoutSec, maxBytes: beadsMaxBuffer)
+    return result?.ok == true
+}
+
 /// One issue in full (`bd show <id> --json`): description, both directions of
 /// its dependency edges, and comments. `nil` when bd is missing or the id is
 /// unknown.

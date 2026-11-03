@@ -577,7 +577,7 @@ private struct ToolsMenu: View {
         .clickCursor()
         // The Heavy Queue row's count is pushed by the core, so the menu holds a watch
         // for as long as it can draw one rather than asking for a snapshot on open.
-        .onAppear { model.watchHeavyQueue() }
+        .onAppear { model.watchHeavyQueue(); model.loadAllBeads() }
         .onDisappear { model.releaseHeavyQueue() }
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
@@ -596,7 +596,8 @@ private struct ToolsMenu: View {
                            trailing: model.recurringTasks.isEmpty ? nil : "\(model.recurringTasks.count)") {
                     model.showingRecurringTasks = true
                 }
-                toolButton("checklist", "Beads") {
+                toolButton("checklist", "Beads",
+                           trailing: model.openBeadsCount == 0 ? nil : "\(model.openBeadsCount)") {
                     model.openBeads()
                 }
                 toolButton("square.stack.3d.up", "Heavy Queue",
