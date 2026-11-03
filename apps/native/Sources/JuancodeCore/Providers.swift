@@ -181,7 +181,7 @@ public enum Providers {
 
     public static let opencode = ProviderSpec(
         id: .opencode,
-        label: "opencode",
+        label: "OpenCode",
         pinsSessionId: false,
         // `--session <id>` continues an EXISTING conversation only — there's no flag
         // to pin a new one — so a fresh session starts clean and we read the id it

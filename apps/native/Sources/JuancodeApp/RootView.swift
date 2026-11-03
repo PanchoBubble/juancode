@@ -2310,6 +2310,9 @@ private struct FolderHeader: View {
         .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 
+    /// Agents offered by the project's "+" picker. Copilot is left out on purpose.
+    private static let pickerProviders = ProviderId.allCases.filter { $0 != .copilot }
+
     private static let pickerWidth: CGFloat = 240
     /// The current-branch end of a split row: a fifth of the popover.
     private static let currentBranchWidth: CGFloat = pickerWidth * 0.2
@@ -2319,8 +2322,9 @@ private struct FolderHeader: View {
     @ViewBuilder
     private var splitAgentRows: some View {
         let branch = model.folderGitState(group.cwd)?.branch
-        ForEach(ProviderId.allCases, id: \.self) { p in
+        ForEach(Self.pickerProviders, id: \.self) { p in
             SplitAgentRow(
+                provider: p,
                 label: Providers.spec(for: p).label,
                 currentHelp: "\(Providers.spec(for: p).label) on "
                     + (branch.map { "the current branch (\($0))" } ?? "the current branch"),
@@ -2336,11 +2340,14 @@ private struct FolderHeader: View {
     }
 
     private func agentRows(worktree: Bool) -> some View {
-        ForEach(ProviderId.allCases, id: \.self) { p in
+        ForEach(Self.pickerProviders, id: \.self) { p in
             Button {
                 startAgent(p, worktree: worktree)
             } label: {
-                Text(Providers.spec(for: p).label)
+                HStack(spacing: 8) {
+                    ProviderIcon(provider: p, size: 13, tint: .primary)
+                    Text(Providers.spec(for: p).label)
+                }
                     // Explicit primary: a plain button's label paints in the
                     // inactive-control gray whenever the popover panel isn't key,
                     // which read as "these options are disabled".
@@ -2439,6 +2446,7 @@ private struct RunCommandEditor: View {
 /// new worktree, the trailing segment on the folder's current branch. Each half
 /// highlights on its own hover so it's clear which one a click lands on.
 private struct SplitAgentRow: View {
+    let provider: ProviderId
     let label: String
     let currentHelp: String
     let currentWidth: CGFloat
@@ -2450,7 +2458,10 @@ private struct SplitAgentRow: View {
     var body: some View {
         HStack(spacing: 0) {
             Button(action: onWorktree) {
-                Text(label)
+                HStack(spacing: 8) {
+                    ProviderIcon(provider: provider, size: 13, tint: .primary)
+                    Text(label)
+                }
                     // Explicit primary: a plain button's label paints in the
                     // inactive-control gray whenever the popover panel isn't key.
                     .foregroundStyle(.primary)
