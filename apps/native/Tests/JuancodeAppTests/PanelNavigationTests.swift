@@ -27,6 +27,33 @@ import Testing
         #expect(opened == ["b"] && actions == ["b"])
     }
 
+    @Test func vimMotionsBrowseWithoutActivating() {
+        let nav = PanelNavigation()
+        var opened = false
+        var acted = false
+        nav.begin(.prs, rows: [
+            PanelNavigationRow(id: "repo", open: {}),
+            PanelNavigationRow(id: "pr", actions: [
+                PanelRowAction(id: "review", label: "Review", perform: { acted = true })
+            ], open: { opened = true })
+        ])
+        #expect(nav.handle(38)) // j
+        #expect(nav.cursor.rowID == "pr")
+        #expect(nav.handle(37)) // l
+        #expect(nav.cursor.actionID == "review")
+        #expect(!opened && !acted)
+        #expect(nav.handle(36))
+        #expect(acted && !opened)
+        #expect(nav.handle(4)) // h
+        #expect(nav.cursor.actionID == nil)
+        #expect(nav.handle(36))
+        #expect(opened)
+        #expect(nav.handle(40)) // k
+        #expect(nav.cursor.rowID == "repo")
+        nav.end()
+        #expect(nav.target == nil)
+    }
+
     @Test func updatesReplaceClosuresAndRemoveUnavailableActions() {
         let nav = PanelNavigation()
         var value = 0

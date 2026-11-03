@@ -59,10 +59,10 @@ final class PanelNavigation {
 
     func handle(_ key: UInt16) -> Bool {
         switch key {
-        case 125: cursor.moveRow(1)
-        case 126: cursor.moveRow(-1)
-        case 123: cursor.moveAction(-1, actions: currentRow?.actions.map(\.id) ?? [])
-        case 124: cursor.moveAction(1, actions: currentRow?.actions.map(\.id) ?? [])
+        case 38, 125: cursor.moveRow(1) // j / ↓
+        case 40, 126: cursor.moveRow(-1) // k / ↑
+        case 4, 123: cursor.moveAction(-1, actions: currentRow?.actions.map(\.id) ?? [])
+        case 37, 124: cursor.moveAction(1, actions: currentRow?.actions.map(\.id) ?? [])
         case 36, 76:
             if let action = cursor.actionID { currentRow?.actions.first { $0.id == action }?.perform() }
             else { currentRow?.open() }

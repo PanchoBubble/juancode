@@ -172,10 +172,13 @@ struct GitHubQueueBadge: View {
                                                toggle: { toggle(group.repo) },
                                                dismiss: { showing = false })
                                         .id(group.repo)
+                                        .panelRowFocus(.prs, id: group.repo)
                                     if !folded {
                                         ForEach(Array(group.rows.enumerated()), id: \.element.id) { i, row in
                                             QueueRow(row: row, reason: reason(row),
                                                      dismiss: { showing = false }) { open(row) }
+                                                .id(row.id)
+                                                .panelRowFocus(.prs, id: row.id)
                                                 .overlay(alignment: .top) {
                                                     if i > 0 {
                                                         Rectangle().fill(Color.appDivider).frame(height: 1)
@@ -188,6 +191,8 @@ struct GitHubQueueBadge: View {
                                 }
                             }
                         }
+                        .panelNavigationRows(navigationRows)
+                        .panelNavigationScroll(.prs, proxy: proxy)
                         .reportsRailOverflow()
                         .task(id: currentRepo) { reveal(currentRepo, proxy) }
                     }
@@ -371,6 +376,20 @@ struct GitHubQueueBadge: View {
                 let ordered = groupPrStacks(prioritized.map(\.pr), in: context)
                     .compactMap { byURL[$0.url] }
                 return (repo, ordered)
+            }
+        }
+
+        // Publish the full visible order outside the lazy stack, so keyboard browsing
+        // can reach rows that have not been mounted yet. Folded repos remain reachable.
+        private var navigationRows: [PanelNavigationRow] {
+            let groups = groups
+            let initialID = groups.first { !collapsed.contains($0.repo) }?.rows.first?.id
+            return groups.flatMap { group in
+                let header = PanelNavigationRow(id: group.repo, open: { toggle(group.repo) })
+                guard !collapsed.contains(group.repo) else { return [header] }
+                return [header] + group.rows.map { row in
+                    PanelNavigationRow(id: row.id, isInitial: row.id == initialID, open: { open(row) })
+                }
             }
         }
 
