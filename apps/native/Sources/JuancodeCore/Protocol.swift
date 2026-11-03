@@ -56,6 +56,10 @@ public struct SessionUsage: Codable, Sendable, Equatable {
     /// a model we have no window for — the percentage is then not computable, which
     /// is deliberately different from 0%.
     public var contextWindow: Int?
+    /// The model of the newest billed request, as the CLI's transcript names it (a
+    /// `/model` switch moves it). Nil until a request lands, and on rows an older
+    /// daemon wrote.
+    public var model: String?
 
     public init(
         inputTokens: Int,
@@ -65,7 +69,8 @@ public struct SessionUsage: Codable, Sendable, Equatable {
         totalTokens: Int,
         costUsd: Double?,
         contextTokens: Int? = nil,
-        contextWindow: Int? = nil
+        contextWindow: Int? = nil,
+        model: String? = nil
     ) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
@@ -75,6 +80,7 @@ public struct SessionUsage: Codable, Sendable, Equatable {
         self.costUsd = costUsd
         self.contextTokens = contextTokens
         self.contextWindow = contextWindow
+        self.model = model
     }
 
     /// Share of the model's context window the live conversation holds (0…1+, it can

@@ -93,6 +93,11 @@ pub struct SessionUsage {
     /// is deliberately different from 0%.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
+    /// The model of the newest billed request, as the transcript names it (a `/model`
+    /// switch moves it; `pinned_model` does not). Rides here because `usage` is already
+    /// persisted as JSON and broadcast with every row change. `None` until a request lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// `SessionMeta` — the session row every client renders. `skipPermissions`,

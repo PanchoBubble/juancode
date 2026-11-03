@@ -117,6 +117,11 @@ impl UsageFold {
                         Some((usage.input + usage.cache_read + usage.cache_write) as i64);
                     let model = self.last_model.as_deref().unwrap_or_default();
                     next.context_window = pricing::context_window(model);
+                    // A request whose step was announced in an earlier batch (restart)
+                    // leaves the row's model alone rather than blanking it.
+                    if self.last_model.is_some() {
+                        next.model = self.last_model.clone();
+                    }
                     match pricing::turn_cost(
                         model,
                         usage.input,
@@ -152,6 +157,7 @@ fn zero() -> SessionUsage {
         cost_usd: None,
         context_tokens: None,
         context_window: None,
+        model: None,
     }
 }
 
@@ -316,6 +322,7 @@ mod tests {
             cost_usd: None,
             context_tokens: Some(500),
             context_window: None,
+            model: None,
         };
         let mut fold = UsageFold::resuming(Some(&base));
         let next = fold
@@ -345,6 +352,37 @@ mod tests {
         let u = fold.apply(None, &batch).unwrap();
         assert_eq!(u.context_window, Some(200_000));
         assert!(u.cost_usd.is_some());
+    }
+
+    #[test]
+    fn the_row_names_the_model_of_the_newest_request_across_a_model_switch() {
+        let mut fold = UsageFold::resuming(None);
+        let first = fold
+            .apply(
+                None,
+                &[
+                    record(1, step("claude-opus-5")),
+                    record(2, usage(10, 1, 0, 0)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(first.model.as_deref(), Some("claude-opus-5"));
+        let second = fold
+            .apply(
+                Some(&first),
+                &[
+                    record(3, step("claude-sonnet-5")),
+                    record(4, usage(10, 1, 0, 0)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(second.model.as_deref(), Some("claude-sonnet-5"));
+        // A restarted fold has not seen a Step yet: the row keeps what it had.
+        let mut resumed = UsageFold::resuming(Some(&second));
+        let third = resumed
+            .apply(Some(&second), &[record(5, usage(10, 1, 0, 0))])
+            .unwrap();
+        assert_eq!(third.model.as_deref(), Some("claude-sonnet-5"));
     }
 
     #[test]

@@ -787,6 +787,7 @@ mod tests {
             cost_usd: Some(0.5),
             context_tokens: Some(4),
             context_window: Some(200_000),
+            model: Some("claude-opus-5".into()),
         });
         store.upsert(&m).unwrap();
         assert_eq!(store.get("s1").unwrap().as_ref(), Some(&m));

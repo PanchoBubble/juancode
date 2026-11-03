@@ -3168,6 +3168,8 @@ struct SessionContainer: View {
     @AppStorage("session.sidePanel.width") private var storedPanelWidth: Double?
     /// The half a session dragged over the pane would land in, while one is.
     @State private var dropZone: SessionDropZone?
+    /// Width of the header's trailing cluster, which the centred project name yields to.
+    @State private var trailingWidth: CGFloat = 0
     /// Persisted height of the bottom terminal panel in the split.
     @AppStorage("session.bottomPanel.height") private var bottomHeight: Double = 240
 
@@ -3186,7 +3188,7 @@ struct SessionContainer: View {
 
     /// Which project a prompt typed here lands in: the repo's name over the
     /// session's actual cwd (the worktree path, for a worktree session).
-    private var projectHeader: some View {
+    private func projectHeader(maxWidth: CGFloat) -> some View {
         let name = (model.repoRoot(forSession: meta) as NSString).lastPathComponent
         let path = (meta.cwd as NSString).abbreviatingWithTildeInPath
         return VStack(spacing: 1) {
@@ -3198,7 +3200,7 @@ struct SessionContainer: View {
                 .truncationMode(.middle)
         }
         .lineLimit(1)
-        .frame(maxWidth: max(model.windowWidth * 0.3, 200))
+        .frame(maxWidth: maxWidth)
     }
 
     var body: some View {
@@ -3225,6 +3227,17 @@ struct SessionContainer: View {
                                     onSplit: { model.splitSessionTab($0, for: meta.id, axis: $1) })
                 }
                 Spacer()
+                HStack(spacing: 12) {
+                // The model the CLI is running right now (a `/model` switch moves it),
+                // up here so it never needs a scroll back through the transcript.
+                if let modelId = meta.usage?.model {
+                    Text(SessionUsageFormat.modelLabel(modelId))
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                        .help("Model: \(modelId)")
+                }
                 Text(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -3294,11 +3307,22 @@ struct SessionContainer: View {
                 }
                 .help(panelShown ? "Hide the Files / Issues panel" : "Show the Files / Issues panel")
                 .clickCursor()
+                }
+                .fixedSize()
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { trailingWidth = $0 }
             }
             .padding(8)
             // An overlay, not an HStack member, so it stays centred on the pane no
-            // matter how wide the tab strip or the button cluster get.
-            .overlay { projectHeader.allowsHitTesting(false) }
+            // matter how wide the tab strip or the button cluster get. It gives way to
+            // the trailing cluster (model chip, usage, buttons) rather than running
+            // under it: its width is what is left once that cluster is mirrored.
+            .overlay {
+                GeometryReader { geo in
+                    projectHeader(maxWidth: max(geo.size.width - 2 * (trailingWidth + 24), 80))
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
+                .allowsHitTesting(false)
+            }
             Divider()
             GeometryReader { geo in
             let frames = splitFrames(geo.size)

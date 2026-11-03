@@ -30,6 +30,26 @@ public enum SessionUsageFormat {
         guard let percent else { return nil }
         return "ctx \(percent)%"
     }
+
+    /// A model id as a short label for the session header: "claude-opus-5-5" → "Opus 5.5",
+    /// "claude-3-5-sonnet-20241022" → "Sonnet 3.5". An id that isn't claude-shaped is
+    /// shown as the CLI wrote it, since a wrong prettification is worse than a long one.
+    public static func modelLabel(_ id: String) -> String {
+        guard id.hasPrefix("claude-") else { return id }
+        var names: [String] = []
+        var version: [String] = []
+        for part in id.dropFirst("claude-".count).split(separator: "-") {
+            if part.allSatisfy(\.isNumber) {
+                // A trailing 8-digit snapshot date is not part of the version.
+                if part.count < 8 { version.append(String(part)) }
+            } else {
+                names.append(String(part).capitalized)
+            }
+        }
+        guard !names.isEmpty else { return id }
+        return ([names.joined(separator: " ")] + (version.isEmpty ? [] : [version.joined(separator: ".")]))
+            .joined(separator: " ")
+    }
 }
 
 extension SessionUsage {
