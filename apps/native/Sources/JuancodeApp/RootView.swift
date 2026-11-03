@@ -41,9 +41,10 @@ struct RootView: View {
                     PanelNavigationDot()
                 }
             }
-            // No toolbar material — the top strip stays the window's black (dark
-            // mode) instead of the system gray band over the split view and the rail.
-            .toolbarBackground(.hidden, for: .windowToolbar)
+            // The sidebar list scrolls beneath the unified titlebar. Keep an opaque
+            // background so its rows cannot draw under the traffic lights and actions.
+            .toolbarBackground(Color(nsColor: .appWindow), for: .windowToolbar)
+            .toolbarBackground(.visible, for: .windowToolbar)
     }
 }
 
