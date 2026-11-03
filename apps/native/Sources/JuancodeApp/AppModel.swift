@@ -129,14 +129,12 @@ final class AppModel {
     private var metaCache: [String: SessionMeta] = [:]
     var activities: [String: SessionActivity] = [:]
     var selection: String? {
+        willSet { beginNavigationChange() }
         didSet {
+            defer { endNavigationChange() }
             // A chain view follows a sidebar click onto one of its sessions, and closes
             // on a click anywhere else.
             if selection != oldValue { followSelectionIntoChain() }
-            // Remember where we came from so the mouse's back button (⇧⌘B) can return.
-            // Every navigation path lands here, so this one hook covers the jump
-            // palette, notifications, search hits and plain sidebar clicks alike.
-            if !navigatingHistory { navHistory.record(leaving: oldValue) }
             // Viewing a session clears its pending turn-end notification (and the
             // Dock badge count it contributed).
             if let sel = selection { clearUnread(sel) }
@@ -369,26 +367,39 @@ final class AppModel {
     /// underneath (juancode-073); `selection.didSet` auto-dismisses it so every
     /// navigation path lands back on the session.
     var showingGitHub = false {
-        didSet { if showingGitHub { showingBeads = false; showingDiffReview = false } }
+        willSet { beginNavigationChange() }
+        didSet {
+            defer { endNavigationChange() }
+            if showingGitHub { showingBeads = false; showingDiffReview = false }
+        }
     }
     /// The app-wide Beads view (BeadsView.swift): the same kind of overlay as the
     /// GitHub view, and never both at once.
     var showingBeads = false {
-        didSet { if showingBeads { showingGitHub = false; showingDiffReview = false } }
+        willSet { beginNavigationChange() }
+        didSet {
+            defer { endNavigationChange() }
+            if showingBeads { showingGitHub = false; showingDiffReview = false }
+        }
     }
     /// The full-width diff-review panel (DiffReviewPanel.swift, juancode-a5j): the
     /// same kind of overlay as the GitHub and Beads views, and never with either.
     /// Like them, a session switch dismisses it (`selection.didSet`); its comments
     /// live in `diffReview` and are still there when it is reopened.
     var showingDiffReview = false {
+        willSet { beginNavigationChange() }
         didSet {
+            defer { endNavigationChange() }
             if showingDiffReview { showingGitHub = false; showingBeads = false }
             else { diffReviewPrId = nil }
         }
     }
     /// The PR review id (`DiffReviewModel.prReviewId`) while the panel reviews a pull
     /// request opened from the GitHub view; nil while it reviews the session.
-    var diffReviewPrId: String?
+    var diffReviewPrId: String? {
+        willSet { beginNavigationChange() }
+        didSet { endNavigationChange() }
+    }
     /// Comments, bases and loaded diffs behind the diff-review panel.
     let diffReview = DiffReviewModel()
     /// Bumped to ask the diff-review panel to take the keyboard back.
@@ -677,6 +688,10 @@ final class AppModel {
         }
         for s in core.liveSessions() { watch(s) }
         watchCoreConnection()
+        github.willNavigate = { [weak self] in self?.beginNavigationChange() }
+        github.didNavigate = { [weak self] in self?.endNavigationChange() }
+        beadsBoard.willNavigate = { [weak self] in self?.beginNavigationChange() }
+        beadsBoard.didNavigate = { [weak self] in self?.endNavigationChange() }
         refresh()
         restoreLaunchSelection() // land back on the pane you were in (juancode restore)
         reviveLaunchPlan()       // ...and bring every other open session back with it
@@ -760,10 +775,15 @@ final class AppModel {
     /// would stay stuck). Instead the dock acts as their "viewer": while it's open we
     /// suppress + clear their notifications, mirroring how selecting a session clears it.
     var oracleDockExpanded = false {
-        didSet { if oracleDockExpanded { markOracleRead() } }
+        willSet { beginNavigationChange() }
+        didSet {
+            defer { endNavigationChange() }
+            if oracleDockExpanded { markOracleRead() }
+        }
     }
     /// Set by `OracleModel`, which owns the dock: closes it so a revealed pane is visible.
     @ObservationIgnored var collapseOracleDock: (() -> Void)?
+    @ObservationIgnored var restoreOracleDock: ((Bool) -> Void)?
 
     /// Unread sessions surfaced in the notification list / bell — excludes Oracle's own
     /// sessions (handled by the dock) since they aren't selectable from the sidebar.
@@ -1122,33 +1142,98 @@ final class AppModel {
     func selectFirst() { if let f = navOrder.first { selection = f } }
     func selectLast() { if let l = navOrder.last { selection = l } }
 
-    /// Viewed-session history for the mouse's back/forward buttons (and ⇧⌘B / ⌘]).
-    /// Fed from `selection.didSet`; `navigatingHistory` keeps our own moves out of
-    /// it so back and forward don't overwrite each other.
-    private var navHistory = NavHistory()
+    /// A destination includes the content covering the selected terminal. Keeping
+    /// review ids preserves the PR's cached diff, comments and delivery target.
+    private struct NavigationDestination: Equatable {
+        var session: String?
+        var github: Bool
+        var githubRow: GitHubModel.PrNavRow?
+        var githubScope: String?
+        var beads: Bool
+        var review: Bool
+        var reviewId: String?
+        var chain: ChainViewState?
+        var oracle: Bool
+        var beadsProject: String?
+        var beadsTicket: String?
+    }
+
+    private var navigationDestination: NavigationDestination {
+        NavigationDestination(session: selection, github: showingGitHub,
+                              githubRow: showingGitHub && github.selectedKey != nil
+                                ? github.selectedRow : nil,
+                              githubScope: showingGitHub ? githubScope : nil,
+                              beads: showingBeads, review: showingDiffReview,
+                              reviewId: showingDiffReview ? diffReviewPrId : nil,
+                              chain: chainView, oracle: oracleDockExpanded,
+                              beadsProject: showingBeads ? beadsBoard.project : nil,
+                              beadsTicket: showingBeads ? beadsBoard.ticket : nil)
+    }
+
+    private var navHistory = NavigationHistory<NavigationDestination>()
     @ObservationIgnored private var navigatingHistory = false
+    @ObservationIgnored private var navigationChangeDepth = 0
+    @ObservationIgnored private var navigationBeforeChange: NavigationDestination?
+
+    /// Group nested property changes into one visit, including mutually exclusive
+    /// overlays and selection's automatic dismissals.
+    func beginNavigationChange() {
+        if navigationChangeDepth == 0 { navigationBeforeChange = navigationDestination }
+        navigationChangeDepth += 1
+    }
+
+    func endNavigationChange() {
+        navigationChangeDepth -= 1
+        guard navigationChangeDepth == 0 else { return }
+        defer { navigationBeforeChange = nil }
+        guard !navigatingHistory, let previous = navigationBeforeChange,
+              previous != navigationDestination else { return }
+        // The empty startup window is not a destination to revisit.
+        guard previous.session != nil || previous.github || previous.beads
+                || previous.review || previous.chain != nil || previous.oracle else { return }
+        navHistory.record(leaving: previous)
+    }
 
     var canGoBack: Bool { navHistory.canGoBack }
     var canGoForward: Bool { navHistory.canGoForward }
 
-    /// Return to the previously viewed session. No-op with nothing behind us (or
-    /// when every entry back there has since been deleted).
+    private func navigationDestinationExists(_ target: NavigationDestination) -> Bool {
+        if let id = target.session, !sessionExists(id) { return false }
+        if let chain = target.chain, chains[chain.slug] == nil { return false }
+        if let id = target.reviewId, diffReview.prTarget(id) == nil { return false }
+        return true
+    }
+
     func goBack() {
-        navigate(to: navHistory.goBack(from: selection, exists: { self.sessionExists($0) }))
+        navigate(to: navHistory.goBack(from: navigationDestination, exists: navigationDestinationExists))
     }
 
-    /// Re-walk forward after one or more `goBack`s.
     func goForward() {
-        navigate(to: navHistory.goForward(from: selection, exists: { self.sessionExists($0) }))
+        navigate(to: navHistory.goForward(from: navigationDestination, exists: navigationDestinationExists))
     }
 
-    private func navigate(to target: String?) {
+    private func navigate(to target: NavigationDestination?) {
         guard let target else { return }
         navigatingHistory = true
-        selection = target
-        navigatingHistory = false
-        // Same landing treatment as the ⌘K jump: flash the rim so the eye finds the
-        // pane it teleported to (juancode-vz1).
+        defer { navigatingHistory = false }
+        selection = target.session
+        chainView = target.chain
+        if let row = target.githubRow { github.select(cwd: row.cwd, pr: row.pr) }
+        else { github.selectedKey = nil }
+        githubScope = target.githubScope
+        showingGitHub = target.github
+        showingBeads = target.beads
+        beadsBoard.project = target.beadsProject
+        beadsBoard.ticket = target.beadsTicket
+        diffReviewPrId = target.reviewId
+        showingDiffReview = target.review
+        if target.review, let id = diffReviewTargetId {
+            loadDiffReview(id)
+            diffReviewFocusToken &+= 1
+        } else if !target.oracle {
+            focusTerminal()
+        }
+        restoreOracleDock?(target.oracle)
         flashFocusRim()
     }
 
@@ -2741,6 +2826,8 @@ final class AppModel {
     /// Open the GitHub view and kick a PR refresh. `scope` nil = every folder
     /// (the global view); a cwd shows that project alone.
     func openGitHub(scope: String? = nil) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         githubScope = scope
         showingGitHub = true
         if let scope { loadPrs(scope) }
@@ -3040,6 +3127,8 @@ final class AppModel {
     /// "Open diff" from the GitHub view: select the PR and show its detail on the
     /// Diff tab.
     func openPrDiff(_ pr: PullRequest, cwd: String) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         github.select(cwd: cwd, pr: pr)
         github.detailWantsDiff = true
         showingGitHub = true
@@ -5684,7 +5773,10 @@ final class AppModel {
     }
 
     /// Non-nil while a chain replaces the detail area's content with its tabs.
-    private(set) var chainView: ChainViewState?
+    private(set) var chainView: ChainViewState? {
+        willSet { beginNavigationChange() }
+        didSet { endNavigationChange() }
+    }
     /// Set while the chain view itself moves `selection`, so the `selection` hook
     /// below can tell a tab switch from the user navigating somewhere else.
     @ObservationIgnored private var chainDrivesSelection = false
@@ -5695,6 +5787,8 @@ final class AppModel {
     /// for a slug the book does not have. Opening another chain over an open one keeps
     /// the first one's way back, so exit always returns to where you started.
     func openChain(slug: String, member: ChainMemberRef? = nil) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         guard let chain = chains[slug] else { return }
         // The chain draws in the detail area, under these overlays: opened from a
         // badge on a PR or beads row, it would otherwise open out of sight.
@@ -5710,6 +5804,8 @@ final class AppModel {
 
     /// A sidebar click leaves the chain on the clicked session, even its current tab.
     func selectSidebarSession(_ id: String) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         let wasReviewing = showingDiffReview
         chainView = nil
         selection = id
@@ -5719,6 +5815,8 @@ final class AppModel {
     /// Close the chain view and go back to the selection it was opened from (nothing,
     /// if that session is gone).
     func exitChain() {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         guard let open = chainView else { return }
         chainView = nil
         let back = open.returnTo.flatMap { id in sessions.contains { $0.id == id } ? id : nil }
@@ -5727,6 +5825,8 @@ final class AppModel {
 
     /// Open and select a member tab for this visit to the chain.
     func selectChainMember(_ member: ChainMemberRef) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         guard let open = chainView, let chain = chains[open.slug], chain.contains(member) else { return }
         chainView?.openedTabs.select(member, in: chain)
         guard member.kind == .session else { return }
@@ -5988,7 +6088,7 @@ final class AppModel {
         pinnedSessions.remove(id)
         if selection == id { selection = editorParent ?? neighbor }
         clearUnread(id)
-        navHistory.prune(keeping: Set(sessions.map(\.id)).subtracting([id]))
+        navHistory.prune(keeping: { $0.session != id })
         refresh()
         // Nothing to reap from here: the core that CUT the tree is the core that
         // reaps it, and `deleteSession` removes the directory as part of forgetting

@@ -20,7 +20,10 @@ struct RootView: View {
     var body: some View {
         WindowContent()
             .toolbar {
-                ToolbarItem(placement: .navigation) { SessionBackButton() }
+                ToolbarItemGroup(placement: .navigation) {
+                    SessionBackButton()
+                    SessionForwardButton()
+                }
                 ToolbarItemGroup(placement: .primaryAction) {
                     // Three items, and each one owns a whole family: how much is
                     // running (with the list, a kill for each and the global pause),
@@ -683,10 +686,23 @@ private struct SessionBackButton: View {
         Button { performShortcut(.navigateBack, model: model, oracle: oracle) } label: {
             Label("Back", systemImage: "chevron.left")
         }
-        .disabled(!model.canGoBack && !model.showingFindBar && model.editing == nil
-                  && !model.showingDiffReview && !model.showingGitHub && !model.showingBeads
-                  && !oracle.expanded && model.chainView == nil)
+        .disabled(!model.canGoBack && !model.showingFindBar && model.editing == nil)
         .help("Back (\(shortcuts.binding(for: .navigateBack).display))")
+        .clickCursor()
+    }
+}
+
+private struct SessionForwardButton: View {
+    @Environment(AppModel.self) private var model
+    @Environment(OracleModel.self) private var oracle
+    @Environment(Shortcuts.self) private var shortcuts
+
+    var body: some View {
+        Button { performShortcut(.navigateForward, model: model, oracle: oracle) } label: {
+            Label("Forward", systemImage: "chevron.right")
+        }
+        .disabled(!model.canGoForward)
+        .help("Forward (\(shortcuts.binding(for: .navigateForward).display))")
         .clickCursor()
     }
 }

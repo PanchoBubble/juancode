@@ -10,14 +10,24 @@ import JuancodeServices
 /// one level at a time: ticket → board → projects → closed.
 @MainActor @Observable
 final class BeadsBoardModel {
-    var project: String?
-    var ticket: String?
+    @ObservationIgnored var willNavigate: (() -> Void)?
+    @ObservationIgnored var didNavigate: (() -> Void)?
+    var project: String? {
+        willSet { willNavigate?() }
+        didSet { didNavigate?() }
+    }
+    var ticket: String? {
+        willSet { willNavigate?() }
+        didSet { didNavigate?() }
+    }
     var filter = BeadsFilter()
     private(set) var closedByCwd: [String: [BeadsIssue]] = [:]
     private var details: [String: BeadsIssueDetail] = [:]
     private var missing: Set<String> = []
 
     func openProject(_ cwd: String) {
+        willNavigate?()
+        defer { didNavigate?() }
         if project != cwd { filter = BeadsFilter() }
         project = cwd
         ticket = nil
@@ -51,6 +61,8 @@ final class BeadsBoardModel {
 
 extension AppModel {
     func openBeads(project: String? = nil) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         if let project { beadsBoard.openProject(project) }
         showingBeads = true
     }

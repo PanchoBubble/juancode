@@ -18,7 +18,12 @@ final class GitHubModel {
     /// Set by "Open Diff"; the PR detail flips to its Diff tab and clears it.
     var detailWantsDiff = false
     /// The selected PR's key, or nil when nothing is selected.
-    var selectedKey: String?
+    @ObservationIgnored var willNavigate: (() -> Void)?
+    @ObservationIgnored var didNavigate: (() -> Void)?
+    var selectedKey: String? {
+        willSet { willNavigate?() }
+        didSet { didNavigate?() }
+    }
     /// Keep the clicked row even when it came from outside the folder list, or
     /// that list is refreshed while its detail is open.
     private(set) var selectedRow: PrNavRow?
@@ -100,6 +105,8 @@ final class GitHubModel {
 
     /// Update selection and prefetch its detail.
     private func load(cwd: String, pr: PullRequest) {
+        willNavigate?()
+        defer { didNavigate?() }
         selectedRow = PrNavRow(cwd: cwd, pr: pr)
         selectedKey = TrackedPr.key(cwd: cwd, number: pr.number)
         loadDetail(cwd: cwd, pr: pr)

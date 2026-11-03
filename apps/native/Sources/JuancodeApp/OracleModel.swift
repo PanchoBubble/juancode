@@ -215,6 +215,9 @@ final class OracleModel {
 
     init(app: AppModel) {
         self.app = app
+        app.restoreOracleDock = { [weak self] expanded in
+            if expanded { self?.reveal() } else { self?.collapse() }
+        }
         app.collapseOracleDock = { [weak self] in self?.expanded = false }
         // A chain's Oracle tab: the same reveal-then-switch as a rail tap.
         app.revealOracle = { [weak self] id in self?.reveal(); self?.selectOracle(id) }

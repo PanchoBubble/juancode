@@ -452,9 +452,11 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .terminalZoomOut: TerminalZoom.shared.zoomOut()
     case .terminalZoomReset: TerminalZoom.shared.reset()
     case .navigateBack:
-        // Browser-shaped: peel off whatever is layered over the session first, and
-        // only step back through the session history once the view is bare.
-        if !dismissTopOverlay(model: model, oracle: oracle) { model.goBack() }
+        // Find and the floating editor are transient tools. Content destinations
+        // use history so Forward can restore the view Back just left.
+        if model.showingFindBar { model.closeFindBar() }
+        else if model.editing != nil { model.editing = nil }
+        else { model.goBack() }
     case .navigateForward: model.goForward()
     case .diffReview: model.toggleDiffReview()
     case .toggleChain: model.toggleChainForSelection()
@@ -480,28 +482,4 @@ func pinShortcutTarget(model: AppModel, oracle: OracleModel) -> String? {
 func pinCommandTitle(model: AppModel, oracle: OracleModel) -> String {
     let pinned = pinShortcutTarget(model: model, oracle: oracle).map(model.isPinned) ?? false
     return pinned ? "Unpin Session" : "Pin Session to Top"
-}
-
-/// Close the topmost thing layered over the visible session, innermost first, and
-/// report whether anything was actually closed. Sheets are deliberately absent —
-/// they own the keyboard and dismiss themselves on Esc, and the callers are gated
-/// on no sheet being attached. The persistent side panels (Changes, Files,
-/// Projects) are absent too: those are layout the user set, not a place they
-/// navigated to, so a stray back click shouldn't reshuffle the window.
-@MainActor
-func dismissTopOverlay(model: AppModel, oracle: OracleModel) -> Bool {
-    if model.showingFindBar { model.closeFindBar(); return true }
-    if model.editing != nil { model.editing = nil; return true }
-    if model.showingDiffReview { model.closeDiffReview(); return true }
-    // PR lists live in the rail; dismiss the detail overlay directly.
-    if model.showingGitHub {
-        model.showingGitHub = false
-        return true
-    }
-    if model.showingBeads { model.beadsBack(); return true }
-    if oracle.expanded { oracle.collapse(); return true }
-    // The chain view is a place you went to, so Back leaves it — after the dock,
-    // which an Oracle tab slid in over it.
-    if model.chainView != nil { model.exitChain(); return true }
-    return false
 }

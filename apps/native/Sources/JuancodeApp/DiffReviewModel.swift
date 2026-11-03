@@ -154,6 +154,8 @@ extension AppModel {
     /// Open the review over the session the window shows, loading its diff and
     /// following edits to it while open.
     func openDiffReview() {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         guard let id = selection else { return }
         diffReviewPrId = nil
         showingDiffReview = true
@@ -164,6 +166,8 @@ extension AppModel {
     /// Open the review over a pull request: the PR's diff against its base branch,
     /// with the same keys and comments as a session's, sent to the agent tracking it.
     func openPrDiffReview(_ pr: PullRequest, cwd: String) {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         let id = DiffReviewModel.prReviewId(cwd: cwd, number: pr.number)
         diffReview.setPrTarget(.init(cwd: cwd, pr: pr), for: id)
         diffReviewPrId = id
@@ -176,6 +180,8 @@ extension AppModel {
     /// for a PR review, back to the GitHub view it was opened from. Staged comments
     /// stay for next time.
     func closeDiffReview() {
+        beginNavigationChange()
+        defer { endNavigationChange() }
         guard showingDiffReview else { return }
         // A PR reviewed by URL was not opened from the GitHub view, so there is no
         // detail there to go back to.
