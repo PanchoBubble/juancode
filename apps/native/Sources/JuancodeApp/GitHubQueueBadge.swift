@@ -82,6 +82,7 @@ struct GitHubQueueBadge: View {
         @Binding var showing: Bool
         /// Nil lets the list fill its container (the right rail); the popover caps it.
         var listMaxHeight: CGFloat? = 320
+        @State private var agentPromptRow: ViewerPr?
 
         private var queue: ViewerPrResult { model.viewerPrs }
 
@@ -175,7 +176,7 @@ struct GitHubQueueBadge: View {
                                         .panelRowFocus(.prs, id: group.repo)
                                     if !folded {
                                         ForEach(Array(group.rows.enumerated()), id: \.element.id) { i, row in
-                                            QueueRow(row: row, reason: reason(row),
+                                            QueueRow(row: row, reason: reason(row), rowActions: rowActions(row),
                                                      dismiss: { showing = false }) { open(row) }
                                                 .id(row.id)
                                                 .panelRowFocus(.prs, id: row.id)
@@ -202,6 +203,11 @@ struct GitHubQueueBadge: View {
                 }
             }
             .padding(.bottom, 6)
+            .sheet(item: $agentPromptRow) { row in
+                if let cwd = model.folder(forRepo: row.repo) {
+                    PrAgentPromptSheet(pr: row.pr, cwd: cwd)
+                }
+            }
         }
 
         private var header: some View {
@@ -388,9 +394,45 @@ struct GitHubQueueBadge: View {
                 let header = PanelNavigationRow(id: group.repo, open: { toggle(group.repo) })
                 guard !collapsed.contains(group.repo) else { return [header] }
                 return [header] + group.rows.map { row in
-                    PanelNavigationRow(id: row.id, isInitial: row.id == initialID, open: { open(row) })
+                    PanelNavigationRow(id: row.id,
+                                       actions: rowActions(row).filter(\.enabled).map(\.navigationAction),
+                                       isInitial: row.id == initialID, open: { open(row) })
                 }
             }
+        }
+
+        // Mouse and keyboard share the order, availability and exact action closure.
+        private func rowActions(_ row: ViewerPr) -> [QueueAction] {
+            let pr = row.pr
+            var actions: [QueueAction] = []
+            if let cwd = model.folder(forRepo: row.repo) {
+                let tracked = model.trackedPr(cwd: cwd, number: pr.number)
+                actions.append(QueueAction(
+                    id: "tracking", symbol: tracked == nil ? "eye" : "eye.slash",
+                    label: tracked == nil ? "Track PR" : "Stop tracking PR",
+                    help: model.unavailable(.trackedPrs)
+                        ?? (tracked == nil ? "Track: an agent watches this PR, fixes the obvious and escalates the rest"
+                            : "Stop tracking this PR"),
+                    enabled: model.supports(.trackedPrs)
+                ) {
+                    if let tracked { model.untrackPr(tracked.id) }
+                    else { model.trackPr(pr, cwd: cwd) }
+                })
+                actions.append(QueueAction(id: "agent", symbol: "terminal", label: "Agent",
+                    help: "Agent: send the PR link and your prompt to a fresh agent session") {
+                    agentPromptRow = row
+                })
+                actions.append(QueueAction(id: "review", symbol: "text.bubble", label: "Review diff",
+                    help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
+                    showing = false
+                    model.openPrDiffReview(pr, cwd: cwd)
+                })
+            }
+            actions.append(QueueAction(id: "github", symbol: "arrow.up.right.square",
+                                       label: "Open on GitHub", help: "Open on GitHub") {
+                if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
+            })
+            return actions
         }
 
         private func reason(_ row: ViewerPr) -> PrAttentionReason? { row.attention }
@@ -444,6 +486,19 @@ struct GitHubQueueBadge: View {
         }
     }
 
+    private struct QueueAction: Identifiable {
+        let id: String
+        let symbol: String
+        let label: String
+        let help: String
+        var enabled = true
+        let perform: () -> Void
+
+        var navigationAction: PanelRowAction {
+            PanelRowAction(id: id, label: label, perform: perform)
+        }
+    }
+
     /// One PR in the queue, under its repo's header: number, stack link, open
     /// threads and age (or, on hover, the actions) on one line, the title (full
     /// text on hover) under it, and the checks dot and tracked eye in a lead column.
@@ -451,6 +506,7 @@ struct GitHubQueueBadge: View {
         @Environment(AppModel.self) private var model
         let row: ViewerPr
         let reason: PrAttentionReason?
+        let rowActions: [QueueAction]
         /// Close the popover: jumping to a tracking agent takes you somewhere else,
         /// so leaving the queue floating over it would be in the way. Track and
         /// Agent spawn in the background and leave it open.
@@ -461,7 +517,6 @@ struct GitHubQueueBadge: View {
         @State private var showingStack = false
         @State private var eyeHovering = false
         @State private var confirmingClose = false
-        @State private var showingAgentPrompt = false
         @State private var availableWidth: CGFloat = 0
 
         private var pr: PullRequest { row.pr }
@@ -483,9 +538,6 @@ struct GitHubQueueBadge: View {
                 .onHover { hovering = $0 }
                 .contextMenu { menu }
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
-                .sheet(isPresented: $showingAgentPrompt) {
-                    if let cwd { PrAgentPromptSheet(pr: pr, cwd: cwd) }
-                }
         }
 
         /// PR identity, stack position and tracking share the facts line. The
@@ -544,7 +596,7 @@ struct GitHubQueueBadge: View {
                     if countsOnTop, let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts).fixedSize()
                     }
-                    if hovering {
+                    if hovering || model.panelNavigation.isFocused(.prs, row: row.id) {
                         actions
                     } else if let age = prAgeLabel(pr.createdAt) {
                         Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
@@ -650,34 +702,13 @@ struct GitHubQueueBadge: View {
         /// mapped row opens the GitHub view instead.
         private var actions: some View {
             HStack(spacing: 1) {
-                if let cwd { checkoutActions(cwd) }
-                HoverCellButton(symbol: "arrow.up.right.square", help: "Open on GitHub") {
-                    if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
+                ForEach(rowActions) { action in
+                    HoverCellButton(symbol: action.symbol, help: action.help,
+                                    focused: model.panelNavigation.isFocused(.prs, row: row.id)
+                                        && model.panelNavigation.cursor.actionID == action.id,
+                                    action: action.perform)
+                        .disabled(!action.enabled)
                 }
-            }
-        }
-
-        @ViewBuilder private func checkoutActions(_ cwd: String) -> some View {
-            if let t = tracked {
-                HoverCellButton(symbol: "eye.slash", help: "Stop tracking this PR") {
-                    model.untrackPr(t.id)
-                }
-                .disabled(!model.supports(.trackedPrs))
-            } else {
-                HoverCellButton(symbol: "eye", help: model.unavailable(.trackedPrs)
-                    ?? "Track: an agent watches this PR, fixes the obvious and escalates the rest") {
-                    model.trackPr(pr, cwd: cwd)
-                }
-                .disabled(!model.supports(.trackedPrs))
-            }
-            HoverCellButton(symbol: "terminal",
-                            help: "Agent: send the PR link and your prompt to a fresh agent session") {
-                showingAgentPrompt = true
-            }
-            HoverCellButton(symbol: "text.bubble",
-                            help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
-                dismiss()
-                model.openPrDiffReview(pr, cwd: cwd)
             }
         }
 
@@ -934,6 +965,7 @@ struct GitHubQueueBadge: View {
 private struct HoverCellButton: View {
     let symbol: String
     let help: String
+    var focused = false
     let action: () -> Void
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
@@ -946,7 +978,10 @@ private struct HoverCellButton: View {
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
                 .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.appHairline(hovering && isEnabled ? 0.18 : 0)))
+                    .fill(focused ? Color.accentColor.opacity(0.3)
+                          : Color.appHairline(hovering && isEnabled ? 0.18 : 0)))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(focused ? Color.accentColor : .clear, lineWidth: 1.5))
         }
         .buttonStyle(.plain)
         .help(help)

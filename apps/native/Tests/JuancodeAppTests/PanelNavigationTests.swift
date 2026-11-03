@@ -54,6 +54,36 @@ import Testing
         #expect(nav.target == nil)
     }
 
+    @Test func horizontalNavigationSelectsActionsAndResetsOnRowChange() {
+        let nav = PanelNavigation()
+        var activated: [String] = []
+        let actions = ["tracking", "agent", "review", "github"].map { id in
+            PanelRowAction(id: id, label: id, perform: { activated.append(id) })
+        }
+        nav.begin(.prs, rows: [
+            PanelNavigationRow(id: "local", actions: actions, open: { activated.append("row") }),
+            PanelNavigationRow(id: "remote", actions: [actions[3]], open: {})
+        ])
+        for id in ["tracking", "agent", "review", "github", "github"] {
+            #expect(nav.handle(37)) // l, clamped at the last available action
+            #expect(nav.cursor.actionID == id)
+            #expect(nav.selectedActionLabel == id)
+        }
+        #expect(activated.isEmpty)
+        #expect(nav.handle(36))
+        #expect(activated == ["github"])
+        #expect(nav.handle(4)) // h
+        #expect(nav.cursor.actionID == "review")
+        #expect(nav.handle(36))
+        #expect(activated == ["github", "review"])
+        #expect(nav.handle(38)) // j clears the action when moving to another row
+        #expect(nav.cursor.actionID == nil)
+        #expect(nav.handle(37))
+        #expect(nav.cursor.actionID == "github")
+        #expect(nav.handle(36))
+        #expect(activated == ["github", "review", "github"])
+    }
+
     @Test func updatesReplaceClosuresAndRemoveUnavailableActions() {
         let nav = PanelNavigation()
         var value = 0
