@@ -273,7 +273,9 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
-        let hosting = NSHostingView(rootView: AnyView(content))
+        // A new hosting root does not inherit the enclosing SwiftUI environment.
+        // Busy indicators need its scene phase and accessibility preferences too.
+        let hosting = NSHostingView(rootView: AnyView(content.environment(\.self, context.environment)))
         hosting.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = hosting
         NSLayoutConstraint.activate([
@@ -287,7 +289,7 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ContainingScrollView, context: Context) {
-        context.coordinator.hosting?.rootView = AnyView(content)
+        context.coordinator.hosting?.rootView = AnyView(content.environment(\.self, context.environment))
         nsView.maxContentHeight = maxHeight
         nsView.invalidateIntrinsicContentSize()
     }
@@ -1853,6 +1855,10 @@ private struct SidebarRowChrome: ViewModifier {
                     .fill(SessionRow.statusColor(live: live, activity: activity, unread: unread,
                                                  unseenDone: unseenDone, activating: activating))
                     .frame(width: 2)
+                    .modifier(AgentWorkPulse(
+                        working: session.kind == .agent && live && activity == .busy && !activating,
+                        tint: SessionRow.statusColor(live: live, activity: activity, unread: unread,
+                                                     unseenDone: unseenDone, activating: activating)))
                     .help(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
                                                 unseenDone: unseenDone, activating: activating))
                     .accessibilityLabel(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
