@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import JuancodeCore
 import JuancodeDesktop
@@ -306,8 +307,9 @@ struct OracleRailAccessory: View {
 /// A compact rail listing the running Oracle agents (you can spin up several in
 /// parallel; they all live in the control dir), docked ALWAYS-VISIBLE on the
 /// window's right edge (mounted by RootView, toggled from the dock header). Each
-/// row shows a live-status dot and title; tapping reveals the chat drawer (sliding
-/// in from this edge) on that Oracle, and the "+" starts a new one (juancode-cwa).
+/// row shows a status-colored provider icon, status rail and title; tapping reveals
+/// the chat drawer (sliding in from this edge) on that Oracle, and the "+" starts a
+/// new one (juancode-cwa).
 /// Only Oracle sessions appear here — never project/dispatched work.
 struct OracleGlobalRail: View {
     @Environment(AppModel.self) private var model
@@ -584,10 +586,11 @@ struct OracleGlobalRail: View {
     }
 }
 
-/// One Oracle rail row: a rounded card with the shared agent-state glyph, the
-/// conversation title and a compact meta line, plus the same hover affordances as
-/// the sidebar's session rows — an ellipsis action menu and a ✕ that deletes after
-/// confirmation (the right-click menu mirrors the ellipsis).
+/// One Oracle rail row: a rounded card with the provider icon and activity-colored
+/// status rail used by the sidebar, the conversation title and a compact meta line,
+/// plus the same hover affordances as the sidebar's session rows — an ellipsis action
+/// menu and a ✕ that deletes after confirmation (the right-click menu mirrors the
+/// ellipsis).
 private struct OracleRailRow: View {
     let meta: SessionMeta
     let number: Int
@@ -596,7 +599,7 @@ private struct OracleRailRow: View {
     let activity: SessionActivity?
     /// A turn-end notification is still pending for this Oracle — bolds the title.
     let unread: Bool
-    /// It finished a turn while you were looking elsewhere — green check until viewed.
+    /// It finished a turn while you were looking elsewhere — green until viewed.
     let unseenDone: Bool
     /// Pinned — kept visible in the rail — a pin ornament at rest, and the hover chip's
     /// pin flips to "unpin".
@@ -615,18 +618,17 @@ private struct OracleRailRow: View {
 
     var body: some View {
         let placeholder = meta.title.hasPrefix(Providers.spec(for: meta.provider).label + " ·")
-        HStack(alignment: .top, spacing: 7) {
-            // The sidebar's state vocabulary, not a bare dot: a working Oracle
-            // pulses, one waiting on a reply shows the amber "?", one that finished
-            // while you were elsewhere keeps a green check until you look.
-            SessionStateGlyph(live: live, activity: activity, unseenDone: unseenDone,
-                              unread: unread)
-                .padding(.top, 2)
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            ProviderIcon(provider: meta.provider, tint: statusRailColor,
+                         working: live && activity == .busy)
+                .alignmentGuide(.firstTextBaseline) {
+                    $0[VerticalAlignment.center] + NSFont.systemFont(ofSize: 13).capHeight / 2
+                }
             VStack(alignment: .leading, spacing: 2) {
                 Text(placeholder ? "Oracle \(number)" : meta.title)
-                    .font(.system(size: 12, weight: unread ? .semibold : .regular))
-                    .lineLimit(2)
-                Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                    .font(.system(size: 13, weight: unread ? .semibold : .regular))
+                    .lineLimit(1)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 if let chain {
                     ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
                 }
@@ -643,18 +645,17 @@ private struct OracleRailRow: View {
                     .help("Pinned — kept visible in the rail")
             }
         }
-        .padding(.horizontal, 8).padding(.vertical, 6)
+        .padding(.horizontal, 10).padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Floated, not laid out — same reason as the sidebar rows: inline they stole
         // width from the title, so it re-truncated the moment the pointer arrived.
         .overlay(alignment: .trailing) { hoverActions }
         .background(RoundedRectangle(cornerRadius: 7).fill(rowFill))
-        // A leading accent bar on the selected row: the tinted fill alone got lost
-        // against the black surface at this width.
         .overlay(alignment: .leading) {
-            if selected {
-                Capsule().fill(Color.accentColor).frame(width: 2.5).padding(.vertical, 5)
-            }
+            AgentWorkRail(working: live && activity == .busy, tint: statusRailColor)
+                .frame(width: 3)
+                .help(statusRailHelp)
+                .accessibilityLabel(statusRailHelp)
         }
         .overlay(RoundedRectangle(cornerRadius: 7)
             .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1))
@@ -675,6 +676,14 @@ private struct OracleRailRow: View {
     private var rowFill: Color {
         if selected { return Color.accentColor.opacity(0.2) }
         return hovering ? Color.appHairline(0.07) : Color.clear
+    }
+
+    private var statusRailColor: Color {
+        SessionStatusAppearance.color(live: live, activity: activity, unread: unread, unseenDone: unseenDone)
+    }
+
+    private var statusRailHelp: String {
+        SessionStatusAppearance.help(live: live, activity: activity, unread: unread, unseenDone: unseenDone)
     }
 
     /// Meta line under the title: the stable Oracle number, when it started, and its

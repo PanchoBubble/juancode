@@ -1854,12 +1854,12 @@ private struct SidebarRowChrome: ViewModifier {
                 let activating = model.isActivating(session.id)
                 AgentWorkRail(
                     working: session.kind == .agent && live && activity == .busy && !activating,
-                    tint: SessionRow.statusColor(live: live, activity: activity, unread: unread,
+                    tint: SessionStatusAppearance.color(live: live, activity: activity, unread: unread,
                                                  unseenDone: unseenDone, activating: activating))
                     .frame(width: 3)
-                    .help(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
+                    .help(SessionStatusAppearance.help(live: live, activity: activity, unread: unread,
                                                 unseenDone: unseenDone, activating: activating))
-                    .accessibilityLabel(SessionRow.statusHelp(live: live, activity: activity, unread: unread,
+                    .accessibilityLabel(SessionStatusAppearance.help(live: live, activity: activity, unread: unread,
                                                               unseenDone: unseenDone, activating: activating))
             }
         }
@@ -2922,39 +2922,8 @@ struct SessionRow: View {
     }
 
     private var statusRailColor: Color {
-        Self.statusColor(live: live, activity: activity, unread: unread,
+        SessionStatusAppearance.color(live: live, activity: activity, unread: unread,
                          unseenDone: unseenDone, activating: activating)
-    }
-
-    fileprivate static func statusColor(live: Bool, activity: SessionActivity?, unread: Bool,
-                                        unseenDone: Bool, activating: Bool) -> Color {
-        if activating { return .accentColor }
-        if showsDone(live: live, activity: activity, unseenDone: unseenDone) { return .green }
-        if unread { return .red }
-        return sessionDotColor(live: live, activity: activity)
-    }
-
-    fileprivate static func statusHelp(live: Bool, activity: SessionActivity?, unread: Bool,
-                                       unseenDone: Bool, activating: Bool) -> String {
-        if activating { return "Resuming session…" }
-        if showsDone(live: live, activity: activity, unseenDone: unseenDone) {
-            return "Finished since you last looked — click to view"
-        }
-        let status: String
-        if !live {
-            status = "Session has exited"
-        } else {
-            switch activity {
-            case .busy: status = "Agent is working"
-            case .waitingInput: status = "Waiting for your reply"
-            case .idle, .none: status = "Agent is running"
-            }
-        }
-        return unread ? "\(status) — unread" : status
-    }
-
-    private static func showsDone(live: Bool, activity: SessionActivity?, unseenDone: Bool) -> Bool {
-        live && activity != .busy && activity != .waitingInput && unseenDone
     }
 }
 
