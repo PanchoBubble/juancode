@@ -275,52 +275,6 @@ fn kimi_preset_args_start(preset: Option<&Preset>) -> Vec<String> {
     }
 }
 
-/// copilot's `--allow-all` ("Enable all permissions": `--allow-all-tools`,
-/// `--allow-all-paths` and `--allow-all-urls` in one). Its own spelling of the opt-in
-/// the session asked for; `--yolo` is the same flag under another name.
-fn copilot_perm_args(skip: bool) -> Vec<String> {
-    if skip {
-        vec!["--allow-all".into()]
-    } else {
-        vec![]
-    }
-}
-
-/// copilot's `--agent <name>`, naming a custom agent defined in the user's own config
-/// (`.github/agents`, `~/.copilot/agents`) — the select-not-append mechanism, like
-/// opencode's same flag. It combines with `--resume`, so the preset rides on both.
-fn copilot_preset_args(preset: &Option<Preset>) -> Vec<String> {
-    match preset.as_ref().map(|p| p.name.as_str()) {
-        Some(name) if !name.is_empty() => vec!["--agent".to_string(), name.to_string()],
-        _ => vec![],
-    }
-}
-
-pub const COPILOT: ProviderSpec = ProviderSpec {
-    id: ProviderId::Copilot,
-    label: "GitHub Copilot",
-    id_source: IdSource::Pinned,
-    bracketed_paste: true,
-    // `--session-id <uuid>` "sets the UUID for a new session", like claude's: the CLI
-    // adopts ours, so the session is resumable at spawn and there is nothing to
-    // discover. `--resume <id>` then revives that exact conversation.
-    start_args: |juancode_id, opts| {
-        let mut a = vec!["--session-id".to_string(), juancode_id.to_string()];
-        a.extend(copilot_perm_args(opts.skip_permissions));
-        a.extend(model_args(&opts.model));
-        a.extend(copilot_preset_args(&opts.preset));
-        a
-    },
-    resume_args: |cli_session_id, opts| {
-        let mut a = vec!["--resume".to_string(), cli_session_id.to_string()];
-        a.extend(copilot_perm_args(opts.skip_permissions));
-        a.extend(model_args(&opts.model));
-        a.extend(copilot_preset_args(&opts.preset));
-        a
-    },
-    spawn_env: no_env,
-};
-
 pub struct Providers;
 
 impl Providers {
@@ -330,7 +284,6 @@ impl Providers {
             ProviderId::Codex => &CODEX,
             ProviderId::Opencode => &OPENCODE,
             ProviderId::Kimi => &KIMI,
-            ProviderId::Copilot => &COPILOT,
         }
     }
 }
@@ -342,7 +295,6 @@ fn bin_override_key(provider: &str) -> Option<&'static str> {
         "codex" => Some("JUANCODE_CODEX_BIN"),
         "opencode" => Some("JUANCODE_OPENCODE_BIN"),
         "kimi" => Some("JUANCODE_KIMI_BIN"),
-        "copilot" => Some("JUANCODE_COPILOT_BIN"),
         _ => None,
     }
 }
@@ -810,11 +762,9 @@ mod tests {
     }
 
     #[test]
-    fn no_preset_means_no_flag_on_any_provider() {
+    fn no_preset_means_no_flag_on_any_of_the_four() {
         let plain = SpawnOptions::default();
         for args in [
-            (COPILOT.start_args)("abc", &plain),
-            (COPILOT.resume_args)("sid", &plain),
             (CLAUDE.start_args)("abc", &plain),
             (CODEX.start_args)("abc", &plain),
             (OPENCODE.start_args)("abc", &plain),
@@ -895,7 +845,7 @@ mod tests {
         // `spawn_env` is the empty overlay for all of them and the child inherits
         // `environ` verbatim. opencode's OPENCODE_PERMISSION entry is gone: `--auto`
         // is the documented flag and the indirection was only ever a workaround.
-        for provider in [&CLAUDE, &CODEX, &OPENCODE, &KIMI, &COPILOT] {
+        for provider in [&CLAUDE, &CODEX, &OPENCODE, &KIMI] {
             let plain = SpawnOptions::default();
             let bypass = SpawnOptions {
                 skip_permissions: true,
@@ -957,7 +907,6 @@ mod tests {
             ("codex", "JUANCODE_CODEX_BIN"),
             ("opencode", "JUANCODE_OPENCODE_BIN"),
             ("kimi", "JUANCODE_KIMI_BIN"),
-            ("copilot", "JUANCODE_COPILOT_BIN"),
         ] {
             assert_eq!(bin_override_key(provider), Some(key));
         }
@@ -967,57 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn copilot_pins_its_session_id_and_keeps_bypass_opt_in() {
-        let plain = SpawnOptions::default();
-        assert_eq!(
-            (COPILOT.start_args)("abc", &plain),
-            vec!["--session-id".to_string(), "abc".to_string()]
-        );
-        assert_eq!(
-            (COPILOT.resume_args)("sid", &plain),
-            vec!["--resume".to_string(), "sid".to_string()]
-        );
-
-        let bypass = SpawnOptions {
-            skip_permissions: true,
-            model: Some("gpt-5".into()),
-            preset: Some(Preset {
-                name: "review".into(),
-                body: None,
-            }),
-        };
-        // No `--model` default, no config override: only what this session asked for,
-        // on resume as much as on start (the agent selection is per-invocation).
-        assert_eq!(
-            (COPILOT.start_args)("abc", &bypass),
-            vec![
-                "--session-id".to_string(),
-                "abc".to_string(),
-                "--allow-all".to_string(),
-                "--model".to_string(),
-                "gpt-5".to_string(),
-                "--agent".to_string(),
-                "review".to_string()
-            ]
-        );
-        assert_eq!(
-            (COPILOT.resume_args)("sid", &bypass),
-            vec![
-                "--resume".to_string(),
-                "sid".to_string(),
-                "--allow-all".to_string(),
-                "--model".to_string(),
-                "gpt-5".to_string(),
-                "--agent".to_string(),
-                "review".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn only_claude_and_copilot_are_resumable_the_moment_they_start() {
+    fn only_claude_is_resumable_the_moment_it_starts() {
         assert!(CLAUDE.pins_session_id());
-        assert!(COPILOT.pins_session_id());
         assert!(!CODEX.pins_session_id());
         assert!(!OPENCODE.pins_session_id());
         assert!(!KIMI.pins_session_id());

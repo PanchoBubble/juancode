@@ -354,11 +354,6 @@ private func getProviderStatus(_ id: ProviderId, resolver: BinaryResolver) async
             // Empty with no error, so the panel shows an absent section rather
             // than a broken CLI.
             mcpServers = []
-        } else if id == .copilot {
-            // copilot's `mcp` subcommand has no list-with-health output we parse yet —
-            // nothing per-provider to gather. Empty with no error, so the panel shows
-            // an absent section rather than a broken CLI.
-            mcpServers = []
         } else {
             let r = try await ProcessRunner.run(command, ["mcp", "list"],
                                                 timeout: listTimeoutSec, maxBytes: statusMaxBuffer)

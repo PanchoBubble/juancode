@@ -36,7 +36,7 @@ fn main() {
     let announced = env_overlay.keys().cloned().collect::<Vec<_>>();
 
     // What we would actually spawn, resolved the way a login shell resolves it.
-    for provider in ["claude", "codex", "opencode", "kimi", "copilot"] {
+    for provider in ["claude", "codex", "opencode", "kimi"] {
         match resolve_provider_bin(provider) {
             Some(path) => println!("RESOLVED {provider} -> {path}"),
             None => println!("RESOLVED {provider} -> (nothing found)"),

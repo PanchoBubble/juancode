@@ -244,10 +244,6 @@ public func recoverCliSessionId(
         cands = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
     case .kimi:
         cands = kimiCandidates(roots.kimiHome ?? RECOVER_KIMI_HOME, cwd)
-    case .copilot:
-        // copilot adopts the id we pin at spawn (`--session-id`), like claude, so an
-        // orphan's id is already known and there is no conversation to match by time.
-        cands = []
     }
     return chooseNearest(cands, createdAtMs, excludeIds)
 }
@@ -318,13 +314,9 @@ public func listExternalSessions(
 /// that booted but never finished a turn has nothing on disk and `--resume` would
 /// just fast-exit into a dead pane. Discovered-id providers (Codex) only ever
 /// capture an id from a transcript that exists, so they're never doomed this way.
-/// The check reads Claude's transcript store, so it is Claude's alone: copilot pins
-/// its id too, but its conversations live elsewhere, and asking Claude's store about
-/// one would always answer "missing" and throw away every copilot resume.
 /// The one shared pre-check behind `AppModel.reactivate` and `reviveSession`.
 public func resumeNeedsFreshStart(_ meta: SessionMeta, roots: RecoverRoots = RecoverRoots()) -> Bool {
-    guard meta.provider == .claude,
-          Providers.spec(for: meta.provider).pinsSessionId,
+    guard Providers.spec(for: meta.provider).pinsSessionId,
           let cliId = meta.cliSessionId else { return false }
     return !claudeConversationExists(cliSessionId: cliId, cwd: meta.cwd, roots: roots)
 }

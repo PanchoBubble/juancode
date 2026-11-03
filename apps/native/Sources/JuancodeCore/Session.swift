@@ -88,7 +88,7 @@ public struct SessionEnvironment: Sendable {
                 return await OpencodeStore.capture(cwd: cwd, sinceMs: sinceMs)
             case .kimi:
                 return await KimiStore.capture(cwd: cwd, sinceMs: sinceMs)
-            case .claude, .copilot:
+            case .claude:
                 return nil  // pins the id at spawn; there is nothing to discover
             }
         },

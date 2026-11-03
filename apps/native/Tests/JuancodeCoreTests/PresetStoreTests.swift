@@ -61,7 +61,7 @@ import Testing
         try withPresetDir { _ in
             // Their mechanisms select a definition the USER wrote (`--profile`,
             // `--agent`), so there is nothing for us to read and no file to require.
-            for provider in [ProviderId.codex, .opencode, .kimi, .copilot] {
+            for provider in [ProviderId.codex, .opencode, .kimi] {
                 let preset = try PresetStore.resolve(name: "lazy", for: provider)
                 #expect(preset.name == "lazy")
                 #expect(preset.body == nil)
@@ -85,7 +85,7 @@ import Testing
 
     @Test func aBadNameIsRefusedForEveryProvider() throws {
         try withPresetDir { _ in
-            for provider in [ProviderId.claude, .codex, .opencode, .kimi, .copilot] {
+            for provider in [ProviderId.claude, .codex, .opencode, .kimi] {
                 #expect(throws: PresetError.self) {
                     try PresetStore.resolve(name: "../escape", for: provider)
                 }

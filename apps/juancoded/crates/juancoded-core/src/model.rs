@@ -11,7 +11,6 @@ pub enum ProviderId {
     Codex,
     Opencode,
     Kimi,
-    Copilot,
 }
 
 impl ProviderId {
@@ -21,7 +20,6 @@ impl ProviderId {
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::Opencode),
             "kimi" => Some(Self::Kimi),
-            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -32,7 +30,6 @@ impl ProviderId {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Kimi => "kimi",
-            Self::Copilot => "copilot",
         }
     }
 }

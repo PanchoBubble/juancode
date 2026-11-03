@@ -29,12 +29,11 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { dispatch, type DispatchOutcome, type DispatchRequest } from "./dispatch.ts";
-import { isDispatchProvider, type DispatchProvider } from "./dispatch-model.ts";
 import { cronError } from "./cron.ts";
 import { oracleDir } from "./oracle.ts";
 import type { TriggerOrigin } from "./dispatch-registry.ts";
 
-export type TriggerProvider = DispatchProvider;
+export type TriggerProvider = "claude" | "codex" | "opencode" | "kimi";
 
 /** One cron-scheduled dispatch. Either `prompt` or `ticket` must be set. */
 export interface ScheduleConfig {
@@ -118,7 +117,7 @@ function str(v: unknown): string | undefined {
 }
 
 function provider(v: unknown): TriggerProvider | undefined {
-  return isDispatchProvider(v) ? v : undefined;
+  return v === "claude" || v === "codex" || v === "opencode" || v === "kimi" ? v : undefined;
 }
 
 function chatId(v: unknown): number | null {

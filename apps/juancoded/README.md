@@ -116,12 +116,12 @@ a real latency floor for an imaginary saving.
 The three CLIs are spawned the same way and differ in exactly three places. Every one
 of those is a fact about the CLI, not a preference of ours.
 
-| | claude | codex | opencode | copilot |
-| --- | --- | --- | --- | --- |
-| Resumable id | `--session-id <ours>`, known at spawn | its own, read from `~/.codex/sessions/**/rollout-*.jsonl` | its own, read from opencode's SQLite | `--session-id <ours>`, known at spawn |
-| When the id lands | immediately | while it boots | on the FIRST message, so possibly minutes later | immediately |
-| Bypass | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `OPENCODE_PERMISSION`, because its TUI has no flag | `--allow-all` |
-| Env overlay | none | none | that one entry, only for a session that asked | none |
+| | claude | codex | opencode |
+| --- | --- | --- | --- |
+| Resumable id | `--session-id <ours>`, known at spawn | its own, read from `~/.codex/sessions/**/rollout-*.jsonl` | its own, read from opencode's SQLite |
+| When the id lands | immediately | while it boots | on the FIRST message, so possibly minutes later |
+| Bypass | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `OPENCODE_PERMISSION`, because its TUI has no flag |
+| Env overlay | none | none | that one entry, only for a session that asked |
 
 **The environment is inherited, entry for entry.** `CommandBuilder::new` seeds from
 `std::env::vars_os()`, and the only entry ever added is a provider's `spawn_env`

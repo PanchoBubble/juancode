@@ -2310,9 +2310,6 @@ private struct FolderHeader: View {
         .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 
-    /// Agents offered by the project's "+" picker. Copilot is left out on purpose.
-    private static let pickerProviders = ProviderId.allCases.filter { $0 != .copilot }
-
     private static let pickerWidth: CGFloat = 240
     /// The current-branch end of a split row: a fifth of the popover.
     private static let currentBranchWidth: CGFloat = pickerWidth * 0.2
@@ -2322,7 +2319,7 @@ private struct FolderHeader: View {
     @ViewBuilder
     private var splitAgentRows: some View {
         let branch = model.folderGitState(group.cwd)?.branch
-        ForEach(Self.pickerProviders, id: \.self) { p in
+        ForEach(ProviderId.allCases, id: \.self) { p in
             SplitAgentRow(
                 provider: p,
                 label: Providers.spec(for: p).label,
@@ -2340,7 +2337,7 @@ private struct FolderHeader: View {
     }
 
     private func agentRows(worktree: Bool) -> some View {
-        ForEach(Self.pickerProviders, id: \.self) { p in
+        ForEach(ProviderId.allCases, id: \.self) { p in
             Button {
                 startAgent(p, worktree: worktree)
             } label: {

@@ -93,10 +93,9 @@ An explicit `provider` pins the provider: Claude tiers are `haiku`/`sonnet`/`opu
 Codex tiers are `gpt-6-luna`/`gpt-6.1-sol`/`gpt-6-astra`. An explicit `model` wins;
 `model: "default"` preserves the CLI's configured model. A model override without
 a provider uses Claude, as before. OpenCode keeps its CLI default unless configured;
-so do kimi (its model aliases move too fast to pin per tier) and copilot (its model
-catalog depends on the account). Customize a tier
+so does kimi (its model aliases move too fast to pin per tier). Customize a tier
 for available account models with sidecar environment variables
-`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE|KIMI|COPILOT>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
+`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE|KIMI>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
 use `default` as the value to keep CLI configuration. No CLI environment is replaced.
 Codex model IDs follow [the official model guide](https://learn.chatgpt.com/docs/models);
 account availability can differ. Unavailable models surface the CLI's own error.
@@ -609,7 +608,7 @@ It is re-read on every tick and every webhook, so **no restart** is needed:
   Label dispatches default to `worktree: true` and, for a PR, the seed prompt tells
   the agent to check the head branch out — the native `create` message has no branch
   field yet, so the worktree starts on the default branch.
-- `provider` (`claude` / `codex` / `opencode` / `kimi` / `copilot`) and `telegramChatId` work exactly as
+- `provider` (`claude` / `codex` / `opencode`) and `telegramChatId` work exactly as
   they do on `POST /api/dispatch`.
 
 ### Kill switch

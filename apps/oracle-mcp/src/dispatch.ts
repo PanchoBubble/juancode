@@ -22,12 +22,7 @@
 // Keep the mailbox line shape in lockstep with the Swift `OracleDispatch` struct
 // in apps/native — the app tails the file and decodes each line.
 
-import {
-  selectDispatchModel,
-  type DispatchProvider,
-  type ModelSelection,
-  type TaskComplexity,
-} from "./dispatch-model.ts";
+import { selectDispatchModel, type ModelSelection, type TaskComplexity } from "./dispatch-model.ts";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -55,7 +50,7 @@ export interface DispatchRequest {
   project: string;
   /** The seed instruction sent to the agent once its TUI is up. */
   prompt: string;
-  provider?: DispatchProvider;
+  provider?: "claude" | "codex" | "opencode" | "kimi";
   model?: string;
   complexity?: TaskComplexity;
   /** Isolate the agent in a fresh git worktree off `project`. */

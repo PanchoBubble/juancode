@@ -163,10 +163,10 @@ final class GetAllStatusTests: XCTestCase {
         let resolver = FakeResolver(paths: [.claude: claude, .codex: codex])
         let all = await getAllStatus(resolver: resolver)
 
-        // Order preserved (ProviderId.allCases: claude, codex, opencode, kimi, copilot).
-        // opencode, kimi and copilot have no fake script here, so they report unavailable —
+        // Order preserved (ProviderId.allCases: claude, codex, opencode, kimi).
+        // opencode and kimi have no fake script here, so they report unavailable —
         // the point is the ordering.
-        XCTAssertEqual(all.map { $0.id }, [.claude, .codex, .opencode, .kimi, .copilot])
+        XCTAssertEqual(all.map { $0.id }, [.claude, .codex, .opencode, .kimi])
 
         let c = all[0]
         XCTAssertEqual(c.id, .claude)

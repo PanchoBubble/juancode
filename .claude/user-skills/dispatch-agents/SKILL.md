@@ -1,6 +1,6 @@
 ---
 name: dispatch-agents
-description: Dispatch a task to a NEW, separate agent session (a real claude/codex/opencode/kimi/copilot pty in the juancode app, in its own git worktree) through juancode's Oracle — in ANY project. Use whenever the user says "dispatch an agent", "dispatch a session", "spin up / open / start a new session or agent for X", "hand this off to another agent", "fire off N agents to do …". This is NOT the in-process Agent/Task subagent tool — never satisfy a dispatch request with a subagent.
+description: Dispatch a task to a NEW, separate agent session (a real claude/codex/opencode pty in the juancode app, in its own git worktree) through juancode's Oracle — in ANY project. Use whenever the user says "dispatch an agent", "dispatch a session", "spin up / open / start a new session or agent for X", "hand this off to another agent", "fire off N agents to do …". This is NOT the in-process Agent/Task subagent tool — never satisfy a dispatch request with a subagent.
 ---
 
 # dispatch-agents
@@ -63,7 +63,7 @@ dispatched CLI inherits the user's environment untouched.
          -H 'content-type: application/json' --data-binary @-
    ```
 
-   Optional fields: `provider` (`claude` | `codex` | `opencode` | `kimi` | `copilot`, default claude),
+   Optional fields: `provider` (`claude` | `codex` | `opencode`, default claude),
    `worktree` (default here: true — set false only when the user wants it in the main
    checkout), `ticket` (a ticket id; enforces one live session per ticket — pass it
    whenever the work is a ticket). `fromSessionId` puts the new session in this
