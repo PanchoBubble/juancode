@@ -1,166 +1,37 @@
-// The right rail's Tickets panel (juancode-04u): Linear issues assigned to you, ten
-// at a time with more loading as you scroll, filtered by state and a search box.
+// The right rail's Tickets panel (juancode-04u): Linear issues assigned to you, scoped
+// to the selected session's repository (juancode-18j.3) or, explicitly, every project.
+// The state lives in `LinearTicketsModel` (JuancodeDesktop); this is its view.
 //
-// Fetched at most once an hour on its own. The last result is kept in UserDefaults,
-// so relaunching the app inside that hour shows it without asking Linear again.
-// Changing the filter, typing a search or pressing refresh fetches straight away.
+// A repository lists tickets only once it is mapped to a Linear team or project. An
+// unmapped one says so and offers the mapping and All projects, never a guess.
 
 import AppKit
 import SwiftUI
 import JuancodeCore
 import JuancodeDesktop
 
-@MainActor @Observable
-final class LinearTicketsStore {
-    var tickets: [LinearTicket] = []
-    var hasMore = false
-    var loading = false
-    var loadingMore = false
-    var error: LinearTicketsError?
-    var fetchedAt: Date?
-    private(set) var scope: LinearTicketScope
-    private(set) var search: String
-
-    @ObservationIgnored private var cursor: String?
-    @ObservationIgnored private var attemptedAt: Date?
-    /// Bumped by every reload, so a page that lands after the filter changed is dropped.
-    @ObservationIgnored private var generation = 0
-
-    static let pageSize = 10
-    static let refreshInterval: TimeInterval = 60 * 60
-    /// A failed fetch is retried sooner than the hourly refresh, but not every tick.
-    static let retryInterval: TimeInterval = 5 * 60
-    private static let scopeKey = "linear.tickets.scope"
-    private static let searchKey = "linear.tickets.search"
-    private static let cacheKey = "linear.tickets.cache.v1"
-
-    private struct Cache: Codable {
-        var scope: String
-        var search: String
-        var tickets: [LinearTicket]
-        var hasMore: Bool
-        var cursor: String?
-        var fetchedAt: Date
-    }
-
-    init() {
-        let d = UserDefaults.standard
-        scope = d.string(forKey: Self.scopeKey).flatMap(LinearTicketScope.init(rawValue:)) ?? .open
-        search = d.string(forKey: Self.searchKey) ?? ""
-        if let data = d.data(forKey: Self.cacheKey),
-           let c = try? JSONDecoder().decode(Cache.self, from: data),
-           c.scope == scope.rawValue, c.search == search {
-            tickets = c.tickets
-            hasMore = c.hasMore
-            cursor = c.cursor
-            fetchedAt = c.fetchedAt
-            attemptedAt = c.fetchedAt
-        }
-    }
-
-    /// The refresh loop: a cheap tick that fetches only once the last fetch is an hour
-    /// old (five minutes after a failure). Runs for as long as the rail is on screen.
-    func run() async {
-        while !Task.isCancelled {
-            let wait = error == nil ? Self.refreshInterval : Self.retryInterval
-            if attemptedAt.map({ Date().timeIntervalSince($0) >= wait }) ?? true {
-                await reload(keepLoaded: true)
-            }
-            await Nap.duration(.seconds(60))
-        }
-    }
-
-    func setScope(_ s: LinearTicketScope) {
-        guard s != scope else { return }
-        scope = s
-        UserDefaults.standard.set(s.rawValue, forKey: Self.scopeKey)
-        Task { await reload(keepLoaded: false) }
-    }
-
-    func setSearch(_ q: String) {
-        let q = q.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard q != search else { return }
-        search = q
-        UserDefaults.standard.set(q, forKey: Self.searchKey)
-        Task { await reload(keepLoaded: false) }
-    }
-
-    /// Fetch from the top. `keepLoaded` asks for as many tickets as are already listed
-    /// (up to 100), so an hourly refresh doesn't snap a scrolled list back to ten.
-    func reload(keepLoaded: Bool) async {
-        generation += 1
-        let gen = generation
-        let first = keepLoaded ? min(max(Self.pageSize, tickets.count), 100) : Self.pageSize
-        loadingMore = false
-        if !keepLoaded {
-            tickets = []
-            hasMore = false
-            cursor = nil
-        }
-        loading = true
-        attemptedAt = Date()
-        let result = await getAssignedTickets(scope: scope, search: search, first: first, after: nil)
-        guard gen == generation else { return }
-        loading = false
-        switch result {
-        case .success(let page):
-            tickets = page.tickets
-            hasMore = page.hasNextPage
-            cursor = page.endCursor
-            error = nil
-            fetchedAt = Date()
-            persist()
-        case .failure(let e):
-            // A failed refresh keeps the last good list on screen; the error still shows.
-            error = e
-        }
-    }
-
-    /// The next page, when the list has been scrolled to its end.
-    func loadMore() async {
-        guard hasMore, !loading, !loadingMore, let after = cursor else { return }
-        let gen = generation
-        loadingMore = true
-        let result = await getAssignedTickets(scope: scope, search: search, first: Self.pageSize, after: after)
-        guard gen == generation else { return }
-        loadingMore = false
-        switch result {
-        case .success(let page):
-            let have = Set(tickets.map(\.id))
-            tickets += page.tickets.filter { !have.contains($0.id) }
-            hasMore = page.hasNextPage
-            cursor = page.endCursor
-            error = nil
-            persist()
-        case .failure(let e):
-            error = e
-        }
-    }
-
-    private func persist() {
-        guard let fetchedAt else { return }
-        let c = Cache(scope: scope.rawValue, search: search, tickets: tickets, hasMore: hasMore,
-                      cursor: cursor, fetchedAt: fetchedAt)
-        if let data = try? JSONEncoder().encode(c) {
-            UserDefaults.standard.set(data, forKey: Self.cacheKey)
-        }
-    }
-}
+/// The rail owns one for as long as it is up, so the hourly refresh outlives a collapse.
+typealias LinearTicketsStore = LinearTicketsModel
 
 struct LinearTicketsRail: View {
+    @Environment(AppModel.self) private var model
     let store: LinearTicketsStore
-    /// The selected session's project: where "Work on" starts its session.
+    /// The selected session's repository root: what the panel is scoped to.
     let root: String?
     @State private var draft = ""
+    @State private var pickingTarget = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             toolbar
+            scopeBar
             Divider().padding(.vertical, 2)
             content
             Spacer(minLength: 0)
         }
         .onAppear { draft = store.search }
+        // Before the next frame, so the list never sits under the wrong repository.
+        .onChange(of: root, initial: true) { store.setRoot(root) }
         // Debounced: a search per keystroke would spend Linear's rate limit on "l", "lo"…
         .task(id: draft) {
             await Nap.duration(.milliseconds(400))
@@ -207,7 +78,7 @@ struct LinearTicketsRail: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .disabled(store.loading)
+            .disabled(store.loading || store.query == nil)
             .help(store.fetchedAt.map { "Updated \(relativeTime(Int($0.timeIntervalSince1970 * 1000))). Refresh now" }
                   ?? "Refresh now")
             .clickCursor()
@@ -215,13 +86,93 @@ struct LinearTicketsRail: View {
         .padding(.horizontal, 10).padding(.top, 4)
     }
 
+    /// Which tickets these are: this repository's team or project, or All projects.
+    private var scopeBar: some View {
+        HStack(spacing: 4) {
+            Menu {
+                Button { store.setShowAll(false) } label: {
+                    let title = root.map { "This project (\(folderName($0)))" } ?? "This project"
+                    if !store.showAll { Label(title, systemImage: "checkmark") } else { Text(title) }
+                }
+                Button { store.setShowAll(true) } label: {
+                    if store.showAll { Label("All projects", systemImage: "checkmark") } else { Text("All projects") }
+                }
+                if let root {
+                    Divider()
+                    Button("Map \(folderName(root)) to a Team or Project…") { pickingTarget = true }
+                    if store.mappings[linearMappingKey(root)] != nil {
+                        Button("Remove Mapping for \(folderName(root))") { store.setMapping(nil, for: root) }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: store.showAll ? "globe" : "folder").font(.system(size: 9))
+                    Text(scopeLabel).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
+                }
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
+            .help("Whose tickets these are")
+            .clickCursor()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.top, 3)
+        .popover(isPresented: $pickingTarget, arrowEdge: .leading) {
+            if let root {
+                LinearTargetPicker(store: store, root: root,
+                                   suggestions: suggestedLinearTargets(root: root, trackedIssues: model.trackedIssuesList,
+                                                                       known: store.targets)) {
+                    pickingTarget = false
+                }
+            }
+        }
+    }
+
+    private var scopeLabel: String {
+        switch store.source {
+        case .all: "All projects"
+        case .project(let root, let target): "\(folderName(root)) · \(target.label)"
+        case .unmapped(let root): "\(folderName(root)) · not mapped"
+        case .noProject: "No session selected"
+        }
+    }
+
     @ViewBuilder private var content: some View {
+        switch store.source {
+        case .noProject:
+            VStack(alignment: .leading, spacing: 6) {
+                note("Select a session to see its project's tickets.")
+                allProjectsButton
+            }
+        case .unmapped(let root):
+            VStack(alignment: .leading, spacing: 6) {
+                note("\(folderName(root)) isn't mapped to a Linear team or project yet, so its tickets can't be told apart from other projects'.")
+                HStack(spacing: 8) {
+                    Button("Choose Team or Project…") { pickingTarget = true }
+                        .controlSize(.small).clickCursor()
+                    allProjectsButton
+                }
+                .padding(.horizontal, 10)
+            }
+        case .all, .project:
+            list
+        }
+    }
+
+    private var allProjectsButton: some View {
+        Button("Show All Projects") { store.setShowAll(true) }
+            .controlSize(.small)
+            .padding(.horizontal, root == nil ? 10 : 0)
+            .clickCursor()
+    }
+
+    @ViewBuilder private var list: some View {
         if let error = store.error, store.tickets.isEmpty {
             note(error.message)
         } else if store.tickets.isEmpty {
             note(store.loading ? "Loading…" : store.search.isEmpty
-                 ? "No \(store.scope.label.lowercased()) tickets assigned to you."
-                 : "No tickets match “\(store.search)”.")
+                 ? "No \(store.scope.label.lowercased()) tickets assigned to you\(scopeSuffix)."
+                 : "No tickets match “\(store.search)”\(scopeSuffix).")
         } else {
             if let error = store.error {
                 Text(error.message)
@@ -231,7 +182,7 @@ struct LinearTicketsRail: View {
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.tickets) { LinearTicketRow(ticket: $0, root: root) }
+                    ForEach(store.tickets) { LinearTicketRow(ticket: $0, start: store.startWork(for: $0)) }
                     if store.hasMore {
                         // Scrolling this into view is what asks for the next page.
                         HStack {
@@ -249,6 +200,11 @@ struct LinearTicketsRail: View {
         }
     }
 
+    private var scopeSuffix: String {
+        if case .project(_, let target) = store.source { return " in \(target.name)" }
+        return ""
+    }
+
     private func note(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -257,12 +213,89 @@ struct LinearTicketsRail: View {
     }
 }
 
+private func folderName(_ path: String) -> String { (path as NSString).lastPathComponent }
+
+/// Pick the Linear team or project a repository's Tickets list. Suggestions come from
+/// issues already tracked from it; nothing is mapped until one is clicked.
+private struct LinearTargetPicker: View {
+    let store: LinearTicketsStore
+    let root: String
+    let suggestions: [LinearTicketTarget]
+    let done: () -> Void
+    @State private var filter = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Map \(folderName(root)) to")
+                .font(.system(size: 12, weight: .semibold))
+            TextField("Filter teams and projects", text: $filter)
+                .textFieldStyle(.roundedBorder).font(.system(size: 11))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if !shownSuggestions.isEmpty {
+                        section("Suggested from issues tracked here", shownSuggestions)
+                    }
+                    section("Teams", shown.filter { if case .team = $0 { true } else { false } })
+                    section("Projects", shown.filter { if case .project = $0 { true } else { false } })
+                    if store.targetsLoading {
+                        ProgressView().controlSize(.small).padding(6)
+                    } else if let e = store.targetsError {
+                        Text(e.message).font(.system(size: 11)).foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true).padding(.vertical, 4)
+                        Button("Retry") { Task { await store.loadTargets(force: true) } }.controlSize(.small)
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+        }
+        .padding(10)
+        .frame(width: 280)
+        .task { await store.loadTargets() }
+    }
+
+    private var current: LinearTicketTarget? { store.mappings[linearMappingKey(root)] }
+    private func matching(_ t: LinearTicketTarget) -> Bool {
+        let q = filter.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty || t.label.localizedCaseInsensitiveContains(q)
+    }
+    private var shownSuggestions: [LinearTicketTarget] { suggestions.filter(matching) }
+    private var shown: [LinearTicketTarget] {
+        let suggested = Set(suggestions.map(\.identity))
+        return store.targets.filter { !suggested.contains($0.identity) && matching($0) }
+    }
+
+    @ViewBuilder private func section(_ title: String, _ targets: [LinearTicketTarget]) -> some View {
+        if !targets.isEmpty {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                .padding(.top, 6).padding(.bottom, 2)
+            ForEach(targets) { t in
+                Button {
+                    store.setMapping(t, for: root)
+                    store.setShowAll(false)
+                    done()
+                } label: {
+                    HStack {
+                        Text(t.label).font(.system(size: 12)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        if t.identity == current?.identity { Image(systemName: "checkmark").font(.system(size: 10)) }
+                    }
+                    .padding(.vertical, 3).padding(.horizontal, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .clickCursor()
+            }
+        }
+    }
+}
+
 /// One ticket: state dot, id, title, priority and age. Click opens it in Linear; on
 /// hover the age gives way to a "Work on" button.
 private struct LinearTicketRow: View {
     @Environment(AppModel.self) private var model
     let ticket: LinearTicket
-    let root: String?
+    /// Where "Work on" starts, resolved from the list this row is shown in.
+    let start: LinearStartWork
     @State private var hovering = false
     /// Briefly true after the hover copy button, which then shows a checkmark.
     @State private var copied = false
@@ -311,7 +344,7 @@ private struct LinearTicketRow: View {
         .clickCursor()
         .contextMenu {
             Button("Open in Linear", action: open)
-            Button(workOnHelp, action: workOn).disabled(root == nil)
+            Button(workOnHelp, action: workOn).disabled(start.root == nil)
             if model.supportsChains { chainMenu }
             Divider()
             Button("Copy ID") { copy(ticket.identifier) }
@@ -372,22 +405,26 @@ private struct LinearTicketRow: View {
             Image(systemName: "play.fill").font(.system(size: 9))
                 .frame(width: 18, height: 16)
                 .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color.accentColor.opacity(root == nil ? 0.08 : 0.2)))
+                    .fill(Color.accentColor.opacity(start.root == nil ? 0.08 : 0.2)))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(root == nil ? Color.secondary : Color.accentColor)
-        .disabled(root == nil)
+        .foregroundStyle(start.root == nil ? Color.secondary : Color.accentColor)
+        .disabled(start.root == nil)
         .help(workOnHelp)
         .clickCursor()
     }
 
     private var workOnHelp: String {
-        guard let root else { return "Select a session to work on \(ticket.identifier) in its project" }
-        return "Work on \(ticket.identifier) in \((root as NSString).lastPathComponent)"
+        switch start {
+        case .root(let root): "Work on \(ticket.identifier) in \(folderName(root))"
+        case .needsSession: "Select a session to work on \(ticket.identifier) in its project"
+        case .ambiguous(let roots):
+            "\(roots.map(folderName).joined(separator: ", ")) are all mapped to this ticket's team or project. Select a session in one of them to work on \(ticket.identifier)"
+        }
     }
 
     private func workOn() {
-        guard let root else { return }
+        guard let root = start.root else { return }
         model.workOnLinearTicket(ticket, cwd: root)
     }
 
