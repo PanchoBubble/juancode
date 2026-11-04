@@ -259,6 +259,12 @@ struct DiffReviewPanel: View {
         }
         .onDisappear { saveDraft() }
         .onChange(of: snapshot) { _, _ in syncSelection() }
+        // The Worktree viewer and this review are one review state: the file open here
+        // is the file open there.
+        .onChange(of: selectedPath) { _, path in
+            guard let checkout = worktreeCheckout, let path, path != prGlobalCommentsPath else { return }
+            model.worktreeViews.update(checkout) { $0.select(path) }
+        }
         .onChange(of: draft == nil && prompt == nil && reply == nil && globalCommentDraft == nil) { _, closed in
             if closed { keyToken &+= 1 }
         }
@@ -281,7 +287,13 @@ struct DiffReviewPanel: View {
                 Text("Review").font(.system(size: 12, weight: .semibold))
                 Picker("", selection: Binding(
                     get: { review.base(sessionId) },
-                    set: { model.loadDiffReview(sessionId, base: $0); keyToken &+= 1 }
+                    set: { base in
+                        if let checkout = worktreeCheckout {
+                            model.worktreeViews.update(checkout) { $0.comparison = base }
+                        }
+                        model.loadDiffReview(sessionId, base: base)
+                        keyToken &+= 1
+                    }
                 )) {
                     ForEach(ReviewBase.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
@@ -1082,10 +1094,19 @@ struct DiffReviewPanel: View {
     // MARK: - Selection sync
 
     /// Keep the selection valid as the diff reloads; default to the first real file.
+    /// The checkout whose Worktree viewer shares this review's open file and
+    /// comparison; nil for a PR review, which has no checkout of its own.
+    private var worktreeCheckout: String? {
+        guard prTarget == nil, let meta = model.sessions.first(where: { $0.id == sessionId }) else { return nil }
+        return model.worktreeContext(for: meta)?.checkout
+    }
+
     private func syncSelection() {
         let order = fileOrder
         if selectedPath == nil || !order.contains(selectedPath!) {
-            selectedPath = reviewInitialSelection(realFileOrder, includePrComments: prTarget != nil)
+            let shared = worktreeCheckout.flatMap { model.worktreeViews.state($0).selectedPath }
+            selectedPath = shared.flatMap { order.contains($0) ? $0 : nil }
+                ?? reviewInitialSelection(realFileOrder, includePrComments: prTarget != nil)
             cursor = nil
             anchor = nil
             draft = nil

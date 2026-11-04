@@ -3116,13 +3116,6 @@ struct DetailView: View {
     }
 }
 
-/// The views the session's right-side panel can show: the file-tree sidebar over
-/// the session's worktree, or the folder's bd issues. The diff lives in the right
-/// rail's Diff panel.
-private enum SidePanelTab: String, CaseIterable {
-    case files = "Files", issues = "Issues"
-}
-
 /// Colour for a usage badge by how full the session's context window is
 /// (juancode-lncw). Secondary until the warn line so the ordinary case stays quiet;
 /// the tint IS the warning, there is no extra chrome.
@@ -3140,10 +3133,9 @@ struct SessionContainer: View {
     let meta: SessionMeta
     /// The handoff line the usage badge is tinted against (juancode-u5q).
     @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
-    /// Active right-panel tab, remembered app-wide.
-    @AppStorage("session.sidePanel.tab") private var tabRaw: String = SidePanelTab.files.rawValue
-    /// Whether the right-side panel is shown. Toggled from the header CTA.
-    @AppStorage("session.sidePanel.shown") private var panelShown: Bool = true
+    /// Whether the floating Worktree panel is shown, while the right rail does not host
+    /// it (`AppModel.worktreeInRail`). Toggled from the header CTA, ⌘C and Files.
+    @AppStorage(SessionSidePanel.shownKey) private var panelShown: Bool = true
     /// Width of the right-side panel, persisted once the user drags its edge. Nil =
     /// never resized → the screen-size-proportional default applies (juancode-it1).
     @AppStorage("session.sidePanel.width") private var storedPanelWidth: Double?
@@ -3158,11 +3150,6 @@ struct SessionContainer: View {
     private var panelWidth: Double {
         storedPanelWidth ?? PanelAutoSize.width(window: model.windowWidth,
                                                 fraction: 0.32, min: 420, max: 640)
-    }
-
-    private var tab: SidePanelTab {
-        get { SidePanelTab(rawValue: tabRaw) ?? .files }
-        nonmutating set { tabRaw = newValue.rawValue }
     }
 
     /// What this pane is running (provider, and the model the CLI reports right now, which
@@ -3278,16 +3265,18 @@ struct SessionContainer: View {
                 }
                 .help(model.bottomTerminalShown ? "Hide the terminal panel (⌃T)" : "Show the terminal panel (⌃T)")
                 .clickCursor()
-                Button {
-                    // The panel floats over the terminal (see the overlay below), so
-                    // toggling it never relayouts the terminal — no transition gate.
-                    // Animated: it slides in from the right edge instead of popping.
-                    withAnimation(.easeOut(duration: 0.18)) { panelShown.toggle() }
-                } label: {
-                    Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
+                if !AppModel.worktreeInRail {
+                    Button {
+                        // The panel floats over the terminal (see the overlay below), so
+                        // toggling it never relayouts the terminal — no transition gate.
+                        // Animated: it slides in from the right edge instead of popping.
+                        withAnimation(.easeOut(duration: 0.18)) { panelShown.toggle() }
+                    } label: {
+                        Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
+                    }
+                    .help(panelShown ? "Hide the Worktree panel" : "Show the Worktree panel (files and changes)")
+                    .clickCursor()
                 }
-                .help(panelShown ? "Hide the Files / Issues panel" : "Show the Files / Issues panel")
-                .clickCursor()
                 }
                 .fixedSize()
             }
@@ -3427,14 +3416,14 @@ struct SessionContainer: View {
             .padding(.horizontal, 10)
             .padding(.top, 6)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // The Files/Issues panel floats OVER the terminal instead of splitting
+            // The Worktree panel floats OVER the terminal instead of splitting
             // the space with it. Squeezing the terminal ~400pt narrower rewraps the
             // whole scrollback and forces the CLI's TUI to redraw across a huge width
             // jump — no SIGWINCH choreography made that clean (juancode-1th.2,
             // juancode-qxb). Overlaying keeps the pty grid untouched, so toggling or
             // drag-resizing the panel can never disturb the terminal render.
             .overlay(alignment: .trailing) {
-                if panelShown {
+                if panelShown && !AppModel.worktreeInRail {
                     HStack(spacing: 0) {
                         // Live resize is fine here: the drag moves only the floating
                         // panel's edge, never the terminal grid. Writing through the
@@ -3487,28 +3476,13 @@ struct SessionContainer: View {
         }
     }
 
-    /// The right-side panel: a Files | Issues tab switcher hosting `FileTreePanel`
-    /// (worktree explorer) and `IssuesPanel` (folder bd issues). The active tab is
-    /// remembered app-wide via @AppStorage.
+    /// The right-side panel: the Worktree viewer over the selected session's checkout,
+    /// until the right rail hosts it. Issues live in Beads (⌘⇧B) and the rail's
+    /// Tickets. Keyed inside by session and checkout, so the always-mounted container
+    /// never carries one session's viewer state into another.
     private var sidePanel: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: Binding(get: { tab }, set: { tab = $0 })) {
-                ForEach(SidePanelTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            Divider()
-            // Keyed explicitly: the container is no longer recreated per session
-            // (keep-alive terminal pool, juancode-073), but these panels hold
-            // per-session/per-folder @State seeded in onAppear.
-            switch tab {
-            case .files: FileTreePanel(sessionId: meta.id, root: meta.effectiveCwd).id(meta.id)
-            case .issues: IssuesPanel(cwd: meta.cwd).id(meta.cwd)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        WorktreeRailPanel()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// "Restored from disk" banner (juancode-mya): shown top-leading over a pane a
