@@ -1,86 +1,75 @@
 import SwiftUI
 import MarkdownUI
 import JuancodeCore
-import cmark_gfm
-import cmark_gfm_extensions
 
-/// A rendered block retains its original review row indices. Never infer source
-/// positions from the rendered text: Markdown removes delimiters and joins lines.
-struct ReviewMarkdownBlock: Equatable, Sendable {
-    let rows: ClosedRange<Int>
-    let markdown: String
-
-    static func blocks(in rows: [ReviewRow], deleted: Bool) -> [ReviewMarkdownBlock] {
-        var result: [ReviewMarkdownBlock] = []
-        var run: [Int] = []
-        func flush() {
-            guard !run.isEmpty else { return }
-            let text = run.compactMap { rows[$0].line?.text }.joined(separator: "\n")
-            result += parse(text, sourceRows: run)
-            run.removeAll(keepingCapacity: true)
-        }
-        for (index, row) in rows.enumerated() {
-            guard let line = row.line else {
-                flush()
-                continue
-            }
-            if deleted ? line.kind != .insert : line.kind != .delete {
-                run.append(index)
-            }
-        }
-        flush()
-        return result
-    }
-
-    private static func parse(_ source: String, sourceRows: [Int]) -> [ReviewMarkdownBlock] {
-        cmark_gfm_core_extensions_ensure_registered()
-        guard let parser = cmark_parser_new(CMARK_OPT_DEFAULT) else { return [] }
-        defer { cmark_parser_free(parser) }
-        for name in ["autolink", "strikethrough", "tagfilter", "tasklist", "table"] {
-            if let ext = cmark_find_syntax_extension(name) {
-                cmark_parser_attach_syntax_extension(parser, ext)
-            }
-        }
-        cmark_parser_feed(parser, source, source.utf8.count)
-        guard let document = cmark_parser_finish(parser) else { return [] }
-        defer { cmark_node_free(document) }
-        var result: [ReviewMarkdownBlock] = []
-        var child = cmark_node_first_child(document)
-        while let node = child {
-            let start = Int(cmark_node_get_start_line(node)) - 1
-            let end = Int(cmark_node_get_end_line(node)) - 1
-            if start >= 0, end >= start, end < sourceRows.count,
-               let normalized = cmark_render_commonmark(node, CMARK_OPT_DEFAULT, 0) {
-                // Rendering the parsed node resolves reference links using the
-                // whole run, including definitions appearing later in the hunk.
-                defer { free(normalized) }
-                result.append(Self(rows: sourceRows[start]...sourceRows[end],
-                                   markdown: String(cString: normalized)))
-            }
-            child = cmark_node_next(node)
-        }
-        return result
-    }
-}
-
-struct ReviewMarkdownBlockView: View {
-    let block: ReviewMarkdownBlock
+/// Formatting never depends on hover or the review cursor. Every source row,
+/// including blank lines and hidden delimiters, keeps its own comment target.
+struct ReviewMarkdownLineView: View {
+    let preview: ReviewMarkdownLine
+    let line: DiffLine
     let selected: Bool
+    let hasComment: Bool
+    let highlighted: Bool
+    let onComment: () -> Void
+    @State private var hovered = false
 
     var body: some View {
-        Markdown(block.markdown)
+        HStack(alignment: .top, spacing: 6) {
+            Button(action: onComment) {
+                Image(systemName: hasComment ? "text.bubble.fill" : "plus.bubble")
+                    .font(.system(size: 12))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .opacity(hovered || selected || hasComment ? 1 : 0)
+            .help("Comment on line \(line.newLine ?? line.oldLine ?? 0)")
+            .accessibilityLabel("Comment on line \(line.newLine ?? line.oldLine ?? 0)")
+            content
+                .padding(.leading, CGFloat(preview.indent) * 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 2)
+        .padding(.trailing, 12)
+        .frame(minHeight: 22)
+        .background(highlighted ? Color.yellow.opacity(0.2) : selected ? Color.accentColor.opacity(0.1) : Color.clear)
+        .overlay(alignment: .leading) {
+            if selected { Rectangle().fill(Color.accentColor).frame(width: 2) }
+        }
+        .onHover { hovered = $0 }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch preview.content {
+        case .blank: Color.clear.frame(height: 18)
+        case .markdown(let text): markdown(text)
+        case .code(let text):
+            Text(text.isEmpty ? " " : text)
+                .font(.system(size: 13, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .background(Color.primary.opacity(0.04))
+        case .source(let text):
+            Text(text).font(.system(size: 14, design: .monospaced))
+        case .table(let cells):
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                    markdown(cell)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                        .overlay(Rectangle().stroke(Color.secondary.opacity(0.2)))
+                }
+            }
+        }
+    }
+
+    private func markdown(_ text: String) -> some View {
+        Markdown(text)
             .markdownTheme(.gitHub.text {
                 ForegroundColor(.primary)
                 BackgroundColor(nil)
                 FontSize(16)
             })
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(selected ? Color.accentColor.opacity(0.10) : Color.clear)
-            .overlay(alignment: .leading) {
-                if selected { Rectangle().fill(Color.accentColor).frame(width: 2) }
-            }
+            .markdownBlockStyle(\.paragraph) { configuration in configuration.label.markdownMargin(top: 0, bottom: 0) }
     }
 }

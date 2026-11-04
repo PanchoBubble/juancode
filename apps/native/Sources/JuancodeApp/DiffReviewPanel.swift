@@ -100,7 +100,7 @@ struct DiffReviewPanel: View {
     @State private var draftSerial = 0
     @State private var parser = ReviewKeyParser()
     @State private var rendered: RenderedReviewFile?
-    @State private var markdownBlocks: [ReviewMarkdownBlock] = []
+    @State private var markdownLines: [Int: ReviewMarkdownLine] = [:]
     @State private var viewportHeight: CGFloat = 600
     /// Center the next cursor scroll (⌃D/⌃U, gg/G, file and hunk jumps).
     @State private var centerNextScroll = false
@@ -672,13 +672,13 @@ struct DiffReviewPanel: View {
                 let out = await Task.detached(priority: .userInitiated) {
                     let rendered = RenderedReviewFile.compute(file, generation: generation, expandedRows: rows)
                     let isMarkdown = ["md", "markdown", "mdown", "mkd"].contains((file.path as NSString).pathExtension.lowercased())
-                    let blocks = isMarkdown ? ReviewMarkdownBlock.blocks(in: rendered.rows, deleted: file.status == .deleted) : []
-                    return (rendered, blocks)
+                    let previews = isMarkdown ? ReviewMarkdownLine.lines(in: rendered.rows, deleted: file.status == .deleted) : [:]
+                    return (rendered, previews)
                 }.value
                 guard !Task.isCancelled else { return }
                 contextLoading = false
                 rendered = out.0
-                markdownBlocks = out.1
+                markdownLines = out.1
                 frames.reset()
                 restoreCursor(after: previous, in: out.0)
             }
@@ -854,12 +854,7 @@ struct DiffReviewPanel: View {
         let byId = Dictionary(fileComments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let commentedKeys = Set(fileComments.map(\.endKey))
         let pattern = highlightPattern
-        let blocks = showingMarkdown ? markdownBlocks : []
-        let blocksByStart = Dictionary(uniqueKeysWithValues: blocks.map { ($0.rows.lowerBound, $0) })
-        let formattedRows = Set(blocks.flatMap { Array($0.rows) }.filter {
-            guard let line = rf.rows[$0].line else { return false }
-            return file?.status == .deleted ? line.kind != .insert : line.kind != .delete
-        })
+        let previews = showingMarkdown ? markdownLines : [:]
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -868,13 +863,18 @@ struct DiffReviewPanel: View {
                         case .row(let i):
                             let row = rf.rows[i]
                             VStack(alignment: .leading, spacing: 0) {
-                                if let block = blocksByStart[i] {
-                                    let active = block.rows.contains { selected.contains($0) || (cursor == .row($0) && focus == .diff) }
-                                    ReviewMarkdownBlockView(block: block, selected: active)
+                                if let preview = previews[i], let line = row.line {
+                                    ReviewMarkdownLineView(
+                                        preview: preview, line: line,
+                                        selected: selected.contains(i) || (cursor == item && focus == .diff),
+                                        hasComment: commentedKeys.contains(reviewLineKey(line)),
+                                        highlighted: pattern.map { reviewRowMatches(row, pattern: $0) } ?? false,
+                                        onComment: { click(row: i); openDraft() })
+                                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(dragSpace)) }
+                                            action: { frames.set(i, $0) }
                                         .contentShape(Rectangle())
                                         .onTapGesture { click(row: i) }
-                                }
-                                if !formattedRows.contains(i) || cursor == item || selected.contains(i) {
+                                } else {
                                     ReviewRowView(
                                         generation: rf.generation, index: i, row: row, text: rf.text[i],
                                         isCursor: cursor == item && focus == .diff,
@@ -897,6 +897,7 @@ struct DiffReviewPanel: View {
                                 VStack(alignment: .leading, spacing: 0) {
                                     GitHubThreadBox(
                                         thread: t,
+                                        contentInset: showingMarkdown ? 28 : ReviewRowView.codeInset,
                                         isCursor: cursor == item && focus == .diff,
                                         expanded: expandedThreads.contains(id),
                                         busy: threadBusy.contains(id),
@@ -913,6 +914,7 @@ struct DiffReviewPanel: View {
                             if let c = byId[id] {
                                 ReviewCommentBox(
                                     comment: c,
+                                    contentInset: showingMarkdown ? 28 : ReviewRowView.codeInset,
                                     isCursor: cursor == item && focus == .diff,
                                     isOrphan: rf.rows.allSatisfy { $0.line.map(reviewLineKey) != c.endKey },
                                     onSelect: { cursor = item; anchor = nil; focus = .diff; keyToken &+= 1 },
@@ -929,7 +931,7 @@ struct DiffReviewPanel: View {
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.bottom, 40)
                 .coordinateSpace(name: dragSpace)
-                .simultaneousGesture(showingMarkdown ? nil : dragSelect)
+                .simultaneousGesture(dragSelect)
             }
             .background(Color.appSurface)
             // A fresh scroll position per file: gt lands at the top of the next one.
@@ -986,7 +988,7 @@ struct DiffReviewPanel: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.purple.opacity(0.35)))
-        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.leading, showingMarkdown ? 28 : ReviewRowView.codeInset)
         .padding(.trailing, 16)
         .padding(.vertical, 4)
     }
@@ -1019,7 +1021,7 @@ struct DiffReviewPanel: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor.opacity(0.35)))
-        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.leading, showingMarkdown ? 28 : ReviewRowView.codeInset)
         .padding(.trailing, 16)
         .padding(.vertical, 4)
     }
@@ -2117,6 +2119,7 @@ private struct ReviewRowView: View, Equatable {
 /// points and what it says.
 private struct ReviewCommentBox: View {
     let comment: ReviewComment
+    var contentInset: CGFloat = ReviewRowView.codeInset
     let isCursor: Bool
     /// Its line has left the diff (it is still sent).
     let isOrphan: Bool
@@ -2159,7 +2162,7 @@ private struct ReviewCommentBox: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.appPanelElevated))
         .overlay(RoundedRectangle(cornerRadius: 6)
             .stroke(isCursor ? Color.accentColor : Color.appHairline(0.15), lineWidth: isCursor ? 1.5 : 1))
-        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.leading, contentInset)
         .padding(.trailing, 16)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -2230,6 +2233,7 @@ private func githubThreadRow(_ t: PrReviewThread, in rows: [ReviewRow]) -> Int? 
 /// and Resolve. A resolved thread folds to its first line until opened.
 private struct GitHubThreadBox: View {
     let thread: PrReviewThread
+    var contentInset: CGFloat = ReviewRowView.codeInset
     let isCursor: Bool
     let expanded: Bool
     let busy: Bool
@@ -2301,7 +2305,7 @@ private struct GitHubThreadBox: View {
         .overlay(RoundedRectangle(cornerRadius: 6)
             .stroke(isCursor ? Color.accentColor : Color.purple.opacity(0.35), lineWidth: isCursor ? 1.5 : 1))
         .opacity(thread.isResolved && !isCursor ? 0.75 : 1)
-        .padding(.leading, ReviewRowView.codeInset)
+        .padding(.leading, contentInset)
         .padding(.trailing, 16)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
