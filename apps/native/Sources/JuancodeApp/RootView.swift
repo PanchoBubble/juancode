@@ -714,45 +714,28 @@ private struct SessionForwardButton: View {
 private struct SidebarActionsMenu: View {
     @Environment(AppModel.self) private var model
     @Environment(SidebarToolbarBridge.self) private var bridge
-    @State private var showing = false
 
     var body: some View {
-        Button { showing = true } label: {
+        // Let the toolbar present a native menu: a separately hosted popover can
+        // lose its presentation/focus while the split-view sidebar updates.
+        Menu {
+            Button("New Project / Session…", systemImage: "plus") {
+                model.showingNewSession = true
+            }
+            Button(bridge.anyExpanded ? "Collapse All Projects" : "Expand All Projects",
+                   systemImage: bridge.anyExpanded
+                       ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
+                bridge.toggleAllRequests += 1
+            }
+            Button("Search Sessions", systemImage: "magnifyingglass") {
+                model.focusSessionSearch()
+            }
+        } label: {
             Label("Project actions", systemImage: "ellipsis")
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .help("Project actions")
-        .clickCursor()
-        .popover(isPresented: $showing, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                action("New Project / Session…", systemImage: "plus") {
-                    model.showingNewSession = true
-                }
-                action(bridge.anyExpanded ? "Collapse All Projects" : "Expand All Projects",
-                       systemImage: bridge.anyExpanded
-                           ? "rectangle.compress.vertical" : "rectangle.expand.vertical") {
-                    bridge.toggleAllRequests += 1
-                }
-                action("Search Sessions", systemImage: "magnifyingglass") {
-                    model.focusSessionSearch()
-                }
-            }
-            .padding(6)
-            .frame(width: 230)
-        }
-    }
-
-    private func action(_ title: String, systemImage: String, perform: @escaping () -> Void) -> some View {
-        Button {
-            showing = false
-            perform()
-        } label: {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 12))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8).padding(.vertical, 6)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
         .clickCursor()
     }
 }
