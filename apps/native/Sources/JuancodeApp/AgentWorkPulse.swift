@@ -1,23 +1,12 @@
 import SwiftUI
 
-/// A rotating arc makes work visible around even a small provider logo.
+/// Gently breathe the provider logo while working, without changing row layout.
 struct AgentWorkPulse: ViewModifier {
     let working: Bool
-    let tint: Color
 
     func body(content: Content) -> some View {
-        content.overlay {
-            AgentWorkMotion(working: working) { phase in
-                if let phase {
-                    Circle().trim(from: 0.1, to: 0.85)
-                        .stroke(AngularGradient(colors: [tint.opacity(0.15), tint, .white], center: .center),
-                                style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                        .rotationEffect(.degrees(phase * 360))
-                        .padding(-3)
-                }
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+        AgentWorkMotion(working: working) { phase in
+            content.scaleEffect(phase.map { 1 + 0.08 * sin($0 * 2 * .pi) } ?? 1)
         }
     }
 }
