@@ -11,7 +11,7 @@ struct AgentWorkPulse: ViewModifier {
     }
 }
 
-/// A bright comet repeatedly sweeps down the rail; the dim track keeps the
+/// A solid segment repeatedly sweeps down the rail; the dim track keeps the
 /// activity color readable between passes. Neither animation changes row layout.
 struct AgentWorkRail: View {
     let working: Bool
@@ -25,8 +25,7 @@ struct AgentWorkRail: View {
                         GeometryReader { geometry in
                             let length = max(18, geometry.size.height * 0.55)
                             Rectangle()
-                                .fill(LinearGradient(colors: [.clear, tint, .white, tint, .clear],
-                                                     startPoint: .top, endPoint: .bottom))
+                                .fill(tint)
                                 .frame(height: length)
                                 .offset(y: phase * (geometry.size.height + length) - length)
                         }
