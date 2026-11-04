@@ -208,20 +208,23 @@ public struct LinearTicket: Sendable, Equatable, Identifiable, Codable {
     public let teamKey: String
     public let branchName: String
     public let updatedAt: Date?
+    /// The Linear project the issue belongs to; empty when it is in none.
+    public let projectId: String
+    public let projectName: String
 
     public init(id: String, identifier: String, title: String, url: String, priority: Int,
                 stateName: String, stateType: String, stateColor: String, teamKey: String,
-                branchName: String, updatedAt: Date?) {
+                branchName: String, updatedAt: Date?, projectId: String = "", projectName: String = "") {
         self.id = id; self.identifier = identifier; self.title = title; self.url = url
         self.priority = priority; self.stateName = stateName; self.stateType = stateType
         self.stateColor = stateColor; self.teamKey = teamKey; self.branchName = branchName
-        self.updatedAt = updatedAt
+        self.updatedAt = updatedAt; self.projectId = projectId; self.projectName = projectName
     }
 }
 
 /// Which workflow states the panel shows. Filtered server-side, so a page of ten is
 /// ten matching tickets rather than ten that are then thinned out.
-public enum LinearTicketScope: String, CaseIterable, Identifiable, Sendable {
+public enum LinearTicketScope: String, CaseIterable, Identifiable, Sendable, Codable {
     case open, inProgress, todo, backlog, done
     public var id: String { rawValue }
     public var label: String {
@@ -264,11 +267,18 @@ public enum LinearTicketsError: Error, Equatable, Sendable {
     }
 }
 
-/// The `IssueFilter` for a scope plus the search box. A query shaped like an issue id
+/// The `IssueFilter` for a scope plus the search box, narrowed to `target` (a repo's
+/// mapped team or project) when one is given. A query shaped like an issue id
 /// ("ENG-42") also matches that issue by team key and number, since titles rarely
 /// contain their own identifier.
-func linearTicketFilter(scope: LinearTicketScope, search: String) -> [String: Any] {
+func linearTicketFilter(scope: LinearTicketScope, search: String,
+                        target: LinearTicketTarget? = nil) -> [String: Any] {
     var filter: [String: Any] = ["state": ["type": scope.stateType]]
+    switch target {
+    case .team(let key, _): filter["team"] = ["key": ["eqIgnoreCase": key]]
+    case .project(let id, _): filter["project"] = ["id": ["eq": id]]
+    case nil: break
+    }
     let q = search.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !q.isEmpty else { return filter }
     var or: [[String: Any]] = [["title": ["containsIgnoreCase": q]]]
@@ -282,10 +292,11 @@ func linearTicketFilter(scope: LinearTicketScope, search: String) -> [String: An
 
 private struct RawTicketState: Decodable { var name: String?; var type: String?; var color: String? }
 private struct RawTeam: Decodable { var key: String? }
+private struct RawProject: Decodable { var id: String?; var name: String? }
 private struct RawTicket: Decodable {
     var id: String?; var identifier: String?; var title: String?; var url: String?
     var priority: Double?; var updatedAt: String?; var branchName: String?
-    var state: RawTicketState?; var team: RawTeam?
+    var state: RawTicketState?; var team: RawTeam?; var project: RawProject?
 }
 private struct RawPageInfo: Decodable { var hasNextPage: Bool?; var endCursor: String? }
 private struct RawTicketConnection: Decodable { var nodes: [RawTicket]?; var pageInfo: RawPageInfo? }
@@ -316,7 +327,8 @@ func parseLinearTickets(_ raw: RawTicketsForTest) -> Result<LinearTicketPage, Li
             priority: Int(t.priority ?? 0),
             stateName: t.state?.name ?? "", stateType: t.state?.type ?? "",
             stateColor: t.state?.color ?? "", teamKey: t.team?.key ?? "",
-            branchName: t.branchName ?? "", updatedAt: t.updatedAt.flatMap(iso.date(from:)))
+            branchName: t.branchName ?? "", updatedAt: t.updatedAt.flatMap(iso.date(from:)),
+            projectId: t.project?.id ?? "", projectName: t.project?.name ?? "")
     }
     let info = conn.pageInfo
     return .success(LinearTicketPage(tickets: tickets, hasNextPage: info?.hasNextPage ?? false,
@@ -326,22 +338,39 @@ func parseLinearTickets(_ raw: RawTicketsForTest) -> Result<LinearTicketPage, Li
 private let TICKETS_QUERY = """
 query($first:Int!,$after:String,$filter:IssueFilter){ viewer{ assignedIssues(first:$first,after:$after,\
 filter:$filter,orderBy:updatedAt){ nodes{ id identifier title url priority updatedAt branchName \
-state{name type color} team{key} } pageInfo{ hasNextPage endCursor } } } }
+state{name type color} team{key} project{id name} } pageInfo{ hasNextPage endCursor } } } }
 """
 
-/// One page of the viewer's assigned issues, most recently updated first. Unlike the
-/// picker's `getAssignedIssues`, failures come back as a reason the panel can show.
+
+/// One page of the viewer's assigned issues, most recently updated first, narrowed to
+/// `target` when given (nil lists every project). Unlike the picker's
+/// `getAssignedIssues`, failures come back as a reason the panel can show.
 public func getAssignedTickets(scope: LinearTicketScope, search: String, first: Int, after: String?,
+                               target: LinearTicketTarget? = nil,
                                env: [String: String] = ProcessInfo.processInfo.environment)
     async -> Result<LinearTicketPage, LinearTicketsError> {
+    var variables: [String: Any] = ["first": first,
+                                    "filter": linearTicketFilter(scope: scope, search: search, target: target)]
+    if let after { variables["after"] = after }
+    return await linearGraphQL(TICKETS_QUERY, variables: variables, env: env) { data in
+        guard let raw = try? JSONDecoder().decode(RawTicketsForTest.self, from: data),
+              raw.errors != nil || raw.data != nil else { return nil }
+        return parseLinearTickets(raw)
+    }
+}
+
+/// POST one query and hand the body to `parse`. GraphQL errors arrive with a 400 too,
+/// so the body is decoded before the status is judged; a nil parse falls back to it.
+private func linearGraphQL<T>(_ query: String, variables: [String: Any],
+                              env: [String: String],
+                              parse: (Data) -> Result<T, LinearTicketsError>?)
+    async -> Result<T, LinearTicketsError> {
     guard let token = linearToken(env) else { return .failure(.noToken) }
     var req = URLRequest(url: LINEAR_GRAPHQL_URL)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.setValue(token, forHTTPHeaderField: "Authorization")
-    var variables: [String: Any] = ["first": first, "filter": linearTicketFilter(scope: scope, search: search)]
-    if let after { variables["after"] = after }
-    guard let body = try? JSONSerialization.data(withJSONObject: ["query": TICKETS_QUERY,
+    guard let body = try? JSONSerialization.data(withJSONObject: ["query": query,
                                                                   "variables": variables]) else {
         return .failure(.failed("Couldn't encode the Linear query."))
     }
@@ -349,14 +378,54 @@ public func getAssignedTickets(scope: LinearTicketScope, search: String, first: 
     do {
         let (data, resp) = try await URLSession.shared.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        // GraphQL errors arrive with a 400 too; decode before judging the status.
-        if let raw = try? JSONDecoder().decode(RawTicketsForTest.self, from: data),
-           raw.errors != nil || raw.data != nil {
-            return parseLinearTickets(raw)
-        }
+        if let parsed = parse(data) { return parsed }
         if status == 401 { return .failure(.failed("Linear rejected the API key.")) }
         return .failure(.failed("Linear answered HTTP \(status)."))
     } catch {
         return .failure(.failed(error.localizedDescription))
+    }
+}
+
+// MARK: - teams and projects (what a repository's Tickets can be mapped to)
+
+private struct RawTeamNode: Decodable { var key: String?; var name: String? }
+private struct RawTeamNodes: Decodable { var nodes: [RawTeamNode]? }
+private struct RawProjectNodes: Decodable { var nodes: [RawProject]? }
+private struct RawTargetsData: Decodable { var teams: RawTeamNodes?; var projects: RawProjectNodes? }
+
+/// Test seam mirroring the `{ "data": { "teams": …, "projects": … } }` envelope.
+public struct RawTargetsForTest: Decodable {
+    fileprivate var data: RawTargetsData?
+    fileprivate var errors: [RawGraphQLError]?
+}
+
+/// Teams (by key) then projects (by id) the viewer can see, as mapping choices.
+func parseLinearTargets(_ raw: RawTargetsForTest) -> Result<[LinearTicketTarget], LinearTicketsError> {
+    if let first = raw.errors?.first {
+        return .failure(.failed(first.message ?? "Linear returned an error."))
+    }
+    guard let data = raw.data else { return .failure(.failed("Linear's response had no teams.")) }
+    let teams = (data.teams?.nodes ?? []).compactMap { t -> LinearTicketTarget? in
+        guard let key = t.key, !key.isEmpty else { return nil }
+        return .team(key: key, name: t.name ?? key)
+    }
+    let projects = (data.projects?.nodes ?? []).compactMap { p -> LinearTicketTarget? in
+        guard let id = p.id, !id.isEmpty else { return nil }
+        return .project(id: id, name: p.name ?? id)
+    }
+    return .success(teams + projects)
+}
+
+private let TARGETS_QUERY = """
+query{ teams(first:100){ nodes{ key name } } projects(first:100,orderBy:updatedAt){ nodes{ id name } } }
+"""
+
+/// The teams and projects a repository's Tickets can be scoped to.
+public func getLinearTargets(env: [String: String] = ProcessInfo.processInfo.environment)
+    async -> Result<[LinearTicketTarget], LinearTicketsError> {
+    await linearGraphQL(TARGETS_QUERY, variables: [:], env: env) { data in
+        guard let raw = try? JSONDecoder().decode(RawTargetsForTest.self, from: data),
+              raw.errors != nil || raw.data != nil else { return nil }
+        return parseLinearTargets(raw)
     }
 }
