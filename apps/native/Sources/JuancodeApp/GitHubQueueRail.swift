@@ -97,9 +97,9 @@ struct RightRailPanels: View {
     @State private var railHeight: CGFloat = 0
     @State private var shownHeight: [RightRailPanel: Double] = [:]
     @State private var overflow: [RightRailPanel: Double] = [:]
-    /// Owned here rather than by the Worktree body, so its title bar can show +/−
-    /// while the section is collapsed.
-    @State private var diffStore = RepoDiffStore()
+    /// Commit / Push / Create PR on the selected checkout. Here so a write's note
+    /// outlives a collapse.
+    @State private var gitStore = WorktreeGitStore()
     /// Here for the same reason, and so the hourly refresh outlives a collapse.
     @State private var ticketsStore = LinearTicketsStore()
     @State private var dropTarget: RightRailPanel?
@@ -141,8 +141,15 @@ struct RightRailPanels: View {
         return model.sessions.first(where: { $0.id == id })
     }
 
+    /// The selected session's project (its main checkout): what Tickets scope to.
     private var root: String? {
         selectedMeta.map { model.repoRoot(forSession: $0) }
+    }
+
+    private var gitRefreshKey: String {
+        guard let ctx = model.worktreeContext else { return "" }
+        return ctx.sessionId + "\u{0}" + ctx.checkout + "\u{0}"
+            + (model.changeStatBySession[ctx.sessionId]?.signature ?? "")
     }
 
     var body: some View {
@@ -242,12 +249,13 @@ struct RightRailPanels: View {
         // the mirror so the rail follows the stored state again.
         .onChange(of: [orderRaw, collapsedRaw, hiddenRaw, heightsRaw, selectedRaw, pinnedRaw]) { mirror = nil }
         .background(Color.appSurface)
-        .task(id: root) { await diffStore.load(root: root, model: model, rewatch: true) }
+        // Branch state for the git actions: re-read when the checkout or its change
+        // signature moves. The Worktree viewer reads the change itself.
+        .task(id: gitRefreshKey) { await gitStore.refresh(root: model.worktreeContext?.checkout, model: model) }
         .task { await ticketsStore.run() }
         // Tickets are project-scoped: the header count follows the selected project
         // even while the Tickets body is collapsed. The global queues do not reset.
         .onChange(of: root, initial: true) { ticketsStore.setRoot(root) }
-        .onDisappear { diffStore.stopWatching() }
     }
 
     private func header(_ panel: RightRailPanel, prefs p: RightRailPrefs.State,
@@ -372,7 +380,13 @@ struct RightRailPanels: View {
     @ViewBuilder private func content(_ panel: RightRailPanel) -> some View {
         switch panel {
         case .worktree:
-            RepoDiffRail(store: diffStore, root: root)
+            VStack(spacing: 0) {
+                if model.worktreeContext != nil {
+                    WorktreeGitActions(store: gitStore)
+                        .padding(.bottom, 2)
+                }
+                WorktreeRailPanel()
+            }
         case .oracle:
             OracleGlobalRail(showsHeader: false)
         case .prs:
@@ -491,30 +505,21 @@ struct RightRailPanels: View {
     /// Which worktree the section is showing, so it is always identifiable, and its
     /// change size while collapsed.
     @ViewBuilder private var worktreeAccessory: some View {
-        if let meta = selectedMeta {
-            let path = meta.worktreePath ?? meta.cwd
-            let name = (path as NSString).lastPathComponent
-            let branch = model.folderGitState(meta.cwd)?.branch
+        if let ctx = model.worktreeContext {
+            let name = (ctx.checkout as NSString).lastPathComponent
+            let branch = model.folderGitState(ctx.checkout)?.branch
+                ?? selectedMeta.flatMap { model.folderGitState($0.cwd)?.branch }
             Text(branch.map { "\(name) · \($0)" } ?? name)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
-                .help(branch.map { "\(path) on \($0)" } ?? path)
+                .help(branch.map { "\(ctx.checkout) on \($0)" } ?? ctx.checkout)
                 .accessibilityLabel("Showing \(name)\(branch.map { " on \($0)" } ?? "")")
+            WorktreeRailAccessory().fixedSize()
         } else {
             Text("No session selected")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
-        }
-        if let files = diffStore.diff?.files, !files.isEmpty {
-            let add = files.reduce(0) { $0 + $1.additions }
-            let del = files.reduce(0) { $0 + $1.deletions }
-            HStack(spacing: 3) {
-                Text("+\(compactCount(add))").foregroundStyle(.green)
-                Text("−\(compactCount(del))").foregroundStyle(.red)
-            }
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .fixedSize()
         }
     }
 }
@@ -538,131 +543,29 @@ private struct RailHeaderDrag: ViewModifier {
     }
 }
 
-/// The selected session's main-checkout diff, kept warm by a file watcher, and the
-/// git writes the Diff tab offers on it. Writes go through the selected session
-/// (the core's git frames are session-scoped) with `cwd` naming the main checkout,
-/// which the core accepts because it is one of that session's worktrees.
+/// Commit, Push and Create PR for the selected session's own checkout, the git
+/// writes the retired Diff panel offered. No file watcher: the Worktree viewer owns
+/// reading the change, so this only reads the branch state when the checkout or
+/// its change signature moves, and after its own writes. Writes go through the
+/// selected session (the core's git frames are session-scoped) with `cwd` naming
+/// that session's checkout.
 @MainActor @Observable
-final class RepoDiffStore {
+final class WorktreeGitStore {
     struct Note: Equatable { var ok: Bool; var text: String }
 
-    var diff: DiffResult?
     var gitState: GitState?
-    var loading = false
-    var error: String?
     var busy = false
     var note: Note?
-    /// The commit picker: `selectedCommit` nil means the working tree.
-    var commits: [RecentCommit] = []
-    var commitsUntil: Date?
-    var commitsLoading = false
-    var hasMoreCommits = false
-    var selectedCommit: RecentCommit?
-    var commitDiff: DiffResult?
-    @ObservationIgnored private var commitLimit = RepoDiffStore.commitPage
-    static let commitPage = 5
-    @ObservationIgnored private var watch: WorktreeWatchToken?
-    @ObservationIgnored private let watcher = WorktreeWatcherRegistry()
     @ObservationIgnored private var root: String?
 
-    func stopWatching() { watch = nil }
-
-    /// What the tree shows: the picked commit's diff, else the working tree's.
-    var shown: DiffResult? { selectedCommit == nil ? diff : commitDiff }
-
-    func loadCommits(model: AppModel, more: Bool = false) async {
-        guard let root else { return }
-        commitLimit = more ? commitLimit + Self.commitPage : Self.commitPage
-        commitsLoading = true
-        defer { commitsLoading = false }
-        let until = commitsUntil.map(Self.untilArg)
-        do {
-            let got = try await model.core.recentCommits(cwd: root, limit: commitLimit, until: until)
-            guard root == self.root else { return }
-            commits = got
-            hasMoreCommits = got.count >= commitLimit
-        } catch {
-            note = Note(ok: false, text: Self.message(error))
-        }
-    }
-
-    func select(_ commit: RecentCommit?, model: AppModel) async {
-        selectedCommit = commit
-        commitDiff = nil
-        guard let commit, let root else { return }
-        loading = true
-        defer { loading = false }
-        do {
-            let d = try await model.core.commitDiff(cwd: root, sha: commit.sha)
-            guard root == self.root, selectedCommit == commit else { return }
-            commitDiff = d
-        } catch {
-            note = Note(ok: false, text: Self.message(error))
-        }
-    }
-
-    /// The end of the picked day, so that day's commits are included.
-    private static func untilArg(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date) + " 23:59:59"
-    }
-
-    func load(root: String?, model: AppModel, rewatch: Bool) async {
+    func refresh(root: String?, model: AppModel) async {
+        if root != self.root { note = nil; gitState = nil }
         self.root = root
-        guard let root else { diff = nil; gitState = nil; watch = nil; return }
-        if rewatch {
-            diff = nil
-            gitState = nil
-            note = nil
-            commits = []
-            commitsUntil = nil
-            hasMoreCommits = false
-            selectedCommit = nil
-            commitDiff = nil
-            watch = watcher.watch(path: root) { [weak self] in
-                Task { @MainActor in await self?.load(root: root, model: model, rewatch: false) }
-            }
-        }
-        if let reason = model.core.unavailableReason(.changes) {
-            error = reason
-            return
-        }
-        loading = true
-        defer { loading = false }
-        do {
-            let result = try await model.core.diff(cwd: root)
-            let state = try? await model.core.gitState(cwd: root)
-            // The selection may have moved on while git ran.
-            guard root == self.root else { return }
-            diff = result
-            gitState = state
-            error = nil
-        } catch {
-            self.error = "Couldn't read the diff: \(error.localizedDescription)"
-        }
-    }
-
-    /// Discard each file's uncommitted change: a tracked file is restored from HEAD,
-    /// a new one deleted (the core's `revert_file`). One file at a time, so a folder's
-    /// blast radius is exactly the files the tree listed under it.
-    func discard(_ files: [DiffFile], model: AppModel) async {
-        guard let root, let sid = model.selection, !files.isEmpty else { return }
-        busy = true
-        defer { busy = false }
-        var failed: String?
-        for f in files {
-            do {
-                _ = try await model.core.revert(sessionId: sid, cwd: root, path: f.path, hunkIndex: nil)
-            } catch {
-                failed = "\(f.path): \(Self.message(error))"
-                break
-            }
-        }
-        note = failed.map { Note(ok: false, text: $0) }
-            ?? Note(ok: true, text: files.count == 1 ? "Discarded \(files[0].path)" : "Discarded \(files.count) files")
-        await load(root: root, model: model, rewatch: false)
+        guard let root, model.core.unavailableReason(.changes) == nil else { return }
+        let state = try? await model.core.gitState(cwd: root)
+        // The selection may have moved on while git ran.
+        guard root == self.root else { return }
+        gitState = state
     }
 
     /// Stage everything in the checkout and commit it.
@@ -673,8 +576,7 @@ final class RepoDiffStore {
         do {
             let r = try await model.core.commitAll(sessionId: sid, cwd: root, message: message)
             note = Note(ok: true, text: "Committed \(r.sha) · \(r.subject)")
-            commits = []
-            await load(root: root, model: model, rewatch: false)
+            await refresh(root: root, model: model)
             return true
         } catch {
             note = Note(ok: false, text: Self.message(error))
@@ -704,7 +606,7 @@ final class RepoDiffStore {
         } catch {
             note = Note(ok: false, text: Self.message(error))
         }
-        await load(root: root, model: model, rewatch: false)
+        await refresh(root: root, model: model)
     }
 
     /// Open a PR for the checkout's branch; gh pushes it first.
@@ -720,7 +622,7 @@ final class RepoDiffStore {
             let r = try await reads.createPr(cwd: root, title: title, body: body, draft: draft)
             note = Note(ok: true, text: r.created ? "Pull request created." : "A PR already exists for this branch.")
             model.refreshViewerPrs()
-            await load(root: root, model: model, rewatch: false)
+            await refresh(root: root, model: model)
             return r
         } catch {
             note = Note(ok: false, text: Self.message(error))
@@ -735,461 +637,10 @@ final class RepoDiffStore {
     }
 }
 
-/// `git diff` of the selected session's main checkout (not its worktree) as a
-/// folder tree with +/− counts and a GitHub-style diffstat bar per row. A click
-/// opens the file in the session's in-place editor tab at its first changed line,
-/// rooted in that checkout; right-click discards a file's or folder's changes.
-private struct RepoDiffRail: View {
+/// The Worktree section's git actions bar.
+struct WorktreeGitActions: View {
     @Environment(AppModel.self) private var model
-    let store: RepoDiffStore
-    let root: String?
-    /// Folder ids folded shut. Folders start open: the point is to see the files.
-    @State private var collapsed: Set<String> = []
-    @State private var pendingDiscard: DiscardRequest?
-
-    private var diff: DiffResult? { store.shown }
-    private var viewingCommit: Bool { store.selectedCommit != nil }
-    private var loading: Bool { store.loading }
-    private var error: String? { store.error }
-
-    /// What the confirmation is about to throw away.
-    struct DiscardRequest: Identifiable {
-        let id: String
-        let name: String
-        let isFolder: Bool
-        let files: [DiffFile]
-        var newFiles: Int { files.filter { $0.status == .untracked }.count }
-        var onlyNew: Bool { newFiles == files.count }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            if root != nil {
-                RepoCommitPicker(store: store)
-            }
-            if !viewingCommit, let files = diff?.files, !files.isEmpty, root != nil {
-                RepoDiffActions(store: store)
-            }
-            Divider().padding(.vertical, 2)
-            content
-        }
-        .confirmationDialog(discardTitle, isPresented: discardShown, titleVisibility: .visible,
-                            presenting: pendingDiscard) { req in
-            Button(req.onlyNew ? "Delete" : "Discard Changes", role: .destructive) {
-                pendingDiscard = nil
-                Task { await store.discard(req.files, model: model) }
-            }
-            Button("Cancel", role: .cancel) { pendingDiscard = nil }
-        } message: { req in
-            Text(discardMessage(req))
-        }
-    }
-
-    private var discardShown: Binding<Bool> {
-        Binding(get: { pendingDiscard != nil }, set: { if !$0 { pendingDiscard = nil } })
-    }
-
-    private var discardTitle: String {
-        guard let req = pendingDiscard else { return "" }
-        if req.isFolder { return "Discard every change in \(req.name)?" }
-        return req.onlyNew ? "Delete \(req.name)?" : "Discard changes to \(req.name)?"
-    }
-
-    private func discardMessage(_ req: DiscardRequest) -> String {
-        let restored = req.files.count - req.newFiles
-        var parts: [String] = []
-        if restored > 0 { parts.append("\(restored) file\(restored == 1 ? "" : "s") restored to the last commit") }
-        if req.newFiles > 0 { parts.append("\(req.newFiles) new file\(req.newFiles == 1 ? "" : "s") deleted") }
-        let what = req.isFolder ? parts.joined(separator: ", ") + ". " : ""
-        return what + "This can't be undone."
-    }
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text(root.map { ($0 as NSString).lastPathComponent } ?? "No session")
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .help(root ?? "")
-            if let branch = store.gitState?.branch {
-                Text(branch)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
-            if let files = diff?.files, !files.isEmpty {
-                Text("+\(files.reduce(0) { $0 + $1.additions })")
-                    .foregroundStyle(.green)
-                Text("−\(files.reduce(0) { $0 + $1.deletions })")
-                    .foregroundStyle(.red)
-            }
-            Spacer()
-            if loading || store.busy { ProgressView().controlSize(.mini) }
-            Button { Task { await store.load(root: root, model: model, rewatch: false) } } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Refresh")
-        }
-        .font(.system(size: 11, design: .monospaced))
-        .padding(.horizontal, 10).padding(.top, 2)
-    }
-
-    @ViewBuilder private var content: some View {
-        if root == nil {
-            note("Select a session to see its repo's changes.")
-        } else if let error {
-            note(error)
-        } else if viewingCommit && diff == nil {
-            note(loading ? "Loading commit…" : "Couldn't load this commit.")
-        } else if let diff, !diff.git {
-            note("Not a git repository.")
-        } else if let files = diff?.files {
-            if files.isEmpty {
-                note(viewingCommit ? "No file changes in this commit." : "Working tree clean.")
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(visibleRows(buildDiffTree(files))) { item in
-                            RepoDiffRow(node: item.node, depth: item.depth,
-                                        collapsed: collapsed.contains(item.node.id),
-                                        onTap: { frame in tap(item.node, from: frame) },
-                                        onDiscard: viewingCommit ? nil : { requestDiscard(item.node) },
-                                        onOpen: { if let f = item.node.file { open(f, from: .zero) } })
-                        }
-                        if diff?.truncatedFiles == true {
-                            note("More files changed than shown.")
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                }
-                .reportsRailOverflow()
-            }
-        }
-        Spacer(minLength: 0)
-    }
-
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12)).foregroundStyle(.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private struct TreeRow: Identifiable {
-        let node: DiffTreeNode
-        let depth: Int
-        var id: String { node.id }
-    }
-
-    private func visibleRows(_ nodes: [DiffTreeNode], depth: Int = 0) -> [TreeRow] {
-        nodes.flatMap { n -> [TreeRow] in
-            let me = TreeRow(node: n, depth: depth)
-            guard n.isFolder, !collapsed.contains(n.id) else { return [me] }
-            return [me] + visibleRows(n.children, depth: depth + 1)
-        }
-    }
-
-    private func tap(_ n: DiffTreeNode, from frame: CGRect) {
-        if let f = n.file {
-            open(f, from: frame)
-        } else if collapsed.contains(n.id) {
-            collapsed.remove(n.id)
-        } else {
-            collapsed.insert(n.id)
-        }
-    }
-
-    private func requestDiscard(_ n: DiffTreeNode) {
-        let files = n.file.map { [$0] } ?? leafFiles(n)
-        guard !files.isEmpty else { return }
-        pendingDiscard = DiscardRequest(id: n.id, name: n.isFolder ? n.id + "/" : n.name,
-                                        isFolder: n.isFolder, files: files)
-    }
-
-    private func leafFiles(_ n: DiffTreeNode) -> [DiffFile] {
-        n.children.flatMap { c in c.file.map { [$0] } ?? leafFiles(c) }
-    }
-
-    private func open(_ f: DiffFile, from frame: CGRect) {
-        guard let root, let id = model.selection else { return }
-        model.editorSpawn.launch(from: frame, title: f.path)
-        model.openEditorSession(id, file: f.path, line: firstChangedLine(f), root: root)
-    }
-
-    /// The new-side line of the first change, so the editor lands on it. A pure
-    /// deletion has no new line of its own; the context line above it stands in.
-    private func firstChangedLine(_ f: DiffFile) -> Int? {
-        guard let hunk = parseUnifiedDiff(f.diff).first else { return nil }
-        var lastContext: Int?
-        for line in hunk.lines {
-            switch line.kind {
-            case .context: lastContext = line.newLine
-            case .insert: return line.newLine
-            case .delete: return lastContext ?? line.oldLine
-            }
-        }
-        return lastContext
-    }
-}
-
-/// One tree row: hover highlight, click to open (or fold), right-click to discard.
-private struct RepoDiffRow: View {
-    let node: DiffTreeNode
-    let depth: Int
-    let collapsed: Bool
-    let onTap: (CGRect) -> Void
-    /// Nil for a commit's diff: there is nothing uncommitted to discard.
-    let onDiscard: (() -> Void)?
-    let onOpen: () -> Void
-
-    @State private var hovering = false
-    /// The row's global frame, for the editor's spawn flight. A reference so a scroll
-    /// updating it never re-renders the row.
-    @State private var frame = FrameBox()
-
-    private final class FrameBox { var rect: CGRect = .zero }
-
-    var body: some View {
-        let deleted = node.file?.status == .deleted
-        Button { onTap(frame.rect) } label: {
-            HStack(spacing: 5) {
-                indentGuides(depth)
-                if let f = node.file {
-                    Text(statusLetter(f.status))
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(statusColor(f.status))
-                        .frame(width: 10)
-                    Image(systemName: "doc.text")
-                        .font(.system(size: 10))
-                        .foregroundStyle(hovering ? .primary : .secondary)
-                    Text(node.name)
-                        .font(.system(size: 12))
-                        .strikethrough(deleted)
-                        .foregroundStyle(deleted ? .secondary : .primary)
-                        .lineLimit(1).truncationMode(.middle)
-                } else {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10)
-                    Image(systemName: collapsed ? "folder.fill" : "folder")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.accentColor.opacity(hovering ? 1 : 0.8))
-                    Text(node.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1).truncationMode(.head)
-                }
-                Spacer(minLength: 4)
-                if node.file?.binary == true {
-                    Text("bin").font(.system(size: 10)).foregroundStyle(.secondary)
-                } else {
-                    if node.additions > 0 { Text("+\(compactCount(node.additions))").foregroundStyle(.green) }
-                    if node.deletions > 0 { Text("−\(compactCount(node.deletions))").foregroundStyle(.red) }
-                    DiffStatBar(additions: node.additions, deletions: node.deletions)
-                }
-            }
-            .font(.system(size: 10, design: .monospaced))
-            .padding(.horizontal, 4).padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? 0.09 : 0))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(deleted)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.1), value: hovering)
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame.rect = $0 }
-        .help(node.file.map { deleted ? "\($0.path) was deleted" : "Open \($0.path) in the editor" } ?? node.id)
-        .contextMenu { menu }
-    }
-
-    @ViewBuilder private var menu: some View {
-        if let f = node.file {
-            if f.status != .deleted {
-                Button("Open in Editor") { onOpen() }
-            }
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(f.path, forType: .string)
-            }
-            if let onDiscard {
-                Divider()
-                if f.status == .untracked {
-                    Button("Delete File…", role: .destructive) { onDiscard() }
-                } else {
-                    Button("Discard Changes…", role: .destructive) { onDiscard() }
-                }
-            }
-        } else {
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.id, forType: .string)
-            }
-            if let onDiscard {
-                Divider()
-                Button("Discard Changes in Folder…", role: .destructive) { onDiscard() }
-            }
-        }
-    }
-
-    /// One faint vertical rule per level, so siblings line up under their folder.
-    private func indentGuides(_ depth: Int) -> some View {
-        HStack(spacing: 0) {
-            ForEach(0..<depth, id: \.self) { _ in
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.2))
-                    .frame(width: 1)
-                    .padding(.leading, 5).padding(.trailing, 6)
-            }
-        }
-    }
-
-    private func statusLetter(_ s: FileStatus) -> String {
-        switch s {
-        case .modified: return "M"
-        case .added: return "A"
-        case .deleted: return "D"
-        case .renamed: return "R"
-        case .untracked: return "U"
-        }
-    }
-
-    private func statusColor(_ s: FileStatus) -> Color {
-        switch s {
-        case .modified, .renamed: return .orange
-        case .added, .untracked: return .green
-        case .deleted: return .red
-        }
-    }
-}
-
-/// Which diff the tab shows: the working tree, or one past commit. The list starts at
-/// the last five, grows a page at a time, and can start from a picked day instead.
-private struct RepoCommitPicker: View {
-    @Environment(AppModel.self) private var model
-    let store: RepoDiffStore
-    @State private var open = false
-    @State private var byDate = false
-    @State private var day = Date()
-
-    var body: some View {
-        Button { open.toggle() } label: {
-            HStack(spacing: 5) {
-                Image(systemName: store.selectedCommit == nil ? "square.and.pencil" : "clock.arrow.circlepath")
-                    .font(.system(size: 10))
-                if let c = store.selectedCommit {
-                    Text(c.shortSha).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                    Text(c.subject).lineLimit(1).truncationMode(.tail)
-                } else {
-                    Text("Working tree")
-                }
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .font(.system(size: 11))
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(Color.primary.opacity(0.06)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .clickCursor()
-        .help("Show the diff of a past commit")
-        .padding(.horizontal, 10).padding(.top, 4)
-        .popover(isPresented: $open, arrowEdge: .bottom) { list }
-        .onChange(of: open) { _, isOpen in
-            if isOpen { Task { await store.loadCommits(model: model) } }
-        }
-    }
-
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            row(nil)
-            Divider()
-            HStack(spacing: 6) {
-                Toggle("On or before", isOn: $byDate)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
-                DatePicker("", selection: $day, in: ...Date(), displayedComponents: .date)
-                    .labelsHidden()
-                    .datePickerStyle(.field)
-                    .controlSize(.small)
-                    .disabled(!byDate)
-                Spacer()
-                if store.commitsLoading { ProgressView().controlSize(.mini) }
-            }
-            .onChange(of: byDate) { _, _ in reloadByDate() }
-            .onChange(of: day) { _, _ in if byDate { reloadByDate() } }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.commits) { row($0) }
-                    if store.commits.isEmpty && !store.commitsLoading {
-                        Text(byDate ? "No commits on or before that day." : "No commits.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                            .padding(.vertical, 8)
-                    }
-                    if store.hasMoreCommits {
-                        Button("Load more") { Task { await store.loadCommits(model: model, more: true) } }
-                            .buttonStyle(.link)
-                            .font(.system(size: 11))
-                            .disabled(store.commitsLoading)
-                            .padding(.horizontal, 6).padding(.vertical, 6)
-                            .clickCursor()
-                    }
-                }
-            }
-            // A popover sizes a ScrollView to its minimum, which is one row; this fits
-            // the first page of five plus "Load more".
-            .frame(minHeight: 170, maxHeight: 320)
-        }
-        .padding(10)
-        .frame(width: 380)
-    }
-
-    private func reloadByDate() {
-        store.commitsUntil = byDate ? day : nil
-        Task { await store.loadCommits(model: model) }
-    }
-
-    private func row(_ commit: RecentCommit?) -> some View {
-        let picked = store.selectedCommit?.sha == commit?.sha
-        return Button {
-            open = false
-            Task { await store.select(commit, model: model) }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
-                    .opacity(picked ? 1 : 0)
-                if let commit {
-                    Text(commit.shortSha)
-                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                    Text(commit.subject).font(.system(size: 11)).lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(commit.relativeAge).font(.system(size: 10)).foregroundStyle(.secondary)
-                        .lineLimit(1)
-                } else {
-                    Text("Working tree").font(.system(size: 11, weight: .medium))
-                    Text("uncommitted changes").font(.system(size: 10)).foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                }
-            }
-            .padding(.horizontal, 6).padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .clickCursor()
-    }
-}
-
-/// Commit / Push / PR for the checkout the Diff tab shows.
-private struct RepoDiffActions: View {
-    @Environment(AppModel.self) private var model
-    let store: RepoDiffStore
+    let store: WorktreeGitStore
 
     @State private var showCommit = false
     @State private var showPr = false
@@ -1317,26 +768,6 @@ private struct RepoDiffActions: View {
             }
         }
         .padding(12).frame(width: 320)
-    }
-}
-
-/// Five blocks split green/red by the share of added vs removed lines, as GitHub
-/// draws a diffstat: a glance at whether a file grew, shrank or was reworked.
-private struct DiffStatBar: View {
-    let additions: Int
-    let deletions: Int
-
-    var body: some View {
-        let total = additions + deletions
-        let green = total == 0 ? 0 : Int((Double(additions) / Double(total) * 5).rounded())
-        let red = total == 0 ? 0 : 5 - green
-        HStack(spacing: 1) {
-            ForEach(0..<5, id: \.self) { i in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(i < green ? Color.green : i < green + red ? Color.red : Color.secondary.opacity(0.25))
-                    .frame(width: 5, height: 5)
-            }
-        }
     }
 }
 

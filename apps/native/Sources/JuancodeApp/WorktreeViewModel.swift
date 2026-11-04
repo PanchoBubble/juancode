@@ -45,14 +45,12 @@ struct WorktreeContext: Equatable {
 }
 
 extension AppModel {
-    /// The rail panel that hosts the Worktree viewer. The rail integrator (juancode-18j.4)
-    /// points this at its Worktree case when it retires the Diff panel.
-    static var worktreeRailPanel: RightRailPanel { .diff }
+    /// The rail section that hosts the Worktree viewer.
+    static var worktreeRailPanel: RightRailPanel { .worktree }
 
-    /// Whether the right rail mounts `WorktreeRailPanel`. Until it does, the viewer
-    /// floats in the session's side panel, so it is reachable either way and never in
-    /// both places at once.
-    static let worktreeInRail = false
+    /// Whether the right rail mounts `WorktreeRailPanel`. When it does not, the viewer
+    /// floats in the session's side panel instead, never in both places at once.
+    static let worktreeInRail = true
 
     /// The selected session and the checkout it really works in: an agent-cut worktree
     /// first, then where its pty runs, then its recorded worktree — never the repo's

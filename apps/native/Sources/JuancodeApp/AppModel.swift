@@ -1502,11 +1502,7 @@ final class AppModel {
     /// `RightRailPanels`; reading the same UserDefaults keys keeps that view the single
     /// owner of the state.
     func isRailPanelOpen(_ panel: RightRailPanel) -> Bool {
-        let d = UserDefaults.standard
-        return RightRailPrefs.isOpen(panel.rawValue,
-                                     railShown: d.object(forKey: "oracle.sessionRail.shown") as? Bool ?? true,
-                                     collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
-                                     hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
+        RightRailPrefs.isOpen(panel.rawValue)
     }
 
     /// Showing it also un-hides it if the user hid it in the rail's edit mode.
@@ -1515,13 +1511,9 @@ final class AppModel {
     /// Open (or collapse) one rail panel. Showing it also shows the rail and un-hides
     /// the panel if the user hid it in the rail's edit mode.
     func setRailPanelShown(_ panel: RightRailPanel, _ shown: Bool) {
-        let d = UserDefaults.standard
-        let next = RightRailPrefs.setting(panel.rawValue, open: shown,
-                                          collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
-                                          hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
-        if shown { d.set(true, forKey: "oracle.sessionRail.shown") }
-        d.set(next.collapsed, forKey: RightRailPrefs.collapsedKey)
-        d.set(next.hidden, forKey: RightRailPrefs.hiddenKey)
+        // The rail's own rules: opening a global queue selects it and collapses the
+        // others except the pinned one; Worktree only opens.
+        RightRailPrefs.setOpen(panel.rawValue, shown)
     }
 
     func scrollback(_ id: String) -> [UInt8] {
