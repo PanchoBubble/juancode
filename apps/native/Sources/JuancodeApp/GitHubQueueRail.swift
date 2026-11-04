@@ -82,8 +82,9 @@ private struct RevealLayout: Layout {
 
 struct RightRailPanels: View {
     @Environment(AppModel.self) private var model
-    /// Shared with the old popover's key, so the chip you lived on carries over.
-    @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
+    /// Shared with the old popover's key, so the chip you lived on carries over; a
+    /// fresh install (nothing stored) opens on what needs you.
+    @AppStorage(ViewerPrSlice.storageKey) private var filterRaw: String?
     // Observed so a write from elsewhere (⌘-key shortcuts go through
     // `RightRailPrefs.setOpen`) re-renders the rail. The state itself is read whole
     // through `RightRailPrefs.state`, which tells a key never written from an empty one.
@@ -303,7 +304,7 @@ struct RightRailPanels: View {
                 case .worktree: worktreeAccessory
                 case .chains: ChainsRailAccessory()
                 case .tickets: ticketsPreview
-                case .prs: EmptyView()
+                case .prs: prsPreview
                 }
                 if canPin && (isPinned || hoveredHeader == panel) {
                     Button {
@@ -373,7 +374,7 @@ struct RightRailPanels: View {
             OracleGlobalRail(showsHeader: false)
         case .prs:
             GitHubQueueBadge.GitHubQueuePopover(
-                slice: Binding(get: { ViewerPrSlice(rawValue: filterRaw) ?? .all },
+                slice: Binding(get: { ViewerPrSlice(storedRaw: filterRaw) },
                                set: { filterRaw = $0.rawValue }),
                 showing: .constant(true),
                 listMaxHeight: nil)
@@ -444,6 +445,33 @@ struct RightRailPanels: View {
             next.heights[panel.rawValue] = v.rounded()
             apply(next)
         })
+    }
+
+    /// The PRs that need you as an accent badge, the rest of the queue as a quiet
+    /// total beside it.
+    @ViewBuilder private var prsPreview: some View {
+        let tally = model.viewerPrQueueTally
+        HStack(spacing: 3) {
+            if tally.actionable > 0 {
+                Text("\(tally.actionable)")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.orange.opacity(0.22)))
+                    .foregroundStyle(.orange)
+            }
+            if tally.quiet > 0 {
+                Text("\(tally.actionable > 0 ? "/" : "")\(tally.actionable > 0 ? tally.total : tally.quiet)")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .help(tally.actionable > 0
+              ? "\(tally.actionable) need\(tally.actionable == 1 ? "s" : "") you of \(tally.total) PRs"
+              : "\(tally.total) PRs, none waiting on you")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(tally.actionable > 0
+                            ? "\(tally.actionable) PRs need you, \(tally.total) total"
+                            : "\(tally.total) PRs")
     }
 
     @ViewBuilder private var ticketsPreview: some View {
