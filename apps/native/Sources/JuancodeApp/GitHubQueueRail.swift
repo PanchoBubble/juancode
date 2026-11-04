@@ -244,6 +244,9 @@ struct RightRailPanels: View {
         .background(Color.appSurface)
         .task(id: root) { await diffStore.load(root: root, model: model, rewatch: true) }
         .task { await ticketsStore.run() }
+        // Tickets are project-scoped: the header count follows the selected project
+        // even while the Tickets body is collapsed. The global queues do not reset.
+        .onChange(of: root, initial: true) { ticketsStore.setRoot(root) }
         .onDisappear { diffStore.stopWatching() }
     }
 
