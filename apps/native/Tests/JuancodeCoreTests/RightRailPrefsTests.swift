@@ -2,122 +2,126 @@ import Foundation
 import Testing
 @testable import JuancodeCore
 
-/// The rail's stored choices must survive the schema-2 redesign (Diff folded into an
-/// anchored Worktree) and the accordion rules must never lose or strand a section.
+/// The rail shows exactly one destination (Worktree, or one Overview queue). Stored
+/// accordion and Diff-panel layouts must land on a valid one, no old choice may make
+/// a queue unreachable, and the shortcuts must report and open what is really shown.
 @Suite struct RightRailPrefsTests {
     typealias P = RightRailPrefs
 
-    @Test func freshInstallCollapsesOnlyChains() {
-        let s = P.state(P.migrated(P.Stored()))
-        #expect(s.order == ["oracle", "prs", "tickets", "chains"])
-        #expect(s.collapsed == ["chains"])
-        #expect(s.isOpen("worktree"))
-        #expect(s.selected == "oracle")
-    }
-
-    @Test func schemaOneChoicesCarryOverAndDiffBecomesWorktree() {
-        let old = P.Stored(order: "tickets,diff,prs,oracle,chains",
-                           collapsed: "diff,oracle",
-                           hidden: "prs",
-                           heights: "diff:240,tickets:180,bogus:9")
-        let new = P.migrated(old)
-        #expect(new.schema == P.schema)
-        let s = P.state(new)
-        #expect(s.order == ["tickets", "prs", "oracle", "chains"])
-        #expect(s.collapsed == ["worktree", "oracle"])
-        #expect(s.hidden == ["prs"])
-        #expect(s.heights == ["worktree": 240, "tickets": 180])
-        // Chains was open in schema 1 and stays open: a saved choice wins the default.
-        #expect(s.isOpen("chains"))
-        #expect(s.selected == "tickets")
-    }
-
-    @Test func hiddenDiffBecomesCollapsedWorktreeNeverHidden() {
-        let s = P.state(P.migrated(P.Stored(collapsed: "", hidden: "diff,chains")))
-        #expect(s.hidden == ["chains"])
-        #expect(s.collapsed == ["worktree"])
-        #expect(!s.settingHidden("worktree", true).hidden.contains("worktree"))
-    }
-
-    @Test func readingSchemaOneWithoutMigratingNeverShowsDiff() {
-        let s = P.state(P.Stored(order: "diff,prs", collapsed: "diff"))
-        #expect(!s.order.contains("diff"))
-        #expect(s.collapsed.contains("worktree"))
-    }
-
-    @Test func migrationIsIdempotentAndKeepsUserHeightOverDiffs() {
-        let once = P.migrated(P.Stored(heights: "worktree:100,diff:300"))
-        #expect(P.migrated(once) == once)
-        #expect(P.state(once).heights["worktree"] == 100)
-        #expect(P.state(P.stored(P.state(once))) == P.state(once))
-    }
-
-    @Test func openingAGlobalSelectsItAndKeepsOnlyThePinnedOneOpen() {
-        var s = P.State(collapsed: [])
-        s = s.togglingPin("tickets").opening("prs")
-        #expect(s.pinned == "tickets")
-        s = s.opening("oracle")
-        #expect(s.selected == "oracle")
-        #expect(s.expanded == ["worktree", "oracle", "tickets"])
-        #expect(s.filler == "oracle")
-        // Worktree is contextual: global accordion moves never collapse it.
-        #expect(s.isOpen("worktree"))
-    }
-
-    @Test func collapsingTheSelectedHandsSpaceToThePinned() {
-        let s = P.State(collapsed: []).togglingPin("chains").opening("prs").collapsing("prs")
-        #expect(s.selected == "chains")
-        #expect(s.pinned == nil)
-        #expect(s.filler == "chains")
-    }
-
-    @Test func pinOnlyAppliesToAnOpenNonSelectedGlobal() {
-        let s = P.State(collapsed: []).opening("prs")
-        #expect(s.togglingPin("prs").pinned == nil)
-        #expect(s.togglingPin("worktree").pinned == nil)
-        #expect(s.togglingPin("oracle").pinned == nil) // collapsed by opening prs
-        #expect(s.togglingPin("oracle").togglingPin("oracle") == s)
-    }
-
-    @Test func openingAHiddenSectionByShortcutRestoresIt() {
-        let s = P.State(hidden: ["tickets"]).opening("tickets")
-        #expect(!s.hidden.contains("tickets"))
-        #expect(s.selected == "tickets")
-    }
-
-    @Test func hidingTheSelectedDropsItsSelection() {
-        let s = P.State(collapsed: []).opening("prs").settingHidden("prs", true)
-        #expect(s.selected == nil)
-        #expect(s.filler == "worktree")
-    }
-
-    @Test func worktreeStaysAnchoredWhileGlobalsReorder() {
-        let s = P.State()
-        #expect(s.moving("worktree", to: "prs") == s)
-        #expect(s.moving("chains", to: "worktree").order.first == "chains")
-        #expect(s.moving("tickets", to: "oracle").order == ["tickets", "oracle", "prs", "chains"])
-    }
-
-    @Test func expandAllRespectsTheAccordion() {
-        let s = P.State(collapsed: []).togglingPin("prs").opening("tickets")
-            .settingAllCollapsed(true)
-        #expect(s.expanded.isEmpty)
-        let open = s.settingAllCollapsed(false)
-        #expect(open.expanded == ["worktree", "prs", "tickets"])
-    }
-
-    @Test func shortcutsWriteWhatTheRailReads() throws {
+    private func defaults() throws -> (UserDefaults, () -> Void) {
         let name = "RightRailPrefsTests.\(UUID().uuidString)"
         let d = try #require(UserDefaults(suiteName: name))
-        defer { d.removePersistentDomain(forName: name) }
-        d.set("diff,tickets", forKey: P.collapsedKey)
+        return (d, { d.removePersistentDomain(forName: name) })
+    }
+
+    @Test func freshInstallStartsOnWorktree() {
+        let s = P.migrated(P.Stored())
+        #expect(s.view == .worktree)
+        #expect(s.destination == "worktree")
+        #expect(s.order == P.queues)
+    }
+
+    @Test func accordionWithWorktreeCollapsedOpensOverviewOnTheSelectedQueue() {
+        let s = P.migrated(P.Stored(order: "tickets,prs,oracle,chains", schema: 2,
+                                    collapsed: "worktree,oracle,chains", hidden: "",
+                                    selected: "prs", pinned: "tickets"))
+        #expect(s.view == .overview)
+        #expect(s.queue == "prs")
+        #expect(s.order == ["tickets", "prs", "oracle", "chains"])
+    }
+
+    @Test func accordionWithWorktreeOpenStaysOnWorktreeAndRemembersTheQueue() {
+        let s = P.migrated(P.Stored(schema: 2, collapsed: "oracle,prs", selected: "tickets"))
+        #expect(s.view == .worktree)
+        #expect(s.queue == "tickets")
+    }
+
+    @Test func noSelectionFallsBackToTheFirstOpenQueueThenTheFirstInOrder() {
+        let open = P.migrated(P.Stored(order: "chains,prs", schema: 2, collapsed: "worktree,chains"))
+        #expect(open.queue == "prs")
+        let allShut = P.migrated(P.Stored(order: "chains", schema: 2,
+                                          collapsed: "worktree,oracle,prs,tickets,chains"))
+        // Nothing open anywhere: Worktree, with the first queue remembered.
+        #expect(allShut.view == .worktree)
+        #expect(allShut.queue == "chains")
+    }
+
+    @Test func aHiddenQueueStaysReachable() {
+        let s = P.migrated(P.Stored(schema: 2, collapsed: "worktree", hidden: "prs,tickets", selected: "prs"))
+        #expect(s.order.contains("prs"))
+        #expect(s.queue == "prs")
+        #expect(s.showing("tickets").destination == "tickets")
+    }
+
+    @Test func diffPanelLayoutMigratesThroughWorktree() {
+        // Schema 1: Diff hidden, PRs open → Worktree was off screen, so Overview.
+        let s = P.migrated(P.Stored(order: "diff,prs,oracle", collapsed: "oracle", hidden: "diff"))
+        #expect(s.view == .overview)
+        #expect(s.queue == "prs")
+        #expect(!s.order.contains("diff"))
+        // Schema 1 with Diff open: Worktree.
+        #expect(P.migrated(P.Stored(order: "diff,prs", collapsed: "prs")).view == .worktree)
+    }
+
+    @Test func garbageHealsToAValidDestination() {
+        let s = P.state(P.Stored(view: "files", queue: "diff", order: "x,prs,prs", schema: 3))
+        #expect(s.view == .worktree)
+        #expect(s.order == ["prs", "oracle", "tickets", "chains"])
+        #expect(s.queue == "prs")
+    }
+
+    @Test func showingAQueueSwitchesToOverviewAndWorktreeSwitchesBack() {
+        let s = P.State().showing("chains")
+        #expect(s.view == .overview && s.queue == "chains")
+        #expect(s.isVisible("chains") && !s.isVisible("prs") && !s.isVisible("worktree"))
+        let back = s.showing("worktree")
+        #expect(back.isVisible("worktree") && !back.isVisible("chains"))
+        #expect(back.queue == "chains")
+        #expect(s.showing("diff") == s)
+    }
+
+    @Test func migrateRewritesOnceAndDropsAccordionKeys() throws {
+        let (d, done) = try defaults()
+        defer { done() }
+        P.Stored(order: "prs,oracle", schema: 2, collapsed: "worktree", heights: "prs:200",
+                 selected: "prs", pinned: "oracle").write(to: d)
+        #expect(P.migrate(d))
+        #expect(!P.migrate(d))
+        #expect(d.string(forKey: "rightRail.collapsed") == nil)
+        #expect(d.string(forKey: "rightRail.heights") == nil)
+        #expect(d.string(forKey: "rightRail.pinned") == nil)
+        #expect(d.string(forKey: P.viewKey) == "overview")
+        #expect(d.string(forKey: P.queueKey) == "prs")
+    }
+
+    @Test func shortcutsOpenTheRightTabAndReportOnlyTheVisibleDestination() throws {
+        let (d, done) = try defaults()
+        defer { done() }
         d.set(false, forKey: P.railShownKey)
         #expect(!P.isOpen("worktree", in: d))
+        P.setOpen("tickets", true, in: d)
+        #expect(P.isOpen("tickets", in: d))
+        #expect(!P.isOpen("worktree", in: d))
+        #expect(!P.isOpen("prs", in: d))
         P.setOpen("worktree", true, in: d)
         #expect(P.isOpen("worktree", in: d))
-        #expect(d.integer(forKey: P.schemaKey) == P.schema)
-        P.setOpen("tickets", true, in: d)
-        #expect(P.state(P.Stored(d)).selected == "tickets")
-        #expect(!P.migrate(d))
+        #expect(!P.isOpen("tickets", in: d))
+    }
+
+    @Test func hidingTheVisibleDestinationHidesTheRailAndNothingElseDoes() throws {
+        let (d, done) = try defaults()
+        defer { done() }
+        P.setOpen("worktree", true, in: d)
+        // ⌘C off while Overview is up must not flip the user to another view.
+        P.setOpen("prs", true, in: d)
+        P.setOpen("worktree", false, in: d)
+        #expect(P.isOpen("prs", in: d))
+        // ⌘C on, then off: Worktree shows, then the rail hides; on again shows it.
+        P.setOpen("worktree", true, in: d)
+        P.setOpen("worktree", false, in: d)
+        #expect(!P.isOpen("worktree", in: d))
+        #expect(d.bool(forKey: P.railShownKey) == false)
+        P.setOpen("worktree", true, in: d)
+        #expect(P.isOpen("worktree", in: d))
     }
 }

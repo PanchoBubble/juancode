@@ -196,7 +196,6 @@ struct LinearTicketsRail: View {
                 }
                 .padding(.horizontal, 4)
             }
-            .reportsRailOverflow()
         }
     }
 

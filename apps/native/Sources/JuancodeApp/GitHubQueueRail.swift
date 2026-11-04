@@ -1,24 +1,28 @@
-// The right rail. Worktree, the selected session's checkout, is anchored at the top
-// and follows the selection. Beneath it the global queues (Oracles, PRs, Tickets,
-// Chains) keep the user's order and their own state whichever session is selected.
-// Every rule about what is open, what takes the space and how stored choices carry
-// over lives in `RightRailPrefs.State`; this view draws it and writes it back.
+// The right rail: two full-height views behind a tab bar.
 //
-// The PR queue was a toolbar badge with the list behind a popover. The rail is always
-// on screen, so the queue can be too: the same list, chips and row actions, with no
-// click in front of them.
+// - Worktree: the selected session's checkout (Files/Changes, File/Diff, Expand),
+//   with Commit / Push / Create PR on that checkout. Follows the selection.
+// - Overview: the global queues. A compact selector picks exactly one of Oracles,
+//   PRs, Tickets or Chains, and that queue fills the rest of the rail. The queues
+//   do not change with the selection (Tickets aside, which scopes to the project).
+//
+// Exactly one destination is on screen. The others stay mounted once visited, so
+// their scroll position, filters and review drafts survive a switch, but they are
+// invisible, take no clicks and give the keyboard back if they held it. Navigation
+// state and its migration from the old stacked layout live in `RightRailPrefs`.
 
+import AppKit
 import SwiftUI
 import JuancodeCore
 import JuancodeClient
 
 enum RightRailPanel: String, CaseIterable, Identifiable {
     case worktree, oracle, prs, tickets, chains
-    /// Schema 1's standalone Diff panel; Worktree shows the changes now.
+    /// The retired Diff panel's name for Worktree.
     static var diff: RightRailPanel { .worktree }
     var id: String { rawValue }
-    /// Worktree follows the selection and is anchored; the rest are global queues.
-    var isGlobal: Bool { self != .worktree }
+    /// Overview's queues; Worktree is its own tab.
+    var isQueue: Bool { self != .worktree }
     var focusTarget: PanelFocusTarget? {
         switch self {
         case .oracle: .oracles
@@ -48,92 +52,38 @@ enum RightRailPanel: String, CaseIterable, Identifiable {
     }
 }
 
-/// Grows a panel body down from its header: the body lays out at full size and the
-/// rail only gives it `progress` of that height, so siblings move with the animation.
-private struct RailReveal: ViewModifier {
-    var progress: Double
-    func body(content: Content) -> some View {
-        RevealLayout(progress: progress) { content }
-            .clipped()
-            .opacity(progress)
-    }
-}
-
-private struct RevealLayout: Layout {
-    var progress: Double
-    var animatableData: Double {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let size = subviews.first?.sizeThatFits(proposal) ?? .zero
-        return CGSize(width: size.width, height: size.height * progress)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard let child = subviews.first else { return }
-        let full = child.sizeThatFits(proposal)
-        child.place(at: bounds.origin, anchor: .topLeading,
-                    proposal: ProposedViewSize(width: bounds.width, height: full.height))
-    }
-}
-
-
 struct RightRailPanels: View {
     @Environment(AppModel.self) private var model
     /// Shared with the old popover's key, so the chip you lived on carries over; a
     /// fresh install (nothing stored) opens on what needs you.
     @AppStorage(ViewerPrSlice.storageKey) private var filterRaw: String?
-    // Observed so a write from elsewhere (⌘-key shortcuts go through
-    // `RightRailPrefs.setOpen`) re-renders the rail. The state itself is read whole
-    // through `RightRailPrefs.state`, which tells a key never written from an empty one.
-    @AppStorage(RightRailPrefs.orderKey) private var orderRaw = ""
-    @AppStorage(RightRailPrefs.collapsedKey) private var collapsedRaw = ""
-    @AppStorage(RightRailPrefs.hiddenKey) private var hiddenRaw = ""
-    @AppStorage(RightRailPrefs.heightsKey) private var heightsRaw = ""
-    @AppStorage(RightRailPrefs.selectedKey) private var selectedRaw = ""
-    @AppStorage(RightRailPrefs.pinnedKey) private var pinnedRaw = ""
-    @State private var railHeight: CGFloat = 0
-    @State private var shownHeight: [RightRailPanel: Double] = [:]
-    @State private var overflow: [RightRailPanel: Double] = [:]
+    // Observed so a shortcut's write (`RightRailPrefs.setOpen`) re-renders the rail;
+    // the state is read whole through `RightRailPrefs.state`.
+    @AppStorage(RightRailPrefs.viewKey) private var viewRaw: String?
+    @AppStorage(RightRailPrefs.queueKey) private var queueRaw: String?
+    @AppStorage(RightRailPrefs.orderKey) private var orderRaw: String?
     /// Commit / Push / Create PR on the selected checkout. Here so a write's note
-    /// outlives a collapse.
+    /// outlives a tab switch.
     @State private var gitStore = WorktreeGitStore()
-    /// Here for the same reason, and so the hourly refresh outlives a collapse.
+    /// Here so the hourly refresh and the project scope run whichever tab is up.
     @State private var ticketsStore = LinearTicketsStore()
-    @State private var dropTarget: RightRailPanel?
-    @State private var hoveredHeader: RightRailPanel?
-    /// Mirrors the stored strings: an `@AppStorage` write does not reliably carry the
-    /// `withAnimation` transaction, so layout reads this until the write lands.
-    @State private var mirror: RightRailPrefs.State?
-    /// The pencil's mode: every section's header is listed, hidden ones dimmed, each
-    /// global with an eye to hide or restore it. Reordering works in both modes.
-    @State private var editing = false
+    /// Destinations visited since the rail appeared. They stay mounted (hidden) so a
+    /// switch back finds them as they were; unvisited ones cost nothing.
+    @State private var mounted: Set<RightRailPanel> = []
 
     init() {
-        // Schema-1 strings (with the retired Diff) are rewritten once, before the
-        // first read, so the ⌘-key shortcuts and this view agree from then on.
+        // Older layouts (the stacked accordion, the Diff panel) are rewritten once,
+        // before the first read, so the shortcuts and this view agree from then on.
         RightRailPrefs.migrate(.standard)
     }
 
     private var prefs: RightRailPrefs.State {
-        if let mirror { return mirror }
-        // Touch every observed key so a change to any of them re-renders.
-        _ = (orderRaw, collapsedRaw, hiddenRaw, heightsRaw, selectedRaw, pinnedRaw)
+        _ = (viewRaw, queueRaw, orderRaw)
         return RightRailPrefs.state(RightRailPrefs.Stored(.standard))
     }
 
-    private func apply(_ next: RightRailPrefs.State) {
-        mirror = next
-        RightRailPrefs.stored(next).write(to: .standard)
-    }
-
-    /// The sections with a header on screen: Worktree always, then the globals (all
-    /// of them while editing, else the unhidden).
-    private func listed(_ p: RightRailPrefs.State) -> [RightRailPanel] {
-        let globals = editing ? p.order : p.order.filter { !p.hidden.contains($0) }
-        return [.worktree] + globals.compactMap(RightRailPanel.init(rawValue:))
+    private func show(_ panel: RightRailPanel) {
+        RightRailPrefs.stored(prefs.showing(panel.rawValue)).write(to: .standard)
     }
 
     private var selectedMeta: SessionMeta? {
@@ -154,230 +104,185 @@ struct RightRailPanels: View {
 
     var body: some View {
         let p = prefs
-        let listed = listed(p)
-        let expanded = p.expanded.compactMap(RightRailPanel.init(rawValue:))
-        let anyExpanded = !expanded.isEmpty
+        let active = RightRailPanel(rawValue: p.destination) ?? .worktree
         VStack(spacing: 0) {
-            HStack(spacing: 2) {
-                Spacer()
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) { editing.toggle() }
-                } label: {
-                    Image(systemName: editing ? "checkmark" : "pencil")
-                        .font(.system(size: 12, weight: editing ? .semibold : .regular))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(editing ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .help(editing ? "Done editing panels" : "Show or hide panels")
-                .accessibilityLabel(editing ? "Done editing panels" : "Show or hide panels")
-                .clickCursor()
-                Button {
-                    withAnimation(.snappy(duration: 0.2)) { apply(p.settingAllCollapsed(anyExpanded)) }
-                } label: {
-                    Image(systemName: anyExpanded
-                          ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
-                        .font(.system(size: 12))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help(anyExpanded ? "Collapse all panels" : "Expand panels")
-                .accessibilityLabel(anyExpanded ? "Collapse all panels" : "Expand panels")
-                .clickCursor()
-                .disabled(editing)
-            }
-            .padding(.horizontal, 6).padding(.vertical, 2)
+            tabBar(p)
             Divider()
-            let sized = sizedHeights(expanded, prefs: p, headers: listed.count)
-            // Sections keep their place whether collapsed or not: moving a header when
-            // it is toggled reads as the rail reshuffling under the cursor.
-            ForEach(listed) { panel in
-                let isHidden = p.hidden.contains(panel.rawValue)
-                let isCollapsed = !p.isOpen(panel.rawValue)
-                header(panel, prefs: p, collapsed: isCollapsed, hidden: isHidden)
-                if !isCollapsed {
-                    // One view for both the sized and the filling case, so a section
-                    // becoming the filler resizes rather than being rebuilt.
-                    let h = sized[panel]
-                    content(panel)
-                        .modifier(RailPanelNavigation(panel: panel))
-                        .frame(maxWidth: .infinity, minHeight: h ?? 0, maxHeight: h ?? .infinity,
-                               alignment: .top)
-                        .clipped()
-                        .onGeometryChange(for: Double.self) { $0.size.height.rounded() } action: {
-                            shownHeight[panel] = $0
-                        }
-                        .onPreferenceChange(RailOverflowKey.self) { overflow[panel] = $0.map(Double.init) }
-                        .overlay(alignment: .bottom) {
-                            if let h {
-                                DragResizeHandle(axis: .horizontal,
-                                                 value: heightBinding(panel, shown: h),
-                                                 min: Self.minPanel,
-                                                 max: max(Self.minPanel,
-                                                          contentSpace(headers: listed.count) - Self.minPanel),
-                                                 invert: false,
-                                                 showsRailGrip: true)
-                                    .offset(y: 7)
-                            }
-                        }
-                        .transition(.modifier(active: RailReveal(progress: 0),
-                                              identity: RailReveal(progress: 1)))
-                        .zIndex(h == nil ? 0 : 1)
-                }
-                if panel == .worktree, listed.count > 1 {
-                    // Where the selection-scoped section ends and the global queues begin.
-                    Rectangle().fill(Color.appHairline(0.18)).frame(height: Self.groupGap)
-                        .accessibilityHidden(true)
+            if p.view == .overview {
+                queueSelector(p, active: active)
+                Divider()
+            }
+            ZStack(alignment: .top) {
+                ForEach(RightRailPanel.allCases) { panel in
+                    if panel == active || mounted.contains(panel) {
+                        destination(panel)
+                            .modifier(RailPanelNavigation(panel: panel))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .modifier(RailDestinationVisibility(active: panel == active))
+                    }
                 }
             }
-            if listed.count == 1, !editing {
-                Button("Global panels are hidden. Show some…") {
-                    withAnimation(.snappy(duration: 0.2)) { editing = true }
-                }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
-                .padding(12)
-            }
-            if !anyExpanded { Spacer(minLength: 0) }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { railHeight = $0 }
-        // A write from anywhere (this view's own included) lands in these keys; drop
-        // the mirror so the rail follows the stored state again.
-        .onChange(of: [orderRaw, collapsedRaw, hiddenRaw, heightsRaw, selectedRaw, pinnedRaw]) { mirror = nil }
         .background(Color.appSurface)
+        .onChange(of: active, initial: true) { old, new in
+            mounted.insert(new)
+            if old != new { releaseKeyboard(leaving: old, for: new) }
+        }
         // Branch state for the git actions: re-read when the checkout or its change
         // signature moves. The Worktree viewer reads the change itself.
         .task(id: gitRefreshKey) { await gitStore.refresh(root: model.worktreeContext?.checkout, model: model) }
         .task { await ticketsStore.run() }
-        // Tickets are project-scoped: the header count follows the selected project
-        // even while the Tickets body is collapsed. The global queues do not reset.
+        // Tickets are project-scoped: the count follows the selected project even
+        // while another destination is up.
         .onChange(of: root, initial: true) { ticketsStore.setRoot(root) }
     }
 
-    private func header(_ panel: RightRailPanel, prefs p: RightRailPrefs.State,
-                        collapsed isCollapsed: Bool, hidden isHidden: Bool) -> some View {
-        let toggle = {
-            withAnimation(.snappy(duration: 0.2)) {
-                // A hidden section's header only exists in edit mode; clicking it is
-                // asking for it back.
-                if isHidden { return apply(p.settingHidden(panel.rawValue, false)) }
-                apply(p.toggling(panel.rawValue))
+    // MARK: Tabs
+
+    private func tabBar(_ p: RightRailPrefs.State) -> some View {
+        HStack(spacing: 2) {
+            tab(.worktree, selected: p.view == .worktree) {
+                WorktreeRailAccessory().fixedSize()
+            }
+            tab(.overview, selected: p.view == .overview) {
+                overviewBadge
             }
         }
-        let isPinned = p.pinned == panel.rawValue
-        let canPin = panel.isGlobal && !isCollapsed && p.selected != panel.rawValue
-        return HStack(spacing: 5) {
-            Button(action: toggle) {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .rotationEffect(.degrees(isCollapsed ? 0 : 90))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 10)
-                    Image(systemName: panel.icon).font(.system(size: 10)).foregroundStyle(.tint)
-                    Text(panel.title)
-                        .font(.system(size: 10, weight: .semibold))
-                        .textCase(.uppercase).tracking(0.5)
-                        .foregroundStyle(.secondary)
-                        .layoutPriority(1)
-                    if panel != .oracle || editing { Spacer(minLength: 0) }
-                }
-                .contentShape(Rectangle())
-                .opacity(isHidden ? 0.45 : 1)
-            }
-            .buttonStyle(.plain)
-            .clickCursor()
-            .accessibilityLabel("\(panel.title), \(isHidden ? "hidden" : isCollapsed ? "collapsed" : "expanded")")
-            .accessibilityAddTraits(.isHeader)
-            if editing {
-                if panel.isGlobal {
-                    Button {
-                        withAnimation(.snappy(duration: 0.2)) { apply(p.settingHidden(panel.rawValue, !isHidden)) }
-                    } label: {
-                        Image(systemName: isHidden ? "eye.slash" : "eye")
-                            .font(.system(size: 11))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(isHidden ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-                    .help(isHidden ? "Show \(panel.title)" : "Hide \(panel.title)")
-                    .accessibilityLabel(isHidden ? "Show \(panel.title)" : "Hide \(panel.title)")
-                    .clickCursor()
-                }
-            } else {
-                switch panel {
-                case .oracle: OracleRailAccessory()
-                case .worktree: worktreeAccessory
-                case .chains: ChainsRailAccessory()
-                case .tickets: ticketsPreview
-                case .prs: prsPreview
-                }
-                if canPin && (isPinned || hoveredHeader == panel) {
-                    Button {
-                        withAnimation(.snappy(duration: 0.2)) { apply(p.togglingPin(panel.rawValue)) }
-                    } label: {
-                        Image(systemName: isPinned ? "pin.fill" : "pin")
-                            .font(.system(size: 9))
-                            .frame(width: 16, height: 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(isPinned ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-                    .help(isPinned ? "Unpin \(panel.title)"
-                                   : "Pin \(panel.title) open while another panel is open")
-                    .accessibilityLabel(isPinned ? "Unpin \(panel.title)" : "Pin \(panel.title) open")
-                    .clickCursor()
-                }
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: Self.headerHeight)
-        // The Oracle accessory's spacer sits outside the button, so the gap up to
-        // its "+" would otherwise be dead; the whole row toggles.
-        .contentShape(Rectangle())
-        .onTapGesture(perform: toggle)
+        .padding(.horizontal, 6).padding(.vertical, 5)
         .background(Color.appBand)
-        .overlay(alignment: .top) {
-            ZStack(alignment: .top) {
-                Rectangle().fill(Color.appHairline(0.12)).frame(height: 1)
-                Rectangle().fill(Color.accentColor).frame(height: 2)
-                    .opacity(dropTarget == panel ? 1 : 0)
+    }
+
+    private func tab<Badge: View>(_ view: RightRailPrefs.View, selected: Bool,
+                                  @ViewBuilder badge: () -> Badge) -> some View {
+        let title = view == .worktree ? "Worktree" : "Overview"
+        let icon = view == .worktree ? "folder" : "square.grid.2x2"
+        return Button {
+            show(view == .worktree ? .worktree : (RightRailPanel(rawValue: prefs.queue) ?? .prs))
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 10))
+                Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                badge()
             }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(selected ? Color.appSelection : Color.clear))
+            .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
         }
-        .overlay(alignment: .bottom) { Divider() }
-        .overlay(alignment: .top) {
-            // Keep the grip centered within the header's upper inset: even a
-            // narrow rail has room here without covering titles or live counts.
-            DragGripDots()
-            .padding(.top, 3)
-            .opacity(panel.isGlobal && hoveredHeader == panel ? 1 : 0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
-        .onHover { hovering in
-            if hovering { hoveredHeader = panel }
-            else if hoveredHeader == panel { hoveredHeader = nil }
-        }
-        .modifier(RailHeaderDrag(panel: panel))
-        .dropDestination(for: String.self) { items, _ in
-            dropTarget = nil
-            guard let dragged = items.first.flatMap(RightRailPanel.init(rawValue:)),
-                  dragged.isGlobal, dragged != panel else { return false }
-            withAnimation(.snappy(duration: 0.2)) {
-                apply(prefs.moving(dragged.rawValue, to: panel.rawValue))
-            }
-            return true
-        } isTargeted: { hovering in
-            dropTarget = hovering ? panel : (dropTarget == panel ? nil : dropTarget)
+        .buttonStyle(.plain)
+        .clickCursor()
+        .help(view == .worktree ? worktreeHelp : "The global queues: Oracles, PRs, Tickets and Chains")
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// The checkout Worktree shows, named in the tab's tooltip so the scope is never
+    /// a guess; the viewer's own header spells out branch and path.
+    private var worktreeHelp: String {
+        guard let ctx = model.worktreeContext else { return "The selected session's worktree" }
+        let branch = model.folderGitState(ctx.checkout)?.branch
+            ?? selectedMeta.flatMap { model.folderGitState($0.cwd)?.branch }
+        return "Worktree: \(ctx.checkout)" + (branch.map { " on \($0)" } ?? "")
+    }
+
+    /// What across the queues needs you, so Overview says so from the Worktree tab.
+    @ViewBuilder private var overviewBadge: some View {
+        let n = model.viewerPrQueueTally.actionable + chainsNeedingYou
+        if n > 0 {
+            Text("\(n)")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color.orange.opacity(0.22)))
+                .foregroundStyle(.orange)
+                .help("\(n) waiting on you across PRs and Chains")
         }
     }
 
-    @ViewBuilder private func content(_ panel: RightRailPanel) -> some View {
+    private var chainsNeedingYou: Int {
+        model.chains.active.reduce(0) { $0 + model.chainAttention($1).total }
+    }
+
+    // MARK: Overview selector
+
+    private func queueSelector(_ p: RightRailPrefs.State, active: RightRailPanel) -> some View {
+        let queues = p.order.compactMap(RightRailPanel.init(rawValue:))
+        return HStack(spacing: 2) {
+            ForEach(queues) { q in
+                let selected = q == active
+                Button { show(q) } label: {
+                    ViewThatFits(in: .horizontal) {
+                        selectorLabel(q, selected: selected, titled: true)
+                        selectorLabel(q, selected: selected, titled: false)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(selected ? Color.appSelection : Color.clear))
+                }
+                .buttonStyle(.plain)
+                .clickCursor()
+                .help(q.title)
+                .accessibilityLabel(q.title)
+                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 4)
+    }
+
+    private func selectorLabel(_ q: RightRailPanel, selected: Bool, titled: Bool) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: q.icon).font(.system(size: 10))
+                .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            if titled {
+                Text(q.title)
+                    .font(.system(size: 10, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .lineLimit(1).fixedSize()
+            }
+            count(q)
+        }
+        .fixedSize()
+    }
+
+    /// Actionable counts in orange; totals quiet.
+    @ViewBuilder private func count(_ q: RightRailPanel) -> some View {
+        switch q {
+        case .prs:
+            let t = model.viewerPrQueueTally
+            if t.actionable > 0 { actionable(t.actionable) } else if t.total > 0 { quiet("\(t.total)") }
+        case .chains:
+            if chainsNeedingYou > 0 { actionable(chainsNeedingYou) }
+            else if !model.chains.active.isEmpty { quiet("\(model.chains.active.count)") }
+        case .tickets:
+            if !ticketsStore.tickets.isEmpty {
+                quiet("\(ticketsStore.tickets.count)\(ticketsStore.hasMore ? "+" : "")")
+            }
+        case .oracle, .worktree:
+            EmptyView()
+        }
+    }
+
+    private func actionable(_ n: Int) -> some View {
+        Text("\(n)")
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(Color.orange.opacity(0.22)))
+            .foregroundStyle(.orange)
+    }
+
+    private func quiet(_ s: String) -> some View {
+        Text(s).font(.system(size: 9, weight: .medium).monospacedDigit()).foregroundStyle(.tertiary)
+    }
+
+    // MARK: Destinations
+
+    @ViewBuilder private func destination(_ panel: RightRailPanel) -> some View {
         switch panel {
         case .worktree:
             VStack(spacing: 0) {
@@ -388,7 +293,7 @@ struct RightRailPanels: View {
                 WorktreeRailPanel()
             }
         case .oracle:
-            OracleGlobalRail(showsHeader: false)
+            OracleGlobalRail(showsHeader: true)
         case .prs:
             GitHubQueueBadge.GitHubQueuePopover(
                 slice: Binding(get: { ViewerPrSlice(storedRaw: filterRaw) },
@@ -406,140 +311,34 @@ struct RightRailPanels: View {
         }
     }
 
-    static let headerHeight: CGFloat = 28
-    static let groupGap: CGFloat = 3
-    static let minPanel: Double = 60
-    /// The most a section other than the filler takes before the user sizes it.
-    static let unsizedShare = 0.35
-    /// The collapse-all bar plus its divider.
-    private static let topBarHeight: CGFloat = 27
-
-    /// Height left for section bodies once the bar, the group gap and every listed
-    /// header are laid out. Hidden sections have no header outside edit mode.
-    private func contentSpace(headers: Int) -> Double {
-        let chrome = Self.topBarHeight + Self.groupGap + Self.headerHeight * CGFloat(headers)
-        return Double(max(0, railHeight - chrome))
-    }
-
-    /// The height that shows a section's whole list, once its scroll view has said
-    /// how far short of (or past) that it is.
-    private func natural(_ panel: RightRailPanel) -> Double? {
-        guard let shown = shownHeight[panel], let over = overflow[panel] else { return nil }
-        return max(Self.minPanel, shown + over)
-    }
-
-    /// Fixed heights for the open sections other than the filler (the selected one):
-    /// the user's size, else the content's up to `unsizedShare` of the rail. The
-    /// filler takes what is left; when its own content needs less, it gets that.
-    /// Heights that no longer fit are scaled down together so the filler keeps at
-    /// least `minPanel`.
-    private func sizedHeights(_ expanded: [RightRailPanel], prefs p: RightRailPrefs.State,
-                              headers: Int) -> [RightRailPanel: Double] {
-        guard let filler = p.filler.flatMap(RightRailPanel.init(rawValue:)), railHeight > 0 else { return [:] }
-        let fixed = expanded.filter { $0 != filler }
-        let stored = p.heights
-        let space = contentSpace(headers: headers)
-        let cap = max(Self.minPanel, space * Self.unsizedShare)
-        var want = Dictionary(uniqueKeysWithValues: fixed.map { panel in
-            (panel, stored[panel.rawValue] ?? min(cap, natural(panel) ?? cap))
-        })
-        if let own = stored[filler.rawValue] ?? natural(filler), want.values.reduce(0, +) + own <= space {
-            want[filler] = own
-            return want
-        }
-        guard !fixed.isEmpty else { return [:] }
-        let budget = max(0, space - Self.minPanel)
-        let total = want.values.reduce(0, +)
-        if total > budget, total > 0 {
-            let k = budget / total
-            want = want.mapValues { max(min(Self.minPanel, budget / Double(fixed.count)), $0 * k) }
-        }
-        return want
-    }
-
-    private func heightBinding(_ panel: RightRailPanel, shown: Double) -> Binding<Double> {
-        Binding(get: { shown }, set: { v in
-            var next = prefs
-            next.heights[panel.rawValue] = v.rounded()
-            apply(next)
-        })
-    }
-
-    /// The PRs that need you as an accent badge, the rest of the queue as a quiet
-    /// total beside it.
-    @ViewBuilder private var prsPreview: some View {
-        let tally = model.viewerPrQueueTally
-        HStack(spacing: 3) {
-            if tally.actionable > 0 {
-                Text("\(tally.actionable)")
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.orange.opacity(0.22)))
-                    .foregroundStyle(.orange)
-            }
-            if tally.quiet > 0 {
-                Text("\(tally.actionable > 0 ? "/" : "")\(tally.actionable > 0 ? tally.total : tally.quiet)")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .help(tally.actionable > 0
-              ? "\(tally.actionable) need\(tally.actionable == 1 ? "s" : "") you of \(tally.total) PRs"
-              : "\(tally.total) PRs, none waiting on you")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(tally.actionable > 0
-                            ? "\(tally.actionable) PRs need you, \(tally.total) total"
-                            : "\(tally.total) PRs")
-    }
-
-    @ViewBuilder private var ticketsPreview: some View {
-        if !ticketsStore.tickets.isEmpty {
-            // A total, not a call to action: kept quiet next to the actionable badges.
-            Text("\(ticketsStore.tickets.count)\(ticketsStore.hasMore ? "+" : "")")
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .help("\(ticketsStore.tickets.count)\(ticketsStore.hasMore ? "+" : "") tickets")
-        }
-    }
-
-    /// Which worktree the section is showing, so it is always identifiable, and its
-    /// change size while collapsed.
-    @ViewBuilder private var worktreeAccessory: some View {
-        if let ctx = model.worktreeContext {
-            let name = (ctx.checkout as NSString).lastPathComponent
-            let branch = model.folderGitState(ctx.checkout)?.branch
-                ?? selectedMeta.flatMap { model.folderGitState($0.cwd)?.branch }
-            Text(branch.map { "\(name) · \($0)" } ?? name)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1).truncationMode(.middle)
-                .help(branch.map { "\(ctx.checkout) on \($0)" } ?? ctx.checkout)
-                .accessibilityLabel("Showing \(name)\(branch.map { " on \($0)" } ?? "")")
-            WorktreeRailAccessory().fixedSize()
-        } else {
-            Text("No session selected")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+    /// A destination going behind another must not keep the keyboard: hand it back
+    /// to the terminal if the hidden one held it (a queue's row navigation, or a
+    /// Worktree review draft). Skipped while a panel-focus request for the new
+    /// destination is pending, so a shortcut that switches and focuses still lands.
+    private func releaseKeyboard(leaving old: RightRailPanel, for new: RightRailPanel) {
+        if let request = model.panelFocusRequest, request.target.railPanel == new,
+           model.consumedPanelFocusSerial != request.serial { return }
+        if let target = model.panelNavigation.target, target.railPanel == old {
+            model.focusTerminal()
+        } else if old == .worktree,
+                  let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+                  editor.isEditable, !editor.isFieldEditor {
+            model.focusTerminal()
         }
     }
 }
 
-/// Only the global queues reorder; Worktree's header is anchored.
-private struct RailHeaderDrag: ViewModifier {
-    let panel: RightRailPanel
+/// A mounted destination that is not on screen: invisible, out of hit testing and
+/// accessibility, and its controls disabled so they cannot take focus.
+private struct RailDestinationVisibility: ViewModifier {
+    let active: Bool
     func body(content: Content) -> some View {
-        if panel.isGlobal {
-            content
-                .draggable(panel.rawValue) {
-                    Text(panel.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Color.appSurface.opacity(0.8))
-                }
-                .help("Drag to reorder")
-        } else {
-            content
-        }
+        content
+            .opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .accessibilityHidden(!active)
+            .disabled(!active)
+            .zIndex(active ? 1 : 0)
     }
 }
 
@@ -769,37 +568,6 @@ struct WorktreeGitActions: View {
         }
         .padding(12).frame(width: 320)
     }
-}
-
-/// How much taller a rail panel's list wants to be than it is, negative when it has
-/// room to spare. Summed when a panel has more than one list.
-struct RailOverflowKey: PreferenceKey {
-    static let defaultValue: CGFloat? = nil
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        if let next = nextValue() { value = (value ?? 0) + next }
-    }
-}
-
-/// Put on a rail panel's ScrollView so the rail can size the panel to its content.
-private struct RailOverflowReporter: ViewModifier {
-    @State private var overflow: CGFloat?
-
-    func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content
-                .onScrollGeometryChange(for: CGFloat.self) { g in
-                    (g.contentSize.height + g.contentInsets.top + g.contentInsets.bottom
-                        - g.containerSize.height).rounded()
-                } action: { _, v in overflow = v }
-                .preference(key: RailOverflowKey.self, value: overflow)
-        } else {
-            content
-        }
-    }
-}
-
-extension View {
-    func reportsRailOverflow() -> some View { modifier(RailOverflowReporter()) }
 }
 
 private struct RailPanelNavigation: ViewModifier {

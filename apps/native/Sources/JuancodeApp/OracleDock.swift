@@ -332,7 +332,7 @@ struct OracleGlobalRail: View {
     /// Measured height of the row area. The row budget derives from it, so the rail
     /// only builds the rows that can actually be on screen instead of all of them.
     @State private var listHeight: Double = 0
-    /// Off when a host (the right rail's collapsible panel) draws the title bar.
+    /// Off when a host draws the title bar itself.
     var showsHeader = true
 
     /// Approximate rendered height of one row (glyph line + subtitle + padding) —
@@ -497,7 +497,6 @@ struct OracleGlobalRail: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .reportsRailOverflow()
                 // The row budget follows the rail's real height, so resizing the
                 // window (or dragging the rail's edge) refits it.
                 .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }

@@ -219,7 +219,6 @@ struct GitHubQueueBadge: View {
                         }
                         .panelNavigationRows(navigationRows)
                         .panelNavigationScroll(.prs, proxy: proxy)
-                        .reportsRailOverflow()
                         .task(id: revealsSelectedRepo ? currentRepo : nil) {
                             if revealsSelectedRepo { reveal(currentRepo, proxy) }
                         }
