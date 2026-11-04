@@ -262,39 +262,133 @@ public struct ViewerPrResult: Codable, Sendable, Equatable {
 public enum ViewerPrSlice: String, Sendable, CaseIterable, Identifiable {
     case all, mine, review, needsYou
     public var id: String { rawValue }
+
+    /// The preference key every surface showing the global queue shares, so the chip
+    /// you picked in one is the chip the other opens on.
+    public static let storageKey = "github.queue.filter"
+
+    /// What a surface opens on before anyone has picked a chip: the rows that want you.
+    /// A queue that opens on everything makes you find the fire yourself.
+    public static let attentionDefault: ViewerPrSlice = .needsYou
+
+    /// The slice a stored preference names. No preference (a fresh install), or one a
+    /// newer or older build wrote that this build cannot read, is the attention default;
+    /// anything the user actually picked — All included — is honoured as is.
+    public init(storedRaw: String?) {
+        self = storedRaw.flatMap(ViewerPrSlice.init(rawValue:)) ?? .attentionDefault
+    }
 }
 
-/// The rows in `slice`, the ones that want you first (by `PrAttentionReason.rank`) and
+// ── what wants you, as the queue reads it ────────────────────────────────────
+
+/// Why a queue row wants the viewer: the core's reason for the PR itself, or a
+/// tracking agent on it that stopped for a decision only you can make.
+///
+/// The decision is the one fact the daemon's `attention` cannot carry, because it
+/// lives in the tracked-PR engine and the agent's own session, not on GitHub. It is
+/// read from what is already known — a tracked PR in `needsDecision`, or its agent
+/// sitting at a prompt — never inferred from checks that are merely running or a
+/// state nobody has reported yet.
+public enum ViewerPrAttention: Equatable, Sendable {
+    /// A tracking agent is blocked on you: it escalated a change it must not make
+    /// alone, or it is waiting at a prompt.
+    case decisionNeeded
+    /// The core's own reason (changes requested, CI failing, open threads, a review
+    /// you owe).
+    case pr(PrAttentionReason)
+
+    /// Lower is more urgent. An agent stopped on you outranks everything the core
+    /// ranks: until you answer, nothing on that PR moves.
+    public var rank: Int {
+        switch self {
+        case .decisionNeeded: return -1
+        case .pr(let reason): return reason.rank
+        }
+    }
+}
+
+public extension ViewerPr {
+    /// Why this row wants you, given the ids (`ViewerPr.id`) of rows whose tracking
+    /// agent is waiting on a decision. Nil when nothing known asks anything of you.
+    func queueAttention(decisions: Set<String> = []) -> ViewerPrAttention? {
+        if decisions.contains(id) { return .decisionNeeded }
+        return attention.map(ViewerPrAttention.pr)
+    }
+
+    /// The words a row shows for `queueAttention`, the core's own label preferred.
+    func queueAttentionLabel(decisions: Set<String> = []) -> String? {
+        switch queueAttention(decisions: decisions) {
+        case nil: return nil
+        case .decisionNeeded: return "decision needed"
+        case .pr(let reason): return attentionLabel ?? reason.label
+        }
+    }
+}
+
+/// The rows in `slice`, the ones that want you first (by `ViewerPrAttention.rank`) and
 /// each group otherwise keeping the queue's own order, which is GitHub's
-/// `sort:updated`.
-public func viewerPrRows(_ result: ViewerPrResult, slice: ViewerPrSlice) -> [ViewerPr] {
-    let kept: [ViewerPr] = result.rows.filter { row in
+/// `sort:updated`. `decisions` are the rows whose tracking agent is waiting on you.
+public func viewerPrRows(_ result: ViewerPrResult, slice: ViewerPrSlice,
+                         decisions: Set<String> = []) -> [ViewerPr] {
+    let ranked = result.rows.map { ($0, $0.queueAttention(decisions: decisions)) }
+    let kept = ranked.filter { row, attention in
         switch slice {
         case .all: return true
         case .mine: return row.reason == .mine
         case .review: return row.reason == .reviewRequested
-        case .needsYou: return row.attention != nil
+        case .needsYou: return attention != nil
         }
     }
     return kept.enumerated().sorted { a, b in
-        let ra = a.element.attention?.rank ?? Int.max
-        let rb = b.element.attention?.rank ?? Int.max
+        let ra = a.element.1?.rank ?? Int.max
+        let rb = b.element.1?.rank ?? Int.max
         return ra == rb ? a.offset < b.offset : ra < rb
-    }.map(\.element)
+    }.map(\.element.0)
 }
 
 /// How many rows a slice holds — the chip counts, and for `needsYou` the badge's tint:
 /// a queue that is merely long is not a queue that is on fire. Zero for every slice
 /// until the queue has actually landed, so a failed search never claims a number.
-public func viewerPrCount(_ result: ViewerPrResult, slice: ViewerPrSlice) -> Int {
+public func viewerPrCount(_ result: ViewerPrResult, slice: ViewerPrSlice,
+                          decisions: Set<String> = []) -> Int {
     guard result.available else { return 0 }
-    return viewerPrRows(result, slice: slice).count
+    return viewerPrRows(result, slice: slice, decisions: decisions).count
 }
 
 /// How many rows in the queue actually want something from you — CI red, changes
-/// requested or open threads on yours, plus every review you owe.
-public func viewerPrsNeedingYou(_ result: ViewerPrResult) -> Int {
-    viewerPrCount(result, slice: .needsYou)
+/// requested or open threads on yours, every review you owe, and every tracking agent
+/// waiting on your decision.
+public func viewerPrsNeedingYou(_ result: ViewerPrResult, decisions: Set<String> = []) -> Int {
+    viewerPrCount(result, slice: .needsYou, decisions: decisions)
+}
+
+/// The queue's numbers for a badge: what is actionable, kept apart from the quiet
+/// rest. A badge that shows the total in the alarm colour cries wolf over every PR
+/// that is merely open; one that shows only the actionable count hides how big the
+/// plate is. All zero until the queue has landed.
+public struct ViewerPrTally: Equatable, Sendable {
+    /// Rows that want you (the `needsYou` slice).
+    public var actionable: Int
+    /// Every row in the queue.
+    public var total: Int
+    public var mine: Int
+    public var reviewing: Int
+
+    public init(actionable: Int = 0, total: Int = 0, mine: Int = 0, reviewing: Int = 0) {
+        self.actionable = actionable; self.total = total
+        self.mine = mine; self.reviewing = reviewing
+    }
+
+    /// Rows on your plate that ask nothing of you right now.
+    public var quiet: Int { max(0, total - actionable) }
+}
+
+public func viewerPrTally(_ result: ViewerPrResult, decisions: Set<String> = []) -> ViewerPrTally {
+    guard result.available else { return ViewerPrTally() }
+    return ViewerPrTally(actionable: viewerPrsNeedingYou(result, decisions: decisions),
+                         total: result.rows.count,
+                         mine: result.mine.count,
+                         reviewing: result.reviewing.count)
 }
 
 /// Group a queue by repo for display: repos in first-appearance order (so the
