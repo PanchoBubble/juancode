@@ -86,6 +86,9 @@ final class DiffReviewModel {
         }
     }
     @ObservationIgnored fileprivate var watchTokens: [String: WorktreeWatchToken] = [:]
+    /// Review ids the Worktree viewer is showing: their diff follows edits even while
+    /// the full-width review is closed.
+    @ObservationIgnored fileprivate var liveInViewer: [String: Int] = [:]
     @ObservationIgnored fileprivate var inFlight: Set<String> = []
     /// A reload asked for while one was in flight, run when it lands.
     @ObservationIgnored fileprivate var reloadQueued: Set<String> = []
@@ -188,7 +191,9 @@ extension AppModel {
         let fromPr = diffReviewPrId.flatMap { diffReview.prTarget($0) }
             .map { !PrAddress.isRemote(cwd: $0.cwd) } ?? false
         showingDiffReview = false
-        for id in Array(diffReview.watchTokens.keys) { stopWatchingDiffReview(id) }
+        for id in Array(diffReview.watchTokens.keys) where diffReview.liveInViewer[id] == nil {
+            stopWatchingDiffReview(id)
+        }
         if fromPr { showingGitHub = true } else { focusTerminal() }
     }
 
@@ -343,14 +348,33 @@ extension AppModel {
     /// Re-diff when the session's tree changes, while the panel is open. Shares the
     /// Changes panel's FSEvents streams (one per tree).
     private func startWatchingDiffReview(_ id: String, cwd: String) {
-        guard showingDiffReview, diffReview.watchTokens[id] == nil else { return }
+        guard isDiffReviewLive(id), diffReview.watchTokens[id] == nil else { return }
         let token = worktreeWatchers.watch(path: cwd) { [weak self] in
             Task { @MainActor in
-                guard let self, self.showingDiffReview else { return }
+                guard let self, self.isDiffReviewLive(id) else { return }
                 self.loadDiffReview(id)
             }
         }
         if let token { diffReview.watchTokens[id] = token }
+    }
+
+    private func isDiffReviewLive(_ id: String) -> Bool {
+        showingDiffReview || diffReview.liveInViewer[id] != nil
+    }
+
+    /// The Worktree viewer is showing session `id`'s review diff: load it on `base`
+    /// and keep it following edits until `endWorktreeLiveReview`. Counted, so two
+    /// viewers on one session (rail and expand) do not stop each other's watch.
+    func beginWorktreeLiveReview(_ id: String, base: ReviewBase) {
+        diffReview.liveInViewer[id, default: 0] += 1
+        loadDiffReview(id, base: base)
+    }
+
+    func endWorktreeLiveReview(_ id: String) {
+        guard let n = diffReview.liveInViewer[id] else { return }
+        if n > 1 { diffReview.liveInViewer[id] = n - 1; return }
+        diffReview.liveInViewer[id] = nil
+        if !showingDiffReview { stopWatchingDiffReview(id) }
     }
 
     private func stopWatchingDiffReview(_ id: String) {

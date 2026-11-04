@@ -402,6 +402,8 @@ final class AppModel {
     }
     /// Comments, bases and loaded diffs behind the diff-review panel.
     let diffReview = DiffReviewModel()
+    /// The Worktree viewer's navigation per checkout (WorktreeViewModel.swift).
+    let worktreeViews = WorktreeViewModel()
     /// Bumped to ask the diff-review panel to take the keyboard back.
     var diffReviewFocusToken = 0
     let beadsBoard = BeadsBoardModel()
@@ -1488,23 +1490,27 @@ final class AppModel {
         projectsSidebarVisible.toggle()
     }
 
-    /// Toggle the right rail's Diff panel (⌘C). Its visibility lives in @AppStorage
-    /// inside `RightRailPanels`; writing the same UserDefaults keys keeps that view the
-    /// single owner of the state. Collapses only when the rail is up and Diff is open.
+    /// ⌘C: the Worktree viewer on Changes (`toggleWorktree`), hidden when it already
+    /// shows them.
     func toggleChangesPanel() {
-        setRailDiffShown(!isRailDiffShown)
+        toggleWorktree(section: .changes)
     }
 
-    var isRailDiffShown: Bool {
+    var isRailDiffShown: Bool { isRailPanelOpen(Self.worktreeRailPanel) }
+
+    /// Whether `panel` is open in the rail. Its visibility lives in @AppStorage inside
+    /// `RightRailPanels`; reading the same UserDefaults keys keeps that view the single
+    /// owner of the state.
+    func isRailPanelOpen(_ panel: RightRailPanel) -> Bool {
         let d = UserDefaults.standard
-        return RightRailPrefs.isOpen(RightRailPanel.diff.rawValue,
+        return RightRailPrefs.isOpen(panel.rawValue,
                                      railShown: d.object(forKey: "oracle.sessionRail.shown") as? Bool ?? true,
                                      collapsedRaw: d.string(forKey: RightRailPrefs.collapsedKey) ?? "",
                                      hiddenRaw: d.string(forKey: RightRailPrefs.hiddenKey) ?? "")
     }
 
-    /// Showing Diff also un-hides it if the user hid it in the rail's edit mode.
-    func setRailDiffShown(_ shown: Bool) { setRailPanelShown(.diff, shown) }
+    /// Showing it also un-hides it if the user hid it in the rail's edit mode.
+    func setRailDiffShown(_ shown: Bool) { setRailPanelShown(Self.worktreeRailPanel, shown) }
 
     /// Open (or collapse) one rail panel. Showing it also shows the rail and un-hides
     /// the panel if the user hid it in the rail's edit mode.
@@ -4841,8 +4847,7 @@ final class AppModel {
         viewedChangeSignatureBySession[id] = changeStatBySession[id]?.signature ?? ""
     }
 
-    /// Open the Changes panel for a session pre-loaded on the working tree and clear
-    /// its review badge. The action behind the sidebar badge, the session banner, and
+    /// Open the Worktree viewer's Changes for a session and clear its review badge. The action behind the sidebar badge, the session banner, and
     /// the "Open Changes for current session" shortcut.
     ///
     /// Lands on the session first: reviewing a diff without its terminal in view means
@@ -4852,7 +4857,7 @@ final class AppModel {
     /// (the ⌥⌘C shortcut, the in-pane banner) just get the panel toggled open.
     func openChanges(for id: String) {
         if selection != id, sessions.contains(where: { $0.id == id }) { selection = id }
-        setRailDiffShown(true)
+        openWorktree(section: .changes)
         markChangesViewed(id)
     }
 
@@ -5051,19 +5056,10 @@ final class AppModel {
         }
     }
 
-    /// Toggle the session's right-side panel onto the Files tab (the file-tree
-    /// sidebar). Mirrors `toggleChangesPanel`: hides only when Files is already the
-    /// visible tab — from another tab it switches instead.
+    /// The Worktree viewer on Files (every file in the checkout). Mirrors
+    /// `toggleChangesPanel`: hides only when Files is already showing.
     func toggleFileTreePanel() {
-        let d = UserDefaults.standard
-        let shown = d.object(forKey: "session.sidePanel.shown") as? Bool ?? true
-        let onFiles = (d.string(forKey: "session.sidePanel.tab") ?? "Files") == "Files"
-        if shown && onFiles {
-            d.set(false, forKey: "session.sidePanel.shown")
-        } else {
-            d.set("Files", forKey: "session.sidePanel.tab")
-            d.set(true, forKey: "session.sidePanel.shown")
-        }
+        toggleWorktree(section: .files)
     }
 
     /// Spawn the user's real editor (`$VISUAL`/`$EDITOR`, default nvim) on `file`,
