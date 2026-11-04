@@ -58,7 +58,8 @@ struct PrAgentPromptSheet: View {
                     .disabled(creating)
                     .clickCursor()
                 Button(creating ? "Starting…" : "Start") { start() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
                     .disabled(creating || trimmedPrompt.isEmpty)
                     .clickCursor()
             }
