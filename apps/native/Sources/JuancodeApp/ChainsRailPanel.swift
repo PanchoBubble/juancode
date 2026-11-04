@@ -74,7 +74,8 @@ struct ChainsRailAccessory: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let total = model.chains.active.reduce(0) { $0 + model.chainAttention($1).total }
+        let active = model.chains.active
+        let total = active.reduce(0) { $0 + model.chainAttention($1).total }
         if total > 0 {
             Text("\(total)")
                 .font(.system(size: 9, weight: .bold, design: .rounded))
@@ -82,6 +83,13 @@ struct ChainsRailAccessory: View {
                 .background(Capsule().fill(Color.orange.opacity(0.22)))
                 .foregroundStyle(.orange)
                 .help("\(total) in your chains waiting on you")
+        } else if !active.isEmpty {
+            // Nothing to act on: the total stays quiet, so the header only shouts
+            // when a chain needs you.
+            Text("\(active.count)")
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .help(active.count == 1 ? "1 active chain" : "\(active.count) active chains")
         }
     }
 }
