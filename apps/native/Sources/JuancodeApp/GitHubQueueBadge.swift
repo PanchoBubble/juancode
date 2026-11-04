@@ -11,6 +11,11 @@
 // actually want something today), a row opens the PR where it lives, a hovered row
 // offers tracking and agent actions. Selecting a row opens its detail — diff,
 // threads, checks and per-comment send-to-agent.
+//
+// Attention first: until you pick a chip the queue opens on Needs you, the badge's
+// loud number is what wants you and the rest of the plate is the quiet one beside it,
+// and each row that wants you says why. What wants you is the core's reason plus any
+// tracking agent stopped on your decision (`GitHubQueueAttention.swift`).
 
 import SwiftUI
 import AppKit
@@ -21,18 +26,17 @@ struct GitHubQueueBadge: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
     /// The chip that was on last time. Persisted: which half of the queue you live
-    /// in is a habit, not a per-launch decision.
-    @AppStorage("github.queue.filter") private var filterRaw = ViewerPrSlice.all.rawValue
+    /// in is a habit, not a per-launch decision. Nil until someone picks one, which
+    /// opens the attention view; an explicit pick (All included) is kept.
+    @AppStorage(ViewerPrSlice.storageKey) private var filterRaw: String?
 
-    private var filter: ViewerPrSlice { ViewerPrSlice(rawValue: filterRaw) ?? .all }
+    private var filter: ViewerPrSlice { ViewerPrSlice(storedRaw: filterRaw) }
 
     private var queue: ViewerPrResult { model.viewerPrs }
-    private var needsYou: Int { model.viewerPrsNeedingYouCount }
 
-    /// The badge counts the whole queue — the number is "how much is on my plate",
-    /// and the tint is what says whether any of it is on fire. Filtering the count
-    /// with the chip would make the toolbar lie whenever the chip wasn't "All".
-    private var total: Int { model.viewerPrCount }
+    /// Neither number follows the chip, or the toolbar would lie whenever the chip
+    /// wasn't "All": the loud one is what wants you, the quiet one the whole plate.
+    private var tally: ViewerPrTally { model.viewerPrQueueTally }
 
     var body: some View {
         Button {
@@ -41,16 +45,27 @@ struct GitHubQueueBadge: View {
             // the popover repeatedly costs nothing.
             model.refreshViewerPrs()
         } label: {
+            let tally = tally
             HStack(spacing: 3) {
                 Image(systemName: "arrow.triangle.pull")
-                if queue.available, total > 0 {
-                    Text("\(total)")
+                if tally.actionable > 0 {
+                    Text(verbatim: "\(tally.actionable)")
                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    if tally.quiet > 0 {
+                        Text(verbatim: "/\(tally.total)")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                } else if tally.total > 0 {
+                    Text(verbatim: "\(tally.total)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(badgeLabel)
         }
-        .foregroundStyle(needsYou > 0 ? Color.orange : Color.primary)
+        .foregroundStyle(tally.actionable > 0 ? Color.orange : Color.primary)
         .help(badgeLabel)
         .clickCursor()
         .popover(isPresented: $showing, arrowEdge: .bottom) {
@@ -65,8 +80,12 @@ struct GitHubQueueBadge: View {
         guard queue.available else {
             return queue.error ?? "Your open PRs and the reviews you owe"
         }
-        var parts = ["\(queue.mine.count) yours", "\(queue.reviewing.count) to review"]
-        if needsYou > 0 { parts.append("\(needsYou) need\(needsYou == 1 ? "s" : "") you") }
+        let tally = tally
+        var parts: [String] = []
+        if tally.actionable > 0 {
+            parts.append("\(tally.actionable) need\(tally.actionable == 1 ? "s" : "") you")
+        }
+        parts += ["\(tally.mine) yours", "\(tally.reviewing) to review"]
         return parts.joined(separator: " · ")
     }
 
@@ -85,6 +104,8 @@ struct GitHubQueueBadge: View {
         @State private var agentPromptRow: ViewerPr?
 
         private var queue: ViewerPrResult { model.viewerPrs }
+        /// Rows whose tracking agent is waiting on you — part of what Needs you means.
+        private var decisions: Set<String> { model.viewerPrDecisionIDs }
 
         /// Minimised repos, newline-joined. Persisted: a repo you fold away is one
         /// you don't want to see next launch either.
@@ -236,18 +257,20 @@ struct GitHubQueueBadge: View {
 
         /// Slice and watch filter as two dropdowns on one line, instead of two chip rows.
         private var filters: some View {
-            let inSlice = viewerPrRows(queue, slice: slice)
+            let decisions = decisions
+            let inSlice = viewerPrRows(queue, slice: slice, decisions: decisions)
             let watchedCount = inSlice.filter(isWatched).count
             return HStack(spacing: 6) {
                 Menu {
                     ForEach(ViewerPrSlice.allCases) { s in
                         Button { slice = s } label: {
-                            menuItem(label(s), count: viewerPrCount(queue, slice: s), selected: slice == s)
+                            menuItem(label(s), count: viewerPrCount(queue, slice: s, decisions: decisions),
+                                     selected: slice == s)
                         }
                         .help(help(s))
                     }
                 } label: {
-                    filterLabel(label(slice), count: viewerPrCount(queue, slice: slice),
+                    filterLabel(label(slice), count: inSlice.count,
                                 countColor: slice == .needsYou ? .orange : .secondary)
                 }
                 .menuStyle(.borderlessButton).fixedSize()
@@ -327,7 +350,7 @@ struct GitHubQueueBadge: View {
 
         /// The queue under the active chip, most urgent first (see `viewerPrRows`).
         private var rows: [ViewerPr] {
-            let all = sorted(viewerPrRows(queue, slice: slice))
+            let all = sorted(viewerPrRows(queue, slice: slice, decisions: decisions))
             switch watch {
             case .any: return all
             case .watched: return all.filter(isWatched)
@@ -435,7 +458,8 @@ struct GitHubQueueBadge: View {
             return actions
         }
 
-        private func reason(_ row: ViewerPr) -> PrAttentionReason? { row.attention }
+        /// Why the row wants you, in the words the row shows; nil when it asks nothing.
+        private func reason(_ row: ViewerPr) -> String? { row.queueAttentionLabel(decisions: decisions) }
 
         private func label(_ s: ViewerPrSlice) -> String {
             switch s {
@@ -451,20 +475,23 @@ struct GitHubQueueBadge: View {
             case .all: return "Every PR on your plate"
             case .mine: return "PRs you authored"
             case .review: return "PRs waiting on your review"
-            case .needsYou: return "Red CI, changes requested, open threads, reviews you owe"
+            case .needsYou: return "Red CI, changes requested, open threads, reviews you owe, agents waiting on you"
             }
         }
 
         private var emptyText: String {
             guard queue.available else { return queue.error ?? "Loading your queue…" }
-            if watch != .any, !viewerPrRows(queue, slice: slice).isEmpty {
+            if watch != .any, !viewerPrRows(queue, slice: slice, decisions: decisions).isEmpty {
                 return watch == .watched ? "Nothing here is being watched." : "Everything here is already watched."
             }
             switch slice {
             case .all: return "Nothing on your plate — no open PRs of yours, no reviews waiting."
             case .mine: return "No open PRs of yours."
             case .review: return "No reviews waiting on you."
-            case .needsYou: return "Nothing needs you — no red CI, no changes requested, no open threads."
+            case .needsYou:
+                let quiet = queue.rows.count
+                return "Nothing needs you — no red CI, no changes requested, no open threads."
+                    + (quiet > 0 ? " \(quiet) quiet PR\(quiet == 1 ? "" : "s") under All." : "")
             }
         }
 
@@ -505,7 +532,8 @@ struct GitHubQueueBadge: View {
     private struct QueueRow: View {
         @Environment(AppModel.self) private var model
         let row: ViewerPr
-        let reason: PrAttentionReason?
+        /// Why this row wants you ("CI failing", "decision needed"…), or nil.
+        let reason: String?
         let rowActions: [QueueAction]
         /// Close the popover: jumping to a tracking agent takes you somewhere else,
         /// so leaving the queue floating over it would be in the way. Track and
@@ -585,6 +613,14 @@ struct GitHubQueueBadge: View {
                     }
                     reviewIcon
                     reviewAssignmentIcons
+                    if let reason {
+                        // The reason is the status: what this row is in Needs you for.
+                        Text(reason)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1).truncationMode(.tail)
+                            .layoutPriority(-1)
+                    }
                     if pr.draft {
                         Text("draft")
                             .font(.system(size: 9))
@@ -753,7 +789,7 @@ struct GitHubQueueBadge: View {
             let where_ = model.folder(forRepo: row.repo) == nil
                 ? "opens on github.com — no local checkout"
                 : "opens in the GitHub view"
-            let why = reason.map { "\n\($0.label)" } ?? ""
+            let why = reason.map { "\n\($0)" } ?? ""
             return "\(pr.title)\(why)\n\(row.repo) #\(pr.number) · \(where_)"
         }
     }
