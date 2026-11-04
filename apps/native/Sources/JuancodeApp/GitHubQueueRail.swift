@@ -377,7 +377,8 @@ struct RightRailPanels: View {
                 slice: Binding(get: { ViewerPrSlice(storedRaw: filterRaw) },
                                set: { filterRaw = $0.rawValue }),
                 showing: .constant(true),
-                listMaxHeight: nil)
+                listMaxHeight: nil,
+                revealsSelectedRepo: false)
                 // Floored to one search a minute inside `refreshViewerPrs`; the
                 // model's own timer keeps it fresh after that.
                 .onAppear { model.refreshViewerPrs() }

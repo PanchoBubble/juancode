@@ -101,6 +101,10 @@ struct GitHubQueueBadge: View {
         @Binding var showing: Bool
         /// Nil lets the list fill its container (the right rail); the popover caps it.
         var listMaxHeight: CGFloat? = 320
+        /// Unfold and scroll to the selected session's repo when the selection changes.
+        /// The popover opens on demand, so it does; the rail's queue is global and keeps
+        /// its folds and scroll position across session switches.
+        var revealsSelectedRepo = true
         @State private var agentPromptRow: ViewerPr?
 
         private var queue: ViewerPrResult { model.viewerPrs }
@@ -216,7 +220,9 @@ struct GitHubQueueBadge: View {
                         .panelNavigationRows(navigationRows)
                         .panelNavigationScroll(.prs, proxy: proxy)
                         .reportsRailOverflow()
-                        .task(id: currentRepo) { reveal(currentRepo, proxy) }
+                        .task(id: revealsSelectedRepo ? currentRepo : nil) {
+                            if revealsSelectedRepo { reveal(currentRepo, proxy) }
+                        }
                     }
                     // Tall enough for ~6 rows, then it scrolls: a popover that grows
                     // with a 40-PR queue runs off the screen.
