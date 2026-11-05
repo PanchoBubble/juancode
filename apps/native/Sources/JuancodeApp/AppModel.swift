@@ -448,6 +448,8 @@ final class AppModel {
     var showingSessionTemplates = false
     /// Controls the Kill Port utility sheet — find and free a stuck local dev port.
     var showingKillPort = false
+    /// Controls the Compress Video utility sheet — shrink a screen recording for Slack.
+    var showingCompressVideo = false
     /// Auth & MCP status sheet — lifted off the sidebar toolbar into the top-bar
     /// Tools popover (juancode-tciz), so it lives on the model rather than local
     /// sidebar @State.

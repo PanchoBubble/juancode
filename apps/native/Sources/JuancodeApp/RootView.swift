@@ -136,6 +136,9 @@ private struct WindowContent: View {
         .sheet(isPresented: $model.showingKillPort) {
             KillPortSheet()
         }
+        .sheet(isPresented: $model.showingCompressVideo) {
+            CompressVideoSheet()
+        }
         .sheet(isPresented: $model.showingStatus) {
             StatusPanel()
         }
@@ -576,7 +579,7 @@ private struct ToolsMenu: View {
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
-        .help("Tools — keep awake, recurring tasks, kill port, MCP status, settings")
+        .help("Tools — keep awake, recurring tasks, kill port, compress video, MCP status, settings")
         .clickCursor()
         // The Heavy Queue row's count is pushed by the core, so the menu holds a watch
         // for as long as it can draw one rather than asking for a snapshot on open.
@@ -611,6 +614,8 @@ private struct ToolsMenu: View {
                     model.showingDispatchGraph = true
                 }
                 toolButton("powerplug", "Kill Port") { model.showingKillPort = true }
+                toolButton("film", "Compress Video") { model.showingCompressVideo = true }
+                    .help("Shrink a screen recording with ffmpeg so it fits in Slack")
                 toolButton("shield.lefthalf.filled", "Auth & MCP status") { model.showingStatus = true }
                 Divider().padding(.vertical, 2)
                 // The gear had its own toolbar slot for one sheet; it is an ordinary
