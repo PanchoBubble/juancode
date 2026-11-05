@@ -441,6 +441,9 @@ struct JuancodeApp: App {
                 Toggle("Turn-End Notifications", isOn: Binding(
                     get: { model.notifyOnTurnEnd },
                     set: { model.notifyOnTurnEnd = $0 }))
+                Button("Enable Native Notifications…") {
+                    model.enableNativeNotifications()
+                }
                 // Block idle system sleep so a long prompt isn't cut off when you
                 // step away. ⌃⇧A toggles it from anywhere.
                 Toggle("Keep Awake", isOn: Binding(

@@ -555,6 +555,17 @@ to its `/ws` on `:4280` to bridge sessions to Telegram / the phone console.
 (`swift run juancode` does build and launch the app, but without the `.app`
 wrapper — expect hanging file pickers and a flaky Dock icon. Use `dev-app.sh`.)
 
+### Native agent notifications
+
+Choose **View → Enable Native Notifications…** and allow notifications in macOS.
+Questions and permission prompts from background sessions show a time-sensitive
+banner with a sound. Click the banner to open the session and answer. The session
+you are watching is suppressed; other sessions can notify while the app is active.
+**View → Turn-End Notifications** controls both question and completion alerts.
+If permission was previously denied, **Enable Native Notifications…** opens macOS
+notification settings. Native banners require the bundled app (`dev-app.sh` or the
+packaged `.app`); bare `swift run` uses the Dock bounce instead.
+
 ### Terminal tabs within a session
 
 Use the **+ rectangle** menu in the session header to open a **New Terminal Tab**

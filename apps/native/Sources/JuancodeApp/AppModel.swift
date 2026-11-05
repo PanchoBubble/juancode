@@ -1944,6 +1944,11 @@ final class AppModel {
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
     }
 
+    func enableNativeNotifications() {
+        notifyOnTurnEnd = true
+        agentNotifier.enableNotifications()
+    }
+
     /// Deliver (or replace) the OS notification for a background session at a turn
     /// boundary (juancode-bao). Whether to fire at all is already decided by
     /// `agentNotificationEffect` at the call site; this only builds the copy, applies
