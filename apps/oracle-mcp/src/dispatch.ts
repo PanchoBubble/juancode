@@ -71,6 +71,8 @@ export interface DispatchRequest {
   idempotencyKey?: string | null;
   /** Skip both guards. For "yes, I really do want a second session on this". */
   force?: boolean;
+  /** Disable automatic parent alerts without changing chain inheritance. */
+  subscribe?: boolean;
   /** The session that asked for this one — the dispatching Oracle. The new session
    *  joins that session's chain (see dispatch-origin.ts). Sent on `create` only to a
    *  core advertising `chainInherit`; not part of the request's fingerprint. */
@@ -308,6 +310,10 @@ function dispatchCreateFrame(
  *  window — exactly when a caller retries — would sail past the registry guard. */
 const inFlight = new Map<string, Promise<DispatchOutcome>>();
 
+function subscriptionAdvice(id: string): string {
+  return `Subscribed: status and output will be queued into your session automatically; no polling is needed. Stop alerts with oracle_session_unsubscribe({id: "${id}"}) or DELETE /api/session-subscriptions/${id}. Use oracle_session_subscriptions to inspect alerts and oracle_session_subscribe to subscribe again.`;
+}
+
 /** The outcome for a request that collapsed onto `first` instead of creating a
  *  second session. Deliberately carries `first`'s dispatchId: a caller that tracks
  *  the id it got back then tracks the dispatch that actually exists. */
@@ -329,8 +335,8 @@ async function asDuplicate(
     state: "duplicate",
     subscriptionId: subscription?.id,
     duplicateOf: first.dispatchId,
-    advice: subscriber
-      ? "Subscribed: status and output will be queued into your session automatically; no polling is needed."
+    advice: subscription
+      ? subscriptionAdvice(subscription.id)
       : `No second session was created. ${POLL_ADVICE}`,
     message: `Not dispatched again — ${why}. ${
       first.sessionId
@@ -360,7 +366,7 @@ export async function dispatch(
     return asDuplicate(
       await pending,
       "an identical dispatch was already in flight",
-      opts.fromSessionId,
+      opts.subscribe === false ? undefined : opts.fromSessionId,
     );
   }
   const run = runDispatch(opts, timeoutMs, deps, fingerprint);
@@ -421,7 +427,7 @@ async function runDispatch(
           message: "",
         },
         `the same dispatch was posted ${ageS}s ago`,
-        opts.fromSessionId,
+        opts.subscribe === false ? undefined : opts.fromSessionId,
       );
     }
 
@@ -447,16 +453,15 @@ async function runDispatch(
   const dispatchId = randomUUID();
   const provider = modelSelection.provider;
   // Register before create: a fast child may finish before its create ack.
-  const subscription = opts.fromSessionId
-    ? await sessionNotifications().subscribe({
-        subscriber: opts.fromSessionId,
-        targetType: "dispatch",
-        targetId: dispatchId,
-      })
-    : null;
-  const followUpAdvice = opts.fromSessionId
-    ? "Subscribed: status and output will be queued into your session automatically; no polling is needed."
-    : POLL_ADVICE;
+  const subscription =
+    opts.fromSessionId && opts.subscribe !== false
+      ? await sessionNotifications().subscribe({
+          subscriber: opts.fromSessionId,
+          targetType: "dispatch",
+          targetId: dispatchId,
+        })
+      : null;
+  const followUpAdvice = subscription ? subscriptionAdvice(subscription.id) : POLL_ADVICE;
   const reply = await wsCreate(
     (capabilities) => dispatchCreateFrame(opts, dispatchId, capabilities),
     !!opts.fromSessionId,

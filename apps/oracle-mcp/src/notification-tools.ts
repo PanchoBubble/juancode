@@ -138,7 +138,8 @@ export function registerNotificationTools(server: McpServer): void {
     "oracle_session_unsubscribe",
     {
       title: "Remove a session subscription",
-      description: "Remove a subscription by id and cancel its undelivered notifications.",
+      description:
+        "Stop alerts, including automatic oracle_dispatch subscriptions, by id and cancel undelivered notifications. Find the id in the dispatch reply or oracle_session_subscriptions. Use oracle_session_subscribe to subscribe again.",
       inputSchema: { id: z.string().min(1) },
     },
     tool(async ({ id }: { id: string }) =>

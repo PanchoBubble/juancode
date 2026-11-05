@@ -188,6 +188,52 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     ]);
   });
 
+  it("keeps queued dispatches unsubscribed when alerts are disabled", async () => {
+    const request = {
+      project: "/abs/repo",
+      prompt: "Queue without alerts",
+      fromSessionId: "parent",
+      subscribe: false,
+    };
+    const queued = await dispatch(request, 50);
+    expect(queued.state).toBe("queued");
+    expect(queued.subscriptionId).toBeUndefined();
+    const duplicate = await dispatch(request, 50);
+    expect(duplicate.state).toBe("duplicate");
+    expect(duplicate.dispatchId).toBe(queued.dispatchId);
+    expect(await sessionNotifications().list("parent")).toEqual([]);
+    expect(mailboxLines()).toHaveLength(1);
+  });
+
+  it("can dispatch without alerts, deduplicate, subscribe later and unsubscribe", async () => {
+    capabilities = ["chains", "chainInherit"];
+    await startServer((msg, sock) => {
+      if (msg.type === "create")
+        sock.send(JSON.stringify({ type: "created", session: { id: "quiet-child" } }));
+    });
+    const request = {
+      project: "/abs/repo",
+      prompt: "Quiet dispatch",
+      fromSessionId: "parent",
+      subscribe: false,
+    };
+    const first = await dispatch(request);
+    expect(first.subscriptionId).toBeUndefined();
+    expect(received[0]!.fromSessionId).toBe("parent");
+    expect(await sessionNotifications().list("parent")).toEqual([]);
+    const quietRetry = await dispatch(request);
+    expect(quietRetry.state).toBe("duplicate");
+    expect(quietRetry.subscriptionId).toBeUndefined();
+    expect(await sessionNotifications().list("parent")).toEqual([]);
+    const watching = await dispatch({ ...request, subscribe: true });
+    expect(watching.dispatchId).toBe(first.dispatchId);
+    expect(watching.subscriptionId).toBeTruthy();
+    expect(watching.advice).toContain("oracle_session_unsubscribe");
+    await sessionNotifications().unsubscribe(watching.subscriptionId!);
+    expect(await sessionNotifications().list("parent")).toEqual([]);
+    expect(received).toHaveLength(1);
+  });
+
   it("leaves the source off for a core without chainInherit, and still dispatches", async () => {
     capabilities = ["chains"];
     await startServer((msg, sock) => {

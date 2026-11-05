@@ -793,6 +793,7 @@ struct SidebarView: View {
     private var folderScrollMaxHeight: Double {
         Swift.min(folderScrollUserHeight ?? folderScrollCap, folderScrollCap)
     }
+    @State private var managingSessionAlerts: SessionMeta?
     /// The session currently being renamed (drives the rename alert).
     @State private var renaming: SessionMeta?
     @State private var renameText = ""
@@ -1457,6 +1458,12 @@ struct SidebarView: View {
                 collapsedFolders = anyExpanded ? Set(groups.map(\.cwd)) : []
             }
         }
+        .sheet(isPresented: Binding(
+            get: { managingSessionAlerts != nil },
+            set: { if !$0 { managingSessionAlerts = nil } }
+        )) {
+            if let meta = managingSessionAlerts { SessionAlertsView(session: meta) }
+        }
         .alert("Rename session", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
@@ -1707,6 +1714,9 @@ struct SidebarView: View {
             Button("Resume in juancode") { model.importExternalSession(meta.id) }
         } else {
             Button("Rename…") { beginRename(meta) }
+            if meta.kind == .agent {
+                Button("Session Alerts…") { managingSessionAlerts = meta }
+            }
             if meta.kind != .editor {
                 Button("Open in Editor") { model.openEditorSession(meta.id) }
             }

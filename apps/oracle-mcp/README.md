@@ -36,6 +36,15 @@ steering queue, without polling or keeping a background curl running. This uses 
 same WebSocket activity events as the desktop dots and Telegram observers. Existing
 Telegram chat routing continues to work for headless Oracle dispatches.
 
+Right-click an agent in the native sidebar → **Session Alerts** to unsubscribe
+receiving sessions, inspect the alerts it receives, or subscribe another running
+session. Dispatch with `subscribe: false` (MCP or HTTP) to skip automatic alerts;
+chain inheritance still works. Dispatch replies include the exact unsubscribe tool
+and HTTP command. Stop an existing subscription with
+`oracle_session_unsubscribe({id: "<subscriptionId>"})`; find ids using
+`oracle_session_subscriptions({subscriber: "<parent-id>"})`. Subscribe again with
+`oracle_session_subscribe` using the original dispatchId or child session id.
+
 `oracle_session_subscribe` also follows an arbitrary session or queued dispatch:
 `{subscriber: "<parent-id>", targetType: "session", targetId: "<child-id>"}`.
 Use `targetType: "dispatch"` with a dispatchId before its session exists. Defaults are

@@ -200,6 +200,12 @@ function buildServer(): McpServer {
           .describe(
             "Dispatch even when an identical request or the same ticket already has a live session (default: false)",
           ),
+        subscribe: z
+          .boolean()
+          .optional()
+          .describe(
+            "Receive session alerts automatically (default true). Set false to dispatch without subscribing. Manage alerts with oracle_session_subscriptions, oracle_session_unsubscribe, and oracle_session_subscribe.",
+          ),
         fromSessionId: z
           .string()
           .optional()
@@ -829,6 +835,7 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       idempotencyKey,
       force,
       fromSessionId,
+      subscribe,
       model,
       complexity,
     } = req.body ?? {};
@@ -839,12 +846,14 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
     if (
       (model !== undefined && (typeof model !== "string" || !model.trim())) ||
       (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
-      (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider))
+      (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider)) ||
+      (subscribe !== undefined && typeof subscribe !== "boolean")
     ) {
-      res.status(400).send("Invalid provider, model, or complexity");
+      res.status(400).send("Invalid provider, model, complexity, or subscribe");
       return;
     }
     const outcome = await dispatch({
+      subscribe,
       model,
       complexity,
       project,
