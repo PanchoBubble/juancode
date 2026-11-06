@@ -567,7 +567,6 @@ struct GitHubQueueBadge: View {
                 .focusEffectDisabled()
                 .modifier(SelectableRowBackground(selected: false))
                 .pointerCursor()
-                .help(helpText)
                 .onHover { hovering = $0 }
                 .contextMenu { menu }
                 .closePrConfirmation($confirmingClose, pr: pr, cwd: cwd, model: model)
@@ -593,6 +592,7 @@ struct GitHubQueueBadge: View {
                     Text(verbatim: "#\(pr.number)")
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .help(helpText)
                     if let base = pr.baseBranch, !base.isEmpty, base != "main" {
                         Image(systemName: "arrow.triangle.branch")
                             .font(.system(size: 10))
@@ -615,6 +615,7 @@ struct GitHubQueueBadge: View {
                             .foregroundStyle(.orange)
                             .cornerCount(pr.unresolvedComments, color: .orange)
                             .padding(.trailing, 4)
+                            .help("\(pr.unresolvedComments) unresolved review threads")
                     }
                     reviewIcon
                     reviewAssignmentIcons
@@ -647,6 +648,7 @@ struct GitHubQueueBadge: View {
                 .frame(height: Self.factsHeight)
                 HStack(spacing: 6) {
                     Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                        .help(helpText)
                     Spacer(minLength: 0)
                     if !countsOnTop, let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts)
@@ -667,9 +669,6 @@ struct GitHubQueueBadge: View {
             HStack(spacing: 4) {
                 let reviewers = pr.assignedReviewers
                 let assigned = !reviewers.isEmpty || reviewAssignedToMe
-                let assignmentLabel = assigned
-                    ? "Review assigned" + (reviewers.isEmpty ? "" : ": " + reviewers.joined(separator: ", "))
-                    : "No reviewer assigned"
                 HStack(spacing: 2) {
                     Image(systemName: assigned ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
                     if reviewers.count > 1 {
@@ -678,9 +677,10 @@ struct GitHubQueueBadge: View {
                     }
                 }
                 .foregroundStyle(assigned ? Color.secondary : Color.orange)
-                .help(assignmentLabel)
+                .contentShape(Rectangle())
+                .help(reviewHelpText)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(assignmentLabel)
+                .accessibilityLabel(reviewHelpText)
                 if reviewAssignedToMe {
                     Image(systemName: "hand.raised.fill")
                         .foregroundStyle(Color.accentColor)
@@ -692,6 +692,27 @@ struct GitHubQueueBadge: View {
             .fixedSize()
         }
 
+        private var reviewHelpText: String {
+            var lines: [String] = []
+            switch pr.reviewDecisionKind {
+            case .approved: lines.append("Approved")
+            case .changesRequested: lines.append("Changes requested")
+            case .reviewRequired: lines.append("Review required")
+            case .none: break
+            }
+            if !pr.reviewRequests.isEmpty {
+                lines.append("Review requested: " + pr.reviewRequests.joined(separator: ", "))
+            }
+            if let reviewers = pr.reviewers, !reviewers.isEmpty {
+                lines.append("Submitted a review: " + reviewers.joined(separator: ", "))
+            }
+            if reviewAssignedToMe { lines.append("Your review is requested") }
+            if pr.assignedReviewers.isEmpty && !reviewAssignedToMe {
+                lines.append("No reviewer assigned")
+            }
+            return lines.joined(separator: "\n")
+        }
+
         /// The review verdict as a bare glyph — the GitHub view's chip without its
         /// word, same symbols and colours. "Review required" draws nothing: it's every
         /// open PR's default on a repo that requires review, so it would say nothing.
@@ -700,11 +721,11 @@ struct GitHubQueueBadge: View {
             case .approved:
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 10))
                     .foregroundStyle(.green)
-                    .help("Approved")
+                    .help(reviewHelpText)
             case .changesRequested:
                 Image(systemName: "arrow.uturn.backward").font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.orange)
-                    .help("Changes requested")
+                    .help(reviewHelpText)
             case .reviewRequired, .none:
                 EmptyView()
             }
@@ -795,7 +816,13 @@ struct GitHubQueueBadge: View {
                 ? "opens on github.com — no local checkout"
                 : "opens in the GitHub view"
             let why = reason.map { "\n\($0)" } ?? ""
-            return "\(pr.title)\(why)\n\(row.repo) #\(pr.number) · \(where_)"
+            var lines = ["\(pr.title)\(why)", "\(row.repo) #\(pr.number) · \(where_)"]
+            if !pr.author.isEmpty { lines.append("Author: \(pr.author)") }
+            if !pr.assignees.isEmpty {
+                lines.append("Assigned to: " + pr.assignees.joined(separator: ", "))
+            }
+            lines.append(reviewHelpText)
+            return lines.joined(separator: "\n")
         }
     }
 
