@@ -54,6 +54,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
     case focusLinearTicketsPanel
     case focusChainsPanel
     case focusOraclesPanel
+    case hintMode
 
     var id: String { rawValue }
 
@@ -99,6 +100,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .focusLinearTicketsPanel: return "Focus Linear Tickets"
         case .focusChainsPanel: return "Focus Chains"
         case .focusOraclesPanel: return "Focus Oracles"
+        case .hintMode: return "Show Keyboard Hints"
         }
     }
 
@@ -170,6 +172,10 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .focusLinearTicketsPanel: return KeyBinding(key: "l", command: true, shift: true)
         case .focusChainsPanel: return KeyBinding(key: "c", command: true, shift: true)
         case .focusOraclesPanel: return KeyBinding(key: "o", command: true, shift: true)
+        // ⌃F labels every visible control with letters to type (Vimium-style). From a
+        // terminal it shadows readline's forward-char; from the editor it is nvim's
+        // page-down, so there the key stays the pty's (see `HintActivation`).
+        case .hintMode: return KeyBinding(key: "f", control: true)
         }
     }
 
@@ -465,6 +471,7 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .focusSessionsPanel, .focusPrsPanel, .focusLinearTicketsPanel,
          .focusChainsPanel, .focusOraclesPanel:
         if let target = action.panelFocusTarget { model.requestPanelFocus(target) }
+    case .hintMode: HintController.shared.toggle(in: model.hostWindow)
     }
 }
 

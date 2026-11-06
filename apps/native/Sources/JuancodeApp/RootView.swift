@@ -343,6 +343,7 @@ private struct PaneNavInstaller: NSViewRepresentable {
             installPaneNavigation(model: model, oracle: oracle, shortcuts: shortcuts, host: v),
             installBackForwardMouse(model: model, oracle: oracle, host: v),
             installBackForwardSwipe(model: model, oracle: oracle, host: v),
+            installHintKeyUpGuard(),
         ].compactMap { $0 }
         return v
     }
@@ -458,6 +459,7 @@ private struct NotificationsBell: View {
         Button { showing = true } label: {
             Label("Notifications", systemImage: hasAny ? "bell.badge.fill" : "bell")
         }
+        .hintTarget { showing = true }
         .help(hasAny
               ? "\(unread.count) unread · \(atRiskNotices.count) work-at-risk"
               : "Notifications — sessions that finished or need a reply")
@@ -605,6 +607,7 @@ private struct ToolsMenu: View {
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
+        .hintTarget { showing = true }
         .help("Tools — keep awake, recurring tasks, kill port, compress video, MCP status, settings")
         .clickCursor()
         // The Heavy Queue row's count is pushed by the core, so the menu holds a watch
@@ -721,6 +724,7 @@ private struct SessionBackButton: View {
         Button { performShortcut(.navigateBack, model: model, oracle: oracle) } label: {
             Label("Back", systemImage: "chevron.left")
         }
+        .hintTarget { performShortcut(.navigateBack, model: model, oracle: oracle) }
         .disabled(!model.canGoBack && !model.showingFindBar && model.editing == nil)
         .help("Back (\(shortcuts.binding(for: .navigateBack).display))")
         .clickCursor()
@@ -736,6 +740,7 @@ private struct SessionForwardButton: View {
         Button { performShortcut(.navigateForward, model: model, oracle: oracle) } label: {
             Label("Forward", systemImage: "chevron.right")
         }
+        .hintTarget { performShortcut(.navigateForward, model: model, oracle: oracle) }
         .disabled(!model.canGoForward)
         .help("Forward (\(shortcuts.binding(for: .navigateForward).display))")
         .clickCursor()
@@ -2043,6 +2048,16 @@ private struct SessionRowHost: View {
             .onMiddleClick(enabled: !external && model.isLive(meta.id)) {
                 model.killSession(meta.id)
             }
+            // The same activation as Enter on the row in panel navigation; an
+            // external row's only action is its Resume button's.
+            .hintTarget {
+                if external {
+                    model.importExternalSession(meta.id)
+                } else {
+                    model.selectSidebarSession(meta.id)
+                    model.focusTerminal()
+                }
+            }
     }
 }
 
@@ -2131,6 +2146,7 @@ private struct FolderHeader: View {
                 }
                 .buttonStyle(.plain)
                 .focusEffectDisabled()
+                .hintTarget(toggle)
                 // Hover lights the whole bar (below), not a rounded chip on the name.
                 .pointerCursor()
                 // A popover (not a native Menu) so each agent option is a real SwiftUI
@@ -2154,6 +2170,10 @@ private struct FolderHeader: View {
                 }
                 .buttonStyle(.plain)
                 .help("New session in \(group.cwd)")
+                .hintTarget {
+                    model.loadFolderGitState(group.cwd)
+                    showingAgentPicker = true
+                }
                 .clickCursor()
                 .onHover { plusHovering = $0 }
                 .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
@@ -2211,6 +2231,13 @@ private struct FolderHeader: View {
                 .help(model.runCommands(forProject: group.cwd).main.map {
                     "Run `\($0)` in \(group.name) (edit it in the … menu)"
                 } ?? "Set a run command for \(group.name)")
+                .hintTarget {
+                    if model.runCommands(forProject: group.cwd).main != nil {
+                        model.runProject(group.cwd)
+                    } else {
+                        showingRunEditor = true
+                    }
+                }
                 .clickCursor()
                 .onHover { runHovering = $0 }
                 .popover(isPresented: $showingRunEditor, arrowEdge: .bottom) {
@@ -2230,6 +2257,7 @@ private struct FolderHeader: View {
                 .buttonStyle(.plain)
                 .help(hasBeads ? "Beads board for \(group.name)"
                                : "Beads board (no tracker in \(group.name) yet)")
+                .hintTarget { model.openBeads(project: group.cwd) }
                 .clickCursor()
                 .onHover { beadsHovering = $0 }
                 // Per-project overflow menu. A popover of plain buttons for the same
@@ -2246,6 +2274,7 @@ private struct FolderHeader: View {
                 }
                 .buttonStyle(.plain)
                 .help("More actions for \(group.name)")
+                .hintTarget { showingProjectMenu = true }
                 .clickCursor()
                 .onHover { menuHovering = $0 }
                 .popover(isPresented: $showingProjectMenu, arrowEdge: .bottom) {
@@ -3297,6 +3326,7 @@ struct SessionContainer: View {
                         Label("PR #\(pr.number)", systemImage: "arrow.triangle.pull")
                     }
                     .help("Open PR #\(pr.number) \"\(pr.title)\" for this branch in juancode")
+                    .hintTarget { model.openGitHubForSession(meta) }
                     .clickCursor()
                 }
                 if meta.kind != .editor {
@@ -3308,6 +3338,7 @@ struct SessionContainer: View {
                     .help(model.editorTabs.hasEditor(meta.id)
                           ? "Show this session's editor (⌘2)"
                           : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
+                    .hintTarget { model.openEditorSession(meta.id) }
                     .clickCursor()
                     splitButton
                 }
@@ -3317,6 +3348,7 @@ struct SessionContainer: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Repaint clean — restart the CLI and resume this conversation so the pane redraws from the transcript (fixes garbled renders; drops an in-flight reply)")
+                .hintTarget { model.deepRefreshSelectedTerminal() }
                 .clickCursor()
                 Menu {
                     Button("New Terminal Tab") { model.openSessionTerminal(meta.id) }
@@ -3333,6 +3365,7 @@ struct SessionContainer: View {
                     Image(systemName: model.bottomTerminalShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
                 }
                 .help(model.bottomTerminalShown ? "Hide the terminal panel (⌃T)" : "Show the terminal panel (⌃T)")
+                .hintTarget { model.toggleBottomTerminal() }
                 .clickCursor()
                 if !AppModel.worktreeInRail {
                     Button {
@@ -3344,6 +3377,7 @@ struct SessionContainer: View {
                         Image(systemName: panelShown ? "sidebar.right" : "sidebar.squares.right")
                     }
                     .help(panelShown ? "Hide the Worktree panel" : "Show the Worktree panel (files and changes)")
+                    .hintTarget { withAnimation(.easeOut(duration: 0.18)) { panelShown.toggle() } }
                     .clickCursor()
                 }
                 }
@@ -3811,6 +3845,7 @@ struct SessionContainer: View {
         .help(axis != nil
               ? "Back to tabs, keeping the focused pane (⌘\\). Right-click for more."
               : "Split the selected tab beside the agent (⌘\\). Right-click to stack instead.")
+        .hintTarget { model.toggleSplitEditor(meta.id) }
         .clickCursor()
         .contextMenu {
             Button("Side by Side") { model.splitEditor(meta.id, axis: .sideBySide) }

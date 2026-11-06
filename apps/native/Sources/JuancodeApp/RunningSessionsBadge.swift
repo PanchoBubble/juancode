@@ -84,6 +84,7 @@ struct RunningSessionsBadge: View {
         }
         .foregroundStyle(tint)
         .help(helpText)
+        .hintTarget { showing = true }
         .clickCursor()
         .confirmationDialog("Pause \(running) running session(s)?",
                             isPresented: $confirmingPause, titleVisibility: .visible) {

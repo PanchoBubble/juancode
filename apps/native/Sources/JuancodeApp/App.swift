@@ -575,6 +575,12 @@ struct JuancodeApp: App {
                     performShortcut(.terminalZoomReset, model: model, oracle: oracle)
                 }
                 .appShortcut(.terminalZoomReset, shortcuts)
+                // Vimium-style letter hints over every visible control. No key
+                // equivalent on the item: the window key monitor owns the chord, and
+                // a menu one would take ⌃F from nvim's page-down (see `HintActivation`).
+                Button("Show Keyboard Hints (\(shortcuts.binding(for: .hintMode).display))") {
+                    performShortcut(.hintMode, model: model, oracle: oracle)
+                }
             }
         }
 

@@ -269,7 +269,9 @@ func installWheelForwarding(on tv: TerminalView) -> Any? {
 func installShiftEnterNewline(view: NSView, session: any LiveSession) -> Any? {
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak view] keyCode, mods in
         // Return (36) or keypad Enter (76), with Shift the only modifier held.
-        guard keyCode == 36 || keyCode == 76,
+        // Hint mode owns the keyboard while it is up, Shift+Enter included.
+        guard !HintController.shared.isActive,
+              keyCode == 36 || keyCode == 76,
               mods.intersection([.command, .control, .option, .shift]) == .shift,
               let view, let window = view.window, window.isKeyWindow,
               window.attachedSheet == nil, window.firstResponder === view
@@ -383,6 +385,21 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
         else { return false }
         let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
         let inEditor = editorHasFocus(window.firstResponder, model: model)
+        // Hint mode (⌃F). While it is up it takes every key, so none reaches the
+        // pty or a panel underneath; Esc and the shortcut itself leave it.
+        let hintChord = shortcuts.action(matching: event) == .hintMode
+        if HintController.shared.isActive {
+            return HintController.shared.handleKeyDown(event, isToggleChord: hintChord)
+        }
+        if hintChord,
+           HintActivation.allows(
+               modifiers: mods, inEditor: inEditor,
+               editingText: window.firstResponder is NSTextView,
+               reviewActive: model.showingDiffReview || model.changesKeyboardActive
+                   || window.firstResponder is ReviewKeyCatcherView) {
+            performShortcut(.hintMode, model: model, oracle: oracle)
+            return true
+        }
         // ⌃E opens the editor from anywhere but the editor itself (where it scrolls)
         // and a text field (where it is end-of-line). It shadows readline's ⌃E in
         // the agent panes on purpose.
